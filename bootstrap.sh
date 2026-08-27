@@ -18,27 +18,27 @@ command -v dotnet >/dev/null 2>&1 && echo "  [OK] .NET SDK: $(dotnet --version)"
 echo -e "\n[2/4] Synchronizing Python environments with uv..."
 case "${PROFILE}" in
     full)
-        uv sync --directory "${SCRIPT_DIR}/../Cyrene-Platform"
-        uv sync --directory "${SCRIPT_DIR}/../plugins"
-        uv sync --directory "${SCRIPT_DIR}/../services/cyrene-reactor" --extra dev --extra pro
-        uv sync --directory "${SCRIPT_DIR}/../services/Cyrene-Yield" --extra dev
-        uv sync --directory "${SCRIPT_DIR}/../services/cyrene-exchange" --extra dev
-        uv sync --directory "${SCRIPT_DIR}/../services/cyrene-astrbot-rev/python/capability_worker"
+        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
+        uv sync --locked --directory "${SCRIPT_DIR}/../plugins"
+        uv sync --locked --directory "${SCRIPT_DIR}/../services/cyrene-reactor" --extra dev --extra pro
+        uv sync --locked --directory "${SCRIPT_DIR}/../services/Cyrene-Yield" --extra dev
+        uv sync --locked --directory "${SCRIPT_DIR}/../services/cyrene-exchange" --extra dev
+        uv sync --locked --directory "${SCRIPT_DIR}/../services/cyrene-astrbot-rev/python/capability_worker"
         ;;
     astrbot)
-        uv sync --directory "${SCRIPT_DIR}/../Cyrene-Platform"
-        uv sync --directory "${SCRIPT_DIR}/../plugins"
-        uv sync --directory "${SCRIPT_DIR}/../services/cyrene-exchange" --extra dev
-        uv sync --directory "${SCRIPT_DIR}/../services/cyrene-astrbot-rev/python/capability_worker"
+        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
+        uv sync --locked --directory "${SCRIPT_DIR}/../plugins"
+        uv sync --locked --directory "${SCRIPT_DIR}/../services/cyrene-exchange" --extra dev
+        uv sync --locked --directory "${SCRIPT_DIR}/../services/cyrene-astrbot-rev/python/capability_worker"
         ;;
     platform)
-        uv sync --directory "${SCRIPT_DIR}/../Cyrene-Platform"
-        uv sync --directory "${SCRIPT_DIR}/../plugins"
+        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
+        uv sync --locked --directory "${SCRIPT_DIR}/../plugins"
         ;;
     training)
-        uv sync --directory "${SCRIPT_DIR}/../Cyrene-Platform"
-        uv sync --directory "${SCRIPT_DIR}/../plugins"
-        uv sync --directory "${SCRIPT_DIR}/../services/Cyrene-Yield" --extra dev
+        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
+        uv sync --locked --directory "${SCRIPT_DIR}/../plugins"
+        uv sync --locked --directory "${SCRIPT_DIR}/../services/Cyrene-Yield" --extra dev
         ;;
     *)
         echo "Unknown profile: ${PROFILE}. Valid profiles: full, astrbot, platform, training."

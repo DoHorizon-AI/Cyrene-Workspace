@@ -34,6 +34,7 @@
     <project name="coordinator" path="$PROJECT_DIR$/../services/cyrene-exchange/components/coordinator" />
     <project name="spring" path="$PROJECT_DIR$/../plugins/plugins/gateway/spring" />
     <project name="jvm" path="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
+    <project name="capability_worker" path="$PROJECT_DIR$/../services/cyrene-astrbot-rev/python/capability_worker" />
     <option name="workspace" value="true" />
   </component>
 </project>

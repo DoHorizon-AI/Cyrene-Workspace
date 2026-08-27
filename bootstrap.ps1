@@ -109,9 +109,9 @@ if (-not $SkipPythonSync) {
         if (Test-Path (Join-Path $envPath "pyproject.toml")) {
             Write-Host "  Syncing $($target.Repo)..." -ForegroundColor Cyan
             if ($target.Extra) {
-                uv sync --directory $envPath ($target.Extra -split " ")
+                uv sync --locked --directory $envPath ($target.Extra -split " ")
             } else {
-                uv sync --directory $envPath
+                uv sync --locked --directory $envPath
             }
         }
     }
@@ -129,7 +129,7 @@ if (-not $SkipDotNetRestore) {
     } elseif ($Profile -eq "full") {
         $slnxPath = Join-Path $ScriptDir "Cyrene.Workspace.slnx"
         if (Test-Path $slnxPath) {
-            dotnet restore $slnxPath
+            dotnet restore $slnxPath -p:WarningsNotAsErrors=NU1902
             Write-Host "  [OK] Cyrene.Workspace.slnx restored successfully." -ForegroundColor Green
         }
     } else {

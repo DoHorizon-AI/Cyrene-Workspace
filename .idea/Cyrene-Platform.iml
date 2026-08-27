@@ -29,9 +29,19 @@
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_artifacts/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_artifacts/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_control_plane/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_control_plane/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_environment/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_environment/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_preflight/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_preflight/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_worker_shim" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/target" />
     </content>
+    <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

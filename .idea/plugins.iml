@@ -3,9 +3,16 @@
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
     <content url="file://$MODULE_DIR$/../plugins">
+      <sourceFolder url="file://$MODULE_DIR$/../plugins/plugins/agents/agent-system/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../plugins/plugins/agents/agent-system/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../plugins/plugins/agents/skills-runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../plugins/plugins/agents/skills-runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../plugins/plugins/providers/model-api-connector/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../plugins/plugins/providers/model-api-connector/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/../plugins/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/../plugins/plugins/gateway/python/compatibility/python/capability_worker/.venv" />
     </content>
+    <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

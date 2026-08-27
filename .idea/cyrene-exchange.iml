@@ -3,8 +3,11 @@
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
     <content url="file://$MODULE_DIR$/../services/cyrene-exchange">
+      <sourceFolder url="file://$MODULE_DIR$/../services/cyrene-exchange/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../services/cyrene-exchange/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/../services/cyrene-exchange/.venv" />
     </content>
+    <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

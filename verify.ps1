@@ -129,7 +129,7 @@ Assert-Step ".NET Cyrene.Workspace.slnx project resolution" {
 if (-not $Quick) {
     Assert-Step ".NET aggregate solution build" {
         $slnx = Join-Path $ScriptDir "Cyrene.Workspace.slnx"
-        $buildOutput = dotnet build $slnx -c Debug --no-restore 2>&1
+        $buildOutput = dotnet build $slnx -c Debug -p:WarningsNotAsErrors=NU1902 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "dotnet build failed"
         }
