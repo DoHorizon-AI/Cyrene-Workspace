@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="GENERAL_MODULE" version="4">
+  <component name="NewModuleRootManager" inherit-compiler-output="true">
+    <exclude-output />
+    <content url="file://$MODULE_DIR$/../services/cyrene-astrbot-rev">
+      <excludeFolder url="file://$MODULE_DIR$/../services/cyrene-astrbot-rev/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../services/cyrene-astrbot-rev/python/capability_worker/.venv" />
+    </content>
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

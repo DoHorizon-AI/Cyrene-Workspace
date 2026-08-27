@@ -1,15 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="WorkspaceProjectModel">
-    <project-item path="../Cyrene-Platform" />
-    <project-item path="../plugins" />
-    <project-item path="../services/cyrene-astrbot-rev" />
-    <project-item path="../services/cyrene-dh-system-internal" />
-    <project-item path="../services/cyrene-reactor" />
-    <project-item path="../services/Cyrene-Yield" />
-    <project-item path="../services/cyrene-exchange" />
-    <project-item path="../services/cyrene-catalyst" />
-    <project-item path="../services/cyrene-echo" />
-    <project-item path="../services/cyrene-navigator" />
+  <component name="WorkspaceSettings">
+    <project name="Cyrene-Platform" path="$PROJECT_DIR$/../Cyrene-Platform">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Platform.git" />
+    </project>
+    <project name="Cyrene-Plugins-Official" path="$PROJECT_DIR$/../plugins">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git" />
+    </project>
+    <project name="Astrbot-Rev" path="$PROJECT_DIR$/../services/cyrene-astrbot-rev">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Astrbot-Rev.git" />
+    </project>
+    <project name="DH-System-Internal" path="$PROJECT_DIR$/../services/cyrene-dh-system-internal">
+      <vcs id="Git" remoteUrl="https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal" />
+    </project>
+    <project name="Cyrene-Reactor" path="$PROJECT_DIR$/../services/cyrene-reactor">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Reactor.git" />
+    </project>
+    <project name="Cyrene-Yield" path="$PROJECT_DIR$/../services/Cyrene-Yield">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Yield.git" />
+    </project>
+    <project name="Cyrene-Exchange" path="$PROJECT_DIR$/../services/cyrene-exchange">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Exchange.git" />
+    </project>
+    <project name="Cyrene-Catalyst" path="$PROJECT_DIR$/../services/cyrene-catalyst">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Catalyst.git" />
+    </project>
+    <project name="Cyrene-Echo" path="$PROJECT_DIR$/../services/cyrene-echo">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Echo.git" />
+    </project>
+    <project name="Cyrene-Navigator" path="$PROJECT_DIR$/../services/cyrene-navigator">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Navigator.git" />
+    </project>
+    <project name="coordinator" path="$PROJECT_DIR$/../services/cyrene-exchange/components/coordinator" />
+    <project name="spring" path="$PROJECT_DIR$/../plugins/plugins/gateway/spring" />
+    <project name="jvm" path="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
+    <option name="workspace" value="true" />
   </component>
 </project>

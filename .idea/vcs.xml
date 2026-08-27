@@ -2,6 +2,7 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$/../Cyrene-Platform" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../plugins" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../services/Cyrene-Yield" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../services/cyrene-astrbot-rev" vcs="Git" />

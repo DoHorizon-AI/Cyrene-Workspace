@@ -37,7 +37,7 @@ All 9 automated checks must report `[PASS]`.
 4. Select **Trust Project**.
 
 ### Step 2: Verify Multi-Project Workspace (`.idea/jb-workspace.xml`)
-1. **Multi-Project Hierarchy**:
+1. **Multi-Project Hierarchy & Active State**:
    - In the Project view, verify each repository appears as an independent native project module:
      - `Cyrene-Platform` (Cargo workspace, Python SDKs, JVM control plane)
      - `plugins` (Python plugins, .NET compat, Spring gateway)
@@ -47,13 +47,15 @@ All 9 automated checks must report `[PASS]`.
      - `services/Cyrene-Yield` (Python training engine)
      - `services/cyrene-exchange` (Python transport, JVM coordinator)
      - `services/cyrene-catalyst`, `cyrene-echo`, `cyrene-navigator`
+   - *Note*: Workspace projects may initially appear inactive in IntelliJ IDEA. To activate an unloaded project: **Right-click project $\rightarrow$ Load '<project>'**.
 2. **VCS Multi-Root Registration**:
    - Open **Git** tool window (`Alt + 9`).
    - Verify all 10 repositories are registered as distinct Git roots.
-3. **Gradle Projects & Toolchain Auto-Provisioning**:
+3. **Gradle Projects & Daemon JVM 25**:
    - Open **Gradle** tool window.
    - Verify `Cyrene-Platform/framework/jvm`, `services/cyrene-exchange/components/coordinator`, and `plugins/plugins/gateway/spring` appear.
-   - Verify Gradle wrapper 9.5.0 and Java 25 toolchain resolve automatically via `foojay-resolver-convention`.
+   - Gradle Daemon JVM is automatically resolved to **JDK 25** via `gradle/gradle-daemon-jvm.properties` (`toolchainVersion=25`).
+   - Java and Kotlin compilation toolchains resolve automatically to JDK 25 via `foojay-resolver-convention`.
 4. **Rust Development Toolchain**:
    - Verify Cargo workspaces attach for `Cyrene-Platform` and `services/cyrene-reactor`.
    - Open a Rust source file (e.g. `Cyrene-Platform/kernel/crates/cy-kernel-daemon/src/main.rs`).

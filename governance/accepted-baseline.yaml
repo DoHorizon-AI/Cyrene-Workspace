@@ -5,12 +5,12 @@ description: "Accepted multi-repository integration baseline for Cyrene"
 repositories:
   - name: "Cyrene-Platform"
     integration_branch: "develop"
-    remote_sha: "5759647641a69f4c18da9ea4652fa330ecd9a51e"
+    remote_sha: "71d9696e191b92bf189dbef459c5d1e4348611c0"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
 
   - name: "Cyrene-Plugins-Official"
     integration_branch: "develop"
-    remote_sha: "4eea100b852f2c5971232a059e868506c7b857d1"
+    remote_sha: "299fb95e0c6e864817a3a871bc2005085e3cb784"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
 
   - name: "Astrbot-Rev"
@@ -30,7 +30,7 @@ repositories:
 
   - name: "Cyrene-Exchange"
     integration_branch: "develop"
-    remote_sha: "64c8b900735f15d2b47b61620cc4abb3133c8b59"
+    remote_sha: "7bfb342084c8be19ef100a74ea8e77864f1fa437"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
 
   - name: "DH-System-Internal"

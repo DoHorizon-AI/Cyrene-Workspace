@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+  <component name="GradleMigrationSettings" migrationVersion="1" />
   <component name="GradleSettings">
     <option name="linkedExternalProjectsSettings">
       <GradleProjectSettings>
         <option name="externalProjectPath" value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
+        <option name="gradleJvm" value="#GRADLE_DAEMON_JVM" />
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
@@ -17,10 +19,12 @@
         </option>
       </GradleProjectSettings>
       <GradleProjectSettings>
-        <option name="externalProjectPath" value="$PROJECT_DIR$/../services/cyrene-exchange/components/coordinator" />
+        <option name="externalProjectPath" value="$PROJECT_DIR$/../plugins/plugins/gateway/spring" />
+        <option name="gradleJvm" value="#GRADLE_DAEMON_JVM" />
       </GradleProjectSettings>
       <GradleProjectSettings>
-        <option name="externalProjectPath" value="$PROJECT_DIR$/../plugins/plugins/gateway/spring" />
+        <option name="externalProjectPath" value="$PROJECT_DIR$/../services/cyrene-exchange/components/coordinator" />
+        <option name="gradleJvm" value="#GRADLE_DAEMON_JVM" />
       </GradleProjectSettings>
     </option>
   </component>

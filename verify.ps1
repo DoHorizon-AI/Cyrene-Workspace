@@ -80,8 +80,8 @@ Assert-Step "IntelliJ IDEA Multi-Project Workspace (.idea/jb-workspace.xml)" {
     $jbWorkspace = Join-Path $ScriptDir ".idea/jb-workspace.xml"
     if (-not (Test-Path $jbWorkspace)) { throw ".idea/jb-workspace.xml not found" }
     $content = Get-Content $jbWorkspace -Raw
-    if ($content -notmatch 'WorkspaceProjectModel') {
-        throw "WorkspaceProjectModel not found in jb-workspace.xml"
+    if ($content -notmatch 'WorkspaceSettings' -and $content -notmatch 'WorkspaceProjectModel') {
+        throw "Workspace configuration not found in jb-workspace.xml"
     }
 }
 
@@ -169,6 +169,14 @@ Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
         $propsContent = Get-Content $wrapperProps -Raw
         if ($propsContent -notmatch 'gradle-9\.5\.0') {
             throw "Gradle wrapper not pinned to 9.5.0 in $rel"
+        }
+        $daemonProps = Join-Path $full "gradle/gradle-daemon-jvm.properties"
+        if (-not (Test-Path $daemonProps)) {
+            throw "Missing gradle-daemon-jvm.properties in $rel"
+        }
+        $daemonContent = Get-Content $daemonProps -Raw
+        if ($daemonContent -notmatch 'toolchainVersion\s*=\s*25') {
+            throw "Gradle daemon JVM not set to toolchainVersion=25 in $rel"
         }
     }
 }
