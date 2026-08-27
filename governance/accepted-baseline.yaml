@@ -1,0 +1,54 @@
+version: "1.0.0"
+timestamp: "2026-08-27T17:36:00Z"
+description: "Accepted multi-repository integration baseline for Cyrene"
+
+repositories:
+  - name: "Cyrene-Platform"
+    integration_branch: "develop"
+    remote_sha: "5759647641a69f4c18da9ea4652fa330ecd9a51e"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
+
+  - name: "Cyrene-Plugins-Official"
+    integration_branch: "develop"
+    remote_sha: "4eea100b852f2c5971232a059e868506c7b857d1"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
+
+  - name: "Astrbot-Rev"
+    integration_branch: "develop"
+    remote_sha: "967bdb9d8b336448da2607bbb4e5857575cb93fd"
+    canonical_remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
+
+  - name: "Cyrene-Yield"
+    integration_branch: "develop"
+    remote_sha: "e5521f6799679caf43470241326e5fabc21302bb"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
+
+  - name: "Cyrene-Reactor"
+    integration_branch: "develop"
+    remote_sha: "123536974c42d40186e250f85fb5173f13c893b3"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
+
+  - name: "Cyrene-Exchange"
+    integration_branch: "develop"
+    remote_sha: "64c8b900735f15d2b47b61620cc4abb3133c8b59"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
+
+  - name: "DH-System-Internal"
+    integration_branch: "main"
+    remote_sha: "e10f998fc4aa46bf9084935633556ce02537772c"
+    canonical_remote: "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"
+
+  - name: "Cyrene-Catalyst"
+    integration_branch: "develop"
+    remote_sha: "93ba3067da99004851a7417c1c70dd74e7e584d7"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
+
+  - name: "Cyrene-Navigator"
+    integration_branch: "develop"
+    remote_sha: "826ac804170e6e17c783520d95d71751cd82e3f5"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
+
+  - name: "Cyrene-Echo"
+    integration_branch: "develop"
+    remote_sha: "27e498eccdab41afee342af4dd57881b6c13912f"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"

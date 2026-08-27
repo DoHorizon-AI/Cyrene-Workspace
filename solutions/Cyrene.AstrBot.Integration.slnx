@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/AstrBot/">
+    <Project Path="../../services/cyrene-astrbot-rev/src/AstrBot.DotNetHost/AstrBot.DotNetHost.csproj" />
+    <Project Path="../../services/cyrene-astrbot-rev/src/AstrBot.DatabaseMigrator/AstrBot.DatabaseMigrator.csproj" />
+    <Project Path="../../services/cyrene-astrbot-rev/src/IrisHistoryImporter/IrisHistoryImporter.csproj" />
+    <Project Path="../../services/cyrene-astrbot-rev/src/AstrBot.KnowledgeBaseImporter/AstrBot.KnowledgeBaseImporter.csproj" />
+    <Project Path="../../services/cyrene-astrbot-rev/tests/AstrBot.DotNetHost.Tests/AstrBot.DotNetHost.Tests.csproj" />
+  </Folder>
+  <Folder Name="/Plugins/">
+    <Project Path="../../plugins/plugins/agents/agent-system/src/dotnet/Cyrene.AgentSystem.Compat.csproj" />
+    <Project Path="../../plugins/plugins/gateway/aspnet-core/src/Cyrene.AspNetCoreGateway/Cyrene.AspNetCoreGateway.csproj" />
+  </Folder>
+</Solution>

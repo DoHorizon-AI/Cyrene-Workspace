@@ -205,3 +205,45 @@ repositories:
     development_hosts: ["windows", "macos", "linux"]
     canonical_runtime_os: "client-desktop"
     canonical_build_target: "multi-target"
+
+profiles:
+  full:
+    description: "Full Architecture Workspace: All canonical Cyrene platform and product repositories"
+    repositories:
+      - "Cyrene-Platform"
+      - "Cyrene-Plugins"
+      - "cyrene-astrbot-rev"
+      - "cyrene-dh-system-internal"
+      - "cyrene-reactor"
+      - "Cyrene-Yield"
+      - "cyrene-exchange"
+      - "cyrene-catalyst"
+      - "cyrene-navigator"
+      - "cyrene-echo"
+    dotnet_solutions:
+      - "Cyrene.Workspace.slnx"
+      - "solutions/Cyrene.AstrBot.Integration.slnx"
+
+  astrbot:
+    description: "AstrBot Integration Workspace: AstrBot host, Platform SDK, Plugins ecosystem, and Exchange transport"
+    repositories:
+      - "cyrene-astrbot-rev"
+      - "Cyrene-Platform"
+      - "Cyrene-Plugins"
+      - "cyrene-exchange"
+    dotnet_solutions:
+      - "solutions/Cyrene.AstrBot.Integration.slnx"
+
+  platform:
+    description: "Core Platform Workspace: Cyrene-Platform and Plugins ecosystem conformance harness"
+    repositories:
+      - "Cyrene-Platform"
+      - "Cyrene-Plugins"
+
+  training:
+    description: "Model Training Workspace: Cyrene-Yield training service, Platform SDK, and conformance harness"
+    repositories:
+      - "Cyrene-Yield"
+      - "Cyrene-Platform"
+      - "Cyrene-Plugins"
+
