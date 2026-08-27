@@ -1,0 +1,129 @@
+version: "1.0.0"
+workspace: "Cyrene"
+description: "Canonical multi-repository topology manifest for Cyrene developers"
+
+repositories:
+  - name: "Cyrene-Platform"
+    path: "../Cyrene-Platform"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
+    integration_branch: "develop"
+    build_systems:
+      - "cargo"
+      - "uv"
+      - "gradle"
+    roles:
+      - "core-platform"
+      - "kernel"
+      - "sdk"
+    ide:
+      cargo_root: "../Cyrene-Platform/Cargo.toml"
+      python_root: "../Cyrene-Platform"
+      gradle_root: "../Cyrene-Platform/framework/jvm/settings.gradle.kts"
+
+  - name: "Cyrene-Plugins"
+    path: "../plugins"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
+    integration_branch: "develop"
+    build_systems:
+      - "uv"
+      - "dotnet"
+      - "gradle"
+    roles:
+      - "plugin-ecosystem"
+      - "conformance-harness"
+    ide:
+      python_root: "../plugins"
+      gradle_root: "../plugins/plugins/gateway/spring/build.gradle.kts"
+
+  - name: "cyrene-astrbot-rev"
+    path: "../services/cyrene-astrbot-rev"
+    canonical_remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
+    integration_branch: "feat/astrbot-model-provider-capability"
+    build_systems:
+      - "dotnet"
+      - "uv"
+    roles:
+      - "product-service"
+      - "im-gateway"
+    ide:
+      dotnet_solution: "../services/cyrene-astrbot-rev/AstrBot.slnx"
+      python_root: "../services/cyrene-astrbot-rev/python/capability_worker"
+
+  - name: "cyrene-dh-system-internal"
+    path: "../services/cyrene-dh-system-internal"
+    canonical_remote: "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"
+    integration_branch: "main"
+    build_systems:
+      - "dotnet"
+    roles:
+      - "enterprise-service"
+      - "wecom-agent-hub"
+    ide:
+      dotnet_solution: "../services/cyrene-dh-system-internal/WeComAgentHub.slnx"
+
+  - name: "cyrene-reactor"
+    path: "../services/cyrene-reactor"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
+    integration_branch: "develop"
+    build_systems:
+      - "uv"
+      - "cargo"
+    roles:
+      - "product-service"
+      - "inference-serving"
+    ide:
+      python_root: "../services/cyrene-reactor"
+      cargo_root: "../services/cyrene-reactor/Cargo.toml"
+
+  - name: "Cyrene-Yield"
+    path: "../services/Cyrene-Yield"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
+    integration_branch: "develop"
+    build_systems:
+      - "uv"
+    roles:
+      - "product-service"
+      - "model-training"
+    ide:
+      python_root: "../services/Cyrene-Yield"
+
+  - name: "cyrene-exchange"
+    path: "../services/cyrene-exchange"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
+    integration_branch: "develop"
+    build_systems:
+      - "uv"
+      - "gradle"
+    roles:
+      - "product-service"
+      - "core-transport"
+    ide:
+      python_root: "../services/cyrene-exchange"
+      gradle_root: "../services/cyrene-exchange/components/coordinator/build.gradle.kts"
+
+  - name: "cyrene-catalyst"
+    path: "../services/cyrene-catalyst"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
+    integration_branch: "develop"
+    build_systems: []
+    roles:
+      - "product-service"
+      - "knowledge-catalyst"
+
+  - name: "cyrene-echo"
+    path: "../services/cyrene-echo"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
+    integration_branch: "develop"
+    build_systems: []
+    roles:
+      - "product-service"
+      - "voice-synthesis"
+
+  - name: "cyrene-navigator"
+    path: "../services/cyrene-navigator"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
+    integration_branch: "develop"
+    build_systems: []
+    roles:
+      - "product-service"
+      - "desktop-navigation"

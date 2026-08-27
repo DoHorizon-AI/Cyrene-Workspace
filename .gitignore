@@ -1,0 +1,30 @@
+# User-specific IDEA workspace files
+.idea/workspace.xml
+.idea/shelf/
+.idea/httpRequests/
+.idea/dictionaries/
+.idea/dataSources/
+.idea/dataSources.local.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+*.iws
+
+# Build outputs
+bin/
+obj/
+out/
+target/
+build/
+.gradle/
+
+# Python virtualenvs & caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local secrets & OS files
+.env
+.env.*
+.DS_Store
+Thumbs.db
