@@ -162,3 +162,10 @@ repositories:
       developers: "push"
       service-maintainers: "maintain"
       release-managers: "maintain"
+
+  - name: "Cyrene-Workspace"
+    description: "Cyrene Multi-Repository Developer Meta-Workspace"
+    team_permissions:
+      developers: "push"
+      platform-maintainers: "maintain"
+      release-managers: "maintain"
