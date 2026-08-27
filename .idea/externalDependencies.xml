@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ExternalDependencies">
+    <plugin id="com.intellij.database" />
+    <plugin id="PythonCore" />
+    <plugin id="org.jetbrains.kotlin" />
+    <plugin id="com.intellij.spring" />
+    <plugin id="com.intellij.spring.boot" />
+    <plugin id="com.intellij.docker" />
+    <plugin id="org.rust.lang" />
+    <plugin id="Git4Idea" />
+    <plugin id="org.jetbrains.plugins.github" />
+    <plugin id="org.intellij.plugins.markdown" />
+  </component>
+</project>

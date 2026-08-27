@@ -195,6 +195,35 @@ Assert-Step "Repository independence & clean SDK authority (no copied source in 
     }
 }
 
+# 8. DEVELOPER APPLIANCE & DATABASE INVENTORY DECLARATIONS
+Assert-Step "Developer appliance & database inventory declarations" {
+    $dbFile = Join-Path $ScriptDir "governance/databases.yaml"
+    if (-not (Test-Path $dbFile)) { throw "Missing governance/databases.yaml" }
+    
+    $depsFile = Join-Path $ScriptDir ".idea/externalDependencies.xml"
+    if (-not (Test-Path $depsFile)) { throw "Missing .idea/externalDependencies.xml" }
+    
+    $dsFile = Join-Path $ScriptDir ".idea/dataSources.xml"
+    if (-not (Test-Path $dsFile)) { throw "Missing .idea/dataSources.xml" }
+    
+    $openScript = Join-Path $ScriptDir "open.ps1"
+    if (-not (Test-Path $openScript)) { throw "Missing open.ps1" }
+}
+
+# 9. ZERO SECRETS IN APPLIANCE CONFIGURATIONS
+Assert-Step "Absence of plaintext secrets in appliance & database configurations" {
+    $sensitiveFiles = @(
+        (Join-Path $ScriptDir "governance/databases.yaml"),
+        (Join-Path $ScriptDir ".idea/dataSources.xml")
+    )
+    foreach ($f in $sensitiveFiles) {
+        $content = Get-Content $f -Raw
+        if ($content -match 'password:\s*["''\w]+' -and $content -notmatch 'password:\s*""' -and $content -notmatch '\$\{' -and $content -notmatch 'password: null') {
+            throw "Potential plaintext password found in $f"
+        }
+    }
+}
+
 Write-Host "`n==================================================" -ForegroundColor Cyan
 Write-Host " RESULTS: $($script:passCount) Passed, $($script:failCount) Failed" -ForegroundColor $(if ($script:failCount -eq 0) { "Green" } else { "Red" })
 Write-Host "==================================================" -ForegroundColor Cyan

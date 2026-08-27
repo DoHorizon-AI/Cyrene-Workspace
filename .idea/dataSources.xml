@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourceManagerImpl" format="xml" multifile-model="true">
+    <data-source source="LOCAL" name="AstrBot (PostgreSQL + pgvector)" uuid="d1a2b3c4-e5f6-7a8b-9c0d-1e2f3a4b5c6d">
+      <driver-ref>postgresql</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.postgresql.Driver</jdbc-driver>
+      <jdbc-url>jdbc:postgresql://localhost:5432/astrbot</jdbc-url>
+      <working-dir>$PROJECT_DIR$</working-dir>
+    </data-source>
+    <data-source source="LOCAL" name="AstrBot (SQLite Local KB)" uuid="a2b3c4d5-e6f7-8a9b-0c1d-2e3f4a5b6c7d">
+      <driver-ref>sqlite.xerial</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.sqlite.JDBC</jdbc-driver>
+      <jdbc-url>jdbc:sqlite:$PROJECT_DIR$/../services/cyrene-astrbot-rev/data/knowledge_base/kb.db</jdbc-url>
+      <working-dir>$PROJECT_DIR$</working-dir>
+    </data-source>
+    <data-source source="LOCAL" name="Cyrene Exchange (Redis Cache)" uuid="b3c4d5e6-f7a8-9b0c-1d2e-3f4a5b6c7d8e">
+      <driver-ref>redis</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-url>redis://localhost:6379/0</jdbc-url>
+      <working-dir>$PROJECT_DIR$</working-dir>
+    </data-source>
+    <data-source source="LOCAL" name="WeComAgentHub (PostgreSQL)" uuid="c4d5e6f7-a8b9-0c1d-2e3f-4a5b6c7d8e9f">
+      <driver-ref>postgresql</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.postgresql.Driver</jdbc-driver>
+      <jdbc-url>jdbc:postgresql://localhost:5432/wecom_agent_hub</jdbc-url>
+      <working-dir>$PROJECT_DIR$</working-dir>
+    </data-source>
+    <data-source source="LOCAL" name="CY-LLM Gateway (PostgreSQL)" uuid="e5f6a7b8-c9d0-1e2f-3a4b-5c6d7e8f9a0b">
+      <driver-ref>postgresql</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>org.postgresql.Driver</jdbc-driver>
+      <jdbc-url>jdbc:postgresql://localhost:5432/cy_gateway</jdbc-url>
+      <working-dir>$PROJECT_DIR$</working-dir>
+    </data-source>
+  </component>
+</project>

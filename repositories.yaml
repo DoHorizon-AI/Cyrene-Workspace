@@ -1,6 +1,6 @@
-version: "1.1.0"
+version: "1.2.0"
 workspace: "Cyrene"
-description: "Canonical multi-repository topology and runtime target manifest for Cyrene developers"
+description: "Canonical multi-repository topology, runtime target manifest, and contract pointers for Cyrene developers"
 
 global_policy:
   development_hosts:
@@ -31,6 +31,8 @@ repositories:
   - name: "Cyrene-Platform"
     path: "../Cyrene-Platform"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems:
       - "cargo"
@@ -51,10 +53,26 @@ repositories:
       cargo_root: "../Cyrene-Platform/Cargo.toml"
       python_root: "../Cyrene-Platform"
       gradle_root: "../Cyrene-Platform/framework/jvm/settings.gradle.kts"
+    pointers:
+      primary_source_roots:
+        - "../Cyrene-Platform/kernel/crates"
+        - "../Cyrene-Platform/sdk/python"
+        - "../Cyrene-Platform/framework/jvm"
+      test_roots:
+        - "../Cyrene-Platform/kernel/crates/*/tests"
+        - "../Cyrene-Platform/sdk/python/*/tests"
+      api_contract_roots:
+        - "../Cyrene-Platform/contracts/proto"
+        - "../Cyrene-Platform/contracts/rust"
+      developer_commands:
+        test: "cargo test --workspace ; uv run pytest"
+        build: "cargo build ; ./gradlew build"
 
   - name: "Cyrene-Plugins"
     path: "../plugins"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems:
       - "uv"
@@ -72,11 +90,28 @@ repositories:
     ide:
       python_root: "../plugins"
       gradle_root: "../plugins/plugins/gateway/spring/build.gradle.kts"
+    pointers:
+      primary_source_roots:
+        - "../plugins/plugins/agents"
+        - "../plugins/plugins/providers"
+        - "../plugins/plugins/gateway/spring/src"
+      test_roots:
+        - "../plugins/plugins/agents/*/tests"
+        - "../plugins/plugins/providers/*/tests"
+      api_contract_roots:
+        - "../plugins/plugins/gateway/spring/proto"
+      database_migration_roots:
+        - "../plugins/plugins/gateway/spring/src/main/resources/db/migration"
+      developer_commands:
+        test: "uv run pytest"
+        build: "./gradlew build"
 
   - name: "cyrene-astrbot-rev"
     path: "../services/cyrene-astrbot-rev"
     canonical_remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
-    integration_branch: "feat/astrbot-model-provider-capability"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
+    integration_branch: "develop"
     build_systems:
       - "dotnet"
       - "uv"
@@ -93,10 +128,24 @@ repositories:
     ide:
       dotnet_solution: "../services/cyrene-astrbot-rev/AstrBot.slnx"
       python_root: "../services/cyrene-astrbot-rev/python/capability_worker"
+    pointers:
+      primary_source_roots:
+        - "../services/cyrene-astrbot-rev/src/AstrBot.DotNetHost"
+        - "../services/cyrene-astrbot-rev/python/capability_worker/src"
+      test_roots:
+        - "../services/cyrene-astrbot-rev/tests"
+        - "../services/cyrene-astrbot-rev/python/capability_worker/tests"
+      database_migration_roots:
+        - "../services/cyrene-astrbot-rev/src/AstrBot.DatabaseMigrator/Migrations"
+      developer_commands:
+        test: "dotnet test AstrBot.slnx ; uv run --directory python/capability_worker pytest"
+        build: "dotnet build AstrBot.slnx"
 
   - name: "cyrene-dh-system-internal"
     path: "../services/cyrene-dh-system-internal"
     canonical_remote: "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"
+    visibility: "private"
+    clone_policy: "external_auth_required"
     integration_branch: "main"
     build_systems:
       - "dotnet"
@@ -111,10 +160,22 @@ repositories:
     release_artifact_target: "linux-x64"
     ide:
       dotnet_solution: "../services/cyrene-dh-system-internal/WeComAgentHub.slnx"
+    pointers:
+      primary_source_roots:
+        - "../services/cyrene-dh-system-internal/src"
+      test_roots:
+        - "../services/cyrene-dh-system-internal/tests"
+      database_migration_roots:
+        - "../services/cyrene-dh-system-internal/src/WeComAgentHub.Infrastructure/Migrations"
+      developer_commands:
+        test: "dotnet test WeComAgentHub.slnx"
+        build: "dotnet build WeComAgentHub.slnx"
 
   - name: "cyrene-reactor"
     path: "../services/cyrene-reactor"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems:
       - "uv"
@@ -131,10 +192,23 @@ repositories:
     ide:
       python_root: "../services/cyrene-reactor"
       cargo_root: "../services/cyrene-reactor/Cargo.toml"
+    pointers:
+      primary_source_roots:
+        - "../services/cyrene-reactor/runtime/core/src"
+        - "../services/cyrene-reactor/runtime/pro/src"
+        - "../services/cyrene-reactor/components/scheduler-rs/src"
+      test_roots:
+        - "../services/cyrene-reactor/runtime/core/tests"
+        - "../services/cyrene-reactor/runtime/pro/tests"
+      developer_commands:
+        test: "uv run pytest ; cargo test"
+        build: "cargo build"
 
   - name: "Cyrene-Yield"
     path: "../services/Cyrene-Yield"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems:
       - "uv"
@@ -149,10 +223,20 @@ repositories:
     release_artifact_target: "py3-none-any"
     ide:
       python_root: "../services/Cyrene-Yield"
+    pointers:
+      primary_source_roots:
+        - "../services/Cyrene-Yield/training/core/src"
+      test_roots:
+        - "../services/Cyrene-Yield/training/core/tests"
+      developer_commands:
+        test: "uv run pytest training/core/tests"
+        build: "uv build"
 
   - name: "cyrene-exchange"
     path: "../services/cyrene-exchange"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems:
       - "uv"
@@ -169,10 +253,23 @@ repositories:
     ide:
       python_root: "../services/cyrene-exchange"
       gradle_root: "../services/cyrene-exchange/components/coordinator/build.gradle.kts"
+    pointers:
+      primary_source_roots:
+        - "../services/cyrene-exchange/src"
+        - "../services/cyrene-exchange/components/coordinator/src"
+      test_roots:
+        - "../services/cyrene-exchange/tests"
+      api_contract_roots:
+        - "../services/cyrene-exchange/proto"
+      developer_commands:
+        test: "uv run pytest ; ./gradlew build"
+        build: "./gradlew build"
 
   - name: "cyrene-catalyst"
     path: "../services/cyrene-catalyst"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems: []
     roles:
@@ -185,6 +282,8 @@ repositories:
   - name: "cyrene-echo"
     path: "../services/cyrene-echo"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems: []
     roles:
@@ -197,6 +296,8 @@ repositories:
   - name: "cyrene-navigator"
     path: "../services/cyrene-navigator"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
+    visibility: "public"
+    clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems: []
     roles:
@@ -246,4 +347,3 @@ profiles:
       - "Cyrene-Yield"
       - "Cyrene-Platform"
       - "Cyrene-Plugins"
-
