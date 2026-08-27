@@ -1,6 +1,31 @@
-version: "1.0.0"
+version: "1.1.0"
 workspace: "Cyrene"
-description: "Canonical multi-repository topology manifest for Cyrene developers"
+description: "Canonical multi-repository topology and runtime target manifest for Cyrene developers"
+
+global_policy:
+  development_hosts:
+    - "windows"
+    - "linux"
+    - "macos"
+  windows_role: "DEVELOPMENT_HOST_ONLY (IDE indexing, rust-analyzer, local diagnostics, Python/DotNet tooling)"
+  canonical_runtime_os: "linux"
+  canonical_rust_target: "x86_64-unknown-linux-gnu"
+  secondary_rust_targets:
+    - "aarch64-unknown-linux-gnu"
+  python_baseline:
+    canonical_dev_version: "3.12"
+    declared_compatibility: ">=3.11"
+    environment_manager: "uv"
+  jvm_baseline:
+    jdk_version: 25
+    kotlin_version: "2.4.10"
+    gradle_version: "9.5.0"
+    dsl: "Gradle Kotlin DSL"
+  dotnet_baseline:
+    sdk_version: "10.0"
+    solution_format: ".slnx"
+  node_baseline:
+    policy: "NONE (no canonical backend execution plane dependency)"
 
 repositories:
   - name: "Cyrene-Platform"
@@ -15,6 +40,13 @@ repositories:
       - "core-platform"
       - "kernel"
       - "sdk"
+    development_hosts: ["windows", "linux", "macos"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "x86_64-unknown-linux-gnu"
+    local_acceptance_environment: "wsl2 / linux_container"
+    ci_acceptance_environment: "ubuntu-latest (GitHub Actions)"
+    release_artifact_target: "x86_64-unknown-linux-gnu"
+    secondary_targets: ["aarch64-unknown-linux-gnu"]
     ide:
       cargo_root: "../Cyrene-Platform/Cargo.toml"
       python_root: "../Cyrene-Platform"
@@ -31,6 +63,12 @@ repositories:
     roles:
       - "plugin-ecosystem"
       - "conformance-harness"
+    development_hosts: ["windows", "linux", "macos"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "x86_64-unknown-linux-gnu"
+    local_acceptance_environment: "wsl2 / linux_container / host"
+    ci_acceptance_environment: "ubuntu-latest"
+    release_artifact_target: "multi-platform"
     ide:
       python_root: "../plugins"
       gradle_root: "../plugins/plugins/gateway/spring/build.gradle.kts"
@@ -45,6 +83,13 @@ repositories:
     roles:
       - "product-service"
       - "im-gateway"
+    development_hosts: ["windows", "linux", "macos"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "linux-x64 (net10.0)"
+    local_acceptance_environment: "wsl2 / linux_container / host"
+    ci_acceptance_environment: "ubuntu-latest (Azure Pipelines / GitHub Actions)"
+    release_artifact_target: "linux-x64"
+    secondary_targets: ["linux-arm64", "win-x64"]
     ide:
       dotnet_solution: "../services/cyrene-astrbot-rev/AstrBot.slnx"
       python_root: "../services/cyrene-astrbot-rev/python/capability_worker"
@@ -58,6 +103,12 @@ repositories:
     roles:
       - "enterprise-service"
       - "wecom-agent-hub"
+    development_hosts: ["windows", "linux", "macos"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "linux-x64 (net10.0)"
+    local_acceptance_environment: "wsl2 / linux_container / host"
+    ci_acceptance_environment: "ubuntu-latest (Azure Pipelines)"
+    release_artifact_target: "linux-x64"
     ide:
       dotnet_solution: "../services/cyrene-dh-system-internal/WeComAgentHub.slnx"
 
@@ -71,6 +122,12 @@ repositories:
     roles:
       - "product-service"
       - "inference-serving"
+    development_hosts: ["windows", "linux"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "x86_64-unknown-linux-gnu"
+    local_acceptance_environment: "wsl2 / linux_container"
+    ci_acceptance_environment: "ubuntu-latest"
+    release_artifact_target: "x86_64-unknown-linux-gnu"
     ide:
       python_root: "../services/cyrene-reactor"
       cargo_root: "../services/cyrene-reactor/Cargo.toml"
@@ -84,6 +141,12 @@ repositories:
     roles:
       - "product-service"
       - "model-training"
+    development_hosts: ["windows", "linux"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "x86_64-unknown-linux-gnu"
+    local_acceptance_environment: "wsl2 / linux_container / host"
+    ci_acceptance_environment: "ubuntu-latest"
+    release_artifact_target: "py3-none-any"
     ide:
       python_root: "../services/Cyrene-Yield"
 
@@ -97,6 +160,12 @@ repositories:
     roles:
       - "product-service"
       - "core-transport"
+    development_hosts: ["windows", "linux", "macos"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "x86_64-unknown-linux-gnu"
+    local_acceptance_environment: "wsl2 / linux_container / host"
+    ci_acceptance_environment: "ubuntu-latest"
+    release_artifact_target: "multi-platform"
     ide:
       python_root: "../services/cyrene-exchange"
       gradle_root: "../services/cyrene-exchange/components/coordinator/build.gradle.kts"
@@ -109,6 +178,9 @@ repositories:
     roles:
       - "product-service"
       - "knowledge-catalyst"
+    development_hosts: ["windows", "linux"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "linux-x64"
 
   - name: "cyrene-echo"
     path: "../services/cyrene-echo"
@@ -118,6 +190,9 @@ repositories:
     roles:
       - "product-service"
       - "voice-synthesis"
+    development_hosts: ["windows", "linux"]
+    canonical_runtime_os: "linux"
+    canonical_build_target: "linux-x64"
 
   - name: "cyrene-navigator"
     path: "../services/cyrene-navigator"
@@ -127,3 +202,6 @@ repositories:
     roles:
       - "product-service"
       - "desktop-navigation"
+    development_hosts: ["windows", "macos", "linux"]
+    canonical_runtime_os: "client-desktop"
+    canonical_build_target: "multi-target"

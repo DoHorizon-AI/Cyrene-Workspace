@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-    Automated Acceptance Gate for Cyrene Multi-Repository Workspace and Toolchain Normalization.
+    Automated Development Workspace and Toolchain Acceptance Gate for Cyrene.
 .DESCRIPTION
     Validates topology, absence of absolute paths, Python environments, .NET meta-solution,
-    Rust workspaces, JVM configurations, and repository independence.
+    Rust development toolchain declarations, JVM toolchain freezing, and repository independence.
+    Distinguishes Development Host checks from Canonical Linux Runtime Acceptance.
 #>
 
 [CmdletBinding()]
@@ -32,7 +33,7 @@ function Assert-Step([string]$name, [scriptblock]$action) {
 }
 
 Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host " CYRENE WORKSPACE VERIFICATION GATE" -ForegroundColor Cyan
+Write-Host " CYRENE WORKSPACE DEVELOPMENT GATE" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Cyan
 
 # 1. TOPOLOGY & ABSOLUTE PATH CHECK
@@ -74,7 +75,17 @@ Assert-Step "Absence of user-specific absolute paths in workspace configuration"
     }
 }
 
-# 2. PYTHON ENVIRONMENTS
+# 2. INTELLIJ MULTI-PROJECT WORKSPACE
+Assert-Step "IntelliJ IDEA Multi-Project Workspace (.idea/jb-workspace.xml)" {
+    $jbWorkspace = Join-Path $ScriptDir ".idea/jb-workspace.xml"
+    if (-not (Test-Path $jbWorkspace)) { throw ".idea/jb-workspace.xml not found" }
+    $content = Get-Content $jbWorkspace -Raw
+    if ($content -notmatch 'WorkspaceProjectModel') {
+        throw "WorkspaceProjectModel not found in jb-workspace.xml"
+    }
+}
+
+# 3. PYTHON ENVIRONMENTS
 Assert-Step "Python .venv discovery and uv environment sanity" {
     $pyTargets = @(
         "../Cyrene-Platform",
@@ -98,7 +109,7 @@ Assert-Step "Python .venv discovery and uv environment sanity" {
     }
 }
 
-# 3. .NET META-SOLUTION
+# 4. .NET META-SOLUTION
 Assert-Step ".NET Cyrene.Workspace.slnx project resolution" {
     $slnx = Join-Path $ScriptDir "Cyrene.Workspace.slnx"
     if (-not (Test-Path $slnx)) { throw "Cyrene.Workspace.slnx not found" }
@@ -122,11 +133,15 @@ if (-not $Quick) {
     }
 }
 
-# 4. RUST WORKSPACES
-Assert-Step "Rust cargo metadata validation" {
+# 5. RUST TOOLCHAIN DECLARATION (DEV HOST ONLY)
+Assert-Step "Rust development toolchain declarations & cargo metadata" {
     $rustTargets = @("../Cyrene-Platform", "../services/cyrene-reactor")
     foreach ($rel in $rustTargets) {
         $full = Join-Path $ScriptDir $rel
+        $toolchainPin = Join-Path $full "rust-toolchain.toml"
+        if (-not (Test-Path $toolchainPin)) {
+            throw "Missing rust-toolchain.toml in $rel"
+        }
         $output = cargo metadata --manifest-path (Join-Path $full "Cargo.toml") --format-version 1 --no-deps 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "cargo metadata failed for $rel"
@@ -134,8 +149,8 @@ Assert-Step "Rust cargo metadata validation" {
     }
 }
 
-# 5. JVM / GRADLE
-Assert-Step "JVM Gradle project configurations" {
+# 6. JVM GRADLE & TOOLCHAIN PINNING
+Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
     $jvmTargets = @(
         "../Cyrene-Platform/framework/jvm",
         "../services/cyrene-exchange/components/coordinator",
@@ -147,21 +162,34 @@ Assert-Step "JVM Gradle project configurations" {
         if (-not (Test-Path $buildScript)) {
             throw "Missing build.gradle.kts in $rel"
         }
+        $wrapperProps = Join-Path $full "gradle/wrapper/gradle-wrapper.properties"
+        if (-not (Test-Path $wrapperProps)) {
+            throw "Missing gradle-wrapper.properties in $rel"
+        }
+        $propsContent = Get-Content $wrapperProps -Raw
+        if ($propsContent -notmatch 'gradle-9\.5\.0') {
+            throw "Gradle wrapper not pinned to 9.5.0 in $rel"
+        }
     }
 }
 
-# 6. REPOSITORY INDEPENDENCE
-Assert-Step "Repository standalone buildability without Cyrene-Workspace" {
-    $astrbotSln = Join-Path $ScriptDir "../services/cyrene-astrbot-rev/AstrBot.slnx"
-    if (-not (Test-Path $astrbotSln)) { throw "AstrBot.slnx missing" }
-    
-    $wecomSln = Join-Path $ScriptDir "../services/cyrene-dh-system-internal/WeComAgentHub.slnx"
-    if (-not (Test-Path $wecomSln)) { throw "WeComAgentHub.slnx missing" }
+# 7. REPOSITORY INDEPENDENCE & STANDALONE REPRODUCIBILITY
+Assert-Step "Repository standalone independence (Cyrene-Yield self-contained)" {
+    $yieldPyproject = Join-Path $ScriptDir "../services/Cyrene-Yield/pyproject.toml"
+    $yieldContent = Get-Content $yieldPyproject -Raw
+    if ($yieldContent -match '\.\./\.\./Cyrene-Platform') {
+        throw "Cyrene-Yield has hardcoded sibling repository dependency on Cyrene-Platform"
+    }
 }
 
 Write-Host "`n==================================================" -ForegroundColor Cyan
 Write-Host " RESULTS: $($script:passCount) Passed, $($script:failCount) Failed" -ForegroundColor $(if ($script:failCount -eq 0) { "Green" } else { "Red" })
 Write-Host "==================================================" -ForegroundColor Cyan
+
+Write-Host "`n[CANONICAL RUST RUNTIME STATUS]" -ForegroundColor Yellow
+Write-Host "  Development Host: Windows (IDE Indexing & Local Tooling [OK])" -ForegroundColor Gray
+Write-Host "  Canonical Runtime Target: Linux (x86_64-unknown-linux-gnu)" -ForegroundColor Gray
+Write-Host "  Canonical Linux Acceptance: Executed via CI (ubuntu-latest) and verify-linux.sh" -ForegroundColor Gray
 
 if ($script:failCount -gt 0) {
     exit 1

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WorkspaceProjectModel">
+    <project-item path="../Cyrene-Platform" />
+    <project-item path="../plugins" />
+    <project-item path="../services/cyrene-astrbot-rev" />
+    <project-item path="../services/cyrene-dh-system-internal" />
+    <project-item path="../services/cyrene-reactor" />
+    <project-item path="../services/Cyrene-Yield" />
+    <project-item path="../services/cyrene-exchange" />
+    <project-item path="../services/cyrene-catalyst" />
+    <project-item path="../services/cyrene-echo" />
+    <project-item path="../services/cyrene-navigator" />
+  </component>
+</project>
