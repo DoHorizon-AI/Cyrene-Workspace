@@ -1,0 +1,164 @@
+version: "1.0.0"
+organization: "DoHorizon-AI"
+description: "Declarative GitHub Access Governance as Code for Cyrene"
+
+teams:
+  - slug: "admin-team"
+    name: "Admin Team"
+    privacy: "closed"
+    description: "Cyrene Organization Administrators"
+    members:
+      - login: "Baijin64"
+        role: "maintainer"
+
+  - slug: "developers"
+    name: "Developers"
+    privacy: "closed"
+    description: "Core Cyrene Software Engineers"
+    members:
+      - login: "Baijin64"
+        role: "maintainer"
+      - login: "Selenophilia37"
+        role: "member"
+      - login: "Icy-Lunar"
+        role: "member"
+      - login: "SugherStar"
+        role: "member"
+      - login: "FireflysDog"
+        role: "member"
+      - login: "AyaxYuna"
+        role: "member"
+      - login: "shenwenbo2009"
+        role: "member"
+      - login: "Shaofei215"
+        role: "member"
+      - login: "MarchsYu"
+        role: "member"
+
+  - slug: "platform-maintainers"
+    name: "Platform Maintainers"
+    privacy: "closed"
+    description: "Maintainers of Cyrene-Platform and Kernel Foundations"
+    members:
+      - login: "Baijin64"
+        role: "maintainer"
+      - login: "Selenophilia37"
+        role: "member"
+      - login: "SugherStar"
+        role: "member"
+      - login: "MarchsYu"
+        role: "member"
+
+  - slug: "plugin-maintainers"
+    name: "Plugin Maintainers"
+    privacy: "closed"
+    description: "Maintainers of Cyrene Official Plugins Monorepo"
+    members:
+      - login: "Baijin64"
+        role: "maintainer"
+      - login: "Selenophilia37"
+        role: "member"
+      - login: "SugherStar"
+        role: "member"
+
+  - slug: "service-maintainers"
+    name: "Service Maintainers"
+    privacy: "closed"
+    description: "Maintainers of Cyrene Services and Products"
+    members:
+      - login: "Baijin64"
+        role: "maintainer"
+      - login: "Selenophilia37"
+        role: "member"
+      - login: "SugherStar"
+        role: "member"
+      - login: "MarchsYu"
+        role: "member"
+
+  - slug: "release-managers"
+    name: "Release Managers"
+    privacy: "closed"
+    description: "Release Engineers Authorized to Manage Tagging & Releases"
+    members:
+      - login: "Baijin64"
+        role: "maintainer"
+      - login: "Icy-Lunar"
+        role: "member"
+      - login: "SugherStar"
+        role: "member"
+      - login: "FireflysDog"
+        role: "member"
+
+  - slug: "all-members"
+    name: "All Members"
+    privacy: "closed"
+    description: "All Registered Organization Members"
+    members:
+      - login: "Baijin64"
+        role: "maintainer"
+      - login: "shenwenbo2009"
+        role: "member"
+
+repositories:
+  - name: "Cyrene-Platform"
+    description: "Cyrene Core Platform & Kernel Engine"
+    team_permissions:
+      developers: "push"
+      platform-maintainers: "maintain"
+      release-managers: "maintain"
+
+  - name: "Cyrene-Plugins-Official"
+    description: "Official Cyrene Plugins Monorepo"
+    team_permissions:
+      developers: "push"
+      plugin-maintainers: "maintain"
+      release-managers: "maintain"
+
+  - name: "Astrbot-Rev"
+    description: "AstrBot .NET Host & Unified IM Gateway"
+    team_permissions:
+      developers: "push"
+      service-maintainers: "maintain"
+      release-managers: "maintain"
+
+  - name: "Cyrene-Yield"
+    description: "Cyrene Yield: Unified Model Training & Fine-Tuning Service"
+    team_permissions:
+      developers: "push"
+      service-maintainers: "maintain"
+      release-managers: "maintain"
+
+  - name: "Cyrene-Reactor"
+    description: "Cyrene Reactor: Model Inference Serving Runtime"
+    team_permissions:
+      developers: "push"
+      service-maintainers: "maintain"
+      release-managers: "maintain"
+
+  - name: "Cyrene-Exchange"
+    description: "Cyrene Exchange: Core Transport & Gateway Service"
+    team_permissions:
+      developers: "push"
+      service-maintainers: "maintain"
+      release-managers: "maintain"
+
+  - name: "Cyrene-Catalyst"
+    description: "Cyrene Catalyst: Knowledge & RAG Service"
+    team_permissions:
+      developers: "push"
+      service-maintainers: "maintain"
+      release-managers: "maintain"
+
+  - name: "Cyrene-Navigator"
+    description: "Cyrene Navigator: Desktop Client & Workflow Navigator"
+    team_permissions:
+      developers: "push"
+      service-maintainers: "maintain"
+      release-managers: "maintain"
+
+  - name: "Cyrene-Echo"
+    description: "Cyrene Echo: Voice Synthesis & Audio Processing Service"
+    team_permissions:
+      developers: "push"
+      service-maintainers: "maintain"
+      release-managers: "maintain"
