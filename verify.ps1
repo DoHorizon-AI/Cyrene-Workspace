@@ -173,12 +173,14 @@ Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
     }
 }
 
-# 7. REPOSITORY INDEPENDENCE & STANDALONE REPRODUCIBILITY
-Assert-Step "Repository standalone independence (Cyrene-Yield self-contained)" {
-    $yieldPyproject = Join-Path $ScriptDir "../services/Cyrene-Yield/pyproject.toml"
-    $yieldContent = Get-Content $yieldPyproject -Raw
-    if ($yieldContent -match '\.\./\.\./Cyrene-Platform') {
-        throw "Cyrene-Yield has hardcoded sibling repository dependency on Cyrene-Platform"
+# 7. REPOSITORY INDEPENDENCE & PLATFORM SDK SEAM
+Assert-Step "Repository independence & clean SDK authority (no copied source in Cyrene-Yield)" {
+    $yieldPackages = Join-Path $ScriptDir "../services/Cyrene-Yield/packages"
+    if (Test-Path $yieldPackages) {
+        $copiedSdks = Get-ChildItem $yieldPackages -Directory | Where-Object { $_.Name -match "^cyrene_" }
+        if ($copiedSdks.Count -gt 0) {
+            throw "Cyrene-Yield has copied Platform SDK sources in packages/"
+        }
     }
 }
 
