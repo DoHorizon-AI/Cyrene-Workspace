@@ -92,15 +92,9 @@ foreach ($repo in $activeRepos) {
             git clone $repo.Remote $targetPath
             Write-Host "    [CLONED] $($repo.Name) successfully." -ForegroundColor Green
         } elseif ($repo.Policy -eq "github_auth_required") {
-            $ghAuth = gh auth status 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                gh repo clone $repo.Remote $targetPath
-                Write-Host "    [CLONED via GH CLI] $($repo.Name) successfully." -ForegroundColor Green
-            } else {
-                Write-Warning "    [AUTH_REQUIRED] Run 'gh auth login' to acquire private repository $($repo.Name)."
-            }
+            Write-Warning "    [AUTH_REQUIRED] Private repository '$($repo.Name)' requires authentication. Run 'gh auth login' or clone manually."
         } elseif ($repo.Policy -eq "external_auth_required") {
-            Write-Warning "    [EXTERNAL_AUTH_REQUIRED] Azure DevOps authentication required for $($repo.Name) ($($repo.Remote))."
+            Write-Warning "    [EXTERNAL_SOURCE] External private repository '$($repo.Name)' requires Azure DevOps authentication ($($repo.Remote))."
         }
     }
 }
