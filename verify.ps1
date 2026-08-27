@@ -62,6 +62,9 @@ Assert-Step "Absence of user-specific absolute paths in workspace configuration"
         $_.FullName -notmatch '\\bin\\' -and
         $_.FullName -notmatch '\\obj\\' -and
         $_.FullName -notmatch '\\\.venv\\' -and
+        $_.FullName -notmatch '\\\.idea\\modules\\' -and
+        $_.FullName -notmatch '\\\.idea\\libraries\\' -and
+        $_.FullName -notmatch '\\\.idea\\\.idea\.' -and
         $_.Extension -in @('.yaml', '.slnx', '.xml', '.iml', '.json', '.md', '.ps1', '.sh')
     }
     

@@ -2,7 +2,36 @@
 <module type="GENERAL_MODULE" version="4">
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
-    <content url="file://$MODULE_DIR$/../Cyrene-Platform" />
+    <content url="file://$MODULE_DIR$/../Cyrene-Platform">
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/adapters/execution/sandboxd/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/adapters/execution/sandboxd/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/adapters/hardware/linux_sys/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/adapters/hardware/nvidia/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/agents/node/cy-node-agent/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/agents/node/cy-node-agent/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-kernel-contract/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-manifest/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-plugin-protocol/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-proto/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-extension-registry/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-extension-registry/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-installation-resolver/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-local-transport/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-platform-api/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-adapter-client/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-kernel-api/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-kernel-daemon/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-kernel-daemon/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-resource-manager/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-sandbox-client/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/runtime/cyrene-kernel/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/runtime/cyrene-kernel/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/examples" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/tests" isTestSource="true" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/target" />
+    </content>
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

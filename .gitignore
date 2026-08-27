@@ -7,6 +7,8 @@
 .idea/dataSources.local.xml
 .idea/tasks.xml
 .idea/usage.statistics.xml
+.idea/libraries/
+.idea/modules/
 .idea/.idea.*/
 *.iws
 

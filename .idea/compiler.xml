@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CompilerConfiguration">
+    <bytecodeTargetLevel>
+      <module name="cyrene-control-plane.adapters" target="25" />
+      <module name="cyrene-control-plane.adapters.inbound-grpc" target="25" />
+      <module name="cyrene-control-plane.adapters.inbound-grpc.main" target="25" />
+      <module name="cyrene-control-plane.adapters.inbound-grpc.test" target="25" />
+      <module name="cyrene-control-plane.adapters.main" target="25" />
+      <module name="cyrene-control-plane.adapters.outbound-kernel" target="25" />
+      <module name="cyrene-control-plane.adapters.outbound-kernel.main" target="25" />
+      <module name="cyrene-control-plane.adapters.outbound-kernel.test" target="25" />
+      <module name="cyrene-control-plane.adapters.test" target="25" />
+      <module name="cyrene-control-plane.application" target="25" />
+      <module name="cyrene-control-plane.application.main" target="25" />
+      <module name="cyrene-control-plane.application.test" target="25" />
+      <module name="cyrene-control-plane.architecture-tests" target="25" />
+      <module name="cyrene-control-plane.architecture-tests.main" target="25" />
+      <module name="cyrene-control-plane.architecture-tests.test" target="25" />
+      <module name="cyrene-control-plane.bootstrap" target="25" />
+      <module name="cyrene-control-plane.bootstrap.main" target="25" />
+      <module name="cyrene-control-plane.bootstrap.test" target="25" />
+      <module name="cyrene-control-plane.domain" target="25" />
+      <module name="cyrene-control-plane.domain.main" target="25" />
+      <module name="cyrene-control-plane.domain.test" target="25" />
+      <module name="cyrene-exchange-coordinator" target="25" />
+      <module name="cyrene-exchange-coordinator.main" target="25" />
+      <module name="cyrene-exchange-coordinator.test" target="25" />
+      <module name="cyrene-spring-gateway" target="25" />
+      <module name="cyrene-spring-gateway.main" target="25" />
+      <module name="cyrene-spring-gateway.test" target="25" />
+    </bytecodeTargetLevel>
+  </component>
+  <component name="JavacSettings">
+    <option name="ADDITIONAL_OPTIONS_OVERRIDE">
+      <module name="cyrene-exchange-coordinator" options="-parameters" />
+      <module name="cyrene-exchange-coordinator.main" options="-parameters" />
+      <module name="cyrene-exchange-coordinator.test" options="-parameters" />
+      <module name="cyrene-spring-gateway" options="-parameters" />
+      <module name="cyrene-spring-gateway.main" options="-parameters" />
+      <module name="cyrene-spring-gateway.test" options="-parameters" />
+    </option>
+  </component>
+</project>
