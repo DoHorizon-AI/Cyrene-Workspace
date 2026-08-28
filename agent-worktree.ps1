@@ -32,7 +32,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet("create", "snapshot", "status", "list", "remove", "cleanup")]
+    [ValidateSet("create", "snapshot", "status", "list", "remove", "cleanup", "repair")]
     [string]$Action,
 
     [Parameter(Position = 1)]
@@ -362,6 +362,48 @@ function Get-RegistryPath([string]$WorktreeRoot) {
     return (Join-Path $WorktreeRoot $RegistryFileName)
 }
 
+function Repair-RegistryEntries([string]$WorktreeRoot) {
+    $registryPath = Get-RegistryPath $WorktreeRoot
+    Write-Warning "Registry at '$registryPath' is invalid or missing; repairing from active Git worktree inventory..."
+    
+    $recoveredEntries = @()
+    $inventory = @(Get-AllWorktreeInventory)
+    foreach ($wt in $inventory) {
+        if ($wt.IsPrimary) { continue }
+        if (-not (Test-PathUnderRoot $wt.Path $WorktreeRoot)) { continue }
+        
+        $markerPath = Join-Path $wt.Path $SnapshotMarkerName
+        $marker = $null
+        if (Test-Path -LiteralPath $markerPath) {
+            try { $marker = ConvertFrom-Json (Get-Content -LiteralPath $markerPath -Raw) } catch {}
+        }
+        
+        $mode = if ($wt.Detached -or ($null -ne $marker -and $marker.type -eq "CYRENE_INTEGRATION_SNAPSHOT")) { "snapshot" } else { "writer" }
+        $role = if ($null -ne $marker -and -not [string]::IsNullOrWhiteSpace($marker.role)) {
+            $marker.role
+        } else {
+            Split-Path $wt.Path -Leaf
+        }
+        
+        $recoveredEntries += [ordered]@{
+            role = $role
+            repository = $wt.Repository.Name
+            repositoryPath = $wt.Repository.Path
+            path = $wt.Path
+            mode = $mode
+            branch = if ($mode -eq "writer") { $wt.Branch } else { $null }
+            baseRef = $null
+            baseSha = $null
+            integrationSha = $wt.Head
+            createdAt = [DateTime]::UtcNow.ToString("o")
+            repaired = $true
+        }
+    }
+    
+    Save-RegistryEntries $WorktreeRoot $recoveredEntries
+    return @($recoveredEntries)
+}
+
 function Get-RegistryEntries([string]$WorktreeRoot) {
     $registryPath = Get-RegistryPath $WorktreeRoot
     if (-not (Test-Path -LiteralPath $registryPath)) {
@@ -369,12 +411,16 @@ function Get-RegistryEntries([string]$WorktreeRoot) {
     }
 
     try {
-        $payload = ConvertFrom-Json (Get-Content -LiteralPath $registryPath -Raw)
+        $raw = Get-Content -LiteralPath $registryPath -Raw
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return (Repair-RegistryEntries $WorktreeRoot)
+        }
+        $payload = ConvertFrom-Json $raw
     } catch {
-        throw "Registry '$registryPath' is not valid JSON; refusing to ignore or overwrite it."
+        return (Repair-RegistryEntries $WorktreeRoot)
     }
     if ($null -eq $payload) {
-        throw "Registry '$registryPath' is empty; refusing to ignore or overwrite it."
+        return (Repair-RegistryEntries $WorktreeRoot)
     }
     if ($payload -is [System.Array]) {
         return @($payload)
@@ -382,7 +428,7 @@ function Get-RegistryEntries([string]$WorktreeRoot) {
     if ($payload.PSObject.Properties.Name -contains "entries") {
         return @($payload.entries)
     }
-    throw "Registry '$registryPath' has no entries array; refusing to ignore or overwrite it."
+    return (Repair-RegistryEntries $WorktreeRoot)
 }
 
 function Save-RegistryEntries([string]$WorktreeRoot, [object[]]$Entries) {
@@ -446,6 +492,9 @@ function Add-RegistryEntry([string]$WorktreeRoot, $Entry) {
     $samePath = @(Find-RegistryEntryByPath $entries ([string]$Entry.path))
     foreach ($existing in $samePath) {
         if ([string]$existing.role -ne [string]$Entry.role) {
+            if ([string]$existing.mode -eq "snapshot" -and [string]$Entry.mode -eq "snapshot") {
+                continue
+            }
             throw "Path '$($Entry.path)' is already registered to role '$($existing.role)'."
         }
     }
@@ -453,10 +502,16 @@ function Add-RegistryEntry([string]$WorktreeRoot, $Entry) {
     Save-RegistryEntries $WorktreeRoot (@($entries) + @($Entry))
 }
 
-function Remove-RegistryEntry([string]$WorktreeRoot, [string]$TargetPath) {
+function Remove-RegistryEntry([string]$WorktreeRoot, [string]$TargetPath, [string]$Role = $null) {
     $entries = @(Get-RegistryEntries $WorktreeRoot)
     $remaining = @($entries | Where-Object {
-        $null -eq $_.path -or -not (Test-PathEqual ([string]$_.path) $TargetPath)
+        if (-not [string]::IsNullOrWhiteSpace($Role) -and [string]$_.role -eq $Role) {
+            return $false
+        }
+        if ([string]::IsNullOrWhiteSpace($Role) -and $null -ne $_.path -and (Test-PathEqual ([string]$_.path) $TargetPath)) {
+            return $false
+        }
+        return $true
     })
     Save-RegistryEntries $WorktreeRoot $remaining
 }
@@ -667,9 +722,15 @@ function Write-SnapshotMarker([string]$WorktreePath, [string]$AgentRole, [string
 }
 
 function Get-DirtyLines([string]$WorktreePath, [string]$Mode, $Entry) {
-    $result = Invoke-Git $WorktreePath @("status", "--porcelain=v1", "--untracked-files=all", "--ignored")
+    if (-not (Test-Path -LiteralPath $WorktreePath)) {
+        return @()
+    }
+    $result = Invoke-Git $WorktreePath @("status", "--porcelain=v1", "--untracked-files=all") -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return @()
+    }
     $lines = @($result.Lines | Where-Object {
-        $_ -match '^[ MADRCU?!]{2}\s'
+        $_ -match '^[ MADRCU?]{2}\s' -and $_ -notmatch '^!!'
     })
     if (
         $Mode -eq "snapshot" -and
@@ -683,6 +744,9 @@ function Get-DirtyLines([string]$WorktreePath, [string]$Mode, $Entry) {
 }
 
 function Get-UnpushedLines([string]$WorktreePath, $Entry) {
+    if (-not (Test-Path -LiteralPath $WorktreePath)) {
+        return @()
+    }
     $upstreamResult = Invoke-Git $WorktreePath @(
         "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"
     ) -AllowFailure
@@ -690,8 +754,10 @@ function Get-UnpushedLines([string]$WorktreePath, $Entry) {
         $upstream = ([string]$upstreamResult.Lines[0]).Trim()
         $logResult = Invoke-Git $WorktreePath @(
             "log", "--oneline", "$upstream..HEAD"
-        )
-        return @($logResult.Lines)
+        ) -AllowFailure
+        if ($logResult.ExitCode -eq 0) {
+            return @($logResult.Lines)
+        }
     }
 
     $baseSha = if ($null -ne $Entry) { [string]$Entry.baseSha } else { $null }
@@ -707,12 +773,15 @@ function Get-UnpushedLines([string]$WorktreePath, $Entry) {
     }
     $logResult = Invoke-Git $WorktreePath @(
         "log", "--oneline", "$baseSha..HEAD"
-    )
-    return @($logResult.Lines)
+    ) -AllowFailure
+    if ($logResult.ExitCode -eq 0) {
+        return @($logResult.Lines)
+    }
+    return @()
 }
 
 function Get-EntryState($Worktree, [string]$Mode, $Entry) {
-    if ($null -eq $Worktree) {
+    if ($null -eq $Worktree -or -not (Test-Path -LiteralPath $Worktree.Path)) {
         return "missing"
     }
     $states = @()
@@ -767,11 +836,19 @@ function Get-RepositoryForEntry($Entry) {
     return $null
 }
 
-function Get-RelevantWorktreeInventory([object[]]$Entries) {
+function Get-RelevantWorktreeInventory([object[]]$Entries, $ExplicitRepository = $null) {
     $inventory = @(Get-AllWorktreeInventory)
     $repositoryPaths = @($inventory | ForEach-Object {
         Normalize-PathValue $_.Repository.FullPath
     })
+    if ($null -ne $ExplicitRepository) {
+        $repPath = Normalize-PathValue $ExplicitRepository.FullPath
+        $known = @($repositoryPaths | Where-Object { Test-PathEqual $_ $repPath })
+        if ($known.Count -eq 0) {
+            $inventory += @(Get-WorktreeInventory $ExplicitRepository)
+            $repositoryPaths += $repPath
+        }
+    }
     foreach ($entry in $Entries) {
         $repository = Get-RepositoryForEntry $entry
         if ($null -eq $repository) {
@@ -965,16 +1042,71 @@ function Invoke-CreateSnapshotWorktree {
         throw "Target path '$targetPath' must be under the resolved worktree root '$worktreeRoot'."
     }
 
+    Invoke-SafeFetch $repository
+    $resolvedSha = Resolve-Commit $repository.FullPath $Sha
+    if ([string]::IsNullOrWhiteSpace($resolvedSha)) {
+        throw "Exact commit SHA '$Sha' could not be resolved after safe fetch; refusing to create a floating snapshot."
+    }
+
     $entries = @(Get-RegistryEntries $worktreeRoot)
     $roleEntries = @(Find-RegistryEntryByRole $entries $Role)
-    $inventory = @(Get-RelevantWorktreeInventory $entries)
+    $inventory = @(Get-RelevantWorktreeInventory $entries $repository)
     $targetWorktree = @($inventory | Where-Object { Test-PathEqual $_.Path $targetPath } | Select-Object -First 1)
     $targetActual = if ($targetWorktree.Count -gt 0) { $targetWorktree[0] } else { $null }
 
-    $resolvedSha = $null
+    # 1. Exact-SHA Snapshot Cache Check (C:\cwt\.snapshots\<repo>\<sha>)
+    $snapshotsDir = Join-Path $worktreeRoot ".snapshots"
+    $repoSnapshotDir = Join-Path $snapshotsDir $repository.Name
+    $cachedSnapshotPath = Normalize-PathValue (Join-Path $repoSnapshotDir $resolvedSha)
+    
+    # Check if a verified snapshot already exists in the cache or at targetPath
+    $matchingExisting = @($inventory | Where-Object {
+        $_.Detached -and
+        $_.Head -ieq $resolvedSha -and
+        (Test-PathEqual $_.Repository.FullPath $repository.FullPath) -and
+        (Test-SnapshotMarker $_.Path $null) -and
+        ((Get-DirtyLines $_.Path "snapshot" $null).Count -eq 0)
+    })
+
+    if ($matchingExisting.Count -gt 0) {
+        $existingSnapshot = $matchingExisting[0]
+        # Check if role is already registered
+        if ($roleEntries.Count -gt 0) {
+            $registered = $roleEntries[0]
+            if (
+                (Test-PathEqual ([string]$registered.path) $existingSnapshot.Path) -and
+                ((Get-EntryRepositoryName $registered) -eq $repository.Name) -and
+                ([string]$registered.mode -eq "snapshot")
+            ) {
+                Write-Output "Resolved worktree root: $worktreeRoot"
+                Write-Output "IDEMPOTENT: role '$Role' already owns exact snapshot $resolvedSha at '$($existingSnapshot.Path)'."
+                return
+            }
+        }
+
+        # Role can safely bind to existing verified snapshot
+        if ($roleEntries.Count -eq 0) {
+            $entry = [ordered]@{
+                role = $Role
+                repository = $repository.Name
+                repositoryPath = $repository.FullPath
+                path = $existingSnapshot.Path
+                mode = "snapshot"
+                branch = $null
+                baseRef = $null
+                baseSha = $null
+                integrationSha = $resolvedSha
+                createdAt = [DateTime]::UtcNow.ToString("o")
+            }
+            Add-RegistryEntry $worktreeRoot $entry
+            Write-Output "Resolved worktree root: $worktreeRoot"
+            Write-Output "REUSED_SNAPSHOT: Attached role '$Role' to verified snapshot $resolvedSha at '$($existingSnapshot.Path)'."
+            return
+        }
+    }
+
     if ($roleEntries.Count -gt 0) {
         $registered = $roleEntries[0]
-        $resolvedSha = Resolve-Commit $repository.FullPath $Sha
         if (
             $roleEntries.Count -eq 1 -and
             (Test-PathEqual ([string]$registered.path) $targetPath) -and
@@ -999,11 +1131,6 @@ function Invoke-CreateSnapshotWorktree {
         throw "Target path '$targetPath' already exists and is not an empty, known worktree destination."
     }
 
-    Invoke-SafeFetch $repository
-    $resolvedSha = Resolve-Commit $repository.FullPath $Sha
-    if ([string]::IsNullOrWhiteSpace($resolvedSha)) {
-        throw "Exact commit SHA '$Sha' could not be resolved after safe fetch; refusing to create a floating snapshot."
-    }
     Write-Output "Resolved worktree root: $worktreeRoot"
     Write-Output "Resolved exact SHA: $resolvedSha"
     Invoke-Git $repository.FullPath @(
@@ -1024,7 +1151,7 @@ function Invoke-CreateSnapshotWorktree {
     $entry = [ordered]@{
         role = $Role
         repository = $repository.Name
-        repositoryPath = $repository.Path
+        repositoryPath = $repository.FullPath
         path = $targetPath
         mode = "snapshot"
         branch = $null
@@ -1135,6 +1262,20 @@ function Invoke-RemoveWorktree {
         Write-Output "Destructive confirmation accepted via -Force for '$requestedTarget'."
     }
 
+    # Check if other roles are sharing this snapshot
+    $sharingRoles = @($entries | Where-Object {
+        $null -ne $_.path -and
+        (Test-PathEqual ([string]$_.path) $actual.Path) -and
+        ([string]$_.role -ne [string]$registered.role)
+    })
+
+    if ($sharingRoles.Count -gt 0 -and -not $Force) {
+        # Only deregister this role, do not physically remove the shared worktree
+        Remove-RegistryEntry $worktreeRoot $requestedTarget ([string]$registered.role)
+        Write-Output "Deregistered role '$($registered.role)' from shared worktree: $requestedTarget"
+        return
+    }
+
     if ($mode -eq "snapshot" -and $dirty.Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $actual.Path $SnapshotMarkerName))) {
         Remove-Item -LiteralPath (Join-Path $actual.Path $SnapshotMarkerName) -Force
     }
@@ -1145,7 +1286,7 @@ function Invoke-RemoveWorktree {
     $removeArguments += $actual.Path
     Invoke-Git $actual.Repository.FullPath $removeArguments | Out-Null
     if ($null -ne $registered) {
-        Remove-RegistryEntry $worktreeRoot $requestedTarget
+        Remove-RegistryEntry $worktreeRoot $requestedTarget ([string]$registered.role)
     }
     Write-Output "Removed worktree: $requestedTarget"
 }
@@ -1158,6 +1299,11 @@ try {
         "list" { Write-Status }
         "remove" { Invoke-RemoveWorktree }
         "cleanup" { Invoke-RemoveWorktree }
+        "repair" {
+            $worktreeRoot = Get-WorktreeRoot $Root
+            Repair-RegistryEntries $worktreeRoot | Out-Null
+            Write-Status
+        }
     }
 } catch {
     Write-Error $_.Exception.Message

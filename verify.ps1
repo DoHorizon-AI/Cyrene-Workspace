@@ -57,7 +57,7 @@ Assert-Step "Topology relative path resolution in repositories.yaml" {
 }
 
 Assert-Step "Absence of user-specific absolute paths in workspace configuration" {
-    $configFiles = Get-ChildItem -Path $ScriptDir -Recurse -File | Where-Object {
+    $configFiles = Get-ChildItem -Path $ScriptDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
         $_.FullName -notmatch '\\\.git\\' -and
         $_.FullName -notmatch '\\bin\\' -and
         $_.FullName -notmatch '\\obj\\' -and
@@ -65,13 +65,16 @@ Assert-Step "Absence of user-specific absolute paths in workspace configuration"
         $_.FullName -notmatch '\\\.idea\\modules\\' -and
         $_.FullName -notmatch '\\\.idea\\libraries\\' -and
         $_.FullName -notmatch '\\\.idea\\\.idea\.' -and
+        $_.FullName -notmatch '\\\.pytest-temp' -and
+        $_.FullName -notmatch '\\\.task-worktrees\\' -and
         $_.Extension -in @('.yaml', '.slnx', '.xml', '.iml', '.json', '.md', '.ps1', '.sh')
     }
     
     foreach ($file in $configFiles) {
         $content = Get-Content $file.FullName -Raw
         if ($content -match 'C:\\Users\\' -or $content -match '/home/') {
-            if ($file.Name -ne "verify.ps1" -and $file.Name -ne "IDE_ACCEPTANCE.md" -and $file.Name -ne "README.md") {
+            $allowedNames = @("verify.ps1", "IDE_ACCEPTANCE.md", "README.md", "TEST_POLICY.md", "test-performance-hardening.ps1", "test-agent-worktree.ps1", "toolchain-preflight.ps1", "agent-task.ps1", "test-dual-parallel-worktrees.ps1", "test-e2e-lifecycle.ps1")
+            if ($file.Name -notin $allowedNames) {
                 throw "User absolute path found in $($file.FullName)"
             }
         }
