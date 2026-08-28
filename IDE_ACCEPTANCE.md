@@ -24,7 +24,7 @@ cd Cyrene-Workspace
 .\verify.ps1
 ```
 
-All 9 automated checks must report `[PASS]`.
+All automated checks must report `[PASS]`.
 
 ---
 
@@ -93,7 +93,7 @@ All 9 automated checks must report `[PASS]`.
    - Verify tests from `AstrBot.DotNetHost.Tests` and `WeComAgentHub.*.Tests` are discovered.
 4. **Aggregate Build**:
    - Select **Build $\rightarrow$ Build Solution** (`Ctrl + Shift + B`).
-   - Verify build finishes with **0 warnings and 0 errors**.
+   - Verify build finishes with **0 warnings and 0 errors** experiments.
 
 ---
 
@@ -101,7 +101,7 @@ All 9 automated checks must report `[PASS]`.
 
 | Check Item | Target Tool | Expected Result | Verified |
 |---|---|---|:---:|
-| Automated Gate | PowerShell | `.\verify.ps1` reports 9/9 Passed | [ ] |
+| Automated Gate | PowerShell | `.\verify.ps1` reports all Passed | [ ] |
 | Multi-Project Model | IntelliJ IDEA | `jb-workspace.xml` loads 10 independent projects | [ ] |
 | VCS Multi-Root | IntelliJ IDEA | All 10 Git repositories recognized | [ ] |
 | Gradle Baseline | IntelliJ IDEA | Gradle 9.5.0 + Kotlin 2.4.10 + JDK 25 resolve | [ ] |
@@ -113,3 +113,28 @@ All 9 automated checks must report `[PASS]`.
 | .NET Test Explorer | JetBrains Rider | Tests from AstrBot and WeComAgentHub discovered | [ ] |
 | .NET Aggregate Build | JetBrains Rider | Clean build of all 25 projects with 0 errors | [ ] |
 | IDE Re-open Persistence | IDEA & Rider | Zero re-configuration required upon reopening | [ ] |
+
+---
+
+## 5. Parallel Agent Worktree & Semantic Endpoint Architecture
+
+### 5.1 JetBrains Semantic Endpoint MCP Limitation
+When working across parallel agent worktrees under `C:\cwt\<role>`, opening a standalone `.idea` project inside a secondary worktree window **does not automatically rebind or transfer existing Agent MCP sessions**. The active Agent MCP endpoint remains bound to the initial host process / window from which the ACP / MCP connection was established.
+
+### 5.2 Safe Operating Patterns
+
+To maintain 100% semantic authority and avoid stale or crossed symbol lookups across parallel worktrees:
+
+#### Pattern A: Launch Agent Session Directly from Target Window (Recommended for Interactive Debugging)
+- Open the dedicated worktree project window in JetBrains (e.g. `C:\cwt\my-feature-branch`).
+- Start the AI Agent session directly within that window's terminal or ACP plugin interface.
+- The Agent inherits the local project context, local Python `.venv`, and exact-worktree symbol index.
+
+#### Pattern B: Hybrid Exact-Worktree Mode (Recommended for CLI / CI / Headless Orchestration)
+- Maintain the primary workspace or main editor window for overall orchestration.
+- Use `agent-task.ps1 start -Repo <repo> -Branch <branch> -Role <role>` to create an isolated worktree under `C:\cwt`.
+- Worktrees are configured with worktree-local `.git/info/exclude` ignoring `.jspace`, `.idea`, and `.state`.
+- Task tracking is stored in `C:\cwt\.state\<repo>\<role>\WORKSPACE.md`.
+- Read-only consumers utilize detached exact-SHA snapshots via `agent-worktree.ps1 snapshot -Repo <repo> -Sha <sha> -Role <role>`.
+- File edits, tests, and Git commits execute strictly against the dedicated worktree path (`C:\cwt\<role>`).
+- On task completion, run `agent-task.ps1 stop -Role <role>` for clean fail-closed teardown.

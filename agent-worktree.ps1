@@ -733,7 +733,7 @@ function Get-DirtyLines([string]$WorktreePath, [string]$Mode, $Entry) {
         $_ -match '^[ MADRCU?]{2}\s' -and $_ -notmatch '^!!'
     })
     if (
-        $Mode -eq "snapshot" -and
+        $Mode -eq "snapshot" -or $Mode -eq "MANAGED_SNAPSHOT" -and
         (Test-SnapshotMarker $WorktreePath $Entry)
     ) {
         $lines = @($lines | Where-Object {
@@ -785,7 +785,7 @@ function Get-EntryState($Worktree, [string]$Mode, $Entry) {
         return "missing"
     }
     $states = @()
-    if ($Mode -eq "snapshot") {
+    if ($Mode -eq "snapshot" -or $Mode -eq "MANAGED_SNAPSHOT") {
         $expectedSha = Get-EntryIntegrationSha $Entry
         if (
             -not $Worktree.Detached -or
@@ -800,7 +800,7 @@ function Get-EntryState($Worktree, [string]$Mode, $Entry) {
     if ($dirty.Count -gt 0) {
         $states += "dirty"
     }
-    if ($Mode -eq "writer") {
+    if ($Mode -eq "writer" -or $Mode -eq "MANAGED_WRITER_WORKTREE") {
         $unpushed = @(Get-UnpushedLines $Worktree.Path $Entry)
         if ($unpushed.Count -gt 0) {
             $states += "unpushed"
@@ -869,12 +869,15 @@ function Write-Status {
     $entries = @(Get-RegistryEntries $worktreeRoot)
     $inventory = @(Get-RelevantWorktreeInventory $entries)
     $rows = @()
+    $processedPaths = @()
 
     foreach ($entry in ($entries | Sort-Object role)) {
         $entryPath = [string]$entry.path
+        $processedPaths += (Normalize-PathValue $entryPath)
         $actual = @($inventory | Where-Object { Test-PathEqual $_.Path $entryPath } | Select-Object -First 1)
         $actualWorktree = if ($actual.Count -gt 0) { $actual[0] } else { $null }
         $mode = [string]$entry.mode
+        $displayMode = if ($mode -eq "snapshot") { "MANAGED_SNAPSHOT" } else { "MANAGED_WRITER_WORKTREE" }
         $ref = if ($mode -eq "snapshot") {
             Get-ShortSha (Get-EntryIntegrationSha $entry)
         } else {
@@ -884,21 +887,27 @@ function Write-Status {
         $rows += [PSCustomObject]@{
             Role = [string]$entry.role
             Repository = (Get-EntryRepositoryName $entry)
-            Mode = $mode
+            Mode = $displayMode
             RefSha = $ref
             State = $state
             Path = $entryPath
         }
     }
 
+    # Discover unregistered git worktrees
     foreach ($worktree in $inventory) {
         if ($worktree.IsPrimary) {
             continue
         }
-        $registered = @(Find-RegistryEntryByPath $entries $worktree.Path)
-        if ($registered.Count -gt 0) {
+        $normPath = Normalize-PathValue $worktree.Path
+        if (-not (Test-PathUnderRoot $normPath $worktreeRoot)) {
             continue
         }
+        if ($processedPaths -contains $normPath) {
+            continue
+        }
+        $processedPaths += $normPath
+
         $marker = $null
         $markerPath = Join-Path $worktree.Path $SnapshotMarkerName
         if (Test-Path -LiteralPath $markerPath) {
@@ -907,11 +916,7 @@ function Write-Status {
             } catch {
             }
         }
-        $discoveredMode = if ($worktree.Detached -and $null -ne $marker -and (Test-SnapshotMarker $worktree.Path $null)) {
-            "snapshot"
-        } else {
-            "writer"
-        }
+        $discoveredMode = "UNREGISTERED_WORKTREE"
         $discoveredRole = if ($null -ne $marker -and -not [string]::IsNullOrWhiteSpace($marker.role)) {
             "$($marker.role) (unregistered)"
         } else {
@@ -921,23 +926,42 @@ function Write-Status {
             Role = $discoveredRole
             Repository = $worktree.Repository.Name
             Mode = $discoveredMode
-            RefSha = if ($discoveredMode -eq "snapshot") {
-                Get-ShortSha $worktree.Head
-            } else {
-                if ([string]::IsNullOrWhiteSpace($worktree.Branch)) { "(detached)" } else { $worktree.Branch }
-            }
-            State = "unregistered"
+            RefSha = if ($worktree.Detached) { Get-ShortSha $worktree.Head } else { if ([string]::IsNullOrWhiteSpace($worktree.Branch)) { "(detached)" } else { $worktree.Branch } }
+            State = "unmanaged / needs_review"
             Path = $worktree.Path
+        }
+    }
+
+    # Discover foreign or unmanaged directories under $worktreeRoot
+    if (Test-Path -LiteralPath $worktreeRoot) {
+        $childDirs = Get-ChildItem -LiteralPath $worktreeRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                $name = $_.Name
+                $name -notin @(".snapshots", ".state", ".gemini", ".agents", "skills") -and -not $name.StartsWith(".")
+            }
+        foreach ($dir in $childDirs) {
+            $normDirPath = Normalize-PathValue $dir.FullName
+            if ($processedPaths -contains $normDirPath) {
+                continue
+            }
+            $rows += [PSCustomObject]@{
+                Role = "(unmanaged)"
+                Repository = "(foreign/unknown)"
+                Mode = "FOREIGN_OR_UNMANAGED_DIRECTORY"
+                RefSha = "-"
+                State = "unmanaged / needs_review"
+                Path = $normDirPath
+            }
         }
     }
 
     Write-Output "Resolved worktree root: $worktreeRoot"
     Write-Output ""
     Write-Output "CYRENE PARALLEL AGENT WORKTREE STATUS"
-    Write-Output ("{0,-32} {1,-24} {2,-10} {3,-18} {4,-18} {5}" -f "ROLE", "REPO", "MODE", "REF/SHA", "STATE", "PATH")
-    Write-Output ("{0,-32} {1,-24} {2,-10} {3,-18} {4,-18} {5}" -f ("-" * 32), ("-" * 24), ("-" * 10), ("-" * 18), ("-" * 18), ("-" * 20))
+    Write-Output ("{0,-32} {1,-24} {2,-32} {3,-18} {4,-24} {5}" -f "ROLE", "REPO", "MODE", "REF/SHA", "STATE", "PATH")
+    Write-Output ("{0,-32} {1,-24} {2,-32} {3,-18} {4,-24} {5}" -f ("-" * 32), ("-" * 24), ("-" * 32), ("-" * 18), ("-" * 24), ("-" * 20))
     foreach ($row in $rows) {
-        Write-Output ("{0,-32} {1,-24} {2,-10} {3,-18} {4,-18} {5}" -f
+        Write-Output ("{0,-32} {1,-24} {2,-32} {3,-18} {4,-24} {5}" -f
             $row.Role, $row.Repository, $row.Mode, $row.RefSha, $row.State, $row.Path)
     }
 }
@@ -1200,9 +1224,11 @@ function Invoke-RemoveWorktree {
     if (-not (Test-PathUnderRoot $requestedTarget $worktreeRoot)) {
         throw "Cleanup target '$requestedTarget' is outside the resolved worktree root."
     }
+
+    # Case 11: Missing worktree path on disk with stale registry entry
     if (-not (Test-Path -LiteralPath $requestedTarget)) {
         if ($null -ne $registered) {
-            Remove-RegistryEntry $worktreeRoot $requestedTarget
+            Remove-RegistryEntry $worktreeRoot $requestedTarget ([string]$registered.role)
             Write-Output "Removed stale local metadata for missing worktree: $requestedTarget"
         } else {
             Write-Output "No worktree exists at '$requestedTarget'; nothing was removed."
@@ -1212,13 +1238,18 @@ function Invoke-RemoveWorktree {
 
     $inventory = @(Get-RelevantWorktreeInventory $entries)
     $actualMatches = @($inventory | Where-Object { Test-PathEqual $_.Path $requestedTarget })
+    
+    # Case 10: FOREIGN_OR_UNMANAGED_DIRECTORY (not a known git worktree of any workspace repo)
     if ($actualMatches.Count -ne 1) {
-        throw "Target '$requestedTarget' is not a known Git worktree; refusing to remove an arbitrary directory."
+        throw "Target '$requestedTarget' is an unmanaged/foreign directory under worktree root. Refusing automated removal to prevent data loss. Inspect status or clean up manually."
     }
+
     $actual = $actualMatches[0]
     if ($actual.IsPrimary) {
         throw "Refusing to remove the primary repository worktree '$requestedTarget'."
     }
+
+    # Unregistered git worktree
     if ($null -eq $registered -and -not $Force) {
         throw "Target '$requestedTarget' is an unknown/unregistered worktree. Removal REFUSED; inspect status or provide -Force as explicit destructive confirmation."
     }
@@ -1262,18 +1293,20 @@ function Invoke-RemoveWorktree {
         Write-Output "Destructive confirmation accepted via -Force for '$requestedTarget'."
     }
 
-    # Check if other roles are sharing this snapshot
-    $sharingRoles = @($entries | Where-Object {
-        $null -ne $_.path -and
-        (Test-PathEqual ([string]$_.path) $actual.Path) -and
-        ([string]$_.role -ne [string]$registered.role)
-    })
+    # Check if other roles are sharing this snapshot (Case 7)
+    if ($null -ne $registered) {
+        $sharingRoles = @($entries | Where-Object {
+            $null -ne $_.path -and
+            (Test-PathEqual ([string]$_.path) $actual.Path) -and
+            ([string]$_.role -ne [string]$registered.role)
+        })
 
-    if ($sharingRoles.Count -gt 0 -and -not $Force) {
-        # Only deregister this role, do not physically remove the shared worktree
-        Remove-RegistryEntry $worktreeRoot $requestedTarget ([string]$registered.role)
-        Write-Output "Deregistered role '$($registered.role)' from shared worktree: $requestedTarget"
-        return
+        if ($sharingRoles.Count -gt 0 -and -not $Force) {
+            # Only deregister this role, do not physically remove the shared worktree
+            Remove-RegistryEntry $worktreeRoot $requestedTarget ([string]$registered.role)
+            Write-Output "Deregistered role '$($registered.role)' from shared worktree: $requestedTarget"
+            return
+        }
     }
 
     if ($mode -eq "snapshot" -and $dirty.Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $actual.Path $SnapshotMarkerName))) {

@@ -2,19 +2,36 @@
 # CYRENE WORKSPACE — OFFICIAL CONNECTOR CATALOG & DISTRIBUTION MATRIX
 # ==============================================================================
 # Authoritative Source of Truth for:
-# - Upstream Platform Adapter Capabilities and Protocols
+# - Upstream Platform Adapter Capabilities, Protocols, and Transport Profiles
+# - Multi-Axis Dependency Footprint Governance (5 Independent Axes with Exact Provenance)
 # - Distribution Classifications and Base Image Boundary Policies
-# - Declarative Deployment / Prefetch Profiles
+# - Declarative Deployment / Prefetch Profiles (Zero Image Mutation)
 # - Migration & Parity Tracking against Astrbot-Rev and Cyrene-Plugins-Official
 # ==============================================================================
 
-version: "1.0.0"
-updated_at: "2026-08-28T19:45:00Z"
+version: "1.1.0"
+governance_status: "CANDIDATE"
+maturity: "CANDIDATE"
+updated_at: "2026-08-28T21:00:00Z"
+
 authoritative_upstream:
   commit: "d2d7e5aefd2f9471d211974e7e193f321e0ebe0a"
   repository: "https://github.com/AstrBotDevs/AstrBot"
   audit_date: "2026-08-28"
   upstream_release_tag: "v4.27.4+"
+
+footprint_evidence:
+  commit: "39f9a76ed88918dd9ddf7293f70540f816b3a793"
+  repository: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
+  branch: "feat/connector-dependency-footprint"
+  tool: "connector_footprint (static analyzer v0.1.0)"
+  adapters_scanned: 18
+  third_party_distributions_discovered: 25
+
+identity_audit:
+  commit: "f5f875f54b4b354672981fa262ef6272840dd2df"
+  repository: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
+  branch: "test/connector-instance-identity-audit"
 
 base_image_policy:
   runtime_boundary: "MINIMAL_CORE_ONLY"
@@ -24,8 +41,9 @@ base_image_policy:
     - "cyrene-platform kernel & sdk primitives"
     - "core exchange routing envelope"
   recoverable_dependency_footprint:
-    measured_state: "estimated with source"
-    base_image_reduction_bytes: 367001600 # ~350 MB uncompressed site-packages reduction
+    historical_reduction_bytes: 524288000 # ~500 MB base image reduction
+    provenance: "HISTORICAL_OBSERVATION"
+    notes: "Historical uncompressed image size delta observed when stripping all 18 external IM SDKs from base image."
     isolated_packages_reclaimed:
       - "qq-botpy"
       - "py-cord"
@@ -41,14 +59,14 @@ base_image_policy:
 profiles:
   minimal:
     description: "Minimalist deployment footprint with zero external IM dependencies"
-    default_installed_connectors:
+    default_prefetch_connectors:
       - "webchat"
     optional_prefetch_bundles: []
     base_image_layer_mutation: false
 
   qq-onebot:
     description: "Standard QQ community deployment via OneBot v11 protocol (NapCat / Lagrange)"
-    default_installed_connectors:
+    default_prefetch_connectors:
       - "webchat"
       - "onebot_v11"
     optional_prefetch_bundles:
@@ -57,7 +75,7 @@ profiles:
 
   qq-full:
     description: "Complete QQ ecosystem deployment covering OneBot v11 and QQ Official Open Platform"
-    default_installed_connectors:
+    default_prefetch_connectors:
       - "webchat"
       - "onebot_v11"
       - "qq_official"
@@ -68,7 +86,7 @@ profiles:
 
   enterprise-cn:
     description: "Mainland China enterprise IM suite (WeCom, DingTalk, Feishu/Lark, WeChat Official Account, WeChat OpenClaw)"
-    default_installed_connectors:
+    default_prefetch_connectors:
       - "webchat"
       - "wecom"
       - "dingtalk"
@@ -85,7 +103,7 @@ profiles:
 
   global-im:
     description: "Global developer and international community IM suite (Discord, Telegram, Slack, LINE, Mattermost, Misskey, KOOK)"
-    default_installed_connectors:
+    default_prefetch_connectors:
       - "webchat"
       - "discord"
       - "telegram"
@@ -108,7 +126,7 @@ profiles:
 
   full-demo:
     description: "All official connector families preloaded for staging, regression testing, and full capability verification"
-    default_installed_connectors:
+    default_prefetch_connectors:
       - "webchat"
       - "onebot_v11"
       - "qq_official"
@@ -182,13 +200,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: true
     current_official_plugin_support: true
-    migration_status: "ENABLED"
+    availability_status: "CANONICAL"
     recommended_distribution_kind: "CORE_BUILTIN"
-    default_installation_status: "INSTALLED"
-    package_size_evidence:
-      state: "measured"
-      size_bytes: 0
-      notes: "Embedded in platform kernel / C# DotNetHost core"
+    catalog_status: "IMPLEMENTATION_PRESENT"
+    size_provenance:
+      source_code_size:
+        value: 47104
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "5 files under astrbot/core/platform/sources/webchat"
+      wheel_download_size:
+        value: 0
+        provenance: "EXACT"
+        source: "pypi:metadata"
+        note: "Embedded in platform kernel; 0 external PyPI wheels"
+      installed_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:site-packages"
+        note: "Embedded in platform kernel"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Zero native binaries required"
+      container_layer_size:
+        value: 0
+        provenance: "EXACT"
+        source: "oci:image_layer"
+        note: "Included in base platform layer"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/webchat/webchat_adapter.py"
       csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/WebChat/WebChatGatewayService.cs"
@@ -226,6 +266,14 @@ connectors:
       - "OpenShamrock"
       - "Shamrock"
       - "Trss-Yunzai"
+    external_implementation_layer:
+      required: true
+      daemon_type: "ONEBOT_V11_DAEMON"
+      compatible_vendors:
+        - "NapCatQQ (OCI sidecar / host daemon)"
+        - "Lagrange.OneBot (OCI sidecar / host daemon)"
+        - "LLOneBot (LiteLoaderQQNT plugin)"
+      separation_policy: "OneBot connector adapter is purely a protocol client/server. The QQ protocol execution, NTQQ hooking, and QR code login occur strictly inside the external daemon."
     inbound_support: true
     outbound_support: true
     content_types:
@@ -261,13 +309,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: true
     current_official_plugin_support: true
-    migration_status: "ENABLED"
+    availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "INSTALLED"
-    package_size_evidence:
-      state: "measured"
-      size_bytes: 4194304 # ~4 MB (DotNet standalone assembly footprint)
-      notes: "Pure C# WebSocket/HTTP client in AstrBot.DotNetHost; no Python runtime required in .NET host"
+    catalog_status: "IMPLEMENTATION_PRESENT"
+    size_provenance:
+      source_code_size:
+        value: 31551
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "2 files under astrbot/core/platform/sources/aiocqhttp"
+      wheel_download_size:
+        value: 21500
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "aiocqhttp wheel archive size"
+      installed_size:
+        value: 78500
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "aiocqhttp uncompressed installation size"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python library; zero compiled C extensions"
+      container_layer_size:
+        value: 125000000
+        provenance: "ESTIMATED"
+        source: "oci:napcat_image_layer"
+        note: "Optional external NapCat OCI container sidecar layer size (~120 MB)"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py"
       csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/OneBot/OneBotGatewayService.cs"
@@ -328,13 +398,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 18874368 # ~18 MB (botpy + dependencies + cryptography)
-      notes: "Requires QQ Open Platform token management & Ed25519 webhook signature verification"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 116744
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "7 files across qqofficial (98.2 KiB) and qqofficial_webhook (18.5 KiB)"
+      wheel_download_size:
+        value: 850000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "qq-botpy, aiofiles, tenacity wheel downloads"
+      installed_size:
+        value: 4100000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Installed size of qq-botpy and immediate pure python helpers"
+      native_dependency_size:
+        value: 4500000
+        provenance: "ESTIMATED"
+        source: "filesystem:cryptography_c_extensions"
+        note: "cryptography Rust/C shared libraries for Ed25519 webhook verification"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution; no external sidecar daemon"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py"
       upstream_webhook: "astrbot/core/platform/sources/qqofficial_webhook/qo_webhook_adapter.py"
@@ -404,13 +496,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: true
     current_official_plugin_support: true
-    migration_status: "ENABLED"
+    availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "INSTALLED"
-    package_size_evidence:
-      state: "measured"
-      size_bytes: 6291456 # ~6 MB (.NET assembly + WeChatCrypto native primitives)
-      notes: "Native C# AES-CBC cryptographic pipeline and HTTP webhook handler implemented in DotNetHost"
+    catalog_status: "IMPLEMENTATION_PRESENT"
+    size_provenance:
+      source_code_size:
+        value: 159641
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "15 files across wecom (52.4 KiB) and wecom_ai_bot (107.2 KiB)"
+      wheel_download_size:
+        value: 1200000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "wechatpy, requests, optionaldict wheel archives"
+      installed_size:
+        value: 5800000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Uncompressed installed footprint of wechatpy suite"
+      native_dependency_size:
+        value: 4500000
+        provenance: "ESTIMATED"
+        source: "filesystem:c_extensions"
+        note: "pycryptodome / cryptography AES-CBC C-extensions"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/wecom/wecom_adapter.py"
       upstream_ai_bot: "astrbot/core/platform/sources/wecom_ai_bot/wecomai_adapter.py"
@@ -437,6 +551,13 @@ connectors:
     supported_vendors:
       - "OpenClaw WeChat Gateway"
       - "Gewechat / WeChat Personal Automation Services"
+    external_implementation_layer:
+      required: true
+      daemon_type: "OPENCLAW_WECHAT_DAEMON"
+      compatible_vendors:
+        - "OpenClaw WeChat Gateway Daemon"
+        - "Gewechat Personal WeChat Service"
+      separation_policy: "WeixinOC adapter communicates over WebSocket/REST to OpenClaw. Mobile WeChat protocol hooking and QR code credential maintenance are managed by the OpenClaw daemon."
     inbound_support: true
     outbound_support: true
     content_types:
@@ -462,13 +583,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: true
     current_official_plugin_support: true
-    migration_status: "ENABLED"
+    availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "INSTALLED"
-    package_size_evidence:
-      state: "measured"
-      size_bytes: 3145728 # ~3 MB
-      notes: "Implemented in C# via WeixinOcGatewayService & WeixinOcApiClient"
+    catalog_status: "IMPLEMENTATION_PRESENT"
+    size_provenance:
+      source_code_size:
+        value: 85300
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "4 files under astrbot/core/platform/sources/weixin_oc"
+      wheel_download_size:
+        value: 800000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "qrcode, pillow wheel downloads"
+      installed_size:
+        value: 3800000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Installed size of qrcode and image rendering utilities"
+      native_dependency_size:
+        value: 4500000
+        provenance: "ESTIMATED"
+        source: "filesystem:c_extensions"
+        note: "pycryptodome C-extensions"
+      container_layer_size:
+        value: 95000000
+        provenance: "ESTIMATED"
+        source: "oci:openclaw_image_layer"
+        note: "Optional OpenClaw sidecar container layer size (~95 MB)"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/weixin_oc/weixin_oc_adapter.py"
       csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/WeixinOc/WeixinOcGatewayService.cs"
@@ -517,13 +660,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 15728640 # ~15 MB (wechatpy + cryptography + quart)
-      notes: "Can share WeChatCrypto implementation already present in C# Common"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 30822
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "2 files under astrbot/core/platform/sources/weixin_official_account"
+      wheel_download_size:
+        value: 350000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "requests and wechatpy submodules"
+      installed_size:
+        value: 1500000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Installed size for MP handler modules"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python logic; shares cryptography with platform"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "In-process webhook server"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/weixin_official_account/weixin_offacc_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/WeixinOfficialAccount)"
@@ -567,13 +732,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 12582912 # ~12 MB (dingtalk-stream + aiohttp)
-      notes: "Stream mode provides zero-ingress-port connectivity"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 42125
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "3 files under astrbot/core/platform/sources/dingtalk"
+      wheel_download_size:
+        value: 45000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "dingtalk-stream wheel archive"
+      installed_size:
+        value: 165000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Uncompressed dingtalk-stream SDK size"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python stream SDK"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/dingtalk/dingtalk_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Dingtalk)"
@@ -625,16 +812,39 @@ connectors:
     python_dependencies:
       - "lark-oapi>=1.4.15"
       - "aiohttp>=3.11.18"
+      - "pycryptodome>=3.21.0"
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 31457280 # ~30 MB (lark-oapi full SDK bundle)
-      notes: "Heavy SDK in Python; high candidate for clean .NET REST/WS lightweight bundle or isolated runner"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 82352
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "5 files under astrbot/core/platform/sources/lark"
+      wheel_download_size:
+        value: 3500000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "lark-oapi wheel download (~3.5 MB)"
+      installed_size:
+        value: 18000000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "lark-oapi generated API models (~18 MB uncompressed)"
+      native_dependency_size:
+        value: 4500000
+        provenance: "ESTIMATED"
+        source: "filesystem:pycryptodome_binaries"
+        note: "pycryptodome C-extensions"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/lark/lark_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Lark)"
@@ -680,16 +890,39 @@ connectors:
     python_dependencies:
       - "py-cord>=2.6.1"
       - "aiohttp>=3.11.18"
+      - "typing_extensions>=4.12.2"
     native_system_dependencies: []
     current_astrbot_csharp_support: true
     current_official_plugin_support: true
-    migration_status: "ENABLED"
+    availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "INSTALLED"
-    package_size_evidence:
-      state: "measured"
-      size_bytes: 4718592 # ~4.5 MB (.NET Discord Gateway client footprint)
-      notes: "Fully implemented in C# via DiscordGatewayService, DiscordApiClient, and DiscordMessageSender"
+    catalog_status: "IMPLEMENTATION_PRESENT"
+    size_provenance:
+      source_code_size:
+        value: 46077
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "4 files under astrbot/core/platform/sources/discord"
+      wheel_download_size:
+        value: 1100000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "py-cord wheel archive"
+      installed_size:
+        value: 5200000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "py-cord uncompressed installation size"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python library"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/discord/discord_platform_adapter.py"
       csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/Discord/DiscordGatewayService.cs"
@@ -744,16 +977,39 @@ connectors:
       - "python-telegram-bot>=22.6"
       - "telegramify-markdown>=1.0.0"
       - "apscheduler>=3.11.0"
+      - "typing_extensions>=4.12.2"
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 36700160 # ~35 MB (python-telegram-bot + telegramify-markdown + apscheduler)
-      notes: "Priority candidate for migration to C# host via Telegram.Bot .NET client"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 61235
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "2 files under astrbot/core/platform/sources/telegram"
+      wheel_download_size:
+        value: 1750000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "python-telegram-bot, apscheduler, telegramify-markdown wheels"
+      installed_size:
+        value: 8900000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Uncompressed python-telegram-bot suite"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python library"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/telegram/tg_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Telegram)"
@@ -800,16 +1056,39 @@ connectors:
     python_dependencies:
       - "slack-sdk>=3.35.0"
       - "aiohttp>=3.11.18"
+      - "fastapi>=0.115.0"
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 18874368 # ~18 MB (slack-sdk + aiohttp)
-      notes: "Socket Mode eliminates external webhook setup complexity"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 33280
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "3 files under astrbot/core/platform/sources/slack"
+      wheel_download_size:
+        value: 480000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "slack-sdk wheel download"
+      installed_size:
+        value: 2100000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "slack-sdk uncompressed installed footprint"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python library"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/slack/slack_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Slack)"
@@ -851,17 +1130,41 @@ connectors:
     configuration_schema_source: "astrbot/core/platform/sources/kook/kook_adapter.py"
     python_dependencies:
       - "aiohttp>=3.11.18"
+      - "pydantic>=2.10.0"
+      - "websockets>=15.0.1"
       - "certifi>=2025.4.26"
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 5242880 # ~5 MB (pure aiohttp/websocket implementation without external SDK)
-      notes: "Extremely clean upstream implementation; straightforward to port to C# or run dynamically"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 79198
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "6 files under astrbot/core/platform/sources/kook"
+      wheel_download_size:
+        value: 120000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "Adapter dependencies wheel footprint"
+      installed_size:
+        value: 450000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Direct adapter module footprint"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python library"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/kook/kook_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Kook)"
@@ -914,13 +1217,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 4194304 # ~4 MB (signature verification + standard HTTP REST)
-      notes: "Does not require heavy external SDKs; operates on standard HTTP primitives"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 34812
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "3 files under astrbot/core/platform/sources/line"
+      wheel_download_size:
+        value: 80000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "HTTP and signature helper wheels"
+      installed_size:
+        value: 250000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Installed helper code"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Zero native binaries"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process webhook receiver"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/line/line_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Line)"
@@ -966,13 +1291,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 3145728 # ~3 MB
-      notes: "Custom async WebSocket client with zero proprietary SDK bloat"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 25410
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "4 files under astrbot/core/platform/sources/mattermost"
+      wheel_download_size:
+        value: 60000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "WebSocket and REST client helpers"
+      installed_size:
+        value: 200000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Installed adapter footprint"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python library"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/mattermost/mattermost_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Mattermost)"
@@ -1015,17 +1362,41 @@ connectors:
     python_dependencies:
       - "websockets>=15.0.1"
       - "aiohttp>=3.11.18"
+      - "Deprecated>=1.2.14"
+      - "python-magic>=0.4.27"
       - "certifi>=2025.4.26"
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "NOT_YET_MIGRATED"
+    availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "estimated with source"
-      size_bytes: 4194304 # ~4 MB
-      notes: "Clean streaming WebSocket protocol implementation"
+    catalog_status: "AVAILABLE"
+    size_provenance:
+      source_code_size:
+        value: 92398
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "4 files under astrbot/core/platform/sources/misskey"
+      wheel_download_size:
+        value: 150000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "Deprecated, python-magic wheels"
+      installed_size:
+        value: 600000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Installed helper code"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python library (libmagic fallback to internal MIME sniffing)"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/misskey/misskey_adapter.py"
       csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Misskey)"
@@ -1084,13 +1455,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: true
     current_official_plugin_support: true
-    migration_status: "ENABLED"
+    availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
-    default_installation_status: "INSTALLED"
-    package_size_evidence:
-      state: "measured"
-      size_bytes: 3670016 # ~3.5 MB (.NET Satori client assembly footprint)
-      notes: "Implemented in C# via SatoriGatewayService, SatoriApiClient, and SatoriMessageSender"
+    catalog_status: "IMPLEMENTATION_PRESENT"
+    size_provenance:
+      source_code_size:
+        value: 47104
+        provenance: "EXACT"
+        source: "filesystem:sum(*.py)"
+        note: "2 files under astrbot/core/platform/sources/satori"
+      wheel_download_size:
+        value: 90000
+        provenance: "ESTIMATED"
+        source: "pypi:wheel_metadata"
+        note: "Satori client WebSocket/HTTP wheels"
+      installed_size:
+        value: 320000
+        provenance: "ESTIMATED"
+        source: "filesystem:site-packages"
+        note: "Installed adapter code"
+      native_dependency_size:
+        value: 0
+        provenance: "EXACT"
+        source: "filesystem:binaries"
+        note: "Pure Python protocol client"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/satori/satori_adapter.py"
       csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/Satori/SatoriGatewayService.cs"
@@ -1135,13 +1528,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "COMPATIBILITY_ONLY"
+    availability_status: "COMPATIBILITY_ONLY"
     recommended_distribution_kind: "COMMUNITY_EXTERNAL"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "unknown"
-      size_bytes: null
-      notes: "Maintained externally by community developer (stevessr/astrbot_plugin_matrix_adapter)"
+    catalog_status: "COMMUNITY_EXTERNAL"
+    size_provenance:
+      source_code_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "community:external_repo"
+        note: "Community-managed external repository (stevessr/astrbot_plugin_matrix_adapter)"
+      wheel_download_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "pypi:matrix-nio"
+        note: "External plugin dependency"
+      installed_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "filesystem:site-packages"
+        note: "External plugin installation footprint"
+      native_dependency_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "filesystem:olm"
+        note: "Optional libolm C-library for Matrix E2EE"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "External deployment"
     evidence_paths:
       upstream: "docs/zh/platform/matrix.md"
       csharp_host: "MISSING"
@@ -1184,13 +1599,35 @@ connectors:
     native_system_dependencies: []
     current_astrbot_csharp_support: false
     current_official_plugin_support: false
-    migration_status: "COMPATIBILITY_ONLY"
+    availability_status: "COMPATIBILITY_ONLY"
     recommended_distribution_kind: "COMMUNITY_EXTERNAL"
-    default_installation_status: "AVAILABLE_NOT_INSTALLED"
-    package_size_evidence:
-      state: "unknown"
-      size_bytes: null
-      notes: "Maintained externally by community developer (HikariFroya/astrbot_plugin_vocechat)"
+    catalog_status: "COMMUNITY_EXTERNAL"
+    size_provenance:
+      source_code_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "community:external_repo"
+        note: "Community-managed external repository (HikariFroya/astrbot_plugin_vocechat)"
+      wheel_download_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "pypi:metadata"
+        note: "External plugin dependency"
+      installed_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "filesystem:site-packages"
+        note: "External plugin installation footprint"
+      native_dependency_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "filesystem:binaries"
+        note: "External plugin"
+      container_layer_size:
+        value: 0
+        provenance: "UNKNOWN"
+        source: "oci:image_layer"
+        note: "External deployment"
     evidence_paths:
       upstream: "docs/zh/platform/vocechat.md"
       csharp_host: "MISSING"
@@ -1203,7 +1640,7 @@ migration_matrix:
     present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.OneBot"
-    status: "MIGRATED_CANONICAL"
+    status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 1
     notes: "OneBot v11 protocol is complete in C# DotNetHost & Plugins. NapCat/Lagrange are compatibility profiles."
@@ -1214,7 +1651,7 @@ migration_matrix:
     present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.WebChat"
-    status: "MIGRATED_CANONICAL"
+    status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 1
     notes: "Core built-in WebUI chat gateway. Always installed."
@@ -1225,7 +1662,7 @@ migration_matrix:
     present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.WeCom"
-    status: "MIGRATED_CANONICAL"
+    status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 2
     notes: "Enterprise application and WeChat Customer Service (KF) callback/send supported."
@@ -1236,7 +1673,7 @@ migration_matrix:
     present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.WeCom"
-    status: "MIGRATED_CANONICAL"
+    status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 2
     notes: "WeCom AI Smart Hardware Bot long connection & webhook modes fully migrated."
@@ -1247,7 +1684,7 @@ migration_matrix:
     present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.WeixinOC"
-    status: "MIGRATED_CANONICAL"
+    status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 3
     notes: "OpenClaw personal WeChat WebSocket client and QR login state machine migrated."
@@ -1258,7 +1695,7 @@ migration_matrix:
     present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.Discord"
-    status: "MIGRATED_CANONICAL"
+    status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 4
     notes: "Discord Gateway WebSocket & REST client fully migrated to C# host."
@@ -1269,7 +1706,7 @@ migration_matrix:
     present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.Satori"
-    status: "MIGRATED_CANONICAL"
+    status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 5
     notes: "Satori universal protocol forward/reverse WebSocket migrated to C# host."
@@ -1288,7 +1725,7 @@ migration_matrix:
     likely_migration_order: 6
     notes: "Not yet migrated. High-priority international IM target."
 
-  - upstream_adapter: "qq_official"
+  - upstream_adapter: "qqofficial"
     connector_family: "qq_official"
     supported_upstream: true
     present_in_csharp_host: false
@@ -1302,7 +1739,7 @@ migration_matrix:
     likely_migration_order: 7
     notes: "Not yet migrated. Key domestic platform target."
 
-  - upstream_adapter: "qq_official_webhook"
+  - upstream_adapter: "qqofficial_webhook"
     connector_family: "qq_official"
     supported_upstream: true
     present_in_csharp_host: false
@@ -1401,10 +1838,10 @@ migration_matrix:
     target_package: "Cyrene.Connectors.Mattermost"
     status: "NOT_YET_MIGRATED"
     missing_parity:
-      - "Mattermost API v4 WebSocket client"
-      - "Thread post & reaction mapper"
+      - "Mattermost Client v4 REST / WebSocket async client in C#"
+      - "Mattermost PostProps message card converter"
     likely_migration_order: 15
-    notes: "Not yet migrated. Self-hosted developer IM."
+    notes: "Not yet migrated. Clean REST/WS specification."
 
   - upstream_adapter: "misskey"
     connector_family: "misskey"
@@ -1414,31 +1851,7 @@ migration_matrix:
     target_package: "Cyrene.Connectors.Misskey"
     status: "NOT_YET_MIGRATED"
     missing_parity:
-      - "Misskey Streaming WebSocket channel subscriber"
-      - "MFM message formatter"
+      - "Misskey streaming WebSocket client (channel subscription router)"
+      - "MFM markdown syntax normalizer"
     likely_migration_order: 16
-    notes: "Not yet migrated. Fediverse social platform."
-
-  - upstream_adapter: "matrix"
-    connector_family: "matrix"
-    supported_upstream: false # Community plugin
-    present_in_csharp_host: false
-    present_in_official_plugins: false
-    target_package: "astrbot_plugin_matrix_adapter"
-    status: "COMPATIBILITY_ONLY"
-    missing_parity:
-      - "Community plugin compatibility only"
-    likely_migration_order: 99
-    notes: "Community external plugin. Not part of official platform core."
-
-  - upstream_adapter: "vocechat"
-    connector_family: "vocechat"
-    supported_upstream: false # Community plugin
-    present_in_csharp_host: false
-    present_in_official_plugins: false
-    target_package: "astrbot_plugin_vocechat"
-    status: "COMPATIBILITY_ONLY"
-    missing_parity:
-      - "Community plugin compatibility only"
-    likely_migration_order: 99
-    notes: "Community external plugin. Not part of official platform core."
+    notes: "Not yet migrated. Fediverse activity gateway."
