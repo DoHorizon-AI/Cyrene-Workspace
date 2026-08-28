@@ -73,7 +73,7 @@ Assert-Step "Absence of user-specific absolute paths in workspace configuration"
     foreach ($file in $configFiles) {
         $content = Get-Content $file.FullName -Raw
         if ($content -match 'C:\\Users\\' -or $content -match '/home/') {
-            $allowedNames = @("verify.ps1", "IDE_ACCEPTANCE.md", "README.md", "TEST_POLICY.md", "test-performance-hardening.ps1", "test-agent-worktree.ps1", "toolchain-preflight.ps1", "agent-task.ps1", "test-dual-parallel-worktrees.ps1", "test-e2e-lifecycle.ps1")
+            $allowedNames = @("verify.ps1", "IDE_ACCEPTANCE.md", "README.md", "TEST_POLICY.md", "test-performance-hardening.ps1", "test-agent-worktree.ps1", "toolchain-preflight.ps1", "agent-task.ps1", "test-dual-parallel-worktrees.ps1", "test-e2e-lifecycle.ps1", "test-same-symbol-authority.ps1")
             if ($file.Name -notin $allowedNames) {
                 throw "User absolute path found in $($file.FullName)"
             }

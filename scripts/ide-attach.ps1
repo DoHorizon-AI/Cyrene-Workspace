@@ -1,15 +1,18 @@
 <#
 .SYNOPSIS
-    JetBrains Local Exact-Worktree Attachment Helper for Cyrene.
+    JetBrains Local Exact-Worktree Attachment & Per-Agent IDE Project Helper for Cyrene.
 
 .DESCRIPTION
-    Attaches C:\cwt task worktrees to the JetBrains IntelliJ / Rider project model
-    as dynamic external content roots and Git VCS roots without modifying sibling checkouts
-    or committing machine-specific paths. Supports multiple concurrent parallel worktrees.
+    Manages JetBrains IntelliJ / Rider project models for C:\cwt task worktrees.
+    Supports:
+    1. Per-Agent IDE Project/Session (Recommended): Generates an isolated .idea project
+       directly inside C:\cwt\<role> for strict 100% single-authority symbol resolution without multi-module collisions.
+    2. Dynamic Workspace Attachment: Attaches task worktrees as external content roots.
 
 .EXAMPLE
-    .\ide-attach.ps1 -Action attach -Path C:\cwt\my-task-role
-    .\ide-attach.ps1 -Action detach -Path C:\cwt\my-task-role
+    .\ide-attach.ps1 -Action init-project -Path C:\cwt\my-task-role -Role my-task-role
+    .\ide-attach.ps1 -Action attach -Path C:\cwt\my-task-role -Role my-task-role
+    .\ide-attach.ps1 -Action detach -Path C:\cwt\my-task-role -Role my-task-role
     .\ide-attach.ps1 -Action status
     .\ide-attach.ps1 -Action clean
 #>
@@ -17,7 +20,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet("attach", "detach", "status", "clean")]
+    [ValidateSet("init-project", "attach", "detach", "status", "clean")]
     [string]$Action,
 
     [Parameter(Position = 1)]
@@ -55,6 +58,80 @@ function Get-ModuleFileName([string]$TargetWorktreePath, [string]$AgentRole) {
     return "task-worktree-$roleName.iml"
 }
 
+function Invoke-InitPerAgentProject([string]$TargetWorktreePath, [string]$AgentRole) {
+    if ([string]::IsNullOrWhiteSpace($TargetWorktreePath)) {
+        throw "Target worktree path (-Path) is required for init-project."
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($TargetWorktreePath)
+    if (-not (Test-Path -LiteralPath $fullPath)) {
+        throw "Target worktree path '$fullPath' does not exist."
+    }
+
+    $agentIdeaDir = Join-Path $fullPath ".idea"
+    $agentModulesDir = Join-Path $agentIdeaDir "modules"
+    New-Item -ItemType Directory -Path $agentIdeaDir, $agentModulesDir -Force | Out-Null
+
+    $roleName = if (-not [string]::IsNullOrWhiteSpace($AgentRole)) { $AgentRole } else { Split-Path $fullPath -Leaf }
+    $urlPath = Normalize-UrlPath $fullPath
+
+    # 1. Module file
+    $imlContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="GENERAL_MODULE" version="4">
+  <component name="NewModuleRootManager" inherit-compiler-output="true">
+    <exclude-output />
+    <content url="$urlPath">
+      <sourceFolder url="$urlPath/src" isTestSource="false" />
+      <sourceFolder url="$urlPath/tests" isTestSource="true" />
+      <excludeFolder url="$urlPath/target" />
+      <excludeFolder url="$urlPath/.venv" />
+      <excludeFolder url="$urlPath/bin" />
+      <excludeFolder url="$urlPath/obj" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>
+"@
+    $imlPath = Join-Path $agentIdeaDir "$roleName.iml"
+    [System.IO.File]::WriteAllText($imlPath, $imlContent, [System.Text.Encoding]::UTF8)
+
+    # 2. modules.xml
+    $modulesXmlContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://`$PROJECT_DIR`$/.idea/$roleName.iml" filepath="`$PROJECT_DIR`$/.idea/$roleName.iml" />
+    </modules>
+  </component>
+</project>
+"@
+    [System.IO.File]::WriteAllText((Join-Path $agentIdeaDir "modules.xml"), $modulesXmlContent, [System.Text.Encoding]::UTF8)
+
+    # 3. vcs.xml
+    $vcsXmlContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$($fullPath.Replace('\', '/'))" vcs="Git" />
+  </component>
+</project>
+"@
+    [System.IO.File]::WriteAllText((Join-Path $agentIdeaDir "vcs.xml"), $vcsXmlContent, [System.Text.Encoding]::UTF8)
+
+    # 4. misc.xml
+    $miscXmlContent = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectRootManager" version="2" />
+</project>
+"@
+    [System.IO.File]::WriteAllText((Join-Path $agentIdeaDir "misc.xml"), $miscXmlContent, [System.Text.Encoding]::UTF8)
+
+    Write-Output "INITIALIZED_PER_AGENT_IDE_PROJECT: Created isolated JetBrains project model in '$agentIdeaDir' (100% authority, zero sibling collision)."
+}
+
 function Invoke-AttachWorktree([string]$TargetWorktreePath, [string]$AgentRole) {
     if ([string]::IsNullOrWhiteSpace($TargetWorktreePath)) {
         throw "Target worktree path (-Path) is required for attach."
@@ -63,6 +140,9 @@ function Invoke-AttachWorktree([string]$TargetWorktreePath, [string]$AgentRole) 
     if (-not (Test-Path -LiteralPath $fullPath)) {
         throw "Target worktree path '$fullPath' does not exist."
     }
+
+    # Initialize per-agent project model inside the worktree first
+    Invoke-InitPerAgentProject -TargetWorktreePath $fullPath -AgentRole $AgentRole
 
     Ensure-ModulesDirectory
 
@@ -242,6 +322,13 @@ function Get-AttachmentStatus {
 }
 
 switch ($Action) {
+    "init-project" {
+        $target = $Path
+        if ([string]::IsNullOrWhiteSpace($target) -and -not [string]::IsNullOrWhiteSpace($Role)) {
+            $target = "C:\cwt\$Role"
+        }
+        Invoke-InitPerAgentProject -TargetWorktreePath $target -AgentRole $Role
+    }
     "attach" {
         $target = $Path
         if ([string]::IsNullOrWhiteSpace($target) -and -not [string]::IsNullOrWhiteSpace($Role)) {

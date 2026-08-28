@@ -119,11 +119,11 @@ function Invoke-TaskStart {
     }
     Write-Host "  [OK] Worktree is clean." -ForegroundColor Green
 
-    # 4. Attach JetBrains Indexing & VCS Root
+    # 4. Attach JetBrains Indexing & VCS Root (Per-Agent Project)
     if (-not $SkipIDE) {
-        Write-Host "`n[4/8] Attaching task worktree to JetBrains semantic index..." -ForegroundColor Yellow
-        & pwsh -NoProfile -File $IdeAttachHelper attach -Path $targetWorktreePath
-        Write-Host "  [OK] JetBrains content root attached." -ForegroundColor Green
+        Write-Host "`n[4/8] Initializing per-agent JetBrains IDE project..." -ForegroundColor Yellow
+        & pwsh -NoProfile -File $IdeAttachHelper init-project -Path $targetWorktreePath -Role $Role
+        Write-Host "  [OK] Per-agent JetBrains IDE project initialized." -ForegroundColor Green
     } else {
         Write-Host "`n[4/8] Skipping IDE attachment (-SkipIDE)." -ForegroundColor Gray
     }
@@ -131,7 +131,7 @@ function Invoke-TaskStart {
     # 5. Initialize Git Workflow Session
     Write-Host "`n[5/8] Initializing Git workflow session..." -ForegroundColor Yellow
     $pythonExe = if (-not [string]::IsNullOrWhiteSpace($env:CYRENE_PYTHON)) { $env:CYRENE_PYTHON } else { "python" }
-    $gitAgentScript = "C:\Users\Baiji\.gemini\skills\git-workflow\scripts\git_agent.py"
+    $gitAgentScript = Join-Path $env:USERPROFILE ".gemini\skills\git-workflow\scripts\git_agent.py"
     if (Test-Path -LiteralPath $gitAgentScript) {
         $sessionJson = & $pythonExe $gitAgentScript start --use-current --task $Task --repo $targetWorktreePath 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0) {
