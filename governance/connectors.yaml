@@ -1,0 +1,1444 @@
+# ==============================================================================
+# CYRENE WORKSPACE — OFFICIAL CONNECTOR CATALOG & DISTRIBUTION MATRIX
+# ==============================================================================
+# Authoritative Source of Truth for:
+# - Upstream Platform Adapter Capabilities and Protocols
+# - Distribution Classifications and Base Image Boundary Policies
+# - Declarative Deployment / Prefetch Profiles
+# - Migration & Parity Tracking against Astrbot-Rev and Cyrene-Plugins-Official
+# ==============================================================================
+
+version: "1.0.0"
+updated_at: "2026-08-28T19:45:00Z"
+authoritative_upstream:
+  commit: "d2d7e5aefd2f9471d211974e7e193f321e0ebe0a"
+  repository: "https://github.com/AstrBotDevs/AstrBot"
+  audit_date: "2026-08-28"
+  upstream_release_tag: "v4.27.4+"
+
+base_image_policy:
+  runtime_boundary: "MINIMAL_CORE_ONLY"
+  rule: "Do not restore every connector dependency into the base image. Support all official connectors via dynamic/isolated selection; install and activate only what the deployment selects."
+  core_builtin_components:
+    - "webchat (built-in platform event gateway & webui messaging)"
+    - "cyrene-platform kernel & sdk primitives"
+    - "core exchange routing envelope"
+  recoverable_dependency_footprint:
+    measured_state: "estimated with source"
+    base_image_reduction_bytes: 367001600 # ~350 MB uncompressed site-packages reduction
+    isolated_packages_reclaimed:
+      - "qq-botpy"
+      - "py-cord"
+      - "lark-oapi"
+      - "dingtalk-stream"
+      - "slack-sdk"
+      - "python-telegram-bot"
+      - "telegramify-markdown"
+      - "wechatpy"
+      - "silk-python"
+      - "faiss-cpu"
+
+profiles:
+  minimal:
+    description: "Minimalist deployment footprint with zero external IM dependencies"
+    default_installed_connectors:
+      - "webchat"
+    optional_prefetch_bundles: []
+    base_image_layer_mutation: false
+
+  qq-onebot:
+    description: "Standard QQ community deployment via OneBot v11 protocol (NapCat / Lagrange)"
+    default_installed_connectors:
+      - "webchat"
+      - "onebot_v11"
+    optional_prefetch_bundles:
+      - "onebot_v11"
+    base_image_layer_mutation: false
+
+  qq-full:
+    description: "Complete QQ ecosystem deployment covering OneBot v11 and QQ Official Open Platform"
+    default_installed_connectors:
+      - "webchat"
+      - "onebot_v11"
+      - "qq_official"
+    optional_prefetch_bundles:
+      - "onebot_v11"
+      - "qq_official"
+    base_image_layer_mutation: false
+
+  enterprise-cn:
+    description: "Mainland China enterprise IM suite (WeCom, DingTalk, Feishu/Lark, WeChat Official Account, WeChat OpenClaw)"
+    default_installed_connectors:
+      - "webchat"
+      - "wecom"
+      - "dingtalk"
+      - "lark"
+      - "weixin_oc"
+      - "weixin_official_account"
+    optional_prefetch_bundles:
+      - "wecom"
+      - "dingtalk"
+      - "lark"
+      - "weixin_oc"
+      - "weixin_official_account"
+    base_image_layer_mutation: false
+
+  global-im:
+    description: "Global developer and international community IM suite (Discord, Telegram, Slack, LINE, Mattermost, Misskey, KOOK)"
+    default_installed_connectors:
+      - "webchat"
+      - "discord"
+      - "telegram"
+      - "slack"
+      - "line"
+      - "mattermost"
+      - "misskey"
+      - "kook"
+      - "satori"
+    optional_prefetch_bundles:
+      - "discord"
+      - "telegram"
+      - "slack"
+      - "line"
+      - "mattermost"
+      - "misskey"
+      - "kook"
+      - "satori"
+    base_image_layer_mutation: false
+
+  full-demo:
+    description: "All official connector families preloaded for staging, regression testing, and full capability verification"
+    default_installed_connectors:
+      - "webchat"
+      - "onebot_v11"
+      - "qq_official"
+      - "wecom"
+      - "weixin_oc"
+      - "weixin_official_account"
+      - "dingtalk"
+      - "lark"
+      - "discord"
+      - "telegram"
+      - "slack"
+      - "kook"
+      - "line"
+      - "mattermost"
+      - "misskey"
+      - "satori"
+    optional_prefetch_bundles:
+      - "onebot_v11"
+      - "qq_official"
+      - "wecom"
+      - "weixin_oc"
+      - "weixin_official_account"
+      - "dingtalk"
+      - "lark"
+      - "discord"
+      - "telegram"
+      - "slack"
+      - "kook"
+      - "line"
+      - "mattermost"
+      - "misskey"
+      - "satori"
+    base_image_layer_mutation: false
+
+connectors:
+  - connector_family: "webchat"
+    adapter_type: "webchat"
+    display_name: "WebChat (Built-in)"
+    protocol: "AstrBot WebChat Protocol v1 / SSE"
+    transport_profiles:
+      - name: "internal_memory_queue"
+        type: "IN_PROCESS"
+        endpoint_role: "SERVER"
+        description: "Direct in-memory asynchronous event queue shared with Dashboard / API host"
+        tls_required: false
+      - name: "rest_sse"
+        type: "HTTP_SSE"
+        endpoint_role: "SERVER"
+        description: "HTTP REST + Server-Sent Events stream for Dashboard real-time chat UI"
+        tls_required: false
+    instance_id_semantics: "Singleton per instance; default ID 'webchat'"
+    supported_vendors:
+      - "AstrBot WebUI"
+      - "Cyrene Dashboard"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "audio"
+      - "record"
+      - "video"
+      - "file"
+      - "markdown"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: false
+    onboarding_login: "Built-in zero-config, activated upon dashboard initialization"
+    configuration_schema_source: "astrbot/core/platform/sources/webchat/webchat_adapter.py"
+    python_dependencies: []
+    native_system_dependencies: []
+    current_astrbot_csharp_support: true
+    current_official_plugin_support: true
+    migration_status: "ENABLED"
+    recommended_distribution_kind: "CORE_BUILTIN"
+    default_installation_status: "INSTALLED"
+    package_size_evidence:
+      state: "measured"
+      size_bytes: 0
+      notes: "Embedded in platform kernel / C# DotNetHost core"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/webchat/webchat_adapter.py"
+      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/WebChat/WebChatGatewayService.cs"
+      official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/WebChat/WebChatGatewayService.cs"
+
+  - connector_family: "onebot_v11"
+    adapter_type: "aiocqhttp"
+    display_name: "OneBot V11"
+    protocol: "OneBot v11 Specification"
+    transport_profiles:
+      - name: "forward_websocket"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        default_uri: "ws://localhost:3001"
+        description: "Connects to external OneBot server WebSocket endpoint (NapCat / Lagrange / LLOneBot)"
+        tls_required: false
+      - name: "reverse_websocket"
+        type: "WEBSOCKET_SERVER"
+        endpoint_role: "SERVER"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 6199
+        description: "Listens for incoming reverse WebSocket connections from OneBot clients"
+        tls_required: false
+      - name: "http_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        default_uri: "http://localhost:3000"
+        description: "HTTP REST client for active outbound calls, media upload, and group administration"
+        tls_required: false
+    instance_id_semantics: "Multi-instance supported; identified by user-defined platform ID (e.g., 'aiocqhttp_main', 'sub_account_1')"
+    supported_vendors:
+      - "NapCatQQ"
+      - "Lagrange.Core / Lagrange.OneBot"
+      - "LLOneBot"
+      - "OpenShamrock"
+      - "Shamrock"
+      - "Trss-Yunzai"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "audio"
+      - "record"
+      - "video"
+      - "file"
+      - "at"
+      - "reply"
+      - "json"
+      - "xml"
+      - "poke"
+      - "dice"
+      - "rps"
+      - "share"
+      - "contact"
+      - "location"
+      - "music"
+      - "forward"
+      - "node"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: false
+    onboarding_login: "External OneBot server authentication (token / access_token shared secret, QR login in NapCat/Lagrange)"
+    configuration_schema_source: "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py"
+    python_dependencies:
+      - "aiocqhttp>=1.4.4"
+      - "websockets>=15.0.1"
+      - "quart>=0.20.0"
+      - "httpx>=0.28.1"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: true
+    current_official_plugin_support: true
+    migration_status: "ENABLED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "INSTALLED"
+    package_size_evidence:
+      state: "measured"
+      size_bytes: 4194304 # ~4 MB (DotNet standalone assembly footprint)
+      notes: "Pure C# WebSocket/HTTP client in AstrBot.DotNetHost; no Python runtime required in .NET host"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py"
+      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/OneBot/OneBotGatewayService.cs"
+      official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/OneBot/OneBotGatewayService.cs"
+
+  - connector_family: "qq_official"
+    adapter_type: "qq_official"
+    display_name: "QQ 官方机器人"
+    protocol: "QQ Open Platform Gateway Protocol v2"
+    transport_profiles:
+      - name: "gateway_websocket"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "WebSocket client connecting to Tencent QQ Open Platform gateway (via botpy SDK)"
+        tls_required: true
+      - name: "webhook"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        default_path: "/qq_official_webhook"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 8080
+        description: "HTTP webhook server receiving Ed25519-signed event payloads from QQ Open Platform"
+        tls_required: true
+      - name: "openapi_rest"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "OpenAPI v2 REST client for media upload, chunked upload, and active messaging"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by BotAppID and user-defined ID"
+    supported_vendors:
+      - "Tencent QQ Open Platform (QQ群 / QQ频道 / C2C)"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "audio"
+      - "record"
+      - "video"
+      - "file"
+      - "markdown"
+      - "button_keyboard"
+      - "ark"
+      - "embed"
+      - "reply"
+    proactive_messaging: true
+    streaming_support: false
+    webhook_support: true
+    onboarding_login: "QQ Open Platform credentials (appid, secret, token), public domain callback verification for webhook"
+    configuration_schema_source: "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py & qqofficial_webhook/qo_webhook_adapter.py"
+    python_dependencies:
+      - "qq-botpy==1.2.1"
+      - "cryptography>=44.0.3"
+      - "aiohttp>=3.11.18"
+      - "httpx>=0.28.1"
+      - "aiofiles>=25.1.0"
+      - "tenacity>=9.1.2"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 18874368 # ~18 MB (botpy + dependencies + cryptography)
+      notes: "Requires QQ Open Platform token management & Ed25519 webhook signature verification"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py"
+      upstream_webhook: "astrbot/core/platform/sources/qqofficial_webhook/qo_webhook_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/QQOfficial)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "wecom"
+    adapter_type: "wecom"
+    display_name: "企业微信 & 智能机器人"
+    protocol: "WeCom Open API & WeCom Smart Hardware Protocol"
+    transport_profiles:
+      - name: "enterprise_webhook"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        default_path: "/wecom_webhook"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 8080
+        description: "Receives AES-CBC encrypted XML/JSON event callbacks for enterprise internal apps & WeCom KF"
+        tls_required: true
+      - name: "smart_hardware_long_connection"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "Long-lived WebSocket connection for WeCom AI Smart Hardware Bot without public IP"
+        tls_required: true
+      - name: "smart_hardware_webhook"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        default_path: "/wecom_ai_bot_webhook"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 8080
+        description: "HTTP webhook server for WeCom AI Bot callbacks with WXBizJsonMsgCrypt verification"
+        tls_required: true
+      - name: "wecom_rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Active outbound message push, media upload, and customer service ticket management"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by CorpID_AgentID or BotID"
+    supported_vendors:
+      - "Tencent WeCom (Enterprise Self-built App)"
+      - "Tencent WeCom (WeChat Customer Service / 微信客服)"
+      - "Tencent WeCom (AI Smart Hardware Bot / 智能机器人)"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "audio"
+      - "voice"
+      - "video"
+      - "file"
+      - "markdown"
+      - "news_card"
+      - "template_card"
+      - "button"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: true
+    onboarding_login: "CorpID, App Secret, AgentID, Token, EncodingAESKey or BotID, BotSecret"
+    configuration_schema_source: "astrbot/core/platform/sources/wecom/wecom_adapter.py & wecom_ai_bot/wecomai_adapter.py"
+    python_dependencies:
+      - "wechatpy>=1.8.18"
+      - "cryptography>=44.0.3"
+      - "quart>=0.20.0"
+      - "aiohttp>=3.11.18"
+      - "httpx>=0.28.1"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: true
+    current_official_plugin_support: true
+    migration_status: "ENABLED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "INSTALLED"
+    package_size_evidence:
+      state: "measured"
+      size_bytes: 6291456 # ~6 MB (.NET assembly + WeChatCrypto native primitives)
+      notes: "Native C# AES-CBC cryptographic pipeline and HTTP webhook handler implemented in DotNetHost"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/wecom/wecom_adapter.py"
+      upstream_ai_bot: "astrbot/core/platform/sources/wecom_ai_bot/wecomai_adapter.py"
+      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/Wecom/WecomWebhookService.cs"
+      official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/Wecom/WecomWebhookService.cs"
+
+  - connector_family: "weixin_oc"
+    adapter_type: "weixin_oc"
+    display_name: "微信 (个人号 / OpenClaw)"
+    protocol: "OpenClaw Gateway WebSocket Protocol"
+    transport_profiles:
+      - name: "openclaw_forward_ws"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        default_uri: "ws://localhost:18080"
+        description: "Client connecting to OpenClaw / WeChat Gateway daemon for personal account automation"
+        tls_required: false
+      - name: "gateway_rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "QR code retrieval, login state polling, and chunked media upload"
+        tls_required: false
+    instance_id_semantics: "Multi-instance supported; identified by user-defined platform ID or WeChat UIN"
+    supported_vendors:
+      - "OpenClaw WeChat Gateway"
+      - "Gewechat / WeChat Personal Automation Services"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "voice"
+      - "video"
+      - "file"
+      - "emoji"
+      - "pat_poke"
+      - "card"
+      - "reply"
+    proactive_messaging: true
+    streaming_support: false
+    webhook_support: false
+    onboarding_login: "Dynamic QR code terminal render / WebUI stream login; token-based daemon authentication"
+    configuration_schema_source: "astrbot/core/platform/sources/weixin_oc/weixin_oc_adapter.py"
+    python_dependencies:
+      - "websockets>=15.0.1"
+      - "aiohttp>=3.11.18"
+      - "qrcode>=8.2"
+      - "pillow>=11.2.1"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: true
+    current_official_plugin_support: true
+    migration_status: "ENABLED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "INSTALLED"
+    package_size_evidence:
+      state: "measured"
+      size_bytes: 3145728 # ~3 MB
+      notes: "Implemented in C# via WeixinOcGatewayService & WeixinOcApiClient"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/weixin_oc/weixin_oc_adapter.py"
+      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/WeixinOc/WeixinOcGatewayService.cs"
+      official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/WeixinOc/WeixinOcGatewayService.cs"
+
+  - connector_family: "weixin_official_account"
+    adapter_type: "weixin_official_account"
+    display_name: "微信公众号"
+    protocol: "WeChat Official Accounts API (MP Protocol)"
+    transport_profiles:
+      - name: "mp_webhook"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        default_path: "/weixin_offacc_webhook"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 8080
+        description: "Receives signature-verified XML payloads from WeChat MP server"
+        tls_required: true
+      - name: "mp_rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Customer service active message push and temporary media management"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by AppID"
+    supported_vendors:
+      - "Tencent WeChat Official Accounts (微信订阅号 / 服务号)"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "voice"
+      - "video"
+      - "news"
+      - "music"
+    proactive_messaging: true
+    streaming_support: false
+    webhook_support: true
+    onboarding_login: "AppID, AppSecret, Token, EncodingAESKey (Safe mode / Compatible mode)"
+    configuration_schema_source: "astrbot/core/platform/sources/weixin_official_account/weixin_offacc_adapter.py"
+    python_dependencies:
+      - "wechatpy>=1.8.18"
+      - "cryptography>=44.0.3"
+      - "quart>=0.20.0"
+      - "requests>=2.32.0"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 15728640 # ~15 MB (wechatpy + cryptography + quart)
+      notes: "Can share WeChatCrypto implementation already present in C# Common"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/weixin_official_account/weixin_offacc_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/WeixinOfficialAccount)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "dingtalk"
+    adapter_type: "dingtalk"
+    display_name: "钉钉"
+    protocol: "DingTalk Open Platform Stream Protocol & Webhook"
+    transport_profiles:
+      - name: "stream_long_connection"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "Outbound persistent WebSocket stream client via dingtalk-stream SDK (no public IP needed)"
+        tls_required: true
+      - name: "openapi_rest"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "DingTalk OpenAPI v1.0 / v2.0 for proactive group messages and interactive cards"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by Client ID (AppKey)"
+    supported_vendors:
+      - "Alibaba DingTalk (企业内部应用 / 机器人)"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "markdown"
+      - "image"
+      - "action_card"
+      - "feed_card"
+      - "audio"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: false
+    onboarding_login: "Client ID (AppKey) and Client Secret (AppSecret) from DingTalk Developer Console"
+    configuration_schema_source: "astrbot/core/platform/sources/dingtalk/dingtalk_adapter.py"
+    python_dependencies:
+      - "dingtalk-stream>=0.22.1"
+      - "aiohttp>=3.11.18"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 12582912 # ~12 MB (dingtalk-stream + aiohttp)
+      notes: "Stream mode provides zero-ingress-port connectivity"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/dingtalk/dingtalk_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Dingtalk)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "lark"
+    adapter_type: "lark"
+    display_name: "飞书 / Lark"
+    protocol: "Lark / Feishu Open Platform OpenAPI v2 & WebSocket Stream"
+    transport_profiles:
+      - name: "websocket_stream"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "Long-lived WebSocket connection via lark-oapi SDK (zero ingress requirement)"
+        tls_required: true
+      - name: "webhook_server"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        default_path: "/lark_webhook"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 8080
+        description: "HTTP webhook server receiving encrypted event callbacks from Lark platform"
+        tls_required: true
+      - name: "openapi_rest"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Lark Open API for rich card messages, interactive reactions, and file uploads"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by App ID"
+    supported_vendors:
+      - "ByteDance Feishu (中国版)"
+      - "ByteDance Lark (Global)"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "audio"
+      - "video"
+      - "file"
+      - "interactive_card"
+      - "post_rich_text"
+      - "reaction"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: true
+    onboarding_login: "App ID, App Secret, Encrypt Key, Verification Token"
+    configuration_schema_source: "astrbot/core/platform/sources/lark/lark_adapter.py"
+    python_dependencies:
+      - "lark-oapi>=1.4.15"
+      - "aiohttp>=3.11.18"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 31457280 # ~30 MB (lark-oapi full SDK bundle)
+      notes: "Heavy SDK in Python; high candidate for clean .NET REST/WS lightweight bundle or isolated runner"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/lark/lark_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Lark)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "discord"
+    adapter_type: "discord"
+    display_name: "Discord"
+    protocol: "Discord Gateway Protocol v10 & REST API"
+    transport_profiles:
+      - name: "gateway_websocket"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "Encrypted WSS connection to Discord Gateway with heartbeat and resume state machine"
+        tls_required: true
+      - name: "rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Discord REST API v10 for message creation, editing, threads, reactions, and attachments"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by Bot Application ID or user-defined ID"
+    supported_vendors:
+      - "Discord Inc."
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "markdown"
+      - "image"
+      - "audio"
+      - "video"
+      - "file"
+      - "embed"
+      - "component_button"
+      - "component_select"
+      - "reply"
+      - "reaction"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: false
+    onboarding_login: "Bot Token from Discord Developer Portal, optional HTTP/SOCKS5 Proxy"
+    configuration_schema_source: "astrbot/core/platform/sources/discord/discord_platform_adapter.py"
+    python_dependencies:
+      - "py-cord>=2.6.1"
+      - "aiohttp>=3.11.18"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: true
+    current_official_plugin_support: true
+    migration_status: "ENABLED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "INSTALLED"
+    package_size_evidence:
+      state: "measured"
+      size_bytes: 4718592 # ~4.5 MB (.NET Discord Gateway client footprint)
+      notes: "Fully implemented in C# via DiscordGatewayService, DiscordApiClient, and DiscordMessageSender"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/discord/discord_platform_adapter.py"
+      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/Discord/DiscordGatewayService.cs"
+      official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/Discord/DiscordGatewayService.cs"
+
+  - connector_family: "telegram"
+    adapter_type: "telegram"
+    display_name: "Telegram"
+    protocol: "Telegram Bot API (MTProto Gateway)"
+    transport_profiles:
+      - name: "long_polling"
+        type: "HTTP_LONG_POLLING"
+        endpoint_role: "CLIENT"
+        description: "HTTPS long-polling client fetching updates from getUpdates endpoint"
+        tls_required: true
+      - name: "webhook_server"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        description: "HTTPS webhook server endpoint receiving updates pushed from Telegram servers"
+        tls_required: true
+      - name: "bot_api_rest"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        default_uri: "https://api.telegram.org/bot"
+        description: "Telegram Bot REST API client with support for custom self-hosted Bot API instances"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by Telegram Bot Token / Bot ID"
+    supported_vendors:
+      - "Telegram Messenger LLP"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "markdown_v2"
+      - "html"
+      - "photo"
+      - "voice"
+      - "audio"
+      - "video"
+      - "document"
+      - "animation_gif"
+      - "sticker"
+      - "inline_keyboard"
+      - "reply"
+      - "reaction"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: true
+    onboarding_login: "Bot Token from @BotFather, optional custom API base URL, optional HTTP/SOCKS5 proxy"
+    configuration_schema_source: "astrbot/core/platform/sources/telegram/tg_adapter.py"
+    python_dependencies:
+      - "python-telegram-bot>=22.6"
+      - "telegramify-markdown>=1.0.0"
+      - "apscheduler>=3.11.0"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 36700160 # ~35 MB (python-telegram-bot + telegramify-markdown + apscheduler)
+      notes: "Priority candidate for migration to C# host via Telegram.Bot .NET client"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/telegram/tg_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Telegram)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "slack"
+    adapter_type: "slack"
+    display_name: "Slack"
+    protocol: "Slack Events API & Socket Mode"
+    transport_profiles:
+      - name: "socket_mode_ws"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "Outbound WebSocket connection via Slack Socket Mode (no ingress firewall exposure)"
+        tls_required: true
+      - name: "webhook_server"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        description: "HTTP webhook server receiving events with HMAC-SHA256 signature verification"
+        tls_required: true
+      - name: "web_api_rest"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Slack Web API client for Block Kit cards, file uploads, threads, and chat.postMessage"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by Slack App ID or Workspace ID"
+    supported_vendors:
+      - "Slack Technologies (Salesforce)"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "mrkdwn"
+      - "image"
+      - "file"
+      - "block_kit"
+      - "thread_reply"
+      - "reaction"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: true
+    onboarding_login: "Bot Token (xoxb-...) and App-Level Token (xapp-...) from Slack Developer App Management"
+    configuration_schema_source: "astrbot/core/platform/sources/slack/slack_adapter.py"
+    python_dependencies:
+      - "slack-sdk>=3.35.0"
+      - "aiohttp>=3.11.18"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 18874368 # ~18 MB (slack-sdk + aiohttp)
+      notes: "Socket Mode eliminates external webhook setup complexity"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/slack/slack_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Slack)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "kook"
+    adapter_type: "kook"
+    display_name: "KOOK (开黑啦)"
+    protocol: "KOOK Gateway Protocol (WebHook / WebSocket)"
+    transport_profiles:
+      - name: "gateway_websocket"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "WebSocket client connecting to KOOK gateway with Zlib inflate/deflate stream handling"
+        tls_required: true
+      - name: "kook_rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "KOOK REST API for CardMessage, channel posts, and direct messages"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by Bot User ID"
+    supported_vendors:
+      - "KOOK (Beijing Kaikai Technology)"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "kmarkdown"
+      - "image"
+      - "card_message"
+      - "audio"
+      - "video"
+      - "file"
+      - "reaction"
+    proactive_messaging: true
+    streaming_support: false
+    webhook_support: false
+    onboarding_login: "Bot Token from KOOK Developer Portal"
+    configuration_schema_source: "astrbot/core/platform/sources/kook/kook_adapter.py"
+    python_dependencies:
+      - "aiohttp>=3.11.18"
+      - "certifi>=2025.4.26"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 5242880 # ~5 MB (pure aiohttp/websocket implementation without external SDK)
+      notes: "Extremely clean upstream implementation; straightforward to port to C# or run dynamically"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/kook/kook_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Kook)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "line"
+    adapter_type: "line"
+    display_name: "LINE"
+    protocol: "LINE Messaging API"
+    transport_profiles:
+      - name: "webhook_server"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        default_path: "/line_webhook"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 8080
+        description: "HTTP webhook server verifying X-Line-Signature header (HMAC-SHA256)"
+        tls_required: true
+      - name: "messaging_rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        default_uri: "https://api.line.me/v2/bot"
+        description: "LINE Messaging API client for reply, push, multicast, and flex messages"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by Channel ID / user-defined ID"
+    supported_vendors:
+      - "LY Corporation (LINE)"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "video"
+      - "audio"
+      - "file"
+      - "location"
+      - "sticker"
+      - "flex_message"
+      - "template_card"
+      - "quick_reply"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: true
+    onboarding_login: "Channel Access Token (long-lived) and Channel Secret from LINE Developers Console"
+    configuration_schema_source: "astrbot/core/platform/sources/line/line_adapter.py"
+    python_dependencies:
+      - "quart>=0.20.0"
+      - "httpx>=0.28.1"
+      - "aiohttp>=3.11.18"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 4194304 # ~4 MB (signature verification + standard HTTP REST)
+      notes: "Does not require heavy external SDKs; operates on standard HTTP primitives"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/line/line_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Line)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "mattermost"
+    adapter_type: "mattermost"
+    display_name: "Mattermost"
+    protocol: "Mattermost Client API v4 & WebSocket API"
+    transport_profiles:
+      - name: "gateway_websocket"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "Client connecting to /api/v4/websocket with Bearer token authentication"
+        tls_required: false
+      - name: "api_rest"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Mattermost REST API v4 for posts, reactions, file uploads, and channel metadata"
+        tls_required: false
+    instance_id_semantics: "Multi-instance supported; identified by Mattermost Server URL + Bot Token"
+    supported_vendors:
+      - "Mattermost Inc. / Self-hosted Mattermost Instances"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "markdown"
+      - "image"
+      - "audio"
+      - "video"
+      - "file"
+      - "post_props_card"
+      - "thread_reply"
+      - "reaction"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: false
+    onboarding_login: "Server URL, Bot Token, Scheme (http/https), optional HTTP Proxy"
+    configuration_schema_source: "astrbot/core/platform/sources/mattermost/mattermost_adapter.py"
+    python_dependencies:
+      - "aiohttp>=3.11.18"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 3145728 # ~3 MB
+      notes: "Custom async WebSocket client with zero proprietary SDK bloat"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/mattermost/mattermost_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Mattermost)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "misskey"
+    adapter_type: "misskey"
+    display_name: "Misskey / Fediverse"
+    protocol: "Misskey Streaming API & REST API"
+    transport_profiles:
+      - name: "streaming_websocket"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        description: "WebSocket client connected to /streaming subscribing to main, homeTimeline, and hybridTimeline channels"
+        tls_required: true
+      - name: "misskey_rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Misskey API client for notes/create, drive/files/create, and notes/reactions/create"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by Misskey origin instance URL + Token"
+    supported_vendors:
+      - "Misskey / Firefish / Fediverse Instances"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "mfm (Misskey Flavored Markdown)"
+      - "image"
+      - "audio"
+      - "video"
+      - "file"
+      - "renote"
+      - "reaction"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: false
+    onboarding_login: "Origin Instance URL (e.g., https://misskey.io), API Token (Settings -> API), optional Proxy"
+    configuration_schema_source: "astrbot/core/platform/sources/misskey/misskey_adapter.py"
+    python_dependencies:
+      - "websockets>=15.0.1"
+      - "aiohttp>=3.11.18"
+      - "certifi>=2025.4.26"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "NOT_YET_MIGRATED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "estimated with source"
+      size_bytes: 4194304 # ~4 MB
+      notes: "Clean streaming WebSocket protocol implementation"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/misskey/misskey_adapter.py"
+      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Misskey)"
+      official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
+
+  - connector_family: "satori"
+    adapter_type: "satori"
+    display_name: "Satori Protocol"
+    protocol: "Satori Universal Chat Bot Protocol v1"
+    transport_profiles:
+      - name: "forward_websocket"
+        type: "WEBSOCKET_CLIENT"
+        endpoint_role: "CLIENT"
+        default_uri: "ws://localhost:5140/v1/events"
+        description: "Client connecting to external Satori server event stream"
+        tls_required: false
+      - name: "reverse_websocket"
+        type: "WEBSOCKET_SERVER"
+        endpoint_role: "SERVER"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 5141
+        description: "Server listening for incoming Satori client event streams"
+        tls_required: false
+      - name: "satori_rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Satori v1 REST API for channel, guild, user, and message resource management"
+        tls_required: false
+    instance_id_semantics: "Multi-instance supported; identified by Satori host/port/token"
+    supported_vendors:
+      - "Chronocat"
+      - "Koishi / Satori Protocol Ecosystem"
+      - "Milky / Satori Server Adapters"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "audio"
+      - "video"
+      - "file"
+      - "at"
+      - "sharp (channel reference)"
+      - "quote"
+      - "button"
+      - "markdown"
+    proactive_messaging: true
+    streaming_support: true
+    webhook_support: false
+    onboarding_login: "Host, Port, Token (optional shared secret), Path"
+    configuration_schema_source: "astrbot/core/platform/sources/satori/satori_adapter.py"
+    python_dependencies:
+      - "websockets>=15.0.1"
+      - "aiohttp>=3.11.18"
+      - "quart>=0.20.0"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: true
+    current_official_plugin_support: true
+    migration_status: "ENABLED"
+    recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
+    default_installation_status: "INSTALLED"
+    package_size_evidence:
+      state: "measured"
+      size_bytes: 3670016 # ~3.5 MB (.NET Satori client assembly footprint)
+      notes: "Implemented in C# via SatoriGatewayService, SatoriApiClient, and SatoriMessageSender"
+    evidence_paths:
+      upstream: "astrbot/core/platform/sources/satori/satori_adapter.py"
+      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/Satori/SatoriGatewayService.cs"
+      official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/Satori/SatoriGatewayService.cs"
+
+  - connector_family: "matrix"
+    adapter_type: "matrix"
+    display_name: "Matrix (Community External)"
+    protocol: "Matrix Client-Server API (Matrix 1.x)"
+    transport_profiles:
+      - name: "matrix_sync"
+        type: "HTTP_LONG_POLLING_REST"
+        endpoint_role: "CLIENT"
+        description: "Client connecting to Matrix homeserver /_matrix/client/v3/sync event loop"
+        tls_required: true
+      - name: "matrix_client_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "Matrix REST API for sending room events, m.room.message, and mxc media uploads"
+        tls_required: true
+    instance_id_semantics: "Multi-instance supported; identified by matrix_user_id and homeserver URL"
+    supported_vendors:
+      - "Synapse / Dendrite / Conduit / Matrix Federation"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "image"
+      - "audio"
+      - "video"
+      - "file"
+      - "poll"
+      - "markdown"
+      - "html"
+    proactive_messaging: true
+    streaming_support: false
+    webhook_support: false
+    onboarding_login: "Homeserver URL, Matrix User ID (@user:domain), Auth Method (password, token, oauth2, qr)"
+    configuration_schema_source: "docs/zh/platform/matrix.md & astrbot_plugin_matrix_adapter"
+    python_dependencies:
+      - "matrix-nio>=0.24.0"
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "COMPATIBILITY_ONLY"
+    recommended_distribution_kind: "COMMUNITY_EXTERNAL"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "unknown"
+      size_bytes: null
+      notes: "Maintained externally by community developer (stevessr/astrbot_plugin_matrix_adapter)"
+    evidence_paths:
+      upstream: "docs/zh/platform/matrix.md"
+      csharp_host: "MISSING"
+      official_plugin: "MISSING"
+
+  - connector_family: "vocechat"
+    adapter_type: "vocechat"
+    display_name: "VoceChat (Community External)"
+    protocol: "VoceChat Webhook & Bot API"
+    transport_profiles:
+      - name: "webhook_server"
+        type: "HTTP_WEBHOOK"
+        endpoint_role: "SERVER"
+        default_path: "/vocechat_webhook"
+        default_listen_host: "0.0.0.0"
+        default_listen_port: 8080
+        description: "Receives JSON push payloads from self-hosted VoceChat server"
+        tls_required: false
+      - name: "bot_rest_api"
+        type: "HTTP_REST"
+        endpoint_role: "CLIENT"
+        description: "VoceChat REST API for message sending and user info lookup"
+        tls_required: false
+    instance_id_semantics: "Multi-instance supported; identified by VoceChat server URL + Bot UID"
+    supported_vendors:
+      - "VoceChat Self-hosted Server"
+    inbound_support: true
+    outbound_support: true
+    content_types:
+      - "text"
+      - "markdown"
+      - "image"
+      - "file"
+    proactive_messaging: true
+    streaming_support: false
+    webhook_support: true
+    onboarding_login: "Server URL, API Key, Bot Self UID, Webhook Path/Port"
+    configuration_schema_source: "docs/zh/platform/vocechat.md & astrbot_plugin_vocechat"
+    python_dependencies: []
+    native_system_dependencies: []
+    current_astrbot_csharp_support: false
+    current_official_plugin_support: false
+    migration_status: "COMPATIBILITY_ONLY"
+    recommended_distribution_kind: "COMMUNITY_EXTERNAL"
+    default_installation_status: "AVAILABLE_NOT_INSTALLED"
+    package_size_evidence:
+      state: "unknown"
+      size_bytes: null
+      notes: "Maintained externally by community developer (HikariFroya/astrbot_plugin_vocechat)"
+    evidence_paths:
+      upstream: "docs/zh/platform/vocechat.md"
+      csharp_host: "MISSING"
+      official_plugin: "MISSING"
+
+migration_matrix:
+  - upstream_adapter: "aiocqhttp"
+    connector_family: "onebot_v11"
+    supported_upstream: true
+    present_in_csharp_host: true
+    present_in_official_plugins: true
+    target_package: "Cyrene.Connectors.OneBot"
+    status: "MIGRATED_CANONICAL"
+    missing_parity: []
+    likely_migration_order: 1
+    notes: "OneBot v11 protocol is complete in C# DotNetHost & Plugins. NapCat/Lagrange are compatibility profiles."
+
+  - upstream_adapter: "webchat"
+    connector_family: "webchat"
+    supported_upstream: true
+    present_in_csharp_host: true
+    present_in_official_plugins: true
+    target_package: "Cyrene.Connectors.WebChat"
+    status: "MIGRATED_CANONICAL"
+    missing_parity: []
+    likely_migration_order: 1
+    notes: "Core built-in WebUI chat gateway. Always installed."
+
+  - upstream_adapter: "wecom"
+    connector_family: "wecom"
+    supported_upstream: true
+    present_in_csharp_host: true
+    present_in_official_plugins: true
+    target_package: "Cyrene.Connectors.WeCom"
+    status: "MIGRATED_CANONICAL"
+    missing_parity: []
+    likely_migration_order: 2
+    notes: "Enterprise application and WeChat Customer Service (KF) callback/send supported."
+
+  - upstream_adapter: "wecom_ai_bot"
+    connector_family: "wecom"
+    supported_upstream: true
+    present_in_csharp_host: true
+    present_in_official_plugins: true
+    target_package: "Cyrene.Connectors.WeCom"
+    status: "MIGRATED_CANONICAL"
+    missing_parity: []
+    likely_migration_order: 2
+    notes: "WeCom AI Smart Hardware Bot long connection & webhook modes fully migrated."
+
+  - upstream_adapter: "weixin_oc"
+    connector_family: "weixin_oc"
+    supported_upstream: true
+    present_in_csharp_host: true
+    present_in_official_plugins: true
+    target_package: "Cyrene.Connectors.WeixinOC"
+    status: "MIGRATED_CANONICAL"
+    missing_parity: []
+    likely_migration_order: 3
+    notes: "OpenClaw personal WeChat WebSocket client and QR login state machine migrated."
+
+  - upstream_adapter: "discord"
+    connector_family: "discord"
+    supported_upstream: true
+    present_in_csharp_host: true
+    present_in_official_plugins: true
+    target_package: "Cyrene.Connectors.Discord"
+    status: "MIGRATED_CANONICAL"
+    missing_parity: []
+    likely_migration_order: 4
+    notes: "Discord Gateway WebSocket & REST client fully migrated to C# host."
+
+  - upstream_adapter: "satori"
+    connector_family: "satori"
+    supported_upstream: true
+    present_in_csharp_host: true
+    present_in_official_plugins: true
+    target_package: "Cyrene.Connectors.Satori"
+    status: "MIGRATED_CANONICAL"
+    missing_parity: []
+    likely_migration_order: 5
+    notes: "Satori universal protocol forward/reverse WebSocket migrated to C# host."
+
+  - upstream_adapter: "telegram"
+    connector_family: "telegram"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.Telegram"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "Telegram Long Polling & Webhook receiver in C#"
+      - "Telegram MarkdownV2 / HTML formatting mapper"
+      - "Forum topic thread session routing"
+    likely_migration_order: 6
+    notes: "Not yet migrated. High-priority international IM target."
+
+  - upstream_adapter: "qq_official"
+    connector_family: "qq_official"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.QQOfficial"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "QQ Open Platform Gateway WebSocket client"
+      - "QQ Open Platform chunked media upload"
+      - "Markdown template message builder"
+    likely_migration_order: 7
+    notes: "Not yet migrated. Key domestic platform target."
+
+  - upstream_adapter: "qq_official_webhook"
+    connector_family: "qq_official"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.QQOfficial"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "Ed25519 webhook signature validator in ASP.NET Core endpoint"
+      - "QQ Webhook event dispatcher"
+    likely_migration_order: 8
+    notes: "Part of QQ Official semantic family (Webhook transport profile)."
+
+  - upstream_adapter: "dingtalk"
+    connector_family: "dingtalk"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.DingTalk"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "DingTalk Stream mode WebSocket long connection client"
+      - "DingTalk ActionCard / Markdown message template builder"
+    likely_migration_order: 9
+    notes: "Not yet migrated. High enterprise adoption."
+
+  - upstream_adapter: "lark"
+    connector_family: "lark"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.Lark"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "Feishu/Lark WebSocket client & Webhook AES decryption"
+      - "Interactive card message builder"
+    likely_migration_order: 10
+    notes: "Not yet migrated. Important enterprise suite target."
+
+  - upstream_adapter: "slack"
+    connector_family: "slack"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.Slack"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "Slack Socket Mode client (WSS with envelope ack)"
+      - "Block Kit card interactive payload parser"
+    likely_migration_order: 11
+    notes: "Not yet migrated. Global developer platform."
+
+  - upstream_adapter: "kook"
+    connector_family: "kook"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.Kook"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "KOOK Gateway WebSocket client with Zlib deflate stream decompression"
+      - "CardMessage builder"
+    likely_migration_order: 12
+    notes: "Not yet migrated. Lightweight protocol; easy to port."
+
+  - upstream_adapter: "weixin_official_account"
+    connector_family: "weixin_official_account"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.WeixinMP"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "WeChat MP XML message parser & crypto handler in ASP.NET Core"
+      - "Customer service 48h active message sender"
+    likely_migration_order: 13
+    notes: "Not yet migrated. Shares WeChatCrypto with WeCom."
+
+  - upstream_adapter: "line"
+    connector_family: "line"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.Line"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "LINE Webhook HMAC-SHA256 signature validator"
+      - "Flex Message / QuickReply JSON builder"
+    likely_migration_order: 14
+    notes: "Not yet migrated. Regional APAC platform."
+
+  - upstream_adapter: "mattermost"
+    connector_family: "mattermost"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.Mattermost"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "Mattermost API v4 WebSocket client"
+      - "Thread post & reaction mapper"
+    likely_migration_order: 15
+    notes: "Not yet migrated. Self-hosted developer IM."
+
+  - upstream_adapter: "misskey"
+    connector_family: "misskey"
+    supported_upstream: true
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "Cyrene.Connectors.Misskey"
+    status: "NOT_YET_MIGRATED"
+    missing_parity:
+      - "Misskey Streaming WebSocket channel subscriber"
+      - "MFM message formatter"
+    likely_migration_order: 16
+    notes: "Not yet migrated. Fediverse social platform."
+
+  - upstream_adapter: "matrix"
+    connector_family: "matrix"
+    supported_upstream: false # Community plugin
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "astrbot_plugin_matrix_adapter"
+    status: "COMPATIBILITY_ONLY"
+    missing_parity:
+      - "Community plugin compatibility only"
+    likely_migration_order: 99
+    notes: "Community external plugin. Not part of official platform core."
+
+  - upstream_adapter: "vocechat"
+    connector_family: "vocechat"
+    supported_upstream: false # Community plugin
+    present_in_csharp_host: false
+    present_in_official_plugins: false
+    target_package: "astrbot_plugin_vocechat"
+    status: "COMPATIBILITY_ONLY"
+    missing_parity:
+      - "Community plugin compatibility only"
+    likely_migration_order: 99
+    notes: "Community external plugin. Not part of official platform core."
