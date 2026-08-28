@@ -44,3 +44,27 @@ cd Cyrene-Workspace
   Open `Cyrene-Workspace/Cyrene.Workspace.slnx`.
 
 See [`IDE_ACCEPTANCE.md`](IDE_ACCEPTANCE.md) for the manual acceptance checklist.
+
+---
+
+## 4. Parallel Agent Worktree Isolation
+
+> **Canonical Rule**:
+> Agents must never use another Agent's mutable working tree as an integration baseline. Exchange exact remote SHAs and use detached snapshots.
+
+### Usage
+
+```powershell
+# Create dedicated task worktree for writer agent
+.\agent-worktree.ps1 create -Repo plugins -Branch chore/spring-boot-4-1-1 -Base origin/develop -Role idea-spring
+
+# Create detached immutable snapshot worktree for consumer agent
+.\agent-worktree.ps1 snapshot -Repo Cyrene-Platform -Sha <40-char-sha> -Role rider-media-platform
+
+# View active agent worktree ownership
+.\agent-worktree.ps1 status
+
+# Safely remove clean task worktree
+.\agent-worktree.ps1 remove -Role idea-spring
+```
+
