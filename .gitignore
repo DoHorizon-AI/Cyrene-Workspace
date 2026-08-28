@@ -39,3 +39,8 @@ Thumbs.db
 *.registry.json
 *.worktree-registry.json
 p/
+
+# Temporary Agent Planning & Workspace Artifacts
+implementation_plan.md
+walkthrough.md
+.jspace/
