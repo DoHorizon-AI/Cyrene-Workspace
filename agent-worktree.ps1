@@ -517,7 +517,13 @@ function Remove-RegistryEntry([string]$WorktreeRoot, [string]$TargetPath, [strin
 }
 
 function Get-WorktreeInventory($Repository) {
-    $result = Invoke-Git $Repository.FullPath @("worktree", "list", "--porcelain")
+    if ($null -eq $Repository -or [string]::IsNullOrWhiteSpace($Repository.FullPath) -or -not (Test-Path -LiteralPath $Repository.FullPath)) {
+        return @()
+    }
+    $result = Invoke-Git $Repository.FullPath @("worktree", "list", "--porcelain") -AllowFailure
+    if ($result.ExitCode -ne 0) {
+        return @()
+    }
     $records = @()
     $current = $null
 
