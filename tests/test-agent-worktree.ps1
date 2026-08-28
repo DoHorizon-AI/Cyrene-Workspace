@@ -74,10 +74,7 @@ function Get-RepositoryFingerprint([string]$RepositoryPath) {
     $status = @(
         & git -C $RepositoryPath status --porcelain=v1 --untracked-files=all 2>$null
     ) -join ([Environment]::NewLine)
-    $worktrees = @(
-        & git -C $RepositoryPath worktree list --porcelain 2>$null
-    ) -join ([Environment]::NewLine)
-    return ($head + "|" + $status + "|" + $worktrees)
+    return ($head + "|" + $status)
 }
 
 Write-Host "=================================================================" -ForegroundColor Cyan
