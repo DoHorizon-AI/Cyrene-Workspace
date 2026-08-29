@@ -14,6 +14,14 @@ governance_status: "CANDIDATE"
 maturity: "CANDIDATE"
 updated_at: "2026-08-28T21:00:00Z"
 
+package_spec:
+  spec_version: "0.1"
+  schema: "governance/connector-package-spec-v0.1.schema.json"
+  manifest_authority: "Cyrene-Plugins-Official/plugin.manifest.json"
+  resolution_lock_authority: "Cyrene-Platform PluginSetLock"
+  installation_state_authority: "node-local PluginStore active record"
+  static_catalog_excludes_runtime_state: true
+
 authoritative_upstream:
   commit: "d2d7e5aefd2f9471d211974e7e193f321e0ebe0a"
   repository: "https://github.com/AstrBotDevs/AstrBot"
@@ -312,6 +320,57 @@ connectors:
     availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
     catalog_status: "IMPLEMENTATION_PRESENT"
+    package_descriptor:
+      record_type: "package_descriptor"
+      spec_version: "0.1"
+      package:
+        manifest_ref: "Cyrene-Plugins-Official/plugins/connectors/im/plugin.manifest.json"
+        id: "cyrene.connectors.im"
+        version: "0.1.0"
+      capability:
+        id: "message.connector.v1"
+        interface_version: "1.0"
+      connector:
+        family: "onebot_v11"
+        type: "aiocqhttp"
+      implementation:
+        artifact:
+          status: "NOT_PUBLISHED"
+        entrypoint: "im_connector:ImConnector"
+      dependencies:
+        lock:
+          status: "NOT_PUBLISHED"
+      configuration:
+        schema_ref: "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py#configuration"
+        digest: null
+      runtime:
+        kind: "subprocess-python"
+        external:
+          required: true
+          kind: "protocol-server"
+          artifact_ref: null
+      compatibility:
+        platform_api: ">=0.1.0"
+        capability_interface: "message.connector.v1"
+        os:
+          - "linux"
+        architectures:
+          - "x86_64"
+          - "aarch64"
+      integrity:
+        artifact_digest: null
+        archive_digest: null
+        signature_ref: null
+      lifecycle:
+        rollback_identity: "cyrene.connectors.im@0.1.0"
+        cache_identity: "pending:cyrene.connectors.im@0.1.0"
+      provenance:
+        source_repository: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official"
+        source_revision: "2cdba4196d8270871c5f487ba8079c9275b99646"
+        builder: null
+        sbom_ref: null
+        attestation_ref: null
+      publication_status: "CANDIDATE"
     size_provenance:
       source_code_size:
         value: 31551

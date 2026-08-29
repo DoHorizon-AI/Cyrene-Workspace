@@ -129,7 +129,9 @@ Assert-Rule "7: All 5 size axes present on connector footprints" {
 # 8. Provenance Enum Validity
 Assert-Rule "8: Provenance metadata strictly adheres to enum" {
     $allowedProv = @("EXACT", "ESTIMATED", "UNKNOWN", "HISTORICAL_OBSERVATION")
-    $provMatches = [Regex]::Matches($rawYaml, "(?m)^\s+provenance:\s*['""]?([A-Za-z_]+)['""]?")
+    # Use horizontal whitespace here so a nested package-descriptor map is not
+    # mistaken for a scalar provenance value.
+    $provMatches = [Regex]::Matches($rawYaml, "(?m)^\s+provenance:[ \t]*['""]?([A-Za-z_]+)['""]?[ \t]*$")
     if ($provMatches.Count -eq 0) { return $false }
     foreach ($match in $provMatches) {
         $val = $match.Groups[1].Value.ToUpperInvariant()

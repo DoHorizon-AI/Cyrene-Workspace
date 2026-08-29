@@ -1,0 +1,559 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/connector-package-spec-v0.1.json",
+  "title": "Cyrene Connector Package Spec v0.1",
+  "description": "Static connector package descriptor and node-local installation record. The descriptor is catalog metadata; the installation record is runtime state and must not be copied into the static catalog.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/packageDescriptor"
+    },
+    {
+      "$ref": "#/$defs/installationRecord"
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "semanticVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"
+    },
+    "packageDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "spec_version",
+        "package",
+        "capability",
+        "connector",
+        "implementation",
+        "dependencies",
+        "configuration",
+        "runtime",
+        "compatibility",
+        "integrity",
+        "lifecycle",
+        "provenance",
+        "publication_status"
+      ],
+      "properties": {
+        "record_type": {
+          "const": "package_descriptor"
+        },
+        "spec_version": {
+          "const": "0.1"
+        },
+        "package": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "manifest_ref",
+            "id",
+            "version"
+          ],
+          "properties": {
+            "manifest_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$"
+            },
+            "version": {
+              "$ref": "#/$defs/semanticVersion"
+            }
+          }
+        },
+        "capability": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "interface_version"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+[a-z0-9._-]*\\.v[0-9]+$"
+            },
+            "interface_version": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "connector": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "family",
+            "type"
+          ],
+          "properties": {
+            "family": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]*$"
+            },
+            "type": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]*$"
+            }
+          }
+        },
+        "implementation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifact",
+            "entrypoint"
+          ],
+          "properties": {
+            "artifact": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "status"
+                  ],
+                  "properties": {
+                    "status": {
+                      "const": "NOT_PUBLISHED"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "status",
+                    "uri",
+                    "digest"
+                  ],
+                  "properties": {
+                    "status": {
+                      "const": "PUBLISHED"
+                    },
+                    "uri": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "digest": {
+                      "$ref": "#/$defs/sha256"
+                    },
+                    "format": {
+                      "type": "string",
+                      "enum": [
+                        "zip",
+                        "oci",
+                        "directory"
+                      ]
+                    }
+                  }
+                }
+              ]
+            },
+            "entrypoint": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "dependencies": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "lock"
+          ],
+          "properties": {
+            "lock": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "status"
+                  ],
+                  "properties": {
+                    "status": {
+                      "const": "NOT_PUBLISHED"
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "status",
+                    "format",
+                    "ref",
+                    "digest"
+                  ],
+                  "properties": {
+                    "status": {
+                      "const": "LOCKED"
+                    },
+                    "format": {
+                      "type": "string",
+                      "enum": [
+                        "requirements.lock",
+                        "uv.lock",
+                        "poetry.lock",
+                        "gradle-verification",
+                        "container-lock"
+                      ]
+                    },
+                    "ref": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "digest": {
+                      "$ref": "#/$defs/sha256"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_ref"
+          ],
+          "properties": {
+            "schema_ref": {
+              "type": "string",
+              "minLength": 1
+            },
+            "digest": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "subprocess-python",
+                "subprocess-jvm",
+                "service"
+              ]
+            },
+            "external": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "required",
+                "kind"
+              ],
+              "properties": {
+                "required": {
+                  "type": "boolean"
+                },
+                "kind": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._-]*$"
+                },
+                "artifact_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "platform_api",
+            "capability_interface"
+          ],
+          "properties": {
+            "platform_api": {
+              "type": "string",
+              "minLength": 1
+            },
+            "capability_interface": {
+              "type": "string",
+              "minLength": 1
+            },
+            "os": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "architectures": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          }
+        },
+        "integrity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "artifact_digest",
+            "archive_digest"
+          ],
+          "properties": {
+            "artifact_digest": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "archive_digest": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "signature_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "lifecycle": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "rollback_identity",
+            "cache_identity"
+          ],
+          "properties": {
+            "rollback_identity": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cache_identity": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_repository",
+            "source_revision"
+          ],
+          "properties": {
+            "source_repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_revision": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "builder": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sbom_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "attestation_ref": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "publication_status": {
+          "type": "string",
+          "enum": [
+            "NOT_PUBLISHED",
+            "CANDIDATE",
+            "PUBLISHED"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "publication_status": {
+                "const": "PUBLISHED"
+              }
+            },
+            "required": [
+              "publication_status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "implementation": {
+                "properties": {
+                  "artifact": {
+                    "properties": {
+                      "status": {
+                        "const": "PUBLISHED"
+                      }
+                    }
+                  }
+                }
+              },
+              "dependencies": {
+                "properties": {
+                  "lock": {
+                    "properties": {
+                      "status": {
+                        "const": "LOCKED"
+                      }
+                    }
+                  }
+                }
+              },
+              "integrity": {
+                "properties": {
+                  "artifact_digest": {
+                    "$ref": "#/$defs/sha256"
+                  },
+                  "archive_digest": {
+                    "$ref": "#/$defs/sha256"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "installationRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "spec_version",
+        "package_id",
+        "package_version",
+        "artifact_digest",
+        "cache_identity",
+        "state",
+        "active_version",
+        "rollback_identity",
+        "history"
+      ],
+      "properties": {
+        "record_type": {
+          "const": "installation_record"
+        },
+        "spec_version": {
+          "const": "0.1"
+        },
+        "package_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$"
+        },
+        "package_version": {
+          "$ref": "#/$defs/semanticVersion"
+        },
+        "artifact_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "cache_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "STAGED",
+            "INSTALLED",
+            "ACTIVE",
+            "FAILED",
+            "ROLLED_BACK",
+            "REMOVED"
+          ]
+        },
+        "active_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/semanticVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rollback_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "history": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "version",
+              "artifact_digest",
+              "cache_identity"
+            ],
+            "properties": {
+              "version": {
+                "$ref": "#/$defs/semanticVersion"
+              },
+              "artifact_digest": {
+                "$ref": "#/$defs/sha256"
+              },
+              "cache_identity": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
