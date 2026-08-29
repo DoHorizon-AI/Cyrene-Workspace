@@ -310,10 +310,7 @@ connectors:
     onboarding_login: "External OneBot server authentication (token / access_token shared secret, QR login in NapCat/Lagrange)"
     configuration_schema_source: "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py"
     python_dependencies:
-      - "aiocqhttp>=1.4.4"
-      - "websockets>=15.0.1"
-      - "quart>=0.20.0"
-      - "httpx>=0.28.1"
+      - "protobuf>=4.21,<5"
     native_system_dependencies: []
     current_astrbot_csharp_support: true
     current_official_plugin_support: true
@@ -324,34 +321,34 @@ connectors:
       record_type: "package_descriptor"
       spec_version: "0.1"
       package:
-        manifest_ref: "Cyrene-Plugins-Official/plugins/connectors/im/plugin.manifest.json"
-        id: "cyrene.connectors.im"
+        manifest_ref: "Cyrene-Plugins-Official/plugins/connectors/onebot-v11/plugin.manifest.json"
+        id: "cyrene.connectors.onebot-v11"
         version: "0.1.0"
       capability:
         id: "message.connector.v1"
-        interface_version: "1.0"
+        interface_version: "1"
       connector:
         family: "onebot_v11"
-        type: "aiocqhttp"
+        type: "onebot_v11"
       implementation:
         artifact:
           status: "NOT_PUBLISHED"
-        entrypoint: "im_connector:ImConnector"
+        entrypoint: "onebot_v11_connector:OneBotV11Connector"
       dependencies:
         lock:
           status: "NOT_PUBLISHED"
       configuration:
-        schema_ref: "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py#configuration"
+        schema_ref: "plugins/connectors/onebot-v11/configuration.schema.json"
         digest: null
       runtime:
         kind: "subprocess-python"
         external:
           required: true
-          kind: "protocol-server"
+          kind: "onebot_v11_runtime"
           artifact_ref: null
       compatibility:
         platform_api: ">=0.1.0"
-        capability_interface: "message.connector.v1"
+        capability_interface: "message.connector.v1@1"
         os:
           - "linux"
         architectures:
@@ -362,11 +359,11 @@ connectors:
         archive_digest: null
         signature_ref: null
       lifecycle:
-        rollback_identity: "cyrene.connectors.im@0.1.0"
-        cache_identity: "pending:cyrene.connectors.im@0.1.0"
+        rollback_identity: "cyrene.connectors.onebot-v11@0.1.0"
+        cache_identity: "cyrene.connectors.onebot-v11@0.1.0"
       provenance:
         source_repository: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official"
-        source_revision: "2cdba4196d8270871c5f487ba8079c9275b99646"
+        source_revision: "018918eb09c2922ea13426fcff42c2c24cfccb3f"
         builder: null
         sbom_ref: null
         attestation_ref: null
@@ -400,7 +397,7 @@ connectors:
     evidence_paths:
       upstream: "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py"
       csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/OneBot/OneBotGatewayService.cs"
-      official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/OneBot/OneBotGatewayService.cs"
+      official_plugin: "plugins/connectors/onebot-v11"
 
   - connector_family: "qq_official"
     adapter_type: "qq_official"

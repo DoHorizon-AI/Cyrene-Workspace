@@ -1,26 +1,26 @@
 version: "1.0.0"
-timestamp: "2026-08-28T19:40:00Z"
+timestamp: "2026-08-29T23:07:28Z"
 description: "Accepted multi-repository integration baseline for Cyrene"
 
 repositories:
   - name: "Cyrene-Workspace"
     integration_branch: "main"
-    remote_sha: "6038128153a5225dbd7b9b5d9827d42cb68165d8"
+    remote_sha: "b7ed77f1df2ef323546e65167bfc4054fd30c23c"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Workspace.git"
 
   - name: "Cyrene-Platform"
     integration_branch: "develop"
-    remote_sha: "a135167c41e299cf7cac2cf0f075b868f9d80999"
+    remote_sha: "14beceef57998796c4ecc4dcedca6ff5ac265c04"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
 
   - name: "Cyrene-Plugins-Official"
     integration_branch: "develop"
-    remote_sha: "2cdba4196d8270871c5f487ba8079c9275b99646"
+    remote_sha: "018918eb09c2922ea13426fcff42c2c24cfccb3f"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
 
   - name: "Astrbot-Rev"
     integration_branch: "develop"
-    remote_sha: "64f684b62b3984d71b4fe25ff02479de2ca5810f"
+    remote_sha: "1b43258aeec72a9dcf5e2a26ef3394ea464239bc"
     canonical_remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
 
   - name: "Cyrene-Yield"
