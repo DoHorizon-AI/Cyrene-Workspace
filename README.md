@@ -12,7 +12,7 @@ This meta-repository provides a unified, reproducible developer workspace config
 - **Language Baselines**:
   - **.NET**: .NET 10 LTS (`global.json`, `Cyrene.Workspace.slnx`)
   - **Python**: `>=3.11` (`uv`, `pyproject.toml`, `.python-version = 3.12`, repo-local `.venv`)
-  - **Rust**: Cargo workspaces (`Cyrene-Platform/Cargo.toml`, `services/cyrene-reactor/Cargo.toml`)
+  - **Rust**: Cargo workspaces (`Cyrene-Platform/Cargo.toml`, `Services/Cyrene-Reactor/Cargo.toml`)
   - **JVM / Kotlin**: Gradle Kotlin DSL with Java Toolchains (Java 21/25, Kotlin 2.0+)
 
 ---

@@ -1,11 +1,19 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/Astrbot-Rev.iml" filepath="$PROJECT_DIR$/.idea/Astrbot-Rev.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Catalyst.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Catalyst.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Echo.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Echo.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Exchange.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Exchange.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Navigator.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Navigator.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Platform.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Platform.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Plugins-Official.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Plugins-Official.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Reactor.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Reactor.iml" />
       <module fileurl="file://$PROJECT_DIR$/Cyrene-Workspace.iml" filepath="$PROJECT_DIR$/Cyrene-Workspace.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-astrbot-rev.iml" filepath="$PROJECT_DIR$/.idea/cyrene-astrbot-rev.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-catalyst.iml" filepath="$PROJECT_DIR$/.idea/cyrene-catalyst.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Yield.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Yield.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/DH-System-Internal.iml" filepath="$PROJECT_DIR$/.idea/DH-System-Internal.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-astrbot-capability-worker.iml" filepath="$PROJECT_DIR$/.idea/cyrene-astrbot-capability-worker.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-control-plane.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-control-plane.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/cyrene-control-plane.adapters.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/cyrene-control-plane.adapters.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/inbound-grpc/cyrene-control-plane.adapters.inbound-grpc.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/inbound-grpc/cyrene-control-plane.adapters.inbound-grpc.iml" />
@@ -28,21 +36,12 @@
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/domain/cyrene-control-plane.domain.iml" filepath="$PROJECT_DIR$/.idea/modules/domain/cyrene-control-plane.domain.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/domain/cyrene-control-plane.domain.main.iml" filepath="$PROJECT_DIR$/.idea/modules/domain/cyrene-control-plane.domain.main.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/domain/cyrene-control-plane.domain.test.iml" filepath="$PROJECT_DIR$/.idea/modules/domain/cyrene-control-plane.domain.test.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-dh-system-internal.iml" filepath="$PROJECT_DIR$/.idea/cyrene-dh-system-internal.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-echo.iml" filepath="$PROJECT_DIR$/.idea/cyrene-echo.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-exchange.iml" filepath="$PROJECT_DIR$/.idea/cyrene-exchange.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.main.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.main.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.test.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.test.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-navigator.iml" filepath="$PROJECT_DIR$/.idea/cyrene-navigator.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-reactor.iml" filepath="$PROJECT_DIR$/.idea/cyrene-reactor.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-spring-gateway.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-spring-gateway.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-spring-gateway.main.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-spring-gateway.main.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-spring-gateway.test.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-spring-gateway.test.iml" />
-      <module fileurl="file://$PROJECT_DIR$/../services/Cyrene-Yield/.idea/cyrene-yield.iml" filepath="$PROJECT_DIR$/../services/Cyrene-Yield/.idea/cyrene-yield.iml" />
-      <module fileurl="file://$PROJECT_DIR$/../services/Cyrene-Yield/.idea/llamafactory.iml" filepath="$PROJECT_DIR$/../services/Cyrene-Yield/.idea/llamafactory.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/plugins.iml" filepath="$PROJECT_DIR$/.idea/plugins.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-astrbot-capability-worker.iml" filepath="$PROJECT_DIR$/.idea/cyrene-astrbot-capability-worker.iml" />
     </modules>
   </component>
 </project>

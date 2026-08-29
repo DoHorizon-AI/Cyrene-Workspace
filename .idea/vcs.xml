@@ -1,16 +1,16 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$/../Cyrene-Platform" vcs="Git" />
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../plugins" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../services/Cyrene-Yield" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../services/cyrene-astrbot-rev" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../services/cyrene-catalyst" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../services/cyrene-dh-system-internal" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../services/cyrene-echo" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../services/cyrene-exchange" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../services/cyrene-navigator" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../services/cyrene-reactor" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Cyrene-Plugins-Official" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Yield" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/Astrbot-Rev" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Catalyst" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/DH-System-Internal" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Echo" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Exchange" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Navigator" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Reactor" vcs="Git" />
   </component>
 </project>

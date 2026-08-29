@@ -91,12 +91,12 @@ $writerBranch = "chore/spring-boot-test-1"
 $unknownPath = Join-Path $fixtureRoot "unregistered-test"
 $businessRepositories = @(
     (Join-Path $WorkspaceDirectory "..\Cyrene-Platform"),
-    (Join-Path $WorkspaceDirectory "..\plugins"),
-    (Join-Path $WorkspaceDirectory "..\services\cyrene-astrbot-rev"),
-    (Join-Path $WorkspaceDirectory "..\services\cyrene-dh-system-internal"),
-    (Join-Path $WorkspaceDirectory "..\services\cyrene-reactor"),
-    (Join-Path $WorkspaceDirectory "..\services\Cyrene-Yield"),
-    (Join-Path $WorkspaceDirectory "..\services\cyrene-exchange")
+    (Join-Path $WorkspaceDirectory "..\Cyrene-Plugins-Official"),
+    (Join-Path $WorkspaceDirectory "..\Services\Astrbot-Rev"),
+    (Join-Path $WorkspaceDirectory "..\Services\DH-System-Internal"),
+    (Join-Path $WorkspaceDirectory "..\Services\Cyrene-Reactor"),
+    (Join-Path $WorkspaceDirectory "..\Services\Cyrene-Yield"),
+    (Join-Path $WorkspaceDirectory "..\Services\Cyrene-Exchange")
 )
 $businessBefore = @{}
 

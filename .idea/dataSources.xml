@@ -12,7 +12,7 @@
       <driver-ref>sqlite.xerial</driver-ref>
       <synchronize>true</synchronize>
       <jdbc-driver>org.sqlite.JDBC</jdbc-driver>
-      <jdbc-url>jdbc:sqlite:$PROJECT_DIR$/../services/cyrene-astrbot-rev/data/knowledge_base/kb.db</jdbc-url>
+      <jdbc-url>jdbc:sqlite:$PROJECT_DIR$/../Services/Astrbot-Rev/data/knowledge_base/kb.db</jdbc-url>
       <working-dir>$PROJECT_DIR$</working-dir>
     </data-source>
     <data-source source="LOCAL" name="Cyrene Exchange (Redis Cache)" uuid="b3c4d5e6-f7a8-9b0c-1d2e-3f4a5b6c7d8e">

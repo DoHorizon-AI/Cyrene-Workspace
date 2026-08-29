@@ -68,8 +68,8 @@ repositories:
         test: "cargo test --workspace ; uv run pytest"
         build: "cargo build ; ./gradlew build"
 
-  - name: "Cyrene-Plugins"
-    path: "../plugins"
+  - name: "Cyrene-Plugins-Official"
+    path: "../Cyrene-Plugins-Official"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -88,26 +88,26 @@ repositories:
     ci_acceptance_environment: "ubuntu-latest"
     release_artifact_target: "multi-platform"
     ide:
-      python_root: "../plugins"
-      gradle_root: "../plugins/plugins/gateway/spring/build.gradle.kts"
+      python_root: "../Cyrene-Plugins-Official"
+      gradle_root: "../Cyrene-Plugins-Official/plugins/gateway/spring/build.gradle.kts"
     pointers:
       primary_source_roots:
-        - "../plugins/plugins/agents"
-        - "../plugins/plugins/providers"
-        - "../plugins/plugins/gateway/spring/src"
+        - "../Cyrene-Plugins-Official/plugins/agents"
+        - "../Cyrene-Plugins-Official/plugins/providers"
+        - "../Cyrene-Plugins-Official/plugins/gateway/spring/src"
       test_roots:
-        - "../plugins/plugins/agents/*/tests"
-        - "../plugins/plugins/providers/*/tests"
+        - "../Cyrene-Plugins-Official/plugins/agents/*/tests"
+        - "../Cyrene-Plugins-Official/plugins/providers/*/tests"
       api_contract_roots:
-        - "../plugins/plugins/gateway/spring/proto"
+        - "../Cyrene-Plugins-Official/plugins/gateway/spring/proto"
       database_migration_roots:
-        - "../plugins/plugins/gateway/spring/src/main/resources/db/migration"
+        - "../Cyrene-Plugins-Official/plugins/gateway/spring/src/main/resources/db/migration"
       developer_commands:
         test: "uv run pytest"
         build: "./gradlew build"
 
-  - name: "cyrene-astrbot-rev"
-    path: "../services/cyrene-astrbot-rev"
+  - name: "Astrbot-Rev"
+    path: "../Services/Astrbot-Rev"
     canonical_remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -126,23 +126,23 @@ repositories:
     release_artifact_target: "linux-x64"
     secondary_targets: ["linux-arm64", "win-x64"]
     ide:
-      dotnet_solution: "../services/cyrene-astrbot-rev/AstrBot.slnx"
-      python_root: "../services/cyrene-astrbot-rev/python/capability_worker"
+      dotnet_solution: "../Services/Astrbot-Rev/AstrBot.slnx"
+      python_root: "../Services/Astrbot-Rev/python/capability_worker"
     pointers:
       primary_source_roots:
-        - "../services/cyrene-astrbot-rev/src/AstrBot.DotNetHost"
-        - "../services/cyrene-astrbot-rev/python/capability_worker/src"
+        - "../Services/Astrbot-Rev/src/AstrBot.DotNetHost"
+        - "../Services/Astrbot-Rev/python/capability_worker/src"
       test_roots:
-        - "../services/cyrene-astrbot-rev/tests"
-        - "../services/cyrene-astrbot-rev/python/capability_worker/tests"
+        - "../Services/Astrbot-Rev/tests"
+        - "../Services/Astrbot-Rev/python/capability_worker/tests"
       database_migration_roots:
-        - "../services/cyrene-astrbot-rev/src/AstrBot.DatabaseMigrator/Migrations"
+        - "../Services/Astrbot-Rev/src/AstrBot.DatabaseMigrator/Migrations"
       developer_commands:
         test: "dotnet test AstrBot.slnx ; uv run --directory python/capability_worker pytest"
         build: "dotnet build AstrBot.slnx"
 
-  - name: "cyrene-dh-system-internal"
-    path: "../services/cyrene-dh-system-internal"
+  - name: "DH-System-Internal"
+    path: "../Services/DH-System-Internal"
     canonical_remote: "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"
     visibility: "private"
     clone_policy: "external_auth_required"
@@ -159,20 +159,20 @@ repositories:
     ci_acceptance_environment: "ubuntu-latest (Azure Pipelines)"
     release_artifact_target: "linux-x64"
     ide:
-      dotnet_solution: "../services/cyrene-dh-system-internal/WeComAgentHub.slnx"
+      dotnet_solution: "../Services/DH-System-Internal/WeComAgentHub.slnx"
     pointers:
       primary_source_roots:
-        - "../services/cyrene-dh-system-internal/src"
+        - "../Services/DH-System-Internal/src"
       test_roots:
-        - "../services/cyrene-dh-system-internal/tests"
+        - "../Services/DH-System-Internal/tests"
       database_migration_roots:
-        - "../services/cyrene-dh-system-internal/src/WeComAgentHub.Infrastructure/Migrations"
+        - "../Services/DH-System-Internal/src/WeComAgentHub.Infrastructure/Migrations"
       developer_commands:
         test: "dotnet test WeComAgentHub.slnx"
         build: "dotnet build WeComAgentHub.slnx"
 
-  - name: "cyrene-reactor"
-    path: "../services/cyrene-reactor"
+  - name: "Cyrene-Reactor"
+    path: "../Services/Cyrene-Reactor"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -190,22 +190,22 @@ repositories:
     ci_acceptance_environment: "ubuntu-latest"
     release_artifact_target: "x86_64-unknown-linux-gnu"
     ide:
-      python_root: "../services/cyrene-reactor"
-      cargo_root: "../services/cyrene-reactor/Cargo.toml"
+      python_root: "../Services/Cyrene-Reactor"
+      cargo_root: "../Services/Cyrene-Reactor/Cargo.toml"
     pointers:
       primary_source_roots:
-        - "../services/cyrene-reactor/runtime/core/src"
-        - "../services/cyrene-reactor/runtime/pro/src"
-        - "../services/cyrene-reactor/components/scheduler-rs/src"
+        - "../Services/Cyrene-Reactor/runtime/core/src"
+        - "../Services/Cyrene-Reactor/runtime/pro/src"
+        - "../Services/Cyrene-Reactor/components/scheduler-rs/src"
       test_roots:
-        - "../services/cyrene-reactor/runtime/core/tests"
-        - "../services/cyrene-reactor/runtime/pro/tests"
+        - "../Services/Cyrene-Reactor/runtime/core/tests"
+        - "../Services/Cyrene-Reactor/runtime/pro/tests"
       developer_commands:
         test: "uv run pytest ; cargo test"
         build: "cargo build"
 
   - name: "Cyrene-Yield"
-    path: "../services/Cyrene-Yield"
+    path: "../Services/Cyrene-Yield"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -222,18 +222,18 @@ repositories:
     ci_acceptance_environment: "ubuntu-latest"
     release_artifact_target: "py3-none-any"
     ide:
-      python_root: "../services/Cyrene-Yield"
+      python_root: "../Services/Cyrene-Yield"
     pointers:
       primary_source_roots:
-        - "../services/Cyrene-Yield/training/core/src"
+        - "../Services/Cyrene-Yield/training/core/src"
       test_roots:
-        - "../services/Cyrene-Yield/training/core/tests"
+        - "../Services/Cyrene-Yield/training/core/tests"
       developer_commands:
         test: "uv run pytest training/core/tests"
         build: "uv build"
 
-  - name: "cyrene-exchange"
-    path: "../services/cyrene-exchange"
+  - name: "Cyrene-Exchange"
+    path: "../Services/Cyrene-Exchange"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -251,22 +251,22 @@ repositories:
     ci_acceptance_environment: "ubuntu-latest"
     release_artifact_target: "multi-platform"
     ide:
-      python_root: "../services/cyrene-exchange"
-      gradle_root: "../services/cyrene-exchange/components/coordinator/build.gradle.kts"
+      python_root: "../Services/Cyrene-Exchange"
+      gradle_root: "../Services/Cyrene-Exchange/components/coordinator/build.gradle.kts"
     pointers:
       primary_source_roots:
-        - "../services/cyrene-exchange/src"
-        - "../services/cyrene-exchange/components/coordinator/src"
+        - "../Services/Cyrene-Exchange/src"
+        - "../Services/Cyrene-Exchange/components/coordinator/src"
       test_roots:
-        - "../services/cyrene-exchange/tests"
+        - "../Services/Cyrene-Exchange/tests"
       api_contract_roots:
-        - "../services/cyrene-exchange/proto"
+        - "../Services/Cyrene-Exchange/proto"
       developer_commands:
         test: "uv run pytest ; ./gradlew build"
         build: "./gradlew build"
 
-  - name: "cyrene-catalyst"
-    path: "../services/cyrene-catalyst"
+  - name: "Cyrene-Catalyst"
+    path: "../Services/Cyrene-Catalyst"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -279,8 +279,8 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "linux-x64"
 
-  - name: "cyrene-echo"
-    path: "../services/cyrene-echo"
+  - name: "Cyrene-Echo"
+    path: "../Services/Cyrene-Echo"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -293,8 +293,8 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "linux-x64"
 
-  - name: "cyrene-navigator"
-    path: "../services/cyrene-navigator"
+  - name: "Cyrene-Navigator"
+    path: "../Services/Cyrene-Navigator"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -312,15 +312,15 @@ profiles:
     description: "Full Architecture Workspace: All canonical Cyrene platform and product repositories"
     repositories:
       - "Cyrene-Platform"
-      - "Cyrene-Plugins"
-      - "cyrene-astrbot-rev"
-      - "cyrene-dh-system-internal"
-      - "cyrene-reactor"
+      - "Cyrene-Plugins-Official"
+      - "Astrbot-Rev"
+      - "DH-System-Internal"
+      - "Cyrene-Reactor"
       - "Cyrene-Yield"
-      - "cyrene-exchange"
-      - "cyrene-catalyst"
-      - "cyrene-navigator"
-      - "cyrene-echo"
+      - "Cyrene-Exchange"
+      - "Cyrene-Catalyst"
+      - "Cyrene-Navigator"
+      - "Cyrene-Echo"
     dotnet_solutions:
       - "Cyrene.Workspace.slnx"
       - "solutions/Cyrene.AstrBot.Integration.slnx"
@@ -328,10 +328,10 @@ profiles:
   astrbot:
     description: "AstrBot Integration Workspace: AstrBot host, Platform SDK, Plugins ecosystem, and Exchange transport"
     repositories:
-      - "cyrene-astrbot-rev"
+      - "Astrbot-Rev"
       - "Cyrene-Platform"
-      - "Cyrene-Plugins"
-      - "cyrene-exchange"
+      - "Cyrene-Plugins-Official"
+      - "Cyrene-Exchange"
     dotnet_solutions:
       - "solutions/Cyrene.AstrBot.Integration.slnx"
 
@@ -339,11 +339,11 @@ profiles:
     description: "Core Platform Workspace: Cyrene-Platform and Plugins ecosystem conformance harness"
     repositories:
       - "Cyrene-Platform"
-      - "Cyrene-Plugins"
+      - "Cyrene-Plugins-Official"
 
   training:
     description: "Model Training Workspace: Cyrene-Yield training service, Platform SDK, and conformance harness"
     repositories:
       - "Cyrene-Yield"
       - "Cyrene-Platform"
-      - "Cyrene-Plugins"
+      - "Cyrene-Plugins-Official"

@@ -20,20 +20,20 @@
         </option>
       </GradleProjectSettings>
       <GradleProjectSettings>
-        <option name="externalProjectPath" value="$PROJECT_DIR$/../plugins/plugins/gateway/spring" />
+        <option name="externalProjectPath" value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
         <option name="gradleJvm" value="#GRADLE_DAEMON_JVM" />
         <option name="modules">
           <set>
-            <option value="$PROJECT_DIR$/../plugins/plugins/gateway/spring" />
+            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
           </set>
         </option>
       </GradleProjectSettings>
       <GradleProjectSettings>
-        <option name="externalProjectPath" value="$PROJECT_DIR$/../services/cyrene-exchange/components/coordinator" />
+        <option name="externalProjectPath" value="$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
         <option name="gradleJvm" value="#GRADLE_DAEMON_JVM" />
         <option name="modules">
           <set>
-            <option value="$PROJECT_DIR$/../services/cyrene-exchange/components/coordinator" />
+            <option value="$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
           </set>
         </option>
       </GradleProjectSettings>

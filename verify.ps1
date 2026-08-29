@@ -95,11 +95,11 @@ Assert-Step "IntelliJ IDEA Multi-Project Workspace (.idea/jb-workspace.xml)" {
 Assert-Step "Python .venv discovery and uv environment sanity" {
     $pyTargets = @(
         "../Cyrene-Platform",
-        "../plugins",
-        "../services/cyrene-reactor",
-        "../services/Cyrene-Yield",
-        "../services/cyrene-exchange",
-        "../services/cyrene-astrbot-rev/python/capability_worker"
+        "../Cyrene-Plugins-Official",
+        "../Services/Cyrene-Reactor",
+        "../Services/Cyrene-Yield",
+        "../Services/Cyrene-Exchange",
+        "../Services/Astrbot-Rev/python/capability_worker"
     )
 
     foreach ($rel in $pyTargets) {
@@ -141,7 +141,7 @@ if (-not $Quick) {
 
 # 5. RUST TOOLCHAIN DECLARATION (DEV HOST ONLY)
 Assert-Step "Rust development toolchain declarations & cargo metadata" {
-    $rustTargets = @("../Cyrene-Platform", "../services/cyrene-reactor")
+    $rustTargets = @("../Cyrene-Platform", "../Services/Cyrene-Reactor")
     foreach ($rel in $rustTargets) {
         $full = Join-Path $ScriptDir $rel
         $toolchainPin = Join-Path $full "rust-toolchain.toml"
@@ -159,8 +159,8 @@ Assert-Step "Rust development toolchain declarations & cargo metadata" {
 Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
     $jvmTargets = @(
         "../Cyrene-Platform/framework/jvm",
-        "../services/cyrene-exchange/components/coordinator",
-        "../plugins/plugins/gateway/spring"
+        "../Services/Cyrene-Exchange/components/coordinator",
+        "../Cyrene-Plugins-Official/plugins/gateway/spring"
     )
     foreach ($rel in $jvmTargets) {
         $full = Join-Path $ScriptDir $rel
@@ -189,7 +189,7 @@ Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
 
 # 7. REPOSITORY INDEPENDENCE & PLATFORM SDK SEAM
 Assert-Step "Repository independence & clean SDK authority (no copied source in Cyrene-Yield)" {
-    $yieldPackages = Join-Path $ScriptDir "../services/Cyrene-Yield/packages"
+    $yieldPackages = Join-Path $ScriptDir "../Services/Cyrene-Yield/packages"
     if (Test-Path $yieldPackages) {
         $copiedSdks = Get-ChildItem $yieldPackages -Directory | Where-Object { $_.Name -match "^cyrene_" }
         if ($copiedSdks.Count -gt 0) {
