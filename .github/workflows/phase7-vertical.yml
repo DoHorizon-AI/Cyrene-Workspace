@@ -1,0 +1,56 @@
+name: Phase 7 three-repository vertical acceptance
+
+on:
+  pull_request:
+    paths:
+      - "ci/vertical-e2e/**"
+      - "governance/**"
+      - ".github/workflows/phase7-vertical.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "ci/vertical-e2e/**"
+      - "governance/**"
+      - ".github/workflows/phase7-vertical.yml"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vertical-e2e:
+    name: Linux configured connector vertical slice
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out harness
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run reproducible three-repository acceptance
+        env:
+          CYRENE_PHASE7_TMP_PARENT: ${{ runner.temp }}/cyrene-phase7
+        run: bash ./ci/vertical-e2e/run.sh
+
+      - name: Upload retained failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase7-vertical-evidence
+          path: ${{ runner.temp }}/cyrene-phase7
+          if-no-files-found: ignore
