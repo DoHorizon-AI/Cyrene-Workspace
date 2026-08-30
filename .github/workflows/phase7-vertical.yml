@@ -1,4 +1,4 @@
-name: Phase 7 three-repository vertical acceptance
+name: Package-installed three-repository vertical acceptance
 
 on:
   pull_request:
@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   vertical-e2e:
-    name: Linux configured connector vertical slice
+    name: Linux package-installed configured connector vertical slice
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -42,7 +42,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run reproducible three-repository acceptance
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.15"
+
+      - name: Run reproducible package-installed three-repository acceptance
         env:
           CYRENE_PHASE7_TMP_PARENT: ${{ runner.temp }}/cyrene-phase7
         run: bash ./ci/vertical-e2e/run.sh

@@ -14,9 +14,9 @@ CYRENE_PLATFORM_URL="${CYRENE_PLATFORM_URL:-https://github.com/DoHorizon-AI/Cyre
 CYRENE_ASTRBOT_URL="${CYRENE_ASTRBOT_URL:-https://github.com/DoHorizon-AI/Astrbot-Rev.git}"
 CYRENE_PLUGINS_URL="${CYRENE_PLUGINS_URL:-https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git}"
 
-CYRENE_PLATFORM_REF="${CYRENE_PLATFORM_REF:-e614710946e6141abc052536cc04228c7d4be57c}"
-CYRENE_ASTRBOT_REF="${CYRENE_ASTRBOT_REF:-1b43258aeec72a9dcf5e2a26ef3394ea464239bc}"
-CYRENE_PLUGINS_REF="${CYRENE_PLUGINS_REF:-018918eb09c2922ea13426fcff42c2c24cfccb3f}"
+CYRENE_PLATFORM_REF="${CYRENE_PLATFORM_REF:-f46190e0f5fed19ff43d6805e5d5823ae1b77557}"
+CYRENE_ASTRBOT_REF="${CYRENE_ASTRBOT_REF:-95197205611fddfd39e4127ab69ca55efdf142d9}"
+CYRENE_PLUGINS_REF="${CYRENE_PLUGINS_REF:-78b47bf1ffcf3fed83e0db36507b5cbbe8574a2e}"
 CYRENE_PHASE7_POSTGRES_IMAGE="${CYRENE_PHASE7_POSTGRES_IMAGE:-pgvector/pgvector@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f}"
 
 TMP_PARENT="${CYRENE_PHASE7_TMP_PARENT:-/tmp/cyrene}"
@@ -44,6 +44,16 @@ fail() {
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"
+}
+
+wait_for_docker() {
+    for _ in {1..12}; do
+        if docker info >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
 }
 
 assert_linux_path() {
@@ -206,7 +216,12 @@ cleanup() {
     fi
     if [[ "${PRIMARY_STATUS}" == "0" ]]; then
         rm -rf -- "${RUN_ROOT}"
-        echo "PHASE7_CLEANUP_PASS: child process groups, ports, PostgreSQL container"
+        if [[ -e "${RUN_ROOT}" ]]; then
+            echo "owned package/runtime temporary state remains: ${RUN_ROOT}" >&2
+            PRIMARY_STATUS=1
+        else
+            echo "PHASE7_CLEANUP_PASS: child process groups, ports, PostgreSQL container, package/runtime state"
+        fi
     else
         echo "PHASE7_EVIDENCE_ROOT=${RUN_ROOT}" >&2
         echo "PHASE7_CLEANUP_STATUS=${CLEANUP_STATUS}" >&2
@@ -220,12 +235,13 @@ require_command cargo
 require_command dotnet
 require_command python3
 require_command docker
+require_command uv
 require_command ss
 require_command setsid
 require_command pgrep
 require_command timeout
 [[ "$(uname -s)" == "Linux" ]] || fail "P0 vertical harness requires Linux"
-docker info >/dev/null 2>&1 || fail "Docker daemon is unavailable"
+wait_for_docker || fail "Docker daemon is unavailable after 24 seconds"
 
 echo "PHASE7_RUN_ROOT=${RUN_ROOT}"
 echo "PHASE7_PLATFORM_REF=${CYRENE_PLATFORM_REF}"
@@ -240,40 +256,76 @@ assert_linux_path "${PLATFORM_ROOT}"
 assert_linux_path "${ASTRBOT_ROOT}"
 assert_linux_path "${PLUGINS_ROOT}"
 
-VENV_ROOT="${RUN_ROOT}/venv"
-if command -v uv >/dev/null 2>&1; then
-    uv venv --python "$(command -v python3)" "${VENV_ROOT}"
-    uv pip install --python "${VENV_ROOT}/bin/python" "protobuf==4.25.8"
-else
-    python3 -m venv "${VENV_ROOT}"
-    "${VENV_ROOT}/bin/python" -m pip install --disable-pip-version-check --no-input \
-        "protobuf==4.25.8"
-fi
-
 CES_EXAMPLE="${PLATFORM_ROOT}/framework/crates/cy-capability-execution-service/examples/configured_binding_server.rs"
-MANIFEST="${PLUGINS_ROOT}/plugins/connectors/onebot-v11/plugin.manifest.json"
 [[ -f "${CES_EXAMPLE}" ]] || fail "Platform ref does not contain configured_binding_server example"
-[[ -f "${MANIFEST}" ]] || fail "Plugins ref does not contain official OneBot manifest"
 
-echo "[1/7] Building the real Platform CES fixture"
+echo "[1/9] Building, publishing, installing, and exercising the immutable OneBot package"
+BOOTSTRAP_VENV="${RUN_ROOT}/package-bootstrap-venv"
+uv venv --python "$(command -v python3)" "${BOOTSTRAP_VENV}"
+"${BOOTSTRAP_VENV}/bin/python" -I -c \
+    'import importlib.util; assert importlib.util.find_spec("onebot_v11_connector") is None' || \
+    fail "minimal package host unexpectedly has OneBot preinstalled"
+uv pip install --python "${BOOTSTRAP_VENV}/bin/python" \
+    "protobuf==4.25.9" "pytest==8.4.2" "jsonschema==4.25.1"
+PYTHONPATH="${PLUGINS_ROOT}/tools:${PLUGINS_ROOT}/plugins/connectors/onebot-v11/src" \
+CYRENE_WORKSPACE_ROOT="${WORKSPACE_ROOT}" \
+    "${BOOTSTRAP_VENV}/bin/python" -m pytest -q \
+    "${PLUGINS_ROOT}/tools/connector_package/tests"
+
+PACKAGE_HOST_ROOT="${RUN_ROOT}/package-host"
+PACKAGE_RESULT="${RUN_ROOT}/package-install-result.json"
+"${BOOTSTRAP_VENV}/bin/python" "${SCRIPT_DIR}/package_install.py" \
+    --plugins-root "${PLUGINS_ROOT}" \
+    --host-root "${PACKAGE_HOST_ROOT}" \
+    --source-revision "${CYRENE_PLUGINS_REF}" \
+    --output "${PACKAGE_RESULT}" \
+    --uv "$(command -v uv)"
+mapfile -t PACKAGE_PATHS < <(
+    "${BOOTSTRAP_VENV}/bin/python" -c \
+        'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); print(value["installed_root"]); print(value["manifest"]); print(value["runtime_python"])' \
+        "${PACKAGE_RESULT}"
+)
+[[ "${#PACKAGE_PATHS[@]}" == "3" ]] || fail "package installer returned incomplete paths"
+INSTALLED_PACKAGE_ROOT="${PACKAGE_PATHS[0]}"
+MANIFEST="${PACKAGE_PATHS[1]}"
+RUNTIME_PYTHON="${PACKAGE_PATHS[2]}"
+for path in "${INSTALLED_PACKAGE_ROOT}" "${MANIFEST}" "${RUNTIME_PYTHON}"; do
+    assert_linux_path "${path}"
+    [[ "${path}" == "${RUN_ROOT}/"* ]] || fail "package path escaped disposable host root: ${path}"
+    [[ "${path}" != "${PLUGINS_ROOT}/"* ]] || fail "package runtime fell back to source checkout: ${path}"
+done
+[[ -f "${MANIFEST}" ]] || fail "installed package manifest is missing"
+[[ -x "${RUNTIME_PYTHON}" ]] || fail "installed package runtime is missing"
+
+# Make the original connector source unavailable before CES starts.  The
+# remaining Plugins checkout contains only the lifecycle authority used above;
+# worker execution can succeed only from the verified installed package.
+SOURCE_PACKAGE_ROOT="${PLUGINS_ROOT}/plugins/connectors/onebot-v11"
+SOURCE_DISABLED_ROOT="${RUN_ROOT}/source-checkout-disabled"
+mkdir -p -- "${SOURCE_DISABLED_ROOT}"
+mv -- "${SOURCE_PACKAGE_ROOT}" "${SOURCE_DISABLED_ROOT}/onebot-v11"
+[[ ! -e "${SOURCE_PACKAGE_ROOT}" ]] || fail "OneBot source checkout remains available"
+
+echo "[2/9] Building the real Platform CES fixture"
 cargo build --locked --manifest-path "${PLATFORM_ROOT}/Cargo.toml" \
     -p cy-capability-execution-service --example configured_binding_server
 CES_BINARY="${PLATFORM_ROOT}/target/debug/examples/configured_binding_server"
 [[ -x "${CES_BINARY}" ]] || fail "CES fixture binary was not built"
 
-echo "[2/7] Starting two external fake OneBot peers"
+echo "[3/9] Starting two external fake OneBot peers"
 MAIN_READY="${RUN_ROOT}/main-peer.ready"
 SECONDARY_READY="${RUN_ROOT}/secondary-peer.ready"
 MAIN_STATE="${RUN_ROOT}/main-peer.jsonl"
 SECONDARY_STATE="${RUN_ROOT}/secondary-peer.jsonl"
-TOKEN="cyrene-phase7-token"
+MAIN_TOKEN="cyrene-phase7-main-token"
+SECONDARY_TOKEN="cyrene-phase7-secondary-token"
 
 start_process main-peer python3 "${SCRIPT_DIR}/fake-peer/fake_onebot_peer.py" \
-    --binding-id qq-main --account-id 10001 --access-token "${TOKEN}" \
+    --binding-id qq-main --account-id 10001 --access-token "${MAIN_TOKEN}" \
     --state-file "${MAIN_STATE}" --ready-file "${MAIN_READY}"
 MAIN_PEER_PID="${LAST_STARTED_PID}"
 start_process secondary-peer python3 "${SCRIPT_DIR}/fake-peer/fake_onebot_peer.py" \
-    --binding-id qq-secondary --account-id 10002 --access-token "${TOKEN}" \
+    --binding-id qq-secondary --account-id 10002 --access-token "${SECONDARY_TOKEN}" \
     --state-file "${SECONDARY_STATE}" --ready-file "${SECONDARY_READY}"
 SECONDARY_PEER_PID="${LAST_STARTED_PID}"
 wait_for_file "${MAIN_READY}" 10 || fail "qq-main fake peer did not become ready"
@@ -287,19 +339,20 @@ TRACKED_PORTS+=("${MAIN_PEER_PORT}" "${SECONDARY_PEER_PORT}")
 BINDINGS_FILE="${RUN_ROOT}/bindings.json"
 PHASE7_MAIN_WS_URL="ws://${MAIN_PEER_ADDRESS}/" \
 PHASE7_SECONDARY_WS_URL="ws://${SECONDARY_PEER_ADDRESS}/" \
-PHASE7_TOKEN="${TOKEN}" \
+PHASE7_MAIN_TOKEN="${MAIN_TOKEN}" \
+PHASE7_SECONDARY_TOKEN="${SECONDARY_TOKEN}" \
 PHASE7_BINDINGS_FILE="${BINDINGS_FILE}" \
-python3 -c 'import json, os; path=os.environ["PHASE7_BINDINGS_FILE"]; token=os.environ["PHASE7_TOKEN"]; data=[{"id":"qq-main","environment":{"CYRENE_CAPABILITY_BINDING_ID":"qq-main","CYRENE_ONEBOT_TRANSPORT_PROFILE":"forward_websocket","CYRENE_ONEBOT_WEBSOCKET_URL":os.environ["PHASE7_MAIN_WS_URL"],"CYRENE_ONEBOT_HTTP_ACCESS_TOKEN":token,"CYRENE_ONEBOT_SELF_ACCOUNT_ID":"10001","CYRENE_ONEBOT_TIMEOUT_SECONDS":"5"}},{"id":"qq-secondary","environment":{"CYRENE_CAPABILITY_BINDING_ID":"qq-secondary","CYRENE_ONEBOT_TRANSPORT_PROFILE":"forward_websocket","CYRENE_ONEBOT_WEBSOCKET_URL":os.environ["PHASE7_SECONDARY_WS_URL"],"CYRENE_ONEBOT_HTTP_ACCESS_TOKEN":token,"CYRENE_ONEBOT_SELF_ACCOUNT_ID":"10002","CYRENE_ONEBOT_TIMEOUT_SECONDS":"5"}}]; json.dump(data, open(path,"w",encoding="utf-8"), indent=2); open(path,"a",encoding="utf-8").write("\n")'
+python3 -c 'import json, os; path=os.environ["PHASE7_BINDINGS_FILE"]; data=[{"id":"qq-main","environment":{"CYRENE_CAPABILITY_BINDING_ID":"qq-main","CYRENE_ONEBOT_TRANSPORT_PROFILE":"forward_websocket","CYRENE_ONEBOT_WEBSOCKET_URL":os.environ["PHASE7_MAIN_WS_URL"],"CYRENE_ONEBOT_HTTP_ACCESS_TOKEN":os.environ["PHASE7_MAIN_TOKEN"],"CYRENE_ONEBOT_SELF_ACCOUNT_ID":"10001","CYRENE_ONEBOT_TIMEOUT_SECONDS":"5"}},{"id":"qq-secondary","environment":{"CYRENE_CAPABILITY_BINDING_ID":"qq-secondary","CYRENE_ONEBOT_TRANSPORT_PROFILE":"forward_websocket","CYRENE_ONEBOT_WEBSOCKET_URL":os.environ["PHASE7_SECONDARY_WS_URL"],"CYRENE_ONEBOT_HTTP_ACCESS_TOKEN":os.environ["PHASE7_SECONDARY_TOKEN"],"CYRENE_ONEBOT_SELF_ACCOUNT_ID":"10002","CYRENE_ONEBOT_TIMEOUT_SECONDS":"5"}}]; json.dump(data, open(path,"w",encoding="utf-8"), indent=2); open(path,"a",encoding="utf-8").write("\n")'
 
-echo "[3/7] Starting the real Platform CES with two configured bindings"
+echo "[4/9] Starting the real Platform CES with two package-installed bindings"
 CES_READY="${RUN_ROOT}/ces.ready"
 start_process capability-execution-service "${CES_BINARY}" \
     --manifest "${MANIFEST}" --bindings "${BINDINGS_FILE}" \
     --bind 127.0.0.1:0 --ready-file "${CES_READY}" \
-    --working-dir "${PLUGINS_ROOT}/plugins/connectors/onebot-v11" \
-    --python-path "${PLUGINS_ROOT}/plugins/connectors/onebot-v11/src" \
+    --working-dir "${INSTALLED_PACKAGE_ROOT}" \
+    --python-path "${INSTALLED_PACKAGE_ROOT}/src" \
     --python-path "${PLATFORM_ROOT}/sdk/python" \
-    --python-executable "${VENV_ROOT}/bin/python" \
+    --python-executable "${RUNTIME_PYTHON}" \
     --handshake-timeout-ms 5000 --default-invoke-timeout-ms 15000 \
     --shutdown-grace-ms 2000 --event-buffer-capacity 32
 CES_PID="${LAST_STARTED_PID}"
@@ -309,7 +362,7 @@ CES_PORT="${CES_ADDRESS##*:}"
 CES_ENDPOINT="http://${CES_ADDRESS}"
 TRACKED_PORTS+=("${CES_PORT}")
 
-echo "[4/7] Starting disposable PostgreSQL/pgvector and applying AstrBot migrations"
+echo "[5/9] Starting disposable PostgreSQL/pgvector and applying AstrBot migrations"
 PG_CONTAINER="cyrene-phase7-pg-${RUN_ROOT##*.}"
 if docker ps -a --format '{{.Names}}' | grep -Fxq "${PG_CONTAINER}"; then
     fail "owned PostgreSQL container name already exists: ${PG_CONTAINER}"
@@ -355,7 +408,7 @@ ASTRBOT_SKIP_DATABASE_ROLE_PERMISSION_VALIDATION=true \
 docker exec "${PG_CONTAINER}" psql -v ON_ERROR_STOP=1 -U postgres -d "${DB_NAME}" \
     -c "GRANT USAGE ON SCHEMA public TO \"${APP_USER}\"; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO \"${APP_USER}\"; GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO \"${APP_USER}\""
 
-echo "[5/7] Building and starting the real AstrBot test host"
+echo "[6/9] Building and starting the real AstrBot test host"
 HOST_DRIVER="${WORKSPACE_ROOT}/ci/vertical-e2e/host-driver/Cyrene.Phase7.HostDriver.csproj"
 HOST_OUTPUT_ROOT="${ASTRBOT_ROOT}/.phase7-host-out"
 DOTNET_PROPS=(
@@ -378,7 +431,7 @@ export CYRENE_PHASE7_SECONDARY_STATE="${SECONDARY_STATE}"
 start_process astrbot-test-host dotnet "${HOST_DLL}"
 HOST_PID="${LAST_STARTED_PID}"
 
-echo "[6/7] Awaiting the real CES -> AstrBot -> PostgreSQL -> CES round trip"
+echo "[7/9] Awaiting the installed package -> CES -> AstrBot -> PostgreSQL round trip"
 if wait "${HOST_PID}"; then
     HOST_EXIT=0
 else
@@ -386,5 +439,12 @@ else
 fi
 [[ "${HOST_EXIT}" == "0" ]] || fail "AstrBot Phase 7 host driver exited with ${HOST_EXIT}"
 
-echo "[7/7] Phase 7 assertions passed; cleanup is verified by the EXIT trap"
+echo "[8/9] Verifying package-installed execution evidence"
+"${BOOTSTRAP_VENV}/bin/python" -c \
+    'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")); assert value["offline_reinstall"] == "PASS"; assert value["corrupt_cache_rejection"] == "PASS"; assert value["upgrade_rollback"] == "PASS"; assert {item["binding_id"] for item in value["bindings"]} == {"qq-main", "qq-secondary"}' \
+    "${PACKAGE_RESULT}"
+[[ ! -e "${SOURCE_PACKAGE_ROOT}" ]] || fail "source-tree fallback reappeared during worker execution"
+echo "PACKAGE_INSTALLED_VERTICAL_PASS"
+
+echo "[9/9] Phase 7 assertions passed; cleanup is verified by the EXIT trap"
 echo "PHASE7_VERTICAL_PASS"
