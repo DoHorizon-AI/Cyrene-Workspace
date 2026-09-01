@@ -130,8 +130,10 @@ copied into these branches.
   vLLM runtime adapter still needs GPU/model E2E through this Product port.
 - Reactor's untouched repository-wide strict Clippy gate currently fails in
   `components/scheduler-rs/src/topology.rs` under Rust 1.96. Product checks,
-  Cargo check/test, and Python baselines pass; the parallel-owned baseline issue
-  is not changed in this slice.
+  Cargo check/test, and the correctly hydrated local Python baseline pass. The
+  existing remote Python job also omits its protobuf dependency and therefore
+  fails collection at `test_proto_roundtrip.py`. These parallel-owned baseline
+  issues are not changed in this slice.
 - Echo's deterministic engine is real but the Inspect AI isolated adapter is not
   implemented in this slice.
 - Exchange's persisted route adapter is exercised with real HTTP and also
