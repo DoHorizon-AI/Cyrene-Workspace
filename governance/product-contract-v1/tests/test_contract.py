@@ -78,7 +78,9 @@ def test_authority_matrix_has_zero_duplicate_definitions() -> None:
     training = [item for item in concepts if item["id"] == "training.engine.v1"]
     assert len(training) == 1
     assert training[0]["canonicalOwner"] == "DoHorizon-AI/Cyrene-Platform"
-    removed = next(item for item in concepts if item["id"] == "training.engine.adapter.v1")
+    removed = next(
+        item for item in concepts if item["id"] == "training.engine.adapter.v1"
+    )
     assert removed["status"] == "REMOVED_AS_DUPLICATE_CAPABILITY"
 
 

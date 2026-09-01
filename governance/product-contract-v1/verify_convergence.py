@@ -100,7 +100,9 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
         assert not tuple(product_contract.glob("*event*.schema.json")), (
             f"{product} duplicates the common event envelope"
         )
-        generated = _json(product_contract / "generated/common/problem-details.schema.json")
+        generated = _json(
+            product_contract / "generated/common/problem-details.schema.json"
+        )
         assert generated == problem, f"{product} Problem Details projection drifted"
         openapi = (product_contract / "openapi.yaml").read_text(encoding="utf-8")
         assert "x-cyrene-contract-profile: product-http-v1" in openapi
@@ -135,9 +137,9 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
     for field in PUBLIC_RUNTIME_FIELDS:
         assert field not in public_schema_text, f"public runtime field leaked: {field}"
 
-    yield_openapi = (
-        roots["yield"] / "contracts/product/v1/openapi.yaml"
-    ).read_text(encoding="utf-8")
+    yield_openapi = (roots["yield"] / "contracts/product/v1/openapi.yaml").read_text(
+        encoding="utf-8"
+    )
     assert yield_openapi.count("Preference-Applied") == 2
     assert yield_openapi.count("Location:") == 2
 
