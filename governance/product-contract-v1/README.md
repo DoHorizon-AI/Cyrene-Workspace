@@ -153,3 +153,6 @@ copied into these branches.
   mappings across restart. Mid-command crash reconciliation and atomic
   multi-replica command reservation require a production database/controller
   implementation before HA acceptance.
+- Product notification names and the common CloudEvents-compatible envelope are
+  frozen, but no MVP claims a transactional outbox or broker publisher. Durable
+  at-least-once publication and replay/retention policy remain integration work.

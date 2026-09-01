@@ -6,7 +6,7 @@
       "id": "catalyst",
       "repository": "DoHorizon-AI/Cyrene-Catalyst",
       "acceptedBaseSha": "93ba3067da99004851a7417c1c70dd74e7e584d7",
-      "contractCommit": "df407f3bf0ca85fedaa2527eae90f9d191cf2cd3",
+      "contractCommit": "f8fde97aca03b0086991955a249fd2839beb637b",
       "contractPath": "contracts/product/v1",
       "authority": ["Dataset", "DatasetVersion", "ArtifactLineage"],
       "deliveryMode": "CONTRACT_AND_MVP"
@@ -15,7 +15,7 @@
       "id": "echo",
       "repository": "DoHorizon-AI/Cyrene-Echo",
       "acceptedBaseSha": "27e498eccdab41afee342af4dd57881b6c13912f",
-      "contractCommit": "2bed790e888e978b15e9a1ec47bba43d1075b379",
+      "contractCommit": "beb48e62b7670e1285bc7b149ce858e1d57e36bb",
       "contractPath": "contracts/product/v1",
       "authority": [
         "EvaluationSuite",
@@ -29,7 +29,7 @@
       "id": "reactor",
       "repository": "DoHorizon-AI/Cyrene-Reactor",
       "acceptedBaseSha": "123536974c42d40186e250f85fb5173f13c893b3",
-      "contractCommit": "ac11b620e10c38da9214b2afc19cc354f589f433",
+      "contractCommit": "511db21d03d6ae1d2198c42b59e3880bd840ea54",
       "contractPath": "contracts/product/v1",
       "authority": ["Deployment", "Endpoint"],
       "deliveryMode": "CONTRACT_AND_MVP"
@@ -38,7 +38,7 @@
       "id": "exchange",
       "repository": "DoHorizon-AI/Cyrene-Exchange",
       "acceptedBaseSha": "9722ca2abe1f2a88e80f71b58296203781af4e97",
-      "contractCommit": "b76a7e4315817c0fa292314f3e43c6c3ede8d815",
+      "contractCommit": "bb75ddeecdbb78448efc5ac57bf4e486d5f86a57",
       "contractPath": "contracts/product/v1",
       "authority": ["GatewayEndpoint", "GatewayRoute"],
       "deliveryMode": "CONTRACT_AND_MVP"
@@ -47,7 +47,7 @@
       "id": "navigator",
       "repository": "DoHorizon-AI/Cyrene-Navigator",
       "acceptedBaseSha": "826ac804170e6e17c783520d95d71751cd82e3f5",
-      "contractCommit": "85d4a9f25f9d2dfd27b068863d2887545bd017ad",
+      "contractCommit": "42eb3dc4a791d63a3c4e98ae4f96cb8b804f32ed",
       "contractPath": "contracts/product/v1",
       "authority": ["WorkspaceSnapshotPresentation"],
       "deliveryMode": "CONTRACT_AND_MVP"
@@ -56,7 +56,7 @@
       "id": "yield",
       "repository": "DoHorizon-AI/Cyrene-Yield",
       "acceptedBaseSha": "e5521f6799679caf43470241326e5fabc21302bb",
-      "contractCommit": "f3d09a509f7c2f53e6c38aa5b1c6d0dc1f0fa29b",
+      "contractCommit": "c6a167cae7a51069dbe5dae9feb91d5293b7ca9c",
       "contractPath": "contracts/product/v1",
       "authority": ["TrainingRun", "TrainingAttempt", "TrainingArtifactLineage"],
       "deliveryMode": "CONTRACT_AND_SPI_ONLY"
