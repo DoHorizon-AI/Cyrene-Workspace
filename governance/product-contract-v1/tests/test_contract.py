@@ -68,3 +68,38 @@ def test_registry_contains_each_product_once() -> None:
         "reactor",
         "yield",
     ]
+
+
+def test_authority_matrix_has_zero_duplicate_definitions() -> None:
+    matrix = _json("contract-authorities-v1.json")
+    concepts = matrix["concepts"]
+    assert len({item["id"] for item in concepts}) == len(concepts)
+    assert sum(item["duplicateDefinitionCount"] for item in concepts) == 0
+    training = [item for item in concepts if item["id"] == "training.engine.v1"]
+    assert len(training) == 1
+    assert training[0]["canonicalOwner"] == "DoHorizon-AI/Cyrene-Platform"
+    removed = next(item for item in concepts if item["id"] == "training.engine.adapter.v1")
+    assert removed["status"] == "REMOVED_AS_DUPLICATE_CAPABILITY"
+
+
+def test_common_profile_owns_complete_async_and_evolution_semantics() -> None:
+    profile = (CONTRACT_ROOT / "product-http-semantics.md").read_text(encoding="utf-8")
+    for requirement in (
+        "Major:",
+        "Minor:",
+        "Patch:",
+        "deprecated: true",
+        "180 days",
+        "Preference-Applied: respond-async",
+        "Product-owned resource",
+        "Idempotency-Key",
+        "Trace Context Level 1",
+        "tracestate",
+    ):
+        assert requirement in profile
+
+
+def test_workspace_does_not_redefine_platform_artifact_identity() -> None:
+    assert not (CONTRACT_ROOT / "artifact-ref.schema.json").exists()
+    readme = (CONTRACT_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "contracts/schemas/manifests/artifact_ref.schema.json" in readme
