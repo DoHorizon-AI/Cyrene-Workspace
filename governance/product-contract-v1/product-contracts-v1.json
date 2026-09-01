@@ -66,7 +66,7 @@
       "id": "yield",
       "repository": "DoHorizon-AI/Cyrene-Yield",
       "acceptedBaseSha": "e5521f6799679caf43470241326e5fabc21302bb",
-      "contractCommit": "979f69580a0eeb77135c73257b85784523aee61c",
+      "contractCommit": "5095f86bcf4125c2bfdfcc310d9c3c1aa765508d",
       "contractPath": "contracts/product/v1",
       "authority": ["TrainingRun", "TrainingAttempt", "TrainingArtifactLineage"],
       "deliveryMode": "CONTRACT_AND_SPI_ONLY",
