@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyrene.dev/product/common/v1/artifact-ref.schema.json",
+  "title": "Cyrene Product ArtifactRef compatibility profile v1",
+  "type": "object",
+  "required": ["uri", "digest", "mediaType", "sizeBytes"],
+  "properties": {
+    "uri": {"type": "string", "minLength": 1},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "mediaType": {"type": "string", "minLength": 1},
+    "sizeBytes": {"type": "integer", "minimum": 0}
+  },
+  "additionalProperties": false
+}

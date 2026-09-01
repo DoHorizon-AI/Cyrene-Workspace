@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyrene.dev/product/common/v1/product-event.schema.json",
+  "title": "Cyrene CloudEvents-compatible Product notification v1",
+  "type": "object",
+  "required": ["specversion", "id", "source", "type", "subject", "time", "datacontenttype", "dataschema", "traceparent", "data"],
+  "properties": {
+    "specversion": {"const": "1.0"},
+    "id": {"type": "string", "minLength": 1},
+    "source": {"type": "string", "format": "uri"},
+    "type": {"type": "string", "pattern": "^dev\\.cyrene\\.[a-z]+\\.[a-z0-9.-]+\\.v1$"},
+    "subject": {"type": "string", "minLength": 1},
+    "time": {"type": "string", "format": "date-time"},
+    "datacontenttype": {"const": "application/json"},
+    "dataschema": {"type": "string", "format": "uri"},
+    "traceparent": {"type": "string", "pattern": "^00-(?!0{32}-)[0-9a-f]{32}-(?!0{16}-)[0-9a-f]{16}-[0-9a-f]{2}$"},
+    "data": {
+      "type": "object",
+      "required": ["resourceUri", "resourceVersion", "change"],
+      "properties": {
+        "resourceUri": {"type": "string", "format": "uri"},
+        "resourceVersion": {"type": "integer", "minimum": 1},
+        "change": {"enum": ["CREATED", "UPDATED", "DELETED"]}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
