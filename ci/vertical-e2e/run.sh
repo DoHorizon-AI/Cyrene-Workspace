@@ -114,11 +114,15 @@ clone_exact() {
     local ref="$3"
     local destination="${RUN_ROOT}/repos/${name}"
     local cloned=0
+    local target_url="${url}"
+    if [[ -n "${CYRENE_CROSS_REPO_TOKEN:-}" && "${url}" =~ ^https://github.com/(.*)$ ]]; then
+        target_url="https://x-access-token:${CYRENE_CROSS_REPO_TOKEN}@github.com/${BASH_REMATCH[1]}"
+    fi
     for attempt in 1 2 3; do
         if [[ -e "${destination}" ]]; then
             rm -rf -- "${destination}"
         fi
-        if timeout --foreground 180s git clone --no-checkout --quiet "${url}" "${destination}"; then
+        if timeout --foreground 180s git clone --no-checkout --quiet "${target_url}" "${destination}"; then
             cloned=1
             break
         fi
@@ -126,7 +130,15 @@ clone_exact() {
             sleep $((attempt * 2))
         fi
     done
-    [[ "${cloned}" == "1" ]] || fail "${name} clone failed after three attempts"
+    if [[ "${cloned}" != "1" ]]; then
+        if [[ "${CROSS_REPO_REQUIRED:-false}" == "true" ]]; then
+            echo "::error title=CROSS_REPO_INFRASTRUCTURE_UNAVAILABLE::${name} clone failed after three attempts. Cross-repo validation is REQUIRED for this release/nightly gate." >&2
+            fail "CROSS_REPO_INFRASTRUCTURE_UNAVAILABLE: ${name} clone failed after three attempts"
+        else
+            echo "::notice title=SKIPPED_CREDENTIALS::${name} clone unavailable due to missing cross-repo credentials. Multi-repo vertical acceptance skipped."
+            exit 0
+        fi
+    fi
     git -C "${destination}" fetch --all --prune --quiet ||
         fail "${name} fetch failed after clone"
     git -C "${destination}" cat-file -e "${ref}^{commit}" ||

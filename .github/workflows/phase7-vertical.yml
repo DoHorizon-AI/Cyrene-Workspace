@@ -16,6 +16,11 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      cross_repo_required:
+        description: "Enforce cross-repo validation (fail if credentials unavailable)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -25,36 +30,41 @@ jobs:
     name: Linux package-installed configured connector vertical slice
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      # Nightly cron and main pushes are release-critical gates: missing credentials MUST fail.
+      # PR checks default to optional unless explicitly mandated.
+      CROSS_REPO_REQUIRED: ${{ github.event_name == 'schedule' || github.event_name == 'push' || (github.event.inputs.cross_repo_required == 'true') || 'false' }}
     steps:
       - name: Check out harness
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.x"
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.8.15"
 
       - name: Run reproducible package-installed three-repository acceptance
         env:
           CYRENE_PHASE7_TMP_PARENT: ${{ runner.temp }}/cyrene-phase7
+          CYRENE_CROSS_REPO_TOKEN: ${{ secrets.CYRENE_CROSS_REPO_TOKEN }}
         run: bash ./ci/vertical-e2e/run.sh
 
       - name: Upload retained failure evidence
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: phase7-vertical-evidence
           path: ${{ runner.temp }}/cyrene-phase7
