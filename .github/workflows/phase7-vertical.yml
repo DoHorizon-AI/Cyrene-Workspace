@@ -33,7 +33,7 @@ jobs:
     env:
       # Nightly cron and main pushes are release-critical gates: missing credentials MUST fail.
       # PR checks default to optional unless explicitly mandated.
-      CROSS_REPO_REQUIRED: ${{ github.event_name == 'schedule' || github.event_name == 'push' || (github.event.inputs.cross_repo_required == 'true') || 'false' }}
+      CROSS_REPO_REQUIRED: ${{ (github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event.inputs.cross_repo_required == 'true')) && 'true' || 'false' }}
     steps:
       - name: Check out harness
         uses: actions/checkout@v5

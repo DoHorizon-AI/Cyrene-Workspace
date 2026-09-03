@@ -131,20 +131,15 @@ clone_exact() {
         fi
     done
     if [[ "${cloned}" != "1" ]]; then
-        if [[ "${CROSS_REPO_REQUIRED:-false}" == "true" ]]; then
-            echo "::error title=CROSS_REPO_INFRASTRUCTURE_UNAVAILABLE::${name} clone failed after three attempts. Cross-repo validation is REQUIRED for this release/nightly gate." >&2
-            fail "CROSS_REPO_INFRASTRUCTURE_UNAVAILABLE: ${name} clone failed after three attempts"
-        else
-            echo "::notice title=SKIPPED_CREDENTIALS::${name} clone unavailable due to missing cross-repo credentials. Multi-repo vertical acceptance skipped."
-            exit 0
-        fi
+        echo "::error title=BLOCKED_INFRASTRUCTURE::${name} clone failed after three attempts despite credentials being present (network timeout, service degradation, or git transport error)." >&2
+        fail "BLOCKED_INFRASTRUCTURE: ${name} clone failed after three attempts"
     fi
     git -C "${destination}" fetch --all --prune --quiet ||
-        fail "${name} fetch failed after clone"
+        fail "BLOCKED_INFRASTRUCTURE: ${name} fetch failed after clone"
     git -C "${destination}" cat-file -e "${ref}^{commit}" ||
-        fail "${name} does not contain requested commit ${ref}"
+        fail "BLOCKED_INFRASTRUCTURE: ${name} does not contain requested commit ${ref}"
     git -C "${destination}" checkout --quiet --detach "${ref}" ||
-        fail "${name} checkout failed for ${ref}"
+        fail "BLOCKED_INFRASTRUCTURE: ${name} checkout failed for ${ref}"
     local actual
     actual="$(git -C "${destination}" rev-parse HEAD)"
     [[ "${actual}" == "${ref}" ]] || fail "${name} checkout mismatch: ${actual} != ${ref}"
@@ -260,6 +255,17 @@ echo "PHASE7_PLATFORM_REF=${CYRENE_PLATFORM_REF}"
 echo "PHASE7_ASTRBOT_REF=${CYRENE_ASTRBOT_REF}"
 echo "PHASE7_PLUGINS_REF=${CYRENE_PLUGINS_REF}"
 echo "PHASE7_POSTGRES_IMAGE=${CYRENE_PHASE7_POSTGRES_IMAGE}"
+
+# Strict distinction between SKIPPED_CREDENTIALS and BLOCKED_INFRASTRUCTURE
+if [[ -z "${CYRENE_CROSS_REPO_TOKEN:-}" ]]; then
+    if [[ "${CROSS_REPO_REQUIRED:-false}" == "true" ]]; then
+        echo "::error title=CROSS_REPO_REQUIRED_FAILURE::secrets.CYRENE_CROSS_REPO_TOKEN is missing for required cross-repo release/nightly gate." >&2
+        fail "CROSS_REPO_REQUIRED_FAILURE: missing secrets.CYRENE_CROSS_REPO_TOKEN"
+    else
+        echo "::notice title=SKIPPED_CREDENTIALS::secrets.CYRENE_CROSS_REPO_TOKEN is not configured in this environment. Multi-repo vertical acceptance skipped."
+        exit 0
+    fi
+fi
 
 PLATFORM_ROOT="$(clone_exact platform "${CYRENE_PLATFORM_URL}" "${CYRENE_PLATFORM_REF}")"
 ASTRBOT_ROOT="$(clone_exact astrbot "${CYRENE_ASTRBOT_URL}" "${CYRENE_ASTRBOT_REF}")"
