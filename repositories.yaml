@@ -71,7 +71,7 @@ repositories:
   - name: "Cyrene-Plugins"
     path: "../plugins"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
-    visibility: "public"
+    visibility: "private"
     clone_policy: "public_zero_auth"
     integration_branch: "develop"
     build_systems:
