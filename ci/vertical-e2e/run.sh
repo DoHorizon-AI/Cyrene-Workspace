@@ -430,7 +430,11 @@ docker exec "${PG_CONTAINER}" psql -v ON_ERROR_STOP=1 -U postgres -d "${DB_NAME}
 MIGRATOR_CONNECTION="Host=127.0.0.1;Port=${PG_PORT};Database=${DB_NAME};Username=${MIGRATOR_USER};Password=${MIGRATOR_PASSWORD};Timeout=10;Command Timeout=300"
 APP_CONNECTION="Host=127.0.0.1;Port=${PG_PORT};Database=${DB_NAME};Username=${APP_USER};Password=${APP_PASSWORD};Timeout=10;Command Timeout=60"
 MIGRATOR_PROJECT="${ASTRBOT_ROOT}/src/AstrBot.DatabaseMigrator/AstrBot.DatabaseMigrator.csproj"
-dotnet build "${MIGRATOR_PROJECT}" --configuration Release --property:NuGetAudit=false \
+DOTNET_NUGET_SOURCE="${CYRENE_DOTNET_NUGET_SOURCE:-https://api.nuget.org/v3/index.json}"
+dotnet restore "${MIGRATOR_PROJECT}" --force-evaluate --source "${DOTNET_NUGET_SOURCE}" \
+    --property:NuGetAudit=false \
+    --property:BaseIntermediateOutputPath="${RUN_ROOT}/migrator-obj/"
+dotnet build "${MIGRATOR_PROJECT}" --no-restore --configuration Release --property:NuGetAudit=false \
     --property:BaseOutputPath="${RUN_ROOT}/migrator-out/" \
     --property:BaseIntermediateOutputPath="${RUN_ROOT}/migrator-obj/"
 MIGRATOR_DLL="$(find "${RUN_ROOT}/migrator-out" -type f -name AstrBot.DatabaseMigrator.dll -print -quit)"
@@ -450,7 +454,7 @@ DOTNET_PROPS=(
     "-p:BaseOutputPath=${HOST_OUTPUT_ROOT}/"
     "-p:NuGetAudit=false"
 )
-dotnet restore "${HOST_DRIVER}" "${DOTNET_PROPS[@]}"
+dotnet restore "${HOST_DRIVER}" --force-evaluate --source "${DOTNET_NUGET_SOURCE}" "${DOTNET_PROPS[@]}"
 dotnet build "${HOST_DRIVER}" --no-restore --configuration Release "${DOTNET_PROPS[@]}"
 HOST_DLL="$(find "${HOST_OUTPUT_ROOT}" -type f -name Cyrene.Phase7.HostDriver.dll -print -quit)"
 [[ -n "${HOST_DLL}" ]] || fail "AstrBot host driver binary was not built"
