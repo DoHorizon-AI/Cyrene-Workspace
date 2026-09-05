@@ -141,8 +141,16 @@ clone_exact() {
         echo "::error title=BLOCKED_INFRASTRUCTURE::${name} clone failed after three attempts despite credentials being present (network timeout, service degradation, or git transport error)." >&2
         fail "BLOCKED_INFRASTRUCTURE: ${name} clone failed after three attempts"
     fi
-    git -C "${destination}" fetch --all --prune --quiet ||
-        fail "BLOCKED_INFRASTRUCTURE: ${name} fetch failed after clone"
+    if [[ -n "${auth_header}" ]]; then
+        GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
+            git -C "${destination}" fetch --all --prune --quiet ||
+            fail "BLOCKED_INFRASTRUCTURE: ${name} fetch failed after clone"
+    else
+        git -C "${destination}" fetch --all --prune --quiet ||
+            fail "BLOCKED_INFRASTRUCTURE: ${name} fetch failed after clone"
+    fi
     git -C "${destination}" cat-file -e "${ref}^{commit}" ||
         fail "BLOCKED_INFRASTRUCTURE: ${name} does not contain requested commit ${ref}"
     git -C "${destination}" checkout --quiet --detach "${ref}" ||
