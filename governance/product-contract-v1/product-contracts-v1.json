@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "frozenAt": "2026-09-05",
+  "products": [
+    {
+      "id": "catalyst",
+      "repository": "DoHorizon-AI/Cyrene-Catalyst",
+      "acceptedBaseSha": "93ba3067da99004851a7417c1c70dd74e7e584d7",
+      "contractCommit": "7b7f9f6e09d704dc58ae4c210f069683450e1018",
+      "contractPath": "contracts/product/v1",
+      "authority": ["Dataset", "DatasetVersion", "ArtifactLineage"],
+      "deliveryMode": "CONTRACT_AND_MVP",
+      "mvpClassification": "REFERENCE_MVP_READY",
+      "contractProfile": "product-http-v1"
+    },
+    {
+      "id": "echo",
+      "repository": "DoHorizon-AI/Cyrene-Echo",
+      "acceptedBaseSha": "27e498eccdab41afee342af4dd57881b6c13912f",
+      "contractCommit": "b1efb4e8238e821fe43bc83cc16ff2298769bcfd",
+      "contractPath": "contracts/product/v1",
+      "authority": [
+        "EvaluationSuite",
+        "EvaluationRun",
+        "EvaluationResult",
+        "GateDecision"
+      ],
+      "deliveryMode": "CONTRACT_AND_MVP",
+      "mvpClassification": "REFERENCE_MVP_READY",
+      "contractProfile": "product-http-v1"
+    },
+    {
+      "id": "reactor",
+      "repository": "DoHorizon-AI/Cyrene-Reactor",
+      "acceptedBaseSha": "123536974c42d40186e250f85fb5173f13c893b3",
+      "contractCommit": "36d1e781d4420bef43d1672d0d4420e52e808d40",
+      "contractPath": "contracts/product/v1",
+      "authority": ["Deployment", "Endpoint"],
+      "deliveryMode": "CONTRACT_AND_MVP",
+      "mvpClassification": "REFERENCE_MVP_READY",
+      "contractProfile": "product-http-v1"
+    },
+    {
+      "id": "exchange",
+      "repository": "DoHorizon-AI/Cyrene-Exchange",
+      "acceptedBaseSha": "9722ca2abe1f2a88e80f71b58296203781af4e97",
+      "contractCommit": "c400f6ddc878169e218dc358cb836189e98bc2e5",
+      "contractPath": "contracts/product/v1",
+      "authority": ["GatewayEndpoint", "GatewayRoute"],
+      "deliveryMode": "CONTRACT_AND_MVP",
+      "mvpClassification": "REFERENCE_MVP_READY",
+      "contractProfile": "product-http-v1"
+    },
+    {
+      "id": "navigator",
+      "repository": "DoHorizon-AI/Cyrene-Navigator",
+      "acceptedBaseSha": "826ac804170e6e17c783520d95d71751cd82e3f5",
+      "contractCommit": "833b168877ae38200bb7d6adfc9337e22738875e",
+      "contractPath": "contracts/product/v1",
+      "authority": ["WorkspaceSnapshotPresentation"],
+      "deliveryMode": "CONTRACT_AND_MVP",
+      "mvpClassification": "HEADLESS_MVP_READY",
+      "contractProfile": "product-http-v1"
+    },
+    {
+      "id": "yield",
+      "repository": "DoHorizon-AI/Cyrene-Yield",
+      "acceptedBaseSha": "e5521f6799679caf43470241326e5fabc21302bb",
+      "contractCommit": "eff0aabe63a9b9b23508390bf7e53daa53b256c0",
+      "contractPath": "contracts/product/v1",
+      "authority": ["TrainingRun", "TrainingAttempt", "TrainingArtifactLineage"],
+      "deliveryMode": "CONTRACT_AND_SPI_ONLY",
+      "mvpClassification": "CONTRACT_CANDIDATE_READY",
+      "contractProfile": "product-http-v1"
+    }
+  ]
+}

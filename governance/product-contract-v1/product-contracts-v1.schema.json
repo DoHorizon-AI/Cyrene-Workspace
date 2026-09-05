@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cyrene.dev/workspace/product-contracts-v1.schema.json",
+  "title": "Cyrene Product contract integration registry v1",
+  "type": "object",
+  "required": ["schemaVersion", "frozenAt", "products"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "frozenAt": {"type": "string", "format": "date"},
+    "products": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": ["id", "repository", "acceptedBaseSha", "contractPath", "authority", "deliveryMode", "mvpClassification", "contractProfile"],
+        "properties": {
+          "id": {"enum": ["catalyst", "echo", "reactor", "exchange", "navigator", "yield"]},
+          "repository": {"type": "string", "pattern": "^DoHorizon-AI/Cyrene-"},
+          "acceptedBaseSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "contractCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "contractPath": {"const": "contracts/product/v1"},
+          "authority": {"type": "array", "minItems": 1, "items": {"type": "string"}, "uniqueItems": true},
+          "deliveryMode": {"enum": ["CONTRACT_AND_MVP", "CONTRACT_AND_SPI_ONLY"]},
+          "mvpClassification": {"enum": ["REFERENCE_MVP_READY", "HEADLESS_MVP_READY", "CONTRACT_CANDIDATE_READY"]},
+          "contractProfile": {"const": "product-http-v1"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
