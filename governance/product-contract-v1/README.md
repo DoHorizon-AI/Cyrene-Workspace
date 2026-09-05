@@ -1,7 +1,7 @@
 # Cyrene Product contract v1 integration profile
 
-Status: converged contract candidate, 2026-09-01. This is not canonical merge
-acceptance or a production-readiness declaration.
+Status: canonical Alpha contract registry, 2026-09-05. The exact merged Product
+and Platform `main` SHAs are recorded in the registry JSON files.
 
 This profile records compatibility and ownership across Product repositories. It
 does not move any Product resource authority into Cyrene-Workspace. Every
@@ -126,9 +126,8 @@ copied into these branches.
 - Root `LICENSE` text is absent in all six Product checkouts despite several
   package manifests claiming Apache-2.0. Maintainers/legal must establish each
   repository's license authority before external redistribution.
-- Catalyst, Echo, and Navigator entered from contract/legacy baselines with
-  manifest-only CI. Their branches add dedicated real-test workflows; those
-  checks still need remote execution before merge acceptance is complete.
+- Catalyst, Echo, and Navigator have dedicated Product checks passing on their
+  exact, synchronized `main` and `develop` SHAs.
 - Reactor's real Product lifecycle uses a local reference process. The existing
   vLLM runtime adapter still needs GPU/model E2E through this Product port.
 - Reactor's Rust 1.96/PyO3 Clippy regression is corrected without a broad lint
@@ -136,22 +135,19 @@ copied into these branches.
   testing. Production vLLM/KServe and GPU/model E2E remain future adapter work.
 - Echo's deterministic engine is real but the Inspect AI isolated adapter is not
   implemented in this slice.
-- Exchange's persisted Product route adapter is exercised with real HTTP. Its
-  older core resolver adapter is not compatible with the current Official
-  provider manifest: the manifest declares `WORKER`, while Exchange requests
-  `INLINE`. Three real integration cases fail closed at Platform
-  `bcc8fa755f5a98d997715f8e438fd5a92655a8d2` and Official Plugins
-  `46cd4b097bbf60f1e4d9169a22e27e3604a2acce`; production readiness requires
-  canonical worker/CES delegation, not an in-process compatibility fallback.
+- Exchange's persisted Product route is exercised through canonical Platform
+  resolver/CES delegation and the Official worker with a real upstream HTTP
+  result. Restart, normal request, SSE, disabled endpoint, and unknown binding
+  cases pass on the recorded exact SHAs.
 - Navigator proves HTTP aggregation but does not wire the parallel Tauri UI.
 - Yield is contract candidate only. `training.engine.adapter.v1` was removed as
   a duplicate capability; the internal adapter is a local application port.
   Filesystem-path internal specs and the current lifecycle-shaped
   `training.engine.v1` compatibility seam remain explicit migration work.
-- Yield's `training-unit` workflow now resolves an explicit canonical Platform
-  checkout, propagates that exact SDK path into child workers, and avoids the
-  nonexistent `training/core` package install. Linux zombie PIDs are treated as
-  stopped process evidence; the full local suite passes without skips.
+- Yield's `training-unit` workflow resolves an explicit canonical Platform
+  checkout and propagates that exact SDK path into child workers. Nested worker
+  cancellation and durable recovery fail closed, and the required hosted
+  Platform/Official Plugins integration executes without credential skips.
 - The SQLite MVPs persist terminal state, failure evidence, and idempotency
   mappings across restart. Mid-command crash reconciliation and atomic
   multi-replica command reservation require a production database/controller

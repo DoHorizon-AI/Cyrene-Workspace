@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "platformContractCommit": "bcc8fa755f5a98d997715f8e438fd5a92655a8d2",
+  "platformContractCommit": "d804edc32fd6094c2885a4ae84e2d1a30446e2ce",
   "concepts": [
     {
       "id": "data.processor.v1",
