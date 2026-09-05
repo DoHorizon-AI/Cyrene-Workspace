@@ -114,16 +114,23 @@ clone_exact() {
     local ref="$3"
     local destination="${RUN_ROOT}/repos/${name}"
     local cloned=0
-    local target_url="${url}"
-    if [[ -n "${CYRENE_CROSS_REPO_TOKEN:-}" && "${url}" =~ ^https://github.com/(.*)$ ]]; then
-        target_url="https://x-access-token:${CYRENE_CROSS_REPO_TOKEN}@github.com/${BASH_REMATCH[1]}"
+    local auth_header=""
+    if [[ -n "${CYRENE_CROSS_REPO_TOKEN:-}" && "${url}" =~ ^https://github.com/ ]]; then
+        auth_header="$(printf 'x-access-token:%s' "${CYRENE_CROSS_REPO_TOKEN}" | base64 -w0)"
     fi
     for attempt in 1 2 3; do
         if [[ -e "${destination}" ]]; then
             rm -rf -- "${destination}"
         fi
-        if timeout --foreground 180s git clone --no-checkout --quiet "${target_url}" "${destination}"; then
+        if [[ -n "${auth_header}" ]]; then
+            GIT_CONFIG_COUNT=1 \
+                GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+                GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
+                timeout --foreground 180s git clone --no-checkout --quiet "${url}" "${destination}" && cloned=1
+        elif timeout --foreground 180s git clone --no-checkout --quiet "${url}" "${destination}"; then
             cloned=1
+        fi
+        if [[ "${cloned}" == "1" ]]; then
             break
         fi
         if [[ "${attempt}" != "3" ]]; then
@@ -247,6 +254,7 @@ require_command ss
 require_command setsid
 require_command pgrep
 require_command timeout
+require_command base64
 [[ "$(uname -s)" == "Linux" ]] || fail "P0 vertical harness requires Linux"
 wait_for_docker || fail "Docker daemon is unavailable after 24 seconds"
 
