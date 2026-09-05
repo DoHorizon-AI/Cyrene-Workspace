@@ -412,13 +412,20 @@ docker run --rm -d --name "${PG_CONTAINER}" \
     -e POSTGRES_PASSWORD="postgres_phase7" \
     -p "127.0.0.1:${PG_PORT}:5432" \
     "${CYRENE_PHASE7_POSTGRES_IMAGE}" >/dev/null
+PG_READY=0
 for _ in {1..120}; do
-    if docker exec "${PG_CONTAINER}" pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+    if docker exec "${PG_CONTAINER}" sh -ec \
+        'test "$(head -n 1 "${PGDATA}/postmaster.pid")" = 1' >/dev/null 2>&1 &&
+        [[ "$(docker exec "${PG_CONTAINER}" psql -U postgres -d postgres -Atc "SELECT 1" 2>/dev/null)" == "1" ]]; then
+        PG_READY=1
         break
     fi
     sleep 0.25
 done
-docker exec "${PG_CONTAINER}" pg_isready -U postgres -d postgres >/dev/null
+if [[ "${PG_READY}" != "1" ]]; then
+    docker logs "${PG_CONTAINER}" >&2
+    fail "PostgreSQL did not reach its final server process"
+fi
 docker exec "${PG_CONTAINER}" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
     -c "CREATE ROLE \"${MIGRATOR_USER}\" LOGIN PASSWORD '${MIGRATOR_PASSWORD}'"
 docker exec "${PG_CONTAINER}" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
