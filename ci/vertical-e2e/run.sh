@@ -114,25 +114,47 @@ clone_exact() {
     local ref="$3"
     local destination="${RUN_ROOT}/repos/${name}"
     local cloned=0
+    local auth_header=""
+    if [[ -n "${CYRENE_CROSS_REPO_TOKEN:-}" && "${url}" =~ ^https://github.com/ ]]; then
+        auth_header="$(printf 'x-access-token:%s' "${CYRENE_CROSS_REPO_TOKEN}" | base64 -w0)"
+    fi
     for attempt in 1 2 3; do
         if [[ -e "${destination}" ]]; then
             rm -rf -- "${destination}"
         fi
-        if timeout --foreground 180s git clone --no-checkout --quiet "${url}" "${destination}"; then
+        if [[ -n "${auth_header}" ]]; then
+            GIT_CONFIG_COUNT=1 \
+                GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+                GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
+                timeout --foreground 180s git clone --no-checkout --quiet "${url}" "${destination}" && cloned=1
+        elif timeout --foreground 180s git clone --no-checkout --quiet "${url}" "${destination}"; then
             cloned=1
+        fi
+        if [[ "${cloned}" == "1" ]]; then
             break
         fi
         if [[ "${attempt}" != "3" ]]; then
             sleep $((attempt * 2))
         fi
     done
-    [[ "${cloned}" == "1" ]] || fail "${name} clone failed after three attempts"
-    git -C "${destination}" fetch --all --prune --quiet ||
-        fail "${name} fetch failed after clone"
+    if [[ "${cloned}" != "1" ]]; then
+        echo "::error title=BLOCKED_INFRASTRUCTURE::${name} clone failed after three attempts despite credentials being present (network timeout, service degradation, or git transport error)." >&2
+        fail "BLOCKED_INFRASTRUCTURE: ${name} clone failed after three attempts"
+    fi
+    if [[ -n "${auth_header}" ]]; then
+        GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" \
+            git -C "${destination}" fetch --all --prune --quiet ||
+            fail "BLOCKED_INFRASTRUCTURE: ${name} fetch failed after clone"
+    else
+        git -C "${destination}" fetch --all --prune --quiet ||
+            fail "BLOCKED_INFRASTRUCTURE: ${name} fetch failed after clone"
+    fi
     git -C "${destination}" cat-file -e "${ref}^{commit}" ||
-        fail "${name} does not contain requested commit ${ref}"
+        fail "BLOCKED_INFRASTRUCTURE: ${name} does not contain requested commit ${ref}"
     git -C "${destination}" checkout --quiet --detach "${ref}" ||
-        fail "${name} checkout failed for ${ref}"
+        fail "BLOCKED_INFRASTRUCTURE: ${name} checkout failed for ${ref}"
     local actual
     actual="$(git -C "${destination}" rev-parse HEAD)"
     [[ "${actual}" == "${ref}" ]] || fail "${name} checkout mismatch: ${actual} != ${ref}"
@@ -240,6 +262,7 @@ require_command ss
 require_command setsid
 require_command pgrep
 require_command timeout
+require_command base64
 [[ "$(uname -s)" == "Linux" ]] || fail "P0 vertical harness requires Linux"
 wait_for_docker || fail "Docker daemon is unavailable after 24 seconds"
 
@@ -248,6 +271,17 @@ echo "PHASE7_PLATFORM_REF=${CYRENE_PLATFORM_REF}"
 echo "PHASE7_ASTRBOT_REF=${CYRENE_ASTRBOT_REF}"
 echo "PHASE7_PLUGINS_REF=${CYRENE_PLUGINS_REF}"
 echo "PHASE7_POSTGRES_IMAGE=${CYRENE_PHASE7_POSTGRES_IMAGE}"
+
+# Strict distinction between SKIPPED_CREDENTIALS and BLOCKED_INFRASTRUCTURE
+if [[ -z "${CYRENE_CROSS_REPO_TOKEN:-}" ]]; then
+    if [[ "${CROSS_REPO_REQUIRED:-false}" == "true" ]]; then
+        echo "::error title=CROSS_REPO_REQUIRED_FAILURE::secrets.CYRENE_CROSS_REPO_TOKEN is missing for required cross-repo release/nightly gate." >&2
+        fail "CROSS_REPO_REQUIRED_FAILURE: missing secrets.CYRENE_CROSS_REPO_TOKEN"
+    else
+        echo "::notice title=SKIPPED_CREDENTIALS::secrets.CYRENE_CROSS_REPO_TOKEN is not configured in this environment. Multi-repo vertical acceptance skipped."
+        exit 0
+    fi
+fi
 
 PLATFORM_ROOT="$(clone_exact platform "${CYRENE_PLATFORM_URL}" "${CYRENE_PLATFORM_REF}")"
 ASTRBOT_ROOT="$(clone_exact astrbot "${CYRENE_ASTRBOT_URL}" "${CYRENE_ASTRBOT_REF}")"
@@ -378,13 +412,20 @@ docker run --rm -d --name "${PG_CONTAINER}" \
     -e POSTGRES_PASSWORD="postgres_phase7" \
     -p "127.0.0.1:${PG_PORT}:5432" \
     "${CYRENE_PHASE7_POSTGRES_IMAGE}" >/dev/null
+PG_READY=0
 for _ in {1..120}; do
-    if docker exec "${PG_CONTAINER}" pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+    if docker exec "${PG_CONTAINER}" sh -ec \
+        'test "$(head -n 1 "${PGDATA}/postmaster.pid")" = 1' >/dev/null 2>&1 &&
+        [[ "$(docker exec "${PG_CONTAINER}" psql -U postgres -d postgres -Atc "SELECT 1" 2>/dev/null)" == "1" ]]; then
+        PG_READY=1
         break
     fi
     sleep 0.25
 done
-docker exec "${PG_CONTAINER}" pg_isready -U postgres -d postgres >/dev/null
+if [[ "${PG_READY}" != "1" ]]; then
+    docker logs "${PG_CONTAINER}" >&2
+    fail "PostgreSQL did not reach its final server process"
+fi
 docker exec "${PG_CONTAINER}" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
     -c "CREATE ROLE \"${MIGRATOR_USER}\" LOGIN PASSWORD '${MIGRATOR_PASSWORD}'"
 docker exec "${PG_CONTAINER}" psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
@@ -396,7 +437,11 @@ docker exec "${PG_CONTAINER}" psql -v ON_ERROR_STOP=1 -U postgres -d "${DB_NAME}
 MIGRATOR_CONNECTION="Host=127.0.0.1;Port=${PG_PORT};Database=${DB_NAME};Username=${MIGRATOR_USER};Password=${MIGRATOR_PASSWORD};Timeout=10;Command Timeout=300"
 APP_CONNECTION="Host=127.0.0.1;Port=${PG_PORT};Database=${DB_NAME};Username=${APP_USER};Password=${APP_PASSWORD};Timeout=10;Command Timeout=60"
 MIGRATOR_PROJECT="${ASTRBOT_ROOT}/src/AstrBot.DatabaseMigrator/AstrBot.DatabaseMigrator.csproj"
-dotnet build "${MIGRATOR_PROJECT}" --configuration Release --property:NuGetAudit=false \
+DOTNET_NUGET_SOURCE="${CYRENE_DOTNET_NUGET_SOURCE:-https://api.nuget.org/v3/index.json}"
+dotnet restore "${MIGRATOR_PROJECT}" --force-evaluate --source "${DOTNET_NUGET_SOURCE}" \
+    --property:NuGetAudit=false \
+    --property:BaseIntermediateOutputPath="${RUN_ROOT}/migrator-obj/"
+dotnet build "${MIGRATOR_PROJECT}" --no-restore --configuration Release --property:NuGetAudit=false \
     --property:BaseOutputPath="${RUN_ROOT}/migrator-out/" \
     --property:BaseIntermediateOutputPath="${RUN_ROOT}/migrator-obj/"
 MIGRATOR_DLL="$(find "${RUN_ROOT}/migrator-out" -type f -name AstrBot.DatabaseMigrator.dll -print -quit)"
@@ -416,7 +461,7 @@ DOTNET_PROPS=(
     "-p:BaseOutputPath=${HOST_OUTPUT_ROOT}/"
     "-p:NuGetAudit=false"
 )
-dotnet restore "${HOST_DRIVER}" "${DOTNET_PROPS[@]}"
+dotnet restore "${HOST_DRIVER}" --force-evaluate --source "${DOTNET_NUGET_SOURCE}" "${DOTNET_PROPS[@]}"
 dotnet build "${HOST_DRIVER}" --no-restore --configuration Release "${DOTNET_PROPS[@]}"
 HOST_DLL="$(find "${HOST_OUTPUT_ROOT}" -type f -name Cyrene.Phase7.HostDriver.dll -print -quit)"
 [[ -n "${HOST_DLL}" ]] || fail "AstrBot host driver binary was not built"
