@@ -9,7 +9,7 @@
 | Field | Value |
 | --- | --- |
 | Plan ID | CYRENE-TEXT-LIFECYCLE-V1 |
-| Current status | IMPLEMENTING — 23 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
+| Current status | IMPLEMENTING — 25 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
 | Baseline authority | Workspace origin/main at eb5fb2cf1af5c3dd0cbadbe6167bc388b643e318 (2026-09-05); Product contract registry remains under governance/product-contract-v1/ |
 | Implementation line | User-authorized implementation proceeds from the Workspace main baseline toward Develop; this plan is maintained on the task branch |
 | Runtime scope | Linux execution node, NVIDIA GPU, CUDA; Windows is a supported desktop client target for Navigator adoption proof |
@@ -17,7 +17,7 @@
 | Serving scope | vLLM as the first Reactor serving engine |
 | Harness proof pin | dsh-v0.1.3-alpha.1 / d347e703908d0406b7a7ef80e3a0e594d86b2215 |
 | Upstream reference | [DeepSeek Harness pinned tree](https://github.com/deepseek-ai/deepseek-harness/tree/d347e703908d0406b7a7ef80e3a0e594d86b2215) |
-| Progress | 23 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
+| Progress | 25 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
 
 ### 0.1 What this document is and is not / 本文边界
 
@@ -214,7 +214,7 @@ Evidence for <CHECK-ID>
 
 真实 vLLM 0.25.1 已加载固定 revision 的 Qwen3-4B-Instruct-2507 并通过 health；这只是 Phase 0 的外部 Provider 环境，还不是 Reactor / Platform 部署验收。WSL 使用 loopback rendezvous、V1 Model Runner、非 FlashInfer sampler 和带开发头文件的 Python 3.12.11，未修改 vLLM 源码。
 
-当前组件验证：Python persistence 最新全仓测试 17 passed（较早证据中的 13 passed 为旧记录）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 个测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障和历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 中稳定落盘，owner/workspace 与单一可写 event log 的边界已有真实服务测试；旧记录迁移时未知 owner 保持未知，新 Session 使用受信 creator/owner。Product route 现已有真实成功 usage、认证拒绝、失败终态、取消 unknown usage、X-Request-Id 合并回读和 gateway 重启保持台账的证据，P0-11 已达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍在后续范围。双进程接管来自同机独立进程，不能替代第二台物理设备；新增 Windows 安装包 GUI Codex 预览→明确新 Session→真实 LLM 续答证据使 P0-27 达到 Actual PASS，安装包 4bea2dc… 又通过同一 Session 的显式 epoch takeover 与新 turn；两个 Windows Profile 接管及受控 TCP 断开后的继续已有证据。P0-30 的桌面交互单独通过；失败输入保留、旧窗口冲突提示、冷客户端标题、干净机和整体桌面 gate 仍待完成。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
+当前组件验证：Python persistence 最新全仓测试 17 passed（较早证据中的 13 passed 为旧记录）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 个测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障和历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 中稳定落盘，owner/workspace 与单一可写 event log 的边界已有真实服务测试；旧记录迁移时未知 owner 保持未知，新 Session 使用受信 creator/owner。Product route 现已有真实成功 usage、认证拒绝、失败终态、取消 unknown usage、X-Request-Id 合并回读和 gateway 重启保持台账的证据，P0-11 已达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍在后续范围。双进程接管来自同机独立进程，不能替代第二台物理设备；新增 Windows 安装包 GUI Codex 预览→明确新 Session→真实 LLM 续答证据使 P0-27 达到 Actual PASS。最新 Windows v5 证据以 Navigator `cd0d6a564c653c6576e1bff68c05cb84d91e57ff` 和 CI 修复 `91a6349eca0b137e57b4f348b8508218826755d1` 为来源：58 个受管构建文件全部 digest 一致，NSIS/MSI 安装包已重新安装并运行；155-entry profile inventory 中 6 个 Cyrene entry active、4 个 entry disabled，动态 loopback ports `12599`、`12294`、`5851` 已在真实运行中分配。P0-08 的 Profile/Bundle 边界和 P0-32 的动态本地传输因此达到 scoped Actual PASS。v5 服务重启还恢复了 158-event committed prefix，epoch 由 8→9，完成后为 170 events、5 Tools、34 audit rows 且没有历史 Tool replay；但 OS 分配新端口改变 browser origin，未发送的 composer draft 丢失，prompt 仅为完成 backend recovery proof 而手工重新输入。此前 backend 返回的 `409 SESSION_ALREADY_LOCAL` 是 writer ownership 冲突，却被 UI 显示为 unknown 并引导重复 observe；该 UI 修复仍待安装包复验。因此 P0-21、P0-31、P0-02/P0-28/P0-29 和 compaction summary 兼容性仍待完成。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
 
 ## 4. Phase 0 — Navigator adoption proof / Navigator 采用证明
 
@@ -236,7 +236,7 @@ Phase 0 通过前，Navigator 仍保留当前实现作为对照；Phase 0 通过
 - [x] **P0-05 — Navigator Profile:** 在 cyrene-navigator 中建立独立 Profile/Bundle，固定上游 runtime、UI extension、配置覆盖入口和构建产物布局。Linux 真实启动的默认 preset 为 `cyrene-navigator`，参见 [Profile 与 Bundle 证据](evidence/2026-09-06-phase-0.md#profile-and-bundle)。
 - [x] **P0-06 — Bundle inventory:** Phase 0 固定并审计实际加载的插件、来源、版本和 disabled defaults；企业动态插件允许列表、签名、管理员策略和版本治理属于 P4-13，不提前当作 adoption proof 的前提。参见 [实际 Bundle inventory](evidence/2026-09-06-phase-0.md#profile-and-bundle)。
 - [x] **P0-07 — Disabled defaults:** 通过配置关闭不适合 Navigator 的默认本地 session log、未经 Exchange 管理的默认路由、未治理的遥测或插件入口；关闭行为要有启动日志/诊断证据，不能只隐藏 UI。Profile 诊断已记录 JSONL persistence、telemetry、默认 DeepSeek route 和 title LLM defaults 为 disabled；企业 allowlist 仍属于 P4。
-- [ ] **P0-08 — Cyrene extension boundary:** Profile 只注册 Exchange、Workspace/Identity、persistence、usage/audit、conversation import、native bridge、Send to 和 UI extension；不把 Cyrene Product 生命周期塞回 Harness Core。
+- [x] **P0-08 — Cyrene extension boundary:** Profile 只注册 Exchange、Workspace/Identity、persistence、usage/audit、conversation import、native bridge、Send to 和 UI extension；不把 Cyrene Product 生命周期塞回 Harness Core。2026-09-06 scoped Actual PASS：Profile authority proof 为 `PASS`，上游 Core patches = 0；最新 Windows v5 authenticated inventory 汇总为 155 entries，其中 6 个 Cyrene entries active、4 个 entries disabled。企业 plugin allowlist、签名和管理员版本治理仍属于 P4，不由本项提前覆盖，参见 [Profile 与 Bundle 证据](evidence/2026-09-06-phase-0.md#profile-and-bundle)。
 
 ### 4.3 Exchange path / Exchange 路径
 
@@ -274,7 +274,8 @@ Rust binary or cyrene-native-host
 ~~~
 
 - [x] **P0-20 — IPC protocol:** 定义并实现 protocol version、request id、method、params、result、error、cancel、event；stdout 只承载协议，stderr 承载日志。Rust stdio 集成与协议测试通过，参见 [Rust bridge 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
-- [ ] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。Native matrix 已覆盖子进程错误/取消边界，Windows 安装包已通过同一 Session 的显式 takeover；完整 lifecycle gate 保持 `[ ]`，等待桌面错误/草稿扩展完成后的安装包复验。
+- [ ] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。Native matrix 已覆盖子进程错误/取消边界，Windows 安装包也观察到 Harness crash 可见；但 v5 尚未证明安装包内完整的 child lifecycle、重启回收和桌面恢复，因此保持 `[ ]`，等待安装包复验。
+  最新安装包正常退出记录显示 9 个受管理进程最终归零；这只支持 clean shutdown 子场景，不能替代 child restart、takeover 和桌面恢复证据，因此仍保持 `[ ]`，参见 [Windows v5 安装包与恢复增量](evidence/2026-09-06-phase-0.md#windows-v5-package-and-recovery-update)。
 - [x] **P0-22 — Real Rust tool:** 使用一个已有 Rust binary（优先 cy-manifest 或等价 Platform artifact utility）作为真实 Tool，模型实际调用并消费结果，不使用内存 fake。真实 `cy-manifest` 返回 Artifact manifest 后由模型续答，参见 [真实 Rust Tool 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
 - [x] **P0-23 — Rust error/cancel:** 验证非法参数、binary 不存在、stderr 日志、超时、用户取消、child crash、协议版本不兼容和大结果边界。
   2026-09-06 Actual PASS（明确 native bridge scope）：Windows 与 Linux native matrix 均报告 13/13 通过，覆盖上述错误、取消、崩溃、协议和输出边界；Windows UI 的完整重启后 takeover 属于 P0-21/P0-31，未并入本项，参见 [Windows native matrix evidence](evidence/2026-09-06-phase-0.md#windows-native-matrix-and-desktop-sub-scenarios)。
@@ -296,8 +297,8 @@ Rust binary or cyrene-native-host
 - [ ] **P0-29 — First launch:** 在干净 Windows 环境安装、启动、退出和再次启动；网络、证书、配置目录、日志目录和升级失败可诊断。
 - [x] **P0-30 — Desktop chat/tool:** 安装包完成 Exchange chat、streaming、真实 Rust Tool、approval、错误和取消。
   2026-09-06 Actual PASS：NSIS digest `5fbb3d004196fc8d60f984679c6c854caed465c21cadee4514e71f2f290cb8be` 已完成 GUI 模型→Rust Tool→续答、允许一次审批、可见 Tool error 和 Stop；8 条完成请求均回读 Exchange usage。失败输入保留、完整恢复与干净机器由独立检查验收，参见 [桌面交互及恢复记录](evidence/2026-09-06-phase-0.md#windows-desktop-recovery-and-faults)。
-- [ ] **P0-31 — Desktop recovery:** 关闭/重启桌面端后从 Cyrene persistence 恢复 Session；验证 persistence service 重启、网络断开和旧 writer 拒绝。
-- [ ] **P0-32 — Dynamic local transport:** 若 Harness UI server 使用本地 HTTP，仅使用系统分配的 loopback 临时端口或等价受监管通道；不写死服务端口，不要求手工端口配置。
+- [ ] **P0-31 — Desktop recovery:** 关闭/重启桌面端后从 Cyrene persistence 恢复 Session；验证 persistence service 重启、网络断开和旧 writer 拒绝。v5 backend proof 已恢复 158-event prefix、完成 epoch 8→9 takeover、170 events/5 Tools/34 audit rows 且无历史 Tool replay，但新 OS port 改变 browser origin 后未发送 composer draft 丢失，且 `SESSION_ALREADY_LOCAL` 曾被 UI 错误显示为 unknown；因此完整桌面恢复仍保持 `[ ]`。
+- [x] **P0-32 — Dynamic local transport:** 若 Harness UI server 使用本地 HTTP，仅使用系统分配的 loopback 临时端口或等价受监管通道；不写死服务端口，不要求手工端口配置。2026-09-06 Actual PASS（transport scope）：Windows v5 实际运行观察到系统分配的 loopback ports `12599`、`12294`、`5851`，启动与关闭均由受监管 launcher 管理；该项不覆盖 package reproducibility、clean Windows 或 desktop recovery。
 
 ### 4.8 Phase 0 gate / Phase 0 总门槛
 
