@@ -8,6 +8,14 @@ does not move any Product resource authority into Cyrene-Workspace. Every
 resource schema and API remains owned by the repository listed in
 `product-contracts-v1.json`.
 
+Navigator's accepted V1 evolution is recorded in
+[Navigator Harness authority](navigator-harness-v1.md). The baseline table and
+merged SHA registry below describe Alpha; V1 adds Navigator-owned Conversation
+and AgentRun semantics over DeepSeek Harness and one Cyrene persistence backend.
+
+Navigator 的 V1 边界演进见上述文档；下表保留 Alpha 历史事实，新 Harness 实现与验收
+单独跟踪，不把基线快照读取能力当作最终产品定位。
+
 ## Product boundary map
 
 | Product | Durable authority | Replaceable engine/runtime seam | Explicit non-ownership | MVP evidence |
