@@ -1,0 +1,8 @@
+{
+  "exchangeUrl": "https://exchange.example.invalid/v1",
+  "persistenceUrl": "https://persistence.example.invalid",
+  "workspaceId": "replace-with-workspace-id",
+  "accountProfileId": "replace-with-account-profile-id",
+  "deviceId": "windows-navigator-1",
+  "model": "replace-with-exchange-model-id"
+}

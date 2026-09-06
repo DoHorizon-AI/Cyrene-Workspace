@@ -9,7 +9,7 @@
 | Field | Value |
 | --- | --- |
 | Plan ID | CYRENE-TEXT-LIFECYCLE-V1 |
-| Current status | IMPLEMENTING — 26/32 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
+| Current status | IMPLEMENTING — 30/32 scoped Phase 0 component checks have Actual PASS evidence; P0-12, P0-29 and P0-GATE remain pending |
 | Baseline authority | Workspace origin/main at eb5fb2cf1af5c3dd0cbadbe6167bc388b643e318 (2026-09-05); Product contract registry remains under governance/product-contract-v1/ |
 | Implementation line | User-authorized implementation proceeds from the Workspace main baseline toward Develop; this plan is maintained on the task branch |
 | Runtime scope | Linux execution node, NVIDIA GPU, CUDA; Windows is a supported desktop client target for Navigator adoption proof |
@@ -17,7 +17,7 @@
 | Serving scope | vLLM as the first Reactor serving engine |
 | Harness proof pin | dsh-v0.1.3-alpha.1 / d347e703908d0406b7a7ef80e3a0e594d86b2215 |
 | Upstream reference | [DeepSeek Harness pinned tree](https://github.com/deepseek-ai/deepseek-harness/tree/d347e703908d0406b7a7ef80e3a0e594d86b2215) |
-| Progress | 26/32 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
+| Progress | 30/32 scoped Phase 0 checks passed; P0-12, P0-29 and P0-GATE remain pending, and all later phase gates remain pending |
 
 ### 0.1 What this document is and is not / 本文边界
 
@@ -214,47 +214,40 @@ Evidence for <CHECK-ID>
 
 真实 vLLM 0.25.1 已加载固定 revision 的 Qwen3-4B-Instruct-2507 并通过 health；这只是 Phase 0 的外部 Provider 环境，还不是 Reactor / Platform 部署验收。WSL 使用 loopback rendezvous、V1 Model Runner、非 FlashInfer sampler 和带开发头文件的 Python 3.12.11，未修改 vLLM 源码。
 
-当前组件验证：Python persistence 最新全仓测试 17 passed（较早证据中的 13 passed 为旧记录）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 个测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障和历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 中稳定落盘，owner/workspace 与单一可写 event log 的边界已有真实服务测试；旧记录迁移时未知 owner 保持未知，新 Session 使用受信 creator/owner。Product route 现已有真实成功 usage、认证拒绝、失败终态、取消 unknown usage、X-Request-Id 合并回读和 gateway 重启保持台账的证据，P0-11 已达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍在后续范围。双进程接管来自同机独立进程，不能替代第二台物理设备；Windows 安装包 GUI Codex 预览→明确新 Session→真实 LLM 续答证据使 P0-27 达到 Actual PASS。最新 V7 证据来自 Navigator `dcfff664a8be0a38d828b684c8c90ae2e7ca73fe`：正式脚本以 81 个精确 committed inputs 构建，package record 为非 intermediate，真实同机安装退出码为 0；严格 TypeScript/Loader 和 client 质量为 23/23，Tauri 质量保持 17/17。V7 host record 明确 `cleanVm: false`；真实恢复子场景保留原输入、保护新草稿，offline store-lock 失败不改变历史，显式 retry 保存成功，关闭重开后用新 port 恢复 retained request，在线显式 Send 后从 171 events/44 audit rows 到 182/46，原前缀保留、无历史 Tool replay、compaction 完成。V7 不能替代 clean Windows、guest/second-device 或 whole P0 验收；当前 CI general run 因 billing/spending-limit annotation 未执行 steps，Product 和 desktop runs failed。Linux upstream rebuild receipt `linux-v7-upstream-rebuild-20260906.json`（SHA-256 `c970c0330cc1ac63c53c873b1642cf71e3465a42492fd666acbac169f8c66270`）支持 P0-02 的 scoped Actual PASS。V7 staged 与 installed runtime 的 49 个选定文件（含 23 个 managed Bundle 文件）逐文件一致，见私有资源审计 receipt（SHA-256 `cb031e2abda7df217183cd6108e96b81c778e4432b8f0c14c8c61d215d649554`）；但 clean Windows 检查发现 native host 与 `cy-manifest` 依赖 `VCRUNTIME140.dll`，因此 P0-28 的自包含安装包验收仍被阻塞，不能用自动安装 CRT 代替证明。P0-17、P0-21、P0-28、P0-29、P0-31 和 P0-GATE 仍待完成。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
+当前组件验证：Python persistence 最新全仓测试 17 passed（较早证据中的 13 passed 为旧记录）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 个测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障和历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 中稳定落盘，owner/workspace 与单一可写 event log 的边界已有真实服务测试；旧记录迁移时未知 owner 保持未知，新 Session 使用受信 creator/owner。Product route 现已有真实成功 usage、认证拒绝、失败终态、取消 unknown usage、X-Request-Id 合并回读和 gateway 重启保持台账的证据，P0-11 已达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍在后续范围。Windows V8 最终安装包已在干净 guest 和 host 安装，完成真实 Rust Tool→模型续答、持久化恢复、旧 writer fencing、服务故障后的 retained input 恢复和正常关闭清理；因此 P0-17、P0-21、P0-28、P0-31 已达到各自声明范围的 Actual PASS。该第二客户端证据使用隔离 Windows VM，不等于第二台物理 GPU 节点；P4-02/P4-05 仍需真实多节点证据。P0-29 的同一 V8 升级失败诊断尚未完成，P0-12 仍按独立外部 Provider 入口跟踪，P0-GATE 保持未通过。V7 证据、VCRUNTIME140.dll 失败、以及 billing/spending-limit 阻塞的 hosted CI 均保留在当前证据报告的历史段落中。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
 
 ### 3.5 Current evidence delta (2026-09-06) / 当前证据增量
 
-本节只更新当前摘要，不改变既有历史证据。当前为 **26/32** 个 Phase 0
-组件检查 Actual PASS；P0-GATE、P0-12、P0-17、P0-21、P0-28、P0-29 和
-P0-31 继续保持未完成。
+本节只更新当前摘要，不改变既有历史证据。当前为 **30/32** 个 Phase 0
+组件检查 Actual PASS；P0-12、P0-29 和 P0-GATE 继续保持未完成。P0-17 的第二客户端
+证据使用隔离 Windows VM，不等于第二台物理 GPU 节点。
 
-- Navigator V7 source `dcfff664a8be0a38d828b684c8c90ae2e7ca73fe` 已由正式脚本构建：
-  81 个精确 committed inputs、无未提交文件、无 skip flags；`windows-v7-package.json`
-  为 `buildComplete: true` 且 `intermediateSnapshot: false`。NSIS/MSI digest、source
-  proof 和 build log 均已记录在 [V7 正式包与恢复增量](evidence/2026-09-06-phase-0.md#windows-v7-package-and-recovery-update)。
-- V7 host installer exit 0，实际安装包不是 intermediate，但 `cleanVm: false`，因此
-  只能作为同机安装证据，不能关闭 P0-29。严格 TypeScript、Loader 和 client 质量为
-  23/23，Tauri 质量保持 17/17；这些质量结果不等于完整安装包 gate。clean Windows
-  检查还发现 `native/cyrene-native-host.exe` 与 `native/cy-manifest.exe` 导入
-  `VCRUNTIME140.dll`；在自包含 CRT 依赖解决并重新验收前，P0-28 保持未完成。
-- V7 的真实同机恢复切片验证原输入恢复、新草稿保护、store-lock 失败后 history 不变、
-  offline 显式 retry 保存、关闭重开后的新 port 恢复，以及 online 显式 Send 后
-  171→182 events、44→46 audit rows、无历史 Tool replay 和 compaction 完成。V6 的
-  receipt outage mislabel 仍作为历史失败保留，不能把 V6 final 说成 full PASS。
-- 当前 V7 CI 不能写成 green：general run `34033941585` 为 0 steps 并带
-  billing/failed-payments/spending-limit annotation，Product `34033941576` 与
-  desktop `34033941578` failed。guest/second-device、clean Windows 和 whole P0
-  acceptance 仍待完成；这些远端状态不改变下面已记录的 scoped P0-02 build proof。
-- Navigator compaction revision `c09e737` 的受控 4 项测试和真实 CUDA summary stream
-  均通过。该插件只从摘要请求中移除辅助 tools，普通 Agent 请求仍保留 tools。原 v5
-  失败的 provider 原始流未采样，因此不能确认那次失败是否来自仅含 Tool Call 的响应。
-- Windows host 的 receipt/Profile/title 组合验证为 receipt 7/7、Profile 1/1、title 5/5，
-  覆盖 `source.kind === 'user'`、真实 HTTP 200/401/403 和中止后关闭持久化 read handle。
-- Linux V7 upstream rebuild receipt `linux-v7-upstream-rebuild-20260906.json`（SHA-256
-  `c970c0330cc1ac63c53c873b1642cf71e3465a42492fd666acbac169f8c66270`）记录 exact
-  Node 24.13.0、pnpm 11.7.0 frozen install、official build exit 0 和 Core patches 0。
-- V7 authenticated profile inventory receipt（SHA-256 `108091f7f818f6e25ea31a2329e5391e26cc73ca368e65803110b83f722416c3`）记录 155 host entries、6 个 Cyrene host entries active、4 个 defaults disabled；默认 preset 为 `cyrene-navigator`，其中 `@cyrene/navigator-harness/compaction` 是 active preset row。Browser delivery extension 单独计数，不折叠进 host inventory。
-  Python persistence 17 项、Tauri 17 项和 V7 client 23 项质量验证保持通过；`3b8ae97` 的
-  local input put/remove 错误边界也已记录。
-- V6 中间安装包的 native IPC put、幂等、冲突、bad-key、重开留存和删除子场景仍作为
-  历史子场景记录；V7 已提供更新的同机恢复切片，但最终 GUI 故障恢复、完整桌面恢复
-  和 clean Windows/VM 验收仍待完成。
+- Navigator V8 source `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` 已由正式脚本构建：97 个精确
+  committed inputs、无未提交变更、无 skip flags、上游 Core patches = 0。NSIS package
+  SHA-256 为 `792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90`；安装后的
+  desktop executable SHA-256 为 `0acf4412a424c91139dcc23fd943491fb168f5a932f6a34e902bb6618f19bcd1`。
+- V8 clean guest 和 host 均完成安装；installed Windows native quality 为 14/14，失败和跳过
+  均为 0。V8 静态 CRT 与 clean guest 无 `VCRUNTIME140.dll` 的结果关闭了旧 V7 的运行时依赖
+  阻塞，支持 P0-28 scoped Actual PASS。
+- Clean guest 的真实 GUI proof 完成 Rust Tool→模型 continuation；持久化结果由 53→67 events、
+  3→4 Tools、52→54 Exchange requests。Guest 显式 takeover 后 Host 旧 writer 的 append 被拒绝，完整
+  backend snapshot 复核保持 67/4/54 不变，实际台账字段为 `requestId`。
+- Guest persistence service 故障/重启、明确 takeover、旧 writer fencing 和 retained input
+  recovery 已完成：service fault 后数据库保持 68 events、4 Tools、54 requests；第三次启动
+  明确 takeover 后 Restore input 恢复原文本且 history 不变，用户显式 Send 后达到 77 events、
+  4 Tools、55 requests，收到 durable receipt 后 retained input 为 0。
+- V8 主窗口正常关闭两次均通过：guest receipt 为 925 ms、9 个 owned processes、原 CDP/Harness
+  listeners 均归零；第二次主窗口关闭为 868 ms。两次均只向可见主窗口投递关闭消息，旧 V7
+  遍历内部消息窗口和强制清理记录继续作为历史失败保留。
+- P0-29 仍保持未完成：已有 V8 clean guest first-launch/install、正常退出/重启证据，但同一
+  V8 包的升级失败诊断尚无真实证据。Hosted CI 的 billing/spending-limit 阻塞继续保留并单独
+  归类，不把未执行的 jobs 写成 source green。
 
 详细哈希、命令和限制见 [Phase 0 当前证据增量](evidence/2026-09-06-phase-0.md#current-evidence-delta)。
+
+最终后端已从固定 Exchange / Platform / Plugins 提交重新启动，并使用同一 V8 Guest 完成
+Tool 与 Usage 复验。完整版本组合与同事连接说明见 [V8 交接](handoff/cyrene-navigator-v8/README.md)
+和 [后端冻结证据](evidence/2026-09-06-phase-0.md#v8-frozen-backends-and-handoff)。
 
 ## 4. Phase 0 — Navigator adoption proof / Navigator 采用证明
 
@@ -267,7 +260,7 @@ Phase 0 通过前，Navigator 仍保留当前实现作为对照；Phase 0 通过
 ### 4.1 Fixed upstream / 固定上游
 
 - [x] **P0-01 — Exact upstream pin:** 锁定 dsh-v0.1.3-alpha.1 和 commit d347e703908d0406b7a7ef80e3a0e594d86b2215，记录 package lock、构建工具链、依赖 digest、Bundle 版本和来源。参见 [固定来源证据](evidence/2026-09-06-phase-0.md) 与 [历史固定来源证据](evidence/2026-09-05-phase-0.md)。
-- [x] **P0-02 — Reproducible upstream build:** 在 Linux 开发环境和 Windows packaging 环境分别按 lock 重建；能证明依赖没有漂移，失败时 fail closed。2026-09-06 scoped Actual PASS：Linux 以 exact Node 24.13.0、pnpm 11.7.0 frozen install 和 official build 退出码 0 重建，upstream Core patches = 0；Windows V7 source receipt 记录 81 个精确 committed inputs、无未提交文件和无 skip flags。Linux proof `linux-v7-upstream-rebuild-20260906.json` SHA-256 为 `c970c0330cc1ac63c53c873b1642cf71e3465a42492fd666acbac169f8c66270`。该项证明上游构建路径，不关闭自包含 Windows package 的 P0-28。
+- [x] **P0-02 — Reproducible upstream build:** 在 Linux 开发环境和 Windows packaging 环境分别按 lock 重建；能证明依赖没有漂移，失败时 fail closed。2026-09-06 scoped Actual PASS：Linux 以 exact Node 24.13.0、pnpm 11.7.0 frozen install 和 official build 退出码 0 重建，upstream Core patches = 0；最终 V8 source receipt 记录 97 个精确 committed inputs、无未提交文件和无 skip flags。Linux proof `linux-v7-upstream-rebuild-20260906.json` SHA-256 为 `c970c0330cc1ac63c53c873b1642cf71e3465a42492fd666acbac169f8c66270`。该项证明上游构建路径与版本冻结；Windows package 的可安装性由 P0-28 单独验收。
 - [x] **P0-03 — Core patch audit:** 对上游 Core 变更做 immutable diff 审计，目标为 UPSTREAM_CORE_PATCHES = 0。若存在 patch，必须记录理由、影响、upstreamability 和移除条件。2026-09-06 固定源码审计结果为 0，参见 [Phase 0 evidence](evidence/2026-09-06-phase-0.md)。
 - [x] **P0-04 — Compatibility ledger:** 记录上游 Session v2、SessionHandle、单写者锁、flush 语义、历史加载性能限制和已知兼容性风险；没有验证过的上游承诺不得写成 Cyrene guarantee。参见 [兼容性台账](evidence/2026-09-06-phase-0.md#compatibility-ledger)。
 
@@ -296,8 +289,7 @@ adoption proof 的模型请求必须经过 Exchange。Navigator 直接连接外�
 - [x] **P0-14 — Append-only ordering:** 事件按序追加，支持 single writer、ordered append、idempotent batch/retry 和 flush barrier；append 成功与 durable flush 的语义分开记录。参见 [持久化证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery) 与 [历史持久化证据](evidence/2026-09-05-phase-0.md)。
 - [x] **P0-15 — Restart recovery:** 重启 Harness 后能恢复 Session、Conversation projection、AgentRun 状态和未完成 turn 的正确边界；恢复只读取事件，不重新执行历史 Tool。第二个 Web process 接管、服务重启后的恢复和后续新 turn 已通过，参见 [恢复证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)。
 - [x] **P0-16 — Persistence service restart:** 单独重启 persistence service 后 Session 内容和 writer ownership 不丢失；重启期间的失败可诊断且不会产生两个 writer。参见 [service kill/restart 证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery) 与 [历史证据](evidence/2026-09-05-phase-0.md)。
-- [ ] **P0-17 — Multi-device read/takeover:** 第二客户端设备使用经授权的 Workspace 身份读取会话并在明确 takeover 后取得 writer；旧 writer 的 append 被拒绝并返回可诊断冲突。Phase 0 可用受控 service credentials 证明边界，完整组织 RBAC/OIDC 仍由 P4-08/P4-09 验收。
-  现有接管证据来自同机的第二个独立 Web process，不能满足“第二客户端设备”的完整文字标准；因此保持 `[ ]`，参见 [恢复证据的拓扑限制](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)。
+- [x] **P0-17 — Multi-device read/takeover:** 第二客户端设备使用经授权的 Workspace 身份读取会话并在明确 takeover 后取得 writer；旧 writer 的 append 被拒绝并返回可诊断冲突。2026-09-06 Actual PASS：隔离的干净 Windows VM 作为第二客户端，通过受控 Workspace 身份读取同一 Session；明确 takeover 后 epoch 前进，旧 writer 的完整 backend append 复核保持 67 events、4 Tools、54 requests 不变。该 VM 是第二客户端设备证据，不是第二台物理 GPU 节点；完整组织 RBAC/OIDC 仍由 P4-08/P4-09 验收，参见 [V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
 - [x] **P0-18 — Product metadata separation:** 证明 Navigator metadata 与单一可写 event log 的边界，owner/workspace 可审计；title、sharing policy、tags、permissions 和 audit projection 的完整产品体验在后续企业阶段继续实现，不复制可写 message history。真实服务迁移、trusted creator/owner 和 metadata boundary 测试已通过，参见 [Product metadata boundary evidence](evidence/2026-09-06-phase-0.md#product-metadata-boundary)。
 - [x] **P0-19 — Crash and replay boundary:** 模拟 append 前后崩溃、重复 batch、断线恢复和读取较新 resourceVersion，证明事件重放不会执行历史工具，也不会丢失或重排已提交事件。Navigator persistence boundary 的四个真实测试已通过；服务 SIGKILL 后未追加事件且原 writer 可恢复。未提交的失败发送草稿不属于 durable event，runtime crash 的 Reload 已替换为关闭并重新打开提示，完整桌面恢复仍待复验，参见 [崩溃与重放边界证据](evidence/2026-09-06-phase-0.md#crash-and-replay-boundary)。
 
@@ -314,8 +306,7 @@ Rust binary or cyrene-native-host
 ~~~
 
 - [x] **P0-20 — IPC protocol:** 定义并实现 protocol version、request id、method、params、result、error、cancel、event；stdout 只承载协议，stderr 承载日志。Rust stdio 集成与协议测试通过，参见 [Rust bridge 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
-- [ ] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。Native matrix 已覆盖子进程错误/取消边界，V7 安装包也有真实同机安装和恢复子场景；但完整 child lifecycle、重启回收和桌面恢复仍未在最终验收拓扑中证明，因此保持 `[ ]`，参见 [Windows V7 安装包与恢复增量](evidence/2026-09-06-phase-0.md#windows-v7-package-and-recovery-update)。
-  既有 clean shutdown 记录显示受管理进程最终归零；V7 的恢复证据补充了输入保留和显式 retry，但仍不能替代 child restart、guest takeover 和完整桌面恢复证据。
+- [x] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。2026-09-06 Actual PASS：V8 已安装包的 native integration 为 14/14（失败、跳过均为 0），clean guest 完成真实 Rust Tool、错误/取消路径和模型续答；正常关闭验证记录 9 个 owned processes、20 秒内全部归零且原 CDP/Harness listeners 归零。该项按 native child lifecycle 与桌面回收范围通过，不扩张为 Phase 1 GPU 或完整企业恢复，参见 [V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
 - [x] **P0-22 — Real Rust tool:** 使用一个已有 Rust binary（优先 cy-manifest 或等价 Platform artifact utility）作为真实 Tool，模型实际调用并消费结果，不使用内存 fake。真实 `cy-manifest` 返回 Artifact manifest 后由模型续答，参见 [真实 Rust Tool 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
 - [x] **P0-23 — Rust error/cancel:** 验证非法参数、binary 不存在、stderr 日志、超时、用户取消、child crash、协议版本不兼容和大结果边界。
   2026-09-06 Actual PASS（明确 native bridge scope）：Windows 与 Linux native matrix 均报告 13/13 通过，覆盖上述错误、取消、崩溃、协议和输出边界；Windows UI 的完整重启后 takeover 属于 P0-21/P0-31，未并入本项，参见 [Windows native matrix evidence](evidence/2026-09-06-phase-0.md#windows-native-matrix-and-desktop-sub-scenarios)。
@@ -333,12 +324,12 @@ Rust binary or cyrene-native-host
 
 优先复用现有 Tauri shell 承载 DeepSeek Harness Web UI 和 Cyrene UI extension；桌面壳不成为第二个 Session 真源。
 
-- [ ] **P0-28 — Reproducible package:** 生成可安装 Windows desktop package，包含锁定版本的 Harness/Profile、native host 和必要运行时；不依赖源码开发环境。V7 的 49 个选定 staged/installed runtime 文件（含 23 个 managed Bundle 文件）和 manifest digest 逐项一致，详见私有 [V7 安装资源审计](evidence/2026-09-06-phase-0.md#windows-v7-installed-resource-audit)，receipt SHA-256 `cb031e2abda7df217183cd6108e96b81c778e4432b8f0c14c8c61d215d649554`。但 clean Windows 检查发现两个 native binary 导入 `VCRUNTIME140.dll`；同机 installer exit 0 不足以证明自包含安装包，不能通过安装依赖来替代验收。
-- [ ] **P0-29 — First launch:** 在干净 Windows 环境安装、启动、退出和再次启动；网络、证书、配置目录、日志目录和升级失败可诊断。
+- [x] **P0-28 — Reproducible package:** 生成可安装 Windows desktop package，包含锁定版本的 Harness/Profile、native host 和必要运行时；不依赖源码开发环境。2026-09-06 Actual PASS：Navigator source `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` 以 97 个精确 committed inputs 生成非 intermediate NSIS 包，SHA-256 为 `792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90`；clean guest 与 host 安装后的 desktop executable SHA-256 均为 `0acf4412a424c91139dcc23fd943491fb168f5a932f6a34e902bb6618f19bcd1`。V8 installed native quality 为 14/14，失败和跳过均为 0；静态 CRT 和 clean guest 无 `VCRUNTIME140.dll`。参见 [V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+- [ ] **P0-29 — First launch:** 在干净 Windows 环境安装、启动、退出和再次启动；网络、证书、配置目录、日志目录和升级失败可诊断。V8 clean guest 已证明安装、启动、正常退出/重启和证书/配置边界，但同一 V8 包的升级失败诊断尚无真实证据；因此本项保持 `[ ]`，不改变其验收标准。
 - [x] **P0-30 — Desktop chat/tool:** 安装包完成 Exchange chat、streaming、真实 Rust Tool、approval、错误和取消。
-  2026-09-06 Actual PASS：NSIS digest `5fbb3d004196fc8d60f984679c6c854caed465c21cadee4514e71f2f290cb8be` 已完成 GUI 模型→Rust Tool→续答、允许一次审批、可见 Tool error 和 Stop；8 条完成请求均回读 Exchange usage。失败输入保留、完整恢复与干净机器由独立检查验收，参见 [桌面交互及恢复记录](evidence/2026-09-06-phase-0.md#windows-desktop-recovery-and-faults)。
-- [ ] **P0-31 — Desktop recovery:** 关闭/重启桌面端后从 Cyrene persistence 恢复 Session；验证 persistence service 重启、网络断开和旧 writer 拒绝。V7 同机证据从 171 events/5 Tools/44 audit rows 开始，记录 epoch 10→11 的 takeover、store-lock/离线提交失败后历史不变、原输入恢复与新草稿保护；新 port reopen 后 epoch 11→12 恢复 retained request，在线显式 Send 后达到 182 events/5 Tools/46 audit rows，原前缀保留且无历史 Tool replay。V6 的 receipt outage mislabel 作为历史失败保留；guest/second-device 和 whole P0 验收仍未完成，因此保持 `[ ]`。
-- [x] **P0-32 — Dynamic local transport:** 若 Harness UI server 使用本地 HTTP，仅使用系统分配的 loopback 临时端口或等价受监管通道；不写死服务端口，不要求手工端口配置。2026-09-06 Actual PASS（transport scope）：既有 Windows v5 运行观察到系统分配的 loopback ports `12599`、`12294`、`5851`，V7 恢复切片又观察到 `12477` 与 reopen 后的 `7470`；启动与关闭均由受监管 launcher 管理。该项不覆盖 package reproducibility、clean Windows 或 desktop recovery，参见 [Windows V7 安装包与恢复增量](evidence/2026-09-06-phase-0.md#windows-v7-package-and-recovery-update)。
+  2026-09-06 Actual PASS：最终 V8 NSIS digest `792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90` 完成 GUI 模型→Rust Tool→续答、审批、错误和取消；clean guest 的持久化结果从 53→67 events、3→4 Tools，参见 [V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+- [x] **P0-31 — Desktop recovery:** 关闭/重启桌面端后从 Cyrene persistence 恢复 Session；验证 persistence service 重启、网络断开和旧 writer 拒绝。2026-09-06 Actual PASS：V8 clean guest/host 完成正常关闭清理、服务故障后的 retained input 保存、重启后的显式 takeover、旧 writer fencing 和再次启动后的明确 Restore；数据库从 68 events、4 Tools、54 requests 保持稳定，用户显式 Send 后达到 77 events、4 Tools、55 requests，durable receipt 到达后 retained input 为 0，历史 Tool 未重放。正常关闭两次分别为 925 ms 和 868 ms，9 个 owned processes 与 CDP/Harness listeners 均归零。该项证据使用隔离 Windows VM 作为第二客户端；P0-29 的升级失败诊断、P0-GATE 和后续企业能力仍单独待验收，参见 [V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+- [x] **P0-32 — Dynamic local transport:** 若 Harness UI server 使用本地 HTTP，仅使用系统分配的 loopback 临时端口或等价受监管通道；不写死服务端口，不要求手工端口配置。2026-09-06 Actual PASS（transport scope）：V8 clean guest/host 使用动态 loopback ports，启动与关闭均由受监管 launcher 管理，V8 重启后仍能恢复并使用新端口。该项不覆盖 package reproducibility、clean Windows 或 desktop recovery，参见 [V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
 
 ### 4.8 Phase 0 gate / Phase 0 总门槛
 
@@ -551,14 +542,18 @@ Navigator 的 TypeScript/Cordis 层只承担 Harness Service/Tool 注册、配�
 
 阶段结束时必须把该阶段的所有检查 ID 映射到台账；没有对应行、链接或完整字段的 [x] 都应在 review 中退回。远程 CI 认证失败、外部服务不可用、Windows runner 不可用、GPU 不足等属于限制或阻塞，必须和源代码失败分开报告。
 
-## 16. First implementation handoff / 首个实现交接
+## 16. Current implementation handoff / 当前实现交接
 
-下一步实现从 Phase 0 开始，建议第一个可审查切片只包含：
+Phase 0 的主要 adoption proof 已完成 30/32 个组件检查。V8 版本冻结、clean guest/host
+安装、真实 Rust Tool、第二客户端 writer fencing、persistence service 故障恢复、retained
+input 显式 Restore，以及正常桌面关闭清理均已有 Actual PASS 证据。当前剩余工作只有：
 
-1. 精确 DeepSeek Harness pin、lock 和 Profile/Bundle scaffold；
-2. Exchange request/stream/tool/usage contract gap 的最小补齐；
-3. Cyrene persistence backend 的事件/单写者/flush contract fixture；
-4. 一个 inherited-stdio Rust Tool fixture；
-5. P0 检查脚本、真实环境矩阵和证据目录约定。
+1. 完成 P0-12 的独立外部 Provider 入口与来源/usage-owner 边界证明；
+2. 为同一 V8 包补齐 P0-29 要求的真实升级失败诊断；
+3. 重新核对 hosted CI billing/spending-limit 环境阻塞后，再决定 P0-GATE 的 canonical
+   adoption read-back。
 
-该切片完成代码和局部测试后，仍需按照 P0-09..P0-24、P0-28..P0-32 做真实进程、真实 persistence、真实 Rust binary 和真实 Windows package 验收。只有 P0-GATE 通过，才把 Navigator 的长期实现方向正式切换为 DeepSeek Harness Profile/Bundle，并停止继续自研通用 Harness Runtime。
+P0-GATE 通过后，Navigator 的长期路线正式以 DeepSeek Harness Profile/Bundle 为基础，停止
+继续自研通用 Harness Runtime；随后按本文 Phase 1→Phase 2→Phase 3→Phase 4 顺序推进真实
+模型消费、CUDA 训练、反馈闭环和企业多设备能力。当前 V8 证据不提前勾选任何后续阶段或最终
+Text Model Lifecycle V1 gate。
