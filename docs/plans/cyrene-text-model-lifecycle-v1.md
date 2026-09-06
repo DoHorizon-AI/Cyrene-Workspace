@@ -9,7 +9,7 @@
 | Field | Value |
 | --- | --- |
 | Plan ID | CYRENE-TEXT-LIFECYCLE-V1 |
-| Current status | IMPLEMENTING — 16 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
+| Current status | IMPLEMENTING — 22 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
 | Baseline authority | Workspace origin/main at eb5fb2cf1af5c3dd0cbadbe6167bc388b643e318 (2026-09-05); Product contract registry remains under governance/product-contract-v1/ |
 | Implementation line | User-authorized implementation proceeds from the Workspace main baseline toward Develop; this plan is maintained on the task branch |
 | Runtime scope | Linux execution node, NVIDIA GPU, CUDA; Windows is a supported desktop client target for Navigator adoption proof |
@@ -17,7 +17,7 @@
 | Serving scope | vLLM as the first Reactor serving engine |
 | Harness proof pin | dsh-v0.1.3-alpha.1 / d347e703908d0406b7a7ef80e3a0e594d86b2215 |
 | Upstream reference | [DeepSeek Harness pinned tree](https://github.com/deepseek-ai/deepseek-harness/tree/d347e703908d0406b7a7ef80e3a0e594d86b2215) |
-| Progress | 16 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
+| Progress | 22 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
 
 ### 0.1 What this document is and is not / 本文边界
 
@@ -214,7 +214,7 @@ Evidence for <CHECK-ID>
 
 真实 vLLM 0.25.1 已加载固定 revision 的 Qwen3-4B-Instruct-2507 并通过 health；这只是 Phase 0 的外部 Provider 环境，还不是 Reactor / Platform 部署验收。WSL 使用 loopback rendezvous、V1 Model Runner、非 FlashInfer sampler 和带开发头文件的 Python 3.12.11，未修改 vLLM 源码。
 
-当前组件验证：Python persistence 全仓测试 13 passed；真实上游 TypeScript、Rust stdio、Codex import/continue 和独立服务重启和 Web Profile 集成 17 passed / 0 failed / 0 skipped；独立 Native Rust 18 passed。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。取消子场景已完成真实停止、终止事件和恢复验证，但 P0-11 所要求的持久化 Usage/Auth/Audit ledger 仍未完成。双进程接管来自同机独立进程，不能替代第二台物理设备；Windows 安装包和桌面启动仍未 Actual PASS。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
+当前组件验证：Python persistence 最新全仓测试 17 passed（较早证据中的 13 passed 为旧记录）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 个测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障和历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 中稳定落盘，owner/workspace 与单一可写 event log 的边界已有真实服务测试；旧记录迁移时未知 owner 保持未知，新 Session 使用受信 creator/owner。Product route 现已有真实成功 usage、认证拒绝、失败终态、取消 unknown usage、X-Request-Id 合并回读和 gateway 重启保持台账的证据，P0-11 已达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍在后续范围。双进程接管来自同机独立进程，不能替代第二台物理设备；新增 Windows 安装包 GUI Codex 预览→明确新 Session→真实 LLM 续答证据使 P0-27 达到 Actual PASS，但完整安装包重建/干净机、同一 Session takeover、runtime crash reload 和桌面 gate 仍未 Actual PASS。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
 
 ## 4. Phase 0 — Navigator adoption proof / Navigator 采用证明
 
@@ -244,8 +244,8 @@ adoption proof 的模型请求必须经过 Exchange。Navigator 直接连接外�
 
 - [x] **P0-09 — Exchange streaming chat:** Harness 发起真实 streaming chat，请求、首 token、结束、错误和 usage 都能关联同一 request/trace ID。真实 Exchange proof 的帧、增量、请求 ID、usage 和终止事件见 [streaming evidence](evidence/2026-09-06-phase-0.md#exchange-streaming-and-tool-continuation)。
 - [x] **P0-10 — Exchange tool continuation:** 完成真实 Tool Call → Tool execution → Tool Result → model continuation；顶层 tools、tool choice、structured tool arguments、result correlation、stream events 在 Gateway 全链路保真。真实 `cy-manifest` Tool 与匹配的 Tool Result 已由模型消费并续答，参见 [streaming/tool evidence](evidence/2026-09-06-phase-0.md#exchange-streaming-and-tool-continuation)。
-- [ ] **P0-11 — Exchange cancel/auth/usage:** 真实取消能停止下游生成并返回可判断的状态；认证、权限、token/usage 记录和失败审计可回读；取消后不得重试为另一条模型请求。
-  当前证据已通过真实取消子场景：下游停止、`user-aborted` 终止事件、取消后 vLLM 无排队/运行请求、同 Session 恢复和无 retry/no fake usage 检查；但 Exchange 的持久化 Usage/Auth/Audit Product ledger 尚未证明，因此整项保持 `[ ]`，参见 [取消子场景证据](evidence/2026-09-06-phase-0.md#cancellation-sub-scenario)。
+- [x] **P0-11 — Exchange cancel/auth/usage:** 真实取消能停止下游生成并返回可判断的状态；认证、权限、token/usage 记录和失败审计可回读；取消后不得重试为另一条模型请求。
+  2026-09-06 Actual PASS：真实 Product route 已证明两条成功请求的 provider usage 与 request ID 精确对应，未认证审计读取返回 401；真实 provider 失败 HTTP 502 可用响应 `X-Request-Id` 通过受认证 API 回读为 `failed`；plain streaming 取消回读为 `cancelled` 且 usage 为 `unknown`（不是 0），无重试，gateway 重启后四条台账及 Endpoint/Route identity 保持并可继续会话。取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 不属于本项，参见 [取消子场景证据](evidence/2026-09-06-phase-0.md#cancellation-sub-scenario) 和 [Product route 台账切片](evidence/2026-09-06-phase-0.md#exchange-product-route-and-ledger-slice)。
 - [ ] **P0-12 — External Provider isolation (tracked in P1-12):** Navigator 能用配置独立连接一个外部 Provider，并明确标记其不经过 Exchange 的来源、usage owner 和权限边界；该入口不会改变 Cyrene persistence 和 Navigator session authority。此项是 V1 独立使用要求，不阻塞 Phase 0 的 Exchange adoption proof。
 
 ### 4.4 Cyrene persistence / Cyrene 会话持久化
@@ -258,8 +258,8 @@ adoption proof 的模型请求必须经过 Exchange。Navigator 直接连接外�
 - [x] **P0-16 — Persistence service restart:** 单独重启 persistence service 后 Session 内容和 writer ownership 不丢失；重启期间的失败可诊断且不会产生两个 writer。参见 [service kill/restart 证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery) 与 [历史证据](evidence/2026-09-05-phase-0.md)。
 - [ ] **P0-17 — Multi-device read/takeover:** 第二客户端设备使用经授权的 Workspace 身份读取会话并在明确 takeover 后取得 writer；旧 writer 的 append 被拒绝并返回可诊断冲突。Phase 0 可用受控 service credentials 证明边界，完整组织 RBAC/OIDC 仍由 P4-08/P4-09 验收。
   现有接管证据来自同机的第二个独立 Web process，不能满足“第二客户端设备”的完整文字标准；因此保持 `[ ]`，参见 [恢复证据的拓扑限制](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)。
-- [ ] **P0-18 — Product metadata separation:** 证明 Navigator metadata 与单一可写 event log 的边界，owner/workspace 可审计；title、sharing policy、tags、permissions 和 audit projection 的完整产品体验在后续企业阶段继续实现，不复制可写 message history。
-- [ ] **P0-19 — Crash and replay boundary:** 模拟 append 前后崩溃、重复 batch、断线恢复和读取较新 resourceVersion，证明事件重放不会执行历史工具，也不会丢失或重排对话。
+- [x] **P0-18 — Product metadata separation:** 证明 Navigator metadata 与单一可写 event log 的边界，owner/workspace 可审计；title、sharing policy、tags、permissions 和 audit projection 的完整产品体验在后续企业阶段继续实现，不复制可写 message history。真实服务迁移、trusted creator/owner 和 metadata boundary 测试已通过，参见 [Product metadata boundary evidence](evidence/2026-09-06-phase-0.md#product-metadata-boundary)。
+- [x] **P0-19 — Crash and replay boundary:** 模拟 append 前后崩溃、重复 batch、断线恢复和读取较新 resourceVersion，证明事件重放不会执行历史工具，也不会丢失或重排已提交事件。Navigator persistence boundary 的四个真实测试已通过；服务 SIGKILL 后未追加事件且原 writer 可恢复。未提交的失败发送草稿不属于 durable event，runtime crash Reload 仍在调查中，参见 [崩溃与重放边界证据](evidence/2026-09-06-phase-0.md#crash-and-replay-boundary)。
 
 ### 4.5 Rust native bridge / Rust 原生能力接入
 
@@ -274,17 +274,19 @@ Rust binary or cyrene-native-host
 ~~~
 
 - [x] **P0-20 — IPC protocol:** 定义并实现 protocol version、request id、method、params、result、error、cancel、event；stdout 只承载协议，stderr 承载日志。Rust stdio 集成与协议测试通过，参见 [Rust bridge 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
-- [ ] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。
+- [ ] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。Native matrix 已覆盖子进程错误/取消边界，但此前 Windows 桌面重启后的同一 Session Continue 仍因缺少 takeover UI 返回 `SessionAlreadyOwnedError`，因此完整 lifecycle gate 保持 `[ ]`。
 - [x] **P0-22 — Real Rust tool:** 使用一个已有 Rust binary（优先 cy-manifest 或等价 Platform artifact utility）作为真实 Tool，模型实际调用并消费结果，不使用内存 fake。真实 `cy-manifest` 返回 Artifact manifest 后由模型续答，参见 [真实 Rust Tool 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
-- [ ] **P0-23 — Rust error/cancel:** 验证非法参数、binary 不存在、stderr 日志、超时、用户取消、child crash、协议版本不兼容和大结果边界。
-- [ ] **P0-24 — Portability:** Linux 与 Windows 都能通过 inherited stdio 工作；没有固定监听端口要求；启动环境、路径、编码和权限由证据记录。
+- [x] **P0-23 — Rust error/cancel:** 验证非法参数、binary 不存在、stderr 日志、超时、用户取消、child crash、协议版本不兼容和大结果边界。
+  2026-09-06 Actual PASS（明确 native bridge scope）：Windows 与 Linux native matrix 均报告 13/13 通过，覆盖上述错误、取消、崩溃、协议和输出边界；Windows UI 的完整重启后 takeover 属于 P0-21/P0-31，未并入本项，参见 [Windows native matrix evidence](evidence/2026-09-06-phase-0.md#windows-native-matrix-and-desktop-sub-scenarios)。
+- [x] **P0-24 — Portability:** Linux 与 Windows 都能通过 inherited stdio 工作；没有固定监听端口要求；启动环境、路径、编码和权限由证据记录。
+  2026-09-06 Actual PASS（明确 portability scope）：Windows 与 Linux native matrix 均报告 13/13；矩阵中的一个检查是 Windows-only Node pin 检查，因此不把它解释为 Linux 的 Node pin 覆盖。inherited stdio、动态本地传输和平台环境边界均按报告记录；桌面安装包 readiness 仍由 P0-02/P0-28..P0-32 单独验收，参见 [Windows native matrix evidence](evidence/2026-09-06-phase-0.md#windows-native-matrix-and-desktop-sub-scenarios)。
 
 ### 4.6 External session import / 外部会话导入
 
 - [x] **P0-25 — Real Codex fixture:** 导入至少一个真实 Codex 会话样本，保留来源标识、原始内容 hash/bytes、转换报告、分支关系和不支持内容说明。真实 Codex CLI 0.152.1 样本的来源字段、bytes/hash 和 conversion report 已保留在 event log，参见 [Codex import 证据](evidence/2026-09-06-phase-0.md#codex-import-and-safety)。
 - [x] **P0-26 — Import safety:** 导入的历史 tool call、approval、permission 和命令只作为历史事件/显示数据，不自动执行、不获得当前设备权限、不写入新的执行队列。历史记录均为 `executable: false`，unknown content 保留且不触发执行，参见 [Codex import safety](evidence/2026-09-06-phase-0.md#codex-import-and-safety)。
-- [ ] **P0-27 — Resume semantics:** 导入会话能作为只读历史打开，并在用户明确建立新的 AgentRun 后继续；新 turn 的权限、模型和 Workspace 来源重新判定。
-  真实后端 Continue 已创建带新 `cwd` 和 preset 的新 AgentRun，历史 Tool 未执行；桌面端的 Open/Continue 交互仍未验收，故保持 `[ ]`。
+- [x] **P0-27 — Resume semantics:** 导入会话能作为只读历史打开，并在用户明确建立新的 AgentRun 后继续；新 turn 的权限、模型和 Workspace 来源重新判定。参见 [Windows GUI resume evidence](evidence/2026-09-06-phase-0.md#windows-codex-ui-resume)。
+  2026-09-06 Actual PASS：Windows 安装包 GUI 完成 Codex 文件选择、只读预览、明确的 Continue as a new session 和 GUI 发送；新 Session `codex-continue-b6c7ca93-1450-4e2a-a196-1224c41b56f1` 记录 32 events，新的 AgentRun 边界为 seq 16，permission/sandbox/policy 重新记录在 seq 17/18/19。导入历史中的 2 个 Tool Call/Result 仅归档，`newToolExecutions=0`；真实 Exchange request `chatcmpl-b3246e9df7624e9c9b1f66e5da9cf199` 的 provider usage 为 6103/8/6111，trusted owner/workspace metadata 也已回读。脱敏 proof JSON 位于 Navigator `.navigator/proof/windows-codex-ui-result.json`，SHA-256 为 `49ff09a5d7bb8bf54c8bf0ce03c8c251a218b20132fe8483a28ccdf779f70de2`。同一 Session 的 takeover、完整 permission projection 和 Windows recovery package 仍是其他检查项。
 
 ### 4.7 Windows desktop proof / Windows 桌面证明
 
