@@ -6,6 +6,7 @@
       <sourceFolder url="file://$MODULE_DIR$/../Services/Cyrene-Exchange/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Services/Cyrene-Exchange/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Exchange/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Exchange/product/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

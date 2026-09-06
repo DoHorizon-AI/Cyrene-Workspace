@@ -2,15 +2,15 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$/../Cyrene-Platform" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../Cyrene-Plugins-Official" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Yield" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../Services/Astrbot-Rev" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Catalyst" vcs="Git" />
-    <mapping directory="$PROJECT_DIR$/../Services/DH-System-Internal" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Echo" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Exchange" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Navigator" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Reactor" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/Cyrene-Yield" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../Services/DH-System-Internal" vcs="Git" />
   </component>
 </project>

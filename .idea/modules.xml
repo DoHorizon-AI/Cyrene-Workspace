@@ -15,15 +15,6 @@
       <module fileurl="file://$PROJECT_DIR$/.idea/DH-System-Internal.iml" filepath="$PROJECT_DIR$/.idea/DH-System-Internal.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-astrbot-capability-worker.iml" filepath="$PROJECT_DIR$/.idea/cyrene-astrbot-capability-worker.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-control-plane.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-control-plane.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/cyrene-control-plane.adapters.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/cyrene-control-plane.adapters.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/inbound-grpc/cyrene-control-plane.adapters.inbound-grpc.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/inbound-grpc/cyrene-control-plane.adapters.inbound-grpc.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/inbound-grpc/cyrene-control-plane.adapters.inbound-grpc.main.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/inbound-grpc/cyrene-control-plane.adapters.inbound-grpc.main.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/inbound-grpc/cyrene-control-plane.adapters.inbound-grpc.test.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/inbound-grpc/cyrene-control-plane.adapters.inbound-grpc.test.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/cyrene-control-plane.adapters.main.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/cyrene-control-plane.adapters.main.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/outbound-kernel/cyrene-control-plane.adapters.outbound-kernel.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/outbound-kernel/cyrene-control-plane.adapters.outbound-kernel.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/outbound-kernel/cyrene-control-plane.adapters.outbound-kernel.main.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/outbound-kernel/cyrene-control-plane.adapters.outbound-kernel.main.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/outbound-kernel/cyrene-control-plane.adapters.outbound-kernel.test.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/outbound-kernel/cyrene-control-plane.adapters.outbound-kernel.test.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/modules/adapters/cyrene-control-plane.adapters.test.iml" filepath="$PROJECT_DIR$/.idea/modules/adapters/cyrene-control-plane.adapters.test.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.iml" filepath="$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.main.iml" filepath="$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.main.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.test.iml" filepath="$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.test.iml" />

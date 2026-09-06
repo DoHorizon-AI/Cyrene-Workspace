@@ -9,9 +9,6 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
-            <option value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm/adapters" />
-            <option value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm/adapters/inbound-grpc" />
-            <option value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm/adapters/outbound-kernel" />
             <option value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm/application" />
             <option value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm/architecture-tests" />
             <option value="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm/bootstrap" />
