@@ -9,7 +9,7 @@
 | Field | Value |
 | --- | --- |
 | Plan ID | CYRENE-TEXT-LIFECYCLE-V1 |
-| Current status | IMPLEMENTING — 22 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
+| Current status | IMPLEMENTING — 23 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
 | Baseline authority | Workspace origin/main at eb5fb2cf1af5c3dd0cbadbe6167bc388b643e318 (2026-09-05); Product contract registry remains under governance/product-contract-v1/ |
 | Implementation line | User-authorized implementation proceeds from the Workspace main baseline toward Develop; this plan is maintained on the task branch |
 | Runtime scope | Linux execution node, NVIDIA GPU, CUDA; Windows is a supported desktop client target for Navigator adoption proof |
@@ -17,7 +17,7 @@
 | Serving scope | vLLM as the first Reactor serving engine |
 | Harness proof pin | dsh-v0.1.3-alpha.1 / d347e703908d0406b7a7ef80e3a0e594d86b2215 |
 | Upstream reference | [DeepSeek Harness pinned tree](https://github.com/deepseek-ai/deepseek-harness/tree/d347e703908d0406b7a7ef80e3a0e594d86b2215) |
-| Progress | 22 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
+| Progress | 23 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
 
 ### 0.1 What this document is and is not / 本文边界
 
@@ -214,7 +214,7 @@ Evidence for <CHECK-ID>
 
 真实 vLLM 0.25.1 已加载固定 revision 的 Qwen3-4B-Instruct-2507 并通过 health；这只是 Phase 0 的外部 Provider 环境，还不是 Reactor / Platform 部署验收。WSL 使用 loopback rendezvous、V1 Model Runner、非 FlashInfer sampler 和带开发头文件的 Python 3.12.11，未修改 vLLM 源码。
 
-当前组件验证：Python persistence 最新全仓测试 17 passed（较早证据中的 13 passed 为旧记录）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 个测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障和历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 中稳定落盘，owner/workspace 与单一可写 event log 的边界已有真实服务测试；旧记录迁移时未知 owner 保持未知，新 Session 使用受信 creator/owner。Product route 现已有真实成功 usage、认证拒绝、失败终态、取消 unknown usage、X-Request-Id 合并回读和 gateway 重启保持台账的证据，P0-11 已达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍在后续范围。双进程接管来自同机独立进程，不能替代第二台物理设备；新增 Windows 安装包 GUI Codex 预览→明确新 Session→真实 LLM 续答证据使 P0-27 达到 Actual PASS，但完整安装包重建/干净机、同一 Session takeover、runtime crash reload 和桌面 gate 仍未 Actual PASS。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
+当前组件验证：Python persistence 最新全仓测试 17 passed（较早证据中的 13 passed 为旧记录）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 个测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障和历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 中稳定落盘，owner/workspace 与单一可写 event log 的边界已有真实服务测试；旧记录迁移时未知 owner 保持未知，新 Session 使用受信 creator/owner。Product route 现已有真实成功 usage、认证拒绝、失败终态、取消 unknown usage、X-Request-Id 合并回读和 gateway 重启保持台账的证据，P0-11 已达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍在后续范围。双进程接管来自同机独立进程，不能替代第二台物理设备；新增 Windows 安装包 GUI Codex 预览→明确新 Session→真实 LLM 续答证据使 P0-27 达到 Actual PASS，安装包 4bea2dc… 又通过同一 Session 的显式 epoch takeover 与新 turn；两个 Windows Profile 接管及受控 TCP 断开后的继续已有证据。P0-30 的桌面交互单独通过；失败输入保留、旧窗口冲突提示、冷客户端标题、干净机和整体桌面 gate 仍待完成。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
 
 ## 4. Phase 0 — Navigator adoption proof / Navigator 采用证明
 
@@ -259,7 +259,7 @@ adoption proof 的模型请求必须经过 Exchange。Navigator 直接连接外�
 - [ ] **P0-17 — Multi-device read/takeover:** 第二客户端设备使用经授权的 Workspace 身份读取会话并在明确 takeover 后取得 writer；旧 writer 的 append 被拒绝并返回可诊断冲突。Phase 0 可用受控 service credentials 证明边界，完整组织 RBAC/OIDC 仍由 P4-08/P4-09 验收。
   现有接管证据来自同机的第二个独立 Web process，不能满足“第二客户端设备”的完整文字标准；因此保持 `[ ]`，参见 [恢复证据的拓扑限制](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)。
 - [x] **P0-18 — Product metadata separation:** 证明 Navigator metadata 与单一可写 event log 的边界，owner/workspace 可审计；title、sharing policy、tags、permissions 和 audit projection 的完整产品体验在后续企业阶段继续实现，不复制可写 message history。真实服务迁移、trusted creator/owner 和 metadata boundary 测试已通过，参见 [Product metadata boundary evidence](evidence/2026-09-06-phase-0.md#product-metadata-boundary)。
-- [x] **P0-19 — Crash and replay boundary:** 模拟 append 前后崩溃、重复 batch、断线恢复和读取较新 resourceVersion，证明事件重放不会执行历史工具，也不会丢失或重排已提交事件。Navigator persistence boundary 的四个真实测试已通过；服务 SIGKILL 后未追加事件且原 writer 可恢复。未提交的失败发送草稿不属于 durable event，runtime crash Reload 仍在调查中，参见 [崩溃与重放边界证据](evidence/2026-09-06-phase-0.md#crash-and-replay-boundary)。
+- [x] **P0-19 — Crash and replay boundary:** 模拟 append 前后崩溃、重复 batch、断线恢复和读取较新 resourceVersion，证明事件重放不会执行历史工具，也不会丢失或重排已提交事件。Navigator persistence boundary 的四个真实测试已通过；服务 SIGKILL 后未追加事件且原 writer 可恢复。未提交的失败发送草稿不属于 durable event，runtime crash 的 Reload 已替换为关闭并重新打开提示，完整桌面恢复仍待复验，参见 [崩溃与重放边界证据](evidence/2026-09-06-phase-0.md#crash-and-replay-boundary)。
 
 ### 4.5 Rust native bridge / Rust 原生能力接入
 
@@ -274,7 +274,7 @@ Rust binary or cyrene-native-host
 ~~~
 
 - [x] **P0-20 — IPC protocol:** 定义并实现 protocol version、request id、method、params、result、error、cancel、event；stdout 只承载协议，stderr 承载日志。Rust stdio 集成与协议测试通过，参见 [Rust bridge 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
-- [ ] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。Native matrix 已覆盖子进程错误/取消边界，但此前 Windows 桌面重启后的同一 Session Continue 仍因缺少 takeover UI 返回 `SessionAlreadyOwnedError`，因此完整 lifecycle gate 保持 `[ ]`。
+- [ ] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。Native matrix 已覆盖子进程错误/取消边界，Windows 安装包已通过同一 Session 的显式 takeover；完整 lifecycle gate 保持 `[ ]`，等待桌面错误/草稿扩展完成后的安装包复验。
 - [x] **P0-22 — Real Rust tool:** 使用一个已有 Rust binary（优先 cy-manifest 或等价 Platform artifact utility）作为真实 Tool，模型实际调用并消费结果，不使用内存 fake。真实 `cy-manifest` 返回 Artifact manifest 后由模型续答，参见 [真实 Rust Tool 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
 - [x] **P0-23 — Rust error/cancel:** 验证非法参数、binary 不存在、stderr 日志、超时、用户取消、child crash、协议版本不兼容和大结果边界。
   2026-09-06 Actual PASS（明确 native bridge scope）：Windows 与 Linux native matrix 均报告 13/13 通过，覆盖上述错误、取消、崩溃、协议和输出边界；Windows UI 的完整重启后 takeover 属于 P0-21/P0-31，未并入本项，参见 [Windows native matrix evidence](evidence/2026-09-06-phase-0.md#windows-native-matrix-and-desktop-sub-scenarios)。
@@ -294,7 +294,8 @@ Rust binary or cyrene-native-host
 
 - [ ] **P0-28 — Reproducible package:** 生成可安装 Windows desktop package，包含锁定版本的 Harness/Profile、native host 和必要运行时；不依赖源码开发环境。
 - [ ] **P0-29 — First launch:** 在干净 Windows 环境安装、启动、退出和再次启动；网络、证书、配置目录、日志目录和升级失败可诊断。
-- [ ] **P0-30 — Desktop chat/tool:** 安装包完成 Exchange chat、streaming、真实 Rust Tool、approval、错误和取消。
+- [x] **P0-30 — Desktop chat/tool:** 安装包完成 Exchange chat、streaming、真实 Rust Tool、approval、错误和取消。
+  2026-09-06 Actual PASS：NSIS digest `5fbb3d004196fc8d60f984679c6c854caed465c21cadee4514e71f2f290cb8be` 已完成 GUI 模型→Rust Tool→续答、允许一次审批、可见 Tool error 和 Stop；8 条完成请求均回读 Exchange usage。失败输入保留、完整恢复与干净机器由独立检查验收，参见 [桌面交互及恢复记录](evidence/2026-09-06-phase-0.md#windows-desktop-recovery-and-faults)。
 - [ ] **P0-31 — Desktop recovery:** 关闭/重启桌面端后从 Cyrene persistence 恢复 Session；验证 persistence service 重启、网络断开和旧 writer 拒绝。
 - [ ] **P0-32 — Dynamic local transport:** 若 Harness UI server 使用本地 HTTP，仅使用系统分配的 loopback 临时端口或等价受监管通道；不写死服务端口，不要求手工端口配置。
 
