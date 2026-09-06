@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "1.0.0",
+  "name": "cyrene-navigator-v8-release-lock",
+  "description": "Exact multi-repository source commits, package digests, and runtime locks for Cyrene Navigator V8 handoff.",
+  "generatedAt": "2026-09-06T16:30:00Z",
+  "repositories": {
+    "Cyrene-Navigator": {
+      "commit": "a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe",
+      "branch": "feat/text-model-lifecycle-v1",
+      "status": "pushed task branch",
+      "pr": null,
+      "upstreamCore": {
+        "repository": "deepseek-ai/deepseek-harness",
+        "tag": "dsh-v0.1.3-alpha.1",
+        "commit": "d347e703908d0406b7a7ef80e3a0e594d86b2215",
+        "patchesCount": 0
+      },
+      "exactCommittedInputs": 97
+    },
+    "Cyrene-Workspace": {
+      "commit": "b6ff1d58d927c39f0ef98c6bb2643a6d713c79a8",
+      "branch": "feat/text-model-lifecycle-v1",
+      "status": "pushed task branch",
+      "pr": "https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/4"
+    },
+    "Cyrene-Platform": {
+      "commitCesResolver": "30272145b9c11df9948465359479c3d95d08a1dc",
+      "commitBundledCyManifest": "185527f82c83700d4f567ac563a393a2e1c18c87",
+      "branch": "feat/text-model-lifecycle-v1",
+      "status": "pushed task branch",
+      "pr": "https://github.com/DoHorizon-AI/Cyrene-Platform/pull/31"
+    },
+    "Cyrene-Exchange": {
+      "commit": "91c509904add26de941e2e14bc3b2b4752233d28",
+      "branch": "feat/text-model-lifecycle-v1",
+      "status": "pushed task branch",
+      "pr": "https://github.com/DoHorizon-AI/Cyrene-Exchange/pull/7"
+    },
+    "Cyrene-Plugins-Official": {
+      "commit": "261a78fd36c7cb2da85a504a89ec7c9c353ecc19",
+      "branch": "feat/text-model-lifecycle-v1",
+      "status": "pushed task branch",
+      "pr": "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/9"
+    }
+  },
+  "packages": {
+    "nsis": {
+      "name": "Cyrene Navigator_0.1.0_x64-setup.exe",
+      "bytes": 52603218,
+      "sha256": "792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90",
+      "installedDesktopSha256": "0acf4412a424c91139dcc23fd943491fb168f5a932f6a34e902bb6618f19bcd1",
+      "storagePath": "C:\\cyrene-nav-build\\proof\\packages\\a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe\\792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90-Cyrene Navigator_0.1.0_x64-setup.exe"
+    },
+    "msi": {
+      "name": "Cyrene Navigator_0.1.0_x64_en-US.msi",
+      "bytes": 99378356,
+      "sha256": "f825b6b569c8eefc8650fbc7b731cd5b24265ca86bd661f1b7b65565d38a52e1",
+      "storagePath": "C:\\cyrene-nav-build\\proof\\packages\\a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe\\f825b6b569c8eefc8650fbc7b731cd5b24265ca86bd661f1b7b65565d38a52e1-Cyrene Navigator_0.1.0_x64_en-US.msi"
+    }
+  },
+  "runningBinaries": {
+    "cesSha256": "923480ad3a88d3f37038b1d7ea462f43377b74a056199956040325fc1f1ddfa7",
+    "resolverSha256": "bff45fd4f589fcca62502ed1123817c9e47fa38d80e57c04e773b5ada4764ac0"
+  },
+  "runtimeParity": {
+    "regularFilesCount": 24382,
+    "contentMapSha256": "1b2fd08a483fc050e6cd0e6cdfd477220d39f06f10f0b085899ec9505fe096a3",
+    "comparisonReceiptSha256": "6b919ec0874b7a1c74dd8f6d0377cb709a83dca3105975227e9f9339db740b9c"
+  }
+}
