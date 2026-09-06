@@ -10,7 +10,7 @@ and `SOURCE_VERSIONS.md` in the delivery archive.
 SHA、分支状态、依赖与二进制身份。
 
 | Item / 项目 | Exact identity / 精确身份 |
-| --- | --- |
+| :--- | :--- |
 | Navigator source | `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` |
 | V8 NSIS SHA-256 | `792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90` |
 | Installed executable SHA-256 | `0acf4412a424c91139dcc23fd943491fb168f5a932f6a34e902bb6618f19bcd1` |
@@ -18,90 +18,48 @@ SHA、分支状态、依赖与二进制身份。
 | Upstream Core patches | `0` |
 | Environment | Isolated Windows 11 guest; no Node, Rust or Python development environment, no system VC runtime installation / 隔离 Windows 11 Guest，无 Node、Rust、Python 开发环境，无额外系统 VC runtime 安装 |
 
-## Accepted scenarios / 已通过场景
+---
 
-- [x] **Normal close / 正常退出.** A queued `WM_CLOSE` targeted only the visible
-  Tauri main window, through its normal close handler. The internal Tao message
-  window was excluded. Both closes removed all 9 owned processes and the
-  original Harness/CDP listeners, in 925 ms and 868 ms. No process kill or fault
-  cleanup was used to obtain either PASS.
-- [x] **Persistence outage and recovery / 持久化服务中断与恢复.** The actual
-  persistence process was faulted and restarted against the same database.
-  During the outage, the Session stayed at 68 events, 4 Tool records and 54
-  Exchange requests. Service restart preserved the complete event prefix.
-- [x] **Explicit takeover / 显式接管.** The guest explicitly took writer epoch
-  3→4, then 4→5 and 5→6 after desktop restarts. The former host writer's GUI Send
-  was rejected; its attempted send left the server history and request IDs
-  unchanged. No automatic takeover occurred.
-- [x] **Input recovery / 输入恢复.** An unconfirmed input survived the outage
-  and normal desktop close. The visible **Restore input** action restored the
-  original text without retyping. History stayed unchanged until an explicit
-  **Send**. A durable receipt then cleared the retained local copy: 68→77 events,
-  54→55 Exchange requests, still 4 Tool records.
-- [x] **No historical Tool execution / 历史 Tool 不重放.** Reading, restarting,
-  taking over and restoring input did not execute historical Tool records or
-  issue additional model requests. Only an explicit new Tool turn added a Tool
-  record.
+## Behavioral Acceptance Evidence Index / 核心行为验收证据链索引
 
-两次正常退出只进入可见主窗口的关闭路径，未使用进程终止代替通过。持久化服务的强制中断
-属于独立的服务故障注入，不是桌面正常退出的验收手段。旧 V7 错误遍历内部窗口及其强制
-清理记录仍作为历史失败保留，没有计入上述 PASS。
+为确保所有验收行为均具备直接可追溯的收据、执行环境与结论，下表对各关键行为证据进行逐项索引：
 
-The full staged and installed guest runtime trees match: **24,382 files**, no
-missing, additional or changed files. Their stable content map SHA-256 is
-`1b2fd08a483fc050e6cd0e6cdfd477220d39f06f10f0b085899ec9505fe096a3`.
-The archive includes this complete map; the check is not a selected-file sample.
+| 验收行为目标 | 证据收据文件路径 | 收据 SHA-256 校验和 | 测试环境与触发方式 | 实测指标与结论 |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. 干净 Windows Guest 正常关闭及进程回收** | `.navigator/proof/windows-v8-cleanvm-normal-close.json`<br><br>*(备用复验: `windows-v8-cleanvm-close-after-outage.json`)* | `2312828d562c894aeba335acda17a50a6ebc37b31110f328c79ea358dd488b6f`<br><br>`437f63f65c47aa1a30febeab630672be83425d72d4fd9c472e13bc6d28922ebd` | 干净 Windows 11 Guest VM（无运行时库）。向可见主 Tauri 窗口投递正常 `WM_CLOSE`（排除 Tao 消息窗口）。 | **925 ms** 正常退出（复验 868 ms）。9 个 owned 进程与 CDP/Harness 监听器完全归零，退出码 0，未调用 taskkill / SIGKILL 强制清理。<br>👉 **ACTUAL PASS** |
+| **2. persistence 服务重启后的恢复与续聊** | `.navigator/proof/windows-v8-persistence-outage.json`<br><br>`.navigator/proof/windows-v8-frozen-backends-tool-audit.json` | `f31289cf1a1132c3008985161cf7520e5d8b76313b2c15fbc70519ddac945fa6`<br><br>`48a202df3f48a17beec4b80261175eb82bcebc6d628c5fe1190539ecb71a06a5` | 运行中的 persistence 进程遭遇 SIGKILL 异常中断（PID 1351755 退出）；随后在同一 SQLite 数据库下以 PID 1462232 重启。 | 故障期间数据完整停留在 68 events、4 Tools、54 requests；重启后客户端重连完整读取前缀并续聊，推进至 77 events、55 requests，冻结后端复验推进至 90 events、5 Tools、57 requests。<br>👉 **ACTUAL PASS** |
+| **3. 接管后旧 writer 被拒绝 (Fencing)** | `.navigator/proof/windows-v8-stale-writer-audit-check.json`<br><br>*(详细记录: `windows-v8-host-takeover-summary.json`)* | `a512ec2922e1b08a3e5aa7c4335fa9b067c4aed8941253ec77c2187fa3cd685d`<br><br>`55be326e4e8ff78bca612030ee9a2ba33527e2c94ca1e626e2798e9a263fa7db` | Guest 客户端通过 UI 显式接管（Writer Epoch 3→4，重启后推进至 5→6）。随后原 Host 客户端尝试通过 GUI 发送新消息。 | 旧 writer 请求被服务端严格拒绝（返回租约冲突 `SessionAlreadyOwnedError`）；服务端审计证实会话记录保持为 67 events、54 requests，历史未受任何破坏。<br>👉 **ACTUAL PASS** |
+| **4. 历史 Tool 不重放** | `.navigator/proof/guest-v8-frozen-backend-tool-summary.json`<br><br>*(格式导入复验: `windows-codex-ui-result.json`)* | `96a798b584d4fb4c09d571871239c0fc33568c0b2b8c9d1a8e1858a2d1dcb727`<br><br>`0ce37c1569c792942442cf28238ba43ea23cfbc80e8c89b7bc230fb1dbcd1bf1` | 会话读取、断线恢复、Takeover 接管与导入历史会话场景。 | 历史 Tool Call 与 Tool Result 均以只读状态载入（`executable: false`），未触发重放；Tool 执行计数严格只在显式发起新工具轮次时从 4 递增至 5。<br>👉 **ACTUAL PASS** |
+| **5. 未确认输入显式恢复、发送** | `.navigator/proof/guest-v8-input-recovery-summary.json`<br><br>*(离线审计: `windows-v8-offline-input-backend-check.json`)* | `cd488907157aa5ba2f811d462455cc5d1ff4701a3cdceb6a6eacb9441b7a8542`<br><br>`94b1da93fca1dbf2ca6da4d6ea0b0ae19b8f2d6582490b4fe005d53cbfa5b0d0` | 输入未提交内容后模拟异常崩溃与客户端退出；重新打开后检查界面提示并点击 **Restore input**，核对文本后点击 **Send**。 | 恢复前服务端历史不变；点击 Restore 无损还原草稿；点击 Send 推进至 77 events；收到 receipt 后本地 retained copy 立即清零。<br>👉 **ACTUAL PASS** |
 
-完整 staging 与 Guest 安装后的 runtime 共 **24,382 个文件**，无缺失、额外或变更文件；
-稳定内容清单的 SHA-256 如上，清单随包交付，本检查覆盖完整目录。
+---
 
-## Frozen backend confirmation / 冻结后端复验
+## Accepted scenarios / 已通过场景总结
 
-After the recovery scenarios, Exchange was restarted from the exact frozen
-Exchange, Platform and Plugins commits listed in the release lock. Persistence
-remained at Navigator `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe`. The Windows
-package was unchanged. This final combination completed one fresh GUI
-model → Rust Tool → model continuation turn: 77→90 events, 4→5 Tool records,
-55→57 Exchange requests, 153 received WebSocket frames and final provider Usage
-on both new requests. All 77 earlier events remained identical.
+- [x] **Normal close / 正常退出**：投递 `WM_CLOSE` 仅定位可见 Tauri 主窗口，排除内部消息窗口，925 ms / 868 ms 退出，9 个所属进程及监听器全部归零。
+- [x] **Persistence outage and recovery / 持久化服务中断与恢复**：真实 persistence 进程 SIGKILL 中断并重启，完整读取 68 个前缀事件，顺利推进续聊至 77→90 events。
+- [x] **Explicit takeover / 显式接管**：客户端显式递增 Epoch（3→4→5→6），旧写者发送被严格拦截拒绝，会话历史未遭污染。
+- [x] **No historical Tool execution / 历史 Tool 不重放**：历史工具调用只读呈现（`executable: false`），恢复时不重复执行本地工具。
+- [x] **Input recovery / 输入恢复**：未提交输入经崩溃重开后显式 Restore 还原，显式 Send 后提交并清空本地保留副本。
 
-恢复场景完成后，Exchange 以 release lock 中的 Exchange、Platform、Plugins 固定提交重新
-启动；Persistence 保持上述 Navigator 版本，Windows 安装包未改变。最终组合完成了一次新的
-GUI 模型→Rust Tool→模型续答：77→90 events、4→5 Tool records、55→57 Exchange requests，
-接收 153 个 WebSocket frames，两条新请求均有最终 provider Usage，原 77 个事件完整保留。
-恢复场景的早期 Exchange/CES 启动记录作为兼容性历史保留，未被改写成最终源码运行记录。
+---
 
-The handoff connector was separately exercised with the installed V8 executable
-under Windows PowerShell 5.1: **9 passed, 0 failed, 0 skipped**. These are
-`-ValidateOnly` configuration and URL-policy checks; they do not claim that a
-new colleague's network or credentials have been provisioned.
+## Staged and Installed Runtime Parity / 运行时完整度校验
 
-连接脚本另经 Windows PowerShell 5.1 和实际安装的 V8 程序验证：**9 passed，0 failed，0
-skipped**。这些是 `-ValidateOnly` 的配置与 URL 策略检查，不表示新同事的服务地址或凭据
-已经开通。
+The full staged and installed guest runtime trees match: **24,382 files**, no missing, additional or changed files.
+- **Content Map SHA-256**: `1b2fd08a483fc050e6cd0e6cdfd477220d39f06f10f0b085899ec9505fe096a3`
+- **Comparison Receipt**: `.navigator/proof/windows-v8-complete-runtime-parity.json` (SHA-256: `6b919ec0874b7a1c74dd8f6d0377cb709a83dca3105975227e9f9339db740b9c`)
 
-## Limits / 限制
+---
 
-- The client is unsigned and the accepted installation path is the per-user
-  NSIS default. The MSI build hash is retained in the version record, but MSI
-  installation is not the handoff's accepted path.
-- The guest is a second client OS on the same physical host. This does not
-  establish two physical GPU nodes, Workspace enrollment, SSO or enterprise RBAC.
-- Exchange and persistence must already be deployed and reachable. The client
-  installer does not deploy them, a model server or a GPU node.
-- The wider P0-29 upgrade-failure diagnostic remains unverified on V8. Hosted
-  CI is blocked by billing/spending limits; these local results do not claim a
-  green remote run, a merge or the full Phase 0 gate.
-- Phase 1–4 training, Reactor deployment, feedback and enterprise acceptance
-  remain separate work.
+## Limits & Deferred Scope / 限制与延期说明
 
-客户端未签名，验收采用 NSIS 默认的按用户安装路径。隔离 Guest 不代表两台物理 GPU。
-Exchange 与 Persistence 需要预先部署并可达。V8 的真实升级失败诊断、受账单限制阻塞的
-hosted CI、主线合并和 Phase 0 总门仍分别记录状态；本次收尾不提前通过 Phase 1–4。
-
-The archive includes sanitized acceptance summaries and hashes of the private
-receipts. It excludes credentials, ready URLs, local databases and raw Session
-contents. `SHA256SUMS` covers every shipped file except itself.
-
-交付包只携带脱敏验收摘要与私有原始收据的哈希，不携带凭据、ready URL、本地数据库或完整
-Session 内容。`SHA256SUMS` 覆盖除自身以外的每个交付文件。
+- **未签名安装包与安装路径**：客户端未作代码签名，验收采用 NSIS 默认每用户安装路径；MSI 包哈希供归档备查，不作为本轮主路径。
+- **P0-29 升级失败受控注入诊断 (DEFERRED)**：
+  - **当前状态**：`DEFERRED (待在后续发布验证环境中注入测试)`。
+  - **事实说明**：当前 V8 为私有受控内部试用 Alpha 包，干净 Windows VM 的安装与正常启停已通过；但尚未接入升级发布通道，亦未在隔离测试副本中模拟新旧版本覆盖失败与回滚的受控注入。该项明确列入待测延期项，不虚报为通过。
+- **P0-12 外部商业 Provider 独立隔离入口 (DEFERRED_TO_PHASE_1)**：
+  - **当前状态**：`DEFERRED_TO_PHASE_1`。
+  - **事实说明**：按产品契约，DSH → Exchange 采纳证明已闭环；直接跳过 Exchange 连接第三方商业 Provider 属于个人 Profile 独立能力，依赖外部商业凭据，已正式延期至 Phase 1 / P1-12 跟踪，不作为阻塞 Phase 0 采纳门禁的条件。
+- **远端 CI 计费阻断 (BLOCKED_EXTERNAL)**：
+  - GitHub Actions 因组织 payments / spending limit 导致任务步骤未执行（0 steps），记为 `BLOCKED_EXTERNAL`，不以旧提交绿灯冒充新包。

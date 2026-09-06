@@ -1,15 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "name": "cyrene-navigator-v8-release-lock",
-  "description": "Exact multi-repository source commits, package digests, and runtime locks for Cyrene Navigator V8 handoff.",
-  "generatedAt": "2026-09-06T16:30:00Z",
+  "description": "Authoritative multi-repository source commits, package digests, component roles, and runtime locks for Cyrene Navigator V8 Phase 0 handoff.",
+  "generatedAt": "2026-09-06T16:45:00Z",
   "repositories": {
     "Cyrene-Navigator": {
       "commit": "a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe",
       "branch": "feat/text-model-lifecycle-v1",
       "status": "pushed task branch",
       "pr": null,
+      "purpose": "Desktop UI client, session adapter, and local Tauri application shell",
       "upstreamCore": {
         "repository": "deepseek-ai/deepseek-harness",
         "tag": "dsh-v0.1.3-alpha.1",
@@ -19,29 +20,54 @@
       "exactCommittedInputs": 97
     },
     "Cyrene-Workspace": {
-      "commit": "b6ff1d58d927c39f0ef98c6bb2643a6d713c79a8",
+      "commit": "ae6175cf1da4ca5e3cfa01844b2f159a68a113ca",
       "branch": "feat/text-model-lifecycle-v1",
       "status": "pushed task branch",
-      "pr": "https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/4"
+      "pr": "https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/4",
+      "purpose": "Multi-repository workspace topology, governance policies, and Phase 0 handoff documentation"
     },
     "Cyrene-Platform": {
-      "commitCesResolver": "30272145b9c11df9948465359479c3d95d08a1dc",
-      "commitBundledCyManifest": "185527f82c83700d4f567ac563a393a2e1c18c87",
       "branch": "feat/text-model-lifecycle-v1",
       "status": "pushed task branch",
-      "pr": "https://github.com/DoHorizon-AI/Cyrene-Platform/pull/31"
+      "pr": "https://github.com/DoHorizon-AI/Cyrene-Platform/pull/31",
+      "components": {
+        "backendExecutionService": {
+          "commit": "30272145b9c11df9948465359479c3d95d08a1dc",
+          "purpose": "Platform Resolver and Capability Execution Service (CES) daemon binaries providing model capability routing and execution",
+          "binariesSha256": {
+            "ces": "923480ad3a88d3f37038b1d7ea462f43377b74a056199956040325fc1f1ddfa7",
+            "resolver": "bff45fd4f589fcca62502ed1123817c9e47fa38d80e57c04e773b5ada4764ac0"
+          }
+        },
+        "bundledNativeToolCyManifest": {
+          "commit": "185527f82c83700d4f567ac563a393a2e1c18c87",
+          "purpose": "Standalone native tool (cy-manifest.exe) bundled inside the Windows V8 desktop installer",
+          "rationale": "Compiled with static CRT (/MT) to eliminate external VCRUNTIME140.dll dependencies on clean Windows Guest installations"
+        },
+        "pythonCapabilityClientSdk": {
+          "commit": "30272145b9c11df9948465359479c3d95d08a1dc",
+          "purpose": "Platform Python Capability Client SDK consumed editably by Exchange Product"
+        }
+      },
+      "verifiedCompositionEvidence": {
+        "receiptPath": ".navigator/proof/windows-v8-frozen-backends-tool-audit.json",
+        "receiptSha256": "48a202df3f48a17beec4b80261175eb82bcebc6d628c5fe1190539ecb71a06a5",
+        "coverage": "Full round-trip GUI model -> cy-manifest tool execution -> model continuation under frozen backends (77->90 events, 4->5 Tools, 55->57 requests)"
+      }
     },
     "Cyrene-Exchange": {
       "commit": "91c509904add26de941e2e14bc3b2b4752233d28",
       "branch": "feat/text-model-lifecycle-v1",
       "status": "pushed task branch",
-      "pr": "https://github.com/DoHorizon-AI/Cyrene-Exchange/pull/7"
+      "pr": "https://github.com/DoHorizon-AI/Cyrene-Exchange/pull/7",
+      "purpose": "Exchange Product gateway, token authentication, usage accounting, and streaming proxy"
     },
     "Cyrene-Plugins-Official": {
       "commit": "261a78fd36c7cb2da85a504a89ec7c9c353ecc19",
       "branch": "feat/text-model-lifecycle-v1",
       "status": "pushed task branch",
-      "pr": "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/9"
+      "pr": "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/9",
+      "purpose": "Official model-api-connector plugin providing standardized model adapter protocol"
     }
   },
   "packages": {
@@ -58,10 +84,6 @@
       "sha256": "f825b6b569c8eefc8650fbc7b731cd5b24265ca86bd661f1b7b65565d38a52e1",
       "storagePath": "C:\\cyrene-nav-build\\proof\\packages\\a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe\\f825b6b569c8eefc8650fbc7b731cd5b24265ca86bd661f1b7b65565d38a52e1-Cyrene Navigator_0.1.0_x64_en-US.msi"
     }
-  },
-  "runningBinaries": {
-    "cesSha256": "923480ad3a88d3f37038b1d7ea462f43377b74a056199956040325fc1f1ddfa7",
-    "resolverSha256": "bff45fd4f589fcca62502ed1123817c9e47fa38d80e57c04e773b5ada4764ac0"
   },
   "runtimeParity": {
     "regularFilesCount": 24382,
