@@ -311,6 +311,12 @@ Rust binary or cyrene-native-host
 
 先让用户可以使用一个已有的普通文本模型：ModelVersion/外部模型 → Reactor → vLLM → Endpoint → Exchange → Navigator。第一版用一张 NVIDIA GPU 完成真实消费路径；多节点资源体验放到 Phase 4。
 
+前置能力进度：共享 V2 目录 Artifact 契约和 Python provider 已在 Platform
+`1b0bb98253b9ca48cb56b6b3b73f2f53f6c81065` 上通过本地与 hosted 检查，详见
+[目录产物前置证据](evidence/2026-09-06-artifact-prerequisite.md)。Linux Rust 目录落盘
+随后在 `30272145b9c11df9948465359479c3d95d08a1dc` 上通过 15 单测、8 集成测试及 CI。
+RuntimeAgent/Reactor/GPU 集成仍需单独验收；下列产品检查和阶段总门尚未因此通过。
+
 - [ ] **P1-01 — Model fixture lock:** 选择一个可再分发、可验证的文本模型 fixture，锁定 revision、tokenizer、chat template、precision、context limit、license 和目标 GPU/VRAM；可评估的候选是 Qwen/Qwen3-4B-Instruct-2507，但在验收前必须写入最终配置。
 - [ ] **P1-02 — External model import:** Reactor 能直接导入/引用外部 Hugging Face 模型或本地可验证模型目录，不依赖 Yield 在线存在。
 - [ ] **P1-03 — Compute selection:** Reactor 使用 Platform resource/placement port 选择一张已加入 Workspace 的 NVIDIA GPU；产品不保存一套独立 SSH/IP/GPU authority。
