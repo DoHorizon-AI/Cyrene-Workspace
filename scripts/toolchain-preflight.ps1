@@ -53,7 +53,7 @@ function Find-CanonicalPython {
         (Join-Path (Get-Location) ".venv\Scripts\python.exe"),
         (Join-Path $WorkspaceRoot ".venv\Scripts\python.exe"),
         (Join-Path $WorkspaceRoot "..\Cyrene-Platform\.venv\Scripts\python.exe"),
-        (Join-Path $WorkspaceRoot "..\plugins\.venv\Scripts\python.exe")
+        (Join-Path $WorkspaceRoot "..\Cyrene-Plugins-Official\.venv\Scripts\python.exe")
     )
     foreach ($venvPy in $venvCandidates) {
         if (Test-Path -LiteralPath $venvPy -PathType Leaf) {

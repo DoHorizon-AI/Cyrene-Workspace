@@ -2,10 +2,10 @@
 <project version="4">
   <component name="FrameworkDetectionExcludesConfiguration">
     <file type="web" url="file://$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
-    <file type="web" url="file://$PROJECT_DIR$/../plugins/plugins/gateway/spring" />
-    <file type="web" url="file://$PROJECT_DIR$/../services/cyrene-exchange/components/coordinator" />
+    <file type="web" url="file://$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
+    <file type="web" url="file://$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
   </component>
-  <component name="ProjectRootManager" version="2" languageLevel="JDK_21" default="true" project-jdk-name="21" project-jdk-type="JavaSDK">
-    <output url="file://$PROJECT_DIR$/../services/cyrene-exchange/out" />
+  <component name="ProjectRootManager" version="2" languageLevel="JDK_25" default="true" project-jdk-name="~/Dev/Cyrene/.venv/bin/python" project-jdk-type="Python SDK">
+    <output url="file://$PROJECT_DIR$/out" />
   </component>
 </project>

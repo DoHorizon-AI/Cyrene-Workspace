@@ -28,24 +28,25 @@ cargo check --workspace --locked --all-targets
 cargo test --workspace --locked
 
 echo -e "\n[3/4] Validating Cyrene-Reactor (Rust Component)..."
-cd "${SCRIPT_DIR}/../services/cyrene-reactor"
+cd "${SCRIPT_DIR}/../Services/Cyrene-Reactor"
 cargo metadata --format-version 1 --no-deps >/dev/null
 cargo check --workspace --locked
 
 echo -e "\n[4/4] Validating Python Runtimes (Linux)..."
 cd "${SCRIPT_DIR}/../Cyrene-Platform"
 uv run pytest tooling/ci
-cd "${SCRIPT_DIR}/../plugins"
+cd "${SCRIPT_DIR}/../Cyrene-Plugins-Official"
 uv run pytest conformance/tests
-cd "${SCRIPT_DIR}/../services/cyrene-reactor"
+cd "${SCRIPT_DIR}/../Services/Cyrene-Reactor"
 uv run pytest
-cd "${SCRIPT_DIR}/../services/Cyrene-Yield"
+cd "${SCRIPT_DIR}/../Services/Cyrene-Yield"
 uv run pytest
-cd "${SCRIPT_DIR}/../services/cyrene-exchange"
+cd "${SCRIPT_DIR}/../Services/Cyrene-Exchange"
 uv run pytest
-cd "${SCRIPT_DIR}/../services/cyrene-astrbot-rev/python/capability_worker"
+cd "${SCRIPT_DIR}/../Services/Astrbot-Rev/python/capability_worker"
 uv run pytest
 
 echo -e "\n=================================================="
 echo " CANONICAL LINUX ACCEPTANCE: ALL GATES PASSED"
 echo "=================================================="
+

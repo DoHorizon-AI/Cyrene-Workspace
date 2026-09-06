@@ -69,15 +69,15 @@ Write-Host "`n[2/6] Checking repository topology & acquiring missing repositorie
 
 $allRepos = @(
     @{ Name = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Platform.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot", "platform", "training") },
-    @{ Name = "Cyrene-Plugins"; Path = "../plugins"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot", "platform", "training") },
-    @{ Name = "cyrene-astrbot-rev"; Path = "../services/cyrene-astrbot-rev"; Remote = "https://github.com/DoHorizon-AI/Astrbot-Rev.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot") },
-    @{ Name = "cyrene-dh-system-internal"; Path = "../services/cyrene-dh-system-internal"; Remote = "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"; Policy = "external_auth_required"; Profiles = @("full") },
-    @{ Name = "cyrene-reactor"; Path = "../services/cyrene-reactor"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "Cyrene-Yield"; Path = "../services/Cyrene-Yield"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Yield.git"; Policy = "public_zero_auth"; Profiles = @("full", "training") },
-    @{ Name = "cyrene-exchange"; Path = "../services/cyrene-exchange"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot") },
-    @{ Name = "cyrene-catalyst"; Path = "../services/cyrene-catalyst"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "cyrene-echo"; Path = "../services/cyrene-echo"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Echo.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "cyrene-navigator"; Path = "../services/cyrene-navigator"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"; Policy = "public_zero_auth"; Profiles = @("full") }
+    @{ Name = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot", "platform", "training") },
+    @{ Name = "Astrbot-Rev"; Path = "../Services/Astrbot-Rev"; Remote = "https://github.com/DoHorizon-AI/Astrbot-Rev.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot") },
+    @{ Name = "DH-System-Internal"; Path = "../Services/DH-System-Internal"; Remote = "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"; Policy = "external_auth_required"; Profiles = @("full") },
+    @{ Name = "Cyrene-Reactor"; Path = "../Services/Cyrene-Reactor"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"; Policy = "public_zero_auth"; Profiles = @("full") },
+    @{ Name = "Cyrene-Yield"; Path = "../Services/Cyrene-Yield"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Yield.git"; Policy = "public_zero_auth"; Profiles = @("full", "training") },
+    @{ Name = "Cyrene-Exchange"; Path = "../Services/Cyrene-Exchange"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot") },
+    @{ Name = "Cyrene-Catalyst"; Path = "../Services/Cyrene-Catalyst"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"; Policy = "public_zero_auth"; Profiles = @("full") },
+    @{ Name = "Cyrene-Echo"; Path = "../Services/Cyrene-Echo"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Echo.git"; Policy = "public_zero_auth"; Profiles = @("full") },
+    @{ Name = "Cyrene-Navigator"; Path = "../Services/Cyrene-Navigator"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"; Policy = "public_zero_auth"; Profiles = @("full") }
 )
 
 $activeRepos = $allRepos | Where-Object { $_.Profiles -contains $Profile }
@@ -105,11 +105,11 @@ if (-not $SkipPythonSync) {
 
     $allPythonTargets = @(
         @{ Repo = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Extra = ""; Profiles = @("full", "astrbot", "platform", "training") },
-        @{ Repo = "plugins"; Path = "../plugins"; Extra = ""; Profiles = @("full", "astrbot", "platform", "training") },
-        @{ Repo = "cyrene-reactor"; Path = "../services/cyrene-reactor"; Extra = "--extra dev --extra pro"; Profiles = @("full") },
-        @{ Repo = "Cyrene-Yield"; Path = "../services/Cyrene-Yield"; Extra = "--extra dev"; Profiles = @("full", "training") },
-        @{ Repo = "cyrene-exchange"; Path = "../services/cyrene-exchange"; Extra = "--extra dev"; Profiles = @("full", "astrbot") },
-        @{ Repo = "cyrene-astrbot-rev/capability_worker"; Path = "../services/cyrene-astrbot-rev/python/capability_worker"; Extra = ""; Profiles = @("full", "astrbot") }
+        @{ Repo = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Extra = ""; Profiles = @("full", "astrbot", "platform", "training") },
+        @{ Repo = "Cyrene-Reactor"; Path = "../Services/Cyrene-Reactor"; Extra = "--extra dev --extra pro"; Profiles = @("full") },
+        @{ Repo = "Cyrene-Yield"; Path = "../Services/Cyrene-Yield"; Extra = "--extra dev"; Profiles = @("full", "training") },
+        @{ Repo = "Cyrene-Exchange"; Path = "../Services/Cyrene-Exchange"; Extra = "--extra dev"; Profiles = @("full", "astrbot") },
+        @{ Repo = "Astrbot-Rev/capability_worker"; Path = "../Services/Astrbot-Rev/python/capability_worker"; Extra = ""; Profiles = @("full", "astrbot") }
     )
 
     $activePython = $allPythonTargets | Where-Object { $_.Profiles -contains $Profile }

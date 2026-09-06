@@ -204,6 +204,10 @@ function Get-WorktreeRoot([string]$ExplicitRoot) {
         $candidates += ($systemDrive.TrimEnd("\", "/") + "\cwt")
         $candidates += (Join-Path ([System.IO.Path]::GetTempPath()) "cwt")
     } else {
+        $homeDir = if (-not [string]::IsNullOrWhiteSpace($env:HOME)) { $env:HOME } else { "" }
+        if (-not [string]::IsNullOrWhiteSpace($homeDir)) {
+            $candidates += (Join-Path $homeDir ".cyrene/cwt")
+        }
         $candidates += "/tmp/cwt"
     }
 
@@ -316,18 +320,28 @@ function Resolve-Repository([string]$Query) {
 
     $aliases = @{
         "platform" = "Cyrene-Platform"
-        "plugins" = "Cyrene-Plugins"
-        "astrbot" = "cyrene-astrbot-rev"
-        "astrbot-rev" = "cyrene-astrbot-rev"
-        "internal" = "cyrene-dh-system-internal"
-        "dh-system" = "cyrene-dh-system-internal"
-        "dh-system-internal" = "cyrene-dh-system-internal"
-        "reactor" = "cyrene-reactor"
+        "plugins" = "Cyrene-Plugins-Official"
+        "cyrene-plugins" = "Cyrene-Plugins-Official"
+        "cyrene-plugins-official" = "Cyrene-Plugins-Official"
+        "astrbot" = "Astrbot-Rev"
+        "astrbot-rev" = "Astrbot-Rev"
+        "cyrene-astrbot-rev" = "Astrbot-Rev"
+        "internal" = "DH-System-Internal"
+        "dh-system" = "DH-System-Internal"
+        "dh-system-internal" = "DH-System-Internal"
+        "cyrene-dh-system-internal" = "DH-System-Internal"
+        "reactor" = "Cyrene-Reactor"
+        "cyrene-reactor" = "Cyrene-Reactor"
         "yield" = "Cyrene-Yield"
-        "exchange" = "cyrene-exchange"
-        "catalyst" = "cyrene-catalyst"
-        "echo" = "cyrene-echo"
-        "navigator" = "cyrene-navigator"
+        "cyrene-yield" = "Cyrene-Yield"
+        "exchange" = "Cyrene-Exchange"
+        "cyrene-exchange" = "Cyrene-Exchange"
+        "catalyst" = "Cyrene-Catalyst"
+        "cyrene-catalyst" = "Cyrene-Catalyst"
+        "echo" = "Cyrene-Echo"
+        "cyrene-echo" = "Cyrene-Echo"
+        "navigator" = "Cyrene-Navigator"
+        "cyrene-navigator" = "Cyrene-Navigator"
     }
     $aliasKey = $Query.Trim().ToLowerInvariant()
     if ($aliases.ContainsKey($aliasKey)) {

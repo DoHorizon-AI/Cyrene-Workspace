@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="GENERAL_MODULE" version="4">
+  <component name="NewModuleRootManager" inherit-compiler-output="true">
+    <exclude-output />
+    <content url="file://$MODULE_DIR$/../Cyrene-Plugins-Official">
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/agent-system/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/agent-system/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/skills-runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/skills-runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/providers/model-api-connector/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/providers/model-api-connector/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/agent-system/compatibility/python" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/gateway/python/compatibility/python/capability_worker/.venv" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

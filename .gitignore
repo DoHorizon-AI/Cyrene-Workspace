@@ -36,6 +36,7 @@ Thumbs.db
 # Agent Worktree Isolation & Local Registries
 .agent-worktrees/
 .task-worktrees/
+.worktrees/
 .registry.json
 *.registry.json
 *.worktree-registry.json
@@ -45,3 +46,9 @@ p/
 implementation_plan.md
 walkthrough.md
 .jspace/
+.agent-log/
+
+# Local IDE Run Configurations
+.run/
+.idea/runConfigurations/
+
