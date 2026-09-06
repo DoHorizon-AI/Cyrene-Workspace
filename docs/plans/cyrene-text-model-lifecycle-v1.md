@@ -9,7 +9,7 @@
 | Field | Value |
 | --- | --- |
 | Plan ID | CYRENE-TEXT-LIFECYCLE-V1 |
-| Current status | IMPLEMENTING — 25 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
+| Current status | IMPLEMENTING — 25/32 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
 | Baseline authority | Workspace origin/main at eb5fb2cf1af5c3dd0cbadbe6167bc388b643e318 (2026-09-05); Product contract registry remains under governance/product-contract-v1/ |
 | Implementation line | User-authorized implementation proceeds from the Workspace main baseline toward Develop; this plan is maintained on the task branch |
 | Runtime scope | Linux execution node, NVIDIA GPU, CUDA; Windows is a supported desktop client target for Navigator adoption proof |
@@ -17,7 +17,7 @@
 | Serving scope | vLLM as the first Reactor serving engine |
 | Harness proof pin | dsh-v0.1.3-alpha.1 / d347e703908d0406b7a7ef80e3a0e594d86b2215 |
 | Upstream reference | [DeepSeek Harness pinned tree](https://github.com/deepseek-ai/deepseek-harness/tree/d347e703908d0406b7a7ef80e3a0e594d86b2215) |
-| Progress | 25 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
+| Progress | 25/32 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
 
 ### 0.1 What this document is and is not / 本文边界
 
@@ -215,6 +215,26 @@ Evidence for <CHECK-ID>
 真实 vLLM 0.25.1 已加载固定 revision 的 Qwen3-4B-Instruct-2507 并通过 health；这只是 Phase 0 的外部 Provider 环境，还不是 Reactor / Platform 部署验收。WSL 使用 loopback rendezvous、V1 Model Runner、非 FlashInfer sampler 和带开发头文件的 Python 3.12.11，未修改 vLLM 源码。
 
 当前组件验证：Python persistence 最新全仓测试 17 passed（较早证据中的 13 passed 为旧记录）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 个测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障和历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 中稳定落盘，owner/workspace 与单一可写 event log 的边界已有真实服务测试；旧记录迁移时未知 owner 保持未知，新 Session 使用受信 creator/owner。Product route 现已有真实成功 usage、认证拒绝、失败终态、取消 unknown usage、X-Request-Id 合并回读和 gateway 重启保持台账的证据，P0-11 已达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍在后续范围。双进程接管来自同机独立进程，不能替代第二台物理设备；新增 Windows 安装包 GUI Codex 预览→明确新 Session→真实 LLM 续答证据使 P0-27 达到 Actual PASS。最新 Windows v5 证据以 Navigator `cd0d6a564c653c6576e1bff68c05cb84d91e57ff` 和 CI 修复 `91a6349eca0b137e57b4f348b8508218826755d1` 为来源：58 个受管构建文件全部 digest 一致，NSIS/MSI 安装包已重新安装并运行；155-entry profile inventory 中 6 个 Cyrene entry active、4 个 entry disabled，动态 loopback ports `12599`、`12294`、`5851` 已在真实运行中分配。P0-08 的 Profile/Bundle 边界和 P0-32 的动态本地传输因此达到 scoped Actual PASS。v5 服务重启还恢复了 158-event committed prefix，epoch 由 8→9，完成后为 170 events、5 Tools、34 audit rows 且没有历史 Tool replay；但 OS 分配新端口改变 browser origin，未发送的 composer draft 丢失，prompt 仅为完成 backend recovery proof 而手工重新输入。此前 backend 返回的 `409 SESSION_ALREADY_LOCAL` 是 writer ownership 冲突，却被 UI 显示为 unknown 并引导重复 observe；该 UI 修复仍待安装包复验。因此 P0-21、P0-31、P0-02/P0-28/P0-29 和 compaction summary 兼容性仍待完成。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
+
+### 3.5 Current evidence delta (2026-09-06) / 当前证据增量
+
+本节只更新当前摘要，不改变既有检查项的勾选状态。当前仍为 **25/32** 个 Phase 0
+组件检查 Actual PASS；P0-GATE、P0-31 以及其它剩余检查继续保持未完成。
+
+- Windows wrapper revision `2d4382a` 已用正式脚本完成构建，但
+  `windows-v6-official-package.json` 明确标记为 `intermediateSnapshot`。因此这份 V6
+  只能作为中间构建记录，不能关闭 P0-02、P0-28 或 P0-29，也不能作为最终安装包证据。
+- Navigator compaction revision `c09e737` 的受控 4 项测试和真实 CUDA summary stream
+  均通过。该插件只从摘要请求中移除辅助 tools，普通 Agent 请求仍保留 tools。原 v5
+  失败的 provider 原始流未采样，因此不能确认那次失败是否来自仅含 Tool Call 的响应。
+- Windows host 的 receipt/Profile/title 组合验证为 receipt 7/7、Profile 1/1、title 5/5，
+  覆盖 `source.kind === 'user'`、真实 HTTP 200/401/403 和中止后关闭持久化 read handle。
+  Python persistence 17 项、Tauri 17 项和 client 22 项质量验证保持通过；`3b8ae97` 的
+  local input put/remove 错误边界也已记录。
+- 中间 V6 安装包的 native IPC put、幂等、冲突、bad-key、重开留存和删除子场景通过，
+  但最终 GUI 故障恢复、完整桌面恢复和 clean Windows/VM 验收仍待新的最终安装包证据。
+
+详细哈希、命令和限制见 [Phase 0 当前证据增量](evidence/2026-09-06-phase-0.md#current-evidence-delta)。
 
 ## 4. Phase 0 — Navigator adoption proof / Navigator 采用证明
 
