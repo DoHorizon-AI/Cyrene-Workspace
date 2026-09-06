@@ -1,0 +1,67 @@
+﻿{
+    "time":  "2026-09-06T15:53:14.6752875+00:00",
+    "windowsPowerShellVersion":  "5.1.26100.7920",
+    "scriptSha256":  "b67a07973c1cb5d8c35e5dd7f3d702e22ee17fd5da480217abc4a3a682904d63",
+    "installedExecutableSha256":  "0acf4412a424c91139dcc23fd943491fb168f5a932f6a34e902bb6618f19bcd1",
+    "passed":  9,
+    "failed":  0,
+    "skipped":  0,
+    "tokensRequested":  false,
+    "processStarted":  false,
+    "checks":  [
+                   {
+                       "name":  "https-valid",
+                       "passed":  true,
+                       "expectedAccepted":  true,
+                       "actualAccepted":  true
+                   },
+                   {
+                       "name":  "literal-loopback-valid",
+                       "passed":  true,
+                       "expectedAccepted":  true,
+                       "actualAccepted":  true
+                   },
+                   {
+                       "name":  "remote-http-rejected",
+                       "passed":  true,
+                       "expectedAccepted":  false,
+                       "actualAccepted":  false
+                   },
+                   {
+                       "name":  "userinfo-rejected",
+                       "passed":  true,
+                       "expectedAccepted":  false,
+                       "actualAccepted":  false
+                   },
+                   {
+                       "name":  "query-rejected",
+                       "passed":  true,
+                       "expectedAccepted":  false,
+                       "actualAccepted":  false
+                   },
+                   {
+                       "name":  "fragment-rejected",
+                       "passed":  true,
+                       "expectedAccepted":  false,
+                       "actualAccepted":  false
+                   },
+                   {
+                       "name":  "unknown-token-field-rejected",
+                       "passed":  true,
+                       "expectedAccepted":  false,
+                       "actualAccepted":  false
+                   },
+                   {
+                       "name":  "missing-model-rejected",
+                       "passed":  true,
+                       "expectedAccepted":  false,
+                       "actualAccepted":  false
+                   },
+                   {
+                       "name":  "nonobject-rejected",
+                       "passed":  true,
+                       "expectedAccepted":  false,
+                       "actualAccepted":  false
+                   }
+               ]
+}

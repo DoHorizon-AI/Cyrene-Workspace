@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "name": "cyrene-navigator-v8-release-lock",
-  "description": "Authoritative multi-repository source commits, package digests, component roles, and runtime locks for Cyrene Navigator V8 Phase 0 handoff.",
-  "generatedAt": "2026-09-06T16:45:00Z",
+  "description": "Authoritative multi-repository source commits, package digests, component roles, receipts, and runtime locks for Cyrene Navigator V8 Phase 0 handoff.",
+  "generatedAt": "2026-09-06T16:55:00Z",
   "repositories": {
     "Cyrene-Navigator": {
       "commit": "a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe",
@@ -20,7 +20,7 @@
       "exactCommittedInputs": 97
     },
     "Cyrene-Workspace": {
-      "commit": "ae6175cf1da4ca5e3cfa01844b2f159a68a113ca",
+      "commit": "77b313b91a0d4f0cceb4b69f3a74e37bf65e7a91",
       "branch": "feat/text-model-lifecycle-v1",
       "status": "pushed task branch",
       "pr": "https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/4",
@@ -50,7 +50,7 @@
         }
       },
       "verifiedCompositionEvidence": {
-        "receiptPath": ".navigator/proof/windows-v8-frozen-backends-tool-audit.json",
+        "receiptPath": "proof/windows-v8-frozen-backends-tool-audit.json",
         "receiptSha256": "48a202df3f48a17beec4b80261175eb82bcebc6d628c5fe1190539ecb71a06a5",
         "coverage": "Full round-trip GUI model -> cy-manifest tool execution -> model continuation under frozen backends (77->90 events, 4->5 Tools, 55->57 requests)"
       }
@@ -88,6 +88,7 @@
   "runtimeParity": {
     "regularFilesCount": 24382,
     "contentMapSha256": "1b2fd08a483fc050e6cd0e6cdfd477220d39f06f10f0b085899ec9505fe096a3",
+    "comparisonReceiptPath": "proof/windows-v8-complete-runtime-parity.json",
     "comparisonReceiptSha256": "6b919ec0874b7a1c74dd8f6d0377cb709a83dca3105975227e9f9339db740b9c"
   }
 }

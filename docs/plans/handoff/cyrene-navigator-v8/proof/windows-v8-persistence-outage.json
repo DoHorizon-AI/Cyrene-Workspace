@@ -1,0 +1,12 @@
+{
+  "time": "2026-09-06T15:24:23.491961+00:00",
+  "service": "Cyrene persistence",
+  "pid": 1788993,
+  "procStartTicks": "50589566",
+  "sourceCommit": "a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe",
+  "signal": "SIGKILL",
+  "purpose": "Controlled persistence outage, not desktop close acceptance",
+  "databasePreserved": true,
+  "port": 46115,
+  "listenerOffline": true
+}

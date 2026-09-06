@@ -15,7 +15,7 @@ All repositories are evaluated on their task branches; no local acceptance is in
 | Repository / 仓库 | Path / 路径 | Branch / 分支 | Exact Full Commit SHA / 精确完整提交 | Delivery & PR Status / 交付与 PR 状态 |
 | :--- | :--- | :--- | :--- | :--- |
 | **Cyrene-Navigator** | `Services/Cyrene-Navigator` | `feat/text-model-lifecycle-v1` | `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` | Pushed; no open PR; working tree clean |
-| **Cyrene-Workspace** | `Cyrene-Workspace` | `feat/text-model-lifecycle-v1` | `ae6175cf1da4ca5e3cfa01844b2f159a68a113ca` | Pushed; [Draft PR #4](https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/4) → `main` |
+| **Cyrene-Workspace** | `Cyrene-Workspace` | `feat/text-model-lifecycle-v1` | `77b313b91a0d4f0cceb4b69f3a74e37bf65e7a91` | Pushed; [Draft PR #4](https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/4) → `main` |
 | **Cyrene-Platform** (CES & Resolver) | `Cyrene-Platform` | `feat/text-model-lifecycle-v1` | `30272145b9c11df9948465359479c3d95d08a1dc` | Pushed; [Draft PR #31](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/31) stacked on #30 |
 | **Cyrene-Platform** (cy-manifest) | `Cyrene-Platform` | `feat/text-model-lifecycle-v1` | `185527f82c83700d4f567ac563a393a2e1c18c87` | Bundled in V8 package via static CRT |
 | **Cyrene-Exchange** | `Services/Cyrene-Exchange` | `feat/text-model-lifecycle-v1` | `91c509904add26de941e2e14bc3b2b4752233d28` | Pushed; [Draft PR #7](https://github.com/DoHorizon-AI/Cyrene-Exchange/pull/7) → `develop` |
@@ -41,7 +41,7 @@ Platform 仓库在本次交付中承担不同角色的组件，具体提交与�
    - **Full Commit SHA**: `30272145b9c11df9948465359479c3d95d08a1dc`
    - **组件用途**: Platform Python SDK，由 Exchange Product 在 `product/pyproject.toml` 中作为 editable 路径引用消费。
 4. **覆盖验证收据 (Composition Evidence)**:
-   - **收据文件**: `.navigator/proof/windows-v8-frozen-backends-tool-audit.json`
+   - **收据文件**: `proof/windows-v8-frozen-backends-tool-audit.json`
    - **收据 SHA-256**: `48a202df3f48a17beec4b80261175eb82bcebc6d628c5fe1190539ecb71a06a5`
    - **验证事实**: 证明该组合下，已安装客户端通过随包 `cy-manifest.exe` 执行工具，由 Platform `30272145...` 后端提供调度并与 Exchange 联动完成流式续答，完整跑通 77→90 events。
 
@@ -73,7 +73,7 @@ Platform 仓库在本次交付中承担不同角色的组件，具体提交与�
 
 - **Total Shipped Files**: 24,382 regular files
 - **Stable Content Map SHA-256**: `1b2fd08a483fc050e6cd0e6cdfd477220d39f06f10f0b085899ec9505fe096a3`
-- **Comparison Receipt SHA-256**: `6b919ec0874b7a1c74dd8f6d0377cb709a83dca3105975227e9f9339db740b9c` (`windows-v8-complete-runtime-parity.json`)
+- **Comparison Receipt**: `proof/windows-v8-complete-runtime-parity.json` (SHA-256: `6b919ec0874b7a1c74dd8f6d0377cb709a83dca3105975227e9f9339db740b9c`)
 - **Parity Result**: Zero missing, zero added, zero mismatched files between staging directory and installed guest runtime.
 
 ---

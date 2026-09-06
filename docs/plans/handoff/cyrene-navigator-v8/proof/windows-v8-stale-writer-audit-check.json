@@ -1,0 +1,7 @@
+{
+  "events": 67,
+  "requests": 54,
+  "eventsAndActualRequestIdsUnchanged": true,
+  "requestIdField": "requestId",
+  "revalidatedBecause": "The original private UI helper looked up request_id/id; verify stored complete backend snapshots using actual requestId schema"
+}

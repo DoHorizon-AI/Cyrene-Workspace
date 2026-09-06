@@ -1,0 +1,157 @@
+﻿{
+    "marker":  "CYRENE_P0_GUEST_V8_QUEUED_WM_CLOSE",
+    "time":  "2026-09-06T15:17:14.3435764Z",
+    "status":  "PASS",
+    "failureCode":  null,
+    "detail":  "One visible main window accepted one queued close message; recorded process and listener identities disappeared.",
+    "metadataPath":  "C:\\cyrene-nav-proof-vm\\navigator-launch-v8.json",
+    "metadataMarker":  "CYRENE_P0_GUEST_V8_SECURE_LAUNCH",
+    "metadataPid":  9516,
+    "metadataSession":  3,
+    "navigatorExecutable":  "C:\\Users\\CyreneP0\\AppData\\Local\\Cyrene Navigator\\cyrene-navigator-desktop.exe",
+    "navigatorProcess":  {
+                             "pid":  9516,
+                             "parentPid":  11564,
+                             "name":  "cyrene-navigator-desktop.exe",
+                             "session":  3,
+                             "creationTime":  "2026-09-06T14:59:31.4987290Z"
+                         },
+    "ownedBefore":  [
+                        {
+                            "pid":  9516,
+                            "parentPid":  11564,
+                            "name":  "cyrene-navigator-desktop.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:31.4987290Z"
+                        },
+                        {
+                            "pid":  7972,
+                            "parentPid":  9516,
+                            "name":  "msedgewebview2.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:31.6077550Z"
+                        },
+                        {
+                            "pid":  5624,
+                            "parentPid":  7972,
+                            "name":  "msedgewebview2.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:31.7069860Z"
+                        },
+                        {
+                            "pid":  8356,
+                            "parentPid":  7972,
+                            "name":  "msedgewebview2.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:31.8900510Z"
+                        },
+                        {
+                            "pid":  4084,
+                            "parentPid":  7972,
+                            "name":  "msedgewebview2.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:31.9754330Z"
+                        },
+                        {
+                            "pid":  6680,
+                            "parentPid":  7972,
+                            "name":  "msedgewebview2.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:32.0053760Z"
+                        },
+                        {
+                            "pid":  11860,
+                            "parentPid":  9516,
+                            "name":  "node.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:33.9142170Z"
+                        },
+                        {
+                            "pid":  5172,
+                            "parentPid":  11860,
+                            "name":  "conhost.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:33.9457560Z"
+                        },
+                        {
+                            "pid":  8264,
+                            "parentPid":  7972,
+                            "name":  "msedgewebview2.exe",
+                            "session":  3,
+                            "creationTime":  "2026-09-06T14:59:38.0701250Z"
+                        }
+                    ],
+    "visibleWindows":  [
+                           {
+                               "hWnd":  "0xC003C",
+                               "pid":  9516,
+                               "session":  3,
+                               "visible":  true,
+                               "ownerIsNull":  true,
+                               "className":  "Tauri Window"
+                           },
+                           {
+                               "hWnd":  "0x80248",
+                               "pid":  9516,
+                               "session":  3,
+                               "visible":  true,
+                               "ownerIsNull":  true,
+                               "className":  "Tao Thread Event Target"
+                           }
+                       ],
+    "mainWindows":  [
+                        {
+                            "hWnd":  "0xC003C",
+                            "pid":  9516,
+                            "session":  3,
+                            "visible":  true,
+                            "ownerIsNull":  true,
+                            "className":  "Tauri Window"
+                        }
+                    ],
+    "published":  [
+                      {
+                          "hWnd":  "0xC003C",
+                          "pid":  9516,
+                          "session":  3,
+                          "message":  "WM_CLOSE",
+                          "postMessageReturned":  true,
+                          "lastError":  0
+                      }
+                  ],
+    "cdpPort":  65132,
+    "harnessPort":  49696,
+    "cdpListenersBefore":  [
+                               {
+                                   "localAddress":  "127.0.0.1",
+                                   "localPort":  65132,
+                                   "owningPid":  7972,
+                                   "state":  "Listen"
+                               }
+                           ],
+    "harnessListenersBefore":  [
+                                   {
+                                       "localAddress":  "127.0.0.1",
+                                       "localPort":  49696,
+                                       "owningPid":  11860,
+                                       "state":  "Listen"
+                                   }
+                               ],
+    "ownedSurvivors":  [
+
+                       ],
+    "cdpListenersAfter":  [
+
+                          ],
+    "harnessListenersAfter":  [
+
+                              ],
+    "waitedMilliseconds":  925,
+    "processObservationAvailable":  true,
+    "listenerObservationAvailable":  true,
+    "taskPid":  10672,
+    "taskSession":  3,
+    "interactive":  true,
+    "timeCompleted":  "2026-09-06T15:17:16.4366592Z"
+}
+
