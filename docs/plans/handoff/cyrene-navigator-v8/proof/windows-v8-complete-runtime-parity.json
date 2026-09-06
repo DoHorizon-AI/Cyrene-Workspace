@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "completeProgramResourceTree": true,
+  "same": true,
+  "fileCount": 24382,
+  "stagedOnly": [],
+  "guestOnly": [],
+  "changed": [],
+  "maps": [
+    {
+      "file": "v8-runtime-staged-file-hashes.json",
+      "sha256": "1b2fd08a483fc050e6cd0e6cdfd477220d39f06f10f0b085899ec9505fe096a3",
+      "files": 24382,
+      "node": "v24.13.0"
+    },
+    {
+      "file": "v8-runtime-guest-file-hashes.json",
+      "sha256": "1b2fd08a483fc050e6cd0e6cdfd477220d39f06f10f0b085899ec9505fe096a3",
+      "files": 24382,
+      "node": "v24.13.0"
+    }
+  ],
+  "windowsV8SourceInputsRechecked": 97,
+  "inspectedDataRootOrCredentials": false,
+  "wrapperExitObservation": "The PowerShell wrapper reported a failed exit observation but did not capture the ExitCode value. Complete worker JSON outputs were independently parsed and compared; stderr was empty. This receipt asserts file content parity, not the worker exit code."
+}

@@ -1,0 +1,22 @@
+{
+  "before": {
+    "events": 52,
+    "tools": 3,
+    "requests": 52
+  },
+  "after": {
+    "events": 53,
+    "tools": 3,
+    "requests": 52
+  },
+  "observed": {
+    "title": "Call cyrene_manifest_id exactly once on",
+    "ownership": "No local writer is held. Takeover will fence the writer observed at epoch 2; nothing changes until you click the takeover button.",
+    "details": "Session: session-7e3b1272-71ba-4e08-a80f-eac336cac427\nWorkspace: adoption-proof\nWorking directory: C:\\cyrene-nav-proof-shared\\workspace\nDurable events: 52\nAgent preset: cyrene-navigator",
+    "panelVisible": true,
+    "port": "6361"
+  },
+  "historyPrefixPreserved": true,
+  "historicalToolReplay": false,
+  "retainedCount": 1
+}

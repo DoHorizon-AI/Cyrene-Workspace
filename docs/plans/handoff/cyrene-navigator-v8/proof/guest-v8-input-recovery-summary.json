@@ -1,0 +1,37 @@
+{
+  "time": "2026-09-06T15:29:25.897Z",
+  "sessionId": "session-7e3b1272-71ba-4e08-a80f-eac336cac427",
+  "originalRequestId": "c9fea84d-4ade-4fd9-89f7-18e0b6bbaf12",
+  "originalTextMatched": true,
+  "noTextInsertedOrRetyped": true,
+  "explicitRestoreClicked": true,
+  "eventsBeforeSend": 68,
+  "historyUnchangedBeforeSend": true,
+  "port": "51467",
+  "timeCompleted": "2026-09-06T15:29:31.513Z",
+  "afterEventCount": 77,
+  "prefixPreserved": true,
+  "newToolCalls": 0,
+  "turnEnds": [
+    {
+      "reason": {
+        "kind": "completed"
+      },
+      "turn": 5
+    }
+  ],
+  "recoveredReply": true,
+  "retainedAfterDurableReceipt": 0,
+  "explicitSendCount": 1,
+  "newEventTypes": [
+    "agent/inbox/spliced",
+    "turn/start",
+    "agent/inbox/spliced",
+    "step/start",
+    "user/message",
+    "request/header",
+    "assistant/message",
+    "step/end",
+    "turn/end"
+  ]
+}

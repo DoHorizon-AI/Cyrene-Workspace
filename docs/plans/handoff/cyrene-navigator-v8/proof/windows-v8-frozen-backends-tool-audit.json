@@ -1,0 +1,35 @@
+{
+  "time": "2026-09-06T15:51:23.056Z",
+  "before": {
+    "events": 77,
+    "tools": 4,
+    "requests": 55
+  },
+  "after": {
+    "events": 90,
+    "tools": 5,
+    "requests": 57
+  },
+  "prefixPreserved": true,
+  "newRequests": [
+    {
+      "requestId": "chatcmpl-267e56589cde45b199b9950a69c37b59",
+      "status": "completed",
+      "usageState": "final",
+      "promptTokens": 6381,
+      "completionTokens": 74,
+      "totalTokens": 6455,
+      "usageSource": "provider"
+    },
+    {
+      "requestId": "chatcmpl-640474d84b2340a8b071189bc11263d0",
+      "status": "completed",
+      "usageState": "final",
+      "promptTokens": 6255,
+      "completionTokens": 41,
+      "totalTokens": 6296,
+      "usageSource": "provider"
+    }
+  ],
+  "databaseAndRoutePreserved": true
+}

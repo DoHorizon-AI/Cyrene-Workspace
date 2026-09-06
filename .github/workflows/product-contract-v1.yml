@@ -3,7 +3,7 @@ name: Product contract integration profile
 on:
   pull_request:
   push:
-    branches: [main, 'docs/**']
+    branches: [main, 'docs/**', 'feat/text-model-lifecycle-v1']
 
 permissions:
   contents: read
