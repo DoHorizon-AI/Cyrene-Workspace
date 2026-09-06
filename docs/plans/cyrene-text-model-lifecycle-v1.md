@@ -9,7 +9,7 @@
 | Field | Value |
 | --- | --- |
 | Plan ID | CYRENE-TEXT-LIFECYCLE-V1 |
-| Current status | IMPLEMENTING — Phase 0 component checks partly passed; complete adoption proof remains pending |
+| Current status | IMPLEMENTING — 16 scoped Phase 0 component checks have Actual PASS evidence; P0-GATE and the remaining checks remain pending |
 | Baseline authority | Workspace origin/main at eb5fb2cf1af5c3dd0cbadbe6167bc388b643e318 (2026-09-05); Product contract registry remains under governance/product-contract-v1/ |
 | Implementation line | User-authorized implementation proceeds from the Workspace main baseline toward Develop; this plan is maintained on the task branch |
 | Runtime scope | Linux execution node, NVIDIA GPU, CUDA; Windows is a supported desktop client target for Navigator adoption proof |
@@ -17,7 +17,7 @@
 | Serving scope | vLLM as the first Reactor serving engine |
 | Harness proof pin | dsh-v0.1.3-alpha.1 / d347e703908d0406b7a7ef80e3a0e594d86b2215 |
 | Upstream reference | [DeepSeek Harness pinned tree](https://github.com/deepseek-ai/deepseek-harness/tree/d347e703908d0406b7a7ef80e3a0e594d86b2215) |
-| Progress | 4 scoped Phase 0 checks passed; full adoption proof and all later phase gates remain pending |
+| Progress | 16 scoped Phase 0 checks passed; P0-GATE, the remaining Phase 0 checks and all later phase gates remain pending |
 
 ### 0.1 What this document is and is not / 本文边界
 
@@ -214,7 +214,7 @@ Evidence for <CHECK-ID>
 
 真实 vLLM 0.25.1 已加载固定 revision 的 Qwen3-4B-Instruct-2507 并通过 health；这只是 Phase 0 的外部 Provider 环境，还不是 Reactor / Platform 部署验收。WSL 使用 loopback rendezvous、V1 Model Runner、非 FlashInfer sampler 和带开发头文件的 Python 3.12.11，未修改 vLLM 源码。
 
-当前组件验证：Python persistence 全仓测试 13 passed；真实上游 TypeScript、Rust stdio、Codex import/continue 和独立服务重启集成 8 passed / 0 failed / 0 skipped；独立 Native Rust 18 passed。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出与恢复 Session。双进程接管和服务强制重启已验证；实时流式兼容修复、Windows 安装包和多设备实际操作仍在验证。检查项证据见 [Phase 0 evidence](evidence/2026-09-05-phase-0.md)。
+当前组件验证：Python persistence 全仓测试 13 passed；真实上游 TypeScript、Rust stdio、Codex import/continue 和独立服务重启和 Web Profile 集成 17 passed / 0 failed / 0 skipped；独立 Native Rust 18 passed。真实 Web Profile 已完成模型→Rust Tool→模型续答，并保存、列出、恢复和服务重启后的 Session；新的实时流证据包含 119 个 assistant frames、87 个文本增量和持久化事件。取消子场景已完成真实停止、终止事件和恢复验证，但 P0-11 所要求的持久化 Usage/Auth/Audit ledger 仍未完成。双进程接管来自同机独立进程，不能替代第二台物理设备；Windows 安装包和桌面启动仍未 Actual PASS。当前证据见 [Phase 0 evidence, 2026-09-06](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据, 2026-09-05](evidence/2026-09-05-phase-0.md)。
 
 ## 4. Phase 0 — Navigator adoption proof / Navigator 采用证明
 
@@ -226,36 +226,38 @@ Phase 0 通过前，Navigator 仍保留当前实现作为对照；Phase 0 通过
 
 ### 4.1 Fixed upstream / 固定上游
 
-- [x] **P0-01 — Exact upstream pin:** 锁定 dsh-v0.1.3-alpha.1 和 commit d347e703908d0406b7a7ef80e3a0e594d86b2215，记录 package lock、构建工具链、依赖 digest、Bundle 版本和来源。参见 [固定来源证据](evidence/2026-09-05-phase-0.md)。
+- [x] **P0-01 — Exact upstream pin:** 锁定 dsh-v0.1.3-alpha.1 和 commit d347e703908d0406b7a7ef80e3a0e594d86b2215，记录 package lock、构建工具链、依赖 digest、Bundle 版本和来源。参见 [固定来源证据](evidence/2026-09-06-phase-0.md) 与 [历史固定来源证据](evidence/2026-09-05-phase-0.md)。
 - [ ] **P0-02 — Reproducible upstream build:** 在 Linux 开发环境和 Windows packaging 环境分别按 lock 重建；能证明依赖没有漂移，失败时 fail closed。
-- [ ] **P0-03 — Core patch audit:** 对上游 Core 变更做 immutable diff 审计，目标为 UPSTREAM_CORE_PATCHES = 0。若存在 patch，必须记录理由、影响、upstreamability 和移除条件。
-- [ ] **P0-04 — Compatibility ledger:** 记录上游 Session v2、SessionHandle、单写者锁、flush 语义、历史加载性能限制和已知兼容性风险；没有验证过的上游承诺不得写成 Cyrene guarantee。
+- [x] **P0-03 — Core patch audit:** 对上游 Core 变更做 immutable diff 审计，目标为 UPSTREAM_CORE_PATCHES = 0。若存在 patch，必须记录理由、影响、upstreamability 和移除条件。2026-09-06 固定源码审计结果为 0，参见 [Phase 0 evidence](evidence/2026-09-06-phase-0.md)。
+- [x] **P0-04 — Compatibility ledger:** 记录上游 Session v2、SessionHandle、单写者锁、flush 语义、历史加载性能限制和已知兼容性风险；没有验证过的上游承诺不得写成 Cyrene guarantee。参见 [兼容性台账](evidence/2026-09-06-phase-0.md#compatibility-ledger)。
 
 ### 4.2 Profile / Bundle / plugin policy
 
-- [ ] **P0-05 — Navigator Profile:** 在 cyrene-navigator 中建立独立 Profile/Bundle，固定上游 runtime、UI extension、配置覆盖入口和构建产物布局。
-- [ ] **P0-06 — Bundle inventory:** Phase 0 固定并审计实际加载的插件、来源、版本和 disabled defaults；企业动态插件允许列表、签名、管理员策略和版本治理属于 P4-13，不提前当作 adoption proof 的前提。
-- [ ] **P0-07 — Disabled defaults:** 通过配置关闭不适合 Navigator 的默认本地 session log、未经 Exchange 管理的默认路由、未治理的遥测或插件入口；关闭行为要有启动日志/诊断证据，不能只隐藏 UI。
+- [x] **P0-05 — Navigator Profile:** 在 cyrene-navigator 中建立独立 Profile/Bundle，固定上游 runtime、UI extension、配置覆盖入口和构建产物布局。Linux 真实启动的默认 preset 为 `cyrene-navigator`，参见 [Profile 与 Bundle 证据](evidence/2026-09-06-phase-0.md#profile-and-bundle)。
+- [x] **P0-06 — Bundle inventory:** Phase 0 固定并审计实际加载的插件、来源、版本和 disabled defaults；企业动态插件允许列表、签名、管理员策略和版本治理属于 P4-13，不提前当作 adoption proof 的前提。参见 [实际 Bundle inventory](evidence/2026-09-06-phase-0.md#profile-and-bundle)。
+- [x] **P0-07 — Disabled defaults:** 通过配置关闭不适合 Navigator 的默认本地 session log、未经 Exchange 管理的默认路由、未治理的遥测或插件入口；关闭行为要有启动日志/诊断证据，不能只隐藏 UI。Profile 诊断已记录 JSONL persistence、telemetry、默认 DeepSeek route 和 title LLM defaults 为 disabled；企业 allowlist 仍属于 P4。
 - [ ] **P0-08 — Cyrene extension boundary:** Profile 只注册 Exchange、Workspace/Identity、persistence、usage/audit、conversation import、native bridge、Send to 和 UI extension；不把 Cyrene Product 生命周期塞回 Harness Core。
 
 ### 4.3 Exchange path / Exchange 路径
 
 adoption proof 的模型请求必须经过 Exchange。Navigator 直接连接外部 Provider 是后续和日常使用允许的独立能力，但不能替代 proof 的 Exchange path。
 
-- [ ] **P0-09 — Exchange streaming chat:** Harness 发起真实 streaming chat，请求、首 token、结束、错误和 usage 都能关联同一 request/trace ID。
-- [ ] **P0-10 — Exchange tool continuation:** 完成真实 Tool Call → Tool execution → Tool Result → model continuation；顶层 tools、tool choice、structured tool arguments、result correlation、stream events 在 Gateway 全链路保真。
+- [x] **P0-09 — Exchange streaming chat:** Harness 发起真实 streaming chat，请求、首 token、结束、错误和 usage 都能关联同一 request/trace ID。真实 Exchange proof 的帧、增量、请求 ID、usage 和终止事件见 [streaming evidence](evidence/2026-09-06-phase-0.md#exchange-streaming-and-tool-continuation)。
+- [x] **P0-10 — Exchange tool continuation:** 完成真实 Tool Call → Tool execution → Tool Result → model continuation；顶层 tools、tool choice、structured tool arguments、result correlation、stream events 在 Gateway 全链路保真。真实 `cy-manifest` Tool 与匹配的 Tool Result 已由模型消费并续答，参见 [streaming/tool evidence](evidence/2026-09-06-phase-0.md#exchange-streaming-and-tool-continuation)。
 - [ ] **P0-11 — Exchange cancel/auth/usage:** 真实取消能停止下游生成并返回可判断的状态；认证、权限、token/usage 记录和失败审计可回读；取消后不得重试为另一条模型请求。
+  当前证据已通过真实取消子场景：下游停止、`user-aborted` 终止事件、取消后 vLLM 无排队/运行请求、同 Session 恢复和无 retry/no fake usage 检查；但 Exchange 的持久化 Usage/Auth/Audit Product ledger 尚未证明，因此整项保持 `[ ]`，参见 [取消子场景证据](evidence/2026-09-06-phase-0.md#cancellation-sub-scenario)。
 - [ ] **P0-12 — External Provider isolation (tracked in P1-12):** Navigator 能用配置独立连接一个外部 Provider，并明确标记其不经过 Exchange 的来源、usage owner 和权限边界；该入口不会改变 Cyrene persistence 和 Navigator session authority。此项是 V1 独立使用要求，不阻塞 Phase 0 的 Exchange adoption proof。
 
 ### 4.4 Cyrene persistence / Cyrene 会话持久化
 
 目标是让 Harness 的 Session event model 写入 Cyrene persistence backend。Harness 本地数据库不能与 Cyrene 服务端数据库形成两套可写 message history 真源。
 
-- [x] **P0-13 — Persistence contract adapter:** 实现并版本化上游 SessionPersistence / SessionHandle 所需的 Cyrene backend adapter；保存原生 event、schema/version、source metadata 和 resource identity。参见 [实际接口与进程证据](evidence/2026-09-05-phase-0.md)。
-- [x] **P0-14 — Append-only ordering:** 事件按序追加，支持 single writer、ordered append、idempotent batch/retry 和 flush barrier；append 成功与 durable flush 的语义分开记录。参见 [实际持久化证据](evidence/2026-09-05-phase-0.md)。
-- [ ] **P0-15 — Restart recovery:** 重启 Harness 后能恢复 Session、Conversation projection、AgentRun 状态和未完成 turn 的正确边界；恢复只读取事件，不重新执行历史 Tool。
-- [x] **P0-16 — Persistence service restart:** 单独重启 persistence service 后 Session 内容和 writer ownership 不丢失；重启期间的失败可诊断且不会产生两个 writer。参见 [真实 service kill/restart 证据](evidence/2026-09-05-phase-0.md)。
+- [x] **P0-13 — Persistence contract adapter:** 实现并版本化上游 SessionPersistence / SessionHandle 所需的 Cyrene backend adapter；保存原生 event、schema/version、source metadata 和 resource identity。参见 [持久化证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery) 与 [历史接口证据](evidence/2026-09-05-phase-0.md)。
+- [x] **P0-14 — Append-only ordering:** 事件按序追加，支持 single writer、ordered append、idempotent batch/retry 和 flush barrier；append 成功与 durable flush 的语义分开记录。参见 [持久化证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery) 与 [历史持久化证据](evidence/2026-09-05-phase-0.md)。
+- [x] **P0-15 — Restart recovery:** 重启 Harness 后能恢复 Session、Conversation projection、AgentRun 状态和未完成 turn 的正确边界；恢复只读取事件，不重新执行历史 Tool。第二个 Web process 接管、服务重启后的恢复和后续新 turn 已通过，参见 [恢复证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)。
+- [x] **P0-16 — Persistence service restart:** 单独重启 persistence service 后 Session 内容和 writer ownership 不丢失；重启期间的失败可诊断且不会产生两个 writer。参见 [service kill/restart 证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery) 与 [历史证据](evidence/2026-09-05-phase-0.md)。
 - [ ] **P0-17 — Multi-device read/takeover:** 第二客户端设备使用经授权的 Workspace 身份读取会话并在明确 takeover 后取得 writer；旧 writer 的 append 被拒绝并返回可诊断冲突。Phase 0 可用受控 service credentials 证明边界，完整组织 RBAC/OIDC 仍由 P4-08/P4-09 验收。
+  现有接管证据来自同机的第二个独立 Web process，不能满足“第二客户端设备”的完整文字标准；因此保持 `[ ]`，参见 [恢复证据的拓扑限制](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)。
 - [ ] **P0-18 — Product metadata separation:** 证明 Navigator metadata 与单一可写 event log 的边界，owner/workspace 可审计；title、sharing policy、tags、permissions 和 audit projection 的完整产品体验在后续企业阶段继续实现，不复制可写 message history。
 - [ ] **P0-19 — Crash and replay boundary:** 模拟 append 前后崩溃、重复 batch、断线恢复和读取较新 resourceVersion，证明事件重放不会执行历史工具，也不会丢失或重排对话。
 
@@ -271,17 +273,18 @@ thin Cordis Plugin
 Rust binary or cyrene-native-host
 ~~~
 
-- [ ] **P0-20 — IPC protocol:** 定义并实现 protocol version、request id、method、params、result、error、cancel、event；stdout 只承载协议，stderr 承载日志。
+- [x] **P0-20 — IPC protocol:** 定义并实现 protocol version、request id、method、params、result、error、cancel、event；stdout 只承载协议，stderr 承载日志。Rust stdio 集成与协议测试通过，参见 [Rust bridge 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
 - [ ] **P0-21 — Process lifecycle:** Cordis plugin 能启动、握手、取消、超时、回收、重启 Rust child；异常退出能映射为可见 Tool error，不把僵尸进程留给桌面端。
-- [ ] **P0-22 — Real Rust tool:** 使用一个已有 Rust binary（优先 cy-manifest 或等价 Platform artifact utility）作为真实 Tool，模型实际调用并消费结果，不使用内存 fake。
+- [x] **P0-22 — Real Rust tool:** 使用一个已有 Rust binary（优先 cy-manifest 或等价 Platform artifact utility）作为真实 Tool，模型实际调用并消费结果，不使用内存 fake。真实 `cy-manifest` 返回 Artifact manifest 后由模型续答，参见 [真实 Rust Tool 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
 - [ ] **P0-23 — Rust error/cancel:** 验证非法参数、binary 不存在、stderr 日志、超时、用户取消、child crash、协议版本不兼容和大结果边界。
 - [ ] **P0-24 — Portability:** Linux 与 Windows 都能通过 inherited stdio 工作；没有固定监听端口要求；启动环境、路径、编码和权限由证据记录。
 
 ### 4.6 External session import / 外部会话导入
 
-- [ ] **P0-25 — Real Codex fixture:** 导入至少一个真实 Codex 会话样本，保留来源标识、原始内容 hash/bytes、转换报告、分支关系和不支持内容说明。
-- [ ] **P0-26 — Import safety:** 导入的历史 tool call、approval、permission 和命令只作为历史事件/显示数据，不自动执行、不获得当前设备权限、不写入新的执行队列。
+- [x] **P0-25 — Real Codex fixture:** 导入至少一个真实 Codex 会话样本，保留来源标识、原始内容 hash/bytes、转换报告、分支关系和不支持内容说明。真实 Codex CLI 0.152.1 样本的来源字段、bytes/hash 和 conversion report 已保留在 event log，参见 [Codex import 证据](evidence/2026-09-06-phase-0.md#codex-import-and-safety)。
+- [x] **P0-26 — Import safety:** 导入的历史 tool call、approval、permission 和命令只作为历史事件/显示数据，不自动执行、不获得当前设备权限、不写入新的执行队列。历史记录均为 `executable: false`，unknown content 保留且不触发执行，参见 [Codex import safety](evidence/2026-09-06-phase-0.md#codex-import-and-safety)。
 - [ ] **P0-27 — Resume semantics:** 导入会话能作为只读历史打开，并在用户明确建立新的 AgentRun 后继续；新 turn 的权限、模型和 Workspace 来源重新判定。
+  真实后端 Continue 已创建带新 `cwd` 和 preset 的新 AgentRun，历史 Tool 未执行；桌面端的 Open/Continue 交互仍未验收，故保持 `[ ]`。
 
 ### 4.7 Windows desktop proof / Windows 桌面证明
 

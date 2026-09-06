@@ -14,4 +14,6 @@
 
 | Plan | Scope / 范围 | Current status / 当前状态 |
 | --- | --- | --- |
-| [Cyrene Text Model Lifecycle V1](cyrene-text-model-lifecycle-v1.md) | Text LLM、NVIDIA CUDA、LLaMA Factory SFT/LoRA、vLLM、Exchange、Navigator Harness、Echo 反馈和开放式资源交接 | Planning; all functional checks unchecked |
+| [Cyrene Text Model Lifecycle V1](cyrene-text-model-lifecycle-v1.md) | Text LLM、NVIDIA CUDA、LLaMA Factory SFT/LoRA、vLLM、Exchange、Navigator Harness、Echo 反馈和开放式资源交接 | Implementing; 16 scoped Phase 0 checks have Actual PASS evidence; P0-GATE and later gates pending |
+
+Current evidence / 当前证据： [Phase 0, 2026-09-06](evidence/2026-09-06-phase-0.md)。
