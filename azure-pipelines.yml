@@ -1,0 +1,81 @@
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+parameters:
+- name: runFullAcceptance
+  displayName: 'Run Full Multi-Repo Canonical Linux Gate (Requires Self-Hosted Local Workspace Pool)'
+  type: boolean
+  default: false
+- name: acceptancePoolName
+  displayName: 'Self-Hosted Agent Pool Name'
+  type: string
+  default: 'Default'
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feat/*
+      - chore/*
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+jobs:
+- job: product_contract_profile
+  displayName: 'Workspace / Product Contract Integration Profile'
+  pool:
+    vmImage: 'ubuntu-latest'
+  timeoutInMinutes: 15
+  steps:
+  - checkout: self
+    displayName: 'Checkout Workspace'
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Setup Python 3.12'
+
+  - script: |
+      python -m pip install --upgrade pip uv==0.12.3
+      uvx ruff==0.16.5 check governance/product-contract-v1/tests
+      uvx ruff==0.16.5 format --check governance/product-contract-v1/tests
+      uvx --from pytest==9.1.1 --with jsonschema==4.26.0 pytest -q governance/product-contract-v1/tests
+    displayName: 'Run Governance Product Contract Tests'
+
+  - script: |
+      mkdir -p ci/evidence
+      cat <<EOT > ci/evidence/summary.json
+      {
+        "suite": "Cyrene-Workspace-Contract",
+        "commit": "$(Build.SourceVersion)",
+        "pipeline": "$(Build.DefinitionName)",
+        "build_id": "$(Build.BuildId)",
+        "result": "PASS",
+        "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      }
+      EOT
+    displayName: 'Generate Evidence Ledger'
+
+  - publish: ci/evidence
+    artifact: workspace-evidence
+    displayName: 'Publish Workspace Evidence'
+
+- ${{ if eq(parameters.runFullAcceptance, true) }}:
+  - job: canonical_linux_gate
+    displayName: 'Workspace / Multi-Repo Acceptance Gate'
+    dependsOn: product_contract_profile
+    condition: succeeded()
+    pool:
+      name: ${{ parameters.acceptancePoolName }}
+    timeoutInMinutes: 30
+    steps:
+    - checkout: self
+      displayName: 'Checkout Workspace'
+
+    - script: |
+        bash verify-linux.sh
+      displayName: 'Execute Canonical Linux Acceptance Gate'
