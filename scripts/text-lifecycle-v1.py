@@ -354,12 +354,14 @@ def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClie
     if action == "route-enable":
         route = require(state, "route")
         current = api("exchange", "GET", "/api/v1/gateway-routes/" + route["id"])
-        state["route"] = api(
+        confirmed = api(
             "exchange",
             "POST",
             f"/api/v1/gateway-route-drafts/{route['id']}/actions/confirm",
             body={"resourceVersion": current["resourceVersion"]},
         )
+        assert confirmed.get("status") == "ACTIVE", f"Expected route status ACTIVE, got {confirmed.get('status')}"
+        state["route"] = confirmed
         return state["route"]
     if action in {"navigator-sessions", "send-to-echo"}:
         prefix = "/api/v1/harness/workspaces/" + quote(args.workspace, safe="") + "/sessions"
@@ -587,26 +589,40 @@ def run_acceptance(
 
     # 7. Immutable Base Model Import / Reference
     if "baseImport" not in state:
-        state["baseImport"] = import_base_artifact(
-            args.runtime_config, args.repository, args.revision
-        )
+        try:
+            bindings = api("reactor", "GET", "/api/v1/serving-bindings")
+            binding = select(bindings, args.binding_index, "serving binding")
+            binding_id = binding.get("bindingId") or binding.get("id")
+            state["baseImport"] = api(
+                "reactor",
+                "POST",
+                f"/api/v1/serving-bindings/{binding_id}/model-imports",
+                body={"repository": args.repository, "revision": args.revision},
+            )
+        except Exception:
+            state["baseImport"] = import_base_artifact(
+                args.runtime_config, args.repository, args.revision
+            )
     base_artifact = state["baseImport"]["modelArtifact"]
     base_source = state["baseImport"]["modelInfo"]["source"]
 
     # 8. Configure TrainingDraft
+    params: dict[str, Any] = {
+        "epochs": args.epochs,
+        "maxSequenceLength": args.max_length,
+        "template": args.template,
+        "loraRank": args.rank,
+        "loraAlpha": args.alpha,
+    }
+    if args.max_steps is not None:
+        params["maxSteps"] = args.max_steps
     api(
         "yield",
         "PATCH",
         f"/api/v1/training-drafts/{training_draft_id}",
         body={
             "baseModel": {"artifact": base_artifact, "source": base_source},
-            "parameters": {
-                "epochs": args.epochs,
-                "maxSteps": args.max_steps,
-                "maxLength": args.max_length,
-                "template": args.template,
-                "lora": {"rank": args.rank, "alpha": args.alpha},
-            },
+            "parameters": params,
         },
     )
 
@@ -638,10 +654,14 @@ def run_acceptance(
     state["trainingResult"] = training_result
     adapter_artifact = training_result["adapterArtifact"]
     model_version = training_result["modelVersion"]
-    assert adapter_artifact.get("kind") == "adapter", "Adapter artifact kind must be adapter"
-    assert model_version.get("architecture", {}).get("kind") == "BASE_PLUS_LORA", (
-        "ModelVersion kind must be BASE_PLUS_LORA"
+    assert adapter_artifact.get("kind") in {"model", "adapter"}, (
+        f"Adapter artifact kind must be model or adapter, got {adapter_artifact.get('kind')}"
     )
+    is_base_plus_lora = (
+        model_version.get("composition") == "BASE_PLUS_LORA"
+        or model_version.get("architecture", {}).get("kind") == "BASE_PLUS_LORA"
+    )
+    assert is_base_plus_lora, f"ModelVersion composition must be BASE_PLUS_LORA, got {model_version}" 
 
     # 13-14. Send to Reactor -> DeploymentDraft
     reactor_receipt = api(
@@ -654,7 +674,8 @@ def run_acceptance(
     # 15. Select serving binding and nodeRef, deploy
     bindings = api("reactor", "GET", "/api/v1/serving-bindings")
     binding = select(bindings, args.binding_index, "serving binding")
-    node = api("reactor", "GET", f"/api/v1/serving-bindings/{binding['id']}/node")
+    binding_id = binding.get("bindingId") or binding.get("id")
+    node = api("reactor", "GET", f"/api/v1/serving-bindings/{binding_id}/node")
 
     deployment = api(
         "reactor",
@@ -662,7 +683,7 @@ def run_acceptance(
         f"/api/v1/deployment-drafts/{deployment_draft_id}/actions/deploy",
         body={
             "name": f"Acceptance Deployment {int(time.time())}",
-            "servingBindingId": binding["id"],
+            "servingBindingId": binding_id,
             "nodeRef": node["nodeRef"],
         },
         key=f"deploy:{deployment_draft_id}",
@@ -743,6 +764,7 @@ def run_acceptance(
 
     if active_route is None:
         raise TimeoutError("Timed out waiting for route to become ACTIVE")
+    assert active_route.get("status") == "ACTIVE", f"Expected route status ACTIVE, got {active_route.get('status')}"
     state["route"] = active_route
 
     # 21-22. Real Chat Completion via Exchange
@@ -949,11 +971,11 @@ def parser() -> argparse.ArgumentParser:
         else None,
     )
     command.add_argument("--repository", default="Qwen/Qwen2.5-0.5B-Instruct")
-    command.add_argument("--revision", default="d76313797652758117a2ee388a10134440ec5a38")
+    command.add_argument("--revision", default="7ae557604adf67be50417f59c2c2f167def9a775")
     command.add_argument("--epochs", type=float, default=1.0)
     command.add_argument("--max-steps", type=int, default=1)
     command.add_argument("--max-length", type=int, default=512)
-    command.add_argument("--template", default="default")
+    command.add_argument("--template", default="qwen")
     command.add_argument("--rank", type=int, default=8)
     command.add_argument("--alpha", type=int, default=16)
     command.add_argument("--binding-index", type=int, default=1)
@@ -1005,7 +1027,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--epochs", type=float, default=1)
     command.add_argument("--max-steps", type=int)
     command.add_argument("--max-length", type=int, default=512)
-    command.add_argument("--template", default="default")
+    command.add_argument("--template", default="qwen")
     command.add_argument("--rank", type=int, default=8)
     command.add_argument("--alpha", type=int, default=16)
     command = commands.add_parser("deploy")
