@@ -73,6 +73,7 @@ jobs:
   timeoutInMinutes: 15
   steps:
   - checkout: self
+    path: s/Cyrene-Workspace
     displayName: 'Checkout Workspace'
 
   - checkout: platform
@@ -89,6 +90,7 @@ jobs:
       uvx ruff==0.16.5 check governance/product-contract-v1/tests
       uvx ruff==0.16.5 format --check governance/product-contract-v1/tests
       uvx --from pytest==9.1.1 --with jsonschema==4.26.0 pytest -q governance/product-contract-v1/tests
+    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
     displayName: 'Run Governance Product Contract Tests'
 
   - bash: |
@@ -97,6 +99,7 @@ jobs:
       python -m pip install --no-deps "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_artifacts"
       uvx ruff==0.16.5 check scripts/reference-runtime.py scripts/text-lifecycle-v1.py tests/test_reference_runtime.py tests/test_text_lifecycle_runtime.py
       python -m pytest -q tests/test_reference_runtime.py tests/test_text_lifecycle_runtime.py
+    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
     displayName: 'Validate reference runtime and Artifact bootstrap client'
 
   - script: |
@@ -111,9 +114,10 @@ jobs:
         "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
       }
       EOT
+    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
     displayName: 'Generate Evidence Ledger'
 
-  - publish: ci/evidence
+  - publish: $(Pipeline.Workspace)/s/Cyrene-Workspace/ci/evidence
     artifact: workspace-evidence
     displayName: 'Publish Workspace Evidence'
 
