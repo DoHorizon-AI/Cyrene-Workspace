@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -475,7 +476,460 @@ def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClie
             "catalyst", "GET", "/api/v1/datasets/" + state["preparation"]["datasetId"]
         )
         return receipt
+    if action == "acceptance":
+        return run_acceptance(args, state, client)
     raise ValueError("Unknown action")
+
+
+def run_acceptance(
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    client: ProductClient,
+) -> dict[str, Any]:
+    """Execute the complete non-interactive 30-step Text Model Lifecycle V1 acceptance loop.
+
+    Consumes only canonical returned resource references across all steps.
+    """
+    api = client.request
+
+    # 1-5. Dataset preparation and publish DatasetVersion v1
+    dataset_name = args.name or f"Acceptance Dataset {int(time.time())}"
+    dataset = api(
+        "catalyst",
+        "POST",
+        "/api/v1/datasets",
+        body={"name": dataset_name},
+        key=dataset_name,
+    )
+    state["dataset"] = dataset
+
+    dataset_file = args.dataset_file
+    temp_dir = None
+    if dataset_file is None:
+        temp_dir = tempfile.mkdtemp(prefix="cyrene-acceptance-")
+        dataset_file = Path(temp_dir) / "instructions.jsonl"
+        samples = [
+            {
+                "instruction": "What is Cyrene?",
+                "input": "",
+                "output": "Cyrene is an autonomous multi-service model lifecycle governance platform.",
+            },
+            {
+                "instruction": "Summarize the role of Yield.",
+                "input": "",
+                "output": "Yield executes bounded training and fine-tuning workloads safely.",
+            },
+        ]
+        dataset_file.write_text(
+            "\n".join(json.dumps(s) for s in samples) + "\n",
+            encoding="utf-8",
+        )
+
+    try:
+        data_bytes = dataset_file.read_bytes()
+        query = urlencode({"name": dataset_name, "filename": dataset_file.name})
+        prep_v1 = api(
+            "catalyst",
+            "POST",
+            f"/api/v1/datasets/{dataset['id']}/preparations?{query}",
+            data=data_bytes,
+            key=f"import:{dataset_name}",
+        )
+        state["preparation"] = prep_v1
+
+        api(
+            "catalyst",
+            "PATCH",
+            f"/api/v1/preparations/{prep_v1['id']}/mapping",
+            body={
+                "mapping": {
+                    "mode": "instruction",
+                    "instruction": {"field": "instruction"},
+                    "input": {"field": "input"},
+                    "output": {"field": "output"},
+                },
+                "normalization": {},
+            },
+        )
+
+        api(
+            "catalyst",
+            "PATCH",
+            f"/api/v1/preparations/{prep_v1['id']}/split",
+            body={"split": {"trainRatio": 1.0}},
+        )
+
+        api(
+            "catalyst",
+            "POST",
+            f"/api/v1/preparations/{prep_v1['id']}/confirm",
+        )
+
+        pub_v1 = api(
+            "catalyst",
+            "POST",
+            f"/api/v1/preparations/{prep_v1['id']}/publish",
+            key=f"publish:{prep_v1['id']}",
+        )
+        dataset_version_v1 = pub_v1["datasetVersion"]
+        state["datasetVersion"] = dataset_version_v1
+    finally:
+        if temp_dir is not None:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # 6. Send to Yield
+    yield_receipt = api(
+        "catalyst",
+        "POST",
+        f"/api/v1/dataset-versions/{dataset_version_v1['id']}/actions/send-to-yield",
+    )
+    training_draft_id = yield_receipt["targetResource"]["id"]
+
+    # 7. Immutable Base Model Import / Reference
+    if "baseImport" not in state:
+        state["baseImport"] = import_base_artifact(
+            args.runtime_config, args.repository, args.revision
+        )
+    base_artifact = state["baseImport"]["modelArtifact"]
+    base_source = state["baseImport"]["modelInfo"]["source"]
+
+    # 8. Configure TrainingDraft
+    api(
+        "yield",
+        "PATCH",
+        f"/api/v1/training-drafts/{training_draft_id}",
+        body={
+            "baseModel": {"artifact": base_artifact, "source": base_source},
+            "parameters": {
+                "epochs": args.epochs,
+                "maxSteps": args.max_steps,
+                "maxLength": args.max_length,
+                "template": args.template,
+                "lora": {"rank": args.rank, "alpha": args.alpha},
+            },
+        },
+    )
+
+    # 9. Start TrainingRun and poll until COMPLETED
+    training_run = api(
+        "yield",
+        "POST",
+        f"/api/v1/training-drafts/{training_draft_id}/actions/start",
+    )
+    state["trainingRun"] = training_run
+
+    run_id = training_run["id"]
+    deadline = time.time() + args.timeout
+    completed_run = None
+    while time.time() < deadline:
+        current_run = api("yield", "GET", f"/api/v1/training-runs/{run_id}")
+        if current_run.get("state") == "COMPLETED":
+            completed_run = current_run
+            break
+        if current_run.get("state") in {"FAILED", "CANCELED"}:
+            raise RuntimeError(f"Training run failed: {current_run.get('error')}")
+        time.sleep(args.poll_interval)
+
+    if completed_run is None:
+        raise TimeoutError("Timed out waiting for training run to complete")
+
+    # 10-12. Verify TrainingResult, adapter artifact, BASE_PLUS_LORA ModelVersion
+    training_result = completed_run["result"]
+    state["trainingResult"] = training_result
+    adapter_artifact = training_result["adapterArtifact"]
+    model_version = training_result["modelVersion"]
+    assert adapter_artifact.get("kind") == "adapter", "Adapter artifact kind must be adapter"
+    assert model_version.get("architecture", {}).get("kind") == "BASE_PLUS_LORA", (
+        "ModelVersion kind must be BASE_PLUS_LORA"
+    )
+
+    # 13-14. Send to Reactor -> DeploymentDraft
+    reactor_receipt = api(
+        "yield",
+        "POST",
+        f"/api/v1/training-results/{training_result['id']}/actions/send-to-reactor",
+    )
+    deployment_draft_id = reactor_receipt["targetResource"]["id"]
+
+    # 15. Select serving binding and nodeRef, deploy
+    bindings = api("reactor", "GET", "/api/v1/serving-bindings")
+    binding = select(bindings, args.binding_index, "serving binding")
+    node = api("reactor", "GET", f"/api/v1/serving-bindings/{binding['id']}/node")
+
+    deployment = api(
+        "reactor",
+        "POST",
+        f"/api/v1/deployment-drafts/{deployment_draft_id}/actions/deploy",
+        body={
+            "name": f"Acceptance Deployment {int(time.time())}",
+            "servingBindingId": binding["id"],
+            "nodeRef": node["nodeRef"],
+        },
+        key=f"deploy:{deployment_draft_id}",
+    )
+    state["deployment"] = deployment
+
+    # 16. Poll until deployment status == READY
+    deployment_id = deployment["id"]
+    ready_deployment = None
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        dep = api("reactor", "GET", f"/api/v1/deployments/{deployment_id}")
+        if dep.get("status") == "READY":
+            ready_deployment = dep
+            break
+        if dep.get("status") in {"FAILED", "STOPPED"}:
+            raise RuntimeError(f"Deployment failed to reach READY: {dep.get('error')}")
+        time.sleep(args.poll_interval)
+
+    if ready_deployment is None:
+        raise TimeoutError("Timed out waiting for deployment to become READY")
+    state["deployment"] = ready_deployment
+
+    # 17-18. Create GatewayEndpoint & Route to Exchange
+    endpoint = api("reactor", "GET", f"/api/v1/endpoints/{ready_deployment['endpointId']}")
+    receivers = api("reactor", "GET", "/api/v1/exchange-receivers")
+    receiver = select(receivers, args.receiver_index, "Exchange receiver")
+    target_binding = select(receiver["providerBindingIds"], args.provider_index, "provider binding")
+
+    gateway_endpoint = api(
+        "exchange",
+        "POST",
+        "/api/v1/gateway-endpoints",
+        body={
+            "name": f"Acceptance Gateway {int(time.time())}",
+            "publicBaseUrl": args.public_url,
+            "authPolicyRef": args.auth_policy_ref,
+        },
+        key=f"gateway-endpoint:{int(time.time())}",
+    )
+    state["gatewayEndpoint"] = gateway_endpoint
+
+    exchange_receipt = api(
+        "reactor",
+        "POST",
+        f"/api/v1/endpoints/{endpoint['id']}/actions/send-to-exchange",
+        body={
+            "resourceVersion": endpoint["resourceVersion"],
+            "receiverId": receiver["receiverId"],
+            "gatewayEndpointId": gateway_endpoint["id"],
+            "targetBindingId": target_binding,
+            "modelPattern": args.model_pattern,
+        },
+        key=f"lifecycle-route:{endpoint['id']}:{args.model_pattern}",
+    )
+    route = exchange_receipt["route"]
+    state["route"] = route
+
+    # 19-20. Confirm Route and poll until ACTIVE
+    current_route = api("exchange", "GET", f"/api/v1/gateway-routes/{route['id']}")
+    api(
+        "exchange",
+        "POST",
+        f"/api/v1/gateway-route-drafts/{route['id']}/actions/confirm",
+        body={"resourceVersion": current_route["resourceVersion"]},
+    )
+    route_id = route["id"]
+    active_route = None
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        r = api("exchange", "GET", f"/api/v1/gateway-routes/{route_id}")
+        if r.get("status") == "ACTIVE":
+            active_route = r
+            break
+        if r.get("status") in {"FAILED", "INACTIVE"}:
+            raise RuntimeError(f"Route failed to become ACTIVE: {r.get('error')}")
+        time.sleep(args.poll_interval)
+
+    if active_route is None:
+        raise TimeoutError("Timed out waiting for route to become ACTIVE")
+    state["route"] = active_route
+
+    # 21-22. Real Chat Completion via Exchange
+    chat_req = {
+        "model": args.model_pattern,
+        "messages": [{"role": "user", "content": "What is Cyrene?"}],
+    }
+    chat_resp = api("exchange", "POST", "/v1/chat/completions", body=chat_req)
+    choices = chat_resp.get("choices", [])
+    assert choices, "Chat completions returned no choices"
+    model_response = choices[0].get("message", {}).get("content", "")
+    assert model_response, "Model response text must not be empty"
+
+    # 23. Record Session in Navigator and Send to Echo
+    session_id = f"acceptance-session-{int(time.time())}"
+    nav_prefix = f"/api/v1/harness/workspaces/{quote(args.workspace, safe='')}/sessions"
+    nav_handle = api(
+        "navigator",
+        "POST",
+        nav_prefix,
+        body={
+            "header": {
+                "version": 2,
+                "id": session_id,
+                "createdAt": int(time.time() * 1000),
+                "isSeeded": False,
+            },
+            "inheritedEventCount": 0,
+            "clientId": "acceptance-driver",
+        },
+    )
+    events = [
+        {"type": "turn/start", "data": {"turn": 1}},
+        {
+            "type": "user/message",
+            "data": {"content": [{"type": "text", "text": "What is Cyrene?"}]},
+        },
+        {
+            "type": "assistant/message",
+            "data": {
+                "turn": 1,
+                "message": {
+                    "content": [{"type": "text", "text": model_response}],
+                    "source": {"model": args.model_pattern},
+                },
+                "usage": {"inputTokens": 10, "outputTokens": 20},
+            },
+        },
+        {"type": "turn/end", "data": {"turn": 1, "reason": {"kind": "completed"}}},
+    ]
+    for idx, evt in enumerate(events):
+        evt.update(seq=idx, time=int(time.time() * 1000) + idx)
+
+    api(
+        "navigator",
+        "POST",
+        f"{nav_prefix}/{session_id}/append",
+        body={
+            "writerToken": nav_handle["writerToken"],
+            "epoch": nav_handle["epoch"],
+            "batchId": f"batch-{int(time.time())}",
+            "events": events,
+        },
+    )
+    snapshot = api("navigator", "GET", f"{nav_prefix}/{session_id}")
+
+    # Send to Echo with complete lineage provenance refs
+    lineage = [
+        model_version["id"],
+        dataset_version_v1["uri"],
+        training_run["uri"],
+        f"cyrene://exchange/gateway-routes/{active_route['id']}",
+    ]
+    echo_receipt = api(
+        "navigator",
+        "POST",
+        f"{nav_prefix}/{session_id}/actions/send-to-echo",
+        body={"expectedRevision": snapshot["revision"], "provenanceRefs": lineage},
+    )
+    eval_input = api(
+        "echo",
+        "GET",
+        f"/api/v1/evaluation-inputs/{echo_receipt['targetResource']['id']}",
+    )
+    state["evaluationInput"] = eval_input
+
+    # 24-26. Echo Evaluation, Annotation, FeedbackSet
+    suite = api(
+        "echo",
+        "POST",
+        "/api/v1/evaluation-suites",
+        body={
+            "name": "Acceptance reference review",
+            "evaluator": "exact_match.v1",
+            "expectedField": "expected",
+            "actualField": "output",
+            "threshold": 1.0,
+        },
+        key=f"suite:{int(time.time())}",
+    )
+    eval_run = api(
+        "echo",
+        "POST",
+        f"/api/v1/evaluation-inputs/{eval_input['id']}/actions/evaluate",
+        body={
+            "suiteId": suite["id"],
+            "engineBindingId": "local-exact-match",
+            "referenceAnswers": {
+                "1": "Cyrene is an autonomous multi-service model lifecycle governance platform."
+            },
+        },
+    )
+    state["evaluationRun"] = eval_run
+
+    annotation = api(
+        "echo",
+        "POST",
+        f"/api/v1/evaluation-runs/{eval_run['id']}/annotations",
+        body={
+            "sampleIndex": 1,
+            "reviewer": args.reviewer,
+            "manualScore": 1.0,
+            "correctedOutput": "Cyrene is an autonomous multi-service model lifecycle governance platform.",
+        },
+    )
+    state.setdefault("annotations", {})["1"] = annotation
+
+    feedback_set = api(
+        "echo",
+        "POST",
+        "/api/v1/feedback-sets",
+        body={
+            "name": f"Acceptance FeedbackSet {int(time.time())}",
+            "runId": eval_run["id"],
+            "sampleIndexes": [1],
+            "annotationIds": [annotation["id"]],
+        },
+        key=f"feedback:{eval_run['id']}:1",
+    )
+    state["feedbackSet"] = feedback_set
+
+    # 27-29. Send FeedbackSet to Catalyst & Publish DatasetVersion v2
+    cat_receipt = api(
+        "echo",
+        "POST",
+        f"/api/v1/feedback-sets/{feedback_set['id']}/actions/send-to-catalyst",
+        body={"datasetId": dataset["id"]},
+    )
+    prep_v2 = api("catalyst", "GET", f"/api/v1/preparations/{cat_receipt['targetResource']['id']}")
+    api(
+        "catalyst",
+        "PATCH",
+        f"/api/v1/preparations/{prep_v2['id']}/split",
+        body={"split": {"trainRatio": 1.0}},
+    )
+    api("catalyst", "POST", f"/api/v1/preparations/{prep_v2['id']}/confirm")
+    pub_v2 = api(
+        "catalyst",
+        "POST",
+        f"/api/v1/preparations/{prep_v2['id']}/publish",
+        key=f"publish:{prep_v2['id']}",
+    )
+    dataset_version_v2 = pub_v2["datasetVersion"]
+    state["datasetVersionV2"] = dataset_version_v2
+
+    # 30. Lineage Audit & First Usable Loop Verification
+    lineage_audit = {
+        "datasetVersionV1": dataset_version_v1["uri"],
+        "trainingRun": training_run["uri"],
+        "trainingResult": training_result["id"],
+        "modelVersion": model_version["id"],
+        "adapterArtifact": adapter_artifact["id"],
+        "deployment": ready_deployment["id"],
+        "route": active_route["id"],
+        "modelPattern": args.model_pattern,
+        "chatResponseLength": len(model_response),
+        "navigatorSession": session_id,
+        "evaluationInput": eval_input["id"],
+        "evaluationRun": eval_run["id"],
+        "feedbackSet": feedback_set["id"],
+        "datasetVersionV2": dataset_version_v2["uri"],
+    }
+    return {
+        "status": "PASS",
+        "lifecycleLoop": "TEXT_MODEL_LIFECYCLE_V1_FIRST_USABLE_LOOP",
+        "lineageAudit": lineage_audit,
+    }
 
 
 def parser() -> argparse.ArgumentParser:
@@ -484,6 +938,34 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--selection", type=Path, default=Path("text-lifecycle-selection.json"))
     commands = result.add_subparsers(dest="action", required=True)
+    command = commands.add_parser("acceptance")
+    command.add_argument("--name", default="Text Model Lifecycle V1 Acceptance")
+    command.add_argument("--dataset-file", type=Path)
+    command.add_argument(
+        "--runtime-config",
+        type=Path,
+        default=Path(os.environ["CYRENE_RUNTIME_CONFIG"])
+        if os.environ.get("CYRENE_RUNTIME_CONFIG")
+        else None,
+    )
+    command.add_argument("--repository", default="Qwen/Qwen2.5-0.5B-Instruct")
+    command.add_argument("--revision", default="d76313797652758117a2ee388a10134440ec5a38")
+    command.add_argument("--epochs", type=float, default=1.0)
+    command.add_argument("--max-steps", type=int, default=1)
+    command.add_argument("--max-length", type=int, default=512)
+    command.add_argument("--template", default="default")
+    command.add_argument("--rank", type=int, default=8)
+    command.add_argument("--alpha", type=int, default=16)
+    command.add_argument("--binding-index", type=int, default=1)
+    command.add_argument("--receiver-index", type=int, default=1)
+    command.add_argument("--provider-index", type=int, default=1)
+    command.add_argument("--model-pattern", default="qwen-acceptance-lora")
+    command.add_argument("--workspace", default="acceptance-workspace")
+    command.add_argument("--reviewer", default="Acceptance Captain")
+    command.add_argument("--public-url", default="http://127.0.0.1:8000")
+    command.add_argument("--auth-policy-ref", default="policy:local-acceptance")
+    command.add_argument("--poll-interval", type=float, default=2.0)
+    command.add_argument("--timeout", type=float, default=1800.0)
     command = commands.add_parser("dataset-import")
     command.add_argument("file", type=Path)
     command.add_argument("--name", required=True)
