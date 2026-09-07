@@ -58,6 +58,7 @@
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-artifact-transfer/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/target" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_capability_client/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

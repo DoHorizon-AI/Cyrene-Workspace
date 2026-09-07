@@ -10,6 +10,7 @@
       <sourceFolder url="file://$MODULE_DIR$/../Services/Cyrene-Reactor/components/scheduler-rs/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Reactor/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Reactor/target" />
+      <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Reactor/product/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
