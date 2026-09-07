@@ -1,0 +1,93 @@
+# Hosted, exact-commit Product integration. No GPU or inference fixture is called real acceptance.
+# 托管精确提交定向集成；不将夹具当作真实训练或推理验收。
+parameters:
+- name: githubServiceConnection
+  type: string
+  default: ff86bffd-772a-43e1-9c94-076f1057e6ca
+trigger:
+  branches:
+    include: [main, feat/text-lifecycle-first-loop-v1]
+pr:
+  branches:
+    include: [main]
+resources:
+  repositories:
+  - repository: platform
+    type: github
+    name: DoHorizon-AI/Cyrene-Platform
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: a29fb0bbb130876429ac4ac80a459d45d59c7c32
+  - repository: catalyst
+    type: github
+    name: DoHorizon-AI/Cyrene-Catalyst
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: 02c74f137081388d3c2fb558557b0bd6dae57442
+  - repository: yield
+    type: github
+    name: DoHorizon-AI/Cyrene-Yield
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: 47456f7abf13970a6beb12775e32dccc2bc02e67
+  - repository: reactor
+    type: github
+    name: DoHorizon-AI/Cyrene-Reactor
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: 9a0c61b3ac5e3b90d2eef5fd44834c46fd5bfe92
+  - repository: navigator
+    type: github
+    name: DoHorizon-AI/Cyrene-Navigator
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: ead2e4ae308a6d35f7a3e5c3bbd2f591cee34b14
+  - repository: echo
+    type: github
+    name: DoHorizon-AI/Cyrene-Echo
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: 77cbdc322b6c714bcfb6e7b6b5900e6d53aef10c
+pool:
+  vmImage: ubuntu-latest
+steps:
+- checkout: self
+  path: s/Cyrene-Workspace
+- checkout: platform
+  path: s/Cyrene-Platform
+- checkout: catalyst
+  path: s/Cyrene-Catalyst
+- checkout: yield
+  path: s/Cyrene-Yield
+- checkout: reactor
+  path: s/Cyrene-Reactor
+- checkout: navigator
+  path: s/Cyrene-Navigator
+- checkout: echo
+  path: s/Cyrene-Echo
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.12'
+- bash: |
+    set -euo pipefail
+    test "$(git -C "$(Pipeline.Workspace)/s/Cyrene-Platform" rev-parse HEAD)" = a29fb0bbb130876429ac4ac80a459d45d59c7c32
+    test "$(git -C "$(Pipeline.Workspace)/s/Cyrene-Catalyst" rev-parse HEAD)" = 02c74f137081388d3c2fb558557b0bd6dae57442
+    test "$(git -C "$(Pipeline.Workspace)/s/Cyrene-Yield" rev-parse HEAD)" = 47456f7abf13970a6beb12775e32dccc2bc02e67
+    test "$(git -C "$(Pipeline.Workspace)/s/Cyrene-Reactor" rev-parse HEAD)" = 9a0c61b3ac5e3b90d2eef5fd44834c46fd5bfe92
+    test "$(git -C "$(Pipeline.Workspace)/s/Cyrene-Navigator" rev-parse HEAD)" = ead2e4ae308a6d35f7a3e5c3bbd2f591cee34b14
+    test "$(git -C "$(Pipeline.Workspace)/s/Cyrene-Echo" rev-parse HEAD)" = 77cbdc322b6c714bcfb6e7b6b5900e6d53aef10c
+    python -m pip install uv==0.12.3
+    uv sync --locked --group text-lifecycle --no-install-package cyrene-artifacts --no-install-package cyrene-environment --no-install-package cyrene-preflight --no-install-package cyrene-control-plane
+    uv pip install --no-deps "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_artifacts" "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_environment" "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_preflight" "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_control_plane"
+    uv run --no-sync ruff check --select E,F,I,UP ci/text-lifecycle-v1 scripts/text-lifecycle-v1.py
+    uv run --no-sync pytest -q ci/text-lifecycle-v1 --junitxml=test-results.xml
+    uv run --no-sync python ci/text-lifecycle-v1/validate_contracts.py ../Cyrene-Catalyst ../Cyrene-Yield ../Cyrene-Reactor ../Cyrene-Navigator ../Cyrene-Echo
+  workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
+  env:
+    CYRENE_CATALYST_WORKTREE: $(Pipeline.Workspace)/s/Cyrene-Catalyst
+    CYRENE_YIELD_WORKTREE: $(Pipeline.Workspace)/s/Cyrene-Yield
+    CYRENE_REACTOR_WORKTREE: $(Pipeline.Workspace)/s/Cyrene-Reactor
+    CYRENE_NAVIGATOR_WORKTREE: $(Pipeline.Workspace)/s/Cyrene-Navigator
+    CYRENE_ECHO_WORKTREE: $(Pipeline.Workspace)/s/Cyrene-Echo
+  displayName: Exact Product handoffs, client actions and schemas
+- task: PublishTestResults@2
+  condition: succeededOrFailed()
+  inputs:
+    testResultsFormat: JUnit
+    testResultsFiles: '$(Pipeline.Workspace)/s/Cyrene-Workspace/test-results.xml'
+    failTaskOnFailedTests: true
+    failTaskOnMissingResultsFile: true

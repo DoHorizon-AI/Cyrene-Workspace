@@ -52,3 +52,6 @@ walkthrough.md
 .run/
 .idea/runConfigurations/
 
+# Local Product selections may contain conversation and annotation content.
+text-lifecycle-selection.json
+text-lifecycle-selection.pending
