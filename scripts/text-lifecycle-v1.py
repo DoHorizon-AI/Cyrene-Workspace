@@ -360,7 +360,9 @@ def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClie
             f"/api/v1/gateway-route-drafts/{route['id']}/actions/confirm",
             body={"resourceVersion": current["resourceVersion"]},
         )
-        assert confirmed.get("status") == "ACTIVE", f"Expected route status ACTIVE, got {confirmed.get('status')}"
+        assert confirmed.get("status") == "ACTIVE", (
+            f"Expected route status ACTIVE, got {confirmed.get('status')}"
+        )
         state["route"] = confirmed
         return state["route"]
     if action in {"navigator-sessions", "send-to-echo"}:
@@ -599,7 +601,7 @@ def run_acceptance(
                 f"/api/v1/serving-bindings/{binding_id}/model-imports",
                 body={"repository": args.repository, "revision": args.revision},
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             state["baseImport"] = import_base_artifact(
                 args.runtime_config, args.repository, args.revision
             )
@@ -661,7 +663,9 @@ def run_acceptance(
         model_version.get("composition") == "BASE_PLUS_LORA"
         or model_version.get("architecture", {}).get("kind") == "BASE_PLUS_LORA"
     )
-    assert is_base_plus_lora, f"ModelVersion composition must be BASE_PLUS_LORA, got {model_version}" 
+    assert is_base_plus_lora, (
+        f"ModelVersion composition must be BASE_PLUS_LORA, got {model_version}"
+    )
 
     # 13-14. Send to Reactor -> DeploymentDraft
     reactor_receipt = api(
@@ -764,7 +768,9 @@ def run_acceptance(
 
     if active_route is None:
         raise TimeoutError("Timed out waiting for route to become ACTIVE")
-    assert active_route.get("status") == "ACTIVE", f"Expected route status ACTIVE, got {active_route.get('status')}"
+    assert active_route.get("status") == "ACTIVE", (
+        f"Expected route status ACTIVE, got {active_route.get('status')}"
+    )
     state["route"] = active_route
 
     # 21-22. Real Chat Completion via Exchange
