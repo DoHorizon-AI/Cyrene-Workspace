@@ -10,15 +10,14 @@ Products remain independently usable.
 
 ## Operator setup / 运维准备
 
-Use the six feature commits recorded in the delivery report and the pinned
-Platform SDK in their lockfiles. Install each Product with `uv sync --locked`
-(`--extra dev` for Yield tests, `--group dev` for other Product tests).
-Keep the existing Reactor, Exchange and Navigator runtime setup described in
-their repositories. In particular, retain logical Endpoint identity, Exchange
-provider credentials and the Navigator/DSH persistence authority.
+Use exact canonical checkouts and the reference profile in
+[`runtime-profile-v1.md`](runtime-profile-v1.md). Set the three checkout roots
+and `CYRENE_RUNTIME_HOME`, then run `scripts/reference-runtime bootstrap`.
+The generated private manifest supplies Artifact Plane, Kernel socket, peer UID,
+placement, signing key, trainer Python, and Reactor Host configuration.
 
-本轮不重新部署已有 serving vertical。先使用交付清单中的精确提交安装产品，保留
-Reactor、Exchange、Navigator 的既有运维配置；不要重新创建会话历史或 serving authority。
+使用精确 canonical checkout 和 reference profile，执行统一 bootstrap。生成的私有
+manifest 负责 Artifact Plane、Kernel、UID、placement、签名密钥与 Python 环境路径。
 
 V1 uses the existing Platform `LocalArtifactProvider` with **one operator-managed
 Artifact root accessible to these services and the selected execution host**.
@@ -27,8 +26,8 @@ This is a provider deployment requirement, not an API file-path handoff. Set:
 | Product | Configuration |
 | --- | --- |
 | Catalyst | `CYRENE_ARTIFACT_ROOT`, `CYRENE_YIELD_URL`; launch `uv run --no-sync python -m cyrene_catalyst` (port 8014) |
-| Yield | `cyrene-yield --state-directory ... --artifact-root ... --kernel-socket ... --installations ... --signing-key-file ... --python ... --reactor-url ...` (port 8092) |
-| Reactor host | Add `artifact_root` to the existing host configuration; keep its existing signed installer, Kernel, vLLM, placement and authenticated control setup |
+| Yield | `cyrene-yield --runtime-config $CYRENE_RUNTIME_HOME/platform/runtime.json --trainer-runtime-config $CYRENE_RUNTIME_HOME/trainer/runtime.json --state-directory ... --reactor-url ...` (port 8092) |
+| Reactor host/control | Use generated `$CYRENE_RUNTIME_HOME/reactor/host.json` and `control.json`; ports 19301 and 19300 |
 | Echo | `cyrene-echo --database ... --artifact-root ... --platform-artifacts --catalyst-url ...` (port 8094) |
 | Navigator persistence | Add `--artifact-root ... --echo-url ...` to `scripts/serve-persistence.py`; retain the existing principal config and database |
 
@@ -41,11 +40,9 @@ replication is outside this V1 deployment profile.
 Artifact provider；未连接时明确失败。首版不新增远程 Artifact 复制机制。
 
 Yield uses one NVIDIA GPU, FP32 SFT and one LoRA with the existing LLaMA-Factory
-adapter. Install the repository's `plugins/llama-factory-training` and its
-compatible CUDA/PyTorch dependencies in the selected trainer Python environment.
-That environment also needs `grpcio` and `protobuf` from Yield's lock. Supply the
-existing operator installer key (mode 0600) and Kernel installations directory;
-Reactor's documented `init-secrets` can initialize an operator installer key.
+adapter. The trainer bootstrap installs its exact Python 3.12, PyTorch CUDA,
+transformers, PEFT, gRPC, protobuf, and LLaMA-Factory lock, then verifies CUDA and
+the Kernel descriptor before reporting READY.
 The Product process does not run the trainer: Kernel starts the signed worker,
 assigns the device, supervises its process tree and confirms lease release.
 An unconfigured Kernel fails explicit start; it never falls back to local training.
@@ -85,10 +82,10 @@ selection indexes are one-based. No command automatically runs the next step.
 2. `dataset-map` — select instruction/input/output fields; flags support other names.
 3. `dataset-split --train-ratio 1`, then `dataset-confirm`, then `dataset-publish`.
 4. `send-to-yield` — expect a Training draft, with no started TrainingRun.
-5. `serving-bindings`, then `base-import --repository OWNER/MODEL --revision COMMIT --binding-index 1`.
-   Choose an immutable 40-hex upstream revision accepted by the existing Reactor
-   text profile. The public import creates the required verified base receipt and
-   an ArtifactRef; the client carries that response into Yield without model bytes.
+5. `base-import --repository OWNER/MODEL --revision COMMIT`. Choose an immutable
+   40-hex upstream revision. The bootstrap client publishes that snapshot directly
+   to the configured Artifact Plane and carries its ArtifactRef into Yield. No live
+   Reactor Host or ServingBinding exists at this training boundary.
 6. `training-configure --template qwen --max-steps 2` — choose the template matching
    that base. These example debug settings are optional; select training settings
    deliberately. `training-start` is the explicit compute operation.
@@ -96,8 +93,9 @@ selection indexes are one-based. No command automatically runs the next step.
    `adapterArtifact`, `modelVersion.id`, BASE_PLUS_LORA, and training/dataset lineage.
    On failure inspect documented `/api/v1/training-runs/{id}/attempts`; no PASS is
    inferred from a trainer output directory. `training-cancel` requests cancellation.
-8. `send-to-reactor` — expect Deployment DRAFT, no allocation. `deploy --name text-v1`
-   starts the existing serving implementation; `deployment-status` must report READY.
+8. `send-to-reactor` — expect Deployment DRAFT, no allocation. Run
+   `serving-bindings`, then `deploy --name text-v1 --binding-index 1`.
+   `deployment-status` must report READY.
 9. `exchange-endpoint-create --name text-v1 --public-url URL --auth-policy-ref REF`
    creates a logical Exchange endpoint using the admitted operator policy. Read
    `exchange-receivers`, then `send-to-exchange --model text-v1` (select receiver and
@@ -168,12 +166,8 @@ existing service connection, without credential extraction. Hosted tests are not
 GPU acceptance. Record actual commits, failures and skipped counts separately.
 
 The `githubServiceConnection` parameter must identify a GitHub service connection
-authorized for that pipeline and the referenced repositories. The connection
-currently recorded by the existing build definitions is rejected for the
-`platform` repository resource. A pipeline administrator must authorize a valid
-connection for the five Product pipelines and Workspace; Workspace also checks out
-the five pinned Product commits. Rerun the exact branch/commit after configuration.
-This infrastructure prerequisite does not require changing any Product payload.
+authorized for that pipeline and every declared repository resource. Resource
+resolution and Product test results remain separate evidence states.
 
 为五个产品分别设置精确检出路径，再运行 Workspace 定向测试和契约校验。Hosted CI
 与 GPU 验收分开记录；不得用模拟训练结果代替真实训练，也不得将未运行标为 PASS。
