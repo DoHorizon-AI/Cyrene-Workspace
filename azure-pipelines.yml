@@ -74,6 +74,7 @@ steps:
     uv sync --locked --group text-lifecycle --no-install-package cyrene-artifacts --no-install-package cyrene-environment --no-install-package cyrene-preflight --no-install-package cyrene-control-plane
     uv pip install --no-deps "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_artifacts" "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_environment" "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_preflight" "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_control_plane"
     uv run --no-sync ruff check --select E,F,I,UP ci/text-lifecycle-v1 scripts/text-lifecycle-v1.py
+    uv run --no-sync mypy --check-untyped-defs scripts/text-lifecycle-v1.py ci/text-lifecycle-v1/export_contracts.py ci/text-lifecycle-v1/validate_contracts.py
     uv run --no-sync pytest -q ci/text-lifecycle-v1 --junitxml=test-results.xml
     uv run --no-sync python ci/text-lifecycle-v1/validate_contracts.py ../Cyrene-Catalyst ../Cyrene-Yield ../Cyrene-Reactor ../Cyrene-Navigator ../Cyrene-Echo
   workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
