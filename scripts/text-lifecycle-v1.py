@@ -11,12 +11,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shutil
 import sys
-from pathlib import Path
+import tempfile
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
+
+from cy_artifacts import ArtifactKind, LocalArtifactProvider
+from huggingface_hub import snapshot_download
+
+RUNTIME_PROFILE = "CYRENE_TEXT_LIFECYCLE_V1_LOCAL_GPU"
 
 
 class ProductClient:
@@ -79,6 +87,73 @@ def require(state: dict[str, Any], name: str) -> Any:
     if name not in state:
         raise ValueError("No selected " + name + "; complete or select that Product resource first")
     return state[name]
+
+
+def _runtime_config(path: Path | None) -> dict[str, Any]:
+    if path is None or not path.expanduser().is_absolute():
+        raise ValueError("CYRENE_RUNTIME_CONFIG must name the private runtime manifest")
+    resolved = path.expanduser().resolve()
+    if not resolved.is_file() or resolved.stat().st_mode & 0o077:
+        raise ValueError("Runtime manifest must exist with mode 0600")
+    value = json.loads(resolved.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise TypeError("Runtime manifest is invalid")
+    if value.get("profile") != RUNTIME_PROFILE or value.get("status") != "READY":
+        raise ValueError("Runtime manifest is not READY for the lifecycle profile")
+    home_value, artifact_value = value.get("runtimeHome"), value.get("artifactRoot")
+    if not isinstance(home_value, str) or not isinstance(artifact_value, str):
+        raise TypeError("Runtime manifest omits Artifact Plane configuration")
+    home, artifact_root = Path(home_value), Path(artifact_value)
+    if (
+        not home.is_absolute()
+        or not artifact_root.is_absolute()
+        or not artifact_root.resolve().is_relative_to(home.resolve())
+    ):
+        raise ValueError("Runtime Artifact Plane must be bounded by runtime home")
+    return value
+
+
+def import_base_artifact(path: Path | None, repository: str, revision: str) -> dict[str, Any]:
+    """Prepare an immutable base Artifact without requiring a Reactor deployment host."""
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ValueError("Base model must be a Hugging Face owner/repository")
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("Base model revision must be an immutable 40-character commit")
+    runtime = _runtime_config(path)
+    runtime_home = Path(runtime["runtimeHome"]).resolve()
+    artifact_root = Path(runtime["artifactRoot"]).resolve()
+    cache = runtime_home / "cache" / "huggingface"
+    cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    snapshot = Path(snapshot_download(repo_id=repository, revision=revision, cache_dir=cache))
+    if not snapshot.resolve().is_relative_to(cache.resolve()) or not snapshot.is_dir():
+        raise ValueError("Downloaded model snapshot escaped the runtime cache")
+    provider = LocalArtifactProvider(artifact_root)
+    file_count = 0
+    with tempfile.TemporaryDirectory(prefix="base-import-", dir=artifact_root) as directory:
+        copied = Path(directory)
+        for member in snapshot.rglob("*"):
+            if member.is_dir():
+                continue
+            resolved = member.resolve(strict=True)
+            if not resolved.is_relative_to(cache.resolve()) or not resolved.is_file():
+                raise ValueError("Downloaded model member escaped the runtime cache")
+            relative = PurePosixPath(member.relative_to(snapshot).as_posix())
+            target = copied / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(resolved, target)
+            file_count += 1
+        if file_count == 0:
+            raise ValueError("Downloaded model snapshot is empty")
+        reference = provider.publish_portable_directory(copied, kind=ArtifactKind.MODEL)
+    return {
+        "modelArtifact": reference.to_dict(),
+        "modelInfo": {
+            "format": "huggingface.snapshot.v1",
+            "fileCount": file_count,
+            "source": {"repository": repository, "revision": revision},
+        },
+    }
 
 
 def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClient) -> Any:
@@ -149,17 +224,14 @@ def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClie
             "yield", "GET", "/api/v1/training-drafts/" + receipt["targetResource"]["id"]
         )
         return receipt
-    if action in {"serving-bindings", "base-import"}:
+    if action == "serving-bindings":
         bindings = api("reactor", "GET", "/api/v1/serving-bindings")
-        if action == "serving-bindings":
-            return bindings
-        binding = select(bindings, args.binding_index, "serving binding")["bindingId"]
-        state["servingBinding"] = binding
-        state["baseImport"] = api(
-            "reactor",
-            "POST",
-            f"/api/v1/serving-bindings/{quote(binding, safe='')}/model-imports",
-            body={"repository": args.repository, "revision": args.revision},
+        return bindings
+    if action == "base-import":
+        state["baseImport"] = import_base_artifact(
+            args.runtime_config,
+            args.repository,
+            args.revision,
         )
         return state["baseImport"]
     if action == "training-configure":
@@ -217,10 +289,10 @@ def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClie
         )
         return receipt
     if action == "deploy":
-        draft, binding = (
-            require(state, "deploymentDraft"),
-            require(state, "servingBinding"),
-        )
+        draft = require(state, "deploymentDraft")
+        bindings = api("reactor", "GET", "/api/v1/serving-bindings")
+        binding = select(bindings, args.binding_index, "serving binding")["bindingId"]
+        state["servingBinding"] = binding
         node = api("reactor", "GET", f"/api/v1/serving-bindings/{quote(binding, safe='')}/node")
         state["deployment"] = api(
             "reactor",
@@ -440,7 +512,13 @@ def parser() -> argparse.ArgumentParser:
     command = commands.add_parser("base-import")
     command.add_argument("--repository", required=True)
     command.add_argument("--revision", required=True)
-    command.add_argument("--binding-index", type=int, default=1)
+    command.add_argument(
+        "--runtime-config",
+        type=Path,
+        default=Path(os.environ["CYRENE_RUNTIME_CONFIG"])
+        if os.environ.get("CYRENE_RUNTIME_CONFIG")
+        else None,
+    )
     command = commands.add_parser("training-configure")
     command.add_argument("--epochs", type=float, default=1)
     command.add_argument("--max-steps", type=int)
@@ -450,6 +528,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--alpha", type=int, default=16)
     command = commands.add_parser("deploy")
     command.add_argument("--name", default="Text lifecycle v1")
+    command.add_argument("--binding-index", type=int, default=1)
     command = commands.add_parser("exchange-endpoint-create")
     command.add_argument("--name", required=True)
     command.add_argument("--public-url", required=True)
@@ -496,7 +575,7 @@ def main() -> None:
             os.fsync(stream.fileno())
         pending.replace(args.selection)
         print(json.dumps(result, indent=2, ensure_ascii=False))
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, TypeError, OSError, KeyError) as exc:
         print("Action did not complete: " + str(exc), file=sys.stderr)
         raise SystemExit(1) from None
 
