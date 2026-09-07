@@ -11,6 +11,7 @@
       <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Reactor/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Reactor/target" />
       <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Reactor/product/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Reactor/runtime/core/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
