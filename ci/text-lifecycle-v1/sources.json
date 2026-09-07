@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "profile": "text-model-lifecycle-v1",
+  "scope": "targeted-http-fixtures-not-gpu-acceptance",
+  "platformRevision": "a29fb0bbb130876429ac4ac80a459d45d59c7c32",
+  "products": {
+    "Catalyst": "02c74f137081388d3c2fb558557b0bd6dae57442",
+    "Yield": "47456f7abf13970a6beb12775e32dccc2bc02e67",
+    "Reactor": "9a0c61b3ac5e3b90d2eef5fd44834c46fd5bfe92",
+    "Navigator": "ead2e4ae308a6d35f7a3e5c3bbd2f591cee34b14",
+    "Echo": "77cbdc322b6c714bcfb6e7b6b5900e6d53aef10c"
+  }
+}
