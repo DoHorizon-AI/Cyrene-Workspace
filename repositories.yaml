@@ -46,18 +46,19 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "x86_64-unknown-linux-gnu"
     local_acceptance_environment: "wsl2 / linux_container"
-    ci_acceptance_environment: "ubuntu-latest (GitHub Actions)"
+    ci_acceptance_environment: "ubuntu-latest (Azure Pipelines)"
     release_artifact_target: "x86_64-unknown-linux-gnu"
     secondary_targets: ["aarch64-unknown-linux-gnu"]
     ide:
       cargo_root: "../Cyrene-Platform/Cargo.toml"
       python_root: "../Cyrene-Platform"
-      gradle_root: "../Cyrene-Platform/framework/jvm/settings.gradle.kts"
     pointers:
       primary_source_roots:
         - "../Cyrene-Platform/kernel/crates"
+        - "../Cyrene-Platform/framework/crates"
+        - "../Cyrene-Platform/agents"
+        - "../Cyrene-Platform/adapters"
         - "../Cyrene-Platform/sdk/python"
-        - "../Cyrene-Platform/framework/jvm"
       test_roots:
         - "../Cyrene-Platform/kernel/crates/*/tests"
         - "../Cyrene-Platform/sdk/python/*/tests"
@@ -65,8 +66,8 @@ repositories:
         - "../Cyrene-Platform/contracts/proto"
         - "../Cyrene-Platform/contracts/rust"
       developer_commands:
-        test: "cargo test --workspace ; uv run pytest"
-        build: "cargo build ; ./gradlew build"
+        test: "cargo test --workspace ; uv run pytest ; gradle -p tck/model-provider-embedding-contract/jvm test"
+        build: "cargo build --locked --workspace --all-targets"
 
   - name: "Cyrene-Plugins-Official"
     path: "../Cyrene-Plugins-Official"
@@ -226,10 +227,11 @@ repositories:
     pointers:
       primary_source_roots:
         - "../Services/Cyrene-Yield/training/core/src"
+        - "../Services/Cyrene-Yield/migration/jvm-product-control-plane"
       test_roots:
         - "../Services/Cyrene-Yield/training/core/tests"
       developer_commands:
-        test: "uv run pytest training/core/tests"
+        test: "uv run pytest training/core/tests ; gradle -p migration/jvm-product-control-plane test"
         build: "uv build"
 
   - name: "Cyrene-Exchange"

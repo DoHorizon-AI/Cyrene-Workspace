@@ -66,7 +66,12 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
     concepts = authorities["concepts"]
     assert len({item["id"] for item in concepts}) == len(concepts)
     assert sum(item["duplicateDefinitionCount"] for item in concepts) == 0
-    assert len([item for item in concepts if item["id"] == "training.engine.v1"]) == 1
+    training_engine = [item for item in concepts if item["id"] == "training.engine.v1"]
+    assert len(training_engine) == 1
+    migrating_ids = {"model.routing.v1", "serving.engine.v1", "training.engine.v1"}
+    assert {
+        item["id"] for item in concepts if item["status"] == "MIGRATING_COMPATIBILITY"
+    } == migrating_ids
 
     registry = _json(contract_root / "product-contracts-v1.json")
     registered_commits = {
@@ -84,8 +89,7 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
     )
     for product in ARTIFACT_CONSUMERS:
         generated = _json(
-            roots[product]
-            / "contracts/product/v1/generated/platform/artifact-ref.schema.json"
+            roots[product] / "contracts/product/v1/generated/platform/artifact-ref.schema.json"
         )
         assert generated == artifact, f"{product} ArtifactRef projection drifted"
         for schema_name in ARTIFACT_EMBEDDINGS[product]:
@@ -100,18 +104,14 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
         assert not tuple(product_contract.glob("*event*.schema.json")), (
             f"{product} duplicates the common event envelope"
         )
-        generated = _json(
-            product_contract / "generated/common/problem-details.schema.json"
-        )
+        generated = _json(product_contract / "generated/common/problem-details.schema.json")
         assert generated == problem, f"{product} Problem Details projection drifted"
         openapi = (product_contract / "openapi.yaml").read_text(encoding="utf-8")
         assert "x-cyrene-contract-profile: product-http-v1" in openapi
         assert "#/components/schemas/Problem" not in openapi
 
     assert not (contract_root / "artifact-ref.schema.json").exists()
-    assert not (
-        roots["yield"] / "contracts/product/v1/training-engine-spi.schema.json"
-    ).exists()
+    assert not (roots["yield"] / "contracts/product/v1/training-engine-spi.schema.json").exists()
     yield_surface = "\n".join(
         (roots["yield"] / relative).read_text(encoding="utf-8")
         for relative in (
@@ -123,9 +123,9 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
     assert "training.engine.adapter.v1" not in yield_surface
     assert '"const": "training.engine.v1"' in yield_surface
 
-    navigator_source = (
-        roots["navigator"] / "src/cyrene_navigator/reader.py"
-    ).read_text(encoding="utf-8")
+    navigator_source = (roots["navigator"] / "src/cyrene_navigator/reader.py").read_text(
+        encoding="utf-8"
+    )
     assert "class ProductReader" not in navigator_source
     assert "class ProductReadPort" in navigator_source
 

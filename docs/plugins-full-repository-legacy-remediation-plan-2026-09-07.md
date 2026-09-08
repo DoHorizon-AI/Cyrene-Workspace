@@ -2,7 +2,7 @@
 
 - **Source audit / 源审计**：`docs/plugins-full-repository-legacy-audit-2026-09-07.md`
 - **Audit snapshot / 审计快照**：2026-09-07
-- **Plan status / 计划状态**：Execution in progress; Platform and Plugins source remediation is closed, and the Astrbot boundary source is read back / 执行中；Platform 与 Plugins 源码修复已关闭，Astrbot 边界源码已远端回读
+- **Plan status / 计划状态**：Execution in progress; the Platform business-boundary follow-up and its Plugins, Yield, and Reactor ownership moves are closed and read back / 执行中；Platform 业务边界复查及对应 Plugins、Yield、Reactor 权威迁移已关闭并完成远端回读
 - **Last status update / 最近状态更新**：2026-09-08
 - **Scope / 范围**：Workspace `repositories.yaml` 中 10 个成员仓库，加上 Workspace，共 11 个仓库
 - **Completion rule / 完成规则**：本文所有 P0、P1、P2 项均须关闭，才能继续下一阶段开发或建立 current accepted baseline
@@ -41,9 +41,13 @@ evidence is recorded first.
 
 | Tasks / 任务 | Repository and exact baseline / 仓库与精确基线 | Disposition and owned scope / 处置与独占范围 | State / 状态 | Canonical and CI evidence / 远端与 CI 证据 | Remaining work / 剩余工作 |
 | --- | --- | --- | --- | --- | --- |
-| T03, T15 | Cyrene-Platform base `8091a53176627e51c507eddae99442be8518849e`; clean baseline `1fa286c4071546c0d4ebb980fe24675e7f13d79e` | `REMOVE/MOVE/ISOLATE`; Product deployment, compatibility snapshots, empty transports, component duplication, boundary guards, policy/docs/CI | `CLOSED` | [PR #38](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/38) merged; Azure build 440 succeeded; task head `1c9b858ce957e8d5706d21f28d6c2914a6aa3c2e` is an ancestor of remote `develop` | GPU runtime is `NOT_RUN_BY_DEFAULT` and stays in T24. Do not add Product adapters to Platform or create a new Platform source task without an accepted `PLATFORM_GAP`. |
+| T03, T15 | Cyrene-Platform base `8091a53176627e51c507eddae99442be8518849e`; historical close `1fa286c4071546c0d4ebb980fe24675e7f13d79e` | `REMOVE/MOVE/ISOLATE`; Product deployment, compatibility snapshots, empty transports, component duplication, boundary guards, policy/docs/CI | `CLOSED` | [PR #38](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/38) merged; Azure build 440 succeeded; task head `1c9b858ce957e8d5706d21f28d6c2914a6aa3c2e` is an ancestor of remote `develop` | T26 supersedes this historical clean-baseline candidate. Do not reuse `1fa286c4` as the current baseline or repeat its source cleanup. |
 | T05, T06, T07, T10, T10A, T10B, T11, T12, T13 | Cyrene-Plugins-Official base `d6117175577720a79a975961e2e7c87e26806531`; canonical `b759e32f0a497020e0f05d3eb1339ef56f81387e` | `REMOVE/SUPPORT/ISOLATE`; legacy shim/catalog truth, simulated results, Custom Script, incomplete plugins, Spring/Python gateways, packaging, Product copies, layered CI | `CLOSED` | [PR #12](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/12) merged; Azure build 444 succeeded across all eight jobs; task head `f6dca75145219d8c5186891fc46c78ec64518ef6` is an ancestor of remote `develop` | Real GPU, provider-service, and production Docker evidence remains T24 work. Seven Platform-fixture conformance cases passed locally against the clean Platform worktree but were skipped, not passed, in the single-repository Azure lane. Do not repeat the source cleanup. |
 | T14 | Astrbot-Rev base `d14d60858a9c6b43b0b68a69a01ac76b69739b8b`; canonical `685978cdff6fb06150e05e7aa9f66ebb87c85f0f` | `MOVE/SUPPORT/ISOLATE`; reusable model/media/OneBot plugin ports, Product-owned .NET boundary, stale compatibility and branch/CI truth | `READ_BACK` | [PR #13](https://github.com/DoHorizon-AI/Astrbot-Rev/pull/13) merged; Azure build 443 succeeded, including 1,073 .NET/PostgreSQL tests; task head `e2bcfc2497d9da4af5aef6f0482d32523f3a08f0` is an ancestor of remote `develop` | Four suites requiring prepared Platform executables and official plugin archives are explicitly `NOT_RUN` in the single-repository lane. T24 owns that cross-repository execution. Do not assign another Astrbot source writer for the same boundary. |
+| T26 | Cyrene-Platform base `1fa286c4071546c0d4ebb980fe24675e7f13d79e`; current clean baseline `1b496733d725680dc999f925c99b20c8ecad178a` | `REMOVE/MOVE/ISOLATE`; remaining Product run/preflight/media ownership, consumer tooling/TCKs, Product JVM shell, migration quarantine and return guards | `CLOSED` | [PR #39](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/39) and [PR #40](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/40) merged; Azure builds 463 and 464 succeeded at exact task heads; a new-target full Cargo build passed; both task heads are ancestors of remote `develop` | The implemented v0 typed SPI, registry, local transport, in-memory storage, plugin taxonomy, and AI manifest/schema records remain `MIGRATING_COMPATIBILITY`, build-tested and frozen; every named SPI proto carries the marker and CI prevents its removal. Real GPU, Kubernetes, external-provider and privileged multi-account execution remain T24 work. No new Platform source task without an accepted `PLATFORM_GAP`. |
+| T27 | Cyrene-Plugins-Official base `b759e32f0a497020e0f05d3eb1339ef56f81387e`; canonical `4f730e1f13fbc64b04b533dbf7f4e90d06460604` | `MOVE/SUPPORT`; generic worker payload to typed media request adaptation | `CLOSED` | [PR #13](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/13) merged; Azure build 448 succeeded; 54 cross-repository tests passed at task head `ac6931a2b4de9beacf611d2d54b85e699fd73bf9`, which is an ancestor of remote `develop` | Real external media-provider execution remains T24. Do not recreate media conversion in Platform or Product hosts. |
+| T28 | Cyrene-Yield base `c71057f69a8f744c02110c0942a70d69254c7fce`; canonical `0f402e0fff5d07a001d90f97c35e211ffd1875b0` | `MOVE/SUPPORT`; Product run/attempt/retry/persistence and Product model-analysis/compatibility-preflight contracts | `CLOSED` | [PR #11](https://github.com/DoHorizon-AI/Cyrene-Yield/pull/11) merged; Azure build 461 succeeded at task head `292971f6907294d59184d3a390c97974804b33aa`; canonical Azure build 462 also succeeded | Self-hosted GPU training remains T24. Do not reintroduce Product lifecycle or model-policy requests into Platform preflight. |
+| T29 | Cyrene-Reactor base `3b8d4e922ed65b179e14176583c89edaced37636`; canonical `997078c4b9fedb9b99bfbe485dd036fbf4497630` | `SUPPORT`; consume the generic Platform runtime profile without a Platform source change | `CLOSED` | [PR #12](https://github.com/DoHorizon-AI/Cyrene-Reactor/pull/12) merged; Azure build 450 succeeded at task head `e8315050730c45dafbdd44cfb33bdc26dd34d915`, which is an ancestor of remote `develop` | Real GPU serving remains T24. Future Reactor profiles must compose the generic Platform runtime contract without Product-specific Platform names. |
 | T24 | Cross-repository acceptance coordinator | Exact-head environment execution only; no source ownership | `OPEN` | Source CI evidence above is immutable routing input | Run and record the Platform/Plugins/Astrbot fixture lane plus remaining real hardware and external-service evidence. Return a failure only to its unique source task when it proves a source defect. |
 
 ## 2. Remediation outcomes / 合法关闭方式
@@ -384,12 +388,52 @@ flowchart LR
   修 PRODUCTS 和架构报告中的 TensorRT、Hybrid、Custom Script 沙箱、网关与 Plugins 过度声明。
 - **Acceptance / 验收**：Workspace verifier 从实际仓库入口得出同一套当前事实。
 
+### T26 Platform remaining business-authority evacuation / Platform 剩余业务权威迁出（P0 / XL）
+
+- **Repository**：Cyrene-Platform。
+- **Dependencies / 依赖**：T14、T27、T28。
+- **Work / 工作**：迁出 Product run、attempt、retry、persistence、模型分析与兼容性策略、媒体请求适配；
+  删除 Product JVM shell、消费仓工具链和跨仓具体 TCK；为必须暂存的已实现 v0 compatibility surface
+  统一标注 `MIGRATING_COMPATIBILITY` 并阻止新增生产依赖。
+- **Acceptance / 验收**：Platform 只保留 Artifact/Runtime/Environment、Node/Resource facts、CES、
+  WorkerControl、Placement、Lease/Fence、Sandbox、通用 resolver 和 wire contracts；从新 target 目录完成
+  全工作区构建，全部语言门禁通过，正常合并并回读 current `PLATFORM_CLEAN_BASELINE`。
+- **Status / 状态**：`CLOSED`；证据见 §1.1，其他模型不得重复领取这些源码路径。
+
+### T27 Plugins media worker adaptation / Plugins 媒体 worker 适配接管（P0 / L）
+
+- **Repository**：Cyrene-Plugins-Official。
+- **Dependencies / 依赖**：T12，且必须先于 T26 删除 Platform 副本。
+- **Work / 工作**：由可安装 media plugin 接管通用 worker payload 到 image/audio typed request 的严格转换，
+  保留直接 typed API 和错误语义。
+- **Acceptance / 验收**：跨仓 conformance 与插件测试通过，Platform 不再识别媒体 operation 名称或请求类。
+- **Status / 状态**：`CLOSED`；证据见 §1.1，真实 provider 环境仍属于 T24。
+
+### T28 Yield Product lifecycle and preflight ownership / Yield 产品生命周期与预检权威（P0 / XL）
+
+- **Repository**：Cyrene-Yield。
+- **Dependencies / 依赖**：T17，且必须先于 T26 删除 Platform 副本。
+- **Work / 工作**：接管 Python Product run/attempt/retry/persistence、JVM migration snapshot，以及模型分析、
+  VRAM 和兼容性策略的 request/result 与 replaceable ports；Platform preflight 只提供通用资源事实和结果。
+- **Acceptance / 验收**：Python 契约/训练套件和 JVM snapshot 在 task head 与 canonical merge 上通过 Azure；
+  Platform 删除 Product store、reconciler 和 policy types。
+- **Status / 状态**：`CLOSED`；证据见 §1.1，自托管 GPU 训练仍属于 T24。
+
+### T29 Reactor generic runtime-profile consumption / Reactor 通用运行时 profile 消费（P1 / M）
+
+- **Repository**：Cyrene-Reactor。
+- **Dependencies / 依赖**：T03。
+- **Work / 工作**：把 Product 命名的 Platform runtime profile 改为通用 profile，由 Reactor 负责 Product
+  serving 组合和选择策略。
+- **Acceptance / 验收**：Reactor bootstrap 测试和 Azure source CI 通过，接入没有产生 Platform 源码 diff。
+- **Status / 状态**：`CLOSED`；证据见 §1.1，真实 GPU serving 仍属于 T24。
+
 ## 8. Wave 3: acceptance and canonical close / 第 3 批：验收与 canonical 关闭
 
 ### T24 Full exact-head acceptance matrix / 全仓 exact-head 验收矩阵（P0-final / XL）
 
 - **Writer scope / 写入范围**：只运行、部署和收集证据；不得顺手修改业务源码。
-- **Dependencies / 依赖**：T03 至 T23。
+- **Dependencies / 依赖**：T03 至 T23，以及执行期新增并登记的 T26 至 T29。
 - **Work / 工作**：对 11 个 canonical exact heads 运行 source CI；建立并排队 DH pipeline；将真实 GPU、
   Docker daemon、DeepSpeed、凭据、Windows 原生构建、JVM 和其他 skipped 环境测试分别记账；GitHub
   付款/额度导致的 0-step failure 保持 CI 环境阻塞分类。
@@ -411,12 +455,12 @@ flowchart LR
 | Repository / 仓库 | Ordered tasks / 串行任务 | Parallel rule / 并行规则 |
 | --- | --- | --- |
 | Workspace | T01 → T02 → T23 → T25 | T01/T02 完成后可等待成员仓库；T23/T25 必须分别在依赖完成后执行。 |
-| Platform | T03 → T15 | T03 冻结通用契约；T15 必须等待 T14 和其他目标仓接管完成，之后 Platform 进入零随动修改状态。 |
-| Plugins | T05 → T06 → T07 → T10 → T10A → T10B → T11 → T12 → T13 | 建议一个模型连续负责；换模型时必须完成 exact-SHA handoff。 |
+| Platform | T03 → T15 → T26 | T26 已在 T27/T28 目标仓接管后关闭；Platform 现以 T26 canonical SHA 进入零随动修改状态。 |
+| Plugins | T05 → T06 → T07 → T10 → T10A → T10B → T11 → T12 → T13 → T27 | 建议一个模型连续负责；T27 已关闭，禁止重新在 Platform 或 Product host 实现媒体转换。 |
 | DH | T04 | 可在 T01 后独立执行。 |
-| Reactor | T08 → T16 | T08 的绑定决策依赖 T01，可能等待 T06。 |
+| Reactor | T08 → T16；T29 已关闭 | T08 的绑定决策依赖 T01，可能等待 T06；后续 profile 继续消费 T29 的通用 Platform 名称。 |
 | Exchange | T09 → T19 | T09 等待 Platform/Yield seam；T19 不得提前修改相同 composition/docs。 |
-| Yield | T17 → T18 | 可在 T01 后执行；T18 不得和 T17 同时写入。 |
+| Yield | T17 → T28 → T18 | T28 已关闭；T18 继续串行处理 vendored engine 治理，不得回改已迁出的生命周期 owner。 |
 | Astrbot-Rev | T14 | 先接管并验收 Astrbot/NapCat 部署与兼容资产；T15 随后只删除 Platform 副本。 |
 | Catalyst | T20 | T02 后可独立执行。 |
 | Echo | T21 | T02 后可独立执行。 |
@@ -430,19 +474,19 @@ T23 更新。跨仓模型可以读取其他仓库以验证契约，但不得顺�
 
 | Source audit section / 源审计章节 | Unique tasks / 唯一覆盖任务 |
 | --- | --- |
-| §3–§4 Plugins P0 与 22 插件盘点 | T05、T06、T07、T10、T10A、T10B |
-| §5–§6 兼容树、TODO、重复资产、Python 质量 | T05、T07、T10、T10A、T10B、T12、T13、T14、T15 |
+| §3–§4 Plugins P0 与 22 插件盘点 | T05、T06、T07、T10、T10A、T10B、T27 |
+| §5–§6 兼容树、TODO、重复资产、Python 质量 | T05、T07、T10、T10A、T10B、T12、T13、T14、T15、T27 |
 | §7 构建与打包 | T10、T10A、T10B、T11 |
 | §8 Catalog、Lifecycle、Policy、Evidence、backlog | T05、T11、T23 |
 | §9 测试与 CI | T13、T24 |
 | §10 Workspace 旧结论 | T23 |
-| §15 X-01～X-17 | T01、T03～T25 |
+| §15 X-01～X-17 | T01、T03～T29 |
 | §16 系统治理漂移 | 各仓 repository-local task、T23、T25 |
-| §17 Platform 详查 | T03、T15 |
+| §17 Platform 详查及执行期边界复查 | T03、T15、T26 |
 | §18 Astrbot-Rev 详查 | T14 |
 | §19 DH 详查 | T04 |
-| §20 Reactor 详查 | T08、T16 |
-| §21 Yield 详查 | T17、T18 |
+| §20 Reactor 详查 | T08、T16、T29 |
+| §21 Yield 详查 | T17、T18、T28 |
 | §22 Exchange 详查 | T09、T19 |
 | §23 Catalyst、Echo、Navigator | T20、T21、T22 |
 | §24 Workspace | T23、T25 |

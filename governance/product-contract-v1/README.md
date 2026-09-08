@@ -3,6 +3,11 @@
 Status: canonical Alpha contract registry, 2026-09-05. The exact merged Product
 and Platform `main` SHAs are recorded in the registry JSON files.
 
+The 2026-09-08 clean-boundary follow-up freezes `model.routing.v1`,
+`serving.engine.v1`, and `training.engine.v1` as
+`MIGRATING_COMPATIBILITY`. New integrations use generic capability descriptors,
+CES payload forwarding, and Product-owned replaceable ports.
+
 This profile records compatibility and ownership across Product repositories. It
 does not move any Product resource authority into Cyrene-Workspace. Every
 resource schema and API remains owned by the repository listed in
@@ -22,10 +27,10 @@ Navigator 的 V1 边界演进见上述文档；下表保留 Alpha 历史事实�
 |---|---|---|---|---|
 | Catalyst | `Dataset`, immutable `DatasetVersion`, lineage | canonical candidate `data.processor.v1`; local `DataProcessingPort` | Artifact bytes, Kernel operations, plugin/provider identity | `REFERENCE_MVP_READY` |
 | Echo | `EvaluationSuite`, `EvaluationRun`, `EvaluationResult`, `GateDecision` | canonical candidate `evaluation.runner.v1`; local `EvaluationExecutionPort` | Evaluator process state, Artifact bytes, provider identity | `REFERENCE_MVP_READY` |
-| Reactor | `Deployment` desired/observed state and distinct `Endpoint` | canonical `serving.engine.v1`; local `ServingExecutionPort` | Kernel/Node Agent authority, runtime evidence, model bytes, route policy | `REFERENCE_MVP_READY` |
-| Exchange | external `GatewayEndpoint`, `GatewayRoute`, request/fallback policy | existing `model.routing.v1` and `model.provider.v1` seams | Reactor Deployment, provider/package identity, secret values | `REFERENCE_MVP_READY` |
+| Reactor | `Deployment` desired/observed state and distinct `Endpoint` | migrating `serving.engine.v1`; local `ServingExecutionPort`; generic CES target | Kernel/Node Agent authority, runtime evidence, model bytes, route policy | `REFERENCE_MVP_READY` |
+| Exchange | external `GatewayEndpoint`, `GatewayRoute`, request/fallback policy | migrating `model.routing.v1`; experimental `model.provider.v1`; generic CES target | Reactor Deployment, provider/package identity, secret values | `REFERENCE_MVP_READY` |
 | Navigator | ephemeral `WorkspaceSnapshot` presentation contract only | Navigator-local `ProductReadPort` | Every Product lifecycle, mutation authority, server-side source of truth | `HEADLESS_MVP_READY` |
-| Yield | `TrainingRun`, `TrainingAttempt`, retry/cancellation/output lineage | canonical `training.engine.v1`; local `TrainingEngineAdapter` port | Kernel/runtime evidence, trainer process state, Artifact bytes | `CONTRACT_CANDIDATE_READY` |
+| Yield | `TrainingRun`, `TrainingAttempt`, retry/cancellation/output lineage | migrating `training.engine.v1`; local `TrainingEngineAdapter` port; generic CES target | Kernel/runtime evidence, trainer process state, Artifact bytes | `CONTRACT_CANDIDATE_READY` |
 
 ## Cross-product happy path
 

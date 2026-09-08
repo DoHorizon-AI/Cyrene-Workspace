@@ -27,7 +27,7 @@ def _runtime(tmp_path: Path) -> Path:
     path.write_text(
         json.dumps(
             {
-                "profile": "CYRENE_TEXT_LIFECYCLE_V1_LOCAL_GPU",
+                "profile": "CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU",
                 "status": "READY",
                 "runtimeHome": str(tmp_path),
                 "artifactRoot": str(artifact_root),

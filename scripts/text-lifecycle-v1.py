@@ -25,7 +25,7 @@ from urllib.request import Request, urlopen
 from cy_artifacts import ArtifactKind, LocalArtifactProvider
 from huggingface_hub import snapshot_download
 
-RUNTIME_PROFILE = "CYRENE_TEXT_LIFECYCLE_V1_LOCAL_GPU"
+PLATFORM_RUNTIME_PROFILE = "CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU"
 
 
 class ProductClient:
@@ -99,7 +99,7 @@ def _runtime_config(path: Path | None) -> dict[str, Any]:
     value = json.loads(resolved.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise TypeError("Runtime manifest is invalid")
-    if value.get("profile") != RUNTIME_PROFILE or value.get("status") != "READY":
+    if value.get("profile") != PLATFORM_RUNTIME_PROFILE or value.get("status") != "READY":
         raise ValueError("Runtime manifest is not READY for the lifecycle profile")
     home_value, artifact_value = value.get("runtimeHome"), value.get("artifactRoot")
     if not isinstance(home_value, str) or not isinstance(artifact_value, str):
