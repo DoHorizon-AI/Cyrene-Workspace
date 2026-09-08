@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "platformContractCommit": "d804edc32fd6094c2885a4ae84e2d1a30446e2ce",
+  "platformContractCommit": "1b496733d725680dc999f925c99b20c8ecad178a",
   "concepts": [
     {
       "id": "data.processor.v1",
@@ -40,7 +40,7 @@
         "contracts/proto/plugin/v1/compat_rule.proto",
         "docs/api/CAPABILITY_INDEX.md"
       ],
-      "status": "EXPERIMENTAL_MANIFEST_SEAM",
+      "status": "MIGRATING_COMPATIBILITY",
       "consumers": ["exchange"],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
@@ -53,7 +53,7 @@
         "contracts/proto/plugin/v1/plugin_protocol.proto",
         "docs/api/CAPABILITY_INDEX.md"
       ],
-      "status": "STABLE",
+      "status": "MIGRATING_COMPATIBILITY",
       "consumers": ["reactor"],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
@@ -66,7 +66,7 @@
         "contracts/proto/plugin/v1/plugin_protocol.proto",
         "docs/api/CAPABILITY_INDEX.md"
       ],
-      "status": "STABLE",
+      "status": "MIGRATING_COMPATIBILITY",
       "consumers": ["yield"],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0

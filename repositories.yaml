@@ -77,7 +77,6 @@ repositories:
     integration_branch: "develop"
     build_systems:
       - "uv"
-      - "gradle"
       - "dotnet"
       - "gradle"
     roles:
