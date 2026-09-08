@@ -278,11 +278,6 @@ version = "0.1.0"
 source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=a29fb0bbb130876429ac4ac80a459d45d59c7c32#a29fb0bbb130876429ac4ac80a459d45d59c7c32" }
 
 [[package]]
-name = "cyrene-control-plane"
-version = "0.1.0"
-source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_control_plane&rev=a29fb0bbb130876429ac4ac80a459d45d59c7c32#a29fb0bbb130876429ac4ac80a459d45d59c7c32" }
-
-[[package]]
 name = "cyrene-environment"
 version = "0.1.0"
 source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_environment&rev=a29fb0bbb130876429ac4ac80a459d45d59c7c32#a29fb0bbb130876429ac4ac80a459d45d59c7c32" }
@@ -304,7 +299,6 @@ source = { virtual = "." }
 text-lifecycle = [
     { name = "cryptography" },
     { name = "cyrene-artifacts" },
-    { name = "cyrene-control-plane" },
     { name = "cyrene-environment" },
     { name = "cyrene-preflight" },
     { name = "duckdb" },
@@ -332,7 +326,6 @@ text-lifecycle = [
 text-lifecycle = [
     { name = "cryptography", specifier = "==50.0.1" },
     { name = "cyrene-artifacts", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=a29fb0bbb130876429ac4ac80a459d45d59c7c32" },
-    { name = "cyrene-control-plane", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_control_plane&rev=a29fb0bbb130876429ac4ac80a459d45d59c7c32" },
     { name = "cyrene-environment", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_environment&rev=a29fb0bbb130876429ac4ac80a459d45d59c7c32" },
     { name = "cyrene-preflight", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=a29fb0bbb130876429ac4ac80a459d45d59c7c32" },
     { name = "duckdb", specifier = "==1.5.5" },

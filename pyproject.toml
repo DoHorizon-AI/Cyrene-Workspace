@@ -28,7 +28,6 @@ text-lifecycle = [
     "cyrene-artifacts @ git+https://github.com/DoHorizon-AI/Cyrene-Platform.git@a29fb0bbb130876429ac4ac80a459d45d59c7c32#subdirectory=sdk/python/cyrene_artifacts",
     "cyrene-environment @ git+https://github.com/DoHorizon-AI/Cyrene-Platform.git@a29fb0bbb130876429ac4ac80a459d45d59c7c32#subdirectory=sdk/python/cyrene_environment",
     "cyrene-preflight @ git+https://github.com/DoHorizon-AI/Cyrene-Platform.git@a29fb0bbb130876429ac4ac80a459d45d59c7c32#subdirectory=sdk/python/cyrene_preflight",
-    "cyrene-control-plane @ git+https://github.com/DoHorizon-AI/Cyrene-Platform.git@a29fb0bbb130876429ac4ac80a459d45d59c7c32#subdirectory=sdk/python/cyrene_control_plane",
     "mypy==2.3.1",
     "types-pyyaml==6.0.12.20260906",
     "types-jsonschema>=4.26.0.20260518",
