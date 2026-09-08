@@ -2,7 +2,8 @@
 
 - **Source audit / 源审计**：`docs/plugins-full-repository-legacy-audit-2026-09-07.md`
 - **Audit snapshot / 审计快照**：2026-09-07
-- **Plan status / 计划状态**：Task assignment only; remediation has not started / 仅用于任务分配，尚未开始修复
+- **Plan status / 计划状态**：Execution in progress; Platform and Plugins source remediation is closed, and the Astrbot boundary source is read back / 执行中；Platform 与 Plugins 源码修复已关闭，Astrbot 边界源码已远端回读
+- **Last status update / 最近状态更新**：2026-09-08
 - **Scope / 范围**：Workspace `repositories.yaml` 中 10 个成员仓库，加上 Workspace，共 11 个仓库
 - **Completion rule / 完成规则**：本文所有 P0、P1、P2 项均须关闭，才能继续下一阶段开发或建立 current accepted baseline
 - **Platform cleanliness target / Platform 纯净目标**：完成一次性适配迁出后，上层软件必须能够基于冻结的
@@ -25,6 +26,25 @@ and cannot be reported as production acceptance.
 源审计是只读快照。执行模型不得直接相信其中的历史 SHA、PR 或 CI 状态。第一个执行动作必须是
 读取当前远端 integration branch、default branch、HEAD、开放 PR、CI、Repository Policy 和实际
 构建入口，形成新的 exact-SHA 任务基线。
+
+### 1.1 Current execution ledger / 当前执行台账
+
+This table is the duplicate-work guard for completed or claimed work. Models must
+read it before accepting a task. A `CLOSED` source task must not be reopened merely
+because its environment acceptance remains assigned to T24. A `READ_BACK` task may
+only receive the explicitly listed remaining acceptance work unless new source-defect
+evidence is recorded first.
+
+下表是已完成或已领取工作的防重复台账。模型领取任务前必须先读取。源码任务已经 `CLOSED` 时，
+不能因为环境验收仍属于 T24 就重复修改源码。状态为 `READ_BACK` 的任务只能继续表中明确列出的
+剩余验收；若要重新修改源码，必须先登记新的源码缺陷证据。
+
+| Tasks / 任务 | Repository and exact baseline / 仓库与精确基线 | Disposition and owned scope / 处置与独占范围 | State / 状态 | Canonical and CI evidence / 远端与 CI 证据 | Remaining work / 剩余工作 |
+| --- | --- | --- | --- | --- | --- |
+| T03, T15 | Cyrene-Platform base `8091a53176627e51c507eddae99442be8518849e`; clean baseline `1fa286c4071546c0d4ebb980fe24675e7f13d79e` | `REMOVE/MOVE/ISOLATE`; Product deployment, compatibility snapshots, empty transports, component duplication, boundary guards, policy/docs/CI | `CLOSED` | [PR #38](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/38) merged; Azure build 440 succeeded; task head `1c9b858ce957e8d5706d21f28d6c2914a6aa3c2e` is an ancestor of remote `develop` | GPU runtime is `NOT_RUN_BY_DEFAULT` and stays in T24. Do not add Product adapters to Platform or create a new Platform source task without an accepted `PLATFORM_GAP`. |
+| T05, T06, T07, T10, T10A, T10B, T11, T12, T13 | Cyrene-Plugins-Official base `d6117175577720a79a975961e2e7c87e26806531`; canonical `b759e32f0a497020e0f05d3eb1339ef56f81387e` | `REMOVE/SUPPORT/ISOLATE`; legacy shim/catalog truth, simulated results, Custom Script, incomplete plugins, Spring/Python gateways, packaging, Product copies, layered CI | `CLOSED` | [PR #12](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/12) merged; Azure build 444 succeeded across all eight jobs; task head `f6dca75145219d8c5186891fc46c78ec64518ef6` is an ancestor of remote `develop` | Real GPU, provider-service, and production Docker evidence remains T24 work. Seven Platform-fixture conformance cases passed locally against the clean Platform worktree but were skipped, not passed, in the single-repository Azure lane. Do not repeat the source cleanup. |
+| T14 | Astrbot-Rev base `d14d60858a9c6b43b0b68a69a01ac76b69739b8b`; canonical `685978cdff6fb06150e05e7aa9f66ebb87c85f0f` | `MOVE/SUPPORT/ISOLATE`; reusable model/media/OneBot plugin ports, Product-owned .NET boundary, stale compatibility and branch/CI truth | `READ_BACK` | [PR #13](https://github.com/DoHorizon-AI/Astrbot-Rev/pull/13) merged; Azure build 443 succeeded, including 1,073 .NET/PostgreSQL tests; task head `e2bcfc2497d9da4af5aef6f0482d32523f3a08f0` is an ancestor of remote `develop` | Four suites requiring prepared Platform executables and official plugin archives are explicitly `NOT_RUN` in the single-repository lane. T24 owns that cross-repository execution. Do not assign another Astrbot source writer for the same boundary. |
+| T24 | Cross-repository acceptance coordinator | Exact-head environment execution only; no source ownership | `OPEN` | Source CI evidence above is immutable routing input | Run and record the Platform/Plugins/Astrbot fixture lane plus remaining real hardware and external-service evidence. Return a failure only to its unique source task when it proves a source defect. |
 
 ## 2. Remediation outcomes / 合法关闭方式
 
