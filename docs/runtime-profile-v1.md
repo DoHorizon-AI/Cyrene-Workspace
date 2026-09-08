@@ -16,6 +16,7 @@ reports `hardIsolation=false`. It does not change the 10 GiB production default.
 
 | Layer | Canonical component or contract |
 | --- | --- |
+| Platform runtime manifest | `CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU` |
 | Artifact Plane | Platform `LocalArtifactProvider`, one runtime-owned root |
 | Hardware | `cyrene-nvidia-adapter`, service-account UID policy |
 | Sandbox | `cyrene-sandboxd`, service-account UID policy |
