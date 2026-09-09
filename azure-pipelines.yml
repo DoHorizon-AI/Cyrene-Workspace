@@ -15,7 +15,7 @@ parameters:
 - name: boundaryPlatformRef
   displayName: 'Exact Platform control-plane revision'
   type: string
-  default: 9305517dbe137bf343aa6eee334c2b352807bed6
+  default: 2b9538230f92d6129bd97126c478ee70008cf86f
 - name: boundaryPluginsRef
   displayName: 'Exact Plugins contract revision'
   type: string
@@ -23,7 +23,7 @@ parameters:
 - name: boundaryAstrbotRef
   displayName: 'Exact AstrBot direct-consumer revision'
   type: string
-  default: 6ce3746d9d4e3f7d57d96e2e2ce3cfa91e8e3bf0
+  default: 30a4d7c40629691c809e6d0609532caa8001b498
 
 resources:
   repositories:
