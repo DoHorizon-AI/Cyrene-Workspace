@@ -245,7 +245,7 @@ Priority orders execution; every listed task is required. Difficulty uses `S/M/L
   - Dependencies: `PLG-004`, `PLAT-001`.
   - Acceptance: Product domain state remains local; direct Plugin calls use versioned owner contracts;
     each repository's Azure exact-head passes with the same Platform exact SHA.
-- [ ] `CON-003` Decouple Catalyst, Echo and Navigator; classify DH-System-Internal — **P0 / L**
+- [x] ~~`CON-003` Decouple Catalyst, Echo and Navigator; classify DH-System-Internal~~ — **P0 / L**
   - Dependencies: `PLG-004`, `PLAT-001`.
   - [x] ~~`CON-003-AUDIT` Read back the four live integration branches and classify production,
     build, compatibility and historical references~~ — **P1 / M**
@@ -260,8 +260,10 @@ Priority orders execution; every listed task is required. Difficulty uses `S/M/L
     `ArtifactKind.DATASET`, `cy-manifest`, typed SPI metadata and Platform checkout; Azure `#533`
     succeeded at that exact head. DH remains `NOT_APPLICABLE` and receives no code change under
     this task.
-  - Canonical result: remediation remains open until the three Product PRs are normally merged and
-    their integration branches are fetched and read back. No completed checkbox is struck early.
+  - Canonical result: PRs `#7`, `#8` and `#6` merged into canonical `develop` branches;
+    canonical commits are Catalyst `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d`, Echo
+    `128b051c555efe881eff2311cb481e0093cf0cd7`, and Navigator `f83a701b885b3b6cfffde5af15c233b13904bdfb`.
+    Remote ancestry and integration read-back verified. Task complete.
   - De-duplicated ownership: Catalyst fixes remain in `T20`; Echo fixes remain in `T21`; Navigator
     production/build coupling, stale SPI metadata and prototype isolation remain in `T22`; DH fake
     providers and missing Azure gate remain in `T04`, while Workspace branch metadata remains in
@@ -322,7 +324,7 @@ Priority orders execution; every listed task is required. Difficulty uses `S/M/L
 | `PLAT-001..008` | fresh-target Cargo check/clippy/test, format and boundary guards passed at `c44782320db933a5328c8ccf32c4c830563b2cf6`; Python pipeline suites passed `1 + 1 + 23`; the real mTLS runtime TCK passed 20 consecutive repetitions; four privileged UDS cases remain explicitly ignored | Platform build `#499` succeeded at the same exact SHA across Rust, documentation, architecture, Python/tooling and evidence jobs | PR `#41` merged as `dc37791a806bd6c405932f0f0457518db6e6aaa0`; ancestry/read-back verified | `COMPLETE` |
 | `CON-001` | .NET format/build and 16 direct Plugin tests passed on the final code path; at final AstrBot `b3dfb46312f132dce714dc459fec022cdf4f0121`, the two model bridge tests passed with every Plugins path unset, all seven active-platform startup cases passed under a deliberately invalid ambient database connection, and Workspace's exact Platform `c4478232...` / Plugins `a019cc37...` / AstrBot `b3dfb463...` OneBot lifecycle TCK passed `1/1` with zero skipped | AstrBot build `#509` succeeded at exact `b3dfb463...`; both the 1,073-test source job and direct Product-to-Plugin job passed | PR `#14` merged as `f1c6fa7a98909ad863ca27ec00e836f68fbb65fe`; ancestry/read-back verified | `COMPLETE` |
 | `CON-002` | Exchange 43 core and 5 integration tests passed at the SHA below; Yield's 122 core tests, ownership guard, 9 targeted contract tests and Gradle 9.5 clean build passed after removing the stale `training.engine.v1` test input; Reactor's 49 Product tests and exact final Yield projection passed after repinning. The earlier 246 serving tests plus placement, lint, type and OpenAPI checks cover the immediately preceding code-equivalent Reactor candidate | Exchange `#501`, Yield `#507` and Reactor `#508` succeeded at their exact final SHAs | Exchange PR `#14` merged as `2bc5dfaee458e428dd607b3284dc4455df017c1b`; Yield PR `#12` as `6931c2d96aae0a6a58bfdff60b7422c8c9976521`; Reactor PR `#13` as `a0561482074418f406155d9a80cfd72796fcbf94`; ancestry/read-back verified | `COMPLETE` |
-| `CON-003` | Catalyst and Echo use Product-owned replaceable Artifact Plane adapters and their boundary guards pass; Navigator's Python, Rust, Harness, desktop, package and boundary suites pass without Platform source or Product APIs. DH was read back as `NOT_APPLICABLE`; its deferred Product redesign is outside this task. | Catalyst `#526` succeeded at exact `c510e06244466d6aca0d4cbc5815a77fc10c81e8`; Echo `#528` at `dd34cdd7cccdab1b7cf441b0b2d645c603622264`; Navigator `#533` at `12199b30cccf3fafc2c42a024211e837ade6fe96`; DH requires no run for this boundary | Product PRs `#7`, `#8` and `#6` remain open; canonical integration read-back is pending | `CANDIDATES_READY_PENDING_MERGE` |
+| `CON-003` | Catalyst and Echo use Product-owned replaceable Artifact Plane adapters and their boundary guards pass; Navigator's Python, Rust, Harness, desktop, package and boundary suites pass without Platform source or Product APIs. DH was read back as `NOT_APPLICABLE`; its deferred Product redesign is outside this task. | Catalyst `#526` succeeded at exact `c510e06244466d6aca0d4cbc5815a77fc10c81e8`; Echo `#528` at `dd34cdd7cccdab1b7cf441b0b2d645c603622264`; Navigator `#533` at `12199b30cccf3fafc2c42a024211e837ade6fe96`; DH requires no run for this boundary | PRs `#7`, `#8` and `#6` merged as Catalyst `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d`, Echo `128b051c555efe881eff2311cb481e0093cf0cd7`, Navigator `f83a701b885b3b6cfffde5af15c233b13904bdfb`; ancestry and remote read-back verified | `COMPLETE` |
 | `ACC-001` | AstrBot, Exchange, Yield and Reactor accepted candidates all pin Platform `c44782320db933a5328c8ccf32c4c830563b2cf6`; Plugins owns capability evolution independently; Workspace and Yield use producer-owned open artifact-kind values and CI rejects closed Product enum constants | Platform `#499`, Plugins `#491`, AstrBot `#509`, Exchange `#501`, Yield `#507` and Reactor `#508` all succeeded at exact final SHAs while Platform stayed fixed | existing candidates merged and read back; Catalyst, Echo and Navigator consumer alignment remains open under `CON-003` | `IN_PROGRESS` |
 | `ACC-002` | Workspace thin orchestrator passed the AstrBot-owned direct OneBot lifecycle TCK at Platform `c4478232...`, Plugins `a019cc37...` and AstrBot `b3dfb463...`; one real lifecycle test passed with zero skipped, and retired CES driver and duplicate peers/package host remain absent | AstrBot `#509` and Workspace `#510` succeeded for the final exact composition | existing direct paths merged and read back; final acceptance waits for `CON-003` | `IN_PROGRESS` |
 | `ACC-003` | accepted Platform candidate is `c44782320db933a5328c8ccf32c4c830563b2cf6`; canonical merge commit is `dc37791a806bd6c405932f0f0457518db6e6aaa0` | Platform build `#499` succeeded at the exact candidate | candidate ancestry and canonical read-back verified; immutable baseline recording waits for `ACC-001` and `ACC-002` | `IN_PROGRESS` |
@@ -336,6 +338,12 @@ Accepted Product revisions used by `CON-002`:
 Their canonical merge commits are Yield `6931c2d96aae0a6a58bfdff60b7422c8c9976521`,
 Reactor `a0561482074418f406155d9a80cfd72796fcbf94`, and Exchange
 `2bc5dfaee458e428dd607b3284dc4455df017c1b`.
+
+Accepted Product revisions used by `CON-003`:
+
+- Catalyst: `c510e06244466d6aca0d4cbc5815a77fc10c81e8` (canonical merge `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d`);
+- Echo: `dd34cdd7cccdab1b7cf441b0b2d645c603622264` (canonical merge `128b051c555efe881eff2311cb481e0093cf0cd7`);
+- Navigator: `12199b30cccf3fafc2c42a024211e837ade6fe96` (canonical merge `f83a701b885b3b6cfffde5af15c233b13904bdfb`).
 
 `CANDIDATE` means the implementation exists on an isolated, pushed task branch. It does not close
 the task. Refresh the exact Azure result, merge normally, fetch the canonical branch, and verify

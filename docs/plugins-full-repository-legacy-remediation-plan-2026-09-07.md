@@ -48,6 +48,9 @@ evidence is recorded first.
 | T27 | Cyrene-Plugins-Official base `b759e32f0a497020e0f05d3eb1339ef56f81387e`; canonical `4f730e1f13fbc64b04b533dbf7f4e90d06460604` | `MOVE/SUPPORT`; generic worker payload to typed media request adaptation | `CLOSED` | [PR #13](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/13) merged; Azure build 448 succeeded; 54 cross-repository tests passed at task head `ac6931a2b4de9beacf611d2d54b85e699fd73bf9`, which is an ancestor of remote `develop` | Real external media-provider execution remains T24. Do not recreate media conversion in Platform or Product hosts. |
 | T28 | Cyrene-Yield base `c71057f69a8f744c02110c0942a70d69254c7fce`; canonical `0f402e0fff5d07a001d90f97c35e211ffd1875b0` | `MOVE/SUPPORT`; Product run/attempt/retry/persistence and Product model-analysis/compatibility-preflight contracts | `CLOSED` | [PR #11](https://github.com/DoHorizon-AI/Cyrene-Yield/pull/11) merged; Azure build 461 succeeded at task head `292971f6907294d59184d3a390c97974804b33aa`; canonical Azure build 462 also succeeded | Self-hosted GPU training remains T24. Do not reintroduce Product lifecycle or model-policy requests into Platform preflight. |
 | T29 | Cyrene-Reactor base `3b8d4e922ed65b179e14176583c89edaced37636`; canonical `997078c4b9fedb9b99bfbe485dd036fbf4497630` | `SUPPORT`; consume the generic Platform runtime profile without a Platform source change | `CLOSED` | [PR #12](https://github.com/DoHorizon-AI/Cyrene-Reactor/pull/12) merged; Azure build 450 succeeded at task head `e8315050730c45dafbdd44cfb33bdc26dd34d915`, which is an ancestor of remote `develop` | Real GPU serving remains T24. Future Reactor profiles must compose the generic Platform runtime contract without Product-specific Platform names. |
+| T20 | Cyrene-Catalyst base `cf568ae9874b9969d14fa2f9ee05e6d13919f02c`; canonical `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d` | `REMOVE/SUPPORT`; Product-owned replaceable Artifact Plane adapter, open `ArtifactRef` wire shape, dataset/datasetversion truth | `CLOSED` | [PR #7](https://github.com/DoHorizon-AI/Cyrene-Catalyst/pull/7) merged; Azure build 526 succeeded at candidate head `c510e06244466d6aca0d4cbc5815a77fc10c81e8`, which is an ancestor of remote `develop` | Real Yield/Echo remote handoffs remain `WIRED_NOT_RUN`. Do not add Platform source checkout back to Catalyst. |
+| T21 | Cyrene-Echo base `8f51170ed372741a81bcfad4a6fd386ad5dfc936`; canonical `128b051c555efe881eff2311cb481e0093cf0cd7` | `REMOVE/SUPPORT`; Product-owned replaceable Artifact Plane adapter, open `ArtifactRef` wire shape, Exchange judge truth | `CLOSED` | [PR #8](https://github.com/DoHorizon-AI/Cyrene-Echo/pull/8) merged; Azure build 528 succeeded at candidate head `dd34cdd7cccdab1b7cf441b0b2d645c603622264`, which is an ancestor of remote `develop` | Real Exchange judge remains `WIRED_NOT_RUN`. Do not add Platform source checkout back to Echo. |
+| T22 | Cyrene-Navigator base `41a42e8608d2fe74d4283dd5599192aef568d163`; canonical `f83a701b885b3b6cfffde5af15c233b13904bdfb` | `REMOVE/SUPPORT/ISOLATE`; Product-owned replaceable Artifact Plane adapter, open artifact kinds, remove `cy-manifest` and legacy typed SPI, isolate mock services | `CLOSED` | [PR #6](https://github.com/DoHorizon-AI/Cyrene-Navigator/pull/6) merged; Azure build 533 succeeded at candidate head `12199b30cccf3fafc2c42a024211e837ade6fe96`, which is an ancestor of remote `develop` | Real remote Echo handoffs remain `WIRED_NOT_RUN`. Do not add Platform source checkout back to Navigator. |
 | T24 | Cross-repository acceptance coordinator | Exact-head environment execution only; no source ownership | `OPEN` | Source CI evidence above is immutable routing input | Run and record the Platform/Plugins/Astrbot fixture lane plus remaining real hardware and external-service evidence. Return a failure only to its unique source task when it proves a source defect. |
 
 ## 2. Remediation outcomes / 合法关闭方式
@@ -366,8 +369,8 @@ flowchart LR
   Platform Product API。
 - **Acceptance / 验收**：没有 `ArtifactKind.DATASET` 等已删除常量或闭合 kind 投影；Azure exact-head
   针对当前 Artifact 契约成功；没有当前文档指向已删除路径，实际构建入口被 Workspace verifier 覆盖。
-- **Candidate / 候选**：PR `#7`，`c510e06244466d6aca0d4cbc5815a77fc10c81e8`；Azure
-  `#526` exact-head 成功。真实 Yield/Echo 远程交接保持 `WIRED_NOT_RUN`。合并与远端回读前 T20 不划掉。
+- **Canonical merge / 权威合并**：PR `#7` 合并为 `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d`；权威 develop 祖先关系已验证。真实 Yield/Echo 远程交接保持 `WIRED_NOT_RUN`。
+- **Status / 状态**：`CLOSED`；消费端完成 Artifact Plane 解耦与真值清理，不包含 Platform 源码修改。
 
 ### T21 Echo contract and truth cleanup / Echo 契约与真值清理（P1 / M）
 
@@ -379,8 +382,8 @@ flowchart LR
   消费端，不恢复 Platform Product API。
 - **Acceptance / 验收**：没有 `ArtifactKind.DATASET` 等已删除常量或闭合 kind 投影；Azure exact-head
   针对当前 Artifact 契约成功；不存在以凭据缺失路径冒充通过的证据，Policy 与当前产品职责一致。
-- **Candidate / 候选**：PR `#8`，`dd34cdd7cccdab1b7cf441b0b2d645c603622264`；Azure
-  `#528` exact-head 成功。真实 Exchange judge 保持 `WIRED_NOT_RUN`。合并与远端回读前 T21 不划掉。
+- **Canonical merge / 权威合并**：PR `#8` 合并为 `128b051c555efe881eff2311cb481e0093cf0cd7`；权威 develop 祖先关系已验证。真实 Exchange judge 保持 `WIRED_NOT_RUN`。
+- **Status / 状态**：`CLOSED`；消费端完成 Artifact Plane 解耦与真值清理，不包含 Platform 源码修改。
 
 ### T22 Navigator Platform decoupling and prototype isolation / Navigator Platform 解耦与原型隔离（P0 / L）
 
@@ -392,8 +395,8 @@ flowchart LR
 - **Acceptance / 验收**：生产和普通构建均不依赖旧 Platform Product API 或 Platform 源码 checkout；
   Navigator 到 Echo/Plugin 的业务调用保持直连；release artifact 不再直接绑定 mock service；prototype
   状态明确且生产不可达。整个任务不得修改 Platform 源码。
-- **Candidate / 候选**：PR `#6`，`12199b30cccf3fafc2c42a024211e837ade6fe96`；Azure
-  `#533` exact-head 成功。真实远程 Echo 交接不由本任务冒充为已运行。合并与远端回读前 T22 不划掉。
+- **Canonical merge / 权威合并**：PR `#6` 合并为 `f83a701b885b3b6cfffde5af15c233b13904bdfb`；权威 develop 祖先关系已验证。真实远程 Echo 交接保持 `WIRED_NOT_RUN`。
+- **Status / 状态**：`CLOSED`；消费端完成 Platform 解耦与原型隔离，不包含 Platform 源码修改。
 
 ### T23 Workspace truth projection / Workspace 真值投影（P1 / L）
 
@@ -480,9 +483,9 @@ flowchart LR
 | Exchange | T09 → T19 | T09 等待 Platform/Yield seam；T19 不得提前修改相同 composition/docs。 |
 | Yield | T17 → T28 → T18 | T28 已关闭；T18 继续串行处理 vendored engine 治理，不得回改已迁出的生命周期 owner。 |
 | Astrbot-Rev | T14 | 先接管并验收 Astrbot/NapCat 部署与兼容资产；T15 随后只删除 Platform 副本。 |
-| Catalyst | T20 | T02 后可独立执行。 |
-| Echo | T21 | T02 后可独立执行。 |
-| Navigator | T22 | T02 后可独立执行。 |
+| Catalyst | T20 已关闭 | T20 已合并到 develop 并完成回读。 |
+| Echo | T21 已关闭 | T21 已合并到 develop 并完成回读。 |
+| Navigator | T22 已关闭 | T22 已合并到 develop 并完成回读。 |
 | Acceptance coordinator | T00 → T24 | 全程只读；发现失败时退回唯一原任务，不直接修源码。 |
 
 每个仓库的 `repository-policy.yaml` 只能由该仓库 writer 更新。Workspace 的 `repositories.yaml` 只能由
