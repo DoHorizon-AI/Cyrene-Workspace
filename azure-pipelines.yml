@@ -23,7 +23,7 @@ parameters:
 - name: boundaryAstrbotRef
   displayName: 'Exact AstrBot direct-consumer revision'
   type: string
-  default: d3ef2b7264a680d8c26b45ec9c3d6f764dce003a
+  default: 424cfd2c51d9c848c86c597ce4e44d3efc813bf6
 
 resources:
   repositories:
