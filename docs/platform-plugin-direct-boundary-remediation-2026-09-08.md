@@ -280,7 +280,29 @@ Priority orders execution; every listed task is required. Difficulty uses `S/M/L
 | Task | Local checks | Azure run | Merge/read-back | Status |
 | --- | --- | --- | --- | --- |
 | `BND-000` | live remote/PR/worktree inventory | not applicable | exact SHAs recorded above | `COMPLETE` |
-| `BND-001` | pending | pending | pending | `IN_PROGRESS` |
+| `BND-001` | ledger committed on Workspace candidate branch | Workspace `#468` succeeded at prior ledger commit; final run required | PR `#11` open, canonical read-back pending | `IN_PROGRESS` |
+| `BND-002` | Platform and Plugins ownership guards pass locally | Platform `#483` succeeded; Plugins final run `#491` requires live refresh | PRs `#41` and `#14` open | `CANDIDATE` |
+| `PLG-001..005` | 145 component tests, 53 conformance tests, schema/package lifecycle and real venv preparation passed at `a019cc37cab39ffafe30884a4a0427aaaadf69a9` | Plugins `#491` was last observed queued; recheck before merge | Plugins PR `#14` open | `CANDIDATE` |
+| `PLAT-001..008` | full Cargo check/clippy/test, 24 Python tests and boundary guards passed at `9305517dbe137bf343aa6eee334c2b352807bed6` | Platform `#483` succeeded at the exact candidate SHA | Platform PR `#41` open | `CANDIDATE` |
+| `CON-001` | AstrBot direct contract tests and exact three-repository OneBot lifecycle TCK passed at `6ce3746d9d4e3f7d57d96e2e2ce3cfa91e8e3bf0` | AstrBot `#492` was last observed queued; recheck before merge | AstrBot PR `#14` open | `CANDIDATE` |
+| `CON-002` | Exchange direct integration; Yield 128 tests; Reactor Product, runtime and placement checks passed at the SHAs below | `#489`, `#490`, `#493` were last observed queued; recheck before merge | Yield PR `#12`, Reactor PR `#13`, Exchange PR `#14` open | `CANDIDATE` |
+| `CON-003` | no current acceptance evidence | not run | not started | `NOT_RUN` |
+| `ACC-001` | Product/Plugin candidates use one unchanged Platform SHA; canonical proof still requires merges | dependent final Azure runs pending | pending | `IN_PROGRESS` |
+| `ACC-002` | Workspace thin orchestrator ran AstrBot-owned direct lifecycle TCK successfully; retired CES driver and duplicate peers/package host removed | final Workspace run required | pending | `IN_PROGRESS` |
+| `ACC-003` | candidate baseline is `9305517dbe137bf343aa6eee334c2b352807bed6` | Platform exact-head green | all normal merges and ancestry read-back pending | `IN_PROGRESS` |
+
+Candidate Product revisions used by `CON-002`:
+
+- Yield: `4592f48bbd30547c64f7f36c0b14d3553981cb6e`;
+- Reactor: `cbd2fd60262c931a251b9c632fd00ea6e7cc7808`;
+- Exchange: `91e19a1044df8aed54491e8fd65271397b7a6c86`.
+
+`CANDIDATE` means the implementation exists on an isolated, pushed task branch. It does not close
+the task. Refresh the exact Azure result, merge normally, fetch the canonical branch, and verify
+ancestry before changing a checkbox to complete.
+
+`CANDIDATE` 仅表示隔离任务分支已有实现。重新核对精确 Azure 结果、正常合并、拉取权威分支并验证
+祖先关系之后，才能勾选任务。
 
 Add one row when a task starts. Never overwrite evidence from another task or report a skipped,
 mocked, hosted-only, credential-blocked or not-run path as production acceptance.
