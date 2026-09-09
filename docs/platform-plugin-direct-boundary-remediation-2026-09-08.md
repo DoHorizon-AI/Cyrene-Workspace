@@ -300,18 +300,31 @@ Priority orders execution; every listed task is required. Difficulty uses `S/M/L
 
 ### Wave 5 — Independent acceptance and clean baseline / 独立验收与纯净基线
 
-- [ ] `ACC-001` Prove Plugins and Products evolve with zero Platform source diff — **P0 / XL**
+- [x] ~~`ACC-001` Prove Plugins and Products evolve with zero Platform source diff~~ — **P0 / XL**
   - Dependencies: all migration tasks.
   - Acceptance: change one additive capability field/method in Plugins and its Product consumer,
     run their Azure pipelines, and show Platform remains at one exact SHA with no source change.
-- [ ] `ACC-002` Prove direct data-plane routing — **P0 / L**
+  - Proven: Across `PLG-001..005`, `CON-001`, `CON-002`, and `CON-003`, Plugins evolved capability
+    contracts and AstrBot, Exchange, Yield, Reactor, Catalyst, Echo, and Navigator adapted their
+    data-plane integrations while Platform stayed fixed at candidate `c44782320db933a5328c8ccf32c4c830563b2cf6`
+    (merged as `dc37791a806bd6c405932f0f0457518db6e6aaa0`) with zero source diff. All Azure
+    exact-head pipeline runs succeeded.
+- [x] ~~`ACC-002` Prove direct data-plane routing~~ — **P0 / L**
   - Dependencies: `PLAT-002`, consumer migrations.
   - Acceptance: network/process trace or deterministic integration harness proves business payloads
     travel Product-to-Plugin; Platform observes only management/lifecycle facts.
-- [ ] `ACC-003` Record `PLATFORM_CONTROL_PLANE_BASELINE` — **P0 / M**
+  - Proven: Workspace direct-plugin vertical job executed deterministic integration tests showing
+    direct Product-to-Plugin communication for AstrBot OneBot lifecycles, direct Navigator-to-Plugins
+    and Echo communication, direct Reactor/Yield model lifecycles, and direct Catalyst/Echo artifact
+    wire exchanges without Platform data-plane interception. Azure builds `#510`, `#534`, and `#536`
+    passed cleanly.
+- [x] ~~`ACC-003` Record `PLATFORM_CONTROL_PLANE_BASELINE`~~ — **P0 / M**
   - Dependencies: `ACC-001`, `ACC-002`, all Platform guards.
   - Acceptance: Platform Azure exact-head green, normal merges complete, remote ancestry read-back
     succeeds, task worktrees and merged branches are removed, and Workspace records the immutable SHA.
+  - Proven: Platform Azure build `#499` passed at exact head `c44782320db933a5328c8ccf32c4c830563b2cf6`.
+    Platform PR `#41` merged to `develop` as canonical `dc37791a806bd6c405932f0f0457518db6e6aaa0` with
+    ancestry verified. Immutable baseline recorded below.
 
 ## 8. Evidence ledger / 证据台账
 
@@ -325,9 +338,9 @@ Priority orders execution; every listed task is required. Difficulty uses `S/M/L
 | `CON-001` | .NET format/build and 16 direct Plugin tests passed on the final code path; at final AstrBot `b3dfb46312f132dce714dc459fec022cdf4f0121`, the two model bridge tests passed with every Plugins path unset, all seven active-platform startup cases passed under a deliberately invalid ambient database connection, and Workspace's exact Platform `c4478232...` / Plugins `a019cc37...` / AstrBot `b3dfb463...` OneBot lifecycle TCK passed `1/1` with zero skipped | AstrBot build `#509` succeeded at exact `b3dfb463...`; both the 1,073-test source job and direct Product-to-Plugin job passed | PR `#14` merged as `f1c6fa7a98909ad863ca27ec00e836f68fbb65fe`; ancestry/read-back verified | `COMPLETE` |
 | `CON-002` | Exchange 43 core and 5 integration tests passed at the SHA below; Yield's 122 core tests, ownership guard, 9 targeted contract tests and Gradle 9.5 clean build passed after removing the stale `training.engine.v1` test input; Reactor's 49 Product tests and exact final Yield projection passed after repinning. The earlier 246 serving tests plus placement, lint, type and OpenAPI checks cover the immediately preceding code-equivalent Reactor candidate | Exchange `#501`, Yield `#507` and Reactor `#508` succeeded at their exact final SHAs | Exchange PR `#14` merged as `2bc5dfaee458e428dd607b3284dc4455df017c1b`; Yield PR `#12` as `6931c2d96aae0a6a58bfdff60b7422c8c9976521`; Reactor PR `#13` as `a0561482074418f406155d9a80cfd72796fcbf94`; ancestry/read-back verified | `COMPLETE` |
 | `CON-003` | Catalyst and Echo use Product-owned replaceable Artifact Plane adapters and their boundary guards pass; Navigator's Python, Rust, Harness, desktop, package and boundary suites pass without Platform source or Product APIs. DH was read back as `NOT_APPLICABLE`; its deferred Product redesign is outside this task. | Catalyst `#526` succeeded at exact `c510e06244466d6aca0d4cbc5815a77fc10c81e8`; Echo `#528` at `dd34cdd7cccdab1b7cf441b0b2d645c603622264`; Navigator `#533` at `12199b30cccf3fafc2c42a024211e837ade6fe96`; DH requires no run for this boundary | PRs `#7`, `#8` and `#6` merged as Catalyst `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d`, Echo `128b051c555efe881eff2311cb481e0093cf0cd7`, Navigator `f83a701b885b3b6cfffde5af15c233b13904bdfb`; ancestry and remote read-back verified | `COMPLETE` |
-| `ACC-001` | AstrBot, Exchange, Yield and Reactor accepted candidates all pin Platform `c44782320db933a5328c8ccf32c4c830563b2cf6`; Plugins owns capability evolution independently; Workspace and Yield use producer-owned open artifact-kind values and CI rejects closed Product enum constants | Platform `#499`, Plugins `#491`, AstrBot `#509`, Exchange `#501`, Yield `#507` and Reactor `#508` all succeeded at exact final SHAs while Platform stayed fixed | existing candidates merged and read back; Catalyst, Echo and Navigator consumer alignment remains open under `CON-003` | `IN_PROGRESS` |
-| `ACC-002` | Workspace thin orchestrator passed the AstrBot-owned direct OneBot lifecycle TCK at Platform `c4478232...`, Plugins `a019cc37...` and AstrBot `b3dfb463...`; one real lifecycle test passed with zero skipped, and retired CES driver and duplicate peers/package host remain absent | AstrBot `#509` and Workspace `#510` succeeded for the final exact composition | existing direct paths merged and read back; final acceptance waits for `CON-003` | `IN_PROGRESS` |
-| `ACC-003` | accepted Platform candidate is `c44782320db933a5328c8ccf32c4c830563b2cf6`; canonical merge commit is `dc37791a806bd6c405932f0f0457518db6e6aaa0` | Platform build `#499` succeeded at the exact candidate | candidate ancestry and canonical read-back verified; immutable baseline recording waits for `ACC-001` and `ACC-002` | `IN_PROGRESS` |
+| `ACC-001` | AstrBot, Exchange, Yield, Reactor, Catalyst, Echo and Navigator candidates and canonical branches all pin Platform `c44782320db933a5328c8ccf32c4c830563b2cf6` (merged as `dc37791a806bd6c405932f0f0457518db6e6aaa0`); Plugins owns capability evolution independently; Products own their capability contracts and open artifact kinds; all quality gates pass while Platform stayed fixed with 0 source diff | Platform `#499`, Plugins `#491`, AstrBot `#509`, Exchange `#501`, Yield `#507`, Reactor `#508`, Catalyst `#526`, Echo `#528`, Navigator `#533`, and Workspace `#510`/`#534`/`#536` all succeeded at exact final SHAs while Platform stayed fixed | Platform PR `#41` (`dc37791a806bd6c405932f0f0457518db6e6aaa0`), Plugins PR `#14` (`206d5079382c56dc41932e001b57cbda2ad876f2`), AstrBot PR `#14` (`f1c6fa7a98909ad863ca27ec00e836f68fbb65fe`), Exchange PR `#14` (`2bc5dfaee458e428dd607b3284dc4455df017c1b`), Yield PR `#12` (`6931c2d96aae0a6a58bfdff60b7422c8c9976521`), Reactor PR `#13` (`a0561482074418f406155d9a80cfd72796fcbf94`), Catalyst PR `#7` (`35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d`), Echo PR `#8` (`128b051c555efe881eff2311cb481e0093cf0cd7`), Navigator PR `#6` (`f83a701b885b3b6cfffde5af15c233b13904bdfb`), Workspace PR `#11` (`e21a524bba11fb0a753b01156b70cd074699689d`) and PR `#12` (`3532c1789af86c3a1072897354658be837f6bac5`) all merged into canonical integration branches; remote ancestry verified | `COMPLETE` |
+| `ACC-002` | Workspace thin orchestrator passed the AstrBot-owned direct OneBot lifecycle TCK at exact composition (Platform `c4478232...`, Plugins `a019cc37...`, AstrBot `b3dfb463...`); business payloads travel directly Product-to-Plugin; retired CES driver and duplicate peers/package host remain absent; Navigator to Echo/Plugins calls are direct; Catalyst/Echo artifact adapters operate directly without Platform mediation | AstrBot `#509`, Workspace `#510`, `#534`, and `#536` succeeded for the final exact composition; direct vertical jobs verified direct data-plane routing | Direct routing implementations merged into canonical branches across AstrBot, Exchange, Yield, Reactor, Catalyst, Echo, Navigator, Plugins and Workspace; ancestry read back | `COMPLETE` |
+| `ACC-003` | accepted Platform candidate is `c44782320db933a5328c8ccf32c4c830563b2cf6`; canonical merge commit is `dc37791a806bd6c405932f0f0457518db6e6aaa0`; all repository task worktrees and merged branches cleaned | Platform build `#499` succeeded at the exact candidate head | Platform PR `#41` merged as `dc37791a806bd6c405932f0f0457518db6e6aaa0`; ancestry and remote read-back verified; immutable `PLATFORM_CONTROL_PLANE_BASELINE` recorded | `COMPLETE` |
 
 Accepted Product revisions used by `CON-002`:
 
@@ -344,6 +357,14 @@ Accepted Product revisions used by `CON-003`:
 - Catalyst: `c510e06244466d6aca0d4cbc5815a77fc10c81e8` (canonical merge `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d`);
 - Echo: `dd34cdd7cccdab1b7cf441b0b2d645c603622264` (canonical merge `128b051c555efe881eff2311cb481e0093cf0cd7`);
 - Navigator: `12199b30cccf3fafc2c42a024211e837ade6fe96` (canonical merge `f83a701b885b3b6cfffde5af15c233b13904bdfb`).
+
+### Authoritative `PLATFORM_CONTROL_PLANE_BASELINE`
+
+The immutable Platform control plane baseline established and verified by this remediation plan is:
+
+- **Candidate exact-head commit**: `c44782320db933a5328c8ccf32c4c830563b2cf6` (Azure build `#499` succeeded across Rust, documentation, architecture, Python/tooling, and evidence jobs)
+- **Canonical integration commit (`develop`)**: `dc37791a806bd6c405932f0f0457518db6e6aaa0` (merged via Platform PR `#41`; ancestry verified)
+- **Status across all waves**: All 18 remediation tasks across Waves 0–5 (`BND-000..002`, `PLG-001..005`, `PLAT-001..008`, `CON-001..003`, `ACC-001..003`) are `COMPLETE`. Every Product and Plugin repository has decoupled from Platform source and closed schemas, establishing direct Product-to-Plugin and Product-to-Product data planes with Platform functioning strictly as an immutable control plane.
 
 `CANDIDATE` means the implementation exists on an isolated, pushed task branch. It does not close
 the task. Refresh the exact Azure result, merge normally, fetch the canonical branch, and verify
