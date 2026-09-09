@@ -159,10 +159,10 @@ def main() -> None:
             entry = f"  {path}:\n    $ref: './{target.name}#/paths/{pointer}'\n"
             pattern = re.compile(
                 r"^  " + re.escape(path) + r":\n.*?(?=^  /|^components:|\Z)",
-                re.M | re.S,
+                re.MULTILINE | re.DOTALL,
             )
             if pattern.search(text):
-                text = pattern.sub(lambda _match: entry, text)
+                text = pattern.sub(lambda _match, replacement=entry: replacement, text)
             else:
                 text = text.replace("components:\n", entry + "components:\n", 1)
         if args.product == "catalyst":

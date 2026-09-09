@@ -12,6 +12,18 @@ parameters:
   displayName: 'Self-Hosted Agent Pool Name'
   type: string
   default: 'Default'
+- name: boundaryPlatformRef
+  displayName: 'Exact Platform control-plane revision'
+  type: string
+  default: c44782320db933a5328c8ccf32c4c830563b2cf6
+- name: boundaryPluginsRef
+  displayName: 'Exact Plugins contract revision'
+  type: string
+  default: a019cc37cab39ffafe30884a4a0427aaaadf69a9
+- name: boundaryAstrbotRef
+  displayName: 'Exact AstrBot direct-consumer revision'
+  type: string
+  default: b3dfb46312f132dce714dc459fec022cdf4f0121
 
 resources:
   repositories:
@@ -50,6 +62,21 @@ resources:
     name: DoHorizon-AI/Cyrene-Echo
     endpoint: ${{ parameters.githubServiceConnection }}
     ref: refs/heads/develop
+  - repository: boundaryPlatform
+    type: github
+    name: DoHorizon-AI/Cyrene-Platform
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: ${{ parameters.boundaryPlatformRef }}
+  - repository: boundaryPlugins
+    type: github
+    name: DoHorizon-AI/Cyrene-Plugins-Official
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: ${{ parameters.boundaryPluginsRef }}
+  - repository: boundaryAstrbot
+    type: github
+    name: DoHorizon-AI/Astrbot-Rev
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: ${{ parameters.boundaryAstrbotRef }}
 
 trigger:
   branches:
@@ -58,6 +85,7 @@ trigger:
       - develop
       - feat/*
       - chore/*
+      - docs/*
 
 pr:
   branches:
@@ -120,6 +148,83 @@ jobs:
   - publish: $(Pipeline.Workspace)/s/Cyrene-Workspace/ci/evidence
     artifact: workspace-evidence
     displayName: 'Publish Workspace Evidence'
+
+- job: direct_plugin_vertical
+  displayName: 'Workspace / Direct Product-to-Plugin Vertical'
+  dependsOn: product_contract_profile
+  pool:
+    vmImage: 'ubuntu-latest'
+  timeoutInMinutes: 45
+  steps:
+  - checkout: self
+    path: s/Cyrene-Workspace
+    clean: true
+    displayName: 'Checkout Workspace orchestrator'
+
+  - checkout: boundaryPlatform
+    path: s/boundary-platform
+    clean: true
+    displayName: 'Checkout exact Platform control plane'
+
+  - checkout: boundaryPlugins
+    path: s/boundary-plugins
+    clean: true
+    displayName: 'Checkout exact Plugins contracts'
+
+  - checkout: boundaryAstrbot
+    path: s/boundary-astrbot
+    clean: true
+    displayName: 'Checkout exact AstrBot consumer'
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Use Python 3.12'
+
+  - bash: |
+      set -euo pipefail
+      test ! -e .github/workflows/phase7-vertical.yml
+      if git grep -n -E \
+        'PHASE7|configured_binding_server|CYRENE_PHASE7_CES_ENDPOINT|cy-capability-execution-service' \
+        -- ci/vertical-e2e; then
+        echo 'Retired CES vertical implementation returned to Workspace.' >&2
+        exit 1
+      fi
+      if git grep -n -E 'ArtifactKind\.[A-Z][A-Z0-9_]+' -- '*.py' \
+        | grep -v 'ArtifactKind\.GENERIC'; then
+        echo 'A closed Product artifact-kind enum returned to Workspace.' >&2
+        exit 1
+      fi
+    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
+    displayName: 'Guard the direct Product-to-Plugin boundary'
+
+  - bash: |
+      set -euo pipefail
+      bash scripts/use_cached_dotnet_sdk.sh "$(Pipeline.Workspace)/s/boundary-astrbot"
+    workingDirectory: $(Pipeline.Workspace)/s/boundary-astrbot
+    displayName: 'Use available .NET SDK (cache preferred)'
+
+  - bash: |
+      set -euo pipefail
+      rustup toolchain install stable --profile minimal --no-self-update
+      rustup default stable
+      python -m pip install --upgrade pip uv==0.12.3
+      bash ./ci/vertical-e2e/run.sh
+    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
+    displayName: 'Run exact-ref direct Plugin acceptance'
+    env:
+      CYRENE_PLATFORM_ROOT: $(Pipeline.Workspace)/s/boundary-platform
+      CYRENE_OFFICIAL_PLUGINS_ROOT: $(Pipeline.Workspace)/s/boundary-plugins
+      CYRENE_ASTRBOT_ROOT: $(Pipeline.Workspace)/s/boundary-astrbot
+      CYRENE_PLATFORM_REF: ${{ parameters.boundaryPlatformRef }}
+      CYRENE_PLUGINS_REF: ${{ parameters.boundaryPluginsRef }}
+      CYRENE_ASTRBOT_REF: ${{ parameters.boundaryAstrbotRef }}
+      CYRENE_DIRECT_E2E_TMP_PARENT: $(Agent.TempDirectory)/cyrene-direct-plugin
+
+  - publish: $(Agent.TempDirectory)/cyrene-direct-plugin
+    artifact: direct-plugin-failure-evidence
+    condition: failed()
+    displayName: 'Publish retained direct Plugin failure evidence'
 
 - ${{ if eq(parameters.runFullAcceptance, true) }}:
   - job: canonical_linux_gate

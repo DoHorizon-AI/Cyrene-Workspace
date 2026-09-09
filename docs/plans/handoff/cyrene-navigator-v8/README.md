@@ -1,5 +1,10 @@
 # Cyrene Navigator V8 connection handoff / Cyrene Navigator V8 连接交接
 
+> Historical package snapshot / 历史交付快照：本目录只描述当时已固定的 V8 Alpha
+> 安装包，不是当前开发架构或依赖权威。当前 Platform–Plugins 边界以
+> `docs/platform-plugin-direct-boundary-remediation-2026-09-08.md` 为准；新代码不得恢复
+> 本快照中的 Platform CES 业务代理路径。
+
 This is an operator note for the Windows Alpha package. It describes how the
 installed desktop client connects to already deployed Cyrene services. The
 final package handoff includes `release-lock.json`, `SOURCE_VERSIONS.md`,

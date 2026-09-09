@@ -66,9 +66,18 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
     concepts = authorities["concepts"]
     assert len({item["id"] for item in concepts}) == len(concepts)
     assert sum(item["duplicateDefinitionCount"] for item in concepts) == 0
-    training_engine = [item for item in concepts if item["id"] == "training.engine.v1"]
-    assert len(training_engine) == 1
-    migrating_ids = {"model.routing.v1", "serving.engine.v1", "training.engine.v1"}
+    by_id = {item["id"]: item for item in concepts}
+    assert {
+        item["id"] for item in concepts if item["canonicalOwner"] == "DoHorizon-AI/Cyrene-Platform"
+    } == {"ArtifactRef"}
+    training_engine = by_id["training.engine.v1"]
+    assert training_engine["canonicalOwner"] == "NONE"
+    assert training_engine["status"] == "RETIRED_NO_REAL_CONSUMER"
+    assert by_id["execution.engine.v1"]["canonicalOwner"] == (
+        "DoHorizon-AI/Cyrene-Plugins-Official"
+    )
+    assert by_id["model.provider.v1"]["canonicalOwner"] == ("DoHorizon-AI/Cyrene-Plugins-Official")
+    migrating_ids = {"model.routing.v1"}
     assert {
         item["id"] for item in concepts if item["status"] == "MIGRATING_COMPATIBILITY"
     } == migrating_ids
@@ -121,7 +130,7 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
         )
     )
     assert "training.engine.adapter.v1" not in yield_surface
-    assert '"const": "training.engine.v1"' in yield_surface
+    assert '"const": "training.engine.v1"' not in yield_surface
 
     navigator_source = (roots["navigator"] / "src/cyrene_navigator/reader.py").read_text(
         encoding="utf-8"
@@ -145,7 +154,7 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
 
     return {
         "duplicateAuthorities": 0,
-        "trainingEngineAuthorities": 1,
+        "trainingEngineAuthorities": 0,
         "eventEnvelopeAuthorities": 1,
         "artifactIdentityAuthorities": 1,
         "productStateLeaksToKernel": 0,

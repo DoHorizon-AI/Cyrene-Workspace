@@ -381,7 +381,7 @@ RuntimeAgent/Reactor/GPU 集成仍需单独验收；下列产品检查和阶段�
 ### 6.2 Yield training path / Yield 训练路径
 
 - [ ] **P2-07 — TrainingSpec contract:** 明确 model base revision、dataset version、SFT format、LoRA/PEFT params、precision、sequence length、batch/accumulation、output policy、compute selector 和 cancellation policy。
-- [ ] **P2-08 — Canonical compute admission:** Yield 通过通用 Platform capability descriptor、CES 与 WorkerControl 请求 Compute、Placement、Execution、Lease；`training.engine.v1` 只作为 `MIGRATING_COMPATIBILITY` 保留，不启用私有 GPU scheduler，不从 CUDA_VISIBLE_DEVICES 推断资源所有权。
+- [ ] **P2-08 — Canonical compute admission:** Yield 通过 Platform 通用资源、Placement、Lease 与进程生命周期接口申请和监督执行，再直接调用实现 owner 的窄契约；旧 `training.engine.v1` 已因没有真实 capability consumer 而删除，不启用私有 GPU scheduler，也不从 CUDA_VISIBLE_DEVICES 推断资源所有权。
 - [ ] **P2-09 — Real CUDA preflight:** 在目标节点验证 driver、CUDA、GPU UUID/VRAM、Python/runtime、model/dataset access、disk 和 write permission；preflight 失败要在 TrainingRun 中持久化。
 - [ ] **P2-10 — Real LLaMA Factory SFT LoRA:** 使用锁定版本的 LLaMA Factory/现有 Yield adapter 启动真实 CUDA SFT + LoRA/PEFT；必须有真实 GPU utilization、进程、loss/progress 和 artifact evidence。
 - [ ] **P2-11 — Training lifecycle:** TrainingRun/Attempt 正确表示 queued/running/progress/failed/cancelling/cancelled/completed/awaiting_retry；Product state 与 Kernel operation、PID、worker state 分离。

@@ -75,10 +75,19 @@ def test_authority_matrix_has_zero_duplicate_definitions() -> None:
     concepts = matrix["concepts"]
     assert len({item["id"] for item in concepts}) == len(concepts)
     assert sum(item["duplicateDefinitionCount"] for item in concepts) == 0
-    training = [item for item in concepts if item["id"] == "training.engine.v1"]
-    assert len(training) == 1
-    assert training[0]["canonicalOwner"] == "DoHorizon-AI/Cyrene-Platform"
-    migrating_ids = {"model.routing.v1", "serving.engine.v1", "training.engine.v1"}
+    by_id = {item["id"]: item for item in concepts}
+    assert {
+        item["id"] for item in concepts if item["canonicalOwner"] == "DoHorizon-AI/Cyrene-Platform"
+    } == {"ArtifactRef"}
+    assert by_id["training.engine.v1"]["canonicalOwner"] == "NONE"
+    assert by_id["training.engine.v1"]["status"] == "RETIRED_NO_REAL_CONSUMER"
+    assert by_id["execution.engine.v1"]["canonicalOwner"] == (
+        "DoHorizon-AI/Cyrene-Plugins-Official"
+    )
+    assert by_id["model.provider.v1"]["canonicalOwner"] == ("DoHorizon-AI/Cyrene-Plugins-Official")
+    assert by_id["data.processor.v1"]["canonicalOwner"] == "NONE"
+    assert by_id["evaluation.runner.v1"]["canonicalOwner"] == "NONE"
+    migrating_ids = {"model.routing.v1"}
     assert {
         item["id"] for item in concepts if item["status"] == "MIGRATING_COMPATIBILITY"
     } == migrating_ids

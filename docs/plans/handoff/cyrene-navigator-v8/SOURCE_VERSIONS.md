@@ -1,5 +1,8 @@
 # Cyrene Navigator V8 Source and Version Matrix / 源码与版本矩阵
 
+> Historical package snapshot / 历史交付快照：这些 SHA 只证明 V8 Alpha 安装包的
+> 可复现来源，不代表当前分支、当前权威或推荐的 Platform–Plugins 调用路径。
+
 This document records the authoritative source commits, upstream pins, binary digests,
 and dependencies for the Cyrene Navigator V8 Phase 0 handoff.
 

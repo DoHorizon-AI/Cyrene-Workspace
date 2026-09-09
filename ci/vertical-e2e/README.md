@@ -1,57 +1,41 @@
-# Three-repository vertical acceptance
+# Direct Product-to-Plugin vertical acceptance / Product 直连 Plugin 纵向验收
 
-`run.sh` is the reproducible Linux acceptance for the configured connector
-vertical slice. It clones exact immutable commits of Cyrene-Platform,
-AstrBot-Rev, and Cyrene-Plugins-Official into a private run directory and
-does not use the Workspace sibling checkout or IDE project roots.
+This directory contains a thin cross-repository orchestrator. It checks three immutable
+commits and delegates capability behavior to the canonical owners:
 
-Before starting the runtime chain, the harness proves the Connector Package
-Spec v0.1 lifecycle against the exact Plugins commit. It starts from a clean
-Python host where `onebot_v11_connector` is unavailable, builds a deterministic
-ZIP and descriptor, verifies both digests, prepares only the exact
-`requirements.lock`, installs into a content-addressed host store, and creates
-`qq-main` and `qq-secondary` binding records. The same gate also covers cache
-corruption rejection, verified offline reinstall, binding-scoped upgrade and
-rollback, runtime generation changes, and secret non-persistence.
+- Cyrene-Plugins-Official builds the versioned OneBot packages;
+- Cyrene-Platform builds only the generic package resolver and runtime;
+- Astrbot-Rev runs its own `OfficialOneBotProductRuntimeTck` against two isolated bindings.
 
-The runtime portion then starts:
+本目录只保留轻量的跨仓库编排。Plugins 构建版本化 OneBot 包，Platform 只构建通用包解析器与
+运行时，Astrbot-Rev 用自己维护的 `OfficialOneBotProductRuntimeTck` 验证两个隔离 binding。
 
-1. two external fake OneBot v11 forward-WebSocket peers;
-2. the Platform `configured_binding_server` CES fixture with `qq-main` and
-   `qq-secondary` bindings;
-3. a disposable PostgreSQL 17 + pgvector container pinned by image digest and
-   the real AstrBot database migrator;
-4. an AstrBot `WebApplicationFactory<Program>` test host with a deterministic
-   test-only worker whose output is persisted by the real PostgreSQL service.
+The TCK installs, starts, recovers, upgrades, rolls back, removes, and restores the package.
+Inbound and outbound business messages travel directly between AstrBot and the Plugin process.
+Platform never receives a message payload and does not own a capability-specific test driver.
 
-The connector is launched from the verified installed package tree; the source
-connector directory is made unavailable before CES starts. The connector,
-worker shim, CES Invoke/Subscribe paths, AstrBot connector
-subscriber, session/history persistence, and outbound action are real. The
-fake peers are only the external OneBot protocol counterpart. Both peers use
-the same conversation and message IDs deliberately; the account, binding,
-WebSocket endpoint, CES environment, stored identity, and outbound action
-must remain isolated.
+TCK 覆盖安装、启动、恢复、升级、回滚、删除与离线恢复。入站和出站业务消息由 AstrBot 与 Plugin
+进程直接传递；Platform 不接收消息 payload，也不维护能力专用测试驱动。
 
-Run from a Linux checkout:
+Run on Linux with the pinned defaults:
 
 ```bash
 ./ci/vertical-e2e/run.sh
 ```
 
-The package lock pins `protobuf==4.25.9`; harness-only test dependencies are
-also exact pins. There is no `pip install latest` or source-tree runtime
-fallback. Repository refs and URLs can be overridden explicitly:
+Azure Pipelines supplies exact multi-checkout roots. A standalone run clones the same exact
+commits into a disposable directory. Candidate revisions can be overridden explicitly:
+
+Azure Pipelines is the CI authority for this acceptance. The obsolete GitHub Actions Phase 7
+workflow was removed together with the CES-based driver.
+
+本验收以 Azure Pipelines 为 CI 权威；旧 GitHub Actions Phase 7 工作流已随 CES 驱动一并删除。
 
 ```bash
 CYRENE_PLATFORM_REF=<commit> \
-CYRENE_ASTRBOT_REF=<commit> \
 CYRENE_PLUGINS_REF=<commit> \
+CYRENE_ASTRBOT_REF=<commit> \
 ./ci/vertical-e2e/run.sh
 ```
 
-On success, all child process groups, tracked ports, the owned PostgreSQL
-container, installed package store, dependency runtime, registry, and cache are
-checked and removed. On failure, the run directory is retained under
-`/tmp/cyrene` (or `CYRENE_PHASE7_TMP_PARENT`) for CI artifact upload; process,
-port, and container cleanup checks still run.
+成功时临时目录会被删除；失败时会输出 `DIRECT_PLUGIN_E2E_EVIDENCE_ROOT` 并保留现场。

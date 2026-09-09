@@ -1,12 +1,17 @@
 # Cyrene Product contract v1 integration profile
 
-Status: canonical Alpha contract registry, 2026-09-05. The exact merged Product
-and Platform `main` SHAs are recorded in the registry JSON files.
+Status: historical Alpha Product registry with a 2026-09-08 boundary candidate
+overlay. Merged Product SHAs remain in `product-contracts-v1.json`; candidate
+Platform and Plugins contract SHAs are in `contract-authorities-v1.json`.
+Canonical promotion is tracked in
+`docs/platform-plugin-direct-boundary-remediation-2026-09-08.md`.
 
-The 2026-09-08 clean-boundary follow-up freezes `model.routing.v1`,
-`serving.engine.v1`, and `training.engine.v1` as
-`MIGRATING_COMPATIBILITY`. New integrations use generic capability descriptors,
-CES payload forwarding, and Product-owned replaceable ports.
+The 2026-09-08 clean-boundary follow-up removes capability payload authority
+from Platform. Products obtain generic lifecycle and connection facts from
+Platform, then call Plugins-owned contracts directly. `model.routing.v1` is a
+Plugins migration snapshot; `execution.engine.v1` and `model.provider.v1` are
+Plugins-owned contracts. The old `serving.engine.v1` and `training.engine.v1`
+Platform surfaces are retired rather than copied.
 
 This profile records compatibility and ownership across Product repositories. It
 does not move any Product resource authority into Cyrene-Workspace. Every
@@ -25,12 +30,12 @@ Navigator 的 V1 边界演进见上述文档；下表保留 Alpha 历史事实�
 
 | Product | Durable authority | Replaceable engine/runtime seam | Explicit non-ownership | MVP evidence |
 |---|---|---|---|---|
-| Catalyst | `Dataset`, immutable `DatasetVersion`, lineage | canonical candidate `data.processor.v1`; local `DataProcessingPort` | Artifact bytes, Kernel operations, plugin/provider identity | `REFERENCE_MVP_READY` |
-| Echo | `EvaluationSuite`, `EvaluationRun`, `EvaluationResult`, `GateDecision` | canonical candidate `evaluation.runner.v1`; local `EvaluationExecutionPort` | Evaluator process state, Artifact bytes, provider identity | `REFERENCE_MVP_READY` |
-| Reactor | `Deployment` desired/observed state and distinct `Endpoint` | migrating `serving.engine.v1`; local `ServingExecutionPort`; generic CES target | Kernel/Node Agent authority, runtime evidence, model bytes, route policy | `REFERENCE_MVP_READY` |
-| Exchange | external `GatewayEndpoint`, `GatewayRoute`, request/fallback policy | migrating `model.routing.v1`; experimental `model.provider.v1`; generic CES target | Reactor Deployment, provider/package identity, secret values | `REFERENCE_MVP_READY` |
+| Catalyst | `Dataset`, immutable `DatasetVersion`, lineage | local `DataProcessingPort`; remote `data.processor.v1` contract remains unassigned | Artifact bytes, Kernel operations, plugin/provider identity | `REFERENCE_MVP_READY` |
+| Echo | `EvaluationSuite`, `EvaluationRun`, `EvaluationResult`, `GateDecision` | local `EvaluationExecutionPort`; remote `evaluation.runner.v1` contract remains unassigned | Evaluator process state, Artifact bytes, provider identity | `REFERENCE_MVP_READY` |
+| Reactor | `Deployment` desired/observed state and distinct `Endpoint` | local `ServingExecutionPort` directly consumes Plugins-owned `execution.engine.v1` | Kernel/Node Agent authority, runtime evidence, model bytes, route policy | `REFERENCE_MVP_READY` |
+| Exchange | external `GatewayEndpoint`, `GatewayRoute`, request/fallback policy | Plugins-owned `model.provider.v1`; migrating Plugins `model.routing.v1` snapshot | Reactor Deployment, provider/package identity, secret values | `REFERENCE_MVP_READY` |
 | Navigator | ephemeral `WorkspaceSnapshot` presentation contract only | Navigator-local `ProductReadPort` | Every Product lifecycle, mutation authority, server-side source of truth | `HEADLESS_MVP_READY` |
-| Yield | `TrainingRun`, `TrainingAttempt`, retry/cancellation/output lineage | migrating `training.engine.v1`; local `TrainingEngineAdapter` port; generic CES target | Kernel/runtime evidence, trainer process state, Artifact bytes | `CONTRACT_CANDIDATE_READY` |
+| Yield | `TrainingRun`, `TrainingAttempt`, retry/cancellation/output lineage and `ModelVersion` | local `TrainingEngineAdapter`; direct owner-scoped Plugin contracts | Kernel/runtime evidence, trainer process state, Artifact bytes | `CONTRACT_CANDIDATE_READY` |
 
 ## Cross-product happy path
 
@@ -148,15 +153,15 @@ copied into these branches.
   testing. Production vLLM/KServe and GPU/model E2E remain future adapter work.
 - Echo's deterministic engine is real but the Inspect AI isolated adapter is not
   implemented in this slice.
-- Exchange's persisted Product route is exercised through canonical Platform
-  resolver/CES delegation and the Official worker with a real upstream HTTP
-  result. Restart, normal request, SSE, disabled endpoint, and unknown binding
-  cases pass on the recorded exact SHAs.
+- Exchange's persisted Product route calls Plugins-owned provider contracts
+  directly after generic Platform package resolution. Restart, normal request,
+  SSE, disabled endpoint, and unknown binding cases pass on the recorded exact
+  candidate SHAs; final Azure exact-head evidence remains pending.
 - Navigator proves HTTP aggregation but does not wire the parallel Tauri UI.
-- Yield is contract candidate only. `training.engine.adapter.v1` was removed as
-  a duplicate capability; the internal adapter is a local application port.
-  Filesystem-path internal specs and the current lifecycle-shaped
-  `training.engine.v1` compatibility seam remain explicit migration work.
+- Yield owns `ModelVersion` and its training lifecycle. The old
+  `training.engine.v1` and `training.engine.adapter.v1` surfaces have no real
+  capability consumer and are retired; the internal adapter remains a local
+  application port while concrete Plugins keep owner-scoped contracts.
 - Yield's `training-unit` workflow resolves an explicit canonical Platform
   checkout and propagates that exact SDK path into child workers. Nested worker
   cancellation and durable recovery fail closed, and the required hosted

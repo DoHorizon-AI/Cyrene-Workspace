@@ -1,5 +1,8 @@
 # Cyrene Navigator V8 backend handoff / Cyrene Navigator V8 后端交接
 
+> Historical package snapshot / 历史交付快照：以下 CES 组合仅记录 V8 Alpha 当时的
+> 固定后端，不可作为当前实现指南。当前能力业务调用由 Product 直连 Plugins 所有的契约。
+
 这份说明给同事和管理员使用。它描述一个已经验证过的受控 Alpha 后端组合，供已安装
 Navigator V8 连接；它不是生产部署器，也不是 Workspace、SSO 或 RBAC 的实现。
 
