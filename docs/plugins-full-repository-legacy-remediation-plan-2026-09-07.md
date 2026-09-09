@@ -359,33 +359,41 @@ flowchart LR
 ### T20 Catalyst contract and truth cleanup / Catalyst 契约与真值清理（P1 / M）
 
 - **Repository**：Cyrene-Catalyst。
-- **Work / 工作**：将 `cyrene-artifacts`、lock 文件和 Azure checkout/guard 从旧 Platform SHA 对齐到
-  当前已接受的开放 artifact-kind 契约；Product schema 不再复制闭合的 Platform Product 分类；删除旧训练
-  语料目录声明；README/API 改为当前 DatasetVersion/样例事实；登记实际 pyproject/wheel、visibility 和
-  branch 元数据。只改 Catalyst 消费端，不为此恢复或修改 Platform Product API。
+- **Work / 工作**：移除 `cyrene-artifacts`、lock 文件和 Azure 对 Platform 源码的 checkout/guard；用
+  Catalyst 自有且可替换的 Artifact Plane 适配器输出开放 `ArtifactRef` 线协议；Product schema 不再复制
+  闭合的 Platform Product 分类；删除旧训练语料目录声明；README/API 改为当前 DatasetVersion/样例事实；
+  登记实际 pyproject/wheel、visibility 和 branch 元数据。只改 Catalyst 消费端，不为此恢复或修改
+  Platform Product API。
 - **Acceptance / 验收**：没有 `ArtifactKind.DATASET` 等已删除常量或闭合 kind 投影；Azure exact-head
   针对当前 Artifact 契约成功；没有当前文档指向已删除路径，实际构建入口被 Workspace verifier 覆盖。
+- **Candidate / 候选**：PR `#7`，`c510e06244466d6aca0d4cbc5815a77fc10c81e8`；Azure
+  `#526` exact-head 成功。真实 Yield/Echo 远程交接保持 `WIRED_NOT_RUN`。合并与远端回读前 T20 不划掉。
 
 ### T21 Echo contract and truth cleanup / Echo 契约与真值清理（P1 / M）
 
 - **Repository**：Cyrene-Echo。
-- **Work / 工作**：将 `cyrene-artifacts`、lock 文件和 Azure checkout/guard 从旧 Platform SHA 对齐到
-  当前已接受的开放 artifact-kind 契约；Product schema 不再复制闭合的 Platform Product 分类；删除
-  Navigator legacy feedback 引用；修 owner/职责、pyproject/wheel、visibility 和 branch 元数据；真实
-  Exchange judge 在取得凭据前保持 `WIRED_NOT_RUN`。只改 Echo 消费端，不恢复 Platform Product API。
+- **Work / 工作**：移除 `cyrene-artifacts`、lock 文件和 Azure 对 Platform 源码的 checkout/guard；用
+  Echo 自有且可替换的 Artifact Plane 适配器输出开放 `ArtifactRef` 线协议；Product schema 不再复制
+  闭合的 Platform Product 分类；删除 Navigator legacy feedback 引用；修 owner/职责、pyproject/wheel、
+  visibility 和 branch 元数据；真实 Exchange judge 在取得凭据前保持 `WIRED_NOT_RUN`。只改 Echo
+  消费端，不恢复 Platform Product API。
 - **Acceptance / 验收**：没有 `ArtifactKind.DATASET` 等已删除常量或闭合 kind 投影；Azure exact-head
   针对当前 Artifact 契约成功；不存在以凭据缺失路径冒充通过的证据，Policy 与当前产品职责一致。
+- **Candidate / 候选**：PR `#8`，`dd34cdd7cccdab1b7cf441b0b2d645c603622264`；Azure
+  `#528` exact-head 成功。真实 Exchange judge 保持 `WIRED_NOT_RUN`。合并与远端回读前 T21 不划掉。
 
 ### T22 Navigator Platform decoupling and prototype isolation / Navigator Platform 解耦与原型隔离（P0 / L）
 
 - **Repository**：Cyrene-Navigator。
-- **Work / 工作**：生产 `EchoHandoff` 不再使用已删除的 `ArtifactKind.DATASET`；Python SDK 与 Windows
-  `cy-manifest` 消费版本化产物，普通构建不再 checkout Platform 源码；删除无消费者的旧 typed SPI、
-  `legacy-dh` 和 Platform ModelVersion 当前声明；Windows mock 可执行物退出 release profile，或注入真实
-  Session/Exchange adapter；补全 Python、Cargo、.NET、NPM 构建和 package 元数据；修 Policy。
+- **Work / 工作**：生产 `EchoHandoff` 改用 Navigator 自有且可替换的 Artifact Plane 适配器与开放
+  artifact kind；删除无消费者的 `cy-manifest`、旧 typed SPI、`legacy-dh` 和 Platform ModelVersion
+  当前声明；普通构建不再 checkout Platform 源码；Windows mock 可执行物退出 release profile，或注入
+  真实 Session/Exchange adapter；补全 Python、Cargo、.NET、NPM 构建和 package 元数据；修 Policy。
 - **Acceptance / 验收**：生产和普通构建均不依赖旧 Platform Product API 或 Platform 源码 checkout；
   Navigator 到 Echo/Plugin 的业务调用保持直连；release artifact 不再直接绑定 mock service；prototype
   状态明确且生产不可达。整个任务不得修改 Platform 源码。
+- **Candidate / 候选**：PR `#6`，`12199b30cccf3fafc2c42a024211e837ade6fe96`；Azure
+  `#533` exact-head 成功。真实远程 Echo 交接不由本任务冒充为已运行。合并与远端回读前 T22 不划掉。
 
 ### T23 Workspace truth projection / Workspace 真值投影（P1 / L）
 
