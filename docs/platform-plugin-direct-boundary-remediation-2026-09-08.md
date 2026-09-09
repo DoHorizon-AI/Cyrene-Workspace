@@ -283,19 +283,19 @@ Priority orders execution; every listed task is required. Difficulty uses `S/M/L
 | `BND-001` | ledger committed on Workspace candidate branch | Workspace `#468` succeeded at prior ledger commit; final run required | PR `#11` open, canonical read-back pending | `IN_PROGRESS` |
 | `BND-002` | Platform and Plugins ownership guards pass locally | Platform `#483` covered the superseded `9305517d…` candidate; exact final Platform and Plugins runs require live refresh | PRs `#41` and `#14` open | `CANDIDATE` |
 | `PLG-001..005` | 145 component tests, 53 conformance tests, schema/package lifecycle and real venv preparation passed at `a019cc37cab39ffafe30884a4a0427aaaadf69a9` | Plugins `#491` was last observed queued; recheck before merge | Plugins PR `#14` open | `CANDIDATE` |
-| `PLAT-001..008` | full Cargo check/clippy/test, 34 Python tests, open artifact-kind schema regression and boundary guards passed at `2b9538230f92d6129bd97126c478ee70008cf86f` | final exact-SHA Azure run required; `#483` is historical evidence for the prior candidate | Platform PR `#41` open | `CANDIDATE` |
-| `CON-001` | 57 AstrBot deployment/control-plane tests and the exact three-repository OneBot lifecycle TCK passed at `30a4d7c40629691c809e6d0609532caa8001b498` | final exact-SHA Azure run required; `#492` covered a superseded candidate | AstrBot PR `#14` open | `CANDIDATE` |
+| `PLAT-001..008` | full Cargo check/clippy/test, a fresh-target Rust workspace test, 36 Python tests, open artifact-kind schema regression and boundary guards passed at `64636dea7a205e13d7ee2073d4a0fb3568b0f80f` | final exact-SHA Azure run required; `#483` is historical evidence for the prior candidate | Platform PR `#41` open | `CANDIDATE` |
+| `CON-001` | 57 AstrBot deployment/control-plane tests and the exact three-repository OneBot lifecycle TCK passed at `f3d9b42c1218365c88c6cf065f22b1312f0c605b` | final exact-SHA Azure run required; `#492` covered a superseded candidate | AstrBot PR `#14` open | `CANDIDATE` |
 | `CON-002` | Exchange 43 tests; Yield 122 tests; Reactor 49 Product and 246 serving tests plus placement, lint, type, projection and OpenAPI checks passed at the SHAs below | final exact-SHA Azure runs required; `#489`, `#490` and `#493` covered superseded candidates | Yield PR `#12`, Reactor PR `#13`, Exchange PR `#14` open | `CANDIDATE` |
 | `CON-003` | no current acceptance evidence | not run | not started | `NOT_RUN` |
-| `ACC-001` | AstrBot, Exchange, Yield and Reactor candidates all pin Platform `2b9538230f92d6129bd97126c478ee70008cf86f`; Plugins owns capability evolution independently | dependent final Azure runs pending | pending | `IN_PROGRESS` |
-| `ACC-002` | Workspace thin orchestrator passed the AstrBot-owned direct OneBot lifecycle TCK at Platform `2b953823…`, Plugins `a019cc37…` and AstrBot `30a4d7c4…`; retired CES driver and duplicate peers/package host remain absent | final Workspace Azure run required | pending | `IN_PROGRESS` |
-| `ACC-003` | candidate baseline is `2b9538230f92d6129bd97126c478ee70008cf86f` | final Platform exact-SHA Azure run required | all normal merges and ancestry read-back pending | `IN_PROGRESS` |
+| `ACC-001` | AstrBot, Exchange, Yield and Reactor candidates all pin Platform `64636dea7a205e13d7ee2073d4a0fb3568b0f80f`; Plugins owns capability evolution independently | dependent final Azure runs pending | pending | `IN_PROGRESS` |
+| `ACC-002` | Workspace thin orchestrator passed the AstrBot-owned direct OneBot lifecycle TCK at Platform `64636dea…`, Plugins `a019cc37…` and AstrBot `f3d9b42c…`; retired CES driver and duplicate peers/package host remain absent | final Workspace Azure run required | pending | `IN_PROGRESS` |
+| `ACC-003` | candidate baseline is `64636dea7a205e13d7ee2073d4a0fb3568b0f80f` | final Platform exact-SHA Azure run required | all normal merges and ancestry read-back pending | `IN_PROGRESS` |
 
 Candidate Product revisions used by `CON-002`:
 
-- Yield: `872b8c91d6f9fc6863bdabe916ab743e57f95924`;
-- Reactor: `e5ebb55c1729fbf8e032b8681a75da95ec899933`;
-- Exchange: `29c713a0955e645d7830796751793a9c433df8b9`.
+- Yield: `f8fd6b884a8b5049d7b363d31949adaa5536a3aa`;
+- Reactor: `7825c12ef4360e5bcafffa43b99317bcf4fb9378`;
+- Exchange: `d6e10ff65e377942dc35699a89b8f62a38895cfd`.
 
 `CANDIDATE` means the implementation exists on an isolated, pushed task branch. It does not close
 the task. Refresh the exact Azure result, merge normally, fetch the canonical branch, and verify
