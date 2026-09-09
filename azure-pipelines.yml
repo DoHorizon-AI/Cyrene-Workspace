@@ -85,6 +85,7 @@ trigger:
       - develop
       - feat/*
       - chore/*
+      - docs/*
 
 pr:
   branches:
