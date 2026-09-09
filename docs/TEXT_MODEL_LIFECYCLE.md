@@ -36,10 +36,10 @@ sequenceDiagram
 - Orchestrates training runs (full fine-tuning, LoRA adapters, DPO).
 - Generates reproducible checkpoints and evaluation benchmarks.
 
-### Stage 3: Model Version Authority (`Cyrene-Yield` & `Cyrene-Platform`)
+### Stage 3: Model Version Authority (`Cyrene-Yield`)
 - **Authority Model**:
-  - `Cyrene-Platform`: Defines the canonical `cy_artifacts.ModelVersion` schema.
-  - `Cyrene-Yield`: **Sole authority** that creates, hashes (`model-version://sha256/<hash>`), and publishes `ModelVersion`.
+  - `Cyrene-Yield`: Defines, creates, hashes (`model-version://sha256/<hash>`), and publishes the canonical `ModelVersion`.
+  - `Cyrene-Platform`: Defines only generic `ArtifactRef` identity, transfer, and runtime facts; it does not define model lineage or composition.
   - No other service may synthesize or mint a `ModelVersion` authority ID.
 
 ### Stage 4: Inference Serving (`Cyrene-Reactor`)

@@ -1,73 +1,78 @@
 {
   "schemaVersion": 1,
-  "platformContractCommit": "1b496733d725680dc999f925c99b20c8ecad178a",
+  "platformContractCommit": "c44782320db933a5328c8ccf32c4c830563b2cf6",
   "concepts": [
     {
       "id": "data.processor.v1",
-      "canonicalOwner": "DoHorizon-AI/Cyrene-Platform",
-      "canonicalPaths": ["docs/api/CAPABILITY_INDEX.md"],
-      "status": "CONTRACT_CANDIDATE",
-      "consumers": ["catalyst"],
+      "canonicalOwner": "NONE",
+      "canonicalPaths": [],
+      "status": "CONTRACT_CANDIDATE_UNASSIGNED",
+      "consumers": [
+        "catalyst"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     },
     {
       "id": "evaluation.runner.v1",
-      "canonicalOwner": "DoHorizon-AI/Cyrene-Platform",
-      "canonicalPaths": ["docs/api/CAPABILITY_INDEX.md"],
-      "status": "CONTRACT_CANDIDATE",
-      "consumers": ["echo"],
+      "canonicalOwner": "NONE",
+      "canonicalPaths": [],
+      "status": "CONTRACT_CANDIDATE_UNASSIGNED",
+      "consumers": [
+        "echo"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     },
     {
       "id": "model.provider.v1",
-      "canonicalOwner": "DoHorizon-AI/Cyrene-Platform",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
       "canonicalPaths": [
         "contracts/proto/cyrene/model/provider/v1/model_provider.proto",
-        "contracts/proto/cyrene/capability/v1/capability_execution.proto",
-        "docs/api/CAPABILITY_INDEX.md"
+        "contracts/capabilities.yaml"
       ],
-      "status": "EXPERIMENTAL",
-      "consumers": ["exchange"],
+      "status": "IMPLEMENTED_STABLE",
+      "consumers": [
+        "astrbot",
+        "exchange"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     },
     {
       "id": "model.routing.v1",
-      "canonicalOwner": "DoHorizon-AI/Cyrene-Platform",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
       "canonicalPaths": [
-        "contracts/proto/plugin/v1/compat_rule.proto",
-        "docs/api/CAPABILITY_INDEX.md"
+        "plugins/policy/model-routing/plugin.manifest.json",
+        "plugins/policy/model-routing/docs/CYRENE_MIGRATION_MARKER.md"
       ],
       "status": "MIGRATING_COMPATIBILITY",
-      "consumers": ["exchange"],
+      "consumers": [
+        "exchange"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     },
     {
-      "id": "serving.engine.v1",
-      "canonicalOwner": "DoHorizon-AI/Cyrene-Platform",
+      "id": "execution.engine.v1",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
       "canonicalPaths": [
-        "contracts/proto/plugin/v1/execution_engine.proto",
-        "contracts/proto/plugin/v1/plugin_protocol.proto",
-        "docs/api/CAPABILITY_INDEX.md"
+        "plugins/engines/tensorrt-llm/contracts/v1/schema.json",
+        "contracts/capabilities.yaml"
       ],
-      "status": "MIGRATING_COMPATIBILITY",
-      "consumers": ["reactor"],
+      "status": "IMPLEMENTED_STABLE",
+      "consumers": [
+        "reactor"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     },
     {
       "id": "training.engine.v1",
-      "canonicalOwner": "DoHorizon-AI/Cyrene-Platform",
-      "canonicalPaths": [
-        "contracts/proto/plugin/v1/training_backend.proto",
-        "contracts/proto/plugin/v1/plugin_protocol.proto",
-        "docs/api/CAPABILITY_INDEX.md"
-      ],
-      "status": "MIGRATING_COMPATIBILITY",
-      "consumers": ["yield"],
+      "canonicalOwner": "NONE",
+      "canonicalPaths": [],
+      "status": "RETIRED_NO_REAL_CONSUMER",
+      "consumers": [],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     },
@@ -83,47 +88,85 @@
     {
       "id": "ProductReadPort",
       "canonicalOwner": "DoHorizon-AI/Cyrene-Navigator",
-      "canonicalPaths": ["src/cyrene_navigator/reader.py"],
+      "canonicalPaths": [
+        "src/cyrene_navigator/reader.py"
+      ],
       "status": "LOCAL_APPLICATION_PORT",
-      "consumers": ["navigator"],
+      "consumers": [
+        "navigator"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     },
     {
       "id": "Product event envelope",
       "canonicalOwner": "DoHorizon-AI/Cyrene-Workspace",
-      "canonicalPaths": ["governance/product-contract-v1/product-event.schema.json"],
+      "canonicalPaths": [
+        "governance/product-contract-v1/product-event.schema.json"
+      ],
       "status": "CONTRACT_CANDIDATE",
-      "consumers": ["catalyst", "echo", "reactor", "exchange", "yield"],
+      "consumers": [
+        "catalyst",
+        "echo",
+        "reactor",
+        "exchange",
+        "yield"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     },
     {
       "id": "Problem Details extensions",
       "canonicalOwner": "DoHorizon-AI/Cyrene-Workspace",
-      "canonicalPaths": ["governance/product-contract-v1/problem-details.schema.json"],
+      "canonicalPaths": [
+        "governance/product-contract-v1/problem-details.schema.json"
+      ],
       "status": "CONTRACT_CANDIDATE",
-      "consumers": ["catalyst", "echo", "reactor", "exchange", "navigator", "yield"],
+      "consumers": [
+        "catalyst",
+        "echo",
+        "reactor",
+        "exchange",
+        "navigator",
+        "yield"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 6
     },
     {
       "id": "ArtifactRef",
       "canonicalOwner": "DoHorizon-AI/Cyrene-Platform",
-      "canonicalPaths": ["contracts/schemas/manifests/artifact_ref.schema.json"],
+      "canonicalPaths": [
+        "contracts/schemas/manifests/artifact_ref.schema.json"
+      ],
       "status": "IMPLEMENTED_STABLE",
-      "consumers": ["catalyst", "echo", "reactor", "yield"],
+      "consumers": [
+        "catalyst",
+        "echo",
+        "reactor",
+        "yield"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 4
     },
     {
       "id": "Product async lifecycle",
       "canonicalOwner": "DoHorizon-AI/Cyrene-Workspace",
-      "canonicalPaths": ["governance/product-contract-v1/product-http-semantics.md"],
+      "canonicalPaths": [
+        "governance/product-contract-v1/product-http-semantics.md"
+      ],
       "status": "CONTRACT_CANDIDATE",
-      "consumers": ["catalyst", "echo", "reactor", "exchange", "navigator", "yield"],
+      "consumers": [
+        "catalyst",
+        "echo",
+        "reactor",
+        "exchange",
+        "navigator",
+        "yield"
+      ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
     }
-  ]
+  ],
+  "pluginsContractCommit": "a019cc37cab39ffafe30884a4a0427aaaadf69a9"
 }

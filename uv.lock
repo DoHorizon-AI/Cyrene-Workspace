@@ -275,20 +275,12 @@ wheels = [
 [[package]]
 name = "cyrene-artifacts"
 version = "0.1.0"
-source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=1b496733d725680dc999f925c99b20c8ecad178a#1b496733d725680dc999f925c99b20c8ecad178a" }
-
-[[package]]
-name = "cyrene-environment"
-version = "0.1.0"
-source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_environment&rev=1b496733d725680dc999f925c99b20c8ecad178a#1b496733d725680dc999f925c99b20c8ecad178a" }
-dependencies = [
-    { name = "cyrene-artifacts" },
-]
+source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=c44782320db933a5328c8ccf32c4c830563b2cf6#c44782320db933a5328c8ccf32c4c830563b2cf6" }
 
 [[package]]
 name = "cyrene-preflight"
 version = "0.1.0"
-source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=1b496733d725680dc999f925c99b20c8ecad178a#1b496733d725680dc999f925c99b20c8ecad178a" }
+source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=c44782320db933a5328c8ccf32c4c830563b2cf6#c44782320db933a5328c8ccf32c4c830563b2cf6" }
 
 [[package]]
 name = "cyrene-workspace"
@@ -299,7 +291,6 @@ source = { virtual = "." }
 text-lifecycle = [
     { name = "cryptography" },
     { name = "cyrene-artifacts" },
-    { name = "cyrene-environment" },
     { name = "cyrene-preflight" },
     { name = "duckdb" },
     { name = "fastapi" },
@@ -325,9 +316,8 @@ text-lifecycle = [
 [package.metadata.requires-dev]
 text-lifecycle = [
     { name = "cryptography", specifier = "==50.0.1" },
-    { name = "cyrene-artifacts", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=1b496733d725680dc999f925c99b20c8ecad178a" },
-    { name = "cyrene-environment", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_environment&rev=1b496733d725680dc999f925c99b20c8ecad178a" },
-    { name = "cyrene-preflight", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=1b496733d725680dc999f925c99b20c8ecad178a" },
+    { name = "cyrene-artifacts", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=c44782320db933a5328c8ccf32c4c830563b2cf6" },
+    { name = "cyrene-preflight", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=c44782320db933a5328c8ccf32c4c830563b2cf6" },
     { name = "duckdb", specifier = "==1.5.5" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "grpcio", specifier = "==1.83.0" },

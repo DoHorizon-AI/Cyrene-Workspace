@@ -8,6 +8,8 @@ from pathlib import Path
 from cy_artifacts import ArtifactKind, LocalArtifactProvider
 from test_handoffs import catalyst_app, echo_app, http_bus, yield_app
 
+DATASET_ARTIFACT_KIND = ArtifactKind("dataset")
+
 
 def test_client_prepares_both_dataset_versions_without_manual_resource_ids(tmp_path):
     spec = importlib.util.spec_from_file_location(
@@ -67,7 +69,7 @@ def test_client_prepares_both_dataset_versions_without_manual_resource_ids(tmp_p
     assert action("send-to-yield")["status"] == "DRAFT"
     assert state["trainingDraft"]["datasetVersion"]["id"] == first["id"]
     snapshot = provider.publish_bytes(
-        b'{"instruction":"q","output":"wrong"}\n', kind=ArtifactKind.DATASET
+        b'{"instruction":"q","output":"wrong"}\n', kind=DATASET_ARTIFACT_KIND
     )
     state["evaluationInput"] = client.request(
         "echo",

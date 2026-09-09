@@ -26,6 +26,7 @@ from cy_artifacts import ArtifactKind, LocalArtifactProvider
 from huggingface_hub import snapshot_download
 
 PLATFORM_RUNTIME_PROFILE = "CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU"
+MODEL_ARTIFACT_KIND = ArtifactKind("model")
 
 
 class ProductClient:
@@ -146,7 +147,7 @@ def import_base_artifact(path: Path | None, repository: str, revision: str) -> d
             file_count += 1
         if file_count == 0:
             raise ValueError("Downloaded model snapshot is empty")
-        reference = provider.publish_portable_directory(copied, kind=ArtifactKind.MODEL)
+        reference = provider.publish_portable_directory(copied, kind=MODEL_ARTIFACT_KIND)
     return {
         "modelArtifact": reference.to_dict(),
         "modelInfo": {

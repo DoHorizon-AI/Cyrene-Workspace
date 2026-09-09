@@ -15,7 +15,7 @@ parameters:
 - name: boundaryPlatformRef
   displayName: 'Exact Platform control-plane revision'
   type: string
-  default: 64636dea7a205e13d7ee2073d4a0fb3568b0f80f
+  default: c44782320db933a5328c8ccf32c4c830563b2cf6
 - name: boundaryPluginsRef
   displayName: 'Exact Plugins contract revision'
   type: string
@@ -23,7 +23,7 @@ parameters:
 - name: boundaryAstrbotRef
   displayName: 'Exact AstrBot direct-consumer revision'
   type: string
-  default: f3d9b42c1218365c88c6cf065f22b1312f0c605b
+  default: d3ef2b7264a680d8c26b45ec9c3d6f764dce003a
 
 resources:
   repositories:
@@ -188,6 +188,11 @@ jobs:
         'PHASE7|configured_binding_server|CYRENE_PHASE7_CES_ENDPOINT|cy-capability-execution-service' \
         -- ci/vertical-e2e; then
         echo 'Retired CES vertical implementation returned to Workspace.' >&2
+        exit 1
+      fi
+      if git grep -n -E 'ArtifactKind\.[A-Z][A-Z0-9_]+' -- '*.py' \
+        | grep -v 'ArtifactKind\.GENERIC'; then
+        echo 'A closed Product artifact-kind enum returned to Workspace.' >&2
         exit 1
       fi
     workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace

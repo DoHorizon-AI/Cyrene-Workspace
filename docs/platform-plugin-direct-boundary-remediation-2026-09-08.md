@@ -280,22 +280,22 @@ Priority orders execution; every listed task is required. Difficulty uses `S/M/L
 | Task | Local checks | Azure run | Merge/read-back | Status |
 | --- | --- | --- | --- | --- |
 | `BND-000` | live remote/PR/worktree inventory | not applicable | exact SHAs recorded above | `COMPLETE` |
-| `BND-001` | ledger committed on Workspace candidate branch | Workspace `#468` succeeded at prior ledger commit; final run required | PR `#11` open, canonical read-back pending | `IN_PROGRESS` |
-| `BND-002` | Platform and Plugins ownership guards pass locally | Platform `#483` covered the superseded `9305517d…` candidate; exact final Platform and Plugins runs require live refresh | PRs `#41` and `#14` open | `CANDIDATE` |
+| `BND-001` | ledger updated on the Workspace candidate; 6 governance tests, 5 reference-runtime tests, full text-lifecycle lint and static boundary checks pass | Workspace `#468` succeeded at a prior ledger commit; final run required | PR `#11` open, canonical read-back pending | `IN_PROGRESS` |
+| `BND-002` | Platform and Plugins ownership guards pass locally; Workspace governance now enforces that Platform owns only generic `ArtifactRef` in this matrix and routes implemented capability contracts to Plugins | Platform `#483` covered the superseded `9305517d…` candidate; exact final Platform and Plugins runs require live refresh | PRs `#41` and `#14` open | `CANDIDATE` |
 | `PLG-001..005` | 145 component tests, 53 conformance tests, schema/package lifecycle and real venv preparation passed at `a019cc37cab39ffafe30884a4a0427aaaadf69a9` | Plugins `#491` was last observed queued; recheck before merge | Plugins PR `#14` open | `CANDIDATE` |
-| `PLAT-001..008` | full Cargo check/clippy/test, a fresh-target Rust workspace test, 36 Python tests, open artifact-kind schema regression and boundary guards passed at `64636dea7a205e13d7ee2073d4a0fb3568b0f80f` | final exact-SHA Azure run required; `#483` is historical evidence for the prior candidate | Platform PR `#41` open | `CANDIDATE` |
-| `CON-001` | 57 AstrBot deployment/control-plane tests and the exact three-repository OneBot lifecycle TCK passed at `f3d9b42c1218365c88c6cf065f22b1312f0c605b` | final exact-SHA Azure run required; `#492` covered a superseded candidate | AstrBot PR `#14` open | `CANDIDATE` |
-| `CON-002` | Exchange 43 tests; Yield 122 tests; Reactor 49 Product and 246 serving tests plus placement, lint, type, projection and OpenAPI checks passed at the SHAs below | final exact-SHA Azure runs required; `#489`, `#490` and `#493` covered superseded candidates | Yield PR `#12`, Reactor PR `#13`, Exchange PR `#14` open | `CANDIDATE` |
-| `CON-003` | no current acceptance evidence | not run | not started | `NOT_RUN` |
-| `ACC-001` | AstrBot, Exchange, Yield and Reactor candidates all pin Platform `64636dea7a205e13d7ee2073d4a0fb3568b0f80f`; Plugins owns capability evolution independently | dependent final Azure runs pending | pending | `IN_PROGRESS` |
-| `ACC-002` | Workspace thin orchestrator passed the AstrBot-owned direct OneBot lifecycle TCK at Platform `64636dea…`, Plugins `a019cc37…` and AstrBot `f3d9b42c…`; retired CES driver and duplicate peers/package host remain absent | final Workspace Azure run required | pending | `IN_PROGRESS` |
-| `ACC-003` | candidate baseline is `64636dea7a205e13d7ee2073d4a0fb3568b0f80f` | final Platform exact-SHA Azure run required | all normal merges and ancestry read-back pending | `IN_PROGRESS` |
+| `PLAT-001..008` | fresh-target Cargo check/clippy/test, format and boundary guards passed at `c44782320db933a5328c8ccf32c4c830563b2cf6`; Python pipeline suites passed `1 + 1 + 23`; the real mTLS runtime TCK passed 20 consecutive repetitions; four privileged UDS cases remain explicitly ignored | final exact-SHA Azure run required; `#483` is historical evidence for the prior candidate | Platform PR `#41` open | `CANDIDATE` |
+| `CON-001` | .NET format/build and 16 direct Plugin tests passed at `d3ef2b7264a680d8c26b45ec9c3d6f764dce003a`; Workspace's exact three-repository OneBot lifecycle TCK then passed at the same AstrBot SHA, Platform `c4478232...` and Plugins `a019cc37...`; 57 broader tests on superseded candidate `f3d9b42c...` are historical evidence only | final exact-SHA Azure runs required; `#492` covered a superseded candidate | AstrBot PR `#14` open | `CANDIDATE` |
+| `CON-002` | Exchange 43 core and 5 integration tests passed at the SHA below; Yield's 122 core tests and ownership guard passed after retiring its stale `training.engine.v1` declaration; Reactor's 49 Product tests and exact Yield projection passed after repinning. The earlier 246 serving tests plus placement, lint, type and OpenAPI checks cover the immediately preceding code-equivalent Reactor candidate | final exact-SHA Azure runs required; `#489`, `#490` and `#493` covered superseded candidates | Yield PR `#12`, Reactor PR `#13`, Exchange PR `#14` open | `CANDIDATE` |
+| `CON-003` | Workspace governance now records `data.processor.v1` and `evaluation.runner.v1` as unassigned instead of falsely routing them to Platform; live Product repository audit and corrections remain required | not run | not started | `NOT_RUN` |
+| `ACC-001` | AstrBot, Exchange, Yield and Reactor candidates all pin Platform `c44782320db933a5328c8ccf32c4c830563b2cf6`; Plugins owns capability evolution independently; Workspace and Yield now use producer-owned open artifact-kind values and CI rejects closed Product enum constants | dependent final Azure runs pending | pending | `IN_PROGRESS` |
+| `ACC-002` | Workspace thin orchestrator passed the AstrBot-owned direct OneBot lifecycle TCK at Platform `c44782320db933a5328c8ccf32c4c830563b2cf6`, Plugins `a019cc37cab39ffafe30884a4a0427aaaadf69a9` and AstrBot `d3ef2b7264a680d8c26b45ec9c3d6f764dce003a`; one real lifecycle test passed with zero skipped, and retired CES driver and duplicate peers/package host remain absent | final Workspace Azure run required | pending | `IN_PROGRESS` |
+| `ACC-003` | candidate baseline is `c44782320db933a5328c8ccf32c4c830563b2cf6` | final Platform exact-SHA Azure run required | all normal merges and ancestry read-back pending | `IN_PROGRESS` |
 
 Candidate Product revisions used by `CON-002`:
 
-- Yield: `f8fd6b884a8b5049d7b363d31949adaa5536a3aa`;
-- Reactor: `7825c12ef4360e5bcafffa43b99317bcf4fb9378`;
-- Exchange: `d6e10ff65e377942dc35699a89b8f62a38895cfd`.
+- Yield: `4052385d3751cbdbda96f1fd870e3dd94fff135b`;
+- Reactor: `be00bcedcff91fd7c4678af37c1224d40167db06`;
+- Exchange: `34fe09d01c4f58fc65f9b24f4d64a2fe95424796`.
 
 `CANDIDATE` means the implementation exists on an isolated, pushed task branch. It does not close
 the task. Refresh the exact Azure result, merge normally, fetch the canonical branch, and verify

@@ -26,6 +26,8 @@ from cyrene_navigator.persistence import PersistencePrincipal, create_persistenc
 from cyrene_preflight import AcceleratorFacts, HardwareFacts
 from cyrene_reactor_product.api import create_app as reactor_app
 
+MODEL_ARTIFACT_KIND = ArtifactKind("model")
+
 
 def weights(path: Path) -> None:
     """One bounded safetensors member for Artifact contract tests only."""
@@ -229,7 +231,7 @@ def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
     base.mkdir()
     (base / "config.json").write_text('{"model_type":"llama"}')
     weights(base / "model.safetensors")
-    base_ref = artifacts.publish_portable_directory(base, kind=ArtifactKind.MODEL)
+    base_ref = artifacts.publish_portable_directory(base, kind=MODEL_ARTIFACT_KIND)
     call(
         client,
         "PATCH",
