@@ -1,9 +1,8 @@
-name: Product contract integration profile
+name: Product contract integration manual fallback
 
 on:
-  pull_request:
-  push:
-    branches: [main, 'docs/**', 'feat/text-model-lifecycle-v1']
+  # Azure owns automatic Workspace contract and cross-repository acceptance.
+  workflow_dispatch:
 
 permissions:
   contents: read

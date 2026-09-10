@@ -7,6 +7,7 @@ This meta-repository provides a unified, reproducible developer workspace config
 ## 1. Architecture & Policy
 
 - **Topology Authority**: [`repositories.yaml`](repositories.yaml) records all canonical Cyrene repositories, relative paths, remotes, and build systems.
+- **CI Authority**: [`docs/governance/ci-authority.md`](docs/governance/ci-authority.md) records the single automatic source gate and Azure supplemental scopes for every repository.
 - **Zero Absolute Paths**: All workspace, solution, and IDE configurations use relative paths.
 - **Independence Guarantee**: Each repository remains fully buildable and testable on its own without requiring `Cyrene-Workspace`.
 - **Language Baselines**:
@@ -67,4 +68,3 @@ See [`IDE_ACCEPTANCE.md`](IDE_ACCEPTANCE.md) for the manual acceptance checklist
 # Safely remove clean task worktree
 .\agent-worktree.ps1 remove -Role idea-spring
 ```
-

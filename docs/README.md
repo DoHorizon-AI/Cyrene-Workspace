@@ -22,6 +22,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**TEXT_MODEL_LIFECYCLE.md**](TEXT_MODEL_LIFECYCLE.md): Six-stage closed loop from data engineering to evaluation feedback.
 - [**COMPATIBILITY.md**](COMPATIBILITY.md): Compatibility surfaces (AstrBot .NET Host compatibility bridge, OpenAI API compat).
 - [**MIGRATION.md**](MIGRATION.md): Legacy surface final closure report and verification inventory.
+- [**CI Authority**](governance/ci-authority.md): GitHub Actions/Azure ownership, automatic trigger boundary, and evidence rules.
 
 ---
 
