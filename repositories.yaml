@@ -147,7 +147,7 @@ repositories:
     canonical_remote: "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"
     visibility: "private"
     clone_policy: "external_auth_required"
-    integration_branch: "main"
+    integration_branch: "develop"
     build_systems:
       - "dotnet"
     roles:
