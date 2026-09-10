@@ -60,8 +60,7 @@ Assert-Rule "1: Root metadata and CANDIDATE maturity authority" {
         $rawYaml -match "governance_status:\s*['""]?CANDIDATE['""]?" -and
         $rawYaml -match "maturity:\s*['""]?CANDIDATE['""]?" -and
         $rawYaml -match "d2d7e5aefd2f9471d211974e7e193f321e0ebe0a" -and
-        $rawYaml -match "39f9a76ed88918dd9ddf7293f70540f816b3a793" -and
-        $rawYaml -match "f5f875f54b4b354672981fa262ef6272840dd2df"
+        $rawYaml -match "39f9a76ed88918dd9ddf7293f70540f816b3a793"
     )
 }
 

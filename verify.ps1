@@ -98,8 +98,7 @@ Assert-Step "Python .venv discovery and uv environment sanity" {
         "../Cyrene-Plugins-Official",
         "../Services/Cyrene-Reactor",
         "../Services/Cyrene-Yield",
-        "../Services/Cyrene-Exchange",
-        "../Services/Astrbot-Rev/python/capability_worker"
+        "../Services/Cyrene-Exchange"
     )
 
     foreach ($rel in $pyTargets) {
@@ -124,8 +123,8 @@ Assert-Step ".NET Cyrene.Workspace.slnx project resolution" {
     if ($LASTEXITCODE -ne 0) { throw "dotnet sln list failed: $output" }
     
     $projectCount = ($output | Where-Object { $_ -match '\.csproj$' }).Count
-    if ($projectCount -lt 20) {
-        throw "Expected at least 20 projects, found $projectCount"
+    if ($projectCount -lt 2) {
+        throw "Expected at least 2 projects, found $projectCount"
     }
 }
 

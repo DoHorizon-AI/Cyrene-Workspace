@@ -41,8 +41,6 @@ All automated checks must report `[PASS]`.
    - In the Project view, verify each repository appears as an independent native project module:
      - `Cyrene-Platform` (Cargo workspace, Python SDKs, JVM control plane)
      - `Cyrene-Plugins-Official` (Python plugins, .NET compat, Spring gateway)
-     - `Services/Astrbot-Rev` (.NET host, Python worker)
-     - `Services/DH-System-Internal` (.NET solution)
      - `Services/Cyrene-Reactor` (Python runtime, Rust scheduler)
      - `Services/Cyrene-Yield` (Python training engine)
      - `Services/Cyrene-Exchange` (Python transport, JVM coordinator)
@@ -50,7 +48,7 @@ All automated checks must report `[PASS]`.
    - *Note*: Workspace projects may initially appear inactive in IntelliJ IDEA. To activate an unloaded project: **Right-click project $\rightarrow$ Load '<project>'**.
 2. **VCS Multi-Root Registration**:
    - Open **Git** tool window (`Alt + 9`).
-   - Verify all 10 repositories are registered as distinct Git roots.
+   - Verify all 8 repositories are registered as distinct Git roots.
 3. **Gradle Projects & Daemon JVM 25**:
    - Open **Gradle** tool window.
    - Verify `Cyrene-Platform/framework/jvm`, `Services/Cyrene-Exchange/components/coordinator`, and `Cyrene-Plugins-Official/plugins/gateway/spring` appear.
@@ -80,17 +78,15 @@ All automated checks must report `[PASS]`.
 
 ### Step 2: Verify Solution Hierarchy & Semantic Indexing
 1. **Solution Structure**:
-   - Verify 3 solution folders are present:
-     - `/AstrBot/` (5 projects)
-     - `/WeComAgentHub/` (18 projects)
+   - Verify 1 solution folder is present:
      - `/Plugins/` (2 projects)
-   - Total: **25 projects**.
+   - Total: **2 projects**.
 2. **Cross-Project Semantic Navigation**:
    - Verify C# semantic search finds symbols across projects.
    - Verify **Find Usages** (`Alt + F7`) and **Go to Implementation** work across solution projects.
 3. **Unit Test Discovery**:
    - Open **Unit Tests** tool window (`Alt + 8`).
-   - Verify tests from `AstrBot.DotNetHost.Tests` and `WeComAgentHub.*.Tests` are discovered.
+   - Verify tests from the Plugins solution projects are discovered.
 4. **Aggregate Build**:
    - Select **Build $\rightarrow$ Build Solution** (`Ctrl + Shift + B`).
    - Verify build finishes with **0 warnings and 0 errors** experiments.
@@ -102,16 +98,16 @@ All automated checks must report `[PASS]`.
 | Check Item | Target Tool | Expected Result | Verified |
 |---|---|---|:---:|
 | Automated Gate | PowerShell | `.\verify.ps1` reports all Passed | [ ] |
-| Multi-Project Model | IntelliJ IDEA | `jb-workspace.xml` loads 10 independent projects | [ ] |
-| VCS Multi-Root | IntelliJ IDEA | All 10 Git repositories recognized | [ ] |
+| Multi-Project Model | IntelliJ IDEA | `jb-workspace.xml` loads 8 independent projects | [ ] |
+| VCS Multi-Root | IntelliJ IDEA | All 8 Git repositories recognized | [ ] |
 | Gradle Baseline | IntelliJ IDEA | Gradle 9.5.0 + Kotlin 2.4.10 + JDK 25 resolve | [ ] |
 | Cargo Attach | IntelliJ IDEA / RustRover | Platform & Reactor Cargo workspaces recognized | [ ] |
-| Python .venv Binding | IntelliJ IDEA | All 6 repos bind to respective `.venv` (3.12) | [ ] |
+| Python .venv Binding | IntelliJ IDEA | All 5 Python repos bind to respective `.venv` (3.12) | [ ] |
 | Python Navigation | IntelliJ IDEA | Cross-package symbols (`cy_artifacts`, etc.) resolve | [ ] |
-| .NET Project Tree | JetBrains Rider | All 25 projects load in `Cyrene.Workspace.slnx` | [ ] |
+| .NET Project Tree | JetBrains Rider | All 2 projects load in `Cyrene.Workspace.slnx` | [ ] |
 | .NET Semantic Search | JetBrains Rider | Symbol search & Find Usages work across projects | [ ] |
-| .NET Test Explorer | JetBrains Rider | Tests from AstrBot and WeComAgentHub discovered | [ ] |
-| .NET Aggregate Build | JetBrains Rider | Clean build of all 25 projects with 0 errors | [ ] |
+| .NET Test Explorer | JetBrains Rider | Plugins solution tests are discovered | [ ] |
+| .NET Aggregate Build | JetBrains Rider | Clean build of all 2 projects with 0 errors | [ ] |
 | IDE Re-open Persistence | IDEA & Rider | Zero re-configuration required upon reopening | [ ] |
 
 ---

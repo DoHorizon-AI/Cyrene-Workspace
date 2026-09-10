@@ -7,12 +7,6 @@
     <project name="Cyrene-Plugins-Official" path="$PROJECT_DIR$/../Cyrene-Plugins-Official">
       <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git" />
     </project>
-    <project name="Astrbot-Rev" path="$PROJECT_DIR$/../Services/Astrbot-Rev">
-      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Astrbot-Rev.git" />
-    </project>
-    <project name="DH-System-Internal" path="$PROJECT_DIR$/../Services/DH-System-Internal">
-      <vcs id="Git" remoteUrl="https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal" />
-    </project>
     <project name="Cyrene-Reactor" path="$PROJECT_DIR$/../Services/Cyrene-Reactor">
       <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Reactor.git" />
     </project>
@@ -34,7 +28,6 @@
     <project name="coordinator" path="$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
     <project name="spring" path="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
     <project name="jvm" path="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
-    <project name="capability_worker" path="$PROJECT_DIR$/../Services/Astrbot-Rev/python/capability_worker" />
     <option name="workspace" value="true" />
   </component>
 </project>

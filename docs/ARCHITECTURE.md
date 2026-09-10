@@ -43,12 +43,8 @@ Cyrene decomposes AI engineering into six specialized service repositories with 
 5. **Cyrene-Navigator**: Front-end orchestration harness, desktop client experience, and sole authority for `Conversation` / `AgentRun` sessions.
 6. **Cyrene-Echo**: Post-inference evaluation, quality metrics, and sole authority for `EvaluationRun` / `HumanAnnotation` / `FeedbackSet`.
 
-### Tier 3: Extensibility & Application Runtimes (`Cyrene-Plugins-Official` & `Astrbot-Rev`)
+### Tier 3: Extensibility (`Cyrene-Plugins-Official`)
 - **Cyrene-Plugins-Official**: Owns versioned capability payload contracts, generated bindings, TCKs, and curated implementations. Products call these contracts directly after Platform returns generic lifecycle and connection facts.
-- **Astrbot-Rev (Extensibility & Bot Application Runtime / Compatibility Bridge)**:
-  - Role: Bot application runtime and messaging platform connector (QQ, Discord, WeChat, WebUI) hosted in C# .NET Host (`AstrBot.DotNetHost`).
-  - Plugin Integration: Calls Plugins-owned chat, embedding, media, and connector contracts directly; Platform remains outside the business payload path.
-  - Legacy Status: Standalone Python provider runtime is frozen and terminated; Astrbot-Rev is strictly a bot application adapter, not an execution authority.
 
 ## 3. Communication & Contract Invariants
 - **Single Authority Invariant**: One concept = one authority. Yield owns ModelVersion; Catalyst owns DatasetVersion; Platform owns Execution; Exchange owns Routes/Quotas; Echo owns Feedback; Navigator owns Sessions.

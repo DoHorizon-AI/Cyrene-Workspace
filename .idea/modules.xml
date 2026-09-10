@@ -2,7 +2,6 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/Astrbot-Rev.iml" filepath="$PROJECT_DIR$/.idea/Astrbot-Rev.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Catalyst.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Catalyst.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Echo.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Echo.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Exchange.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Exchange.iml" />
@@ -12,8 +11,6 @@
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Reactor.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Reactor.iml" />
       <module fileurl="file://$PROJECT_DIR$/Cyrene-Workspace.iml" filepath="$PROJECT_DIR$/Cyrene-Workspace.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Yield.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Yield.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/DH-System-Internal.iml" filepath="$PROJECT_DIR$/.idea/DH-System-Internal.iml" />
-      <module fileurl="file://$PROJECT_DIR$/.idea/cyrene-astrbot-capability-worker.iml" filepath="$PROJECT_DIR$/.idea/cyrene-astrbot-capability-worker.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-control-plane.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-control-plane.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.iml" filepath="$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.main.iml" filepath="$PROJECT_DIR$/.idea/modules/application/cyrene-control-plane.application.main.iml" />

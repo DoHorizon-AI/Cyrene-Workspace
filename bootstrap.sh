@@ -23,13 +23,6 @@ case "${PROFILE}" in
         uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Reactor" --extra dev --extra pro
         uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Yield" --extra dev
         uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Exchange" --extra dev
-        uv sync --locked --directory "${SCRIPT_DIR}/../Services/Astrbot-Rev/python/capability_worker"
-        ;;
-    astrbot)
-        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
-        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Plugins-Official"
-        uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Exchange" --extra dev
-        uv sync --locked --directory "${SCRIPT_DIR}/../Services/Astrbot-Rev/python/capability_worker"
         ;;
     platform)
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
@@ -41,17 +34,14 @@ case "${PROFILE}" in
         uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Yield" --extra dev
         ;;
     *)
-        echo "Unknown profile: ${PROFILE}. Valid profiles: full, astrbot, platform, training."
+        echo "Unknown profile: ${PROFILE}. Valid profiles: full, platform, training."
         exit 1
         ;;
 esac
 
 echo -e "\n[3/4] Restoring .NET solution(s)..."
-if [ "${PROFILE}" = "astrbot" ]; then
-    dotnet restore "${SCRIPT_DIR}/solutions/Cyrene.AstrBot.Integration.slnx"
-elif [ "${PROFILE}" = "full" ]; then
+if [ "${PROFILE}" = "full" ]; then
     dotnet restore "${SCRIPT_DIR}/Cyrene.Workspace.slnx"
 fi
 
 echo -e "\n[4/4] Bootstrap complete for profile '${PROFILE}'!"
-
