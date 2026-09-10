@@ -56,6 +56,7 @@
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-package-runtime/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-workspace-fabric/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-artifact-transfer/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-artifact-transfer/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/target" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_capability_client/.venv" />
