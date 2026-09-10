@@ -1,4 +1,4 @@
-version: "1.0.0"
+version: "1.1.0"
 workspace: "Cyrene"
 description: "Declarative Database and Data-Service Inventory for Cyrene Developer Composition"
 
@@ -22,7 +22,7 @@ services:
     default_schema: "public"
     migration_authority: "AstrBot.DatabaseMigrator (.NET 10 / SQL Scripts in src/AstrBot.DatabaseMigrator/Migrations)"
     seed_authority: "AstrBot.KnowledgeBaseImporter / IrisHistoryImporter (.NET 10)"
-    container_authority: "Services/Astrbot-Rev/docker-compose.yml (or shared local Postgres)"
+    container_authority: "Services/Astrbot-Rev/compose.database.yml"
     credential_policy: "Environment variables (ASTRBOT_PG_CONNECTION_STRING, ConnectionStrings__AstrBot). Never committed to VCS."
     ide_datasource_eligible: true
     jdbc_url_template: "jdbc:postgresql://localhost:5432/astrbot"
@@ -70,7 +70,7 @@ services:
     default_schema: null
     migration_authority: "None (key-value structure managed by application lifecycle)"
     seed_authority: "None (runtime dynamic)"
-    container_authority: "Services/Cyrene-Navigator/legacy-dh/apps/control-plane/docker-compose.yml"
+    container_authority: "None (owner repository provides no container manifest; use an external development service)"
     credential_policy: "Environment variables (REDIS_CONNECTION_STRING, SPRING_DATA_REDIS_PASSWORD). Never committed to VCS."
     ide_datasource_eligible: true
     jdbc_url_template: "redis://localhost:6379/0"
@@ -99,48 +99,24 @@ services:
     jdbc_url_template: "jdbc:postgresql://localhost:5432/wecom_agent_hub"
 
   # ===================================================================
-  # 5. PostgreSQL (Spring Gateway Control & Billing)
+  # 5. SQLite (Navigator Session Persistence)
   # ===================================================================
-  - name: "cy-gateway-postgres"
-    owner_repository: "Cyrene-Plugins-Official"
-    technology: "PostgreSQL (R2DBC / JDBC)"
-    category: "relational database"
-    purpose: "Gateway routing table, API key quotas, tenant billing events, and audit logs"
-    development_role: "Local PostgreSQL instance"
-    production_role: "Managed PostgreSQL"
-    profiles:
-      - "full"
-      - "platform"
-    host_convention: "localhost"
-    port_convention: 5432
-    default_database: "cy_gateway"
-    default_schema: "public"
-    migration_authority: "Flyway (Cyrene-Plugins-Official/plugins/gateway/spring/src/main/resources/db/migration/V1__init_schema.sql)"
-    seed_authority: "Flyway / Spring Boot ApplicationRunner"
-    container_authority: "Services/Cyrene-Navigator/legacy-dh/apps/control-plane/docker-compose.yml"
-    credential_policy: "Environment variables (SPRING_R2DBC_PASSWORD, CY_GATEWAY_DB_PASSWORD). Never committed to VCS."
-    ide_datasource_eligible: true
-    jdbc_url_template: "jdbc:postgresql://localhost:5432/cy_gateway"
-
-  # ===================================================================
-  # 6. PostgreSQL (Navigator Control Plane)
-  # ===================================================================
-  - name: "navigator-control-plane-postgres"
+  - name: "navigator-persistence-sqlite"
     owner_repository: "Services/Cyrene-Navigator"
-    technology: "PostgreSQL 16"
-    category: "relational database"
-    purpose: "Desktop navigator and local control plane session state"
-    development_role: "Docker container defined in legacy-dh/apps/control-plane/docker-compose.yml"
-    production_role: "Development / Single-node deployment"
+    technology: "SQLite (WAL, synchronous=FULL)"
+    category: "embedded session event store"
+    purpose: "Navigator Session headers, append-only event envelopes, writer leases, and Product metadata projection"
+    development_role: "Explicit file path passed to scripts/serve-persistence.py --database"
+    production_role: "Local single-node Navigator persistence"
     profiles:
       - "full"
-    host_convention: "localhost"
-    port_convention: 5432
-    default_database: "dh_cp"
-    default_schema: "public"
-    migration_authority: "Control plane migration scripts"
-    seed_authority: "Control plane bootstrap"
-    container_authority: "Services/Cyrene-Navigator/legacy-dh/apps/control-plane/docker-compose.yml"
-    credential_policy: "Environment variables (POSTGRES_PASSWORD). Never committed to VCS."
+    host_convention: "local-filesystem"
+    port_convention: null
+    default_database: null
+    default_schema: "main"
+    migration_authority: "PersistenceStore schema initialization (src/cyrene_navigator/persistence/store.py)"
+    seed_authority: "None (Session state is created through the authenticated persistence API)"
+    container_authority: "None (embedded file)"
+    credential_policy: "No database credential; service bearer credentials are referenced through environment variables."
     ide_datasource_eligible: true
-    jdbc_url_template: "jdbc:postgresql://localhost:5432/dh_cp"
+    jdbc_url_template: null
