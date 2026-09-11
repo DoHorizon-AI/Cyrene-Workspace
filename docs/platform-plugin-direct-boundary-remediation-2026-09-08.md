@@ -1,6 +1,6 @@
 # Platform–Plugin Direct Boundary Remediation Ledger / Platform–插件直连边界修复台账
 
-- **Status / 状态**：`IN_PROGRESS`
+- **Status / 状态**：`COMPLETE`
 - **Started / 开始时间**：2026-09-08
 - **Source plan / 来源计划**：`docs/plugins-full-repository-legacy-remediation-plan-2026-09-07.md`
 - **Execution rule / 执行规则**：一个仓库同一时刻只有一个 writer；先接管目标，再删除来源；禁止复制出第二份权威。

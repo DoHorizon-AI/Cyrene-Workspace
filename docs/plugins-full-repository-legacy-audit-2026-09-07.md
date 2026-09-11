@@ -1,5 +1,10 @@
 # Cyrene 全仓疑似老代码与规范偏差审计
 
+> **Historical snapshot (2026-09-07).** This audit reflects the topology at that date, when
+> `Astrbot-Rev` and `DH-System-Internal` were still canonical workspace members. Both
+> repositories have since been retired; their migrated code lives under
+> `Cyrene-Plugins-Official/plugins/`. The authoritative current inventory is `repositories.yaml`.
+
 **Audit date / 审计日期**：2026-09-07
 **First-pass target / 首轮目标**：`DoHorizon-AI/Cyrene-Plugins-Official`，`develop@0b13720e76184dc122e91726a0168ac12fc7030d`
 **Expanded scope / 扩展范围**：Workspace `repositories.yaml` 中的 10 个成员仓库，加上 Workspace 自身，共 11 个仓库

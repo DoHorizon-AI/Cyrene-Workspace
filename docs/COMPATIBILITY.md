@@ -11,4 +11,4 @@ Cyrene maintains a clear distinction between **Permanent Canonical Interfaces** 
 ### B. Migration & Compatibility Boundaries
 Compatibility code remains explicitly scoped and must not become a second canonical runtime:
 
-Under operator decision, `plugins/**/compatibility/` directories in `Cyrene-Plugins-Official` are temporarily retained as approved deferred exceptions while legacy third-party plugins migrate to `plugin.toml` V1.
+Under operator decision, `plugins/**/compatibility/` directories in `Cyrene-Plugins-Official` are temporarily retained as approved deferred exceptions while legacy third-party plugins migrate to `plugin.manifest.json`.

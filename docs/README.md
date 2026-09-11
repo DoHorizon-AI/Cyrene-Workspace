@@ -8,7 +8,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**ARCHITECTURE.md**](ARCHITECTURE.md): Complete system architecture, 3-tier model, and platform boundaries.
 - [**PRODUCTS.md**](PRODUCTS.md): Product catalog and service responsibilities (Catalyst, Yield, Reactor, Exchange, Navigator, Echo).
 - [**RUNTIME.md**](RUNTIME.md): Clean-room runtime execution model and environment profiles.
-- [**PLUGINS.md**](PLUGINS.md): Plugin architecture, `plugin.toml` V1 specification, and catalog governance.
+- [**PLUGINS.md**](PLUGINS.md): Plugin architecture, `plugin.manifest.json` specification, and catalog governance.
 
 ---
 

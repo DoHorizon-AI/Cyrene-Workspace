@@ -39,7 +39,7 @@ All automated checks must report `[PASS]`.
 ### Step 2: Verify Multi-Project Workspace (`.idea/jb-workspace.xml`)
 1. **Multi-Project Hierarchy & Active State**:
    - In the Project view, verify each repository appears as an independent native project module:
-     - `Cyrene-Platform` (Cargo workspace, Python SDKs, JVM control plane)
+     - `Cyrene-Platform` (Cargo workspace, Python SDKs)
      - `Cyrene-Plugins-Official` (Python plugins, .NET compat, Spring gateway)
      - `Services/Cyrene-Reactor` (Python runtime, Rust scheduler)
      - `Services/Cyrene-Yield` (Python training engine)
@@ -51,7 +51,7 @@ All automated checks must report `[PASS]`.
    - Verify all 8 repositories are registered as distinct Git roots.
 3. **Gradle Projects & Daemon JVM 25**:
    - Open **Gradle** tool window.
-   - Verify `Cyrene-Platform/framework/jvm`, `Services/Cyrene-Exchange/components/coordinator`, and `Cyrene-Plugins-Official/plugins/gateway/spring` appear.
+   - Verify `Services/Cyrene-Exchange/components/coordinator` and `Cyrene-Plugins-Official/plugins/gateway/spring` appear.
    - Gradle Daemon JVM is automatically resolved to **JDK 25** via `gradle/gradle-daemon-jvm.properties` (`toolchainVersion=25`).
    - Java and Kotlin compilation toolchains resolve automatically to JDK 25 via `foojay-resolver-convention`.
 4. **Rust Development Toolchain**:

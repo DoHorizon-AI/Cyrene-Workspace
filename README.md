@@ -23,11 +23,11 @@ This meta-repository provides a unified, reproducible developer workspace config
 | `Cyrene-Platform` | `../Cyrene-Platform` | Core platform kernel, native sys/nvidia runtime adapters, execution engine, and Python SDK (Pure Rust + Python baseline; decoupled from product control-planes per PR #41) |
 | `Cyrene-Plugins-Official` | `../Cyrene-Plugins-Official` | Official connectors, extensions, media processors, and gateway spring integrations |
 | `Cyrene-Reactor` | `../Services/Cyrene-Reactor` | High-throughput inference runtime service (Python + Rust scheduler) |
-| `Cyrene-Yield` | `../Services/Cyrene-Yield` | Distributed training orchestration, checkpoint lifecycle, and kernel execution |
+| `Cyrene-Yield` | `../Services/Cyrene-Yield` | Distributed training orchestration and sole authority for `ModelVersion` |
 | `Cyrene-Exchange` | `../Services/Cyrene-Exchange` | Service exchange gateway, dispatch contracts, and backend coordinator |
-| `Cyrene-Catalyst` | `../Services/Cyrene-Catalyst` | Real-time stream processing, event pipeline, and feature transformation |
-| `Cyrene-Echo` | `../Services/Cyrene-Echo` | Telemetry aggregation, distributed trace collector, and diagnostic audit |
-| `Cyrene-Navigator` | `../Services/Cyrene-Navigator` | Workspace routing, dependency graph explorer, and service catalog |
+| `Cyrene-Catalyst` | `../Services/Cyrene-Catalyst` | Dataset curation and sole authority for `DatasetVersion` |
+| `Cyrene-Echo` | `../Services/Cyrene-Echo` | Post-inference evaluation and sole authority for `EvaluationRun` / `HumanAnnotation` / `FeedbackSet` |
+| `Cyrene-Navigator` | `../Services/Cyrene-Navigator` | Desktop client experience and sole authority for `Conversation` / `AgentRun` sessions |
 
 > [!NOTE]
 > **Repository vs. Subcomponent Boundary**  

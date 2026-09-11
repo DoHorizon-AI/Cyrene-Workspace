@@ -24,8 +24,6 @@ This record is the current CI topology for the Cyrene repositories. It separates
 | --- | --- | --- | --- | --- |
 | `Cyrene-Platform` | public | GitHub Actions | Manual GPU/runtime and delivery acceptance | Required source, contract, and unit checks |
 | `Cyrene-Plugins-Official` | private | Azure Pipelines | Required source, catalog, package, and private integration checks | Manual troubleshooting fallback |
-| `Astrbot-Rev` | public | GitHub Actions | Manual private integration and deployment validation | Required source and product checks |
-| `DH-System-Internal` | private | Azure Pipelines | Required source and delivery validation | No automatic GitHub source gate |
 | `Cyrene-Reactor` | public | GitHub Actions | Manual self-hosted CUDA/runtime and delivery acceptance | Required source and product checks |
 | `Cyrene-Yield` | public | GitHub Actions | Manual self-hosted CUDA/runtime and delivery acceptance | Required source and product checks |
 | `Cyrene-Exchange` | public | GitHub Actions | Manual private integration and delivery validation | Required source and product checks |

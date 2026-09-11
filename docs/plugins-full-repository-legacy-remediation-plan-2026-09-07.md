@@ -1,5 +1,10 @@
 # Cyrene Full-Repository Legacy Remediation Assignment Plan / Cyrene 全仓遗留问题修复分工计划
 
+> **Historical / superseded (2026-09-07).** This plan belongs to the pre-retirement topology;
+> all tasks are closed per `docs/platform-plugin-direct-boundary-remediation-2026-09-08.md`.
+> `Astrbot-Rev` and `DH-System-Internal` are retired; their code lives under
+> `Cyrene-Plugins-Official/plugins/`.
+
 - **Source audit / 源审计**：`docs/plugins-full-repository-legacy-audit-2026-09-07.md`
 - **Audit snapshot / 审计快照**：2026-09-07
 - **Plan status / 计划状态**：Execution in progress; the Platform business-boundary follow-up and its Plugins, Yield, and Reactor ownership moves are closed and read back / 执行中；Platform 业务边界复查及对应 Plugins、Yield、Reactor 权威迁移已关闭并完成远端回读

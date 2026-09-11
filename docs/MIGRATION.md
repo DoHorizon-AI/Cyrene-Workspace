@@ -32,6 +32,5 @@ All repositories now enforce the clean-room invariant via continuous integration
 ### Cyrene-Reactor (PR #11), Cyrene-Navigator (PR #5), Cyrene-Exchange (PR #12)
 - Cleaned legacy source trees and pinned platform guard to canonical commit.
 
-### AstrBot-Rev (PR #10)
-- Resolved documentation contract drift in `docs/plugin-event-api-compatibility.md` (`DOC_CLAIMS_NONEXISTENT_TESTS = 0`).
-- Documented active fixtures in `tests/test_legacy_plugin_compat_fixtures.py`.
+### AstrBot-Rev (retired)
+- The AstrBot-Rev repository was retired; its migrated code now lives under `Cyrene-Plugins-Official/plugins/`.

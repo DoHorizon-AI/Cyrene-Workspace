@@ -30,9 +30,9 @@ Cyrene organizes functional capabilities into specialized, decoupled product rep
 ## 3. Cyrene-Reactor (Inference Serving Engine)
 - **Repo**: `DoHorizon-AI/Cyrene-Reactor`
 - **Primary Responsibility**:
-  - Production inference serving with optimized execution backends (vLLM, SGLang, TensorRT-LLM, HuggingFace fallback).
+  - Production inference serving with optimized execution backends; engine implementations are Plugins-owned.
   - High-performance Rust core (`cy_exec`, `cy_exec_pro`) with Python integration layer.
-  - Hot model swapping based on verified `ModelVersion` manifests.
+  - Model deployment selection based on verified `ModelVersion` manifests.
 - **Key Interfaces**:
   - OpenAI-compatible `/v1/chat/completions` and `/v1/completions`.
   - Internal high-speed IPC/gRPC execution endpoints.
