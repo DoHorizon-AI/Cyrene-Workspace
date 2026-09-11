@@ -25,8 +25,12 @@
     <project name="Cyrene-Navigator" path="$PROJECT_DIR$/../Services/Cyrene-Navigator">
       <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Navigator.git" />
     </project>
-    <project name="coordinator" path="$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
-    <project name="spring" path="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
+    <project name="cyrene-exchange-coordinator" path="$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
+    <project name="cyrene-exchange-coordinator" path="$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
+    <project name="cyrene-spring-gateways" path="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
+    <project name="cyrene-spring-gateways" path="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
+    <project name="cyrene-control-plane" path="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
+    <project name="cyrene-control-plane" path="$PROJECT_DIR$/../Cyrene-Platform/framework/jvm" />
     <option name="workspace" value="true" />
   </component>
 </project>

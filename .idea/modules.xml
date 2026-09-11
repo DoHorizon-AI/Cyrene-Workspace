@@ -11,6 +11,16 @@
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Reactor.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Reactor.iml" />
       <module fileurl="file://$PROJECT_DIR$/Cyrene-Workspace.iml" filepath="$PROJECT_DIR$/Cyrene-Workspace.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Yield.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Yield.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-spring-gateways.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-spring-gateways.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.iml" filepath="$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.main.iml" filepath="$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.test.iml" filepath="$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.iml" filepath="$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.main.iml" filepath="$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.test.iml" filepath="$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.main.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.test.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.test.iml" />
     </modules>
   </component>
 </project>

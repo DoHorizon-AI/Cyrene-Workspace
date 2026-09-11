@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <module type="GENERAL_MODULE" version="4">
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
@@ -11,12 +11,8 @@
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/agents/node/cy-node-agent/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-kernel-contract/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-manifest/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-plugin-protocol/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-proto/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-extension-registry/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-extension-registry/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-installation-resolver/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-local-transport/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-platform-api/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-adapter-client/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-kernel-api/src" isTestSource="false" />
@@ -26,26 +22,12 @@
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-sandbox-client/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/runtime/cyrene-kernel/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/runtime/cyrene-kernel/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/examples" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/rust/cy-worker-sdk/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_artifacts/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_artifacts/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_control_plane/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_control_plane/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_environment/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_environment/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_preflight/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_preflight/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/sdk/python/cyrene_worker_shim" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-platform-api/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-proto/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-capability-execution-service/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-capability-execution-service/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-capability-execution-service/examples" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-local-transport/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-node-agent/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/kernel/crates/cy-plugin-supervisor/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/agents/runtime/cy-runtime-agent/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/contracts/rust/cy-manifest/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Platform/framework/crates/cy-execution-control/src" isTestSource="false" />
