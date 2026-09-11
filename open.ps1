@@ -6,7 +6,7 @@
     and opens the appropriate multi-project workspace or focused solution according to the profile.
 .EXAMPLE
     .\open.ps1 -Ide idea -Profile full
-    .\open.ps1 -Ide rider -Profile astrbot
+    .\open.ps1 -Ide rider -Profile platform
 #>
 
 [CmdletBinding()]
@@ -14,7 +14,7 @@ param(
     [ValidateSet("idea", "rider")]
     [string]$Ide = "idea",
 
-    [ValidateSet("full", "astrbot", "platform", "training")]
+    [ValidateSet("full", "platform", "training")]
     [string]$Profile = "full"
 )
 
@@ -75,11 +75,7 @@ if ($Ide -eq "idea") {
         Write-Error "JetBrains Rider installation not found. Please ensure JetBrains Rider is installed or in PATH."
     }
 
-    $targetSolution = if ($Profile -eq "astrbot") {
-        Join-Path $ScriptDir "solutions/Cyrene.AstrBot.Integration.slnx"
-    } else {
-        Join-Path $ScriptDir "Cyrene.Workspace.slnx"
-    }
+    $targetSolution = Join-Path $ScriptDir "Cyrene.Workspace.slnx"
 
     Write-Host "Opening JetBrains Rider Solution ($targetSolution)..." -ForegroundColor Cyan
     Start-Process -FilePath $exe -ArgumentList "`"$targetSolution`""

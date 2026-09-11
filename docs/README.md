@@ -20,7 +20,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 
 ## 3. Specifications & Governance
 - [**TEXT_MODEL_LIFECYCLE.md**](TEXT_MODEL_LIFECYCLE.md): Six-stage closed loop from data engineering to evaluation feedback.
-- [**COMPATIBILITY.md**](COMPATIBILITY.md): Compatibility surfaces (AstrBot .NET Host compatibility bridge, OpenAI API compat).
+- [**COMPATIBILITY.md**](COMPATIBILITY.md): OpenAI API compatibility and scoped Plugin migration surfaces.
 - [**MIGRATION.md**](MIGRATION.md): Legacy surface final closure report and verification inventory.
 
 ---

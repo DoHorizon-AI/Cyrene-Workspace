@@ -6,7 +6,7 @@
 # - Multi-Axis Dependency Footprint Governance (5 Independent Axes with Exact Provenance)
 # - Distribution Classifications and Base Image Boundary Policies
 # - Declarative Deployment / Prefetch Profiles (Zero Image Mutation)
-# - Migration & Parity Tracking against Astrbot-Rev and Cyrene-Plugins-Official
+# - Migration & Parity Tracking for Cyrene-Plugins-Official connectors
 # ==============================================================================
 
 version: "1.1.0"
@@ -35,11 +35,6 @@ footprint_evidence:
   tool: "connector_footprint (static analyzer v0.1.0)"
   adapters_scanned: 18
   third_party_distributions_discovered: 25
-
-identity_audit:
-  commit: "f5f875f54b4b354672981fa262ef6272840dd2df"
-  repository: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
-  branch: "test/connector-instance-identity-audit"
 
 base_image_policy:
   runtime_boundary: "MINIMAL_CORE_ONLY"
@@ -206,7 +201,6 @@ connectors:
     configuration_schema_source: "astrbot/core/platform/sources/webchat/webchat_adapter.py"
     python_dependencies: []
     native_system_dependencies: []
-    current_astrbot_csharp_support: true
     current_official_plugin_support: true
     availability_status: "CANONICAL"
     recommended_distribution_kind: "CORE_BUILTIN"
@@ -239,7 +233,6 @@ connectors:
         note: "Included in base platform layer"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/webchat/webchat_adapter.py"
-      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/WebChat/WebChatGatewayService.cs"
       official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/WebChat/WebChatGatewayService.cs"
 
   - connector_family: "onebot_v11"
@@ -312,7 +305,6 @@ connectors:
     python_dependencies:
       - "protobuf>=4.21,<5"
     native_system_dependencies: []
-    current_astrbot_csharp_support: true
     current_official_plugin_support: true
     availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -396,7 +388,6 @@ connectors:
         note: "Optional external NapCat OCI container sidecar layer size (~120 MB)"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_platform_adapter.py"
-      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/OneBot/OneBotGatewayService.cs"
       official_plugin: "plugins/connectors/onebot-v11"
 
   - connector_family: "qq_official"
@@ -452,7 +443,6 @@ connectors:
       - "aiofiles>=25.1.0"
       - "tenacity>=9.1.2"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -486,7 +476,6 @@ connectors:
     evidence_paths:
       upstream: "astrbot/core/platform/sources/qqofficial/qqofficial_platform_adapter.py"
       upstream_webhook: "astrbot/core/platform/sources/qqofficial_webhook/qo_webhook_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/QQOfficial)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "wecom"
@@ -550,7 +539,6 @@ connectors:
       - "aiohttp>=3.11.18"
       - "httpx>=0.28.1"
     native_system_dependencies: []
-    current_astrbot_csharp_support: true
     current_official_plugin_support: true
     availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -584,7 +572,6 @@ connectors:
     evidence_paths:
       upstream: "astrbot/core/platform/sources/wecom/wecom_adapter.py"
       upstream_ai_bot: "astrbot/core/platform/sources/wecom_ai_bot/wecomai_adapter.py"
-      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/Wecom/WecomWebhookService.cs"
       official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/Wecom/WecomWebhookService.cs"
 
   - connector_family: "weixin_oc"
@@ -637,7 +624,6 @@ connectors:
       - "qrcode>=8.2"
       - "pillow>=11.2.1"
     native_system_dependencies: []
-    current_astrbot_csharp_support: true
     current_official_plugin_support: true
     availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -670,7 +656,6 @@ connectors:
         note: "Optional OpenClaw sidecar container layer size (~95 MB)"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/weixin_oc/weixin_oc_adapter.py"
-      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/WeixinOc/WeixinOcGatewayService.cs"
       official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/WeixinOc/WeixinOcGatewayService.cs"
 
   - connector_family: "weixin_official_account"
@@ -714,7 +699,6 @@ connectors:
       - "quart>=0.20.0"
       - "requests>=2.32.0"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -747,7 +731,6 @@ connectors:
         note: "In-process webhook server"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/weixin_official_account/weixin_offacc_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/WeixinOfficialAccount)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "dingtalk"
@@ -786,7 +769,6 @@ connectors:
       - "dingtalk-stream>=0.22.1"
       - "aiohttp>=3.11.18"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -819,7 +801,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/dingtalk/dingtalk_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Dingtalk)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "lark"
@@ -870,7 +851,6 @@ connectors:
       - "aiohttp>=3.11.18"
       - "pycryptodome>=3.21.0"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -903,7 +883,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/lark/lark_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Lark)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "discord"
@@ -948,7 +927,6 @@ connectors:
       - "aiohttp>=3.11.18"
       - "typing_extensions>=4.12.2"
     native_system_dependencies: []
-    current_astrbot_csharp_support: true
     current_official_plugin_support: true
     availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -981,7 +959,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/discord/discord_platform_adapter.py"
-      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/Discord/DiscordGatewayService.cs"
       official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/Discord/DiscordGatewayService.cs"
 
   - connector_family: "telegram"
@@ -1035,7 +1012,6 @@ connectors:
       - "apscheduler>=3.11.0"
       - "typing_extensions>=4.12.2"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -1068,7 +1044,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/telegram/tg_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Telegram)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "slack"
@@ -1114,7 +1089,6 @@ connectors:
       - "aiohttp>=3.11.18"
       - "fastapi>=0.115.0"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -1147,7 +1121,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/slack/slack_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Slack)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "kook"
@@ -1190,7 +1163,6 @@ connectors:
       - "websockets>=15.0.1"
       - "certifi>=2025.4.26"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -1223,7 +1195,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/kook/kook_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Kook)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "line"
@@ -1271,7 +1242,6 @@ connectors:
       - "httpx>=0.28.1"
       - "aiohttp>=3.11.18"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -1304,7 +1274,6 @@ connectors:
         note: "Direct in-process webhook receiver"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/line/line_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Line)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "mattermost"
@@ -1345,7 +1314,6 @@ connectors:
     python_dependencies:
       - "aiohttp>=3.11.18"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -1378,7 +1346,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/mattermost/mattermost_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Mattermost)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "misskey"
@@ -1422,7 +1389,6 @@ connectors:
       - "python-magic>=0.4.27"
       - "certifi>=2025.4.26"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "NOT_YET_MIGRATED"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -1455,7 +1421,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/misskey/misskey_adapter.py"
-      csharp_host: "MISSING (Not yet ported to AstrBot.DotNetHost/Services/Platforms/Misskey)"
       official_plugin: "MISSING (Not yet ported to Cyrene-Plugins-Official/connectors)"
 
   - connector_family: "satori"
@@ -1509,7 +1474,6 @@ connectors:
       - "aiohttp>=3.11.18"
       - "quart>=0.20.0"
     native_system_dependencies: []
-    current_astrbot_csharp_support: true
     current_official_plugin_support: true
     availability_status: "AVAILABLE"
     recommended_distribution_kind: "LIGHTWEIGHT_BUNDLE"
@@ -1542,7 +1506,6 @@ connectors:
         note: "Direct in-process execution"
     evidence_paths:
       upstream: "astrbot/core/platform/sources/satori/satori_adapter.py"
-      csharp_host: "src/AstrBot.DotNetHost/Services/Platforms/Satori/SatoriGatewayService.cs"
       official_plugin: "plugins/connectors/im/src/dotnet/Services/Platforms/Satori/SatoriGatewayService.cs"
 
   - connector_family: "matrix"
@@ -1582,7 +1545,6 @@ connectors:
     python_dependencies:
       - "matrix-nio>=0.24.0"
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "COMPATIBILITY_ONLY"
     recommended_distribution_kind: "COMMUNITY_EXTERNAL"
@@ -1615,7 +1577,6 @@ connectors:
         note: "External deployment"
     evidence_paths:
       upstream: "docs/zh/platform/matrix.md"
-      csharp_host: "MISSING"
       official_plugin: "MISSING"
 
   - connector_family: "vocechat"
@@ -1653,7 +1614,6 @@ connectors:
     configuration_schema_source: "docs/zh/platform/vocechat.md & astrbot_plugin_vocechat"
     python_dependencies: []
     native_system_dependencies: []
-    current_astrbot_csharp_support: false
     current_official_plugin_support: false
     availability_status: "COMPATIBILITY_ONLY"
     recommended_distribution_kind: "COMMUNITY_EXTERNAL"
@@ -1686,25 +1646,22 @@ connectors:
         note: "External deployment"
     evidence_paths:
       upstream: "docs/zh/platform/vocechat.md"
-      csharp_host: "MISSING"
       official_plugin: "MISSING"
 
 migration_matrix:
   - upstream_adapter: "aiocqhttp"
     connector_family: "onebot_v11"
     supported_upstream: true
-    present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.OneBot"
     status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 1
-    notes: "OneBot v11 protocol is complete in C# DotNetHost & Plugins. NapCat/Lagrange are compatibility profiles."
+    notes: "OneBot v11 protocol is complete in Cyrene-Plugins-Official. NapCat/Lagrange are compatibility profiles."
 
   - upstream_adapter: "webchat"
     connector_family: "webchat"
     supported_upstream: true
-    present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.WebChat"
     status: "CANONICAL"
@@ -1715,7 +1672,6 @@ migration_matrix:
   - upstream_adapter: "wecom"
     connector_family: "wecom"
     supported_upstream: true
-    present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.WeCom"
     status: "CANONICAL"
@@ -1726,7 +1682,6 @@ migration_matrix:
   - upstream_adapter: "wecom_ai_bot"
     connector_family: "wecom"
     supported_upstream: true
-    present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.WeCom"
     status: "CANONICAL"
@@ -1737,7 +1692,6 @@ migration_matrix:
   - upstream_adapter: "weixin_oc"
     connector_family: "weixin_oc"
     supported_upstream: true
-    present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.WeixinOC"
     status: "CANONICAL"
@@ -1748,29 +1702,26 @@ migration_matrix:
   - upstream_adapter: "discord"
     connector_family: "discord"
     supported_upstream: true
-    present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.Discord"
     status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 4
-    notes: "Discord Gateway WebSocket & REST client fully migrated to C# host."
+    notes: "Discord Gateway WebSocket & REST client fully migrated to Cyrene-Plugins-Official."
 
   - upstream_adapter: "satori"
     connector_family: "satori"
     supported_upstream: true
-    present_in_csharp_host: true
     present_in_official_plugins: true
     target_package: "Cyrene.Connectors.Satori"
     status: "CANONICAL"
     missing_parity: []
     likely_migration_order: 5
-    notes: "Satori universal protocol forward/reverse WebSocket migrated to C# host."
+    notes: "Satori universal protocol forward/reverse WebSocket migrated to Cyrene-Plugins-Official."
 
   - upstream_adapter: "telegram"
     connector_family: "telegram"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.Telegram"
     status: "NOT_YET_MIGRATED"
@@ -1784,7 +1735,6 @@ migration_matrix:
   - upstream_adapter: "qqofficial"
     connector_family: "qq_official"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.QQOfficial"
     status: "NOT_YET_MIGRATED"
@@ -1798,7 +1748,6 @@ migration_matrix:
   - upstream_adapter: "qqofficial_webhook"
     connector_family: "qq_official"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.QQOfficial"
     status: "NOT_YET_MIGRATED"
@@ -1811,7 +1760,6 @@ migration_matrix:
   - upstream_adapter: "dingtalk"
     connector_family: "dingtalk"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.DingTalk"
     status: "NOT_YET_MIGRATED"
@@ -1824,7 +1772,6 @@ migration_matrix:
   - upstream_adapter: "lark"
     connector_family: "lark"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.Lark"
     status: "NOT_YET_MIGRATED"
@@ -1837,7 +1784,6 @@ migration_matrix:
   - upstream_adapter: "slack"
     connector_family: "slack"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.Slack"
     status: "NOT_YET_MIGRATED"
@@ -1850,7 +1796,6 @@ migration_matrix:
   - upstream_adapter: "kook"
     connector_family: "kook"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.Kook"
     status: "NOT_YET_MIGRATED"
@@ -1863,7 +1808,6 @@ migration_matrix:
   - upstream_adapter: "weixin_official_account"
     connector_family: "weixin_official_account"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.WeixinMP"
     status: "NOT_YET_MIGRATED"
@@ -1876,7 +1820,6 @@ migration_matrix:
   - upstream_adapter: "line"
     connector_family: "line"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.Line"
     status: "NOT_YET_MIGRATED"
@@ -1889,7 +1832,6 @@ migration_matrix:
   - upstream_adapter: "mattermost"
     connector_family: "mattermost"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.Mattermost"
     status: "NOT_YET_MIGRATED"
@@ -1902,7 +1844,6 @@ migration_matrix:
   - upstream_adapter: "misskey"
     connector_family: "misskey"
     supported_upstream: true
-    present_in_csharp_host: false
     present_in_official_plugins: false
     target_package: "Cyrene.Connectors.Misskey"
     status: "NOT_YET_MIGRATED"

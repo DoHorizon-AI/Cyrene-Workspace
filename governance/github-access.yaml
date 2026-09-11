@@ -114,13 +114,6 @@ repositories:
       plugin-maintainers: "maintain"
       release-managers: "maintain"
 
-  - name: "Astrbot-Rev"
-    description: "AstrBot .NET Host & Unified IM Gateway"
-    team_permissions:
-      developers: "push"
-      service-maintainers: "maintain"
-      release-managers: "maintain"
-
   - name: "Cyrene-Yield"
     description: "Cyrene Yield: Unified Model Training & Fine-Tuning Service"
     team_permissions:

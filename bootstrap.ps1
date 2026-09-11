@@ -7,12 +7,12 @@
     and validates developer appliance readiness for the selected profile.
 .EXAMPLE
     .\bootstrap.ps1 -Profile full
-    .\bootstrap.ps1 -Profile astrbot -ProvisionIDE -ProvisionData
+    .\bootstrap.ps1 -Profile platform -ProvisionIDE
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet("full", "astrbot", "platform", "training")]
+    [ValidateSet("full", "platform", "training")]
     [string]$Profile = "full",
 
     [switch]$ProvisionIDE,
@@ -68,13 +68,11 @@ try {
 Write-Host "`n[2/6] Checking repository topology & acquiring missing repositories for '$Profile'..." -ForegroundColor Yellow
 
 $allRepos = @(
-    @{ Name = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Platform.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot", "platform", "training") },
-    @{ Name = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot", "platform", "training") },
-    @{ Name = "Astrbot-Rev"; Path = "../Services/Astrbot-Rev"; Remote = "https://github.com/DoHorizon-AI/Astrbot-Rev.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot") },
-    @{ Name = "DH-System-Internal"; Path = "../Services/DH-System-Internal"; Remote = "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"; Policy = "external_auth_required"; Profiles = @("full") },
+    @{ Name = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Platform.git"; Policy = "public_zero_auth"; Profiles = @("full", "platform", "training") },
+    @{ Name = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"; Policy = "public_zero_auth"; Profiles = @("full", "platform", "training") },
     @{ Name = "Cyrene-Reactor"; Path = "../Services/Cyrene-Reactor"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"; Policy = "public_zero_auth"; Profiles = @("full") },
     @{ Name = "Cyrene-Yield"; Path = "../Services/Cyrene-Yield"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Yield.git"; Policy = "public_zero_auth"; Profiles = @("full", "training") },
-    @{ Name = "Cyrene-Exchange"; Path = "../Services/Cyrene-Exchange"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"; Policy = "public_zero_auth"; Profiles = @("full", "astrbot") },
+    @{ Name = "Cyrene-Exchange"; Path = "../Services/Cyrene-Exchange"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"; Policy = "public_zero_auth"; Profiles = @("full") },
     @{ Name = "Cyrene-Catalyst"; Path = "../Services/Cyrene-Catalyst"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"; Policy = "public_zero_auth"; Profiles = @("full") },
     @{ Name = "Cyrene-Echo"; Path = "../Services/Cyrene-Echo"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Echo.git"; Policy = "public_zero_auth"; Profiles = @("full") },
     @{ Name = "Cyrene-Navigator"; Path = "../Services/Cyrene-Navigator"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"; Policy = "public_zero_auth"; Profiles = @("full") }
@@ -104,12 +102,11 @@ if (-not $SkipPythonSync) {
     Write-Host "`n[3/6] Synchronizing Python environments with uv..." -ForegroundColor Yellow
 
     $allPythonTargets = @(
-        @{ Repo = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Extra = ""; Profiles = @("full", "astrbot", "platform", "training") },
-        @{ Repo = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Extra = ""; Profiles = @("full", "astrbot", "platform", "training") },
+        @{ Repo = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Extra = ""; Profiles = @("full", "platform", "training") },
+        @{ Repo = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Extra = ""; Profiles = @("full", "platform", "training") },
         @{ Repo = "Cyrene-Reactor"; Path = "../Services/Cyrene-Reactor"; Extra = "--extra dev --extra pro"; Profiles = @("full") },
         @{ Repo = "Cyrene-Yield"; Path = "../Services/Cyrene-Yield"; Extra = "--extra dev"; Profiles = @("full", "training") },
-        @{ Repo = "Cyrene-Exchange"; Path = "../Services/Cyrene-Exchange"; Extra = "--extra dev"; Profiles = @("full", "astrbot") },
-        @{ Repo = "Astrbot-Rev/capability_worker"; Path = "../Services/Astrbot-Rev/python/capability_worker"; Extra = ""; Profiles = @("full", "astrbot") }
+        @{ Repo = "Cyrene-Exchange"; Path = "../Services/Cyrene-Exchange"; Extra = "--extra dev"; Profiles = @("full") }
     )
 
     $activePython = $allPythonTargets | Where-Object { $_.Profiles -contains $Profile }
@@ -130,13 +127,7 @@ if (-not $SkipPythonSync) {
 # 4. .NET Solution Restore
 if (-not $SkipDotNetRestore) {
     Write-Host "`n[4/6] Restoring .NET solution(s)..." -ForegroundColor Yellow
-    if ($Profile -eq "astrbot") {
-        $slnxPath = Join-Path $ScriptDir "solutions/Cyrene.AstrBot.Integration.slnx"
-        if (Test-Path $slnxPath) {
-            dotnet restore $slnxPath
-            Write-Host "  [OK] Cyrene.AstrBot.Integration.slnx restored successfully." -ForegroundColor Green
-        }
-    } elseif ($Profile -eq "full") {
+    if ($Profile -eq "full") {
         $slnxPath = Join-Path $ScriptDir "Cyrene.Workspace.slnx"
         if (Test-Path $slnxPath) {
             dotnet restore $slnxPath -p:WarningsNotAsErrors=NU1902

@@ -2,33 +2,22 @@
 <project version="4">
   <component name="CompilerConfiguration">
     <bytecodeTargetLevel>
-      <module name="cyrene-control-plane.adapters" target="25" />
-      <module name="cyrene-control-plane.adapters.inbound-grpc" target="25" />
-      <module name="cyrene-control-plane.adapters.inbound-grpc.main" target="25" />
-      <module name="cyrene-control-plane.adapters.inbound-grpc.test" target="25" />
-      <module name="cyrene-control-plane.adapters.main" target="25" />
-      <module name="cyrene-control-plane.adapters.outbound-kernel" target="25" />
-      <module name="cyrene-control-plane.adapters.outbound-kernel.main" target="25" />
-      <module name="cyrene-control-plane.adapters.outbound-kernel.test" target="25" />
-      <module name="cyrene-control-plane.adapters.test" target="25" />
-      <module name="cyrene-control-plane.application" target="25" />
-      <module name="cyrene-control-plane.application.main" target="25" />
-      <module name="cyrene-control-plane.application.test" target="25" />
-      <module name="cyrene-control-plane.architecture-tests" target="25" />
-      <module name="cyrene-control-plane.architecture-tests.main" target="25" />
-      <module name="cyrene-control-plane.architecture-tests.test" target="25" />
-      <module name="cyrene-control-plane.bootstrap" target="25" />
-      <module name="cyrene-control-plane.bootstrap.main" target="25" />
-      <module name="cyrene-control-plane.bootstrap.test" target="25" />
-      <module name="cyrene-control-plane.domain" target="25" />
-      <module name="cyrene-control-plane.domain.main" target="25" />
-      <module name="cyrene-control-plane.domain.test" target="25" />
       <module name="cyrene-exchange-coordinator" target="25" />
       <module name="cyrene-exchange-coordinator.main" target="25" />
       <module name="cyrene-exchange-coordinator.test" target="25" />
-      <module name="cyrene-spring-gateway" target="25" />
-      <module name="cyrene-spring-gateway.main" target="25" />
-      <module name="cyrene-spring-gateway.test" target="25" />
+      <module name="cyrene-spring-gateways.billing" target="21" />
+      <module name="cyrene-spring-gateways.billing.main" target="21" />
+      <module name="cyrene-spring-gateways.billing.test" target="21" />
+      <module name="cyrene-spring-gateways.conversation" target="21" />
+      <module name="cyrene-spring-gateways.conversation.main" target="21" />
+      <module name="cyrene-spring-gateways.conversation.test" target="21" />
+      <module name="cyrene-spring-gateways.tenant" target="21" />
+      <module name="cyrene-spring-gateways.tenant.main" target="21" />
+      <module name="cyrene-spring-gateways.tenant.test" target="21" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.main" target="21" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.test" target="21" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.main" target="21" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.test" target="21" />
     </bytecodeTargetLevel>
   </component>
   <component name="JavacSettings">
@@ -36,9 +25,19 @@
       <module name="cyrene-exchange-coordinator" options="-parameters" />
       <module name="cyrene-exchange-coordinator.main" options="-parameters" />
       <module name="cyrene-exchange-coordinator.test" options="-parameters" />
-      <module name="cyrene-spring-gateway" options="-parameters" />
-      <module name="cyrene-spring-gateway.main" options="-parameters" />
-      <module name="cyrene-spring-gateway.test" options="-parameters" />
+      <module name="cyrene-spring-gateways.billing" options="-parameters" />
+      <module name="cyrene-spring-gateways.billing.main" options="-parameters" />
+      <module name="cyrene-spring-gateways.billing.test" options="-parameters" />
+      <module name="cyrene-spring-gateways.conversation" options="-parameters" />
+      <module name="cyrene-spring-gateways.conversation.main" options="-parameters" />
+      <module name="cyrene-spring-gateways.conversation.test" options="-parameters" />
+      <module name="cyrene-spring-gateways.tenant" options="-parameters" />
+      <module name="cyrene-spring-gateways.tenant.main" options="-parameters" />
+      <module name="cyrene-spring-gateways.tenant.test" options="-parameters" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.main" options="-parameters" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.test" options="-parameters" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.main" options="-parameters" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.test" options="-parameters" />
     </option>
   </component>
 </project>

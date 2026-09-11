@@ -1,33 +1,6 @@
 <Solution>
-  <Folder Name="/AstrBot/">
-    <Project Path="../Services/Astrbot-Rev/src/AstrBot.DotNetHost/AstrBot.DotNetHost.csproj" />
-    <Project Path="../Services/Astrbot-Rev/src/AstrBot.DatabaseMigrator/AstrBot.DatabaseMigrator.csproj" />
-    <Project Path="../Services/Astrbot-Rev/src/IrisHistoryImporter/IrisHistoryImporter.csproj" />
-    <Project Path="../Services/Astrbot-Rev/src/AstrBot.KnowledgeBaseImporter/AstrBot.KnowledgeBaseImporter.csproj" />
-    <Project Path="../Services/Astrbot-Rev/tests/AstrBot.DotNetHost.Tests/AstrBot.DotNetHost.Tests.csproj" />
-  </Folder>
-  <Folder Name="/WeComAgentHub/">
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.Domain/WeComAgentHub.Domain.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.Application/WeComAgentHub.Application.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.Infrastructure/WeComAgentHub.Infrastructure.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.Wecom/WeComAgentHub.Wecom.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.Mcp/WeComAgentHub.Mcp.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.Scheduler/WeComAgentHub.Scheduler.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.Worker/WeComAgentHub.Worker.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.Api/WeComAgentHub.Api.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.AdminWeb/WeComAgentHub.AdminWeb.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.AppHost/WeComAgentHub.AppHost.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.CloudConnectors/Abstractions/WeComAgentHub.CloudConnectors.Abstractions.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.CloudConnectors/Billing/WeComAgentHub.CloudConnectors.Billing.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.CloudConnectors/GpuCompute/WeComAgentHub.CloudConnectors.GpuCompute.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.CloudConnectors/Hyperscale/WeComAgentHub.CloudConnectors.Hyperscale.csproj" />
-    <Project Path="../Services/DH-System-Internal/src/WeComAgentHub.CloudConnectors/ModelApi/WeComAgentHub.CloudConnectors.ModelApi.csproj" />
-    <Project Path="../Services/DH-System-Internal/tests/WeComAgentHub.Application.Tests/WeComAgentHub.Application.Tests.csproj" />
-    <Project Path="../Services/DH-System-Internal/tests/WeComAgentHub.Architecture.Tests/WeComAgentHub.Architecture.Tests.csproj" />
-    <Project Path="../Services/DH-System-Internal/tests/WeComAgentHub.Domain.Tests/WeComAgentHub.Domain.Tests.csproj" />
-  </Folder>
-  <Folder Name="/Plugins/">
-    <Project Path="../Cyrene-Plugins-Official/plugins/agents/agent-system/src/dotnet/Cyrene.AgentSystem.Compat.csproj" />
-    <Project Path="../Cyrene-Plugins-Official/plugins/gateway/aspnet-core/src/Cyrene.AspNetCoreGateway/Cyrene.AspNetCoreGateway.csproj" />
+  <Folder Name="/Contracts/">
+    <Project Path="../Cyrene-Plugins-Official/contracts/tck/message-connector-v1/dotnet/MessageConnectorContractTck.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/dotnet/ModelProviderContractTck.csproj" />
   </Folder>
 </Solution>

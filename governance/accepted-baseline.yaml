@@ -18,11 +18,6 @@ repositories:
     remote_sha: "78b47bf1ffcf3fed83e0db36507b5cbbe8574a2e"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
 
-  - name: "Astrbot-Rev"
-    integration_branch: "develop"
-    remote_sha: "95197205611fddfd39e4127ab69ca55efdf142d9"
-    canonical_remote: "https://github.com/DoHorizon-AI/Astrbot-Rev.git"
-
   - name: "Cyrene-Yield"
     integration_branch: "develop"
     remote_sha: "e5521f6799679caf43470241326e5fabc21302bb"
@@ -37,11 +32,6 @@ repositories:
     integration_branch: "develop"
     remote_sha: "9722ca2abe1f2a88e80f71b58296203781af4e97"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
-
-  - name: "DH-System-Internal"
-    integration_branch: "main"
-    remote_sha: "e10f998fc4aa46bf9084935633556ce02537772c"
-    canonical_remote: "https://dohorizon@dev.azure.com/dohorizon/Cyrene/_git/DH-System-Internal"
 
   - name: "Cyrene-Catalyst"
     integration_branch: "develop"

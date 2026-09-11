@@ -44,7 +44,6 @@ rulesets:
 managed_repositories:
   - "Cyrene-Platform"
   - "Cyrene-Plugins-Official"
-  - "Astrbot-Rev"
   - "Cyrene-Yield"
   - "Cyrene-Reactor"
   - "Cyrene-Exchange"

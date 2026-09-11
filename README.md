@@ -15,6 +15,25 @@ This meta-repository provides a unified, reproducible developer workspace config
   - **Rust**: Cargo workspaces (`Cyrene-Platform/Cargo.toml`, `Services/Cyrene-Reactor/Cargo.toml`)
   - **JVM / Kotlin**: Gradle Kotlin DSL with Java Toolchains (Java 21/25, Kotlin 2.0+)
 
+### Canonical Repository Inventory
+
+| Repository | Relative Path | Role & Technology |
+| :--- | :--- | :--- |
+| `Cyrene-Platform` | `../Cyrene-Platform` | Core platform kernel, native sys/nvidia runtime adapters, execution engine, and Python SDK (Pure Rust + Python baseline; decoupled from product control-planes per PR #41) |
+| `Cyrene-Plugins-Official` | `../Cyrene-Plugins-Official` | Official connectors, extensions, media processors, and gateway spring integrations |
+| `Cyrene-Reactor` | `../Services/Cyrene-Reactor` | High-throughput inference runtime service (Python + Rust scheduler) |
+| `Cyrene-Yield` | `../Services/Cyrene-Yield` | Distributed training orchestration, checkpoint lifecycle, and kernel execution |
+| `Cyrene-Exchange` | `../Services/Cyrene-Exchange` | Service exchange gateway, dispatch contracts, and backend coordinator |
+| `Cyrene-Catalyst` | `../Services/Cyrene-Catalyst` | Real-time stream processing, event pipeline, and feature transformation |
+| `Cyrene-Echo` | `../Services/Cyrene-Echo` | Telemetry aggregation, distributed trace collector, and diagnostic audit |
+| `Cyrene-Navigator` | `../Services/Cyrene-Navigator` | Workspace routing, dependency graph explorer, and service catalog |
+
+> [!NOTE]
+> **Repository vs. Subcomponent Boundary**  
+> Only the 8 canonical repositories above are top-level Git repositories in the Cyrene workspace.  
+> Internal submodules or build components—such as `coordinator` (`Services/Cyrene-Exchange/components/coordinator`) or `spring` (`Cyrene-Plugins-Official/plugins/gateway/spring`)—are Gradle/build subcomponents belonging to their respective parent repositories. They are linked via build systems (`.idea/gradle.xml`, `settings.gradle.kts`) and must **never** be registered as standalone repositories in `repositories.yaml` or as top-level `<project>` entries in `.idea/jb-workspace.xml`.  
+> *Note on JVM Control-Plane*: The legacy `cyrene-control-plane` JVM service (`framework/jvm`) previously inside `Cyrene-Platform` was retired in PR #41 to maintain a clean platform substrate boundary; its product control-plane surfaces migrated to domain-owned services (e.g. `Services/Cyrene-Yield`).
+
 ---
 
 ## 2. Quick Start
@@ -39,7 +58,7 @@ cd Cyrene-Workspace
 ## 3. Opening in IDEs
 
 - **IntelliJ IDEA Ultimate / WebStorm / PyCharm / CLion**:
-  Open the `Cyrene-Workspace` folder.
+  Open the `Cyrene-Workspace` folder. The workspace automatically mounts the 8 canonical repositories via `.idea/jb-workspace.xml`.
 - **JetBrains Rider / Visual Studio**:
   Open `Cyrene-Workspace/Cyrene.Workspace.slnx`.
 
@@ -49,14 +68,16 @@ See [`IDE_ACCEPTANCE.md`](IDE_ACCEPTANCE.md) for the manual acceptance checklist
 
 ## 4. Parallel Agent Worktree Isolation
 
-> **Canonical Rule**:
+> **Canonical Rule**:  
 > Agents must never use another Agent's mutable working tree as an integration baseline. Exchange exact remote SHAs and use detached snapshots.
 
 ### Usage
 
+Use canonical repository names (or clean 1:1 convenience aliases like `platform`, `plugins`, `reactor`, `yield`, `exchange`, `catalyst`, `echo`, `navigator`):
+
 ```powershell
 # Create dedicated task worktree for writer agent
-.\agent-worktree.ps1 create -Repo plugins -Branch chore/spring-boot-4-1-1 -Base origin/develop -Role idea-spring
+.\agent-worktree.ps1 create -Repo Cyrene-Plugins-Official -Branch chore/spring-boot-4-1-1 -Base origin/develop -Role idea-spring
 
 # Create detached immutable snapshot worktree for consumer agent
 .\agent-worktree.ps1 snapshot -Repo Cyrene-Platform -Sha <40-char-sha> -Role rider-media-platform
@@ -67,4 +88,3 @@ See [`IDE_ACCEPTANCE.md`](IDE_ACCEPTANCE.md) for the manual acceptance checklist
 # Safely remove clean task worktree
 .\agent-worktree.ps1 remove -Role idea-spring
 ```
-

@@ -43,10 +43,7 @@ cd "${SCRIPT_DIR}/../Services/Cyrene-Yield"
 uv run pytest
 cd "${SCRIPT_DIR}/../Services/Cyrene-Exchange"
 uv run pytest
-cd "${SCRIPT_DIR}/../Services/Astrbot-Rev/python/capability_worker"
-uv run pytest
 
 echo -e "\n=================================================="
 echo " CANONICAL LINUX ACCEPTANCE: ALL GATES PASSED"
 echo "=================================================="
-
