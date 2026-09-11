@@ -85,7 +85,7 @@ jobs:
 
   - task: Cache@2
     inputs:
-      key: 'uv | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
+      key: 'uv | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cyrene-Workspace/uv.lock'
       restoreKeys: |
         uv | "$(Agent.OS)" | "$(Build.Repository.Name)"
       path: '$(Pipeline.Workspace)/.cache/uv'
