@@ -11,6 +11,7 @@
             <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
             <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring/billing" />
             <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring/conversation" />
+            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring/prompt-cache" />
             <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring/tenant" />
           </set>
         </option>

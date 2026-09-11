@@ -11,6 +11,9 @@
       <module name="cyrene-spring-gateways.conversation" target="21" />
       <module name="cyrene-spring-gateways.conversation.main" target="21" />
       <module name="cyrene-spring-gateways.conversation.test" target="21" />
+      <module name="cyrene-spring-gateways.prompt-cache" target="21" />
+      <module name="cyrene-spring-gateways.prompt-cache.main" target="21" />
+      <module name="cyrene-spring-gateways.prompt-cache.test" target="21" />
       <module name="cyrene-spring-gateways.tenant" target="21" />
       <module name="cyrene-spring-gateways.tenant.main" target="21" />
       <module name="cyrene-spring-gateways.tenant.test" target="21" />
@@ -31,6 +34,9 @@
       <module name="cyrene-spring-gateways.conversation" options="-parameters" />
       <module name="cyrene-spring-gateways.conversation.main" options="-parameters" />
       <module name="cyrene-spring-gateways.conversation.test" options="-parameters" />
+      <module name="cyrene-spring-gateways.prompt-cache" options="-parameters" />
+      <module name="cyrene-spring-gateways.prompt-cache.main" options="-parameters" />
+      <module name="cyrene-spring-gateways.prompt-cache.test" options="-parameters" />
       <module name="cyrene-spring-gateways.tenant" options="-parameters" />
       <module name="cyrene-spring-gateways.tenant.main" options="-parameters" />
       <module name="cyrene-spring-gateways.tenant.test" options="-parameters" />

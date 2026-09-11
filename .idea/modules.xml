@@ -18,6 +18,9 @@
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.iml" filepath="$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.main.iml" filepath="$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.main.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.test.iml" filepath="$PROJECT_DIR$/.idea/modules/conversation/cyrene-spring-gateways.conversation.test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/prompt-cache/cyrene-spring-gateways.prompt-cache.iml" filepath="$PROJECT_DIR$/.idea/modules/prompt-cache/cyrene-spring-gateways.prompt-cache.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/prompt-cache/cyrene-spring-gateways.prompt-cache.main.iml" filepath="$PROJECT_DIR$/.idea/modules/prompt-cache/cyrene-spring-gateways.prompt-cache.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/prompt-cache/cyrene-spring-gateways.prompt-cache.test.iml" filepath="$PROJECT_DIR$/.idea/modules/prompt-cache/cyrene-spring-gateways.prompt-cache.test.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.main.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.main.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.test.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.test.iml" />
