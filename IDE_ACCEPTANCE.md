@@ -41,26 +41,26 @@ All automated checks must report `[PASS]`.
    - In the Project view, verify each repository appears as an independent native project module:
      - `Cyrene-Platform` (Cargo workspace, Python SDKs)
      - `Cyrene-Plugins-Official` (Python plugins, .NET compat, Spring gateway)
-     - `Services/Cyrene-Reactor` (Python runtime, Rust scheduler)
-     - `Services/Cyrene-Yield` (Python training engine)
-     - `Services/Cyrene-Exchange` (Python transport, JVM coordinator)
-     - `Services/Cyrene-Catalyst`, `Cyrene-Echo`, `Cyrene-Navigator`
+     - `Cyrene-Services/Cyrene-Reactor` (Python runtime, Rust scheduler)
+     - `Cyrene-Services/Cyrene-Yield` (Python training engine)
+     - `Cyrene-Services/Cyrene-Exchange` (Python transport, JVM coordinator)
+     - `Cyrene-Services/Cyrene-Catalyst`, `Cyrene-Echo`, `Cyrene-Navigator`
    - *Note*: Workspace projects may initially appear inactive in IntelliJ IDEA. To activate an unloaded project: **Right-click project $\rightarrow$ Load '<project>'**.
 2. **VCS Multi-Root Registration**:
    - Open **Git** tool window (`Alt + 9`).
    - Verify all 8 repositories are registered as distinct Git roots.
 3. **Gradle Projects & Daemon JVM 25**:
    - Open **Gradle** tool window.
-   - Verify `Services/Cyrene-Exchange/components/coordinator` and `Cyrene-Plugins-Official/plugins/gateway/spring` appear.
+   - Verify `Cyrene-Services/Cyrene-Exchange/components/coordinator` and `Cyrene-Plugins-Official/plugins/gateway/spring` appear.
    - Gradle Daemon JVM is automatically resolved to **JDK 25** via `gradle/gradle-daemon-jvm.properties` (`toolchainVersion=25`).
    - Java and Kotlin compilation toolchains resolve automatically to JDK 25 via `foojay-resolver-convention`.
 4. **Rust Development Toolchain**:
-   - Verify Cargo workspaces attach for `Cyrene-Platform` and `Services/Cyrene-Reactor`.
+   - Verify Cargo workspaces attach for `Cyrene-Platform` and `Cyrene-Services/Cyrene-Reactor`.
    - Open a Rust source file (e.g. `Cyrene-Platform/kernel/crates/cy-kernel-daemon/src/main.rs`).
    - Verify trait/struct navigation and code completion work natively via rust-analyzer.
 5. **Python Interpreters (.venv)**:
    - Verify each Python module binds to its own repo-local `.venv` (Python 3.12).
-   - Open `Services/Cyrene-Yield/training/core/src/cy_exec/training/artifacts.py` $\rightarrow$ press `Ctrl + B` on `ArtifactKind` to verify symbol navigation into `cy_artifacts`.
+   - Open `Cyrene-Services/Cyrene-Yield/training/core/src/cy_exec/training/artifacts.py` $\rightarrow$ press `Ctrl + B` on `ArtifactKind` to verify symbol navigation into `cy_artifacts`.
 
 ### Step 3: Session Persistence
 1. Close IntelliJ IDEA completely (`File $\rightarrow$ Exit`).

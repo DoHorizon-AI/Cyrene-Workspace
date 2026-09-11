@@ -92,9 +92,9 @@ $unknownPath = Join-Path $fixtureRoot "unregistered-test"
 $businessRepositories = @(
     (Join-Path $WorkspaceDirectory "..\Cyrene-Platform"),
     (Join-Path $WorkspaceDirectory "..\Cyrene-Plugins-Official"),
-    (Join-Path $WorkspaceDirectory "..\Services\Cyrene-Reactor"),
-    (Join-Path $WorkspaceDirectory "..\Services\Cyrene-Yield"),
-    (Join-Path $WorkspaceDirectory "..\Services\Cyrene-Exchange")
+    (Join-Path $WorkspaceDirectory "..\Cyrene-Services\Cyrene-Reactor"),
+    (Join-Path $WorkspaceDirectory "..\Cyrene-Services\Cyrene-Yield"),
+    (Join-Path $WorkspaceDirectory "..\Cyrene-Services\Cyrene-Exchange")
 )
 $businessBefore = @{}
 

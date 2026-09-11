@@ -2,8 +2,8 @@
 <module type="GENERAL_MODULE" version="4">
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
-    <content url="file://$MODULE_DIR$/../Services/Cyrene-Yield">
-      <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Yield/.venv" />
+    <content url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield">
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/.venv" />
     </content>
     <orderEntry type="sourceFolder" forTests="false" />
   </component>

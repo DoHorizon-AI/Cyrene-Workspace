@@ -13,7 +13,7 @@ This meta-repository provides a unified, reproducible developer workspace config
 - **Language Baselines**:
   - **.NET**: .NET 10 LTS (`global.json`, `Cyrene.Workspace.slnx`)
   - **Python**: `>=3.11` (`uv`, `pyproject.toml`, `.python-version = 3.12`, repo-local `.venv`)
-  - **Rust**: Cargo workspaces (`Cyrene-Platform/Cargo.toml`, `Services/Cyrene-Reactor/Cargo.toml`)
+  - **Rust**: Cargo workspaces (`Cyrene-Platform/Cargo.toml`, `Cyrene-Services/Cyrene-Reactor/Cargo.toml`)
   - **JVM / Kotlin**: Gradle Kotlin DSL with Java Toolchains (Java 21/25, Kotlin 2.0+)
 
 ### Canonical Repository Inventory
@@ -22,18 +22,18 @@ This meta-repository provides a unified, reproducible developer workspace config
 | :--- | :--- | :--- |
 | `Cyrene-Platform` | `../Cyrene-Platform` | Core platform kernel, native sys/nvidia runtime adapters, execution engine, and Python SDK (Pure Rust + Python baseline; decoupled from product control-planes per PR #41) |
 | `Cyrene-Plugins-Official` | `../Cyrene-Plugins-Official` | Official connectors, extensions, media processors, and gateway spring integrations |
-| `Cyrene-Reactor` | `../Services/Cyrene-Reactor` | High-throughput inference runtime service (Python + Rust scheduler) |
-| `Cyrene-Yield` | `../Services/Cyrene-Yield` | Distributed training orchestration and sole authority for `ModelVersion` |
-| `Cyrene-Exchange` | `../Services/Cyrene-Exchange` | Service exchange gateway, dispatch contracts, and backend coordinator |
-| `Cyrene-Catalyst` | `../Services/Cyrene-Catalyst` | Dataset curation and sole authority for `DatasetVersion` |
-| `Cyrene-Echo` | `../Services/Cyrene-Echo` | Post-inference evaluation and sole authority for `EvaluationRun` / `HumanAnnotation` / `FeedbackSet` |
-| `Cyrene-Navigator` | `../Services/Cyrene-Navigator` | Desktop client experience and sole authority for `Conversation` / `AgentRun` sessions |
+| `Cyrene-Reactor` | `../Cyrene-Services/Cyrene-Reactor` | High-throughput inference runtime service (Python + Rust scheduler) |
+| `Cyrene-Yield` | `../Cyrene-Services/Cyrene-Yield` | Distributed training orchestration and sole authority for `ModelVersion` |
+| `Cyrene-Exchange` | `../Cyrene-Services/Cyrene-Exchange` | Service exchange gateway, dispatch contracts, and backend coordinator |
+| `Cyrene-Catalyst` | `../Cyrene-Services/Cyrene-Catalyst` | Dataset curation and sole authority for `DatasetVersion` |
+| `Cyrene-Echo` | `../Cyrene-Services/Cyrene-Echo` | Post-inference evaluation and sole authority for `EvaluationRun` / `HumanAnnotation` / `FeedbackSet` |
+| `Cyrene-Navigator` | `../Cyrene-Services/Cyrene-Navigator` | Desktop client experience and sole authority for `Conversation` / `AgentRun` sessions |
 
 > [!NOTE]
 > **Repository vs. Subcomponent Boundary**  
 > Only the 8 canonical repositories above are top-level Git repositories in the Cyrene workspace.  
-> Internal submodules or build components—such as `coordinator` (`Services/Cyrene-Exchange/components/coordinator`) or `spring` (`Cyrene-Plugins-Official/plugins/gateway/spring`)—are Gradle/build subcomponents belonging to their respective parent repositories. They are linked via build systems (`.idea/gradle.xml`, `settings.gradle.kts`) and must **never** be registered as standalone repositories in `repositories.yaml` or as top-level `<project>` entries in `.idea/jb-workspace.xml`.  
-> *Note on JVM Control-Plane*: The legacy `cyrene-control-plane` JVM service (`framework/jvm`) previously inside `Cyrene-Platform` was retired in PR #41 to maintain a clean platform substrate boundary; its product control-plane surfaces migrated to domain-owned services (e.g. `Services/Cyrene-Yield`).
+> Internal submodules or build components—such as `coordinator` (`Cyrene-Services/Cyrene-Exchange/components/coordinator`) or `spring` (`Cyrene-Plugins-Official/plugins/gateway/spring`)—are Gradle/build subcomponents belonging to their respective parent repositories. They are linked via build systems (`.idea/gradle.xml`, `settings.gradle.kts`) and must **never** be registered as standalone repositories in `repositories.yaml` or as top-level `<project>` entries in `.idea/jb-workspace.xml`.
+> *Note on JVM Control-Plane*: The legacy `cyrene-control-plane` JVM service (`framework/jvm`) previously inside `Cyrene-Platform` was retired in PR #41 to maintain a clean platform substrate boundary; its product control-plane surfaces migrated to domain-owned services (e.g. `Cyrene-Services/Cyrene-Yield`).
 
 ---
 

@@ -72,6 +72,8 @@ jobs:
   pool:
     vmImage: 'ubuntu-latest'
   timeoutInMinutes: 15
+  variables:
+    UV_CACHE_DIR: '$(Pipeline.Workspace)/.cache/uv'
   steps:
   - checkout: self
     path: s/Cyrene-Workspace
@@ -80,6 +82,14 @@ jobs:
   - checkout: platform
     path: s/Cyrene-Platform
     displayName: 'Checkout Platform Artifact SDK'
+
+  - task: Cache@2
+    inputs:
+      key: 'uv | "$(Agent.OS)" | "$(Build.Repository.Name)" | uv.lock'
+      restoreKeys: |
+        uv | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cache/uv'
+    displayName: 'Restore uv dependency cache'
 
   - task: UsePythonVersion@0
     inputs:

@@ -462,21 +462,21 @@ Workspace 的规范基线 `main@e10f998f` 只有最初两次 .NET foundation 提
 
 ### 20.1 Hybrid 仍是活动旧策略
 
-[`engine_factory.py:136`](../../Services/Cyrene-Reactor/runtime/core/src/cy_exec/engines/engine_factory.py) 仍注册旧别名 `nvidia`、`cuda`、`ascend`、`npu`，并在 165–170 行注册 `hybrid`。Pro [`engine_selector.py:100`](../../Services/Cyrene-Reactor/runtime/pro/src/cy_exec_pro/core/engine_selector.py) 也注册 Hybrid。
+[`engine_factory.py:136`](../../Cyrene-Services/Cyrene-Reactor/runtime/core/src/cy_exec/engines/engine_factory.py) 仍注册旧别名 `nvidia`、`cuda`、`ascend`、`npu`，并在 165–170 行注册 `hybrid`。Pro [`engine_selector.py:100`](../../Cyrene-Services/Cyrene-Reactor/runtime/pro/src/cy_exec_pro/core/engine_selector.py) 也注册 Hybrid。
 
-[`hybrid_engine.py:50`](../../Services/Cyrene-Reactor/runtime/core/src/cy_exec/engines/hybrid_engine.py) 顺序尝试 NVIDIA/Ascend，并对任何 `Exception` 继续下一个 backend。这不是跨设备拆分，只是宽异常 fallback；模型损坏、参数错误、权限错误和真实硬件不兼容都会被同样吞掉。它应从默认 registry 移除，或只对明确的“backend unavailable”错误执行有审计的策略切换。
+[`hybrid_engine.py:50`](../../Cyrene-Services/Cyrene-Reactor/runtime/core/src/cy_exec/engines/hybrid_engine.py) 顺序尝试 NVIDIA/Ascend，并对任何 `Exception` 继续下一个 backend。这不是跨设备拆分，只是宽异常 fallback；模型损坏、参数错误、权限错误和真实硬件不兼容都会被同样吞掉。它应从默认 registry 移除，或只对明确的“backend unavailable”错误执行有审计的策略切换。
 
 ### 20.2 具体 engine owner 尚未收敛
 
-Reactor README 把 TensorRT-LLM 声明为 canonical runtime component，`engine_factory.py:114-120` 与 Pro selector 都主动注册 [`trt_engine.py`](../../Services/Cyrene-Reactor/runtime/core/src/cy_exec/engines/trt_engine.py)。同一仓 [`architecture-and-lifecycle.md:59-62`](../../Services/Cyrene-Reactor/docs/architecture-and-lifecycle.md) 又把 TensorRT、vLLM、Ascend 列为待抽取的 replaceable plugins，而 Plugins 已有 `cyrene.engines.tensorrt-llm`。
+Reactor README 把 TensorRT-LLM 声明为 canonical runtime component，`engine_factory.py:114-120` 与 Pro selector 都主动注册 [`trt_engine.py`](../../Cyrene-Services/Cyrene-Reactor/runtime/core/src/cy_exec/engines/trt_engine.py)。同一仓 [`architecture-and-lifecycle.md:59-62`](../../Cyrene-Services/Cyrene-Reactor/docs/architecture-and-lifecycle.md) 又把 TensorRT、vLLM、Ascend 列为待抽取的 replaceable plugins，而 Plugins 已有 `cyrene.engines.tensorrt-llm`。
 
 这里需要一次明确的 owner 决策，不能继续同时维护 Product 内置 engine 与 Official plugin 两个实现。建议 Reactor 保留 Deployment/Serving lifecycle 与选择策略，具体 backend implementation 由 capability binding 注入。
 
 ### 20.3 模拟 Pro 与 legacy sidecar
 
-- [`hot_swapper.py:1-21`](../../Services/Cyrene-Reactor/runtime/pro/src/cy_exec_pro/engines/lora/hot_swapper.py) 明确只模拟 LoRA load/unload/switch，却仍更新 `loaded=True`、成功次数和耗时；只有调用方主动检查 `BACKEND_INTEGRATION_SIMULATED` 才能避免误判。
+- [`hot_swapper.py:1-21`](../../Cyrene-Services/Cyrene-Reactor/runtime/pro/src/cy_exec_pro/engines/lora/hot_swapper.py) 明确只模拟 LoRA load/unload/switch，却仍更新 `loaded=True`、成功次数和耗时；只有调用方主动检查 `BACKEND_INTEGRATION_SIMULATED` 才能避免误判。
 - `runtime/pro/README.md` 明确 non-stream UDS token count 是 placeholder，无 Rust scheduler 时 fallback 不是 production scheduler。
-- [`architecture-and-lifecycle.md:18`](../../Services/Cyrene-Reactor/docs/architecture-and-lifecycle.md) 把 sidecar 标为 `Legacy gRPC proxy prototype`；其 telemetry reporter 把 queue/KV/GPU 值写为 0、未向 coordinator 发送，client 收到的新 weight/capacity 也不应用。
+- [`architecture-and-lifecycle.md:18`](../../Cyrene-Services/Cyrene-Reactor/docs/architecture-and-lifecycle.md) 把 sidecar 标为 `Legacy gRPC proxy prototype`；其 telemetry reporter 把 queue/KV/GPU 值写为 0、未向 coordinator 发送，client 收到的新 weight/capacity 也不应用。
 - README 仍提到不存在的 `Backup/` 和“Pro training package remains in enterprise bundle”，需要验证后移到历史说明。
 
 这些路径可以作为研发骨架保留，但 production profile 和 CI 账本必须显式排除 simulated success。
@@ -489,11 +489,11 @@ Reactor README 把 TensorRT-LLM 声明为 canonical runtime component，`engine_
 
 ### 21.2 README 引用已经失效
 
-[`training/core/README.md:7`](../../Services/Cyrene-Yield/training/core/README.md) 固定 Platform `27e69c46`，远落后于当前 `a402b7b8`，并链接不存在的 `docs/KERNEL_CANONICAL_BASE.md`。同一文件还记录 `KernelAuthority has no Configure RPC` 的 live envelope contract gap。应把固定 SHA 移入可机器验证的 lock/ledger，并让 README 指向真实存在的当前契约说明。
+[`training/core/README.md:7`](../../Cyrene-Services/Cyrene-Yield/training/core/README.md) 固定 Platform `27e69c46`，远落后于当前 `a402b7b8`，并链接不存在的 `docs/KERNEL_CANONICAL_BASE.md`。同一文件还记录 `KernelAuthority has no Configure RPC` 的 live envelope contract gap。应把固定 SHA 移入可机器验证的 lock/ledger，并让 README 指向真实存在的当前契约说明。
 
 ### 21.3 LLaMA Factory vendored fork 需要独立治理
 
-[`plugins/llama-factory-training`](../../Services/Cyrene-Yield/plugins/llama-factory-training) 有 586 个跟踪文件、约 64,211 行 Python。根 README 写明来源为 `hiyouga/LLaMA-Factory` 与 `Icy-Lunar/LlamaFactory@f5a4a8f8`，但该目录没有独立 machine-readable upstream/provenance 文件或 patch queue；同时仍保留上游 API、eval、chat、v1 plugin 框架等大量非训练源码。
+[`plugins/llama-factory-training`](../../Cyrene-Services/Cyrene-Yield/plugins/llama-factory-training) 有 586 个跟踪文件、约 64,211 行 Python。根 README 写明来源为 `hiyouga/LLaMA-Factory` 与 `Icy-Lunar/LlamaFactory@f5a4a8f8`，但该目录没有独立 machine-readable upstream/provenance 文件或 patch queue；同时仍保留上游 API、eval、chat、v1 plugin 框架等大量非训练源码。
 
 这不应作为普通死代码批量删除，因为它是实际训练 backend。需要先建立：upstream commit、许可证/通知、Cyrene patch 列表、允许保留的模块、禁用但仍跟踪的模块、更新流程和回归矩阵。否则 43 个 TODO、36 个空文件和上游大面积变更无法区分“上游占位”“Cyrene 删除后残壳”和“未来能力”。
 
@@ -503,11 +503,11 @@ Repository Policy 同时写明 Yield 不拥有 concrete training engine internal
 
 ### 22.1 删除了源码，但文档还在发布旧目录
 
-当前 `git ls-files 'legacy/**'` 为 0；但 [`README.md:19`](../../Services/Cyrene-Exchange/README.md)、`docs/README.md`、`docs/architecture/overview.md`、`docs/API.md` 和 `docs/modules/README.md` 仍反复写 former Rust/Python gateway、migration、CLI 保存在 `legacy/`。这些是确定的 stale references，应立即修正。
+当前 `git ls-files 'legacy/**'` 为 0；但 [`README.md:19`](../../Cyrene-Services/Cyrene-Exchange/README.md)、`docs/README.md`、`docs/architecture/overview.md`、`docs/API.md` 和 `docs/modules/README.md` 仍反复写 former Rust/Python gateway、migration、CLI 保存在 `legacy/`。这些是确定的 stale references，应立即修正。
 
 ### 22.2 Kotlin coordinator 仍拥有训练和脚本生命周期
 
-`components/coordinator` 有 58 个文件，活动 main source 约 4,622 行。[`GrpcServerConfig.kt:38`](../../Services/Cyrene-Exchange/components/coordinator/src/main/kotlin/com/cy/llm/coordinator/config/GrpcServerConfig.kt) 同时注册 inference 与 training service；[`CoordinatorTrainingService.kt:63`](../../Services/Cyrene-Exchange/components/coordinator/src/main/kotlin/com/cy/llm/coordinator/grpc/CoordinatorTrainingService.kt) 管理训练队列，304 行起管理自定义脚本；[`WorkerGrpcClient.kt:100`](../../Services/Cyrene-Exchange/components/coordinator/src/main/kotlin/com/cy/llm/coordinator/worker/WorkerGrpcClient.kt) 直接调用 worker training/script RPC。
+`components/coordinator` 有 58 个文件，活动 main source 约 4,622 行。[`GrpcServerConfig.kt:38`](../../Cyrene-Services/Cyrene-Exchange/components/coordinator/src/main/kotlin/com/cy/llm/coordinator/config/GrpcServerConfig.kt) 同时注册 inference 与 training service；[`CoordinatorTrainingService.kt:63`](../../Cyrene-Services/Cyrene-Exchange/components/coordinator/src/main/kotlin/com/cy/llm/coordinator/grpc/CoordinatorTrainingService.kt) 管理训练队列，304 行起管理自定义脚本；[`WorkerGrpcClient.kt:100`](../../Cyrene-Services/Cyrene-Exchange/components/coordinator/src/main/kotlin/com/cy/llm/coordinator/worker/WorkerGrpcClient.kt) 直接调用 worker training/script RPC。
 
 这与 Exchange Policy 的 gateway/routing owner 冲突，也与 Yield 的 TrainingRun authority、Platform 的受管执行边界重复。应把仍需的路由/worker health 语义收敛到 Product gateway seam，把训练与脚本服务迁出或删除。
 
@@ -521,21 +521,21 @@ Repository Policy 同时写明 Yield 不拥有 concrete training engine internal
 
 ### 23.1 Catalyst
 
-当前没有跟踪 `legacy/`。但 [`README.md:15`](../../Services/Cyrene-Catalyst/README.md) 和 [`docs/API.md:95`](../../Services/Cyrene-Catalyst/docs/API.md) 仍称对话语料保存在 `legacy/CY_LLM_Training`；实际上该语料已移出仓库，`data/samples/.../README.md` 也明确说明了这一点。README/API 应改成当前 DatasetVersion/样例事实。
+当前没有跟踪 `legacy/`。但 [`README.md:15`](../../Cyrene-Services/Cyrene-Catalyst/README.md) 和 [`docs/API.md:95`](../../Cyrene-Services/Cyrene-Catalyst/docs/API.md) 仍称对话语料保存在 `legacy/CY_LLM_Training`；实际上该语料已移出仓库，`data/samples/.../README.md` 也明确说明了这一点。README/API 应改成当前 DatasetVersion/样例事实。
 
-Policy 和 Workspace 都把 build systems 写空，尽管根 [`pyproject.toml`](../../Services/Cyrene-Catalyst/pyproject.toml) 可构建 `cyrene-catalyst` wheel。源代码未发现新的 TODO/NotImplemented 或第二套 DatasetVersion authority。
+Policy 和 Workspace 都把 build systems 写空，尽管根 [`pyproject.toml`](../../Cyrene-Services/Cyrene-Catalyst/pyproject.toml) 可构建 `cyrene-catalyst` wheel。源代码未发现新的 TODO/NotImplemented 或第二套 DatasetVersion authority。
 
 ### 23.2 Echo
 
-当前没有跟踪 `legacy/`。[`README.md:17`](../../Services/Cyrene-Echo/README.md) 与 [`docs/API.md:89`](../../Services/Cyrene-Echo/docs/API.md) 仍声称 Navigator feedback panel 位于 `legacy/navigator-feedback/`，但该目录已经由 closure commit 删除。Repository Policy 还把 owner 写成 `Audio & Realtime Team`、职责写成 `Realtime audio service definition and legacy assets`，与当前 model evaluation/feedback 实现明显不符。
+当前没有跟踪 `legacy/`。[`README.md:17`](../../Cyrene-Services/Cyrene-Echo/README.md) 与 [`docs/API.md:89`](../../Cyrene-Services/Cyrene-Echo/docs/API.md) 仍声称 Navigator feedback panel 位于 `legacy/navigator-feedback/`，但该目录已经由 closure commit 删除。Repository Policy 还把 owner 写成 `Audio & Realtime Team`、职责写成 `Realtime audio service definition and legacy assets`，与当前 model evaluation/feedback 实现明显不符。
 
 Policy/Workspace 同样遗漏实际 pyproject/wheel。Echo 的真实 Exchange judge 仍诚实标为 `WIRED_NOT_RUN`，本轮没有把该凭据门槛升级为缺陷。
 
 ### 23.3 Navigator
 
-当前没有跟踪 `legacy-dh/`，但 [`README.md:17`](../../Services/Cyrene-Navigator/README.md) 与 [`docs/API.md:11`](../../Services/Cyrene-Navigator/docs/API.md) 仍声称完整 Dh codebase 保存在该目录；Workspace `governance/databases.yaml` 还把它当三个数据库/Redis 的 container authority。
+当前没有跟踪 `legacy-dh/`，但 [`README.md:17`](../../Cyrene-Services/Cyrene-Navigator/README.md) 与 [`docs/API.md:11`](../../Cyrene-Services/Cyrene-Navigator/docs/API.md) 仍声称完整 Dh codebase 保存在该目录；Workspace `governance/databases.yaml` 还把它当三个数据库/Redis 的 container authority。
 
-Windows 原生应用自己的 [`README.md:1-8`](../../Services/Cyrene-Navigator/apps/windows/README.md) 诚实说明它只有 mock 数据、没有 backend/Harness/Exchange/session persistence；但项目本身会构建可执行文件，且 [`MainWindow.cs:36-40`](../../Services/Cyrene-Navigator/apps/windows/src/Cyrene.Navigator.Windows/MainWindow.cs) 直接绑定 mock service。下一阶段要么把它放入显式 `prototype` profile，要么先注入接口并接真实 Session/Exchange，再进入 release artifact。
+Windows 原生应用自己的 [`README.md:1-8`](../../Cyrene-Services/Cyrene-Navigator/apps/windows/README.md) 诚实说明它只有 mock 数据、没有 backend/Harness/Exchange/session persistence；但项目本身会构建可执行文件，且 [`MainWindow.cs:36-40`](../../Cyrene-Services/Cyrene-Navigator/apps/windows/src/Cyrene.Navigator.Windows/MainWindow.cs) 直接绑定 mock service。下一阶段要么把它放入显式 `prototype` profile，要么先注入接口并接真实 Session/Exchange，再进入 release artifact。
 
 Navigator 根还有 Python Product package、3 个 Cargo manifest 和 2 个 C# project；仓库 Policy 只列 Cargo/NPM，Workspace 写空。未发现跟踪中的 `.navigator/proof`、缓存、数据库或构建产物；本地被 ignore 的证明/缓存目录不属于源码结论。
 

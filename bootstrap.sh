@@ -20,9 +20,9 @@ case "${PROFILE}" in
     full)
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Plugins-Official"
-        uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Reactor" --extra dev --extra pro
-        uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Yield" --extra dev
-        uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Exchange" --extra dev
+        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Reactor" --extra dev --extra pro
+        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Yield" --extra dev
+        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Exchange" --extra dev
         ;;
     platform)
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
@@ -31,7 +31,7 @@ case "${PROFILE}" in
     training)
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Plugins-Official"
-        uv sync --locked --directory "${SCRIPT_DIR}/../Services/Cyrene-Yield" --extra dev
+        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Yield" --extra dev
         ;;
     *)
         echo "Unknown profile: ${PROFILE}. Valid profiles: full, platform, training."

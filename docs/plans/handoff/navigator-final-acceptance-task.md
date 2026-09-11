@@ -19,7 +19,7 @@ Platform、Exchange、Plugins、Reactor、Yield 默认只读，需要修改时�
 验收方式，由主 Agent 协调。不得接管 Reactor 部署、GPU 适配、模型产物契约或 Yield 训练。
 
 仓库入口：`/home/baijin/Dev/Cyrene/Cyrene-Workspace/repositories.yaml`。
-Navigator：`/home/baijin/Dev/Cyrene/Services/Cyrene-Navigator`。
+Navigator：`/home/baijin/Dev/Cyrene/Cyrene-Services/Cyrene-Navigator`。
 先读 Workspace 的以下文件，再读 Navigator 对应实现和验收脚本：
 
 1. `docs/plans/cyrene-text-model-lifecycle-v1.md`，重点 P0-12、P0-29、P0-GATE。

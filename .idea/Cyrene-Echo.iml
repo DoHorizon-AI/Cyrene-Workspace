@@ -2,8 +2,8 @@
 <module type="GENERAL_MODULE" version="4">
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
-    <content url="file://$MODULE_DIR$/../Services/Cyrene-Echo">
-      <excludeFolder url="file://$MODULE_DIR$/../Services/Cyrene-Echo/.venv" />
+    <content url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Echo">
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Echo/.venv" />
     </content>
     <orderEntry type="sourceFolder" forTests="false" />
   </component>

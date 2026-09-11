@@ -70,12 +70,12 @@ Write-Host "`n[2/6] Checking repository topology & acquiring missing repositorie
 $allRepos = @(
     @{ Name = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Platform.git"; Policy = "public_zero_auth"; Profiles = @("full", "platform", "training") },
     @{ Name = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"; Policy = "public_zero_auth"; Profiles = @("full", "platform", "training") },
-    @{ Name = "Cyrene-Reactor"; Path = "../Services/Cyrene-Reactor"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "Cyrene-Yield"; Path = "../Services/Cyrene-Yield"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Yield.git"; Policy = "public_zero_auth"; Profiles = @("full", "training") },
-    @{ Name = "Cyrene-Exchange"; Path = "../Services/Cyrene-Exchange"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "Cyrene-Catalyst"; Path = "../Services/Cyrene-Catalyst"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "Cyrene-Echo"; Path = "../Services/Cyrene-Echo"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Echo.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "Cyrene-Navigator"; Path = "../Services/Cyrene-Navigator"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"; Policy = "public_zero_auth"; Profiles = @("full") }
+    @{ Name = "Cyrene-Reactor"; Path = "../Cyrene-Services/Cyrene-Reactor"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"; Policy = "public_zero_auth"; Profiles = @("full") },
+    @{ Name = "Cyrene-Yield"; Path = "../Cyrene-Services/Cyrene-Yield"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Yield.git"; Policy = "public_zero_auth"; Profiles = @("full", "training") },
+    @{ Name = "Cyrene-Exchange"; Path = "../Cyrene-Services/Cyrene-Exchange"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"; Policy = "public_zero_auth"; Profiles = @("full") },
+    @{ Name = "Cyrene-Catalyst"; Path = "../Cyrene-Services/Cyrene-Catalyst"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"; Policy = "public_zero_auth"; Profiles = @("full") },
+    @{ Name = "Cyrene-Echo"; Path = "../Cyrene-Services/Cyrene-Echo"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Echo.git"; Policy = "public_zero_auth"; Profiles = @("full") },
+    @{ Name = "Cyrene-Navigator"; Path = "../Cyrene-Services/Cyrene-Navigator"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"; Policy = "public_zero_auth"; Profiles = @("full") }
 )
 
 $activeRepos = $allRepos | Where-Object { $_.Profiles -contains $Profile }
@@ -104,9 +104,9 @@ if (-not $SkipPythonSync) {
     $allPythonTargets = @(
         @{ Repo = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Extra = ""; Profiles = @("full", "platform", "training") },
         @{ Repo = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Extra = ""; Profiles = @("full", "platform", "training") },
-        @{ Repo = "Cyrene-Reactor"; Path = "../Services/Cyrene-Reactor"; Extra = "--extra dev --extra pro"; Profiles = @("full") },
-        @{ Repo = "Cyrene-Yield"; Path = "../Services/Cyrene-Yield"; Extra = "--extra dev"; Profiles = @("full", "training") },
-        @{ Repo = "Cyrene-Exchange"; Path = "../Services/Cyrene-Exchange"; Extra = "--extra dev"; Profiles = @("full") }
+        @{ Repo = "Cyrene-Reactor"; Path = "../Cyrene-Services/Cyrene-Reactor"; Extra = "--extra dev --extra pro"; Profiles = @("full") },
+        @{ Repo = "Cyrene-Yield"; Path = "../Cyrene-Services/Cyrene-Yield"; Extra = "--extra dev"; Profiles = @("full", "training") },
+        @{ Repo = "Cyrene-Exchange"; Path = "../Cyrene-Services/Cyrene-Exchange"; Extra = "--extra dev"; Profiles = @("full") }
     )
 
     $activePython = $allPythonTargets | Where-Object { $_.Profiles -contains $Profile }

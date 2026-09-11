@@ -28,7 +28,7 @@ cargo check --workspace --locked --all-targets
 cargo test --workspace --locked
 
 echo -e "\n[3/4] Validating Cyrene-Reactor (Rust Component)..."
-cd "${SCRIPT_DIR}/../Services/Cyrene-Reactor"
+cd "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Reactor"
 cargo metadata --format-version 1 --no-deps >/dev/null
 cargo check --workspace --locked
 
@@ -37,11 +37,11 @@ cd "${SCRIPT_DIR}/../Cyrene-Platform"
 uv run pytest tooling/ci
 cd "${SCRIPT_DIR}/../Cyrene-Plugins-Official"
 uv run pytest conformance/tests
-cd "${SCRIPT_DIR}/../Services/Cyrene-Reactor"
+cd "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Reactor"
 uv run pytest
-cd "${SCRIPT_DIR}/../Services/Cyrene-Yield"
+cd "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Yield"
 uv run pytest
-cd "${SCRIPT_DIR}/../Services/Cyrene-Exchange"
+cd "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Exchange"
 uv run pytest
 
 echo -e "\n=================================================="

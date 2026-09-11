@@ -17,11 +17,11 @@
         </option>
       </GradleProjectSettings>
       <GradleProjectSettings>
-        <option name="externalProjectPath" value="$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
+        <option name="externalProjectPath" value="$PROJECT_DIR$/../Cyrene-Services/Cyrene-Exchange/components/coordinator" />
         <option name="gradleJvm" value="#GRADLE_DAEMON_JVM" />
         <option name="modules">
           <set>
-            <option value="$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
+            <option value="$PROJECT_DIR$/../Cyrene-Services/Cyrene-Exchange/components/coordinator" />
           </set>
         </option>
       </GradleProjectSettings>
