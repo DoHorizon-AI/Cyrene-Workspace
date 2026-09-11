@@ -20,7 +20,7 @@ All repositories now enforce the clean-room invariant via continuous integration
 - Implemented governance conformance test `test_no_legacy_surface.py` (all tests passing).
 
 ### Cyrene-Catalyst (PR #6)
-- Relocated full dialogue corpus to external storage (`/home/baijin/Dev/DH-LLMs/genshin-dialogue-zh-v2025-11-20/`).
+- Relocated full dialogue corpus to external storage (`../DH-LLMs/genshin-dialogue-zh-v2025-11-20/`).
 - Curated minimal representative public sample in `data/samples/genshin-dialogue-zh/` with strict provenance and license documentation.
 - Integrated platform guard into Azure Pipeline.
 

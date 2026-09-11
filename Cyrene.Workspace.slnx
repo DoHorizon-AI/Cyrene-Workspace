@@ -1,6 +1,6 @@
 <Solution>
-  <Folder Name="/Plugins/">
-    <Project Path="../Cyrene-Plugins-Official/plugins/agents/agent-system/src/dotnet/Cyrene.AgentSystem.Compat.csproj" />
-    <Project Path="../Cyrene-Plugins-Official/plugins/gateway/aspnet-core/src/Cyrene.AspNetCoreGateway/Cyrene.AspNetCoreGateway.csproj" />
+  <Folder Name="/Contracts/">
+    <Project Path="../Cyrene-Plugins-Official/contracts/tck/message-connector-v1/dotnet/MessageConnectorContractTck.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/dotnet/ModelProviderContractTck.csproj" />
   </Folder>
 </Solution>
