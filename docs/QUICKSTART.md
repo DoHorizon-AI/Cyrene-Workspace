@@ -35,7 +35,7 @@ bash Cyrene-Platform/tooling/ci/check-no-legacy-surface.sh .
 To start the inference serving backend:
 
 ```bash
-cd Services/Cyrene-Reactor
+cd Cyrene-Services/Cyrene-Reactor
 cargo check
 uv run pytest
 ```
@@ -43,6 +43,6 @@ uv run pytest
 To start the API Gateway:
 
 ```bash
-cd Services/Cyrene-Exchange
+cd Cyrene-Services/Cyrene-Exchange
 uv run pytest
 ```

@@ -15,6 +15,10 @@ from pathlib import Path
 import urllib.request
 import urllib.error
 
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+CYRENE_ROOT = WORKSPACE_ROOT.parent
+SERVICES_ROOT = CYRENE_ROOT / "Cyrene-Services"
+
 ENV_DIR = Path("/tmp/cyrene-acceptance-env")
 LOGS_DIR = ENV_DIR / "logs"
 PIDS_FILE = ENV_DIR / "pids.json"
@@ -24,9 +28,9 @@ SERVICES = [
         "name": "catalyst",
         "port": 8014,
         "health_path": "/openapi.json",
-        "cwd": "/home/baijin/Dev/Cyrene/Services/Cyrene-Catalyst",
+        "cwd": str(SERVICES_ROOT / "Cyrene-Catalyst"),
         "cmd": [
-            "uv", "run", "--project", "/home/baijin/Dev/Cyrene/Services/Cyrene-Catalyst",
+            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Catalyst"),
             "python", "-m", "cyrene_catalyst"
         ],
         "env": {
@@ -40,9 +44,9 @@ SERVICES = [
         "name": "yield",
         "port": 8092,
         "health_path": "/openapi.json",
-        "cwd": "/home/baijin/Dev/Cyrene/Services/Cyrene-Yield",
+        "cwd": str(SERVICES_ROOT / "Cyrene-Yield"),
         "cmd": [
-            "uv", "run", "--project", "/home/baijin/Dev/Cyrene/Services/Cyrene-Yield",
+            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Yield"),
             "python", "-m", "cy_exec.training.product_cli",
             "--runtime-config", "/tmp/cyrene-runtime-test/platform/runtime.json",
             "--trainer-runtime-config", "/tmp/cyrene-runtime-test/trainer/runtime.json",
@@ -57,9 +61,9 @@ SERVICES = [
         "name": "reactor-host",
         "port": 19301,
         "health_path": "/docs",
-        "cwd": "/home/baijin/Dev/Cyrene/Services/Cyrene-Reactor/product",
+        "cwd": str(SERVICES_ROOT / "Cyrene-Reactor/product"),
         "cmd": [
-            "uv", "run", "--project", "/home/baijin/Dev/Cyrene/Services/Cyrene-Reactor/product",
+            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Reactor/product"),
             "python", "-m", "cyrene_reactor_product.cli", "host",
             "--config", "/tmp/cyrene-runtime-test/reactor/host.json",
             "--port", "19301",
@@ -70,9 +74,9 @@ SERVICES = [
         "name": "reactor-control",
         "port": 19300,
         "health_path": "/docs",
-        "cwd": "/home/baijin/Dev/Cyrene/Services/Cyrene-Reactor/product",
+        "cwd": str(SERVICES_ROOT / "Cyrene-Reactor/product"),
         "cmd": [
-            "uv", "run", "--project", "/home/baijin/Dev/Cyrene/Services/Cyrene-Reactor/product",
+            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Reactor/product"),
             "python", "-m", "cyrene_reactor_product.cli", "control",
             "--config", "/tmp/cyrene-runtime-test/reactor/control.json",
             "--port", "19300",
@@ -83,10 +87,10 @@ SERVICES = [
         "name": "exchange",
         "port": 8000,
         "health_path": "/docs",
-        "cwd": "/home/baijin/Dev/Cyrene/Services/Cyrene-Exchange/product",
+        "cwd": str(SERVICES_ROOT / "Cyrene-Exchange/product"),
         "cmd": [
-            "uv", "run", "--project", "/home/baijin/Dev/Cyrene/Services/Cyrene-Exchange/product",
-            "python", "/home/baijin/Dev/Cyrene/Cyrene-Workspace/scripts/serve-exchange.py",
+            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Exchange/product"),
+            "python", str(WORKSPACE_ROOT / "scripts/serve-exchange.py"),
             "--database", "/tmp/cyrene-acceptance-env/exchange/exchange.sqlite3",
             "--port", "8000",
             "--control-token", "acceptance-exchange-control-token-12345678",
@@ -98,10 +102,10 @@ SERVICES = [
         "name": "navigator",
         "port": 8012,
         "health_path": "/openapi.json",
-        "cwd": "/home/baijin/Dev/Cyrene/Services/Cyrene-Navigator",
+        "cwd": str(SERVICES_ROOT / "Cyrene-Navigator"),
         "cmd": [
-            "uv", "run", "--project", "/home/baijin/Dev/Cyrene/Services/Cyrene-Navigator",
-            "python", "/home/baijin/Dev/Cyrene/Services/Cyrene-Navigator/scripts/serve-persistence.py",
+            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Navigator"),
+            "python", str(SERVICES_ROOT / "Cyrene-Navigator/scripts/serve-persistence.py"),
             "--database", "/tmp/cyrene-acceptance-env/navigator/sessions.sqlite3",
             "--principal-config", "/tmp/cyrene-acceptance-env/navigator/principal.json",
             "--port", "8012",
@@ -116,9 +120,9 @@ SERVICES = [
         "name": "echo",
         "port": 8094,
         "health_path": "/openapi.json",
-        "cwd": "/home/baijin/Dev/Cyrene/Services/Cyrene-Echo",
+        "cwd": str(SERVICES_ROOT / "Cyrene-Echo"),
         "cmd": [
-            "uv", "run", "--project", "/home/baijin/Dev/Cyrene/Services/Cyrene-Echo",
+            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Echo"),
             "python", "-c", "from cyrene_echo.server import main; main()",
             "--database", "/tmp/cyrene-acceptance-env/echo/echo.sqlite3",
             "--artifact-root", "/tmp/cyrene-runtime-test/platform/artifacts",

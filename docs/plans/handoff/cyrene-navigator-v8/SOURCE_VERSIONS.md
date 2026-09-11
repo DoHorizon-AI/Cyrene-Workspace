@@ -17,11 +17,11 @@ All repositories are evaluated on their task branches; no local acceptance is in
 
 | Repository / 仓库 | Path / 路径 | Branch / 分支 | Exact Full Commit SHA / 精确完整提交 | Delivery & PR Status / 交付与 PR 状态 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Cyrene-Navigator** | `Services/Cyrene-Navigator` | `feat/text-model-lifecycle-v1` | `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` | Pushed; no open PR; working tree clean |
+| **Cyrene-Navigator** | `Cyrene-Services/Cyrene-Navigator` | `feat/text-model-lifecycle-v1` | `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` | Pushed; no open PR; working tree clean |
 | **Cyrene-Workspace** | `Cyrene-Workspace` | `feat/text-model-lifecycle-v1` | `77b313b91a0d4f0cceb4b69f3a74e37bf65e7a91` | Pushed; [Draft PR #4](https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/4) → `main` |
 | **Cyrene-Platform** (CES & Resolver) | `Cyrene-Platform` | `feat/text-model-lifecycle-v1` | `30272145b9c11df9948465359479c3d95d08a1dc` | Pushed; [Draft PR #31](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/31) stacked on #30 |
 | **Cyrene-Platform** (cy-manifest) | `Cyrene-Platform` | `feat/text-model-lifecycle-v1` | `185527f82c83700d4f567ac563a393a2e1c18c87` | Bundled in V8 package via static CRT |
-| **Cyrene-Exchange** | `Services/Cyrene-Exchange` | `feat/text-model-lifecycle-v1` | `91c509904add26de941e2e14bc3b2b4752233d28` | Pushed; [Draft PR #7](https://github.com/DoHorizon-AI/Cyrene-Exchange/pull/7) → `develop` |
+| **Cyrene-Exchange** | `Cyrene-Services/Cyrene-Exchange` | `feat/text-model-lifecycle-v1` | `91c509904add26de941e2e14bc3b2b4752233d28` | Pushed; [Draft PR #7](https://github.com/DoHorizon-AI/Cyrene-Exchange/pull/7) → `develop` |
 | **Cyrene-Plugins-Official** | `Cyrene-Plugins-Official` | `feat/text-model-lifecycle-v1` | `261a78fd36c7cb2da85a504a89ec7c9c353ecc19` | Pushed; [Draft PR #9](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/9) → `develop` |
 
 ---

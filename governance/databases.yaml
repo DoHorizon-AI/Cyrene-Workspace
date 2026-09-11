@@ -7,7 +7,7 @@ services:
   # 1. Redis (Exchange Coordinator Distributed Cache / Queue)
   # ===================================================================
   - name: "cyrene-redis-cache"
-    owner_repository: "Services/Cyrene-Exchange"
+    owner_repository: "Cyrene-Services/Cyrene-Exchange"
     technology: "Redis"
     category: "cache/key-value store"
     purpose: "Distributed session cache, token bucket rate-limiting, prompt caching (pc:), worker registration, and message routing"
@@ -53,7 +53,7 @@ services:
   # 3. SQLite (Navigator Session Persistence)
   # ===================================================================
   - name: "navigator-persistence-sqlite"
-    owner_repository: "Services/Cyrene-Navigator"
+    owner_repository: "Cyrene-Services/Cyrene-Navigator"
     technology: "SQLite (WAL, synchronous=FULL)"
     category: "embedded session event store"
     purpose: "Navigator Session headers, append-only event envelopes, writer leases, and Product metadata projection"

@@ -2,7 +2,7 @@
 <project version="4">
   <component name="FrameworkDetectionExcludesConfiguration">
     <file type="web" url="file://$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
-    <file type="web" url="file://$PROJECT_DIR$/../Services/Cyrene-Exchange/components/coordinator" />
+    <file type="web" url="file://$PROJECT_DIR$/../Cyrene-Services/Cyrene-Exchange/components/coordinator" />
   </component>
   <component name="ProjectRootManager" version="2" languageLevel="JDK_25" default="true" project-jdk-name="~/Dev/Cyrene/.venv/bin/python" project-jdk-type="Python SDK">
     <output url="file://$PROJECT_DIR$/out" />

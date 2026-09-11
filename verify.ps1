@@ -97,9 +97,9 @@ Assert-Step "Python .venv discovery and uv environment sanity" {
     $pyTargets = @(
         "../Cyrene-Platform",
         "../Cyrene-Plugins-Official",
-        "../Services/Cyrene-Reactor",
-        "../Services/Cyrene-Yield",
-        "../Services/Cyrene-Exchange"
+        "../Cyrene-Services/Cyrene-Reactor",
+        "../Cyrene-Services/Cyrene-Yield",
+        "../Cyrene-Services/Cyrene-Exchange"
     )
 
     foreach ($rel in $pyTargets) {
@@ -141,7 +141,7 @@ if (-not $Quick) {
 
 # 5. RUST TOOLCHAIN DECLARATION (DEV HOST ONLY)
 Assert-Step "Rust development toolchain declarations & cargo metadata" {
-    $rustTargets = @("../Cyrene-Platform", "../Services/Cyrene-Reactor")
+    $rustTargets = @("../Cyrene-Platform", "../Cyrene-Services/Cyrene-Reactor")
     foreach ($rel in $rustTargets) {
         $full = Join-Path $ScriptDir $rel
         $toolchainPin = Join-Path $full "rust-toolchain.toml"
@@ -158,7 +158,7 @@ Assert-Step "Rust development toolchain declarations & cargo metadata" {
 # 6. JVM GRADLE & TOOLCHAIN PINNING
 Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
     $jvmTargets = @(
-        "../Services/Cyrene-Exchange/components/coordinator",
+        "../Cyrene-Services/Cyrene-Exchange/components/coordinator",
         "../Cyrene-Plugins-Official/plugins/gateway/spring"
     )
     foreach ($rel in $jvmTargets) {
@@ -187,7 +187,7 @@ Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
 
 # 7. REPOSITORY INDEPENDENCE & PLATFORM SDK SEAM
 Assert-Step "Repository independence & clean SDK authority (no copied source in Cyrene-Yield)" {
-    $yieldPackages = Join-Path $ScriptDir "../Services/Cyrene-Yield/packages"
+    $yieldPackages = Join-Path $ScriptDir "../Cyrene-Services/Cyrene-Yield/packages"
     if (Test-Path $yieldPackages) {
         $copiedSdks = Get-ChildItem $yieldPackages -Directory | Where-Object { $_.Name -match "^cyrene_" }
         if ($copiedSdks.Count -gt 0) {

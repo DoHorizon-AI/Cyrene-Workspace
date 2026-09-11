@@ -116,20 +116,20 @@ repositories:
       primary_source_roots:
         - "../Cyrene-Plugins-Official/plugins/agents"
         - "../Cyrene-Plugins-Official/plugins/providers"
-        - "../Cyrene-Plugins-Official/plugins/gateway/spring/src"
+        - "../Cyrene-Plugins-Official/plugins/training"
+        - "../Cyrene-Plugins-Official/plugins/gateway/spring/billing/src"
+        - "../Cyrene-Plugins-Official/plugins/gateway/spring/conversation/src"
+        - "../Cyrene-Plugins-Official/plugins/gateway/spring/prompt-cache/src"
+        - "../Cyrene-Plugins-Official/plugins/gateway/spring/tenant/src"
       test_roots:
         - "../Cyrene-Plugins-Official/plugins/agents/*/tests"
         - "../Cyrene-Plugins-Official/plugins/providers/*/tests"
-      api_contract_roots:
-        - "../Cyrene-Plugins-Official/plugins/gateway/spring/proto"
-      database_migration_roots:
-        - "../Cyrene-Plugins-Official/plugins/gateway/spring/src/main/resources/db/migration"
       developer_commands:
         test: "uv run pytest"
         build: "./gradlew build"
 
   - name: "Cyrene-Reactor"
-    path: "../Services/Cyrene-Reactor"
+    path: "../Cyrene-Services/Cyrene-Reactor"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -152,22 +152,22 @@ repositories:
     ci_acceptance_environment: "ubuntu-latest (GitHub Actions source); self-hosted GPU/runtime (Azure manual)"
     release_artifact_target: "x86_64-unknown-linux-gnu"
     ide:
-      python_root: "../Services/Cyrene-Reactor"
-      cargo_root: "../Services/Cyrene-Reactor/Cargo.toml"
+      python_root: "../Cyrene-Services/Cyrene-Reactor"
+      cargo_root: "../Cyrene-Services/Cyrene-Reactor/Cargo.toml"
     pointers:
       primary_source_roots:
-        - "../Services/Cyrene-Reactor/runtime/core/src"
-        - "../Services/Cyrene-Reactor/runtime/pro/src"
-        - "../Services/Cyrene-Reactor/components/scheduler-rs/src"
+        - "../Cyrene-Services/Cyrene-Reactor/runtime/core/src"
+        - "../Cyrene-Services/Cyrene-Reactor/runtime/pro/src"
+        - "../Cyrene-Services/Cyrene-Reactor/components/scheduler-rs/src"
       test_roots:
-        - "../Services/Cyrene-Reactor/runtime/core/tests"
-        - "../Services/Cyrene-Reactor/runtime/pro/tests"
+        - "../Cyrene-Services/Cyrene-Reactor/runtime/core/tests"
+        - "../Cyrene-Services/Cyrene-Reactor/runtime/pro/tests"
       developer_commands:
         test: "uv run pytest ; cargo test"
         build: "cargo build"
 
   - name: "Cyrene-Yield"
-    path: "../Services/Cyrene-Yield"
+    path: "../Cyrene-Services/Cyrene-Yield"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -179,6 +179,7 @@ repositories:
       supplemental_azure_scope: "self_hosted_gpu_or_delivery"
     build_systems:
       - "uv"
+      - "gradle"
     roles:
       - "product-service"
       - "model-training"
@@ -189,19 +190,19 @@ repositories:
     ci_acceptance_environment: "ubuntu-latest (GitHub Actions source); self-hosted GPU/runtime (Azure manual)"
     release_artifact_target: "py3-none-any"
     ide:
-      python_root: "../Services/Cyrene-Yield"
+      python_root: "../Cyrene-Services/Cyrene-Yield"
     pointers:
       primary_source_roots:
-        - "../Services/Cyrene-Yield/training/core/src"
-        - "../Services/Cyrene-Yield/migration/jvm-product-control-plane"
+        - "../Cyrene-Services/Cyrene-Yield/training/core/src"
+        - "../Cyrene-Services/Cyrene-Yield/migration/jvm-product-control-plane"
       test_roots:
-        - "../Services/Cyrene-Yield/training/core/tests"
+        - "../Cyrene-Services/Cyrene-Yield/training/core/tests"
       developer_commands:
         test: "uv run pytest training/core/tests ; gradle -p migration/jvm-product-control-plane test"
         build: "uv build"
 
   - name: "Cyrene-Exchange"
-    path: "../Services/Cyrene-Exchange"
+    path: "../Cyrene-Services/Cyrene-Exchange"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
@@ -224,27 +225,28 @@ repositories:
     ci_acceptance_environment: "ubuntu-latest (GitHub Actions source); Azure manual private integration/delivery"
     release_artifact_target: "multi-platform"
     ide:
-      python_root: "../Services/Cyrene-Exchange"
-      gradle_root: "../Services/Cyrene-Exchange/components/coordinator/build.gradle.kts"
+      python_root: "../Cyrene-Services/Cyrene-Exchange"
+      gradle_root: "../Cyrene-Services/Cyrene-Exchange/components/coordinator/build.gradle.kts"
     pointers:
       primary_source_roots:
-        - "../Services/Cyrene-Exchange/src"
-        - "../Services/Cyrene-Exchange/components/coordinator/src"
+        - "../Cyrene-Services/Cyrene-Exchange/src"
+        - "../Cyrene-Services/Cyrene-Exchange/components/coordinator/src"
       test_roots:
-        - "../Services/Cyrene-Exchange/tests"
+        - "../Cyrene-Services/Cyrene-Exchange/tests"
       api_contract_roots:
-        - "../Services/Cyrene-Exchange/proto"
+        - "../Cyrene-Services/Cyrene-Exchange/proto"
       developer_commands:
         test: "uv run pytest ; ./gradlew build"
         build: "./gradlew build"
 
   - name: "Cyrene-Catalyst"
-    path: "../Services/Cyrene-Catalyst"
+    path: "../Cyrene-Services/Cyrene-Catalyst"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
     integration_branch: "develop"
-    build_systems: []
+    build_systems:
+      - "uv"
     roles:
       - "product-service"
       - "knowledge-catalyst"
@@ -257,14 +259,25 @@ repositories:
     development_hosts: ["windows", "linux"]
     canonical_runtime_os: "linux"
     canonical_build_target: "linux-x64"
+    ide:
+      python_root: "../Cyrene-Services/Cyrene-Catalyst"
+    pointers:
+      primary_source_roots:
+        - "../Cyrene-Services/Cyrene-Catalyst/src"
+      test_roots:
+        - "../Cyrene-Services/Cyrene-Catalyst/tests"
+      developer_commands:
+        test: "uv run pytest"
+        build: "uv build"
 
   - name: "Cyrene-Echo"
-    path: "../Services/Cyrene-Echo"
+    path: "../Cyrene-Services/Cyrene-Echo"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
     integration_branch: "develop"
-    build_systems: []
+    build_systems:
+      - "uv"
     roles:
       - "product-service"
       - "voice-synthesis"
@@ -277,14 +290,28 @@ repositories:
     development_hosts: ["windows", "linux"]
     canonical_runtime_os: "linux"
     canonical_build_target: "linux-x64"
+    ide:
+      python_root: "../Cyrene-Services/Cyrene-Echo"
+    pointers:
+      primary_source_roots:
+        - "../Cyrene-Services/Cyrene-Echo/src"
+      test_roots:
+        - "../Cyrene-Services/Cyrene-Echo/tests"
+      developer_commands:
+        test: "uv run pytest"
+        build: "uv build"
 
   - name: "Cyrene-Navigator"
-    path: "../Services/Cyrene-Navigator"
+    path: "../Cyrene-Services/Cyrene-Navigator"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
     integration_branch: "develop"
-    build_systems: []
+    build_systems:
+      - "uv"
+      - "node"
+      - "cargo"
+      - "dotnet"
     roles:
       - "product-service"
       - "desktop-navigation"
@@ -297,6 +324,24 @@ repositories:
     development_hosts: ["windows", "macos", "linux"]
     canonical_runtime_os: "client-desktop"
     canonical_build_target: "multi-target"
+    ide:
+      python_root: "../Cyrene-Services/Cyrene-Navigator"
+      node_root: "../Cyrene-Services/Cyrene-Navigator/apps/desktop"
+      cargo_root: "../Cyrene-Services/Cyrene-Navigator/native/Cargo.toml"
+      dotnet_solution: "../Cyrene-Services/Cyrene-Navigator/apps/windows/Cyrene.Navigator.Windows.sln"
+    pointers:
+      primary_source_roots:
+        - "../Cyrene-Services/Cyrene-Navigator/src"
+        - "../Cyrene-Services/Cyrene-Navigator/apps/desktop/ui"
+        - "../Cyrene-Services/Cyrene-Navigator/harness/src"
+        - "../Cyrene-Services/Cyrene-Navigator/native"
+        - "../Cyrene-Services/Cyrene-Navigator/apps/windows"
+      test_roots:
+        - "../Cyrene-Services/Cyrene-Navigator/tests"
+        - "../Cyrene-Services/Cyrene-Navigator/harness/tests"
+      developer_commands:
+        test: "uv run pytest ; pnpm --dir apps/desktop build ; cargo test --manifest-path native/Cargo.toml"
+        build: "pnpm --dir apps/desktop build ; cargo build --manifest-path native/Cargo.toml"
 
 profiles:
   full:
