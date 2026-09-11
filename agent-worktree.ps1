@@ -11,7 +11,7 @@
     repositories.yaml remains the only committed repository-topology authority.
 
 .EXAMPLE
-    .\agent-worktree.ps1 create -Repo plugins -Branch chore/spring-boot-4-1-1 -Base origin/develop -Role idea-spring
+    .\agent-worktree.ps1 create -Repo Cyrene-Plugins-Official -Branch chore/spring-boot-4-1-1 -Base origin/develop -Role idea-spring
 
 .EXAMPLE
     .\agent-worktree.ps1 snapshot -Repo Cyrene-Platform -Sha 4449fe770ece8bf2ef27271b109dcd8b715f869a -Role rider-media-platform
@@ -319,22 +319,14 @@ function Resolve-Repository([string]$Query) {
     }
 
     $aliases = @{
-        "platform" = "Cyrene-Platform"
-        "plugins" = "Cyrene-Plugins-Official"
-        "cyrene-plugins" = "Cyrene-Plugins-Official"
-        "cyrene-plugins-official" = "Cyrene-Plugins-Official"
-        "reactor" = "Cyrene-Reactor"
-        "cyrene-reactor" = "Cyrene-Reactor"
-        "yield" = "Cyrene-Yield"
-        "cyrene-yield" = "Cyrene-Yield"
-        "exchange" = "Cyrene-Exchange"
-        "cyrene-exchange" = "Cyrene-Exchange"
-        "catalyst" = "Cyrene-Catalyst"
-        "cyrene-catalyst" = "Cyrene-Catalyst"
-        "echo" = "Cyrene-Echo"
-        "cyrene-echo" = "Cyrene-Echo"
+        "platform"  = "Cyrene-Platform"
+        "plugins"   = "Cyrene-Plugins-Official"
+        "reactor"   = "Cyrene-Reactor"
+        "yield"     = "Cyrene-Yield"
+        "exchange"  = "Cyrene-Exchange"
+        "catalyst"  = "Cyrene-Catalyst"
+        "echo"      = "Cyrene-Echo"
         "navigator" = "Cyrene-Navigator"
-        "cyrene-navigator" = "Cyrene-Navigator"
     }
     $aliasKey = $Query.Trim().ToLowerInvariant()
     if ($aliases.ContainsKey($aliasKey)) {
