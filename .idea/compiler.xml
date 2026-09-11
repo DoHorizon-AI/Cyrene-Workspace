@@ -14,6 +14,10 @@
       <module name="cyrene-spring-gateways.tenant" target="21" />
       <module name="cyrene-spring-gateways.tenant.main" target="21" />
       <module name="cyrene-spring-gateways.tenant.test" target="21" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.main" target="21" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.test" target="21" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.main" target="21" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.test" target="21" />
     </bytecodeTargetLevel>
   </component>
   <component name="JavacSettings">
@@ -30,6 +34,10 @@
       <module name="cyrene-spring-gateways.tenant" options="-parameters" />
       <module name="cyrene-spring-gateways.tenant.main" options="-parameters" />
       <module name="cyrene-spring-gateways.tenant.test" options="-parameters" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.main" options="-parameters" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.test" options="-parameters" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.main" options="-parameters" />
+      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.test" options="-parameters" />
     </option>
   </component>
 </project>

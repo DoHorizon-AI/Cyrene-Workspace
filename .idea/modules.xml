@@ -21,6 +21,10 @@
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.main.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.main.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.test.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/cyrene-spring-gateways.tenant.test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/billing/dev.cyrene.gateway.cyrene-spring-gateways.billing.main.iml" filepath="$PROJECT_DIR$/.idea/modules/billing/dev.cyrene.gateway.cyrene-spring-gateways.billing.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/billing/dev.cyrene.gateway.cyrene-spring-gateways.billing.test.iml" filepath="$PROJECT_DIR$/.idea/modules/billing/dev.cyrene.gateway.cyrene-spring-gateways.billing.test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/dev.cyrene.gateway.cyrene-spring-gateways.tenant.main.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/dev.cyrene.gateway.cyrene-spring-gateways.tenant.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/tenant/dev.cyrene.gateway.cyrene-spring-gateways.tenant.test.iml" filepath="$PROJECT_DIR$/.idea/modules/tenant/dev.cyrene.gateway.cyrene-spring-gateways.tenant.test.iml" />
     </modules>
   </component>
 </project>
