@@ -21,7 +21,7 @@ services:
     default_schema: null
     migration_authority: "None (key-value structure managed by application lifecycle)"
     seed_authority: "None (runtime dynamic)"
-    container_authority: null
+    container_authority: "None (owner repository provides no container manifest; use an external development service)"
     credential_policy: "Environment variables (REDIS_CONNECTION_STRING, SPRING_DATA_REDIS_PASSWORD). Never committed to VCS."
     ide_datasource_eligible: true
     jdbc_url_template: "redis://localhost:6379/0"
@@ -50,24 +50,24 @@ services:
     jdbc_url_template: "jdbc:postgresql://localhost:5432/cy_gateway"
 
   # ===================================================================
-  # 3. PostgreSQL (Navigator Control Plane)
+  # 3. SQLite (Navigator Session Persistence)
   # ===================================================================
-  - name: "navigator-control-plane-postgres"
+  - name: "navigator-persistence-sqlite"
     owner_repository: "Services/Cyrene-Navigator"
-    technology: "PostgreSQL 16"
-    category: "relational database"
-    purpose: "Desktop navigator and local control plane session state"
-    development_role: "Local PostgreSQL container or instance"
-    production_role: "Development / Single-node deployment"
+    technology: "SQLite (WAL, synchronous=FULL)"
+    category: "embedded session event store"
+    purpose: "Navigator Session headers, append-only event envelopes, writer leases, and Product metadata projection"
+    development_role: "Explicit file path passed to scripts/serve-persistence.py --database"
+    production_role: "Local single-node Navigator persistence"
     profiles:
       - "full"
-    host_convention: "localhost"
-    port_convention: 5432
-    default_database: "dh_cp"
-    default_schema: "public"
-    migration_authority: "Control plane migration scripts"
-    seed_authority: "Control plane bootstrap"
-    container_authority: null
-    credential_policy: "Environment variables (POSTGRES_PASSWORD). Never committed to VCS."
+    host_convention: "local-filesystem"
+    port_convention: null
+    default_database: null
+    default_schema: "main"
+    migration_authority: "PersistenceStore schema initialization (src/cyrene_navigator/persistence/store.py)"
+    seed_authority: "None (Session state is created through the authenticated persistence API)"
+    container_authority: "None (embedded file)"
+    credential_policy: "No database credential; service bearer credentials are referenced through environment variables."
     ide_datasource_eligible: true
-    jdbc_url_template: "jdbc:postgresql://localhost:5432/dh_cp"
+    jdbc_url_template: null
