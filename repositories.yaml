@@ -1,4 +1,4 @@
-version: "1.2.0"
+version: "1.3.0"
 workspace: "Cyrene"
 description: "Canonical multi-repository topology, runtime target manifest, and contract pointers for Cyrene developers"
 
@@ -26,6 +26,17 @@ global_policy:
     solution_format: ".slnx"
   node_baseline:
     policy: "NONE (no canonical backend execution plane dependency)"
+  ci_authority_policy:
+    automatic_source_rule: "Exactly one provider owns automatic source and contract checks per repository."
+    public_source_authority: "github_actions"
+    private_source_authority: "azure_pipelines"
+    azure_supplemental_scopes:
+      - "deployment"
+      - "self_hosted_gpu"
+      - "private_credentials"
+      - "exact_cross_repository_acceptance"
+    status_reporting: "Azure supplemental results must be published as checks on the same GitHub revision."
+    evidence_rule: "Skipped, simulated, credential-blocked, and unrun work must retain those states."
 
 repositories:
   - name: "Cyrene-Platform"
@@ -34,6 +45,11 @@ repositories:
     visibility: "public"
     clone_policy: "public_zero_auth"
     integration_branch: "develop"
+    ci_authority:
+      source: "github_actions"
+      delivery: "azure_pipelines"
+      automatic_azure_scope: "none"
+      supplemental_azure_scope: "self_hosted_gpu_or_delivery"
     build_systems:
       - "cargo"
       - "uv"
@@ -46,7 +62,7 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "x86_64-unknown-linux-gnu"
     local_acceptance_environment: "wsl2 / linux_container"
-    ci_acceptance_environment: "ubuntu-latest (Azure Pipelines)"
+    ci_acceptance_environment: "ubuntu-latest (GitHub Actions source); self-hosted GPU/runtime (Azure manual)"
     release_artifact_target: "x86_64-unknown-linux-gnu"
     secondary_targets: ["aarch64-unknown-linux-gnu"]
     ide:
@@ -73,8 +89,13 @@ repositories:
     path: "../Cyrene-Plugins-Official"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
     visibility: "private"
-    clone_policy: "public_zero_auth"
+    clone_policy: "external_auth_required"
     integration_branch: "develop"
+    ci_authority:
+      source: "azure_pipelines"
+      delivery: "azure_pipelines"
+      automatic_github_scope: "none"
+      manual_github_scope: "troubleshooting_fallback"
     build_systems:
       - "uv"
       - "dotnet"
@@ -86,7 +107,7 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "x86_64-unknown-linux-gnu"
     local_acceptance_environment: "wsl2 / linux_container / host"
-    ci_acceptance_environment: "ubuntu-latest"
+    ci_acceptance_environment: "ubuntu-latest (Azure Pipelines source/package)"
     release_artifact_target: "multi-platform"
     ide:
       python_root: "../Cyrene-Plugins-Official"
@@ -113,6 +134,11 @@ repositories:
     visibility: "public"
     clone_policy: "public_zero_auth"
     integration_branch: "develop"
+    ci_authority:
+      source: "github_actions"
+      delivery: "azure_pipelines"
+      automatic_azure_scope: "none"
+      supplemental_azure_scope: "self_hosted_gpu_or_delivery"
     build_systems:
       - "uv"
       - "cargo"
@@ -123,7 +149,7 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "x86_64-unknown-linux-gnu"
     local_acceptance_environment: "wsl2 / linux_container"
-    ci_acceptance_environment: "ubuntu-latest"
+    ci_acceptance_environment: "ubuntu-latest (GitHub Actions source); self-hosted GPU/runtime (Azure manual)"
     release_artifact_target: "x86_64-unknown-linux-gnu"
     ide:
       python_root: "../Services/Cyrene-Reactor"
@@ -146,6 +172,11 @@ repositories:
     visibility: "public"
     clone_policy: "public_zero_auth"
     integration_branch: "develop"
+    ci_authority:
+      source: "github_actions"
+      delivery: "azure_pipelines"
+      automatic_azure_scope: "none"
+      supplemental_azure_scope: "self_hosted_gpu_or_delivery"
     build_systems:
       - "uv"
     roles:
@@ -155,7 +186,7 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "x86_64-unknown-linux-gnu"
     local_acceptance_environment: "wsl2 / linux_container / host"
-    ci_acceptance_environment: "ubuntu-latest"
+    ci_acceptance_environment: "ubuntu-latest (GitHub Actions source); self-hosted GPU/runtime (Azure manual)"
     release_artifact_target: "py3-none-any"
     ide:
       python_root: "../Services/Cyrene-Yield"
@@ -175,6 +206,11 @@ repositories:
     visibility: "public"
     clone_policy: "public_zero_auth"
     integration_branch: "develop"
+    ci_authority:
+      source: "github_actions"
+      delivery: "azure_pipelines"
+      automatic_azure_scope: "none"
+      supplemental_azure_scope: "private_credentials_or_delivery"
     build_systems:
       - "uv"
       - "gradle"
@@ -185,7 +221,7 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "x86_64-unknown-linux-gnu"
     local_acceptance_environment: "wsl2 / linux_container / host"
-    ci_acceptance_environment: "ubuntu-latest"
+    ci_acceptance_environment: "ubuntu-latest (GitHub Actions source); Azure manual private integration/delivery"
     release_artifact_target: "multi-platform"
     ide:
       python_root: "../Services/Cyrene-Exchange"
@@ -212,6 +248,12 @@ repositories:
     roles:
       - "product-service"
       - "knowledge-catalyst"
+    ci_authority:
+      source: "github_actions"
+      delivery: "azure_pipelines"
+      automatic_azure_scope: "none"
+      supplemental_azure_scope: "private_credentials_or_delivery"
+    ci_acceptance_environment: "ubuntu-latest (GitHub Actions source; Azure manual delivery/integration)"
     development_hosts: ["windows", "linux"]
     canonical_runtime_os: "linux"
     canonical_build_target: "linux-x64"
@@ -226,6 +268,12 @@ repositories:
     roles:
       - "product-service"
       - "voice-synthesis"
+    ci_authority:
+      source: "github_actions"
+      delivery: "azure_pipelines"
+      automatic_azure_scope: "none"
+      supplemental_azure_scope: "private_credentials_or_delivery"
+    ci_acceptance_environment: "ubuntu-latest (GitHub Actions source; Azure manual delivery/integration)"
     development_hosts: ["windows", "linux"]
     canonical_runtime_os: "linux"
     canonical_build_target: "linux-x64"
@@ -240,6 +288,12 @@ repositories:
     roles:
       - "product-service"
       - "desktop-navigation"
+    ci_authority:
+      source: "github_actions"
+      delivery: "azure_pipelines"
+      automatic_azure_scope: "none"
+      supplemental_azure_scope: "private_credentials_or_delivery"
+    ci_acceptance_environment: "GitHub hosted source/desktop checks; Azure manual delivery/integration"
     development_hosts: ["windows", "macos", "linux"]
     canonical_runtime_os: "client-desktop"
     canonical_build_target: "multi-target"

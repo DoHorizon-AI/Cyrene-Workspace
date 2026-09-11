@@ -1,3 +1,5 @@
+# Workspace Azure is the authority for exact multi-repository acceptance.
+# Public repository source checks run in their own GitHub Actions workflows.
 name: $(Date:yyyyMMdd)$(Rev:.r)
 
 parameters:
@@ -109,7 +111,8 @@ jobs:
         "commit": "$(Build.SourceVersion)",
         "pipeline": "$(Build.DefinitionName)",
         "build_id": "$(Build.BuildId)",
-        "result": "PASS",
+        "result": "SCOPED_WORKSPACE_GATES_COMPLETED",
+        "scope": "product_contract_profile",
         "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
       }
       EOT
