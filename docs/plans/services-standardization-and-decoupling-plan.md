@@ -126,7 +126,7 @@ Yield 是训练生命周期 Product，不再是训练器或通用预检算法仓
 | Catalyst | `89338e3d527a947933cd2b0fdc24c3323f620244` | 18 tests；Ruff/format/mypy/OpenAPI/boundary PASS | run `34705592984`: 0-step failure |
 | Echo | `5119bd6f7c6d5a855bcff0a8aa8c78dd373a74a3` | 47 tests；Ruff/format/mypy/OpenAPI/boundary PASS | run `34705592965`: 0-step failure |
 | Navigator | unchanged in this extraction slice | existing Product/API adapter evidence retained | not reclassified by this slice |
-| Workspace | current task branch | Workspace checks recorded after final commit | pending final exact-SHA run |
+| Workspace | this document's task branch | 11 governance/boundary tests；Ruff/format；241 files/0 violations；YAML/JSON/XML structure PASS | automatic Azure job fails before steps because the organization has no free hosted minutes |
 
 Hosted runs terminated before checkout or test execution. They are `NOT_RUN / ACCOUNT_CAPACITY_BLOCKED`,
 not source PASS and not a source-code failure diagnosis. Because no hosted source gate passed, no draft PR was
