@@ -16,6 +16,26 @@ This meta-repository provides a unified, reproducible developer workspace config
   - **Rust**: Cargo workspaces (`Cyrene-Platform/Cargo.toml`, `Cyrene-Services/Cyrene-Reactor/Cargo.toml`)
   - **JVM / Kotlin**: Gradle Kotlin DSL with Java Toolchains (Java 21/25, Kotlin 2.0+)
 
+### Cross-project API naming constitution
+
+All Cyrene repositories share the canonical API vocabulary owned by
+Cyrene-Platform. Before adding or renaming a cross-repository API, read the
+[Cyrene API Naming Constitution](https://github.com/DoHorizon-AI/Cyrene-Platform/blob/develop/docs/governance/API_NAMING_CONSTITUTION.md).
+It is mandatory to preserve the semantic distinctions between
+`Acquire`/`Reserve`, `Start`/`Launch`, `Stop`/`Terminate`,
+`Watch`/`Subscribe`, and `State`/`Status`/`Phase` across Yield, Reactor,
+Exchange, Plugins, and the other Product repositories.
+
+Platform is the language source for shared terms. A repository must not add a
+local synonym for an existing Platform concept. Any deliberate domain-specific
+distinction must be documented in that repository and must not create a second
+authority. Breaking renames are permitted before the first public release; the
+Cyrene public API naming freeze begins with that release.
+
+所有 Cyrene 仓库共享由 Cyrene-Platform 维护的 API 统一词汇。跨仓库新增或
+重命名 API 前必须阅读上面的命名宪法；Yield、Reactor、Exchange、Plugins
+及其他 Product 仓库不得重新发明已有 Platform 术语或用本地同义词替代。
+
 ### Canonical Repository Inventory
 
 | Repository | Relative Path | Role & Technology |
