@@ -8,7 +8,7 @@ This record is the current CI topology for the Cyrene repositories. It separates
 
 1. Each repository has one automatic source and contract authority. The same source gate is not run automatically by both GitHub Actions and Azure Pipelines.
 2. Each repository declares one automatic source authority. GitHub Actions is the publication-target source authority; repository visibility alone does not select the provider.
-3. In this task, the eight live-public Platform/Product repositories use GitHub Actions for source and contract checks. Cyrene-Plugins-Official retains its existing declared authority and is excluded from this change.
+3. In this task, the eight live-public Cyrene repositories (Workspace, Platform, and Product) use GitHub Actions for source and contract checks. Cyrene-Plugins-Official retains its existing declared authority and is excluded from this change.
 4. For public repositories, a successful GitHub Actions push run builds the release payload exactly once and publishes an immutable artifact named with the repository slug and commit SHA. Its manifest records the repository, workflow run, commit, artifact name, and SHA-256 payload digests.
 5. Azure CD consumes only the explicitly selected GitHub Actions run artifact. It verifies the run's repository, completed/successful conclusion, head SHA, artifact identity, and manifest digests before promotion. Azure CD performs no checkout, build, or test.
 6. Azure also owns self-hosted GPU, private-credential, and exact multi-repository acceptance. These remain supplemental scopes for the live-public repositories; this task does not change the declared authority or scope of the excluded Plugins repository, and these lanes are not source CI.
@@ -17,7 +17,7 @@ This record is the current CI topology for the Cyrene repositories. It separates
 
 1. 每个仓库只有一个自动源码与契约验证权威；同一源码门禁不由 GitHub Actions 与 Azure Pipelines 自动重复执行。
 2. 每个仓库都声明一个自动源码权威；GitHub Actions 是发布目标的源码权威，不能仅凭仓库可见性推断 provider。
-3. 本轮 8 个 live-public Platform/Product 仓库的源码与契约检查使用 GitHub Actions。Cyrene-Plugins-Official 保持既有声明，本轮不修改。
+3. 本轮 8 个 live-public Cyrene 仓库（Workspace、Platform 与 Product）的源码与契约检查使用 GitHub Actions。Cyrene-Plugins-Official 保持既有声明，本轮不修改。
 4. 对公开仓库，GitHub Actions 成功的 push run 只构建一次发布载荷，并发布以仓库 slug 和 commit SHA 命名的不可变制品。制品 manifest 记录仓库、workflow run、commit、制品名和载荷 SHA-256 摘要。
 5. Azure CD 只消费显式选定的 GitHub Actions run 制品。提升前必须校验 run 的仓库、已完成且成功的结论、head SHA、制品身份与 manifest 摘要；Azure CD 不 checkout、不 build、不 test。
 6. 自托管 GPU、私有凭据和精确多仓验收也由 Azure 负责；对本轮 live-public 仓库它们是补充范围。被排除的 Plugins 仓库的既有权威与范围不在本轮变更内；这些 lane 都不属于源码 CI。
@@ -40,7 +40,7 @@ This record is the current CI topology for the Cyrene repositories. It separates
 
 The authoritative per-repository declaration is `repositories.yaml`. Its `ci_authority` block records the automatic source provider, the delivery provider, and the Azure scope kept outside the source gate.
 
-A live GitHub recheck on 2026-09-12 reported the eight Platform/Product repositories as public and Cyrene-Plugins-Official as private. This task intentionally excludes Plugins.
+A live GitHub recheck on 2026-09-12 reported the eight Cyrene repositories (Workspace, Platform, and Product) as public and Cyrene-Plugins-Official as private. This task intentionally excludes Plugins.
 
 各仓库的权威声明位于 `repositories.yaml`。其中的 `ci_authority` 记录自动源码 provider、交付 provider，以及不并入源码门禁的 Azure 范围。
 
