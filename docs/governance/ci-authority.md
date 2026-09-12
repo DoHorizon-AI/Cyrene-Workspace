@@ -8,19 +8,19 @@ This record is the current CI topology for the Cyrene repositories. It separates
 
 1. Each repository has one automatic source and contract authority. The same source gate is not run automatically by both GitHub Actions and Azure Pipelines.
 2. Each repository declares one automatic source authority. GitHub Actions is the publication-target source authority; repository visibility alone does not select the provider.
-3. Public repository source and contract checks use GitHub Actions. Private repository source and package checks use Azure Pipelines.
+3. In this task, the eight live-public Platform/Product repositories use GitHub Actions for source and contract checks. Cyrene-Plugins-Official retains its existing declared authority and is excluded from this change.
 4. For public repositories, a successful GitHub Actions push run builds the release payload exactly once and publishes an immutable artifact named with the repository slug and commit SHA. Its manifest records the repository, workflow run, commit, artifact name, and SHA-256 payload digests.
 5. Azure CD consumes only the explicitly selected GitHub Actions run artifact. It verifies the run's repository, completed/successful conclusion, head SHA, artifact identity, and manifest digests before promotion. Azure CD performs no checkout, build, or test.
-6. Azure also owns self-hosted GPU, private-credential, and exact multi-repository acceptance. These remain supplemental scopes for public repositories and required scopes for private repositories; they are not source CI.
+6. Azure also owns self-hosted GPU, private-credential, and exact multi-repository acceptance. These remain supplemental scopes for the live-public repositories; this task does not change the declared authority or scope of the excluded Plugins repository, and these lanes are not source CI.
 7. When Azure reports a result for a GitHub-hosted repository, its result must be published as a check for the same commit. A successful Azure run does not establish merge, ancestry, canonical read-back, or hardware acceptance by itself.
 8. Skipped, simulated, credential-blocked, and unrun work keeps its original state in evidence.
 
 1. 每个仓库只有一个自动源码与契约验证权威；同一源码门禁不由 GitHub Actions 与 Azure Pipelines 自动重复执行。
 2. 每个仓库都声明一个自动源码权威；GitHub Actions 是发布目标的源码权威，不能仅凭仓库可见性推断 provider。
-3. 公开仓库的源码与契约检查使用 GitHub Actions；私有仓库的源码与包检查使用 Azure Pipelines。
+3. 本轮 8 个 live-public Platform/Product 仓库的源码与契约检查使用 GitHub Actions。Cyrene-Plugins-Official 保持既有声明，本轮不修改。
 4. 对公开仓库，GitHub Actions 成功的 push run 只构建一次发布载荷，并发布以仓库 slug 和 commit SHA 命名的不可变制品。制品 manifest 记录仓库、workflow run、commit、制品名和载荷 SHA-256 摘要。
 5. Azure CD 只消费显式选定的 GitHub Actions run 制品。提升前必须校验 run 的仓库、已完成且成功的结论、head SHA、制品身份与 manifest 摘要；Azure CD 不 checkout、不 build、不 test。
-6. 自托管 GPU、私有凭据和精确多仓验收也由 Azure 负责。对公开仓库这是补充范围，对私有仓库这是必需范围；它们不属于源码 CI。
+6. 自托管 GPU、私有凭据和精确多仓验收也由 Azure 负责；对本轮 live-public 仓库它们是补充范围。被排除的 Plugins 仓库的既有权威与范围不在本轮变更内；这些 lane 都不属于源码 CI。
 7. Azure 为 GitHub 仓库回报结果时，必须以同一 commit 的 check 回写 GitHub。Azure 成功本身不代表 merge、祖先关系、canonical 回读或硬件验收已经完成。
 8. skipped、simulated、凭据阻塞和未运行工作在证据中保留原始状态。
 
@@ -29,7 +29,7 @@ This record is the current CI topology for the Cyrene repositories. It separates
 | Repository / 仓库 | Visibility / 可见性 | Automatic source authority / 自动源码权威 | Azure scope / Azure 范围 | GitHub role / GitHub 角色 |
 | --- | --- | --- | --- | --- |
 | `Cyrene-Platform` | public | GitHub Actions | Manual GPU/runtime and delivery acceptance | Required source, contract, and unit checks |
-| `Cyrene-Plugins-Official` | private | Azure Pipelines | Required source, catalog, package, and private integration checks | Manual troubleshooting fallback |
+| `Cyrene-Plugins-Official` | private (excluded this round) | GitHub Actions | Manual protected-resource and delivery acceptance | Required source, catalog, contract, and package checks |
 | `Cyrene-Reactor` | public | GitHub Actions | Manual self-hosted CUDA/runtime and delivery acceptance | Required source and product checks |
 | `Cyrene-Yield` | public | GitHub Actions | Manual self-hosted CUDA/runtime and delivery acceptance | Required source and product checks |
 | `Cyrene-Exchange` | public | GitHub Actions | Manual private integration and delivery validation | Required source and product checks |
@@ -52,7 +52,7 @@ Plugins 的 GitHub workflow 是自动源码权威，仅依赖本仓库执行契�
 
 Automatic Azure source triggers are disabled in repositories whose source authority is GitHub Actions. Their GitHub source workflows remain the merge authority and their successful push runs publish immutable artifacts consumed by the CD definition. Azure definitions remain available for explicit artifact promotion/handoff and for manual GPU, deployment, protected-credential, or integration evidence in supplemental definitions. Workspace's exact multi-repository acceptance remains supplemental; its CD definition performs only verified artifact handoff.
 
-公开 Platform 与 Product 仓库的 Azure 自动源码触发已关闭，GitHub 源码 workflow 继续作为 merge 权威。Azure definition 仍保留其中的手工 GPU、部署、私有凭据或集成范围。Workspace product-contract workflow 以及 Catalyst/Echo 的空操作 CI workflow 也改为仅手工回退。
+公开 Platform 与 Product 仓库的 Azure 自动源码触发已关闭，GitHub 源码 workflow 继续作为 merge 权威，其成功的 push run 发布由 CD definition 消费的不可变制品。Azure definition 仍用于显式制品提升/交接，以及 supplemental definition 中的手工 GPU、部署、私有凭据或集成范围。Workspace 的精确多仓验收仍是 supplemental；其 CD definition 只执行已验证制品交接。
 
 The Azure service connection, pipeline definition, branch policy, and GitHub status check are external operational settings. They still require live verification after each repository's configuration is promoted; this repository change does not claim that external status wiring is already accepted.
 
