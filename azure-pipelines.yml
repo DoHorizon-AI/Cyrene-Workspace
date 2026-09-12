@@ -57,6 +57,7 @@ trigger:
       - main
       - develop
       - feat/*
+      - fix/*
       - chore/*
       - docs/*
 

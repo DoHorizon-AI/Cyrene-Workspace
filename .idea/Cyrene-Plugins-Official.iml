@@ -11,6 +11,8 @@
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/providers/model-api-connector/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/agent-system/compatibility/python" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/gateway/python/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/training/llama-factory/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

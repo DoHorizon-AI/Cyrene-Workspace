@@ -41,8 +41,8 @@ All automated checks must report `[PASS]`.
    - In the Project view, verify each repository appears as an independent native project module:
      - `Cyrene-Platform` (Cargo workspace, Python SDKs)
      - `Cyrene-Plugins-Official` (Python plugins, .NET compat, Spring gateway)
-     - `Cyrene-Services/Cyrene-Reactor` (Python runtime, Rust scheduler)
-     - `Cyrene-Services/Cyrene-Yield` (Python training engine)
+     - `Cyrene-Services/Cyrene-Reactor` (Python Product runtime, Rust host-placement adapter)
+     - `Cyrene-Services/Cyrene-Yield` (training lifecycle Product and direct Plugin adapters)
      - `Cyrene-Services/Cyrene-Exchange` (Python transport, JVM coordinator)
      - `Cyrene-Services/Cyrene-Catalyst`, `Cyrene-Echo`, `Cyrene-Navigator`
    - *Note*: Workspace projects may initially appear inactive in IntelliJ IDEA. To activate an unloaded project: **Right-click project $\rightarrow$ Load '<project>'**.

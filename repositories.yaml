@@ -1,4 +1,4 @@
-version: "1.3.0"
+version: "1.4.0"
 workspace: "Cyrene"
 description: "Canonical multi-repository topology, runtime target manifest, and contract pointers for Cyrene developers"
 
@@ -28,8 +28,8 @@ global_policy:
     policy: "NONE (no canonical backend execution plane dependency)"
   ci_authority_policy:
     automatic_source_rule: "Exactly one provider owns automatic source and contract checks per repository."
-    public_source_authority: "github_actions"
-    private_source_authority: "azure_pipelines"
+    repository_declaration_rule: "Each repository ci_authority.source is authoritative; visibility alone does not select a provider."
+    publication_target_source_authority: "github_actions"
     azure_supplemental_scopes:
       - "deployment"
       - "self_hosted_gpu"
@@ -44,6 +44,7 @@ repositories:
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Platform.git"
     visibility: "public"
     clone_policy: "public_zero_auth"
+    default_branch: "main"
     integration_branch: "develop"
     ci_authority:
       source: "github_actions"
@@ -88,14 +89,17 @@ repositories:
   - name: "Cyrene-Plugins-Official"
     path: "../Cyrene-Plugins-Official"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git"
-    visibility: "private"
-    clone_policy: "external_auth_required"
+    # Desired publication policy. Live GitHub visibility remains private until
+    # the hosting setting is changed and read back independently.
+    visibility: "public"
+    clone_policy: "public_zero_auth"
+    default_branch: "main"
     integration_branch: "develop"
     ci_authority:
-      source: "azure_pipelines"
+      source: "github_actions"
       delivery: "azure_pipelines"
-      automatic_github_scope: "none"
-      manual_github_scope: "troubleshooting_fallback"
+      automatic_azure_scope: "none"
+      supplemental_azure_scope: "protected_resources_or_delivery"
     build_systems:
       - "uv"
       - "dotnet"
@@ -107,7 +111,7 @@ repositories:
     canonical_runtime_os: "linux"
     canonical_build_target: "x86_64-unknown-linux-gnu"
     local_acceptance_environment: "wsl2 / linux_container / host"
-    ci_acceptance_environment: "ubuntu-latest (Azure Pipelines source/package)"
+    ci_acceptance_environment: "ubuntu-latest (GitHub Actions source/package); protected resources/delivery (Azure manual)"
     release_artifact_target: "multi-platform"
     ide:
       python_root: "../Cyrene-Plugins-Official"
@@ -115,7 +119,12 @@ repositories:
     pointers:
       primary_source_roots:
         - "../Cyrene-Plugins-Official/plugins/agents"
+        - "../Cyrene-Plugins-Official/plugins/engines"
+        - "../Cyrene-Plugins-Official/plugins/evaluation"
+        - "../Cyrene-Plugins-Official/plugins/models"
+        - "../Cyrene-Plugins-Official/plugins/policy"
         - "../Cyrene-Plugins-Official/plugins/providers"
+        - "../Cyrene-Plugins-Official/plugins/tools"
         - "../Cyrene-Plugins-Official/plugins/training"
         - "../Cyrene-Plugins-Official/plugins/gateway/spring/billing/src"
         - "../Cyrene-Plugins-Official/plugins/gateway/spring/conversation/src"
@@ -123,7 +132,13 @@ repositories:
         - "../Cyrene-Plugins-Official/plugins/gateway/spring/tenant/src"
       test_roots:
         - "../Cyrene-Plugins-Official/plugins/agents/*/tests"
+        - "../Cyrene-Plugins-Official/plugins/engines/*/tests"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/*/tests"
+        - "../Cyrene-Plugins-Official/plugins/models/*/tests"
+        - "../Cyrene-Plugins-Official/plugins/policy/*/tests"
         - "../Cyrene-Plugins-Official/plugins/providers/*/tests"
+        - "../Cyrene-Plugins-Official/plugins/tools/*/tests"
+        - "../Cyrene-Plugins-Official/plugins/training/*/tests"
       developer_commands:
         test: "uv run pytest"
         build: "./gradlew build"
@@ -131,8 +146,9 @@ repositories:
   - name: "Cyrene-Reactor"
     path: "../Cyrene-Services/Cyrene-Reactor"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Reactor.git"
-    visibility: "public"
-    clone_policy: "public_zero_auth"
+    visibility: "private"
+    clone_policy: "private_token_auth"
+    default_branch: "main"
     integration_branch: "develop"
     ci_authority:
       source: "github_actions"
@@ -158,7 +174,7 @@ repositories:
       primary_source_roots:
         - "../Cyrene-Services/Cyrene-Reactor/runtime/core/src"
         - "../Cyrene-Services/Cyrene-Reactor/runtime/pro/src"
-        - "../Cyrene-Services/Cyrene-Reactor/components/scheduler-rs/src"
+        - "../Cyrene-Services/Cyrene-Reactor/components/host-placement/src"
       test_roots:
         - "../Cyrene-Services/Cyrene-Reactor/runtime/core/tests"
         - "../Cyrene-Services/Cyrene-Reactor/runtime/pro/tests"
@@ -169,8 +185,9 @@ repositories:
   - name: "Cyrene-Yield"
     path: "../Cyrene-Services/Cyrene-Yield"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Yield.git"
-    visibility: "public"
-    clone_policy: "public_zero_auth"
+    visibility: "private"
+    clone_policy: "private_token_auth"
+    default_branch: "main"
     integration_branch: "develop"
     ci_authority:
       source: "github_actions"
@@ -179,7 +196,6 @@ repositories:
       supplemental_azure_scope: "self_hosted_gpu_or_delivery"
     build_systems:
       - "uv"
-      - "gradle"
     roles:
       - "product-service"
       - "model-training"
@@ -194,18 +210,18 @@ repositories:
     pointers:
       primary_source_roots:
         - "../Cyrene-Services/Cyrene-Yield/training/core/src"
-        - "../Cyrene-Services/Cyrene-Yield/migration/jvm-product-control-plane"
       test_roots:
         - "../Cyrene-Services/Cyrene-Yield/training/core/tests"
       developer_commands:
-        test: "uv run pytest training/core/tests ; gradle -p migration/jvm-product-control-plane test"
+        test: "uv run pytest training/core/tests"
         build: "uv build"
 
   - name: "Cyrene-Exchange"
     path: "../Cyrene-Services/Cyrene-Exchange"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"
-    visibility: "public"
-    clone_policy: "public_zero_auth"
+    visibility: "private"
+    clone_policy: "private_token_auth"
+    default_branch: "main"
     integration_branch: "develop"
     ci_authority:
       source: "github_actions"
@@ -242,8 +258,9 @@ repositories:
   - name: "Cyrene-Catalyst"
     path: "../Cyrene-Services/Cyrene-Catalyst"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"
-    visibility: "public"
-    clone_policy: "public_zero_auth"
+    visibility: "private"
+    clone_policy: "private_token_auth"
+    default_branch: "main"
     integration_branch: "develop"
     build_systems:
       - "uv"
@@ -273,14 +290,15 @@ repositories:
   - name: "Cyrene-Echo"
     path: "../Cyrene-Services/Cyrene-Echo"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Echo.git"
-    visibility: "public"
-    clone_policy: "public_zero_auth"
+    visibility: "private"
+    clone_policy: "private_token_auth"
+    default_branch: "main"
     integration_branch: "develop"
     build_systems:
       - "uv"
     roles:
       - "product-service"
-      - "voice-synthesis"
+      - "model-evaluation"
     ci_authority:
       source: "github_actions"
       delivery: "azure_pipelines"
@@ -304,8 +322,9 @@ repositories:
   - name: "Cyrene-Navigator"
     path: "../Cyrene-Services/Cyrene-Navigator"
     canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"
-    visibility: "public"
-    clone_policy: "public_zero_auth"
+    visibility: "private"
+    clone_policy: "private_token_auth"
+    default_branch: "main"
     integration_branch: "develop"
     build_systems:
       - "uv"

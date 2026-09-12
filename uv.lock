@@ -275,12 +275,12 @@ wheels = [
 [[package]]
 name = "cyrene-artifacts"
 version = "0.1.0"
-source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=c44782320db933a5328c8ccf32c4c830563b2cf6#c44782320db933a5328c8ccf32c4c830563b2cf6" }
+source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=c59be6f2bd82489fbe933dadff84fc589e00afd9#c59be6f2bd82489fbe933dadff84fc589e00afd9" }
 
 [[package]]
 name = "cyrene-preflight"
 version = "0.1.0"
-source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=c44782320db933a5328c8ccf32c4c830563b2cf6#c44782320db933a5328c8ccf32c4c830563b2cf6" }
+source = { git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=c59be6f2bd82489fbe933dadff84fc589e00afd9#c59be6f2bd82489fbe933dadff84fc589e00afd9" }
 
 [[package]]
 name = "cyrene-workspace"
@@ -316,8 +316,8 @@ text-lifecycle = [
 [package.metadata.requires-dev]
 text-lifecycle = [
     { name = "cryptography", specifier = "==50.0.1" },
-    { name = "cyrene-artifacts", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=c44782320db933a5328c8ccf32c4c830563b2cf6" },
-    { name = "cyrene-preflight", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=c44782320db933a5328c8ccf32c4c830563b2cf6" },
+    { name = "cyrene-artifacts", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=c59be6f2bd82489fbe933dadff84fc589e00afd9" },
+    { name = "cyrene-preflight", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=c59be6f2bd82489fbe933dadff84fc589e00afd9" },
     { name = "duckdb", specifier = "==1.5.5" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "grpcio", specifier = "==1.83.0" },

@@ -150,7 +150,7 @@ repositories:
       release-managers: "maintain"
 
   - name: "Cyrene-Echo"
-    description: "Cyrene Echo: Voice Synthesis & Audio Processing Service"
+    description: "Cyrene Echo: Model Evaluation & Performance Analysis Product"
     team_permissions:
       developers: "push"
       service-maintainers: "maintain"

@@ -85,8 +85,32 @@ def test_authority_matrix_has_zero_duplicate_definitions() -> None:
         "DoHorizon-AI/Cyrene-Plugins-Official"
     )
     assert by_id["model.provider.v1"]["canonicalOwner"] == ("DoHorizon-AI/Cyrene-Plugins-Official")
-    assert by_id["data.processor.v1"]["canonicalOwner"] == "NONE"
-    assert by_id["evaluation.runner.v1"]["canonicalOwner"] == "NONE"
+    plugin_owned_ids = {
+        "compatibility.evaluator.v1",
+        "dataset.preparation.v1",
+        "evaluation.runner.v1",
+        "execution.engine.v1",
+        "gateway.cache.v1",
+        "model.analyzer.v1",
+        "model.provider.v1",
+        "model.routing.v1",
+        "tool.dataset.validator.v1",
+        "training.llama-factory.v1",
+    }
+    assert {
+        item["id"]
+        for item in concepts
+        if item["canonicalOwner"] == "DoHorizon-AI/Cyrene-Plugins-Official"
+    } == plugin_owned_ids
+    assert {item["id"] for item in concepts if item["status"] == "IMPLEMENTED_CANDIDATE"} == {
+        "compatibility.evaluator.v1",
+        "dataset.preparation.v1",
+        "evaluation.runner.v1",
+        "execution.engine.v1",
+        "model.analyzer.v1",
+        "tool.dataset.validator.v1",
+        "training.llama-factory.v1",
+    }
     migrating_ids = {"model.routing.v1"}
     assert {
         item["id"] for item in concepts if item["status"] == "MIGRATING_COMPATIBILITY"

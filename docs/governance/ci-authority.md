@@ -7,7 +7,7 @@ This record is the current CI topology for the Cyrene repositories. It separates
 ## Rules / 规则
 
 1. Each repository has one automatic source and contract authority. The same source gate is not run automatically by both GitHub Actions and Azure Pipelines.
-2. Public repository source and contract checks use GitHub Actions. Private repository source and package checks use Azure Pipelines.
+2. Each repository declares one automatic source authority. GitHub Actions is the publication-target source authority; repository visibility alone does not select the provider.
 3. Azure owns delivery, deployment, self-hosted GPU, private-credential, and exact multi-repository acceptance. These are supplemental scopes for public repositories and the required scopes for private repositories.
 4. When Azure validates a GitHub-hosted repository, its result must be published as a check for the same commit. A successful Azure run does not establish merge, ancestry, canonical read-back, or hardware acceptance by itself.
 5. Skipped, simulated, credential-blocked, and unrun work keeps its original state in evidence.
@@ -23,26 +23,30 @@ This record is the current CI topology for the Cyrene repositories. It separates
 | Repository / 仓库 | Visibility / 可见性 | Automatic source authority / 自动源码权威 | Azure scope / Azure 范围 | GitHub role / GitHub 角色 |
 | --- | --- | --- | --- | --- |
 | `Cyrene-Platform` | public | GitHub Actions | Manual GPU/runtime and delivery acceptance | Required source, contract, and unit checks |
-| `Cyrene-Plugins-Official` | private | Azure Pipelines | Required source, catalog, package, and private integration checks | Manual troubleshooting fallback |
-| `Cyrene-Reactor` | public | GitHub Actions | Manual self-hosted CUDA/runtime and delivery acceptance | Required source and product checks |
-| `Cyrene-Yield` | public | GitHub Actions | Manual self-hosted CUDA/runtime and delivery acceptance | Required source and product checks |
-| `Cyrene-Exchange` | public | GitHub Actions | Manual private integration and delivery validation | Required source and product checks |
-| `Cyrene-Catalyst` | public | GitHub Actions | Manual private integration and delivery validation | Required source and product checks |
-| `Cyrene-Echo` | public | GitHub Actions | Manual private integration and delivery validation | Required source and product checks |
-| `Cyrene-Navigator` | public | GitHub Actions | Manual private integration and delivery validation | Required source, desktop, and product checks |
-| `Cyrene-Workspace` | meta-workspace | Azure Pipelines | Exact multi-repository and full lifecycle acceptance | Manual product-contract fallback |
+| `Cyrene-Plugins-Official` | public target; remote currently private | GitHub Actions | Manual protected-resource and delivery acceptance | Required source, catalog, contract, and package checks |
+| `Cyrene-Reactor` | private | GitHub Actions | Manual self-hosted CUDA/runtime and delivery acceptance | Required source and product checks |
+| `Cyrene-Yield` | private | GitHub Actions | Manual self-hosted CUDA/runtime and delivery acceptance | Required source and product checks |
+| `Cyrene-Exchange` | private | GitHub Actions | Manual private integration and delivery validation | Required source and product checks |
+| `Cyrene-Catalyst` | private | GitHub Actions | Manual private integration and delivery validation | Required source and product checks |
+| `Cyrene-Echo` | private | GitHub Actions | Manual private integration and delivery validation | Required source and product checks |
+| `Cyrene-Navigator` | private | GitHub Actions | Manual private integration and delivery validation | Required source, desktop, and product checks |
+| `Cyrene-Workspace` | private (meta) | Azure Pipelines | Exact multi-repository and full lifecycle acceptance | Manual product-contract fallback |
 
 The authoritative per-repository declaration is `repositories.yaml`. Its `ci_authority` block records the automatic source provider, the delivery provider, and the Azure scope kept outside the source gate.
+
+The Plugins visibility value is the publication target. A live GitHub read on
+2026-09-12 still reported `PRIVATE`; publication and post-change read-back are
+separate remote operations and have not been performed by this candidate.
 
 各仓库的权威声明位于 `repositories.yaml`。其中的 `ci_authority` 记录自动源码 provider、交付 provider，以及不并入源码门禁的 Azure 范围。
 
 ## Current cleanup / 当前清理
 
-The Plugins Azure pipeline now classifies the diff before starting source jobs. Plugin, provider, connector, dependency, contract, test, and CI changes select their relevant gates; lockfiles, pipeline definitions, contracts, SDKs, tests, and CI tooling force all source gates. Its GitHub workflows are manual-only fallbacks.
+The Plugins GitHub workflow is the automatic source authority and runs repository-local contract, catalog, SDK, implementation, and package gates without private checkouts. Its Azure pipeline is manual-only for supplemental protected-resource or delivery evidence.
 
-Plugins 的 Azure pipeline 会先分类 diff，再启动源码 job。插件、provider、connector、依赖、契约、测试和 CI 变更只选择对应门禁；lockfile、pipeline 定义、契约、SDK、测试和 CI tooling 变更强制执行全部源码门禁。Plugins 的 GitHub workflow 仅保留手工回退。
+Plugins 的 GitHub workflow 是自动源码权威，仅依赖本仓库执行契约、目录、SDK、实现和打包门禁；Azure pipeline 改为手工补充受保护资源或交付证据。
 
-The automatic Azure source triggers for the public Platform and Product repositories are disabled. Their GitHub source workflows remain the merge authority. Azure definitions remain available for the manual GPU, deployment, private-credential, or integration scopes they contain. The Workspace product-contract workflow and the no-op Catalyst/Echo CI workflows are also manual-only fallbacks.
+Automatic Azure source triggers are disabled in repositories whose source authority is GitHub Actions. Their Azure definitions remain available only for manual GPU, deployment, protected-credential, or integration evidence. Workspace keeps Azure as its automatic multi-repository authority; its GitHub product-contract workflow is a manual fallback.
 
 公开 Platform 与 Product 仓库的 Azure 自动源码触发已关闭，GitHub 源码 workflow 继续作为 merge 权威。Azure definition 仍保留其中的手工 GPU、部署、私有凭据或集成范围。Workspace product-contract workflow 以及 Catalyst/Echo 的空操作 CI workflow 也改为仅手工回退。
 

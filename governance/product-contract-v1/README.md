@@ -1,17 +1,17 @@
 # Cyrene Product contract v1 integration profile
 
-Status: historical Alpha Product registry with a 2026-09-08 boundary candidate
-overlay. Merged Product SHAs remain in `product-contracts-v1.json`; candidate
-Platform and Plugins contract SHAs are in `contract-authorities-v1.json`.
-Canonical promotion is tracked in
-`docs/platform-plugin-direct-boundary-remediation-2026-09-08.md`.
+Status: historical Alpha Product registry with a 2026-09-12 extraction overlay.
+Historical Alpha Product SHAs remain in `product-contracts-v1.json`; exact Platform and
+Plugins contract SHAs are in `contract-authorities-v1.json`. Canonical promotion
+is tracked in `docs/plans/services-standardization-and-decoupling-plan.md`.
 
 The 2026-09-08 clean-boundary follow-up removes capability payload authority
 from Platform. Products obtain generic lifecycle and connection facts from
-Platform, then call Plugins-owned contracts directly. `model.routing.v1` is a
-Plugins migration snapshot; `execution.engine.v1` and `model.provider.v1` are
-Plugins-owned contracts. The old `serving.engine.v1` and `training.engine.v1`
-Platform surfaces are retired rather than copied.
+Platform, then call Plugins-owned contracts directly. `model.routing.v1` remains
+a Plugins migration snapshot. Execution, model provider, dataset preparation,
+training, reusable preflight, and evaluation contracts now have Plugins-owned
+implementations. The old `serving.engine.v1` and `training.engine.v1` Platform
+surfaces are retired rather than copied.
 
 This profile records compatibility and ownership across Product repositories. It
 does not move any Product resource authority into Cyrene-Workspace. Every
@@ -30,12 +30,12 @@ Navigator 的 V1 边界演进见上述文档；下表保留 Alpha 历史事实�
 
 | Product | Durable authority | Replaceable engine/runtime seam | Explicit non-ownership | MVP evidence |
 |---|---|---|---|---|
-| Catalyst | `Dataset`, immutable `DatasetVersion`, lineage | local `DataProcessingPort`; remote `data.processor.v1` contract remains unassigned | Artifact bytes, Kernel operations, plugin/provider identity | `REFERENCE_MVP_READY` |
-| Echo | `EvaluationSuite`, `EvaluationRun`, `EvaluationResult`, `GateDecision` | local `EvaluationExecutionPort`; remote `evaluation.runner.v1` contract remains unassigned | Evaluator process state, Artifact bytes, provider identity | `REFERENCE_MVP_READY` |
+| Catalyst | `Dataset`, immutable `DatasetVersion`, lineage | Product port directly consumes Plugins-owned `dataset.preparation.v1` | Artifact bytes, Kernel operations, plugin/provider identity | `PLUGIN_CUTOVER_CANDIDATE` |
+| Echo | `EvaluationSuite`, `EvaluationRun`, `EvaluationResult`, `GateDecision` | Product port directly consumes Plugins-owned `evaluation.runner.v1` | Evaluator process state, Artifact bytes, provider identity | `PLUGIN_CUTOVER_CANDIDATE` |
 | Reactor | `Deployment` desired/observed state and distinct `Endpoint` | local `ServingExecutionPort` directly consumes Plugins-owned `execution.engine.v1` | Kernel/Node Agent authority, runtime evidence, model bytes, route policy | `REFERENCE_MVP_READY` |
 | Exchange | external `GatewayEndpoint`, `GatewayRoute`, request/fallback policy | Plugins-owned `model.provider.v1`; migrating Plugins `model.routing.v1` snapshot | Reactor Deployment, provider/package identity, secret values | `REFERENCE_MVP_READY` |
 | Navigator | ephemeral `WorkspaceSnapshot` presentation contract only | Navigator-local `ProductReadPort` | Every Product lifecycle, mutation authority, server-side source of truth | `HEADLESS_MVP_READY` |
-| Yield | `TrainingRun`, `TrainingAttempt`, retry/cancellation/output lineage and `ModelVersion` | local `TrainingEngineAdapter`; direct owner-scoped Plugin contracts | Kernel/runtime evidence, trainer process state, Artifact bytes | `CONTRACT_CANDIDATE_READY` |
+| Yield | `TrainingRun`, `TrainingAttempt`, retry/cancellation/output lineage and `ModelVersion` | direct owner-scoped trainer, analyzer, compatibility, and dataset-validator Plugin contracts | Kernel/runtime evidence, trainer process state, Artifact bytes | `PLUGIN_CUTOVER_CANDIDATE` |
 
 ## Cross-product happy path
 
@@ -111,13 +111,13 @@ current resource and tolerate a newer version than the notification.
 
 ## OSS selection and license due diligence
 
-All selected or deferred candidates are permissively licensed. The actual root
-license/NOTICE file was read at the exact tag, and the abbreviated SHA-256 below
-is the content evidence captured during review.
+Selected dependencies retain their own licenses. Public repository visibility
+does not replace component-level license review or create a repository-wide
+relicensing grant.
 
 | Dependency or target | Exact release / commit | Root evidence | Actual status |
 |---|---|---|---|
-| DuckDB | `v1.5.5` / `d8cdaa33fda8df955cc76ef58a280f68f4cd43fa` | `LICENSE`, MIT, `7e17fd31249fa875` | **Selected**, Catalyst embedded adapter; contract remains engine-neutral |
+| DuckDB | `v1.5.5` / `d8cdaa33fda8df955cc76ef58a280f68f4cd43fa` | `LICENSE`, MIT, `7e17fd31249fa875` | **Selected**, Plugins dataset-preparation implementation; Product contract remains engine-neutral |
 | Inspect AI | `0.3.261` / `f9186b4e2f34ca81f192ae2c08535c24b7e8f356` | `LICENSE`, MIT, `c593c2afc8138852` | **FUTURE ADAPTER TARGET**, not a current Echo dependency |
 | vLLM | `v0.28.0` / `2cf0a6915ce544dc493a0990f2ea38d81601128a` | `LICENSE`, Apache-2.0, `c71d239df91726fc` | **FUTURE ADAPTER TARGET** for this Product branch; no GPU/runtime acceptance |
 | KServe | `v0.20.0` / `1fb781055dd1567164358233e1125142ca6ef1fe` | `LICENSE`, Apache-2.0, `c71d239df91726fc` | **FUTURE ADAPTER TARGET**, not embedded or current runtime authority |

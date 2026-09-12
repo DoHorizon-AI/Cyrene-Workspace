@@ -7,7 +7,8 @@ Cyrene organizes functional capabilities into specialized, decoupled product rep
 ## 1. Cyrene-Catalyst (Data Engineering & Curation)
 - **Repo**: `DoHorizon-AI/Cyrene-Catalyst`
 - **Primary Responsibility**:
-  - Raw dataset ingestion, cleaning, tokenization, and schema validation.
+  - Owns dataset intake, mapping intent, review, lineage, and publication workflows.
+  - Calls Plugins-owned preparation implementations for parsing, normalization, deduplication, splitting, and conversion.
   - Generates immutable `DatasetVersion` artifacts.
   - Enforces dataset provenance, licensing compliance, and minimal representative samples in public repositories.
 - **Key Schemas / Artifacts**:
@@ -18,7 +19,8 @@ Cyrene organizes functional capabilities into specialized, decoupled product rep
 ## 2. Cyrene-Yield (Training & Fine-Tuning Engine)
 - **Repo**: `DoHorizon-AI/Cyrene-Yield`
 - **Primary Responsibility**:
-  - Executes distributed training runs, LoRA adaptation, and full fine-tuning.
+  - Owns training drafts, runs, attempts, retry/cancel policy, checkpoints, results, and handoffs.
+  - Calls Plugins-owned trainers and reusable dataset/model preflight capabilities through resolved endpoints.
   - Consumes `DatasetVersion` from Catalyst.
   - **Single Authority** for creating, hashing, and persisting canonical `ModelVersion` artifacts (`model-version://sha256/<hash>`).
 - **Key Schemas / Artifacts**:
@@ -30,8 +32,8 @@ Cyrene organizes functional capabilities into specialized, decoupled product rep
 ## 3. Cyrene-Reactor (Inference Serving Engine)
 - **Repo**: `DoHorizon-AI/Cyrene-Reactor`
 - **Primary Responsibility**:
-  - Production inference serving with optimized execution backends; engine implementations are Plugins-owned.
-  - High-performance Rust core (`cy_exec`, `cy_exec_pro`) with Python integration layer.
+  - Owns serving deployments, endpoint readiness, request admission, streaming, drain, and model-residency policy.
+  - Calls Plugins-owned optimized execution engines; the retained Rust component is a thin Platform host-placement adapter.
   - Model deployment selection based on verified `ModelVersion` manifests.
 - **Key Interfaces**:
   - OpenAI-compatible `/v1/chat/completions` and `/v1/completions`.
@@ -43,7 +45,7 @@ Cyrene organizes functional capabilities into specialized, decoupled product rep
 - **Repo**: `DoHorizon-AI/Cyrene-Exchange`
 - **Primary Responsibility**:
   - Unified entry point for API traffic, client routing, and policy enforcement.
-  - Complete multi-tenant domain models: API key management, quota tracking, billing records, and audit logging.
+  - Multi-tenant API key, quota, usage, route/fallback, and audit authority; invoicing and payments remain outside the Product.
   - Load balancing across multiple Reactor serving instances.
 - **Domain Modules**:
   - `cyrene_exchange.governance` (`APIKey`, `TenantQuota`, `UsageRecord`, `BillingRecord`, `AuditLog`).
@@ -63,6 +65,7 @@ Cyrene organizes functional capabilities into specialized, decoupled product rep
 - **Repo**: `DoHorizon-AI/Cyrene-Echo`
 - **Primary Responsibility**:
   - Collects user ratings, corrections, and execution feedback from Navigator sessions.
-  - Computes evaluation metrics (perplexity, coherence, safety guardrails, token efficiency).
+  - Owns evaluation suites, runs, quality gates, annotations, and feedback-set lifecycle.
+  - Calls Plugins-owned evaluator implementations to compute reusable measurements.
   - Stores canonical analytical models (`SessionTokenUsage`, `SessionCost`, `ContextBreakdown`, `CapabilityDowngradeDisplay`).
   - Exports validated insights to Catalyst for dataset reinforcement loops.

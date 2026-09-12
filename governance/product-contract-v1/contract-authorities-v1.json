@@ -1,12 +1,15 @@
 {
   "schemaVersion": 1,
-  "platformContractCommit": "c44782320db933a5328c8ccf32c4c830563b2cf6",
+  "platformContractCommit": "c59be6f2bd82489fbe933dadff84fc589e00afd9",
   "concepts": [
     {
-      "id": "data.processor.v1",
-      "canonicalOwner": "NONE",
-      "canonicalPaths": [],
-      "status": "CONTRACT_CANDIDATE_UNASSIGNED",
+      "id": "dataset.preparation.v1",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "canonicalPaths": [
+        "plugins/tools/dataset-preparation/contracts/v1/schema.json",
+        "contracts/capabilities.yaml"
+      ],
+      "status": "IMPLEMENTED_CANDIDATE",
       "consumers": [
         "catalyst"
       ],
@@ -15,11 +18,70 @@
     },
     {
       "id": "evaluation.runner.v1",
-      "canonicalOwner": "NONE",
-      "canonicalPaths": [],
-      "status": "CONTRACT_CANDIDATE_UNASSIGNED",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "canonicalPaths": [
+        "plugins/evaluation/exact-match/contracts/v1/schema.json",
+        "contracts/capabilities.yaml"
+      ],
+      "status": "IMPLEMENTED_CANDIDATE",
       "consumers": [
         "echo"
+      ],
+      "duplicateDefinitionCount": 0,
+      "generatedSourceCount": 0
+    },
+    {
+      "id": "model.analyzer.v1",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "canonicalPaths": [
+        "plugins/models/hf-model-analyzer/contracts/v1/schema.json",
+        "contracts/capabilities.yaml"
+      ],
+      "status": "IMPLEMENTED_CANDIDATE",
+      "consumers": [
+        "yield"
+      ],
+      "duplicateDefinitionCount": 0,
+      "generatedSourceCount": 0
+    },
+    {
+      "id": "compatibility.evaluator.v1",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "canonicalPaths": [
+        "plugins/policy/compat-rules/contracts/v1/schema.json",
+        "contracts/capabilities.yaml"
+      ],
+      "status": "IMPLEMENTED_CANDIDATE",
+      "consumers": [
+        "yield"
+      ],
+      "duplicateDefinitionCount": 0,
+      "generatedSourceCount": 0
+    },
+    {
+      "id": "tool.dataset.validator.v1",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "canonicalPaths": [
+        "plugins/tools/dataset-validator/contracts/v1/schema.json",
+        "contracts/capabilities.yaml"
+      ],
+      "status": "IMPLEMENTED_CANDIDATE",
+      "consumers": [
+        "yield"
+      ],
+      "duplicateDefinitionCount": 0,
+      "generatedSourceCount": 0
+    },
+    {
+      "id": "training.llama-factory.v1",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "canonicalPaths": [
+        "plugins/training/llama-factory/contracts/v1/schema.json",
+        "contracts/capabilities.yaml"
+      ],
+      "status": "IMPLEMENTED_CANDIDATE",
+      "consumers": [
+        "yield"
       ],
       "duplicateDefinitionCount": 0,
       "generatedSourceCount": 0
@@ -29,6 +91,20 @@
       "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
       "canonicalPaths": [
         "contracts/proto/cyrene/model/provider/v1/model_provider.proto",
+        "contracts/capabilities.yaml"
+      ],
+      "status": "IMPLEMENTED_STABLE",
+      "consumers": [
+        "exchange"
+      ],
+      "duplicateDefinitionCount": 0,
+      "generatedSourceCount": 0
+    },
+    {
+      "id": "gateway.cache.v1",
+      "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "canonicalPaths": [
+        "plugins/gateway/spring/prompt-cache/contracts/v1/schema.json",
         "contracts/capabilities.yaml"
       ],
       "status": "IMPLEMENTED_STABLE",
@@ -56,10 +132,10 @@
       "id": "execution.engine.v1",
       "canonicalOwner": "DoHorizon-AI/Cyrene-Plugins-Official",
       "canonicalPaths": [
-        "plugins/engines/tensorrt-llm/contracts/v1/schema.json",
+        "plugins/engines/contracts/v1/schema.json",
         "contracts/capabilities.yaml"
       ],
-      "status": "IMPLEMENTED_STABLE",
+      "status": "IMPLEMENTED_CANDIDATE",
       "consumers": [
         "reactor"
       ],
@@ -167,5 +243,5 @@
       "generatedSourceCount": 0
     }
   ],
-  "pluginsContractCommit": "a019cc37cab39ffafe30884a4a0427aaaadf69a9"
+  "pluginsContractCommit": "c3f75689ebb10b2e07b3816310e768d74ae6cc10"
 }

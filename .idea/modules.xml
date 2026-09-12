@@ -11,6 +11,9 @@
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Reactor.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Reactor.iml" />
       <module fileurl="file://$PROJECT_DIR$/Cyrene-Workspace.iml" filepath="$PROJECT_DIR$/Cyrene-Workspace.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/Cyrene-Yield.iml" filepath="$PROJECT_DIR$/.idea/Cyrene-Yield.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.main.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.test.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-exchange-coordinator.test.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/cyrene-spring-gateways.iml" filepath="$PROJECT_DIR$/.idea/modules/cyrene-spring-gateways.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.iml" filepath="$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.main.iml" filepath="$PROJECT_DIR$/.idea/modules/billing/cyrene-spring-gateways.billing.main.iml" />

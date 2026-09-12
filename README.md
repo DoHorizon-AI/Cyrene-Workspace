@@ -41,8 +41,8 @@ Cyrene public API naming freeze begins with that release.
 | Repository | Relative Path | Role & Technology |
 | :--- | :--- | :--- |
 | `Cyrene-Platform` | `../Cyrene-Platform` | Core platform kernel, native sys/nvidia runtime adapters, execution engine, and Python SDK (Pure Rust + Python baseline; decoupled from product control-planes per PR #41) |
-| `Cyrene-Plugins-Official` | `../Cyrene-Plugins-Official` | Official connectors, extensions, media processors, and gateway spring integrations |
-| `Cyrene-Reactor` | `../Cyrene-Services/Cyrene-Reactor` | High-throughput inference runtime service (Python + Rust scheduler) |
+| `Cyrene-Plugins-Official` | `../Cyrene-Plugins-Official` | Public-target capability contracts, SDKs, TCKs, and replaceable implementations |
+| `Cyrene-Reactor` | `../Cyrene-Services/Cyrene-Reactor` | Inference deployment/endpoint Product and direct execution-engine consumer |
 | `Cyrene-Yield` | `../Cyrene-Services/Cyrene-Yield` | Distributed training orchestration and sole authority for `ModelVersion` |
 | `Cyrene-Exchange` | `../Cyrene-Services/Cyrene-Exchange` | Service exchange gateway, dispatch contracts, and backend coordinator |
 | `Cyrene-Catalyst` | `../Cyrene-Services/Cyrene-Catalyst` | Dataset curation and sole authority for `DatasetVersion` |

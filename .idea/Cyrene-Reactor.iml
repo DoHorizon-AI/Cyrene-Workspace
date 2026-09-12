@@ -7,7 +7,7 @@
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Reactor/runtime/core/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Reactor/runtime/pro/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Reactor/runtime/pro/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Reactor/components/scheduler-rs/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Reactor/components/host-placement/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Reactor/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Reactor/target" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Reactor/product/.venv" />
