@@ -30,6 +30,9 @@ global_policy:
     automatic_source_rule: "Exactly one provider owns automatic source and contract checks per repository."
     repository_declaration_rule: "Each repository ci_authority.source is authoritative; visibility alone does not select a provider."
     publication_target_source_authority: "github_actions"
+    artifact_build_rule: "GitHub Actions builds the public release payload once on a successful push and publishes an immutable commit-SHA artifact with a manifest and SHA-256 payload digests."
+    azure_delivery_rule: "Azure Pipelines CD consumes only the explicitly selected successful GitHub Actions run artifact, verifies repository, conclusion, commit SHA, and manifest digests, then performs delivery or an explicit verified handoff without checkout, build, or test."
+    artifact_retention: "GitHub Actions artifacts retain for 30 days; Azure CD requires githubArtifactReadToken with Actions: read access."
     azure_supplemental_scopes:
       - "deployment"
       - "self_hosted_gpu"

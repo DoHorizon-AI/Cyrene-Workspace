@@ -1,0 +1,182 @@
+# Workspace supplemental Azure lane for exact multi-repository acceptance.
+# This lane is intentionally separate from azure-pipelines.yml (CD) and is not
+# the automatic source/contract CI authority. GitHub Actions owns those checks.
+name: $(Date:yyyyMMdd)$(Rev:.r)
+
+parameters:
+- name: githubServiceConnection
+  type: string
+  default: DoHorizon-AI
+- name: runFullAcceptance
+  displayName: 'Provision RTX 4080 Runtime for Independent Full Lifecycle Acceptance'
+  type: boolean
+  default: false
+- name: acceptancePoolName
+  displayName: 'Self-Hosted Agent Pool Name'
+  type: string
+  default: 'Default'
+resources:
+  repositories:
+  - repository: platform
+    type: github
+    name: DoHorizon-AI/Cyrene-Platform
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: refs/heads/main
+  - repository: catalyst
+    type: github
+    name: DoHorizon-AI/Cyrene-Catalyst
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: refs/heads/main
+  - repository: yield
+    type: github
+    name: DoHorizon-AI/Cyrene-Yield
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: refs/heads/main
+  - repository: reactor
+    type: github
+    name: DoHorizon-AI/Cyrene-Reactor
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: refs/heads/main
+  - repository: exchange
+    type: github
+    name: DoHorizon-AI/Cyrene-Exchange
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: refs/heads/main
+  - repository: navigator
+    type: github
+    name: DoHorizon-AI/Cyrene-Navigator
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: refs/heads/main
+  - repository: echo
+    type: github
+    name: DoHorizon-AI/Cyrene-Echo
+    endpoint: ${{ parameters.githubServiceConnection }}
+    ref: refs/heads/main
+trigger: none
+pr: none
+
+jobs:
+- job: product_contract_profile
+  displayName: 'Workspace / Product Contract Integration Profile'
+  pool:
+    vmImage: 'ubuntu-latest'
+  timeoutInMinutes: 15
+  variables:
+    UV_CACHE_DIR: '$(Pipeline.Workspace)/.cache/uv'
+  steps:
+  - checkout: self
+    path: s/Cyrene-Workspace
+    displayName: 'Checkout Workspace'
+
+  - checkout: platform
+    path: s/Cyrene-Platform
+    displayName: 'Checkout Platform Artifact SDK'
+
+  - task: Cache@2
+    inputs:
+      key: 'uv | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cyrene-Workspace/uv.lock'
+      restoreKeys: |
+        uv | "$(Agent.OS)" | "$(Build.Repository.Name)"
+      path: '$(Pipeline.Workspace)/.cache/uv'
+    displayName: 'Restore uv dependency cache'
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '3.12'
+    displayName: 'Setup Python 3.12'
+
+  - script: |
+      python -m pip install --upgrade pip uv==0.12.3
+      uvx ruff==0.16.5 check governance/product-contract-v1/tests
+      uvx ruff==0.16.5 format --check governance/product-contract-v1/tests
+      uvx --from pytest==9.1.1 --with jsonschema==4.26.0 pytest -q governance/product-contract-v1/tests
+    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
+    displayName: 'Run Governance Product Contract Tests'
+
+  - bash: |
+      set -euo pipefail
+      python -m pip install --upgrade pip pytest==9.1.1 huggingface-hub==1.29.0
+      python -m pip install --no-deps "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_artifacts"
+      uvx ruff==0.16.5 check scripts/reference-runtime.py scripts/text-lifecycle-v1.py tests/test_reference_runtime.py tests/test_text_lifecycle_runtime.py
+      python -m pytest -q tests/test_reference_runtime.py tests/test_text_lifecycle_runtime.py
+    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
+    displayName: 'Validate reference runtime and Artifact bootstrap client'
+
+  - script: |
+      mkdir -p ci/evidence
+      cat <<EOT > ci/evidence/summary.json
+      {
+        "suite": "Cyrene-Workspace-Contract",
+        "commit": "$(Build.SourceVersion)",
+        "pipeline": "$(Build.DefinitionName)",
+        "build_id": "$(Build.BuildId)",
+        "result": "SCOPED_WORKSPACE_GATES_COMPLETED",
+        "scope": "product_contract_profile",
+        "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      }
+      EOT
+    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
+    displayName: 'Generate Evidence Ledger'
+
+  - publish: $(Pipeline.Workspace)/s/Cyrene-Workspace/ci/evidence
+    artifact: workspace-evidence
+    displayName: 'Publish Workspace Evidence'
+
+- ${{ if eq(parameters.runFullAcceptance, true) }}:
+  - job: canonical_linux_gate
+    displayName: 'Workspace / RTX 4080 Canonical Runtime Provisioning'
+    dependsOn: product_contract_profile
+    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+    pool:
+      name: ${{ parameters.acceptancePoolName }}
+      demands:
+      - cyrene.gpu -equals rtx4080
+    timeoutInMinutes: 120
+    steps:
+    - checkout: self
+      path: s/Cyrene-Workspace
+      displayName: 'Checkout Workspace'
+
+    - checkout: platform
+      path: s/Cyrene-Platform
+    - checkout: catalyst
+      path: s/Cyrene-Catalyst
+    - checkout: yield
+      path: s/Cyrene-Yield
+    - checkout: reactor
+      path: s/Cyrene-Reactor
+    - checkout: exchange
+      path: s/Cyrene-Exchange
+    - checkout: navigator
+      path: s/Cyrene-Navigator
+    - checkout: echo
+      path: s/Cyrene-Echo
+
+    - bash: |
+        set -euo pipefail
+        case "$(Build.SourceBranch)" in
+          refs/heads/develop|refs/heads/main) ;;
+          *) echo 'GPU acceptance is restricted to canonical branches.' >&2; exit 1 ;;
+        esac
+        export CYRENE_PLATFORM_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Platform"
+        export CYRENE_YIELD_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Yield"
+        export CYRENE_REACTOR_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Reactor"
+        export CYRENE_RUNTIME_HOME="$(Agent.TempDirectory)/cyrene-reference-runtime"
+        "$(Pipeline.Workspace)/s/Cyrene-Workspace/scripts/reference-runtime" down \
+          --runtime-home "$CYRENE_RUNTIME_HOME" >/dev/null || true
+        "$(Pipeline.Workspace)/s/Cyrene-Workspace/scripts/reference-runtime" bootstrap \
+          --runtime-home "$CYRENE_RUNTIME_HOME"
+        "$(Pipeline.Workspace)/s/Cyrene-Workspace/scripts/reference-runtime" status \
+          --runtime-home "$CYRENE_RUNTIME_HOME"
+      displayName: 'Provision canonical Platform, trainer and Reactor runtime'
+
+    - bash: |
+        set -euo pipefail
+        export CYRENE_PLATFORM_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Platform"
+        export CYRENE_YIELD_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Yield"
+        export CYRENE_REACTOR_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Reactor"
+        export CYRENE_RUNTIME_HOME="$(Agent.TempDirectory)/cyrene-reference-runtime"
+        "$(Pipeline.Workspace)/s/Cyrene-Workspace/scripts/reference-runtime" down \
+          --runtime-home "$CYRENE_RUNTIME_HOME"
+      condition: always()
+      displayName: 'Teardown runtime after validation job'
