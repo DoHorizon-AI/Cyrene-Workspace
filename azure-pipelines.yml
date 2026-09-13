@@ -1,194 +1,206 @@
-# Workspace Azure is the authority for exact multi-repository acceptance.
-# Public repository source checks run in their own GitHub Actions workflows.
-name: $(Date:yyyyMMdd)$(Rev:.r)
+# GitHub Actions owns automatic source/contract CI and builds the immutable artifact.
+# Azure owns only this CD handoff: download by explicit run ID, verify the commit
+# and SHA-256 manifest, then promote the verified bytes to the next Azure stage.
+# Self-hosted GPU, private-credential, and exact cross-repository acceptance lanes
+# remain in azure-pipelines-supplemental.yml and are never implicit CI/CD checks.
+# GitHub Actions artifacts retain for 30 days; configure the secret variable
+# githubArtifactReadToken with a GitHub token that has Actions: read access.
+
+name: Cyrene-Workspace CD artifact promotion
+
+trigger: none
+pr: none
 
 parameters:
-- name: githubServiceConnection
+- name: githubRepository
+  displayName: 'GitHub repository (owner/name)'
   type: string
-  default: DoHorizon-AI
-- name: runFullAcceptance
-  displayName: 'Provision RTX 4080 Runtime for Independent Full Lifecycle Acceptance'
-  type: boolean
-  default: false
-- name: acceptancePoolName
-  displayName: 'Self-Hosted Agent Pool Name'
+  default: DoHorizon-AI/Cyrene-Workspace
+- name: githubRunId
+  displayName: 'Successful GitHub Actions run ID'
   type: string
-  default: 'Default'
-resources:
-  repositories:
-  - repository: platform
-    type: github
-    name: DoHorizon-AI/Cyrene-Platform
-    endpoint: ${{ parameters.githubServiceConnection }}
-    ref: refs/heads/develop
-  - repository: catalyst
-    type: github
-    name: DoHorizon-AI/Cyrene-Catalyst
-    endpoint: ${{ parameters.githubServiceConnection }}
-    ref: refs/heads/develop
-  - repository: yield
-    type: github
-    name: DoHorizon-AI/Cyrene-Yield
-    endpoint: ${{ parameters.githubServiceConnection }}
-    ref: refs/heads/develop
-  - repository: reactor
-    type: github
-    name: DoHorizon-AI/Cyrene-Reactor
-    endpoint: ${{ parameters.githubServiceConnection }}
-    ref: refs/heads/develop
-  - repository: exchange
-    type: github
-    name: DoHorizon-AI/Cyrene-Exchange
-    endpoint: ${{ parameters.githubServiceConnection }}
-    ref: refs/heads/develop
-  - repository: navigator
-    type: github
-    name: DoHorizon-AI/Cyrene-Navigator
-    endpoint: ${{ parameters.githubServiceConnection }}
-    ref: refs/heads/develop
-  - repository: echo
-    type: github
-    name: DoHorizon-AI/Cyrene-Echo
-    endpoint: ${{ parameters.githubServiceConnection }}
-    ref: refs/heads/develop
-trigger:
-  branches:
-    include:
-      - main
-      - develop
-      - feat/*
-      - fix/*
-      - chore/*
-      - docs/*
-
-pr:
-  branches:
-    include:
-      - main
-      - develop
+  default: ''
+- name: expectedCommitSha
+  displayName: 'Expected GitHub commit SHA'
+  type: string
+  default: ''
+- name: githubArtifactName
+  displayName: 'GitHub artifact name (optional; defaults to cyrene-repo-SHA)'
+  type: string
+  default: ''
+- name: githubArtifactSlug
+  displayName: 'GitHub artifact slug used for the default name'
+  type: string
+  default: cyrene-workspace
+- name: deploymentEnvironment
+  displayName: 'CD target label'
+  type: string
+  default: staging
 
 jobs:
-- job: product_contract_profile
-  displayName: 'Workspace / Product Contract Integration Profile'
+- job: verify_github_artifact
+  displayName: 'CD / Download and verify GitHub artifact'
   pool:
-    vmImage: 'ubuntu-latest'
+    vmImage: ubuntu-latest
   timeoutInMinutes: 15
-  variables:
-    UV_CACHE_DIR: '$(Pipeline.Workspace)/.cache/uv'
   steps:
-  - checkout: self
-    path: s/Cyrene-Workspace
-    displayName: 'Checkout Workspace'
-
-  - checkout: platform
-    path: s/Cyrene-Platform
-    displayName: 'Checkout Platform Artifact SDK'
-
-  - task: Cache@2
-    inputs:
-      key: 'uv | "$(Agent.OS)" | "$(Build.Repository.Name)" | Cyrene-Workspace/uv.lock'
-      restoreKeys: |
-        uv | "$(Agent.OS)" | "$(Build.Repository.Name)"
-      path: '$(Pipeline.Workspace)/.cache/uv'
-    displayName: 'Restore uv dependency cache'
-
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: '3.12'
-    displayName: 'Setup Python 3.12'
-
-  - script: |
-      python -m pip install --upgrade pip uv==0.12.3
-      uvx ruff==0.16.5 check governance/product-contract-v1/tests
-      uvx ruff==0.16.5 format --check governance/product-contract-v1/tests
-      uvx --from pytest==9.1.1 --with jsonschema==4.26.0 pytest -q governance/product-contract-v1/tests
-    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
-    displayName: 'Run Governance Product Contract Tests'
-
+  - checkout: none
   - bash: |
       set -euo pipefail
-      python -m pip install --upgrade pip pytest==9.1.1 huggingface-hub==1.29.0
-      python -m pip install --no-deps "$(Pipeline.Workspace)/s/Cyrene-Platform/sdk/python/cyrene_artifacts"
-      uvx ruff==0.16.5 check scripts/reference-runtime.py scripts/text-lifecycle-v1.py tests/test_reference_runtime.py tests/test_text_lifecycle_runtime.py
-      python -m pytest -q tests/test_reference_runtime.py tests/test_text_lifecycle_runtime.py
-    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
-    displayName: 'Validate reference runtime and Artifact bootstrap client'
 
-  - script: |
-      mkdir -p ci/evidence
-      cat <<EOT > ci/evidence/summary.json
-      {
-        "suite": "Cyrene-Workspace-Contract",
-        "commit": "$(Build.SourceVersion)",
-        "pipeline": "$(Build.DefinitionName)",
-        "build_id": "$(Build.BuildId)",
-        "result": "SCOPED_WORKSPACE_GATES_COMPLETED",
-        "scope": "product_contract_profile",
-        "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+      : "${GITHUB_TOKEN:?Configure the secret Azure variable githubArtifactReadToken.}"
+      [[ "$GH_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+        echo 'githubRepository must be owner/name.' >&2
+        exit 1
       }
-      EOT
-    workingDirectory: $(Pipeline.Workspace)/s/Cyrene-Workspace
-    displayName: 'Generate Evidence Ledger'
+      [[ "$GH_RUN_ID" =~ ^[0-9]+$ ]] || {
+        echo 'githubRunId must be a numeric GitHub Actions run ID.' >&2
+        exit 1
+      }
+      [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+        echo 'expectedCommitSha must be a 40-character lowercase commit SHA.' >&2
+        exit 1
+      }
 
-  - publish: $(Pipeline.Workspace)/s/Cyrene-Workspace/ci/evidence
-    artifact: workspace-evidence
-    displayName: 'Publish Workspace Evidence'
+      artifact_name="$REQUESTED_ARTIFACT"
+      if [[ -z "$artifact_name" ]]; then
+        artifact_name="${ARTIFACT_SLUG}-${EXPECTED_SHA}"
+      fi
+      [[ "$artifact_name" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+        echo 'githubArtifactName contains unsupported characters.' >&2
+        exit 1
+      }
 
-- ${{ if eq(parameters.runFullAcceptance, true) }}:
-  - job: canonical_linux_gate
-    displayName: 'Workspace / RTX 4080 Canonical Runtime Provisioning'
-    dependsOn: product_contract_profile
-    condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
-    pool:
-      name: ${{ parameters.acceptancePoolName }}
-      demands:
-      - cyrene.gpu -equals rtx4080
-    timeoutInMinutes: 120
-    steps:
-    - checkout: self
-      path: s/Cyrene-Workspace
-      displayName: 'Checkout Workspace'
+      artifact_root="$(Pipeline.Workspace)/github-artifact"
+      run_metadata_file="$(mktemp)"
+      metadata_file="$(mktemp)"
+      archive_file="$(mktemp --suffix=.zip)"
+      trap 'rm -f "$run_metadata_file" "$metadata_file" "$archive_file"' EXIT
+      rm -rf "$artifact_root"
+      mkdir -p "$artifact_root"
 
-    - checkout: platform
-      path: s/Cyrene-Platform
-    - checkout: catalyst
-      path: s/Cyrene-Catalyst
-    - checkout: yield
-      path: s/Cyrene-Yield
-    - checkout: reactor
-      path: s/Cyrene-Reactor
-    - checkout: exchange
-      path: s/Cyrene-Exchange
-    - checkout: navigator
-      path: s/Cyrene-Navigator
-    - checkout: echo
-      path: s/Cyrene-Echo
+      curl --fail-with-body --silent --show-error --location \
+        --header 'Accept: application/vnd.github+json' \
+        --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header 'X-GitHub-Api-Version: 2022-11-28' \
+        "https://api.github.com/repos/${GH_REPOSITORY}/actions/runs/${GH_RUN_ID}" \
+        > "$run_metadata_file"
+      test "$(jq -r '.repository.full_name' "$run_metadata_file")" = "$GH_REPOSITORY"
+      test "$(jq -r '.head_sha' "$run_metadata_file")" = "$EXPECTED_SHA"
+      test "$(jq -r '.status' "$run_metadata_file")" = 'completed'
+      test "$(jq -r '.conclusion' "$run_metadata_file")" = 'success'
 
-    - bash: |
-        set -euo pipefail
-        case "$(Build.SourceBranch)" in
-          refs/heads/develop|refs/heads/main) ;;
-          *) echo 'GPU acceptance is restricted to canonical branches.' >&2; exit 1 ;;
+      curl --fail-with-body --silent --show-error --location \
+        --header 'Accept: application/vnd.github+json' \
+        --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header 'X-GitHub-Api-Version: 2022-11-28' \
+        "https://api.github.com/repos/${GH_REPOSITORY}/actions/runs/${GH_RUN_ID}/artifacts?per_page=100" \
+          > "$metadata_file"
+
+      artifact_json="$(jq -e --arg name "$artifact_name" '
+        [.artifacts[] | select(.name == $name)] |
+        if length == 1 then .[0] else error("expected exactly one matching artifact") end
+      ' "$metadata_file")"
+      [[ "$(jq -r '.expired' <<<"$artifact_json")" == 'false' ]] || {
+        echo 'The selected GitHub artifact is expired.' >&2
+        exit 1
+      }
+      download_url="$(jq -er '.archive_download_url' <<<"$artifact_json")"
+      api_digest="$(jq -r '.digest // empty' <<<"$artifact_json")"
+
+      curl --fail-with-body --silent --show-error --location \
+        --header 'Accept: application/vnd.github+json' \
+        --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+        --header 'X-GitHub-Api-Version: 2022-11-28' \
+        "$download_url" \
+        --output "$archive_file"
+
+      zip_sha="$(sha256sum "$archive_file" | awk '{print $1}')"
+      if [[ -n "$api_digest" ]]; then
+        expected_zip_sha="${api_digest#sha256:}"
+        [[ "$expected_zip_sha" =~ ^[0-9a-f]{64}$ ]] || {
+          echo 'GitHub returned an invalid artifact digest.' >&2
+          exit 1
+        }
+        test "$zip_sha" = "$expected_zip_sha"
+      fi
+
+      unzip -q "$archive_file" -d "$artifact_root"
+      manifest_file="$(find "$artifact_root" -type f -name artifact-manifest.json -print -quit)"
+      test -n "$manifest_file"
+      manifest_root="$(dirname "$manifest_file")"
+
+      test "$(jq -r '.schema_version' "$manifest_file")" = '1'
+      test "$(jq -r '.repository' "$manifest_file")" = "$GH_REPOSITORY"
+      test "$(jq -r '.commit_sha' "$manifest_file")" = "$EXPECTED_SHA"
+      test "$(jq -r '.workflow_run_id' "$manifest_file")" = "$GH_RUN_ID"
+      test "$(jq -r '.artifact_name' "$manifest_file")" = "$artifact_name"
+      jq -e '.payload | type == "array" and length > 0' "$manifest_file" >/dev/null
+
+      while IFS=$'\t' read -r relative_path expected_sha; do
+        case "$relative_path" in
+          ''|/*|../*|*/../*|*../*) echo "Unsafe artifact path: $relative_path" >&2; exit 1 ;;
         esac
-        export CYRENE_PLATFORM_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Platform"
-        export CYRENE_YIELD_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Yield"
-        export CYRENE_REACTOR_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Reactor"
-        export CYRENE_RUNTIME_HOME="$(Agent.TempDirectory)/cyrene-reference-runtime"
-        "$(Pipeline.Workspace)/s/Cyrene-Workspace/scripts/reference-runtime" down \
-          --runtime-home "$CYRENE_RUNTIME_HOME" >/dev/null || true
-        "$(Pipeline.Workspace)/s/Cyrene-Workspace/scripts/reference-runtime" bootstrap \
-          --runtime-home "$CYRENE_RUNTIME_HOME"
-        "$(Pipeline.Workspace)/s/Cyrene-Workspace/scripts/reference-runtime" status \
-          --runtime-home "$CYRENE_RUNTIME_HOME"
-      displayName: 'Provision canonical Platform, trainer and Reactor runtime'
+        [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || {
+          echo "Invalid SHA-256 in manifest for $relative_path." >&2
+          exit 1
+        }
+        payload_path="$manifest_root/$relative_path"
+        test -f "$payload_path"
+        actual_sha="$(sha256sum "$payload_path" | awk '{print $1}')"
+        test "$actual_sha" = "$expected_sha"
+      done < <(jq -r '.payload[] | [.file, .sha256] | @tsv' "$manifest_file")
 
-    - bash: |
-        set -euo pipefail
-        export CYRENE_PLATFORM_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Platform"
-        export CYRENE_YIELD_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Yield"
-        export CYRENE_REACTOR_WORKTREE="$(Pipeline.Workspace)/s/Cyrene-Reactor"
-        export CYRENE_RUNTIME_HOME="$(Agent.TempDirectory)/cyrene-reference-runtime"
-        "$(Pipeline.Workspace)/s/Cyrene-Workspace/scripts/reference-runtime" down \
-          --runtime-home "$CYRENE_RUNTIME_HOME"
-      condition: always()
-      displayName: 'Teardown runtime after validation job'
+      evidence_root="$(Pipeline.Workspace)/cd-evidence"
+      mkdir -p "$evidence_root"
+      jq -n \
+        --arg repository "$GH_REPOSITORY" \
+        --arg run_id "$GH_RUN_ID" \
+        --arg commit_sha "$EXPECTED_SHA" \
+        --arg artifact_name "$artifact_name" \
+        --arg zip_sha256 "$zip_sha" \
+        --arg target "$TARGET_ENVIRONMENT" \
+        '{
+          schema_version: 1,
+          status: "VERIFIED_GITHUB_ARTIFACT",
+          repository: $repository,
+          github_run_id: ($run_id | tonumber),
+          commit_sha: $commit_sha,
+          artifact_name: $artifact_name,
+          downloaded_zip_sha256: $zip_sha256,
+          target_environment: $target
+        }' > "$evidence_root/verification.json"
+      echo "Verified immutable GitHub artifact $artifact_name at $EXPECTED_SHA."
+    displayName: 'Download exact run artifact and verify SHA-256 manifest'
+    env:
+      GITHUB_TOKEN: $(githubArtifactReadToken)
+      GH_REPOSITORY: "${{ parameters.githubRepository }}"
+      GH_RUN_ID: "${{ parameters.githubRunId }}"
+      EXPECTED_SHA: "${{ parameters.expectedCommitSha }}"
+      REQUESTED_ARTIFACT: "${{ parameters.githubArtifactName }}"
+      ARTIFACT_SLUG: "${{ parameters.githubArtifactSlug }}"
+      TARGET_ENVIRONMENT: "${{ parameters.deploymentEnvironment }}"
+  - publish: $(Pipeline.Workspace)/github-artifact
+    artifact: verified-github-artifact
+    displayName: 'Promote verified bytes to Azure CD artifact'
+
+- job: cd_handoff
+  displayName: 'CD / Handoff to deployment target'
+  dependsOn: verify_github_artifact
+  condition: succeeded()
+  pool:
+    vmImage: ubuntu-latest
+  timeoutInMinutes: 10
+  steps:
+  - checkout: none
+  - download: current
+    artifact: verified-github-artifact
+    displayName: 'Download promoted verified artifact'
+  - bash: |
+      set -euo pipefail
+      manifest="$(find "$(Pipeline.Workspace)/verified-github-artifact" -type f -name artifact-manifest.json -print -quit)"
+      test -n "$manifest"
+      test "$(jq -r '.commit_sha' "$manifest")" = "${{ parameters.expectedCommitSha }}"
+      echo "CD handoff ready for ${{ parameters.deploymentEnvironment }} from immutable GitHub bytes."
+      echo 'No source checkout, build, or test is performed in Azure CD.'
+    displayName: 'Expose verified artifact to deployment integration'
