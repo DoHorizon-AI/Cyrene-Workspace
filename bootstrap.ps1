@@ -103,7 +103,6 @@ if (-not $SkipPythonSync) {
 
     $allPythonTargets = @(
         @{ Repo = "Cyrene-Platform"; Path = "../Cyrene-Platform"; Extra = ""; Profiles = @("full", "platform", "training") },
-        @{ Repo = "Cyrene-Plugins-Official"; Path = "../Cyrene-Plugins-Official"; Extra = ""; Profiles = @("full", "platform", "training") },
         @{ Repo = "Cyrene-Reactor"; Path = "../Cyrene-Services/Cyrene-Reactor"; Extra = "--extra dev --extra pro"; Profiles = @("full") },
         @{ Repo = "Cyrene-Yield"; Path = "../Cyrene-Services/Cyrene-Yield"; Extra = "--extra dev"; Profiles = @("full", "training") },
         @{ Repo = "Cyrene-Exchange"; Path = "../Cyrene-Services/Cyrene-Exchange"; Extra = "--extra dev"; Profiles = @("full") }
@@ -122,6 +121,8 @@ if (-not $SkipPythonSync) {
             }
         }
     }
+
+    Write-Host "  Cyrene-Plugins-Official uses independent package/TCK pyproject.toml entrypoints; no root uv sync is performed." -ForegroundColor Gray
 }
 
 # 4. .NET Solution Restore

@@ -1,0 +1,7 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Compound: All Cargo Builds" type="CompoundRunConfigurationType">
+    <toRun name="Cargo: Build Platform" type="CargoCommandRunConfiguration" />
+    <toRun name="Cargo: Build Reactor" type="CargoCommandRunConfiguration" />
+    <method v="2" />
+  </configuration>
+</component>

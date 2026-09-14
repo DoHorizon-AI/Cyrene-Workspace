@@ -52,8 +52,7 @@ Cyrene public API naming freeze begins with that release.
 > [!NOTE]
 > **Repository vs. Subcomponent Boundary**  
 > Only the 8 canonical repositories above are top-level Git repositories in the Cyrene workspace.  
-> Internal submodules or build components—such as `coordinator` (`Cyrene-Services/Cyrene-Exchange/components/coordinator`) or `spring` (`Cyrene-Plugins-Official/plugins/gateway/spring`)—are Gradle/build subcomponents belonging to their respective parent repositories. They are linked via build systems (`.idea/gradle.xml`, `settings.gradle.kts`) and must **never** be registered as standalone repositories in `repositories.yaml` or as top-level `<project>` entries in `.idea/jb-workspace.xml`.
-> *Note on JVM Control-Plane*: The legacy `cyrene-control-plane` JVM service (`framework/jvm`) previously inside `Cyrene-Platform` was retired in PR #41 to maintain a clean platform substrate boundary; its product control-plane surfaces migrated to domain-owned services (e.g. `Cyrene-Services/Cyrene-Yield`).
+> Current Gradle projects belong to the Plugins repository under `contracts/jvm` and `contracts/tck/model-provider-v1/jvm`; they are linked as build roots, not as standalone repositories. The retired Exchange coordinator, legacy Spring gateway, and Platform JVM control-plane paths are historical references only and must not be reintroduced into `repositories.yaml` or `.idea/jb-workspace.xml`.
 
 ---
 

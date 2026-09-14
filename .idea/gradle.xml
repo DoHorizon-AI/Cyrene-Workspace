@@ -4,24 +4,20 @@
   <component name="GradleSettings">
     <option name="linkedExternalProjectsSettings">
       <GradleProjectSettings>
-        <option name="externalProjectPath" value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
-        <option name="gradleJvm" value="#GRADLE_DAEMON_JVM" />
+        <option name="externalProjectPath" value="$PROJECT_DIR$/../Cyrene-Plugins-Official/contracts/jvm" />
+        <option name="gradleJvm" value="Temurin 25.0.4" />
         <option name="modules">
           <set>
-            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring" />
-            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring/billing" />
-            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring/conversation" />
-            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring/prompt-cache" />
-            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/plugins/gateway/spring/tenant" />
+            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/contracts/jvm" />
           </set>
         </option>
       </GradleProjectSettings>
       <GradleProjectSettings>
-        <option name="externalProjectPath" value="$PROJECT_DIR$/../Cyrene-Services/Cyrene-Exchange/components/coordinator" />
-        <option name="gradleJvm" value="#GRADLE_DAEMON_JVM" />
+        <option name="externalProjectPath" value="$PROJECT_DIR$/../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/jvm" />
+        <option name="gradleJvm" value="Temurin 25.0.4" />
         <option name="modules">
           <set>
-            <option value="$PROJECT_DIR$/../Cyrene-Services/Cyrene-Exchange/components/coordinator" />
+            <option value="$PROJECT_DIR$/../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/jvm" />
           </set>
         </option>
       </GradleProjectSettings>

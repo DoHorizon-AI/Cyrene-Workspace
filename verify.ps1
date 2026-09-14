@@ -92,26 +92,34 @@ Assert-Step "IntelliJ IDEA Multi-Project Workspace (.idea/jb-workspace.xml)" {
     }
 }
 
-# 3. PYTHON ENVIRONMENTS
-Assert-Step "Python .venv discovery and uv environment sanity" {
+# 3. PYTHON PROJECTS AND PLUGIN PACKAGE ENTRYPOINTS
+Assert-Step "Python project topology and Plugins package entrypoints" {
     $pyTargets = @(
         "../Cyrene-Platform",
-        "../Cyrene-Plugins-Official",
         "../Cyrene-Services/Cyrene-Reactor",
         "../Cyrene-Services/Cyrene-Yield",
-        "../Cyrene-Services/Cyrene-Exchange"
+        "../Cyrene-Services/Cyrene-Exchange",
+        "../Cyrene-Services/Cyrene-Catalyst",
+        "../Cyrene-Services/Cyrene-Echo",
+        "../Cyrene-Services/Cyrene-Navigator"
     )
 
     foreach ($rel in $pyTargets) {
         $full = Join-Path $ScriptDir $rel
-        $venv = Join-Path $full ".venv"
-        if (-not (Test-Path $venv)) {
-            throw "Missing .venv in $rel (run bootstrap.ps1 first)"
+        if (-not (Test-Path (Join-Path $full "pyproject.toml"))) {
+            throw "Missing root pyproject.toml in $rel"
         }
         $pyVersion = Join-Path $full ".python-version"
-        if (-not (Test-Path $pyVersion)) {
-            throw "Missing .python-version in $rel"
+        if ((Test-Path $pyVersion) -and ((Get-Content $pyVersion -Raw).Trim() -ne "3.12")) {
+            throw "Unexpected Python baseline in $rel"
         }
+    }
+
+    $pluginsRoot = Join-Path $ScriptDir "../Cyrene-Plugins-Official"
+    $pluginProjects = @(Get-ChildItem -Path $pluginsRoot -Recurse -Filter "pyproject.toml" -File |
+        Where-Object { $_.FullName -notmatch '[/\\]\.venv[/\\]' })
+    if ($pluginProjects.Count -lt 13) {
+        throw "Expected the current Plugins package/TCK entrypoints, found $($pluginProjects.Count) pyproject.toml files"
     }
 }
 
@@ -124,8 +132,8 @@ Assert-Step ".NET Cyrene.Workspace.slnx project resolution" {
     if ($LASTEXITCODE -ne 0) { throw "dotnet sln list failed: $output" }
     
     $projectCount = ($output | Where-Object { $_ -match '\.csproj$' }).Count
-    if ($projectCount -lt 2) {
-        throw "Expected at least 2 projects, found $projectCount"
+    if ($projectCount -ne 12) {
+        throw "Expected the current Plugins solution to contain 12 projects, found $projectCount"
     }
 }
 
@@ -155,11 +163,11 @@ Assert-Step "Rust development toolchain declarations & cargo metadata" {
     }
 }
 
-# 6. JVM GRADLE & TOOLCHAIN PINNING
-Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
+# 6. JVM GRADLE & TOOLCHAIN DECLARATIONS
+Assert-Step "JVM toolchain declarations (Kotlin 2.4.10, JDK 25)" {
     $jvmTargets = @(
-        "../Cyrene-Services/Cyrene-Exchange/components/coordinator",
-        "../Cyrene-Plugins-Official/plugins/gateway/spring"
+        "../Cyrene-Plugins-Official/contracts/jvm",
+        "../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/jvm"
     )
     foreach ($rel in $jvmTargets) {
         $full = Join-Path $ScriptDir $rel
@@ -167,20 +175,16 @@ Assert-Step "JVM toolchain baseline (Gradle 9.5.0, Kotlin 2.4.10, JDK 25)" {
         if (-not (Test-Path $buildScript)) {
             throw "Missing build.gradle.kts in $rel"
         }
-        $wrapperProps = Join-Path $full "gradle/wrapper/gradle-wrapper.properties"
-        if (-not (Test-Path $wrapperProps)) {
-            throw "Missing gradle-wrapper.properties in $rel"
+        $settingsScript = Join-Path $full "settings.gradle.kts"
+        if (-not (Test-Path $settingsScript)) {
+            throw "Missing settings.gradle.kts in $rel"
         }
-        $propsContent = Get-Content $wrapperProps -Raw
-        if ($propsContent -notmatch 'gradle-9\.5\.0') {
-            throw "Gradle wrapper not pinned to 9.5.0 in $rel"
+        $buildContent = Get-Content $buildScript -Raw
+        if ($buildContent -notmatch 'kotlin\("jvm"\) version "2\.4\.10"') {
+            throw "Kotlin JVM plugin is not pinned to 2.4.10 in $rel"
         }
-        $daemonProps = Join-Path $full "gradle/gradle-daemon-jvm.properties"
-        if (Test-Path $daemonProps) {
-            $daemonContent = Get-Content $daemonProps -Raw
-            if ($daemonContent -notmatch 'toolchainVersion\s*=\s*25') {
-                throw "Gradle daemon JVM not set to toolchainVersion=25 in $rel"
-            }
+        if ($buildContent -notmatch 'jvmToolchain\(25\)') {
+            throw "JVM toolchain is not set to 25 in $rel"
         }
     }
 }

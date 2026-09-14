@@ -1,4 +1,4 @@
-version: "1.4.0"
+version: "1.5.0"
 workspace: "Cyrene"
 description: "Canonical multi-repository topology, runtime target manifest, and contract pointers for Cyrene developers"
 
@@ -19,7 +19,7 @@ global_policy:
   jvm_baseline:
     jdk_version: 25
     kotlin_version: "2.4.10"
-    gradle_version: "9.5.0"
+    gradle_version: "9.6.0"
     dsl: "Gradle Kotlin DSL"
   dotnet_baseline:
     sdk_version: "10.0"
@@ -56,7 +56,6 @@ repositories:
     build_systems:
       - "cargo"
       - "uv"
-      - "gradle"
     roles:
       - "core-platform"
       - "kernel"
@@ -117,26 +116,72 @@ repositories:
     ci_acceptance_environment: "GitHub Actions source, contract, build, and package checks"
     release_artifact_target: "multi-platform"
     ide:
-      python_root: "../Cyrene-Plugins-Official"
+      python_roots:
+        - "../Cyrene-Plugins-Official/contracts/tck/message-connector-v1/python"
+        - "../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/python"
+        - "../Cyrene-Plugins-Official/sdk/python/cyrene_model_provider_contracts"
+        - "../Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime"
+        - "../Cyrene-Plugins-Official/plugins/connectors/onebot-v11"
+        - "../Cyrene-Plugins-Official/plugins/connectors/wecom"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/evaluator-pack"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/exact-match"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/llm-judge"
+        - "../Cyrene-Plugins-Official/plugins/models/hf-model-analyzer"
+        - "../Cyrene-Plugins-Official/plugins/policy/compat-rules"
+        - "../Cyrene-Plugins-Official/plugins/tools/dataset-preparation"
+        - "../Cyrene-Plugins-Official/plugins/tools/dataset-validator"
+      gradle_roots:
+        - "../Cyrene-Plugins-Official/contracts/jvm"
+        - "../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/jvm"
+      maven_root: "../Cyrene-Plugins-Official/sdk/java/pom.xml"
+      buf_root: "../Cyrene-Plugins-Official/contracts"
+      dotnet_roots:
+        - "../Cyrene-Plugins-Official/contracts/dotnet/Cyrene.Plugin.Contracts/Cyrene.Plugin.Contracts.csproj"
+        - "../Cyrene-Plugins-Official/contracts/tck/computer-runtime-v1/dotnet/ComputerRuntimeContractTck.csproj"
+        - "../Cyrene-Plugins-Official/contracts/tck/message-connector-v1/dotnet/MessageConnectorContractTck.csproj"
+        - "../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/dotnet/ModelProviderContractTck.csproj"
+        - "../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Provider.Tests/Cyrene.Provider.Tests.csproj"
+      rust_manifests:
+        - "../Cyrene-Plugins-Official/contracts/rust/cyrene-plugin-contracts/Cargo.toml"
+        - "../Cyrene-Plugins-Official/runtime/rust/cyrene-agent-runtime/Cargo.toml"
+        - "../Cyrene-Plugins-Official/runtime/rust/cyrene-computer-runtime/Cargo.toml"
+        - "../Cyrene-Plugins-Official/runtime/rust/cyrene-mcp-provider/Cargo.toml"
+        - "../Cyrene-Plugins-Official/runtime/rust/cyrene-memory-runtime/Cargo.toml"
+        - "../Cyrene-Plugins-Official/runtime/rust/cyrene-plugin-cabi/Cargo.toml"
+        - "../Cyrene-Plugins-Official/runtime/rust/cyrene-plugin-server/Cargo.toml"
     pointers:
       primary_source_roots:
         - "../Cyrene-Plugins-Official/contracts"
         - "../Cyrene-Plugins-Official/runtime"
         - "../Cyrene-Plugins-Official/sdk"
         - "../Cyrene-Plugins-Official/plugins/connectors/onebot-v11"
+        - "../Cyrene-Plugins-Official/plugins/connectors/wecom"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/evaluator-pack"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/exact-match"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/llm-judge"
+        - "../Cyrene-Plugins-Official/plugins/models/hf-model-analyzer"
+        - "../Cyrene-Plugins-Official/plugins/policy/compat-rules"
         - "../Cyrene-Plugins-Official/plugins/tools/computer-runtime"
+        - "../Cyrene-Plugins-Official/plugins/tools/dataset-preparation"
+        - "../Cyrene-Plugins-Official/plugins/tools/dataset-validator"
         - "../Cyrene-Plugins-Official/manifests"
       test_roots:
         - "../Cyrene-Plugins-Official/contracts/rust/cyrene-plugin-contracts/tests"
         - "../Cyrene-Plugins-Official/contracts/tck"
+        - "../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/jvm/src/test"
         - "../Cyrene-Plugins-Official/runtime/rust/*/tests"
         - "../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Provider.Tests"
         - "../Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/tests"
         - "../Cyrene-Plugins-Official/sdk/java/*/src/test"
         - "../Cyrene-Plugins-Official/plugins/connectors/onebot-v11/tests"
+        - "../Cyrene-Plugins-Official/plugins/connectors/wecom/tests"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/evaluator-pack/tests"
+        - "../Cyrene-Plugins-Official/plugins/evaluation/llm-judge/tests"
+        - "../Cyrene-Plugins-Official/plugins/tools/dataset-preparation/tests"
+        - "../Cyrene-Plugins-Official/plugins/tools/dataset-validator/tests"
       developer_commands:
         test: "python3 tools/ci/verify_source_manifest.py --root . --allow-git-metadata"
-        build: "Use .github/workflows/public-ci.yml for the complete multi-language build matrix"
+        build: "Use .github/workflows/public-ci.yml for the complete multi-language build matrix; local entrypoints are listed in Cyrene-Plugins-Official/README.md"
 
   - name: "Cyrene-Reactor"
     path: "../Cyrene-Services/Cyrene-Reactor"
@@ -228,7 +273,6 @@ repositories:
       azure_scope: "delivery_only"
     build_systems:
       - "uv"
-      - "gradle"
     roles:
       - "product-service"
       - "core-transport"
@@ -240,18 +284,17 @@ repositories:
     release_artifact_target: "multi-platform"
     ide:
       python_root: "../Cyrene-Services/Cyrene-Exchange"
-      gradle_root: "../Cyrene-Services/Cyrene-Exchange/components/coordinator/build.gradle.kts"
     pointers:
       primary_source_roots:
         - "../Cyrene-Services/Cyrene-Exchange/src"
-        - "../Cyrene-Services/Cyrene-Exchange/components/coordinator/src"
       test_roots:
         - "../Cyrene-Services/Cyrene-Exchange/tests"
+        - "../Cyrene-Services/Cyrene-Exchange/product/tests"
       api_contract_roots:
-        - "../Cyrene-Services/Cyrene-Exchange/proto"
+        - "../Cyrene-Services/Cyrene-Exchange/contracts/product"
       developer_commands:
-        test: "uv run pytest ; ./gradlew build"
-        build: "./gradlew build"
+        test: "uv run pytest ; uv run --directory product pytest"
+        build: "uv build ; uv build --directory product"
 
   - name: "Cyrene-Catalyst"
     path: "../Cyrene-Services/Cyrene-Catalyst"
@@ -331,7 +374,6 @@ repositories:
       - "uv"
       - "node"
       - "cargo"
-      - "dotnet"
     roles:
       - "product-service"
       - "desktop-navigation"
@@ -346,22 +388,19 @@ repositories:
     canonical_build_target: "multi-target"
     ide:
       python_root: "../Cyrene-Services/Cyrene-Navigator"
-      node_root: "../Cyrene-Services/Cyrene-Navigator/apps/desktop"
+      node_root: "../Cyrene-Services/Cyrene-Navigator/harness"
       cargo_root: "../Cyrene-Services/Cyrene-Navigator/native/Cargo.toml"
-      dotnet_solution: "../Cyrene-Services/Cyrene-Navigator/apps/windows/Cyrene.Navigator.Windows.sln"
     pointers:
       primary_source_roots:
         - "../Cyrene-Services/Cyrene-Navigator/src"
-        - "../Cyrene-Services/Cyrene-Navigator/apps/desktop/ui"
         - "../Cyrene-Services/Cyrene-Navigator/harness/src"
         - "../Cyrene-Services/Cyrene-Navigator/native"
-        - "../Cyrene-Services/Cyrene-Navigator/apps/windows"
       test_roots:
         - "../Cyrene-Services/Cyrene-Navigator/tests"
         - "../Cyrene-Services/Cyrene-Navigator/harness/tests"
       developer_commands:
-        test: "uv run pytest ; pnpm --dir apps/desktop build ; cargo test --manifest-path native/Cargo.toml"
-        build: "pnpm --dir apps/desktop build ; cargo build --manifest-path native/Cargo.toml"
+        test: "uv run pytest ; pnpm --dir harness test ; cargo test --manifest-path native/Cargo.toml"
+        build: "pnpm --dir harness build ; cargo build --manifest-path native/Cargo.toml"
 
 profiles:
   full:

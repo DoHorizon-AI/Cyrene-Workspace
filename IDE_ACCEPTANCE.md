@@ -40,26 +40,25 @@ All automated checks must report `[PASS]`.
 1. **Multi-Project Hierarchy & Active State**:
    - In the Project view, verify each repository appears as an independent native project module:
      - `Cyrene-Platform` (Cargo workspace, Python SDKs)
-     - `Cyrene-Plugins-Official` (Python plugins, .NET compat, Spring gateway)
+     - `Cyrene-Plugins-Official` (capability contracts, Python packages, Rust/.NET runtimes, Java SDKs, and TCKs)
      - `Cyrene-Services/Cyrene-Reactor` (Python Product runtime, Rust host-placement adapter)
      - `Cyrene-Services/Cyrene-Yield` (training lifecycle Product and direct Plugin adapters)
-     - `Cyrene-Services/Cyrene-Exchange` (Python transport, JVM coordinator)
+     - `Cyrene-Services/Cyrene-Exchange` (Python transport and Product gateway)
      - `Cyrene-Services/Cyrene-Catalyst`, `Cyrene-Echo`, `Cyrene-Navigator`
    - *Note*: Workspace projects may initially appear inactive in IntelliJ IDEA. To activate an unloaded project: **Right-click project $\rightarrow$ Load '<project>'**.
 2. **VCS Multi-Root Registration**:
    - Open **Git** tool window (`Alt + 9`).
    - Verify all 8 repositories are registered as distinct Git roots.
-3. **Gradle Projects & Daemon JVM 25**:
+3. **Gradle Projects & JDK 25**:
    - Open **Gradle** tool window.
-   - Verify `Cyrene-Services/Cyrene-Exchange/components/coordinator` and `Cyrene-Plugins-Official/plugins/gateway/spring` appear.
-   - Gradle Daemon JVM is automatically resolved to **JDK 25** via `gradle/gradle-daemon-jvm.properties` (`toolchainVersion=25`).
-   - Java and Kotlin compilation toolchains resolve automatically to JDK 25 via `foojay-resolver-convention`.
+   - Verify the live Plugins Gradle roots appear: `contracts/jvm` and `contracts/tck/model-provider-v1/jvm`.
+   - Set the Gradle JVM to the registered **Temurin 25.0.4** SDK. These projects declare Kotlin 2.4.10 and `jvmToolchain(25)`; they do not depend on a retired Exchange coordinator or Spring gateway path.
 4. **Rust Development Toolchain**:
    - Verify Cargo workspaces attach for `Cyrene-Platform` and `Cyrene-Services/Cyrene-Reactor`.
    - Open a Rust source file (e.g. `Cyrene-Platform/kernel/crates/cy-kernel-daemon/src/main.rs`).
    - Verify trait/struct navigation and code completion work natively via rust-analyzer.
 5. **Python Interpreters (.venv)**:
-   - Verify each Python module binds to its own repo-local `.venv` (Python 3.12).
+   - Verify Python repositories bind to their available repo-local `.venv`/uv environments (Python 3.12 where `.python-version` is declared). Plugins is a component collection; its package and TCK `pyproject.toml` files are independent entrypoints and it has no root Python environment.
    - Open `Cyrene-Services/Cyrene-Yield/training/core/src/cy_exec/training/artifacts.py` $\rightarrow$ press `Ctrl + B` on `ArtifactKind` to verify symbol navigation into `cy_artifacts`.
 
 ### Step 3: Session Persistence
@@ -78,9 +77,8 @@ All automated checks must report `[PASS]`.
 
 ### Step 2: Verify Solution Hierarchy & Semantic Indexing
 1. **Solution Structure**:
-   - Verify 1 solution folder is present:
-     - `/Plugins/` (2 projects)
-   - Total: **2 projects**.
+   - Verify the solution folders `/Plugins/Contracts/` and `/Plugins/Runtime/` are present.
+   - Total: **12 projects** (4 contract/TCK projects and 8 Native AOT/runtime projects).
 2. **Cross-Project Semantic Navigation**:
    - Verify C# semantic search finds symbols across projects.
    - Verify **Find Usages** (`Alt + F7`) and **Go to Implementation** work across solution projects.
@@ -100,14 +98,14 @@ All automated checks must report `[PASS]`.
 | Automated Gate | PowerShell | `.\verify.ps1` reports all Passed | [ ] |
 | Multi-Project Model | IntelliJ IDEA | `jb-workspace.xml` loads 8 independent projects | [ ] |
 | VCS Multi-Root | IntelliJ IDEA | All 8 Git repositories recognized | [ ] |
-| Gradle Baseline | IntelliJ IDEA | Gradle 9.5.0 + Kotlin 2.4.10 + JDK 25 resolve | [ ] |
+| Gradle Baseline | IntelliJ IDEA | Gradle 9.6.0 + Kotlin 2.4.10 + JDK 25 resolve | [ ] |
 | Cargo Attach | IntelliJ IDEA / RustRover | Platform & Reactor Cargo workspaces recognized | [ ] |
-| Python .venv Binding | IntelliJ IDEA | All 5 Python repos bind to respective `.venv` (3.12) | [ ] |
+| Python Environment Binding | IntelliJ IDEA | Current Python repos use their declared uv/.venv environments; Plugins uses package entrypoints | [ ] |
 | Python Navigation | IntelliJ IDEA | Cross-package symbols (`cy_artifacts`, etc.) resolve | [ ] |
-| .NET Project Tree | JetBrains Rider | All 2 projects load in `Cyrene.Workspace.slnx` | [ ] |
+| .NET Project Tree | JetBrains Rider | All 12 current Plugins projects load in `Cyrene.Workspace.slnx` | [ ] |
 | .NET Semantic Search | JetBrains Rider | Symbol search & Find Usages work across projects | [ ] |
 | .NET Test Explorer | JetBrains Rider | Plugins solution tests are discovered | [ ] |
-| .NET Aggregate Build | JetBrains Rider | Clean build of all 2 projects with 0 errors | [ ] |
+| .NET Aggregate Build | JetBrains Rider | Clean build of all 12 current Plugins projects with 0 errors | [ ] |
 | IDE Re-open Persistence | IDEA & Rider | Zero re-configuration required upon reopening | [ ] |
 
 ---

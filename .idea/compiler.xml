@@ -2,48 +2,12 @@
 <project version="4">
   <component name="CompilerConfiguration">
     <bytecodeTargetLevel>
-      <module name="cyrene-exchange-coordinator" target="25" />
-      <module name="cyrene-exchange-coordinator.main" target="25" />
-      <module name="cyrene-exchange-coordinator.test" target="25" />
-      <module name="cyrene-spring-gateways.billing" target="21" />
-      <module name="cyrene-spring-gateways.billing.main" target="21" />
-      <module name="cyrene-spring-gateways.billing.test" target="21" />
-      <module name="cyrene-spring-gateways.conversation" target="21" />
-      <module name="cyrene-spring-gateways.conversation.main" target="21" />
-      <module name="cyrene-spring-gateways.conversation.test" target="21" />
-      <module name="cyrene-spring-gateways.prompt-cache" target="21" />
-      <module name="cyrene-spring-gateways.prompt-cache.main" target="21" />
-      <module name="cyrene-spring-gateways.prompt-cache.test" target="21" />
-      <module name="cyrene-spring-gateways.tenant" target="21" />
-      <module name="cyrene-spring-gateways.tenant.main" target="21" />
-      <module name="cyrene-spring-gateways.tenant.test" target="21" />
-      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.main" target="21" />
-      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.test" target="21" />
-      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.main" target="21" />
-      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.test" target="21" />
+      <module name="cyrene-plugin-contracts-jvm" target="25" />
+      <module name="cyrene-plugin-contracts-jvm.main" target="25" />
+      <module name="cyrene-plugin-contracts-jvm.test" target="25" />
+      <module name="model-provider-contract-tck" target="25" />
+      <module name="model-provider-contract-tck.main" target="25" />
+      <module name="model-provider-contract-tck.test" target="25" />
     </bytecodeTargetLevel>
-  </component>
-  <component name="JavacSettings">
-    <option name="ADDITIONAL_OPTIONS_OVERRIDE">
-      <module name="cyrene-exchange-coordinator" options="-parameters" />
-      <module name="cyrene-exchange-coordinator.main" options="-parameters" />
-      <module name="cyrene-exchange-coordinator.test" options="-parameters" />
-      <module name="cyrene-spring-gateways.billing" options="-parameters" />
-      <module name="cyrene-spring-gateways.billing.main" options="-parameters" />
-      <module name="cyrene-spring-gateways.billing.test" options="-parameters" />
-      <module name="cyrene-spring-gateways.conversation" options="-parameters" />
-      <module name="cyrene-spring-gateways.conversation.main" options="-parameters" />
-      <module name="cyrene-spring-gateways.conversation.test" options="-parameters" />
-      <module name="cyrene-spring-gateways.prompt-cache" options="-parameters" />
-      <module name="cyrene-spring-gateways.prompt-cache.main" options="-parameters" />
-      <module name="cyrene-spring-gateways.prompt-cache.test" options="-parameters" />
-      <module name="cyrene-spring-gateways.tenant" options="-parameters" />
-      <module name="cyrene-spring-gateways.tenant.main" options="-parameters" />
-      <module name="cyrene-spring-gateways.tenant.test" options="-parameters" />
-      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.main" options="-parameters" />
-      <module name="dev.cyrene.gateway.cyrene-spring-gateways.billing.test" options="-parameters" />
-      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.main" options="-parameters" />
-      <module name="dev.cyrene.gateway.cyrene-spring-gateways.tenant.test" options="-parameters" />
-    </option>
   </component>
 </project>

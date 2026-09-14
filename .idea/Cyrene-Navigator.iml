@@ -3,8 +3,17 @@
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
     <content url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator">
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/harness/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/harness/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/native/crates/cyrene-native-host/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/.pytest_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/harness/node_modules" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Navigator/native/target" />
     </content>
+    <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

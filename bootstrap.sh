@@ -19,18 +19,15 @@ echo -e "\n[2/4] Synchronizing Python environments with uv..."
 case "${PROFILE}" in
     full)
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
-        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Plugins-Official"
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Reactor" --extra dev --extra pro
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Yield" --extra dev
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Exchange" --extra dev
         ;;
     platform)
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
-        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Plugins-Official"
         ;;
     training)
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Platform"
-        uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Plugins-Official"
         uv sync --locked --directory "${SCRIPT_DIR}/../Cyrene-Services/Cyrene-Yield" --extra dev
         ;;
     *)
@@ -38,6 +35,8 @@ case "${PROFILE}" in
         exit 1
         ;;
 esac
+
+echo "  Cyrene-Plugins-Official uses independent package/TCK pyproject.toml entrypoints; no root uv sync is performed."
 
 echo -e "\n[3/4] Restoring .NET solution(s)..."
 if [ "${PROFILE}" = "full" ]; then

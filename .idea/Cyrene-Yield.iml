@@ -3,8 +3,17 @@
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
     <content url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield">
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/training/core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/training/core/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/trainer-runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/sdk/python/cyrene_yield_contracts/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/.pytest_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/.ruff_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/.mypy_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Yield/cyrene_yield.egg-info" />
     </content>
+    <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

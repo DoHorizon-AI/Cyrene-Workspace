@@ -3,16 +3,46 @@
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
     <content url="file://$MODULE_DIR$/../Cyrene-Plugins-Official">
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/agent-system/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/agent-system/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/skills-runtime/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/skills-runtime/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/providers/model-api-connector/src" isTestSource="false" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/providers/model-api-connector/tests" isTestSource="true" />
-      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/agents/agent-system/compatibility/python" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/contracts/tck/message-connector-v1/python" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/python" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/contracts/rust/cyrene-plugin-contracts/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/contracts/rust/cyrene-plugin-contracts/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-agent-runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-agent-runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-computer-runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-computer-runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-mcp-provider/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-mcp-provider/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-memory-runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-memory-runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-plugin-cabi/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-plugin-server/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/runtime/rust/cyrene-plugin-server/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/sdk/python/cyrene_model_provider_contracts/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/connectors/onebot-v11/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/connectors/onebot-v11/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/connectors/wecom/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/connectors/wecom/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/evaluation/evaluator-pack" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/evaluation/evaluator-pack/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/evaluation/exact-match" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/evaluation/llm-judge" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/evaluation/llm-judge/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/models/hf-model-analyzer" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/policy/compat-rules" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/tools/dataset-preparation" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/tools/dataset-preparation/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/tools/dataset-validator" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/tools/dataset-validator/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/.venv" />
-      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/gateway/python/.venv" />
-      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/training/llama-factory/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/.ruff_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/target" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/build" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/dist" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/bin" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/obj" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

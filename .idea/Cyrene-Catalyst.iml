@@ -3,8 +3,16 @@
   <component name="NewModuleRootManager" inherit-compiler-output="true">
     <exclude-output />
     <content url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst">
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst/tooling" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst/examples" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst/.pytest_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst/.ruff_cache" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Services/Cyrene-Catalyst/.mypy_cache" />
     </content>
+    <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

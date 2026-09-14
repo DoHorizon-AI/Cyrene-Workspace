@@ -1,6 +1,18 @@
 <Solution>
-  <Folder Name="/Contracts/">
+  <Folder Name="/Plugins/Contracts/">
+    <Project Path="../Cyrene-Plugins-Official/contracts/dotnet/Cyrene.Plugin.Contracts/Cyrene.Plugin.Contracts.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/contracts/tck/computer-runtime-v1/dotnet/ComputerRuntimeContractTck.csproj" />
     <Project Path="../Cyrene-Plugins-Official/contracts/tck/message-connector-v1/dotnet/MessageConnectorContractTck.csproj" />
     <Project Path="../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/dotnet/ModelProviderContractTck.csproj" />
+  </Folder>
+  <Folder Name="/Plugins/Runtime/">
+    <Project Path="../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Plugin.Core/Cyrene.Plugin.Core.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Plugin.Host/Cyrene.Plugin.Host.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Plugin.NativeLib/Cyrene.Plugin.NativeLib.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Provider.Anthropic/Cyrene.Provider.Anthropic.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Provider.Gemini/Cyrene.Provider.Gemini.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Provider.Infrastructure/Cyrene.Provider.Infrastructure.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Provider.OpenAi/Cyrene.Provider.OpenAi.csproj" />
+    <Project Path="../Cyrene-Plugins-Official/runtime/dotnet-native-aot/Cyrene.Provider.Tests/Cyrene.Provider.Tests.csproj" />
   </Folder>
 </Solution>
