@@ -39,7 +39,6 @@ def test_bootstrap_emits_only_component_profiles_and_status(
             "platformUp": ["platform-up"],
             "platformDown": ["platform-down"],
             "trainerBootstrap": ["trainer-up"],
-            "reactorBootstrap": ["reactor-up"],
         },
     )
     monkeypatch.setattr(
@@ -49,7 +48,7 @@ def test_bootstrap_emits_only_component_profiles_and_status(
     )
     result = module.run(_args(tmp_path))
     assert result["status"] == "READY"
-    assert set(result["components"]) == {"platform", "trainer", "reactor"}
+    assert set(result["components"]) == {"platform", "trainer"}
     assert "RuntimeConfig" not in str(result)
     assert (tmp_path / "runtime" / "reference-runtime.json").stat().st_mode & 0o077 == 0
 
@@ -66,7 +65,6 @@ def test_failed_child_bootstrap_tears_down_platform(
             "platformUp": ["platform-up"],
             "platformDown": ["platform-down"],
             "trainerBootstrap": ["trainer-up"],
-            "reactorBootstrap": ["reactor-up"],
         },
     )
 
@@ -114,10 +112,9 @@ def test_down_stops_every_runtime_and_releases_recorded_pids(
     args.command = "down"
     result = module.run(args)
 
-    assert calls == ["platform-down", str(reactor_script), str(trainer_script)]
+    assert calls == ["platform-down", str(trainer_script)]
     assert released == ["trainer"]
     assert result["status"] == "DOWN"
-    assert result["components"]["reactor"]["status"] == "DOWN"
     assert result["components"]["trainer"]["teardown"] == "PID_RELEASE"
     assert (tmp_path / "runtime" / "reference-runtime.json").stat().st_mode & 0o077 == 0
 

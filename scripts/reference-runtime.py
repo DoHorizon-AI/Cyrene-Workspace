@@ -73,13 +73,10 @@ def _write(path: Path, value: Any) -> None:
 def _commands(args: argparse.Namespace, home: Path) -> dict[str, list[str]]:
     platform = _repository("CYRENE_PLATFORM_WORKTREE")
     yield_repository = _repository("CYRENE_YIELD_WORKTREE")
-    reactor = _repository("CYRENE_REACTOR_WORKTREE")
     platform_home = home / "platform"
     trainer_home = home / "trainer"
-    reactor_home = home / "reactor"
     runtime = str(platform / "tooling/runtime/cyrene-runtime")
     trainer = str(yield_repository / "trainer-runtime/cyrene-trainer-runtime")
-    serving = str(reactor / "serving-runtime/cyrene-reactor-runtime")
     return {
         "platformUp": [
             runtime,
@@ -95,37 +92,6 @@ def _commands(args: argparse.Namespace, home: Path) -> dict[str, list[str]]:
         "trainerBootstrap": [trainer, "bootstrap", "--runtime-home", str(trainer_home)],
         "trainerStatus": [trainer, "status", "--runtime-home", str(trainer_home)],
         "trainerDown": [trainer, "down", "--runtime-home", str(trainer_home)],
-        "reactorBootstrap": [
-            serving,
-            "bootstrap",
-            "--runtime-home",
-            str(reactor_home),
-            "--platform-runtime-config",
-            str(platform_home / "runtime.json"),
-            "--platform-repository",
-            str(platform),
-            *(["--no-build", "--no-sync"] if args.no_build else []),
-        ],
-        "reactorStatus": [
-            serving,
-            "status",
-            "--runtime-home",
-            str(reactor_home),
-            "--platform-runtime-config",
-            str(platform_home / "runtime.json"),
-            "--platform-repository",
-            str(platform),
-        ],
-        "reactorDown": [
-            serving,
-            "down",
-            "--runtime-home",
-            str(reactor_home),
-            "--platform-runtime-config",
-            str(platform_home / "runtime.json"),
-            "--platform-repository",
-            str(platform),
-        ],
     }
 
 
@@ -179,7 +145,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "down":
         platform = _invoke(commands["platformDown"], "PLATFORM_RUNTIME_DOWN_FAILED")
         components: dict[str, dict[str, Any]] = {"platform": platform}
-        for name in ("reactor", "trainer"):
+        for name in ("trainer",):
             command = commands[name + "Down"]
             teardown: dict[str, Any] = {"status": "DOWN"}
             if Path(command[0]).is_file():
@@ -198,7 +164,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         components = {
             "platform": _invoke(commands["platformStatus"], "PLATFORM_RUNTIME_STATUS_FAILED"),
             "trainer": _invoke(commands["trainerStatus"], "TRAINER_RUNTIME_STATUS_FAILED"),
-            "reactor": _invoke(commands["reactorStatus"], "REACTOR_RUNTIME_STATUS_FAILED"),
         }
         mode = str(components["platform"].get("runtimeMode") or args.profile)
         result = _public(components, mode, "READY")
@@ -210,8 +175,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         platform = _invoke(commands["platformUp"], "PLATFORM_RUNTIME_BOOTSTRAP_FAILED")
         platform_started = True
         trainer = _invoke(commands["trainerBootstrap"], "TRAINER_RUNTIME_BOOTSTRAP_FAILED")
-        reactor = _invoke(commands["reactorBootstrap"], "REACTOR_RUNTIME_BOOTSTRAP_FAILED")
-        components = {"platform": platform, "trainer": trainer, "reactor": reactor}
+        components = {"platform": platform, "trainer": trainer}
         mode = str(platform.get("runtimeMode") or args.profile)
         private = {
             **_public(components, mode, "READY"),

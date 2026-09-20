@@ -47,6 +47,12 @@ _OWNER_ENDPOINTS = (
         "DatasetValidatorPlugin",
         DATASET_VALIDATOR_CONNECTION_ENV,
     ),
+    (
+        "training.llama-factory.v1",
+        "llama_factory",
+        "LlamaFactoryTrainingPlugin",
+        LLAMA_FACTORY_CONNECTION_ENV,
+    ),
 )
 
 for repository, source in (
@@ -72,29 +78,18 @@ def _serve(capability: str, module: str, attribute: str, environment: str) -> No
     os.environ[environment] = connection_ref
 
 
-def _serve_llama_factory_fixture() -> None:
-    """Serve the offline launch-contract fixture at the real training endpoint."""
-
-    from llama_factory_fixture import CAPABILITY_ID, LlamaFactoryFixturePlugin
-
-    server, connection_ref = serve(LlamaFactoryFixturePlugin(), CAPABILITY_ID, "1", "127.0.0.1:0")
-    _PLUGIN_SERVERS.append(server)
-    os.environ[LLAMA_FACTORY_CONNECTION_ENV] = connection_ref
-
-
 def pytest_configure() -> None:
     """Start the canonical Plugin owner endpoints the Products resolve against.
 
     Every Product resolves its capability engines from opaque connection
     references, so the cross-repository fixtures must serve the real owner
     packages instead of any in-repository capability implementation.  The
-    LLaMA-Factory trainer remains an offline launch-contract fixture because
-    real training is a separate GPU acceptance lane.
+    LLaMA-Factory trainer is the real Plugins package; only its accelerator
+    process is out of scope for this profile.
     """
 
     for capability, module, attribute, environment in _OWNER_ENDPOINTS:
         _serve(capability, module, attribute, environment)
-    _serve_llama_factory_fixture()
 
 
 def pytest_unconfigure() -> None:

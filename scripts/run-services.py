@@ -28,6 +28,9 @@ LOGS_DIR = DEV_HOME / "logs"
 PIDS_FILE = DEV_HOME / "pids.json"
 ARTIFACT_ROOT = DEV_HOME / "artifacts"
 CREDENTIALS_FILE = DEV_HOME / "credentials.env"
+PLUGINS_ROOT = Path(
+    os.environ.get("CYRENE_PLUGINS_WORKTREE", CYRENE_ROOT / "Cyrene-Plugins-Official")
+).expanduser()
 
 _CREDENTIAL_KEYS = ("CYRENE_EXCHANGE_TOKEN", "CYRENE_NAVIGATOR_TOKEN")
 
@@ -58,6 +61,42 @@ def load_credentials() -> dict[str, str]:
 
 
 SERVICES = [
+    {
+        "name": "product-endpoints",
+        "port": 0,
+        "health_path": "",
+        "cwd": str(WORKSPACE_ROOT),
+        "cmd": [
+            sys.executable,
+            str(WORKSPACE_ROOT / "scripts/product-endpoints.py"),
+            "up",
+        ],
+        "env": {},
+        "optional": True,
+    },
+    {
+        "name": "serving-runtime",
+        "port": 19400,
+        "health_path": "/healthz",
+        "cwd": str(PLUGINS_ROOT / "plugins/serving/vllm-runtime"),
+        "cmd": [
+            sys.executable,
+            str(PLUGINS_ROOT / "plugins/serving/vllm-runtime/vllm_runtime.py"),
+            "serve",
+            "--runtime-home",
+            str(DEV_HOME / "reactor-serving"),
+            "--artifact-root",
+            str(ARTIFACT_ROOT),
+            "--credential-file",
+            str(DEV_HOME / "reactor/private/serving.token"),
+            "--control-url",
+            "http://127.0.0.1:19400",
+            "--port",
+            "19400",
+        ],
+        "env": {},
+        "optional": True,
+    },
     {
         "name": "catalyst",
         "port": 8014,
@@ -223,6 +262,71 @@ def wait_healthy(name: str, port: int, path: str, timeout: float = 30.0) -> bool
     return False
 
 
+def materialize_reactor_config(credentials: dict[str, str]) -> Path:
+    """Write Reactor's private control configuration and binding credentials.
+
+    Reactor owns no local bootstrap any more: its serving backend is the
+    Plugins-owned vLLM runtime, so the workspace only materializes the private
+    files the Product needs and never invents product state.
+    """
+
+    reactor = DEV_HOME / "reactor"
+    private = reactor / "private"
+    private.mkdir(parents=True, exist_ok=True, mode=0o700)
+    private.chmod(0o700)
+    for name, value in (
+        ("control.token", secrets.token_urlsafe(48)),
+        ("serving.token", secrets.token_urlsafe(48)),
+    ):
+        marker = private / name
+        if not marker.is_file():
+            fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(value)
+    exchange_token = private / "exchange.token"
+    fd = os.open(exchange_token, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write(credentials["CYRENE_EXCHANGE_TOKEN"])
+    configuration = {
+        "database_path": str(reactor / "reactor.sqlite3"),
+        "credential_file": str(private / "control.token"),
+        "public_base_url": "http://127.0.0.1:19300",
+        "serving_bindings": [
+            {
+                "binding_id": "local-gpu",
+                "control_url": "http://127.0.0.1:19400",
+                "credential_file": str(private / "serving.token"),
+            }
+        ],
+        "exchange_receivers": [
+            {
+                "receiver_id": "local-exchange",
+                "control_url": "http://127.0.0.1:8000",
+                "credential_file": str(exchange_token),
+                "allowed_binding_ids": ["local-gpu"],
+            }
+        ],
+    }
+    target = reactor / "control.json"
+    pending = target.with_suffix(".pending")
+    pending.write_text(json.dumps(configuration, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    pending.replace(target)
+    return target
+
+
+def load_endpoint_references() -> dict[str, str]:
+    """Read the DirectPlugin connection references the supervisor published."""
+
+    target = DEV_HOME / "endpoints.json"
+    if not target.is_file():
+        return {}
+    try:
+        value = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {str(key): str(item) for key, item in value.items()} if isinstance(value, dict) else {}
+
+
 def _read_pids() -> dict[str, int]:
     try:
         value = json.loads(PIDS_FILE.read_text(encoding="utf-8"))
@@ -271,6 +375,8 @@ def start_all() -> int:
         stop_all()
 
     credentials = load_credentials()
+    materialize_reactor_config(credentials)
+    endpoint_references = load_endpoint_references()
     reactor_token_file = DEV_HOME / "reactor" / "private" / "control.token"
     reactor_token = reactor_token_file.read_text().strip() if reactor_token_file.is_file() else ""
 
@@ -282,6 +388,10 @@ def start_all() -> int:
             env["CYRENE_EXCHANGE_SOURCE_TOKEN"] = reactor_token
         env.update(s["env"])
         env.update(credentials)
+        env.update(endpoint_references)
+        if s.get("optional") and not Path(s["cmd"][1]).exists():
+            print(f"Skipping {name}: {s['cmd'][1]} is not present")
+            continue
         print(f"Starting {name} on port {s['port']}...")
         with (
             (LOGS_DIR / f"{name}.stdout.log").open("w", encoding="utf-8") as log_out,
@@ -302,6 +412,8 @@ def start_all() -> int:
     all_healthy = True
     for s in SERVICES:
         name = s["name"]
+        if name not in pids or not s["health_path"]:
+            continue
         print(f"Waiting for {name} on port {s['port']}...", end="", flush=True)
         if wait_healthy(name, s["port"], s["health_path"]):
             print(" READY")
