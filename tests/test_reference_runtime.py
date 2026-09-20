@@ -84,9 +84,7 @@ def test_down_stops_every_runtime_and_releases_recorded_pids(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _module()
-    reactor_script = tmp_path / "cyrene-reactor-runtime"
     trainer_script = tmp_path / "cyrene-trainer-runtime"
-    reactor_script.write_text("")
     trainer_script.write_text("")
     calls: list[str] = []
     monkeypatch.setattr(
@@ -94,7 +92,6 @@ def test_down_stops_every_runtime_and_releases_recorded_pids(
         "_commands",
         lambda _args, _home: {
             "platformDown": ["platform-down"],
-            "reactorDown": [str(reactor_script), "down"],
             "trainerDown": [str(trainer_script), "down"],
         },
     )

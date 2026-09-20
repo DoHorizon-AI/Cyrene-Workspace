@@ -31,7 +31,6 @@ SCOPES = ("all", "runtimes", "services")
 DEFAULT_WORKTREES = {
     "CYRENE_PLATFORM_WORKTREE": CYRENE_ROOT / "Cyrene-Platform",
     "CYRENE_YIELD_WORKTREE": CYRENE_ROOT / "Cyrene-Services" / "Cyrene-Yield",
-    "CYRENE_REACTOR_WORKTREE": CYRENE_ROOT / "Cyrene-Services" / "Cyrene-Reactor",
 }
 
 RUNTIME_COMMANDS = {"up": "bootstrap", "status": "status", "down": "down"}

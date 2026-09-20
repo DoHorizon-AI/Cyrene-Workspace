@@ -1,9 +1,12 @@
 """
 ┌─────────────────────────────────────────────────────────────────────┐
 │ Module: Cyrene Text Lifecycle V1 reference runtime                 │
-│ Role: Coordinate canonical Platform, trainer and serving bootstrap.│
-│ 模块职责：统一协调 Platform、训练与服务运行时，隐藏内部路径拓扑。          │
+│ Role: Coordinate canonical Platform and trainer bootstrap.          │
+│ 模块职责：统一协调 Platform 与训练运行时，隐藏内部路径拓扑。               │
 └─────────────────────────────────────────────────────────────────────┘
+
+Serving is owned by the Plugins vLLM runtime and is supervised by
+``run-services.py``; this coordinator deliberately starts no serving component.
 """
 
 from __future__ import annotations
@@ -181,7 +184,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             **_public(components, mode, "READY"),
             "platformRuntimeConfig": str(home / "platform" / "runtime.json"),
             "trainerRuntimeConfig": str(home / "trainer" / "runtime.json"),
-            "reactorRuntimeConfig": str(home / "reactor" / "runtime.json"),
         }
         _write(home / "reference-runtime.json", private)
         return _public(components, mode, "READY")

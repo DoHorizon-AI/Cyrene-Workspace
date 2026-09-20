@@ -23,18 +23,15 @@ def test_default_worktrees_derives_only_real_sibling_checkouts(
 ) -> None:
     module = _module()
     platform = tmp_path / "Cyrene-Platform"
-    yield_repository = tmp_path / "Cyrene-Services" / "Cyrene-Yield"
-    reactor = tmp_path / "Cyrene-Services" / "Cyrene-Reactor"
-    for checkout in (platform, yield_repository):
-        (checkout / ".git").mkdir(parents=True)
-    reactor.mkdir(parents=True)
+    trainer = tmp_path / "Cyrene-Services" / "Cyrene-Yield"
+    (platform / ".git").mkdir(parents=True)
+    trainer.mkdir(parents=True)
     monkeypatch.setattr(
         module,
         "DEFAULT_WORKTREES",
         {
             "CYRENE_PLATFORM_WORKTREE": platform,
-            "CYRENE_YIELD_WORKTREE": yield_repository,
-            "CYRENE_REACTOR_WORKTREE": reactor,
+            "CYRENE_YIELD_WORKTREE": trainer,
         },
     )
     for variable in module.DEFAULT_WORKTREES:
@@ -42,10 +39,7 @@ def test_default_worktrees_derives_only_real_sibling_checkouts(
 
     derived = module.default_worktrees()
 
-    assert derived == {
-        "CYRENE_PLATFORM_WORKTREE": str(platform),
-        "CYRENE_YIELD_WORKTREE": str(yield_repository),
-    }
+    assert derived == {"CYRENE_PLATFORM_WORKTREE": str(platform)}
 
 
 def test_default_worktrees_never_overrides_an_explicit_environment(

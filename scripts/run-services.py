@@ -1,5 +1,7 @@
 """
-Orchestration manager for starting and stopping the 6 Product services for Text Model Lifecycle V1 acceptance.
+Orchestration manager for starting and stopping the Product services for Text Model
+Lifecycle V1 acceptance. It starts the DirectPlugin endpoint supervisor first, waits
+for its published connection references, and only then starts the Product services.
 """
 
 from __future__ import annotations
@@ -73,6 +75,7 @@ SERVICES = [
         ],
         "env": {},
         "optional": True,
+        "supervises_endpoints": True,
     },
     {
         "name": "serving-runtime",
@@ -327,6 +330,23 @@ def load_endpoint_references() -> dict[str, str]:
     return {str(key): str(item) for key, item in value.items()} if isinstance(value, dict) else {}
 
 
+def wait_for_endpoint_references(timeout: float = 30.0) -> dict[str, str]:
+    """Wait until the supervisor publishes a complete endpoint reference file.
+
+    The supervisor writes ``endpoints.json`` atomically only after every endpoint
+    is serving, so a cold start injects real references instead of the previous
+    run's stale file (or none at all).
+    """
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        references = load_endpoint_references()
+        if references:
+            return references
+        time.sleep(0.25)
+    return {}
+
+
 def _read_pids() -> dict[str, int]:
     try:
         value = json.loads(PIDS_FILE.read_text(encoding="utf-8"))
@@ -343,6 +363,47 @@ def _terminate(pids: dict[str, int], sig: int) -> None:
             continue
         except OSError as exc:
             print(f"Error terminating {name}: {exc}")
+
+
+def _environment(
+    service: dict,
+    credentials: dict[str, str],
+    endpoint_references: dict[str, str],
+    reactor_token: str,
+) -> dict[str, str]:
+    """Compose one service environment with operator and connection credentials."""
+
+    environment = os.environ.copy()
+    if reactor_token:
+        environment["CYRENE_REACTOR_TOKEN"] = reactor_token
+        environment["CYRENE_EXCHANGE_SOURCE_TOKEN"] = reactor_token
+    environment.update(service["env"])
+    environment.update(credentials)
+    environment.update(endpoint_references)
+    return environment
+
+
+def _launch(service: dict, environment: dict[str, str], pids: dict[str, int]) -> None:
+    """Start one service unless an optional payload is absent."""
+
+    name = service["name"]
+    if service.get("optional") and not Path(service["cmd"][1]).exists():
+        print(f"Skipping {name}: {service['cmd'][1]} is not present")
+        return
+    print(f"Starting {name} on port {service['port']}...")
+    with (
+        (LOGS_DIR / f"{name}.stdout.log").open("w", encoding="utf-8") as log_out,
+        (LOGS_DIR / f"{name}.stderr.log").open("w", encoding="utf-8") as log_err,
+    ):
+        process = subprocess.Popen(
+            service["cmd"],
+            cwd=service["cwd"],
+            env=environment,
+            stdout=log_out,
+            stderr=log_err,
+            start_new_session=True,
+        )
+    pids[name] = process.pid
 
 
 def start_all() -> int:
@@ -376,36 +437,26 @@ def start_all() -> int:
 
     credentials = load_credentials()
     materialize_reactor_config(credentials)
-    endpoint_references = load_endpoint_references()
     reactor_token_file = DEV_HOME / "reactor" / "private" / "control.token"
     reactor_token = reactor_token_file.read_text().strip() if reactor_token_file.is_file() else ""
 
-    for s in SERVICES:
-        name = s["name"]
-        env = os.environ.copy()
-        if reactor_token:
-            env["CYRENE_REACTOR_TOKEN"] = reactor_token
-            env["CYRENE_EXCHANGE_SOURCE_TOKEN"] = reactor_token
-        env.update(s["env"])
-        env.update(credentials)
-        env.update(endpoint_references)
-        if s.get("optional") and not Path(s["cmd"][1]).exists():
-            print(f"Skipping {name}: {s['cmd'][1]} is not present")
-            continue
-        print(f"Starting {name} on port {s['port']}...")
-        with (
-            (LOGS_DIR / f"{name}.stdout.log").open("w", encoding="utf-8") as log_out,
-            (LOGS_DIR / f"{name}.stderr.log").open("w", encoding="utf-8") as log_err,
-        ):
-            proc = subprocess.Popen(
-                s["cmd"],
-                cwd=s["cwd"],
-                env=env,
-                stdout=log_out,
-                stderr=log_err,
-                start_new_session=True,
+    (DEV_HOME / "endpoints.json").unlink(missing_ok=True)
+    supervisors = [s for s in SERVICES if s.get("supervises_endpoints")]
+    dependents = [s for s in SERVICES if not s.get("supervises_endpoints")]
+    for service in supervisors:
+        _launch(service, _environment(service, credentials, {}, reactor_token), pids)
+
+    endpoint_references: dict[str, str] = {}
+    if supervisors:
+        endpoint_references = wait_for_endpoint_references()
+        if not endpoint_references:
+            print(
+                "Plugin endpoints published no connection references; "
+                "dependent services continue without them.",
+                file=sys.stderr,
             )
-        pids[name] = proc.pid
+    for service in dependents:
+        _launch(service, _environment(service, credentials, endpoint_references, reactor_token), pids)
 
     PIDS_FILE.write_text(json.dumps(pids, indent=2), encoding="utf-8")
 
