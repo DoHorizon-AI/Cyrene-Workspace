@@ -7,21 +7,55 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
 import time
-from pathlib import Path
-import urllib.request
 import urllib.error
+import urllib.request
+from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 CYRENE_ROOT = WORKSPACE_ROOT.parent
 SERVICES_ROOT = CYRENE_ROOT / "Cyrene-Services"
 
-ENV_DIR = Path("/tmp/cyrene-acceptance-env")
-LOGS_DIR = ENV_DIR / "logs"
-PIDS_FILE = ENV_DIR / "pids.json"
+DEV_HOME = Path(
+    os.environ.get("CYRENE_DEV_HOME") or Path.home() / ".local" / "state" / "cyrene" / "dev"
+).expanduser()
+ENV_DIR = DEV_HOME / "services"
+LOGS_DIR = DEV_HOME / "logs"
+PIDS_FILE = DEV_HOME / "pids.json"
+ARTIFACT_ROOT = DEV_HOME / "artifacts"
+CREDENTIALS_FILE = DEV_HOME / "credentials.env"
+
+_CREDENTIAL_KEYS = ("CYRENE_EXCHANGE_TOKEN", "CYRENE_NAVIGATOR_TOKEN")
+
+
+def load_credentials() -> dict[str, str]:
+    """Load or create the operator credentials shared with lifecycle commands.
+
+    Generated tokens live in one mode-0600 file so `cyrene-dev up` can hand the
+    lifecycle client exactly the credentials the Products were started with,
+    instead of every script inventing its own constant.
+    """
+
+    if CREDENTIALS_FILE.is_file():
+        loaded: dict[str, str] = {}
+        for line in CREDENTIALS_FILE.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip() in _CREDENTIAL_KEYS and value.strip():
+                loaded[key.strip()] = value.strip()
+        if len(loaded) == len(_CREDENTIAL_KEYS):
+            return loaded
+    generated = {key: secrets.token_urlsafe(32) for key in _CREDENTIAL_KEYS}
+    DEV_HOME.mkdir(parents=True, exist_ok=True)
+    fd = os.open(CREDENTIALS_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        for key, value in generated.items():
+            stream.write(f"{key}={value}\n")
+    return generated
+
 
 SERVICES = [
     {
@@ -30,13 +64,18 @@ SERVICES = [
         "health_path": "/openapi.json",
         "cwd": str(SERVICES_ROOT / "Cyrene-Catalyst"),
         "cmd": [
-            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Catalyst"),
-            "python", "-m", "cyrene_catalyst"
+            "uv",
+            "run",
+            "--project",
+            str(SERVICES_ROOT / "Cyrene-Catalyst"),
+            "python",
+            "-m",
+            "cyrene_catalyst",
         ],
         "env": {
             "CATALYST_PORT": "8014",
-            "CATALYST_HOME": "/tmp/cyrene-acceptance-env/catalyst",
-            "CYRENE_ARTIFACT_ROOT": "/tmp/cyrene-runtime-test/platform/artifacts",
+            "CATALYST_HOME": str(ENV_DIR / "catalyst"),
+            "CYRENE_ARTIFACT_ROOT": str(ARTIFACT_ROOT),
             "CYRENE_YIELD_URL": "http://127.0.0.1:8092",
         },
     },
@@ -46,27 +85,25 @@ SERVICES = [
         "health_path": "/openapi.json",
         "cwd": str(SERVICES_ROOT / "Cyrene-Yield"),
         "cmd": [
-            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Yield"),
-            "python", "-m", "cy_exec.training.product_cli",
-            "--runtime-config", "/tmp/cyrene-runtime-test/platform/runtime.json",
-            "--trainer-runtime-config", "/tmp/cyrene-runtime-test/trainer/runtime.json",
-            "--state-directory", "/tmp/cyrene-acceptance-env/yield",
-            "--reactor-url", "http://127.0.0.1:19300",
-            "--reactor-token-env", "CYRENE_REACTOR_TOKEN",
-            "--port", "8092",
-        ],
-        "env": {},
-    },
-    {
-        "name": "reactor-host",
-        "port": 19301,
-        "health_path": "/docs",
-        "cwd": str(SERVICES_ROOT / "Cyrene-Reactor/product"),
-        "cmd": [
-            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Reactor/product"),
-            "python", "-m", "cyrene_reactor_product.cli", "host",
-            "--config", "/tmp/cyrene-runtime-test/reactor/host.json",
-            "--port", "19301",
+            "uv",
+            "run",
+            "--project",
+            str(SERVICES_ROOT / "Cyrene-Yield"),
+            "python",
+            "-m",
+            "cy_exec.training.product_cli",
+            "--runtime-config",
+            str(DEV_HOME / "platform" / "runtime.json"),
+            "--trainer-runtime-config",
+            str(DEV_HOME / "trainer" / "runtime.json"),
+            "--state-directory",
+            str(ENV_DIR / "yield"),
+            "--reactor-url",
+            "http://127.0.0.1:19300",
+            "--reactor-token-env",
+            "CYRENE_REACTOR_TOKEN",
+            "--port",
+            "8092",
         ],
         "env": {},
     },
@@ -76,10 +113,18 @@ SERVICES = [
         "health_path": "/docs",
         "cwd": str(SERVICES_ROOT / "Cyrene-Reactor/product"),
         "cmd": [
-            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Reactor/product"),
-            "python", "-m", "cyrene_reactor_product.cli", "control",
-            "--config", "/tmp/cyrene-runtime-test/reactor/control.json",
-            "--port", "19300",
+            "uv",
+            "run",
+            "--project",
+            str(SERVICES_ROOT / "Cyrene-Reactor/product"),
+            "python",
+            "-m",
+            "cyrene_reactor_product.cli",
+            "control",
+            "--config",
+            str(DEV_HOME / "reactor" / "control.json"),
+            "--port",
+            "19300",
         ],
         "env": {},
     },
@@ -89,12 +134,25 @@ SERVICES = [
         "health_path": "/docs",
         "cwd": str(SERVICES_ROOT / "Cyrene-Exchange/product"),
         "cmd": [
-            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Exchange/product"),
-            "python", str(WORKSPACE_ROOT / "scripts/serve-exchange.py"),
-            "--database", "/tmp/cyrene-acceptance-env/exchange/exchange.sqlite3",
-            "--port", "8000",
-            "--control-token", "acceptance-exchange-control-token-12345678",
-            "--allowed-bindings", "local-gpu,vllm-product",
+            "uv",
+            "run",
+            "--project",
+            str(SERVICES_ROOT / "Cyrene-Exchange/product"),
+            "cyrene-exchange",
+            "serve",
+            "--database",
+            str(ENV_DIR / "exchange" / "exchange.sqlite3"),
+            "--port",
+            "8000",
+            "--control-token-env",
+            "CYRENE_EXCHANGE_TOKEN",
+            "--allowed-bindings",
+            "local-gpu,vllm-product",
+            "--provider-from-route-source",
+            "--allowed-source-origin",
+            "http://127.0.0.1:19300",
+            "--source-token-env",
+            "CYRENE_EXCHANGE_SOURCE_TOKEN",
         ],
         "env": {},
     },
@@ -104,17 +162,24 @@ SERVICES = [
         "health_path": "/openapi.json",
         "cwd": str(SERVICES_ROOT / "Cyrene-Navigator"),
         "cmd": [
-            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Navigator"),
-            "python", str(SERVICES_ROOT / "Cyrene-Navigator/scripts/serve-persistence.py"),
-            "--database", "/tmp/cyrene-acceptance-env/navigator/sessions.sqlite3",
-            "--principal-config", "/tmp/cyrene-acceptance-env/navigator/principal.json",
-            "--port", "8012",
-            "--artifact-root", "/tmp/cyrene-runtime-test/platform/artifacts",
-            "--echo-url", "http://127.0.0.1:8094",
+            "uv",
+            "run",
+            "--project",
+            str(SERVICES_ROOT / "Cyrene-Navigator"),
+            "python",
+            str(SERVICES_ROOT / "Cyrene-Navigator/scripts/serve-persistence.py"),
+            "--database",
+            str(ENV_DIR / "navigator" / "sessions.sqlite3"),
+            "--principal-config",
+            str(ENV_DIR / "navigator" / "principal.json"),
+            "--port",
+            "8012",
+            "--artifact-root",
+            str(ARTIFACT_ROOT),
+            "--echo-url",
+            "http://127.0.0.1:8094",
         ],
-        "env": {
-            "CYRENE_NAVIGATOR_TOKEN": "acceptance-navigator-token-12345678901234567890",
-        },
+        "env": {},
     },
     {
         "name": "echo",
@@ -122,13 +187,21 @@ SERVICES = [
         "health_path": "/openapi.json",
         "cwd": str(SERVICES_ROOT / "Cyrene-Echo"),
         "cmd": [
-            "uv", "run", "--project", str(SERVICES_ROOT / "Cyrene-Echo"),
-            "python", "-c", "from cyrene_echo.server import main; main()",
-            "--database", "/tmp/cyrene-acceptance-env/echo/echo.sqlite3",
-            "--artifact-root", "/tmp/cyrene-runtime-test/platform/artifacts",
-            "--platform-artifacts",
-            "--catalyst-url", "http://127.0.0.1:8014",
-            "--port", "8094",
+            "uv",
+            "run",
+            "--project",
+            str(SERVICES_ROOT / "Cyrene-Echo"),
+            "python",
+            "-c",
+            "from cyrene_echo.server import main; main()",
+            "--database",
+            str(ENV_DIR / "echo" / "echo.sqlite3"),
+            "--artifact-root",
+            str(ARTIFACT_ROOT),
+            "--catalyst-url",
+            "http://127.0.0.1:8014",
+            "--port",
+            "8094",
         ],
         "env": {},
     },
@@ -136,6 +209,7 @@ SERVICES = [
 
 
 def wait_healthy(name: str, port: int, path: str, timeout: float = 30.0) -> bool:
+    del name
     url = f"http://127.0.0.1:{port}{path}"
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -144,57 +218,83 @@ def wait_healthy(name: str, port: int, path: str, timeout: float = 30.0) -> bool
             with urllib.request.urlopen(req, timeout=1.0) as resp:
                 if 200 <= resp.status < 400:
                     return True
-        except Exception:
+        except (urllib.error.URLError, OSError):
             time.sleep(0.5)
     return False
 
 
+def _read_pids() -> dict[str, int]:
+    try:
+        value = json.loads(PIDS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {name: int(pid) for name, pid in value.items()}
+
+
+def _terminate(pids: dict[str, int], sig: int) -> None:
+    for name, pid in pids.items():
+        try:
+            os.killpg(os.getpgid(pid), sig)
+        except (ProcessLookupError, PermissionError):
+            continue
+        except OSError as exc:
+            print(f"Error terminating {name}: {exc}")
+
+
 def start_all() -> int:
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    for sub in ("catalyst", "yield", "exchange", "navigator", "echo"):
+    for sub in ("catalyst", "yield", "exchange", "navigator", "echo", "reactor"):
         (ENV_DIR / sub).mkdir(parents=True, exist_ok=True)
 
     principal_file = ENV_DIR / "navigator" / "principal.json"
     if not principal_file.exists():
         principal_file.write_text(
-            json.dumps({
-                "principals": [
-                    {
-                        "token_env": "CYRENE_NAVIGATOR_TOKEN",
-                        "actor_id": "acceptance-actor",
-                        "workspace_ids": ["acceptance-workspace", "default"],
-                        "can_takeover": True,
-                    }
-                ]
-            }, indent=2),
+            json.dumps(
+                {
+                    "principals": [
+                        {
+                            "token_env": "CYRENE_NAVIGATOR_TOKEN",
+                            "actor_id": "acceptance-actor",
+                            "workspace_ids": ["acceptance-workspace", "default"],
+                            "can_takeover": True,
+                        }
+                    ]
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
 
-    pids = {}
+    pids: dict[str, int] = {}
     if PIDS_FILE.exists():
         print("Pids file exists. Stopping previous services first...")
         stop_all()
 
-    reactor_token_file = Path("/tmp/cyrene-runtime-test/reactor/private/control.token")
+    credentials = load_credentials()
+    reactor_token_file = DEV_HOME / "reactor" / "private" / "control.token"
     reactor_token = reactor_token_file.read_text().strip() if reactor_token_file.is_file() else ""
 
     for s in SERVICES:
         name = s["name"]
-        log_out = open(LOGS_DIR / f"{name}.stdout.log", "w", encoding="utf-8")
-        log_err = open(LOGS_DIR / f"{name}.stderr.log", "w", encoding="utf-8")
         env = os.environ.copy()
         if reactor_token:
             env["CYRENE_REACTOR_TOKEN"] = reactor_token
+            env["CYRENE_EXCHANGE_SOURCE_TOKEN"] = reactor_token
         env.update(s["env"])
+        env.update(credentials)
         print(f"Starting {name} on port {s['port']}...")
-        proc = subprocess.Popen(
-            s["cmd"],
-            cwd=s["cwd"],
-            env=env,
-            stdout=log_out,
-            stderr=log_err,
-            preexec_fn=os.setsid,
-        )
+        with (
+            (LOGS_DIR / f"{name}.stdout.log").open("w", encoding="utf-8") as log_out,
+            (LOGS_DIR / f"{name}.stderr.log").open("w", encoding="utf-8") as log_err,
+        ):
+            proc = subprocess.Popen(
+                s["cmd"],
+                cwd=s["cwd"],
+                env=env,
+                stdout=log_out,
+                stderr=log_err,
+                start_new_session=True,
+            )
         pids[name] = proc.pid
 
     PIDS_FILE.write_text(json.dumps(pids, indent=2), encoding="utf-8")
@@ -214,7 +314,9 @@ def start_all() -> int:
         stop_all()
         return 1
 
-    print("All 7 Product services are READY.")
+    print("All Product services are READY.")
+    print(f"Operator credentials: {CREDENTIALS_FILE}")
+    print("For lifecycle commands run: set -a; . " + str(CREDENTIALS_FILE) + "; set +a")
     return 0
 
 
@@ -223,32 +325,15 @@ def stop_all() -> int:
         print("No pids file found.")
         return 0
 
-    try:
-        pids = json.loads(PIDS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pids = {}
+    pids = _read_pids()
+    for name in reversed(list(pids)):
+        print(f"Stopping {name} (pid {pids[name]})...")
 
-    for name, pid in reversed(list(pids.items())):
-        print(f"Stopping {name} (pid {pid})...")
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        except Exception as exc:
-            print(f"Error terminating {name}: {exc}")
-
+    _terminate(pids, signal.SIGTERM)
     time.sleep(2.0)
+    _terminate(pids, signal.SIGKILL)
 
-    for name, pid in pids.items():
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except Exception:
-            pass
-
-    if PIDS_FILE.exists():
-        PIDS_FILE.unlink()
+    PIDS_FILE.unlink(missing_ok=True)
     print("All Product services stopped.")
     return 0
 
@@ -258,13 +343,8 @@ def status_all() -> int:
         print("No active services recorded.")
         return 1
 
-    try:
-        pids = json.loads(PIDS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        pids = {}
-
     all_alive = True
-    for name, pid in pids.items():
+    for name, pid in _read_pids().items():
         try:
             os.kill(pid, 0)
             status = "RUNNING"

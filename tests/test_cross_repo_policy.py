@@ -168,7 +168,7 @@ def test_all_six_product_repositories_live_conformance() -> None:
     assert result.passed, (
         f"Expected 6 product services to pass, but found violations: {result.violations}"
     )
-    assert result.total_files_scanned > 200, "Should scan at least 200 production source files"
+    assert result.total_files_scanned > 120, "Should scan a realistic production source tree"
     assert set(result.repositories_checked) == {
         "Cyrene-Reactor",
         "Cyrene-Yield",

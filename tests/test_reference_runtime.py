@@ -80,3 +80,56 @@ def test_failed_child_bootstrap_tears_down_platform(
     with pytest.raises(ValueError, match="TRAINER_FAILED"):
         module.run(_args(tmp_path))
     assert calls == ["platform-up", "trainer-up", "platform-down"]
+
+
+def test_down_stops_every_runtime_and_releases_recorded_pids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    reactor_script = tmp_path / "cyrene-reactor-runtime"
+    trainer_script = tmp_path / "cyrene-trainer-runtime"
+    reactor_script.write_text("")
+    trainer_script.write_text("")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "_commands",
+        lambda _args, _home: {
+            "platformDown": ["platform-down"],
+            "reactorDown": [str(reactor_script), "down"],
+            "trainerDown": [str(trainer_script), "down"],
+        },
+    )
+
+    def invoke(command: list[str], _code: str) -> dict[str, str]:
+        calls.append(command[0])
+        if command[0] == str(trainer_script):
+            raise ValueError("TRAINER_RUNTIME_DOWN_FAILED")
+        return {"profile": command[0], "status": "DOWN"}
+
+    released: list[str] = []
+    monkeypatch.setattr(module, "_release_pid_files", lambda path: released.append(path.name) or [])
+    monkeypatch.setattr(module, "_invoke", invoke)
+    args = _args(tmp_path)
+    args.command = "down"
+    result = module.run(args)
+
+    assert calls == ["platform-down", str(reactor_script), str(trainer_script)]
+    assert released == ["trainer"]
+    assert result["status"] == "DOWN"
+    assert result["components"]["reactor"]["status"] == "DOWN"
+    assert result["components"]["trainer"]["teardown"] == "PID_RELEASE"
+    assert (tmp_path / "runtime" / "reference-runtime.json").stat().st_mode & 0o077 == 0
+
+
+def test_release_pid_files_terminates_and_removes_markers(tmp_path: Path) -> None:
+    module = _module()
+    runtime_home = tmp_path / "trainer"
+    runtime_home.mkdir()
+    marker = runtime_home / "worker.pid"
+    marker.write_text(str(2**31 - 1))
+
+    released = module._release_pid_files(runtime_home)
+
+    assert released == [2**31 - 1]
+    assert not marker.exists()

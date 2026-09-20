@@ -23,14 +23,12 @@ def test_client_prepares_both_dataset_versions_without_manual_resource_ids(tmp_p
         "catalyst": catalyst_app(
             database_path=tmp_path / "catalyst.db",
             artifact_root=root,
-            platform_artifacts=True,
             yield_url="http://yield",
         ),
         "yield": yield_app(state_directory=tmp_path / "yield", artifact_root=root),
         "echo": echo_app(
             database_path=tmp_path / "echo.db",
             artifact_root=root,
-            platform_artifacts=True,
             catalyst_url="http://catalyst",
         ),
     }

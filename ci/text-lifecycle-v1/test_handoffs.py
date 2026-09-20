@@ -151,7 +151,6 @@ def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
         "catalyst": catalyst_app(
             database_path=tmp_path / "catalyst.db",
             artifact_root=tmp_path / "artifacts",
-            platform_artifacts=True,
             yield_url="http://yield",
         ),
         "yield": yield_app(
@@ -164,7 +163,6 @@ def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
         "echo": echo_app(
             database_path=tmp_path / "echo.db",
             artifact_root=tmp_path / "artifacts",
-            platform_artifacts=True,
             catalyst_url="http://catalyst",
         ),
         "navigator": create_persistence_app(
@@ -370,7 +368,7 @@ def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
         201,
         json={
             "suiteId": suite["id"],
-            "engineBindingId": "exact-match",
+            "engineBindingId": "exact-match-plugin",
             "referenceAnswers": {"1": "Hi"},
         },
     )

@@ -28,13 +28,41 @@ This is a provider deployment requirement, not an API file-path handoff. Set:
 | Catalyst | `CYRENE_ARTIFACT_ROOT`, `CYRENE_YIELD_URL`; launch `uv run --no-sync python -m cyrene_catalyst` (port 8014) |
 | Yield | `cyrene-yield --runtime-config $CYRENE_RUNTIME_HOME/platform/runtime.json --trainer-runtime-config $CYRENE_RUNTIME_HOME/trainer/runtime.json --state-directory ... --reactor-url ...` (port 8092) |
 | Reactor host/control | Use generated `$CYRENE_RUNTIME_HOME/reactor/host.json` and `control.json`; ports 19301 and 19300 |
-| Echo | `cyrene-echo --database ... --artifact-root ... --platform-artifacts --catalyst-url ...` (port 8094) |
+| Echo | `cyrene-echo --database ... --artifact-root ... --catalyst-url ...` (port 8094) |
 | Navigator persistence | Add `--artifact-root ... --echo-url ...` to `scripts/serve-persistence.py`; retain the existing principal config and database |
 
 All paths above are private operator configuration. Public resource identity is
 always a Product URI or Artifact digest. A missing provider/receiver rejects the
 action. There is no local-file, SSH-copy or hidden API fallback. Remote Artifact
 replication is outside this V1 deployment profile.
+
+Local development uses one orchestrator and one canonical data root
+(`CYRENE_DEV_HOME`, default `~/.local/state/cyrene/dev`):
+
+```bash
+scripts/cyrene-dev.py init
+scripts/cyrene-dev.py up       # reference runtimes, then the Product APIs
+scripts/cyrene-dev.py status
+scripts/cyrene-dev.py down     # releases services, runtimes, and recorded pids
+```
+
+`--scope runtimes|services` narrows any command. `up` stops previously recorded
+services first, refuses to start the Product APIs when a runtime bootstrap
+failed, and tears the stack down when a service never becomes ready. `down`
+releases the Product services before the runtimes they depend on and never
+deletes anything outside the data root.
+
+`up` generates the operator credentials once into `$CYRENE_DEV_HOME/credentials.env`
+(mode 0600) and prints the file. The lifecycle client reads the same names the
+Products were started with, so an operator runs:
+
+```bash
+set -a; . "$CYRENE_DEV_HOME/credentials.env"; set +a
+```
+
+`scripts/text-lifecycle-v1.py acceptance` releases the gateway endpoint,
+deployment, and training run when it passes; add `--keep-resources` only when
+collecting evidence from a live route.
 
 这里的路径仅用于服务启动配置，不进入产品资源身份。服务和执行端必须能访问同一
 Artifact provider；未连接时明确失败。首版不新增远程 Artifact 复制机制。

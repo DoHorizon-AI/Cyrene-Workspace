@@ -172,6 +172,8 @@ def test_acceptance_driver_orchestrates_entire_loop(
                     and path == "/api/v1/training-results/tres-1/actions/send-to-reactor"
                 ):
                     return {"targetResource": {"id": "dd-1"}}
+                if method == "POST" and path == "/api/v1/training-runs/trun-1/actions/cancel":
+                    return {"id": "trun-1", "state": "CANCELED"}
             elif product == "reactor":
                 if method == "GET" and path == "/api/v1/serving-bindings":
                     return [{"id": "sb-1", "name": "local-rtx"}]
@@ -187,6 +189,8 @@ def test_acceptance_driver_orchestrates_entire_loop(
                     return [{"receiverId": "rec-1", "providerBindingIds": ["pb-1"]}]
                 if method == "POST" and path == "/api/v1/endpoints/ep-1/actions/send-to-exchange":
                     return {"route": {"id": "rt-1"}}
+                if method == "POST" and path == "/api/v1/deployments/dep-1/actions/stop":
+                    return {"id": "dep-1", "status": "STOPPED"}
             elif product == "exchange":
                 if method == "POST" and path == "/api/v1/gateway-endpoints":
                     return {"id": "gep-1"}
@@ -194,6 +198,8 @@ def test_acceptance_driver_orchestrates_entire_loop(
                     return {"id": "rt-1", "status": "ACTIVE", "resourceVersion": "v1"}
                 if method == "POST" and path == "/api/v1/gateway-route-drafts/rt-1/actions/confirm":
                     return {"id": "rt-1", "status": "ACTIVE"}
+                if method == "POST" and path == "/api/v1/gateway-endpoints/gep-1/actions/disable":
+                    return {"id": "gep-1", "state": "DISABLED"}
                 if method == "POST" and path == "/v1/chat/completions":
                     return {
                         "choices": [{"message": {"content": "Cyrene is an autonomous platform."}}]
@@ -238,6 +244,8 @@ def test_acceptance_driver_orchestrates_entire_loop(
         runtime_config=runtime,
         repository="owner/model",
         revision="a" * 40,
+        allow_offline_base_import=True,
+        eval_binding="exact-match-plugin",
         epochs=1.0,
         max_steps=1,
         max_length=512,
@@ -255,8 +263,81 @@ def test_acceptance_driver_orchestrates_entire_loop(
         poll_interval=0.01,
         timeout=10.0,
     )
-    result = module.perform(args, state, MockClient())
+    client = MockClient()
+    result = module.perform(args, state, client)
     assert result["status"] == "PASS"
     assert result["lifecycleLoop"] == "TEXT_MODEL_LIFECYCLE_V1_FIRST_USABLE_LOOP"
-    assert result["lineageAudit"]["datasetVersionV1"] == "cyrene://catalyst/dataset-versions/dv-1"
-    assert result["lineageAudit"]["datasetVersionV2"] == "cyrene://catalyst/dataset-versions/dv-2"
+    # A passing acceptance releases the live route, deployment, and run.
+    assert ("exchange", "POST", "/api/v1/gateway-endpoints/gep-1/actions/disable") in calls
+    assert ("reactor", "POST", "/api/v1/deployments/dep-1/actions/stop") in calls
+    assert ("yield", "POST", "/api/v1/training-runs/trun-1/actions/cancel") in calls
+
+
+def test_acceptance_refuses_to_silently_import_the_base_model_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    monkeypatch.setattr(module, "snapshot_download", lambda **_kwargs: str(tmp_path))
+    calls: list[tuple[str, str, str]] = []
+
+    class RejectingClient:
+        def request(
+            self,
+            product: str,
+            method: str,
+            path: str,
+            *,
+            body: object = None,
+            data: bytes | None = None,
+            key: str | None = None,
+        ) -> object:
+            del body, data, key
+            calls.append((product, method, path))
+            if product == "reactor":
+                raise AssertionError("reactor is unavailable")
+            if method == "POST" and path == "/api/v1/datasets":
+                return {"id": "ds-1"}
+            if method == "POST" and "preparations?" in path:
+                return {"id": "prep-1", "datasetId": "ds-1"}
+            if method == "POST" and path == "/api/v1/preparations/prep-1/publish":
+                return {
+                    "datasetVersion": {
+                        "id": "dv-1",
+                        "uri": "cyrene://catalyst/dataset-versions/dv-1",
+                    }
+                }
+            if method == "POST" and path.endswith("/actions/send-to-yield"):
+                return {"targetResource": {"id": "td-1"}}
+            if product == "catalyst":
+                return {"status": "ok"}
+            raise AssertionError(f"Unexpected API call: {product} {method} {path}")
+
+    args = argparse.Namespace(
+        action="acceptance",
+        name="Acceptance Test",
+        dataset_file=None,
+        runtime_config=_runtime(tmp_path),
+        repository="owner/model",
+        revision="a" * 40,
+        allow_offline_base_import=False,
+        eval_binding="exact-match-plugin",
+        epochs=1.0,
+        max_steps=1,
+        max_length=512,
+        template="default",
+        rank=8,
+        alpha=16,
+        binding_index=1,
+        receiver_index=1,
+        provider_index=1,
+        model_pattern="test-model",
+        workspace="test-workspace",
+        reviewer="Test Reviewer",
+        public_url="http://127.0.0.1:8000",
+        auth_policy_ref="policy:test",
+        poll_interval=0.01,
+        timeout=10.0,
+    )
+    with pytest.raises(RuntimeError, match="Reactor base model import failed"):
+        module.perform(args, {}, RejectingClient())
+    assert ("reactor", "GET", "/api/v1/serving-bindings") in calls

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,8 @@ def _repository(variable: str) -> Path:
 
 
 def _invoke(command: list[str], code: str) -> dict[str, Any]:
+    if not Path(command[0]).is_file():
+        raise ValueError(code + "_ABSENT: " + command[0])
     result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=7200)
     try:
         value = json.loads(result.stdout.splitlines()[-1])
@@ -91,6 +94,7 @@ def _commands(args: argparse.Namespace, home: Path) -> dict[str, list[str]]:
         "platformDown": [runtime, "down", "--runtime-home", str(platform_home)],
         "trainerBootstrap": [trainer, "bootstrap", "--runtime-home", str(trainer_home)],
         "trainerStatus": [trainer, "status", "--runtime-home", str(trainer_home)],
+        "trainerDown": [trainer, "down", "--runtime-home", str(trainer_home)],
         "reactorBootstrap": [
             serving,
             "bootstrap",
@@ -112,7 +116,40 @@ def _commands(args: argparse.Namespace, home: Path) -> dict[str, list[str]]:
             "--platform-repository",
             str(platform),
         ],
+        "reactorDown": [
+            serving,
+            "down",
+            "--runtime-home",
+            str(reactor_home),
+            "--platform-runtime-config",
+            str(platform_home / "runtime.json"),
+            "--platform-repository",
+            str(platform),
+        ],
     }
+
+
+def _release_pid_files(runtime_home: Path) -> list[int]:
+    """Terminate and remove process ids recorded inside one runtime home."""
+
+    released: list[int] = []
+    if not runtime_home.is_dir():
+        return released
+    for marker in sorted(runtime_home.rglob("*.pid")):
+        try:
+            pid = int(marker.read_text().strip())
+        except (OSError, ValueError):
+            marker.unlink(missing_ok=True)
+            continue
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError:
+            pass
+        released.append(pid)
+        marker.unlink(missing_ok=True)
+    return released
 
 
 def _public(components: dict[str, dict[str, Any]], mode: str, status: str) -> dict[str, Any]:
@@ -125,6 +162,11 @@ def _public(components: dict[str, dict[str, Any]], mode: str, status: str) -> di
             name: {
                 "profile": value.get("profile"),
                 "status": value.get("status"),
+                **(
+                    {"teardown": value["teardown"], "releasedPids": value["releasedPids"]}
+                    if value.get("teardown")
+                    else {}
+                ),
             }
             for name, value in components.items()
         },
@@ -136,7 +178,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     commands = _commands(args, home)
     if args.command == "down":
         platform = _invoke(commands["platformDown"], "PLATFORM_RUNTIME_DOWN_FAILED")
-        result = _public({"platform": platform}, args.profile, "DOWN")
+        components: dict[str, dict[str, Any]] = {"platform": platform}
+        for name in ("reactor", "trainer"):
+            command = commands[name + "Down"]
+            teardown: dict[str, Any] = {"status": "DOWN"}
+            if Path(command[0]).is_file():
+                try:
+                    components[name] = _invoke(command, name.upper() + "_RUNTIME_DOWN_FAILED")
+                    continue
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    teardown["code"] = str(exc).split(":", 1)[0]
+            teardown["teardown"] = "PID_RELEASE"
+            teardown["releasedPids"] = _release_pid_files(home / name)
+            components[name] = teardown
+        result = _public(components, args.profile, "DOWN")
         _write(home / "reference-runtime.json", result)
         return result
     if args.command == "status":

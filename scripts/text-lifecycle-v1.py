@@ -27,6 +27,7 @@ from huggingface_hub import snapshot_download
 
 PLATFORM_RUNTIME_PROFILE = "CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU"
 MODEL_ARTIFACT_KIND = ArtifactKind("model")
+_TRAINING_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELED", "CANCELLED"})
 
 
 class ProductClient:
@@ -419,7 +420,7 @@ def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClie
             f"/api/v1/evaluation-inputs/{resource['id']}/actions/evaluate",
             body={
                 "suiteId": suite["id"],
-                "engineBindingId": "local-exact-match",
+                "engineBindingId": args.eval_binding,
                 "referenceAnswers": {
                     str(index + 1): value for index, value in enumerate(args.reference_answer)
                 },
@@ -482,8 +483,66 @@ def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClie
         )
         return receipt
     if action == "acceptance":
-        return run_acceptance(args, state, client)
+        try:
+            result = run_acceptance(args, state, client)
+        except BaseException:
+            release_acceptance_resources(state, api)
+            raise
+        if not getattr(args, "keep_resources", False):
+            # A passing acceptance must not leave a route serving traffic, a
+            # deployment resident on an accelerator, or a queued TrainingRun.
+            release_acceptance_resources(state, api)
+        return result
     raise ValueError("Unknown action")
+
+
+def release_acceptance_resources(state: dict[str, Any], api: Any) -> None:
+    """Release everything an interrupted acceptance loop still holds.
+
+    A failed acceptance run must not leave a route serving traffic, a deployment
+    resident on an accelerator, or a queued TrainingRun consuming the scheduler,
+    so every release is attempted even when an earlier Product is unreachable.
+    """
+
+    endpoint = state.get("gatewayEndpoint")
+    if endpoint:
+        _attempt_release(
+            "gateway endpoint",
+            lambda: api(
+                "exchange",
+                "POST",
+                f"/api/v1/gateway-endpoints/{endpoint['id']}/actions/disable",
+            ),
+        )
+    deployment = state.get("deployment")
+    if deployment and deployment.get("status") != "STOPPED":
+        _attempt_release(
+            "deployment",
+            lambda: api(
+                "reactor",
+                "POST",
+                f"/api/v1/deployments/{deployment['id']}/actions/stop",
+            ),
+        )
+    training_run = state.get("trainingRun")
+    if training_run and str(training_run.get("state", "")).upper() not in _TRAINING_TERMINAL_STATES:
+        _attempt_release(
+            "training run",
+            lambda: api(
+                "yield",
+                "POST",
+                f"/api/v1/training-runs/{training_run['id']}/actions/cancel",
+            ),
+        )
+
+
+def _attempt_release(label: str, release: Any) -> None:
+    """Release one resource without masking the failure that triggered cleanup."""
+
+    try:
+        release()
+    except Exception as exc:  # noqa: BLE001 - cleanup must never mask the original error
+        print(f"Acceptance cleanup could not release {label}: {exc}", file=sys.stderr)
 
 
 def run_acceptance(
@@ -602,7 +661,9 @@ def run_acceptance(
                 f"/api/v1/serving-bindings/{binding_id}/model-imports",
                 body={"repository": args.repository, "revision": args.revision},
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:
+            if not getattr(args, "allow_offline_base_import", False):
+                raise RuntimeError(f"Reactor base model import failed: {exc}") from exc
             state["baseImport"] = import_base_artifact(
                 args.runtime_config, args.repository, args.revision
             )
@@ -645,7 +706,7 @@ def run_acceptance(
         if current_run.get("state") == "COMPLETED":
             completed_run = current_run
             break
-        if current_run.get("state") in {"FAILED", "CANCELED"}:
+        if current_run.get("state") in {"FAILED", "CANCELED", "CANCELLED"}:
             raise RuntimeError(f"Training run failed: {current_run.get('error')}")
         time.sleep(args.poll_interval)
 
@@ -878,7 +939,7 @@ def run_acceptance(
         f"/api/v1/evaluation-inputs/{eval_input['id']}/actions/evaluate",
         body={
             "suiteId": suite["id"],
-            "engineBindingId": "local-exact-match",
+            "engineBindingId": args.eval_binding,
             "referenceAnswers": {
                 "1": "Cyrene is an autonomous multi-service model lifecycle governance platform."
             },
@@ -966,6 +1027,11 @@ def parser() -> argparse.ArgumentParser:
         description="One explicit Cyrene Product action per command; no automatic pipeline"
     )
     result.add_argument("--selection", type=Path, default=Path("text-lifecycle-selection.json"))
+    result.add_argument(
+        "--eval-binding",
+        default=os.environ.get("CYRENE_ECHO_EVAL_BINDING", "exact-match-plugin"),
+        help="Echo runner binding id declared by the Echo Product build",
+    )
     commands = result.add_subparsers(dest="action", required=True)
     command = commands.add_parser("acceptance")
     command.add_argument("--name", default="Text Model Lifecycle V1 Acceptance")
@@ -979,6 +1045,16 @@ def parser() -> argparse.ArgumentParser:
     )
     command.add_argument("--repository", default="Qwen/Qwen2.5-0.5B-Instruct")
     command.add_argument("--revision", default="7ae557604adf67be50417f59c2c2f167def9a775")
+    command.add_argument(
+        "--allow-offline-base-import",
+        action="store_true",
+        help="Fall back to a local base-model artifact when Reactor cannot import it",
+    )
+    command.add_argument(
+        "--keep-resources",
+        action="store_true",
+        help="Keep the deployment, route, and run after a passing acceptance",
+    )
     command.add_argument("--epochs", type=float, default=1.0)
     command.add_argument("--max-steps", type=int, default=1)
     command.add_argument("--max-length", type=int, default=512)
@@ -992,7 +1068,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--workspace", default="acceptance-workspace")
     command.add_argument("--reviewer", default="Acceptance Captain")
     command.add_argument("--public-url", default="http://127.0.0.1:8000")
-    command.add_argument("--auth-policy-ref", default="policy:local-acceptance")
+    command.add_argument("--auth-policy-ref", default="policy://local-acceptance")
     command.add_argument("--poll-interval", type=float, default=2.0)
     command.add_argument("--timeout", type=float, default=1800.0)
     command = commands.add_parser("dataset-import")
