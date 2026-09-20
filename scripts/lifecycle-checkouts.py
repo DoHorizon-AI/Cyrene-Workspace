@@ -114,7 +114,11 @@ def main() -> int:
         for failure in failures:
             print("FAIL " + failure, file=sys.stderr)
         return 1
-    print(f"Verified {len(_pins())} pinned revisions under {arguments.destination}")
+    # The summary goes to stderr so `--print-env` can be appended directly to
+    # $GITHUB_ENV, which only accepts KEY=VALUE lines on stdout.
+    print(
+        f"Verified {len(_pins())} pinned revisions under {arguments.destination}", file=sys.stderr
+    )
     return 0
 
 
