@@ -294,7 +294,7 @@ dependencies = [
 [[package]]
 name = "cyrene-dataset-preparation"
 version = "0.1.0"
-source = { git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftools%2Fdataset-preparation&rev=b17e0fab972a4281626ef6ef3595168ee6bcb06b#b17e0fab972a4281626ef6ef3595168ee6bcb06b" }
+source = { git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftools%2Fdataset-preparation&rev=f55547e97d9496bf1b3b34480a98e299bc99a220#f55547e97d9496bf1b3b34480a98e299bc99a220" }
 dependencies = [
     { name = "cyrene-plugin-runtime" },
     { name = "duckdb" },
@@ -328,7 +328,7 @@ dependencies = [
 [[package]]
 name = "cyrene-llama-factory"
 version = "0.1.0"
-source = { git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftraining%2Fllama-factory&rev=b17e0fab972a4281626ef6ef3595168ee6bcb06b#b17e0fab972a4281626ef6ef3595168ee6bcb06b" }
+source = { git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftraining%2Fllama-factory&rev=f55547e97d9496bf1b3b34480a98e299bc99a220#f55547e97d9496bf1b3b34480a98e299bc99a220" }
 dependencies = [
     { name = "cyrene-plugin-runtime" },
 ]
@@ -390,11 +390,11 @@ text-lifecycle = [
     { name = "cryptography", specifier = "==50.0.1" },
     { name = "cyrene-artifacts", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_artifacts&rev=c59be6f2bd82489fbe933dadff84fc589e00afd9" },
     { name = "cyrene-compat-rules", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Fpolicy%2Fcompat-rules&rev=3afbac4d386eb7a27f6778149187884820c0b7f6" },
-    { name = "cyrene-dataset-preparation", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftools%2Fdataset-preparation&rev=b17e0fab972a4281626ef6ef3595168ee6bcb06b" },
+    { name = "cyrene-dataset-preparation", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftools%2Fdataset-preparation&rev=f55547e97d9496bf1b3b34480a98e299bc99a220" },
     { name = "cyrene-dataset-validator", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftools%2Fdataset-validator&rev=3afbac4d386eb7a27f6778149187884820c0b7f6" },
     { name = "cyrene-exact-match-evaluator", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Fevaluation%2Fexact-match&rev=3afbac4d386eb7a27f6778149187884820c0b7f6" },
     { name = "cyrene-hf-model-analyzer", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Fmodels%2Fhf-model-analyzer&rev=3afbac4d386eb7a27f6778149187884820c0b7f6" },
-    { name = "cyrene-llama-factory", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftraining%2Fllama-factory&rev=b17e0fab972a4281626ef6ef3595168ee6bcb06b" },
+    { name = "cyrene-llama-factory", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=plugins%2Ftraining%2Fllama-factory&rev=f55547e97d9496bf1b3b34480a98e299bc99a220" },
     { name = "cyrene-plugin-runtime", git = "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git?subdirectory=sdk%2Fpython%2Fcyrene_plugin_runtime&rev=3afbac4d386eb7a27f6778149187884820c0b7f6" },
     { name = "cyrene-preflight", git = "https://github.com/DoHorizon-AI/Cyrene-Platform.git?subdirectory=sdk%2Fpython%2Fcyrene_preflight&rev=c59be6f2bd82489fbe933dadff84fc589e00afd9" },
     { name = "duckdb", specifier = "==1.5.5" },
