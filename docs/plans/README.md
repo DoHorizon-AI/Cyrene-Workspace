@@ -15,7 +15,9 @@
 | Plan | Scope / 范围 | Current status / 当前状态 |
 | --- | --- | --- |
 | [Cyrene Text Model Lifecycle V1](cyrene-text-model-lifecycle-v1.md) | Text LLM、NVIDIA CUDA、LLaMA Factory SFT/LoRA、vLLM、Exchange、Navigator Harness、Echo 反馈和开放式资源交接 | Implementing; 30/32 scoped Phase 0 checks have Actual PASS evidence; P0-GATE and later gates pending |
+| [Cyrene First Usable RC V1](cyrene-first-rc-v1.md) | 安装、浏览器控制台、模型导入、数据集、单卡 SFT + LoRA、vLLM 部署、Exchange 网关与 API Key、外部客户端 | Implementing; Wave 0 baseline and Wave 2 import/gateway API foundations have LOCAL_TEST_PASS; installer, WebUI, real GPU and HTTPS gates pending |
 
-Current evidence / 当前证据： [Phase 0, 2026-09-06](evidence/2026-09-06-phase-0.md)。
+Current evidence / 当前证据： [Phase 0, 2026-09-06](evidence/2026-09-06-phase-0.md)；
+[First RC Wave 0 / Wave 2, 2026-09-20](evidence/2026-09-20-rc-wave0-wave2.md)。
 
 Frozen client handoff / 固定客户端交接：[Navigator V8](handoff/cyrene-navigator-v8/README.md)。

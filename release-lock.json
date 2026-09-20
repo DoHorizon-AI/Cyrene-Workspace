@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schemaVersion": 1,
+  "name": "cyrene-0.1.0-rc.1",
+  "description": "Single release lock for the first usable Cyrene RC: supported environment, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine and plugin entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
+  "generatedAt": "2026-09-20T22:47:55Z",
+  "sourceState": "pre-release working tree; repository revisions are re-locked by the promotion commit, and the Workspace plugin package pins move to the same Plugins revision once that revision is pushed",
+  "supportedEnvironment": {
+    "os": "Ubuntu 24.04 x86_64",
+    "gpu": {
+      "vendor": "nvidia",
+      "count": 1,
+      "minimumVramMib": 12288
+    },
+    "browser": "same-host or remote modern browser over HTTPS",
+    "notes": [
+      "WSL2 is a development validation profile, not native Linux production acceptance.",
+      "One GPU admits one exclusive training or inference Lease at a time."
+    ]
+  },
+  "acceptanceModel": {
+    "repository": "Qwen/Qwen2.5-1.5B-Instruct",
+    "revision": "5fee7c4ed634dc66c6e318c8ac2897b8b9154536",
+    "license": "Apache-2.0",
+    "artifacts": [
+      "safetensors weights",
+      "config.json",
+      "tokenizer files",
+      "chat template"
+    ],
+    "status": "PINNED"
+  },
+  "python": {
+    "runtime": "3.12",
+    "declaredRange": ">=3.11,<3.15",
+    "devObserved": "3.12.3",
+    "status": "PINNED"
+  },
+  "cuda": {
+    "requirement": "NVIDIA driver compatible with the pinned vLLM/PyTorch CUDA wheel",
+    "devObservedDriver": "616.92",
+    "devObservedGpu": "NVIDIA GeForce RTX 5070 12227 MiB",
+    "status": "RECORDED_AT_INSTALL"
+  },
+  "engines": {
+    "training.llama-factory.v1": {
+      "package": "llamafactory",
+      "acceptedVersion": "0.9.5",
+      "license": "Apache-2.0",
+      "source": "https://github.com/hiyouga/LLaMA-Factory",
+      "status": "PENDING_REAL_ACCEPTANCE",
+      "notes": "Pinned for packaging; the Wave 3 native CUDA SFT + LoRA acceptance must confirm this exact version."
+    },
+    "execution.engine.v1": {
+      "package": "vllm",
+      "acceptedVersion": "0.25.1",
+      "license": "Apache-2.0",
+      "source": "https://github.com/vllm-project/vllm",
+      "resolvedDependencies": {
+        "torch": "2.11.0",
+        "transformers": ">=5.5.3"
+      },
+      "status": "EVIDENCE_SCOPED",
+      "evidence": "Real vLLM 0.25.1 loaded a pinned model revision and passed health in the Phase 0 external-provider environment; native Reactor/vLLM acceptance on the RC host is still pending.",
+      "notes": "A newer vLLM exists upstream; the RC pins the version with real health evidence, not the newest release."
+    }
+  },
+  "plugins": {
+    "cyrene-plugin-runtime": {
+      "package": "cyrene-plugin-runtime",
+      "versionRange": ">=0.2,<0.3",
+      "status": "PINNED"
+    },
+    "cyrene-llama-factory": {
+      "package": "cyrene-llama-factory",
+      "version": "0.1.0",
+      "capability": "training.llama-factory.v1",
+      "status": "PINNED"
+    },
+    "cyrene-vllm-runtime": {
+      "package": "cyrene-vllm-runtime",
+      "version": "0.1.0",
+      "capability": "execution.engine.v1",
+      "status": "PINNED"
+    }
+  },
+  "repositories": {
+    "Cyrene-Platform": "a3917fb9e3bcc5c9abf6e2fb6265d08f02dd1e3a",
+    "Cyrene-Plugins-Official": "31147dd264de527eee6ad27882f3abe1718081fe",
+    "Cyrene-Workspace": "ec4f73dcf6cdeb459c0e6a3cad7f42c6ce5fb486",
+    "Cyrene-Reactor": "44c5113ba246ab8894dea600ff95058d05c11e04",
+    "Cyrene-Yield": "941d6718fb963827ee1bd3d42970cf9e99eabc7c",
+    "Cyrene-Exchange": "7e5d132334f940b9e22450a489798fa1644b5772",
+    "Cyrene-Catalyst": "d4037bb2d11847dd489170ae4a7615461a4b7c31",
+    "Cyrene-Echo": "cb5ddb0ca7e10b50692bf1e92e9d05a9f5089b3b",
+    "Cyrene-Navigator": "09515e84e801bf42d989f1a7adab4fd7fb252d48"
+  }
+}
