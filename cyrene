@@ -20,6 +20,7 @@ import tarfile
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent
@@ -63,25 +64,38 @@ def generate_pair_code() -> str:
     return "".join(secrets.choice(alphabet) for _ in range(6))
 
 
-def read_pair_code(home: Path) -> str:
+def read_pair_credentials(home: Path) -> tuple[str, str | None]:
+    pair_code = ""
+    issued_at: str | None = None
     code_file = home / "pair_code.txt"
     if code_file.is_file():
-        return code_file.read_text(encoding="utf-8").strip()
+        pair_code = code_file.read_text(encoding="utf-8").strip()
     creds_file = home / "credentials.env"
     if creds_file.is_file():
         for line in creds_file.read_text(encoding="utf-8").splitlines():
             k, sep, v = line.partition("=")
-            if sep and k.strip() == "CYRENE_WEB_HOST_PAIR_CODE":
-                return v.strip()
-    return ""
+            if sep:
+                key = k.strip()
+                if key == "CYRENE_WEB_HOST_PAIR_CODE" and not pair_code:
+                    pair_code = v.strip()
+                elif key == "CYRENE_WEB_HOST_PAIR_CODE_ISSUED_AT":
+                    issued_at = v.strip()
+    return pair_code, issued_at
+
+
+def read_pair_code(home: Path) -> str:
+    code, _ = read_pair_credentials(home)
+    return code
 
 
 def write_credentials(home: Path, pair_code: str) -> None:
     creds_file = home / "credentials.env"
+    now_iso = datetime.now(timezone.utc).isoformat()
     creds = {
         "CYRENE_EXCHANGE_TOKEN": secrets.token_urlsafe(32),
         "CYRENE_NAVIGATOR_TOKEN": secrets.token_urlsafe(32),
         "CYRENE_WEB_HOST_PAIR_CODE": pair_code,
+        "CYRENE_WEB_HOST_PAIR_CODE_ISSUED_AT": now_iso,
     }
     if creds_file.is_file():
         for line in creds_file.read_text(encoding="utf-8").splitlines():
@@ -89,6 +103,7 @@ def write_credentials(home: Path, pair_code: str) -> None:
             if sep and k.strip():
                 creds[k.strip()] = v.strip()
         creds["CYRENE_WEB_HOST_PAIR_CODE"] = pair_code
+        creds["CYRENE_WEB_HOST_PAIR_CODE_ISSUED_AT"] = now_iso
 
     fd = os.open(creds_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -113,15 +128,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_up(args: argparse.Namespace) -> int:
     home = dev_home()
     prepare_data_dirs(home)
-    pair_code = read_pair_code(home)
+    pair_code, issued_at = read_pair_credentials(home)
     if not pair_code:
         pair_code = generate_pair_code()
         write_credentials(home, pair_code)
+        _, issued_at = read_pair_credentials(home)
 
     env = os.environ.copy()
     env["CYRENE_DEV_HOME"] = str(home)
     env["CYRENE_RUNTIME_HOME"] = str(home)
     env["CYRENE_WEB_HOST_PAIR_CODE"] = pair_code
+    if issued_at:
+        env["CYRENE_WEB_HOST_PAIR_CODE_ISSUED_AT"] = issued_at
 
     cmd = [sys.executable, str(DEV_SCRIPT), "up"]
     if getattr(args, "no_build", False):
