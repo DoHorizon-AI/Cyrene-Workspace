@@ -222,10 +222,95 @@
 - **Cyrene-Exchange (Product Service):**
   - Pytest suite (`product/tests`): 39 passed (0 failed), including correlation headers and error mapping.
 
-### 3. Acceptance Statement
+### 3. Acceptance Statement (Phase 1)
 The Cyrene Release Candidate structured logging, error codes, and diagnostics system satisfies all requirements of the canonical specification (`logging-and-errors.md`) and passes all gate criteria from `OBS-G0` through `OBS-G6`.
 
-Execution is halted at **OBS-G6** awaiting joint RC sign-off.
+---
+
+# Phase 2 — Multi-Repository Full Workspace Rollout Evidence
+
+## Wave 7 — Product Services Observability & Error Catalog (Gate: OBS-G7)
+
+### 1. Implementation Summary
+All 5 Product services have been equipped with:
+- Canonical domain error catalogs (`PRODUCT.<SERVICE>.<REASON>`) with `cause_kind` and `recovery_action`.
+- RFC 9457 Problem Details HTTP error responses (`traceId`, `requestId`, `recoveryAction`, `code`).
+- W3C `traceparent` extraction and response header propagation (`traceparent`, `x-request-id`).
+- Structured NDJSON logging strictly to stderr via `emit_diagnostic_error`, keeping stdout clean.
+- Untrusted input sanitization (`sanitize_request_id`) and secret redaction preserving usage token counts.
+
+| Product Service | Canonical Error Prefix | Commit SHA | Test Suite Status | Key Verifications |
+| :--- | :--- | :--- | :--- | :--- |
+| **Cyrene-Reactor** | `PRODUCT.REACTOR.*` | `7e5cd49` | 27 passed, 0 failed | W3C traceparent middleware, ProblemDetails with requestId/recoveryAction, stderr NDJSON diagnostics. |
+| **Cyrene-Yield** | `PRODUCT.YIELD.*` | `3aebae4` | 32 passed, 0 failed | W3C propagation, token metrics preservation (`tokens`, `prompt_tokens`), ProblemDetails wire format. |
+| **Cyrene-Navigator** | `PRODUCT.NAVIGATOR.*` | `acb21b0` | 42 passed, 0 failed | Pairing code sanitization, W3C traceparent middleware, ProblemDetails recovery actions. |
+| **Cyrene-Catalyst** | `PRODUCT.CATALYST.*` | `81d186e` | 36 passed, 0 failed | Schema mismatch & engine failure diagnostic logging, W3C trace propagation, wire format backwards compatibility. |
+| **Cyrene-Echo** | `PRODUCT.ECHO.*` | `42b9f4b` | 56 passed, 0 failed | Suite not found & judge failure diagnostic logging, prompt non-leakage, W3C traceparent propagation. |
+
+**Gate Status: OBS-G7 PASS.**
+
+---
+
+## Wave 8 — Plugins Ecosystem Structured Logging & Contracts (Gate: OBS-G8)
+
+### 1. Implementation Summary
+- **Plugin Runtime SDK (`Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime`):**
+  - Created `logging.py`: Structured NDJSON logging to stderr via `emit_diagnostic_error`. Zero stdout pollution, keeping stdout strictly reserved for machine protocols (`direct_plugin_ready`, stdio/MCP connectors).
+  - Created `errors.py`: Canonical error taxonomy `PLUGIN.<FAMILY>.<REASON>` (e.g. `PLUGIN.RUNTIME.INVALID_REQUEST`, `PLUGIN.RUNTIME.TIMEOUT`, `PLUGIN.RUNTIME.UNAVAILABLE`, `PLUGIN.RUNTIME.EXECUTION_FAILED`) with `map_plugin_error`.
+  - Integrated `_wire_error` in `server.py` to automatically emit diagnostic logs on failed capability invocations.
+  - Secret redaction and W3C trace correlation without adding binary cross-language dependencies.
+- **Evidence:**
+  - Commit: `479ab65` in `Cyrene-Plugins-Official`.
+  - Tests Executed: `pytest sdk/python/cyrene_plugin_runtime/tests`: 19 passed; 0 failed (including `test_correlation_and_errors.py`).
+
+**Gate Status: OBS-G8 PASS.**
+
+---
+
+## Wave 9 — Frontend Studio Diagnostics & Error Experience (Gate: OBS-G9)
+
+### 1. Implementation Summary
+- **Cyrene-Studio (`apps/web/src/services/client.ts`):**
+  - Upgraded `SettingsClient` and `ServiceError` with `DiagnosticInfo` (`traceId`, `requestId`, `recoveryAction`, `retryable`).
+  - Added robust parser for RFC 9457 Problem Details supporting canonical dot-separated codes (`PRODUCT.CATALYST.*`, `PRODUCT.NAVIGATOR.*`, etc.) alongside legacy codes.
+  - Automated client `X-Request-ID` generation and transmission on HTTP requests.
+  - Safe error message formatting via `formatDiagnosticSummary` providing copyable correlation IDs and actionable recovery guidance without leaking credentials or raw server traces.
+- **Evidence:**
+  - Commit: `9116ac1` in `Cyrene-Studio`.
+  - Tests Executed: `npx vitest run`: 72 passed; 0 failed across all 6 test suites (including `correlation-and-errors.test.ts`).
+
+**Gate Status: OBS-G9 PASS.**
+
+---
+
+## Wave 10 — Full Workspace Rollout Sign-Off (Gate: OBS-G10)
+
+### 1. Multi-Repository Scope & Verification Matrix (10 of 10 Repositories)
+
+| # | Repository | Component Role | Commit SHA | Logging / Correlation Status | Test Verification |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | **Cyrene-Platform** | Rust core, daemons, adapters, kernel | `facb607` | Full spec (Waves 1-5), stderr sink, panic hook, bounded budgets | `cargo test --workspace`: ALL passed |
+| 2 | **Cyrene-Workspace** | Docs, standards, governance, CLI | `e5632ff` | Canonical standard (`logging-and-errors.md`), full plan & evidence | All docs aligned & verified |
+| 3 | **Cyrene-Exchange** | Gateway & model routing service | `941cd8b` | W3C traceparent, `PRODUCT.EXCHANGE.*`, RFC 9457 ProblemDetails | Pytest: 39 passed (0 failed) |
+| 4 | **Cyrene-Reactor** | Serving & deployment supervisor | `7e5cd49` | W3C traceparent, `PRODUCT.REACTOR.*`, stderr NDJSON diagnostics | Pytest: 27 passed (0 failed) |
+| 5 | **Cyrene-Yield** | Training execution engine | `3aebae4` | W3C traceparent, `PRODUCT.YIELD.*`, token preservation | Pytest: 32 passed (0 failed) |
+| 6 | **Cyrene-Navigator** | Web host & agent evaluation | `acb21b0` | W3C traceparent, `PRODUCT.NAVIGATOR.*`, pairing code sanitization | Pytest: 42 passed (0 failed) |
+| 7 | **Cyrene-Catalyst** | Dataset curation & processing | `81d186e` | W3C traceparent, `PRODUCT.CATALYST.*`, schema failure diagnostics | Pytest: 36 passed (0 failed) |
+| 8 | **Cyrene-Echo** | Multimodal / evaluation interface | `42b9f4b` | W3C traceparent, `PRODUCT.ECHO.*`, prompt non-leakage | Pytest: 56 passed (0 failed) |
+| 9 | **Cyrene-Plugins-Official** | Official plugin runtime & SDK | `479ab65` | `PLUGIN.*` taxonomy, stderr diagnostics, pristine stdout protocol | Pytest: 19 passed (0 failed) |
+| 10 | **Cyrene-Studio** | Frontend IDE & settings client | `9116ac1` | ProblemDetails client, `X-Request-ID` propagation, safe summary | Vitest: 72 passed (0 failed) |
+
+### 2. Cross-Repository Invariants Verified
+1. **Zero stdout protocol pollution**: Across all binaries and runtimes, stdout is preserved for machine protocols (JSON-RPC, hashes, CLI discovery, stdio MCP connectors). Diagnostics strictly flow to stderr or controlled rolling file sinks.
+2. **End-to-end W3C trace propagation**: Client -> Gateway/Exchange -> Product services -> Platform kernel/adapters pass validated `traceparent` and sanitized correlation IDs (`x-request-id`, `operation_id`, `resource_id`).
+3. **Canonical error hierarchy**: Standardized `DOMAIN.CATEGORY.REASON` formats across Platform (`PLATFORM.*`), Products (`PRODUCT.<SVC>.*`), and Plugins (`PLUGIN.<FAMILY>.*`).
+4. **No cross-language binary leakage**: Product services and plugins remain decoupled from Platform Rust crates, using independent lightweight adapters conforming to the unified format.
+5. **Preservation of external work**: All pre-existing modified files outside this task scope (`Cyrene-Workspace/cyrene`, `packaging/build-deb.sh`; `Cyrene-Plugins-Official/plugins/ui/navigator/src/*`; `Cyrene-Navigator/src/cyrene_navigator/web_host.py`) remain completely untouched and preserved.
+
+### 3. Final Sign-Off
+All 10 repositories across the Cyrene workspace are fully covered and verified.
+**Gate Status: OBS-G10 PASS.**
+
 
 
 
