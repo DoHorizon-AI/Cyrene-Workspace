@@ -131,4 +131,30 @@
   - `cargo test -p cy-workspace-fabric`: 5 passed; 0 failed
   - `cargo test --workspace`: ALL crates across Platform workspace passed cleanly (0 failed).
 
+---
+
+## Wave 4 — Correlation and API mapping (Gate: OBS-G4)
+
+### 1. Implementation
+- **OBS-W4-01 (Correlation Hierarchy):**
+  - Created `cy_observability::correlation::CorrelationContext` enforcing strict hierarchy between `request_id` (single HTTP/RPC call), `operation_id` (long-running asynchronous workflow), `resource_id` (business entity reference), and `trace_id`/`span_id` (distributed trace context).
+  - In `cy_observability::formatter::CyreneLayer`: automatically promotes `trace_id` and `span_id` to top-level JSON fields matching specification Section 4.1, while preserving `request_id`, `operation_id`, and `resource_id` in `attributes`.
+- **OBS-W4-02 (Untrusted Boundary Sanitization & W3C Trace Context):**
+  - Implemented `TraceContext` with strict W3C `traceparent` validation (`00-<32hex>-<16hex>-<2hex>`), rejecting invalid versions, length mismatches, non-hex characters, and all-zero IDs.
+  - Implemented `sanitize_request_id` (128 chars), `sanitize_operation_id` (128 chars), and `sanitize_resource_id` (256 chars), stripping control characters, newlines (`\r`, `\n`), tabs, null bytes, and quotes to eliminate log injection and header smuggling vulnerabilities.
+- **OBS-W4-03 (Cross-Product & Plugin Correlation Mapping):**
+  - In `Cyrene-Exchange` (`cyrene_exchange_product`):
+    - Added `EXCHANGE_ERROR_MAPPINGS` and `map_exchange_error` mapping Exchange product error codes to canonical `PRODUCT.EXCHANGE.<REASON>` codes, `cause_kind`, and `recovery_action`.
+    - Added W3C `traceparent` and `x-request-id` header validation and propagation in HTTP middleware and error handlers (`ProblemDetails`).
+    - Implemented `logging.py` providing Cyrene-compliant NDJSON structured log formatting and recursive secret redaction without binary dependencies on Platform.
+    - Explicitly distinguished credential tokens (`token`, `auth`, `api_key`) from usage metrics (`tokens`, `prompt_tokens`, `completion_tokens`).
+
+### 2. Evidence
+- Commit: `9179935` in `Cyrene-Platform` (`feat(observability): implement correlation hierarchy, W3C trace context, and untrusted header sanitization (OBS-G4)`).
+- Commit: `941cd8b` in `Cyrene-Services/Cyrene-Exchange` (`feat(correlation): implement W3C trace context, header sanitization, and error mapping for Exchange`).
+- Tests Executed:
+  - `cargo test -p cy-observability`: 17 passed; 0 failed (all correlation, W3C parsing, rejection, and log promotion tests passing).
+  - `product/.venv/bin/pytest product/tests` in `Cyrene-Exchange`: 39 passed; 0 failed (including `test_correlation_and_errors.py`).
+
+
 

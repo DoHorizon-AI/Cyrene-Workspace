@@ -132,13 +132,13 @@
 
 ### Wave 4 — Correlation and API mapping (门禁: OBS-G4)
 
-- [ ] **OBS-W4-01 — Correlation Hierarchy.**
+- [x] **OBS-W4-01 — Correlation Hierarchy.**
   Clean separation of `request_id`, `operation_id`, `resource_id`, and `trace_id`/`span_id`.
-- [ ] **OBS-W4-02 — Untrusted Boundary Sanitization & W3C Trace Context.**
+- [x] **OBS-W4-02 — Untrusted Boundary Sanitization & W3C Trace Context.**
   Format validation and bounded lengths for all incoming correlation headers.
-- [ ] **OBS-W4-03 — Cross-Product & Plugin Correlation Mapping.**
+- [x] **OBS-W4-03 — Cross-Product & Plugin Correlation Mapping.**
   Product services (Exchange, Reactor, Catalyst) map their existing logging and API error codes into compatible standard fields without introducing binary dependencies on Platform.
-- [ ] **OBS-G4 — Wave 4 Correlation Gate.**
+- [x] **OBS-G4 — Wave 4 Correlation Gate.**
   End-to-end operation tracing demonstrated across boundaries; API error codes mapped.
 
 ---
