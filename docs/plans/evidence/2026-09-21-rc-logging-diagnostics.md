@@ -179,9 +179,11 @@
   - Configurable `lossy` policy via `NonBlockingBuilder` prevents queue exhaustion from inducing backpressure deadlocks.
 
 ### 2. Evidence
-- Commit: `8d34abf` in `Cyrene-Platform` (`feat(observability): implement bounded rolling file persistence and fault elasticity`).
+- Commits:
+  - `8d34abf` in `Cyrene-Platform` (`feat(observability): implement bounded rolling file persistence and fault elasticity`).
+  - `facb607` in `Cyrene-Platform` (`test(observability): verify concurrent thread isolation and config failure handling`).
 - Tests Executed:
-  - `cargo test -p cy-observability`: 20 passed; 0 failed (including `rolling_file_config_defaults_and_builder`, `rolling_file_sink_rotates_and_shifts_history`, `rolling_file_sink_tracks_dropped_writes_on_error`).
+  - `cargo test -p cy-observability`: 22 passed; 0 failed (including `rolling_file_config_defaults_and_builder`, `rolling_file_sink_rotates_and_shifts_history`, `rolling_file_sink_tracks_dropped_writes_on_error`, `init_observability_fails_gracefully_on_invalid_config`, `concurrent_threads_maintain_isolated_correlation_contexts`).
   - `cargo test --workspace`: ALL crates across Platform workspace passed cleanly (0 failed).
 
 ---
@@ -198,7 +200,7 @@
 | **LOG-04** | Injected persistence/cleanup failure records exact cause, preserved state, recovery action; no fabricated RELEASED | Unit & RPC tests | **PASS** | `kernel_service.rs` lease failure paths emit `PLATFORM.KERNEL.JOURNAL_WRITE_FAILED`, `PLATFORM.LEASE.RELEASE_ROLLBACK_FAILED`, `PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED` with `allocation_released = false`. Reconcile in `controller.rs` transitions to `UnknownRequiresReconciliation`. |
 | **LOG-05** | Reconnect / backoff loops output rate-limited summaries with retry count and elapsed time; no retry log storm | Unit tests | **PASS** | `cy-node-agent::daemon` rate-limits reconnect logging: logs initial disconnect, throttles retries with exponential backoff & elapsed time, and logs on reconnection. |
 | **LOG-06** | Normal cancelation does not produce misleading ERROR; unconfirmed cleanup isolated | Code audit & tests | **PASS** | Client cancelations in `kernel_service.rs` and `worker.rs` avoid false errors; unconfirmed worker cleanup explicitly isolated as `PLATFORM.WORKER.CLEANUP_UNCONFIRMED`. |
-| **LOG-07** | Strict correlation hierarchy (`request_id`, `operation_id`, `resource_id`, `trace_id`/`span_id`) without cross-talk; async task safety | Unit tests | **PASS** | `CorrelationContext`, W3C `TraceContext` parsing/derivation, and `CyreneLayer` top-level trace promotion in `cy-observability`; verified in `tests::structured_record_promotes_trace_id_and_retains_correlation_attributes`. |
+| **LOG-07** | Strict correlation hierarchy (`request_id`, `operation_id`, `resource_id`, `trace_id`/`span_id`) without cross-talk; async task safety | Unit tests | **PASS** | `CorrelationContext`, W3C `TraceContext` parsing/derivation, and `CyreneLayer` top-level trace promotion in `cy-observability`; verified in `tests::concurrent_threads_maintain_isolated_correlation_contexts`. |
 | **LOG-08** | Tokens, API keys, cookies, passwords, auth headers redacted; token usage counters (`tokens`, `prompt_tokens`) not over-redacted | Unit tests | **PASS** | `redaction::tests::sensitive_values_are_redacted`, `redaction::tests::sensitive_keys_are_detected` in Rust; `test_redaction_does_not_mask_token_usage_metrics` in Python Exchange. |
 | **LOG-09** | Log injection resistance, overlong string truncation, bounded record budget | Unit tests | **PASS** | `tests::log_injection_attempt_does_not_create_multiple_lines` (CR/LF escaped in JSON value strings); 4 KiB message truncate with `... [TRUNCATED]`; 32 KiB record pruning with `truncated: true`. |
 | **LOG-10** | Non-blocking queue bounded; disk full, permission denied, dropped writes tracked without deadlock | Unit tests | **PASS** | `BoundedRollingFileSink` tracks `dropped_writes_count`; non-blocking worker queue with bounded limits; verified in `tests::rolling_file_sink_tracks_dropped_writes_on_error`. |
@@ -209,7 +211,7 @@
 
 ### 2. Verified Test Suites Summary
 - **Cyrene-Platform:**
-  - `cy-observability`: 20 unit tests passed (0 failed).
+  - `cy-observability`: 22 unit tests passed (0 failed).
   - `cy-kernel-daemon`: 82 tests passed (0 failed).
   - `cy-execution-control`: 20 tests passed (0 failed).
   - `cy-node-agent`: 13 tests passed (0 failed).
