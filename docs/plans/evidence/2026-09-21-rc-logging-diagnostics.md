@@ -101,3 +101,34 @@
 - Command: `cargo test -p cy-observability -- test_structured_json_matches_specification_schema test_error_event_includes_stable_error_code test_sensitive_tokens_are_strictly_redacted test_overlong_message_is_safely_truncated test_log_injection_attempt_does_not_create_multiple_lines test_oversize_record_is_pruned_without_breaking_json`
   - Result: All test cases passed with positive and negative assertions.
 
+---
+
+## Wave 3 — Critical Platform instrumentation (Gate: OBS-G3)
+
+### 1. Implementation
+- **OBS-W3-A (Kernel Lease, Worker, Persistence & Recovery):**
+  - In `cy-kernel-daemon` (`src/rpc/kernel_service.rs`): instrumented lease acquisition (`platform.lease.acquired`), lease release (`platform.lease.released`), lease release deferred/fail-closed (`platform.lease.release_deferred`), and lease rollback errors (`PLATFORM.KERNEL.JOURNAL_WRITE_FAILED`, `PLATFORM.LEASE.RELEASE_ROLLBACK_FAILED`, `PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED`).
+  - In `cy-kernel-daemon` (`src/adapter/worker.rs`): instrumented watchdog reap (`platform.worker.reaped`) with worker ID and lease ID attributes.
+- **OBS-W3-B (Execution Reconcile & Termination Classification):**
+  - In `cy-execution-control` (`src/controller.rs`): instrumented transition to `UnknownRequiresReconciliation` on kernel invalid lease return or unknown `AssignmentAck` (`PLATFORM.WORKER.CLEANUP_UNCONFIRMED`, `PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED`).
+- **OBS-W3-C (Node Disconnect, Reconnect & Backoff):**
+  - In `cy-node-agent` (`src/daemon.rs`): implemented rate-limited connection diagnostics with retry count, elapsed time, backoff state. Emits `platform.node.connected`, `platform.node.disconnected`, `platform.node.reconnecting`, and `platform.node.reconnected` without log storming in retry loops.
+- **OBS-W3-D (Sandbox Termination & Cleanup):**
+  - In `cyrene-sandboxd` (`src/runtime.rs`): instrumented `kill_cgroup` failures, stale recovery cleanup, and cgroup directory removal warnings. Emits `platform.sandbox.terminated` with pid, cgroup path, and exit code.
+- **OBS-W3-E (Package, Plugin & Adapter Lifecycle):**
+  - In `cy-package-runtime` (`src/runtime.rs`): instrumented activation rollback failures (`PLATFORM.PACKAGE.DEACTIVATION_FAILED`), staging cleanup warnings, and lifecycle events (`platform.package.activated`, `platform.package.deactivated`) while preserving pristine JSON-RPC on stdout.
+- **OBS-W3-F (Relay Failures & Workspace Fabric):**
+  - In `cy-workspace-fabric` (`src/relay.rs`): instrumented session lifecycle (`platform.relay.connected`, `platform.relay.disconnected`), frame decoding errors (`platform.relay.frame_error`), and offline connector warnings without corrupting test fixture stdout contracts.
+
+### 2. Evidence
+- Commit: `0f9424e` in `Cyrene-Platform` (`feat(observability): implement critical platform instrumentation for Wave 3 (OBS-G3)`).
+- Tests Executed:
+  - `cargo test -p cy-kernel-daemon`: 82 passed; 0 failed
+  - `cargo test -p cy-execution-control`: 20 passed; 0 failed
+  - `cargo test -p cy-node-agent`: 13 passed; 0 failed
+  - `cargo test -p cyrene-sandboxd`: 18 passed; 0 failed
+  - `cargo test -p cy-package-runtime`: 5 passed; 0 failed
+  - `cargo test -p cy-workspace-fabric`: 5 passed; 0 failed
+  - `cargo test --workspace`: ALL crates across Platform workspace passed cleanly (0 failed).
+
+

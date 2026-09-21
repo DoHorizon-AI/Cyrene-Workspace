@@ -113,19 +113,19 @@
 
 ### Wave 3 — Critical Platform instrumentation (门禁: OBS-G3)
 
-- [ ] **OBS-W3-A — Kernel Lease, Worker, Persistence & Recovery.**
+- [x] **OBS-W3-A — Kernel Lease, Worker, Persistence & Recovery.**
   Instrument `cyrene-kernel` & `cy-kernel-daemon`: lease acquisition/release, rollback failures, epoch recovery evidence, watchdog reap.
-- [ ] **OBS-W3-B — Execution Reconcile & Termination Classification.**
+- [x] **OBS-W3-B — Execution Reconcile & Termination Classification.**
   Instrument reconciliation invocation in `cy-execution-fabric` / `cy-execution-control`: desired vs observed, termination disposition, without INFO spam per loop.
-- [ ] **OBS-W3-C — Node Disconnect, Reconnect & Backoff.**
+- [x] **OBS-W3-C — Node Disconnect, Reconnect & Backoff.**
   Instrument `cy-node-agent`: initial failure, rate-limited summary with retry count and elapsed time, recovery event. No ERROR spam per retry.
-- [ ] **OBS-W3-D — Sandbox Termination & Cleanup.**
+- [x] **OBS-W3-D — Sandbox Termination & Cleanup.**
   Instrument `cyrene-sandboxd`: termination signals, grace periods, cgroup removal, unconfirmed cleanup reporting.
-- [ ] **OBS-W3-E — Package, Plugin & Adapter Lifecycle.**
+- [x] **OBS-W3-E — Package, Plugin & Adapter Lifecycle.**
   Instrument `cy-package-runtime`: installation, activation, health check, deactivation, rollback failure.
-- [ ] **OBS-W3-F — Relay & Control Request Failures.**
+- [x] **OBS-W3-F — Relay & Control Request Failures.**
   Instrument `cy-workspace-fabric`: peer rejection, frame errors, disconnect/reconnect.
-- [ ] **OBS-G3 — Wave 3 Platform Instrumentation Gate.**
+- [x] **OBS-G3 — Wave 3 Platform Instrumentation Gate.**
   Critical paths observable under normal and failure modes; no log storm in loops.
 
 ---
