@@ -87,26 +87,26 @@
 
 ### Wave 1 — Rust observability foundation (门禁: OBS-G1)
 
-- [ ] **OBS-W1-01 — Thin shared helper crate `cy-observability`.**
+- [x] **OBS-W1-01 — Thin shared helper crate `cy-observability`.**
   Located at `framework/crates/cy-observability`. Encapsulates `tracing` + `tracing-subscriber` configuration, explicit `stderr` writer, JSON and human-readable formatting, level filtering, service metadata (`service.name`, `service.instance.id`), and bounded field helpers. Zero business logic, zero state authority, zero custom RPC.
-- [ ] **OBS-W1-02 — Formatting, Redaction & Emergency Panic Diagnostics.**
+- [x] **OBS-W1-02 — Formatting, Redaction & Emergency Panic Diagnostics.**
   Deterministic UTC RFC3339 timestamps, secret sanitizer/redactor, emergency panic hook writing minimal unredacted-safe diagnosis to stderr without locks or async queues, and bounded flush.
-- [ ] **OBS-W1-03 — Platform Executable Integration.**
+- [x] **OBS-W1-03 — Platform Executable Integration.**
   Executable binaries (`cyrene-kernel`, `cy-node-agent`, `cy-runtime-agent`, `cyrene-sandboxd`, `cy-package-runtime`) initialize the subscriber on startup. Libraries only emit events/spans.
-- [ ] **OBS-G1 — Wave 1 Observability Foundation Gate.**
+- [x] **OBS-G1 — Wave 1 Observability Foundation Gate.**
   Subscriber initialization verified; stdout isolation verified for stdio protocols; panic hook verified.
 
 ---
 
 ### Wave 2 — Error namespace and structured model (门禁: OBS-G2)
 
-- [ ] **OBS-W2-01 — Stable Error Code Catalog for Platform.**
-  Format: `PLATFORM.<DOMAIN>.<REASON>`. Defined in `cy-observability` or domain crates with stable machine identifiers (e.g., `PLATFORM.LEASE.*`, `PLATFORM.WORKER.*`, `PLATFORM.NODE.*`, `PLATFORM.SANDBOX.*`, `PLATFORM.PACKAGE.*`).
-- [ ] **OBS-W2-02 — Strict Structured Event Model.**
+- [x] **OBS-W2-01 — Stable Error Code Catalog for Platform.**
+  Format: `PLATFORM.<DOMAIN>.<REASON>`. Defined in `cy-observability` with stable machine identifiers (`PLATFORM.KERNEL.*`, `PLATFORM.LEASE.*`, `PLATFORM.WORKER.*`, `PLATFORM.NODE.*`, `PLATFORM.SANDBOX.*`, `PLATFORM.PACKAGE.*`, `PLATFORM.RELAY.*`, `PLATFORM.PANIC.*`).
+- [x] **OBS-W2-02 — Strict Structured Event Model.**
   All first-party events conform to schema: `schema_version`, `timestamp`, `level`, `event.name`, `service.name`, `service.instance.id`, `message`, `trace_id`/`span_id`, `attributes`. Normal events do not mandate error codes.
-- [ ] **OBS-W2-03 — Bounded Record Limits & Sanitization.**
-  Enforce 32 KiB record budget, 4 KiB message budget, 8-level cause chain budget. Field whitelist for sensitive contexts.
-- [ ] **OBS-G2 — Wave 2 Structured Model Gate.**
+- [x] **OBS-W2-03 — Bounded Record Limits & Sanitization.**
+  Enforced 32 KiB record budget, 4 KiB message budget, 8-level cause chain budget. Field whitelist for sensitive contexts.
+- [x] **OBS-G2 — Wave 2 Structured Model Gate.**
   JSON schemas validated with positive and negative unit tests; no full env/request/token dumps.
 
 ---

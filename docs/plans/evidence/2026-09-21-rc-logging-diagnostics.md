@@ -44,3 +44,60 @@
 - Plan document: `Cyrene-Workspace/docs/plans/rc-logging-and-diagnostics.md` created.
 - Evidence record: `Cyrene-Workspace/docs/plans/evidence/2026-09-21-rc-logging-diagnostics.md` created.
 - Zero production code behavior modified in Wave 0.
+
+---
+
+## Wave 1 — Rust observability foundation
+
+### 1. Implementation
+- Created thin shared helper crate `framework/crates/cy-observability`.
+- Modules implemented:
+  - `config`: strict profile and log level validation.
+  - `formatter`: custom `CyreneLayer` emitting strict NDJSON to stderr and human-readable text for development.
+  - `redaction`: secret sanitization (tokens, keys, passwords, cookies, auth headers) and bounded truncation.
+  - `panic_hook`: raw stderr emergency diagnostic output without locks or async queues.
+  - `guard`: RAII guard for bounded non-blocking worker shutdown.
+  - `init`: subscriber initialization directly to `std::io::stderr`.
+- Integrated subscriber initialization into key Platform executables:
+  - `cyrene-kernel/src/main.rs`
+  - `cy-node-agent/src/main.rs`
+  - `cy-runtime-agent/src/main.rs`
+  - `cy-package-runtime/src/main.rs`
+  - `cyrene-sandboxd/src/main.rs`
+
+### 2. Evidence
+- Command: `cargo test -p cy-observability`
+  - Result: `13 passed; 0 failed; 0 ignored`
+- Command: `cargo clippy -p cy-observability`
+  - Result: 0 warnings, 0 errors
+- Command: `cargo test -p cy-package-runtime`
+  - Result: `5 passed` (including `package_runtime_tck`)
+- Command: `cargo test -p cyrene-sandboxd`
+  - Result: `18 passed`
+- Command: `cargo test --workspace`
+  - Result: All tests across the entire Platform workspace passed cleanly.
+
+---
+
+## Wave 2 — Error namespace and structured model
+
+### 1. Implementation
+- Canonical Platform error catalog: `PLATFORM.<DOMAIN>.<REASON>` in `cy_observability::error_catalog::PlatformErrorCode`.
+- Structured NDJSON record schema implemented:
+  - `schema_version`: 1
+  - `timestamp`: UTC RFC3339
+  - `level`: `TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR`
+  - `event.name`: dot-separated stable string
+  - `service.name`: logical service name
+  - `service.instance.id`: unique instance UUID
+  - `message`: human-readable description
+  - `attributes`: key-value attributes
+- Validated bounded constraints:
+  - Max record budget: 32 KiB
+  - Max message budget: 4 KiB
+  - Log injection resistance: newlines escaped; single NDJSON line per record.
+
+### 2. Evidence
+- Command: `cargo test -p cy-observability -- test_structured_json_matches_specification_schema test_error_event_includes_stable_error_code test_sensitive_tokens_are_strictly_redacted test_overlong_message_is_safely_truncated test_log_injection_attempt_does_not_create_multiple_lines test_oversize_record_is_pruned_without_breaking_json`
+  - Result: All test cases passed with positive and negative assertions.
+
