@@ -164,3 +164,65 @@
   Final evidence compiled with exact command logs, testing scope, and limitations. Ready for RC joint acceptance.
 - [x] **OBS-G6 — Final RC Observability Gate.**
   Joint acceptance readiness achieved.
+
+---
+
+## 5. Phase 2 — Multi-Repository Full Workspace Rollout / 全仓覆盖扩展实施
+
+### Wave 7 — Product Services Observability & Canonical Error Catalog (门禁: OBS-G7)
+
+- [ ] **OBS-W7-01 — Cyrene-Reactor (Model Serving & Deployment Supervisor).**
+  - Canonical error catalog: `PRODUCT.REACTOR.<REASON>`.
+  - Structured NDJSON logging to stderr, W3C `traceparent` propagation, correlation hierarchy (`deployment_id` as resource, `operation_id` for deploy/undeploy, `request_id` for API calls).
+  - RFC 9457 Problem Details error handling with stable codes and recovery actions.
+- [ ] **OBS-W7-02 — Cyrene-Yield (Training Execution Engine).**
+  - Canonical error catalog: `PRODUCT.YIELD.<REASON>`.
+  - Structured NDJSON logging to stderr, correlation hierarchy (`run_id` as resource, `training_run_id`, `operation_id`, `request_id`).
+  - Strict secret redaction for dataset URLs and storage credentials; usage token metrics (`tokens`, `token_count`) unredacted.
+- [ ] **OBS-W7-03 — Cyrene-Navigator (Evaluation & Web Host Service).**
+  - Canonical error catalog: `PRODUCT.NAVIGATOR.<REASON>`.
+  - Structured NDJSON logging to stderr; W3C `traceparent` propagation; session/pairing code sanitization.
+  - Problem Details HTTP error responses with machine codes and safe recovery actions.
+- [ ] **OBS-W7-04 — Cyrene-Catalyst (Dataset Curation & Processing).**
+  - Canonical error catalog: `PRODUCT.CATALYST.<REASON>`.
+  - Structured NDJSON logging to stderr; correlation hierarchy (`dataset_id` / `version_id` as resource); safe schema validation error mapping.
+- [ ] **OBS-W7-05 — Cyrene-Echo (Multimodal / Evaluation Interface).**
+  - Canonical error catalog: `PRODUCT.ECHO.<REASON>`.
+  - Structured NDJSON logging to stderr; judge evaluation error mapping; non-leakage of evaluation samples or private prompts.
+- [ ] **OBS-G7 — Wave 7 Product Services Gate.**
+  - All 5 Product services equipped with canonical error codes, structured logging, correlation propagation, and passing unit test suites.
+
+---
+
+### Wave 8 — Plugins Ecosystem Structured Logging & Contracts (门禁: OBS-G8)
+
+- [ ] **OBS-W8-01 — Plugin Python SDK Logging Helper.**
+  - Thin logging module in `Cyrene-Plugins-Official/sdk/python`: structured NDJSON formatter, correlation context, and secret sanitization without binary dependencies.
+- [ ] **OBS-W8-02 — Plugin Error Namespace & Contracts.**
+  - Standard error code convention: `PLUGIN.<NAME>.<REASON>`.
+  - Ensure plugins preserve stdout machine protocols when running as stdio/MCP connectors.
+- [ ] **OBS-G8 — Wave 8 Plugins Gate.**
+  - Official plugins repository compliance verified; contracts and tests pass.
+
+---
+
+### Wave 9 — Frontend Studio Diagnostics & Error Experience (门禁: OBS-G9)
+
+- [ ] **OBS-W9-01 — RFC 9457 Problem Details & Correlation Client.**
+  - In `Cyrene-Studio`: robust parser for Problem Details responses extracting stable `code`, `trace_id`, `operation_id`, `request_id`, and `recovery_action`.
+- [ ] **OBS-W9-02 — Safe Error Display & Correlation Copying.**
+  - Display human-readable message, machine error code badge, copyable trace/operation IDs, and actionable recovery buttons.
+  - Safe fallback when encountering unknown error codes without crashing or leaking raw stack traces.
+- [ ] **OBS-G9 — Wave 9 Studio UI Gate.**
+  - Vitest test suites verify error decoding, safe fallback, and correlation propagation.
+
+---
+
+### Wave 10 — Full Workspace Cross-Repository Acceptance (门禁: OBS-G10)
+
+- [ ] **OBS-W10-01 — End-to-End Cross-Repository Correlation Audit.**
+  - Verified correlation flow from Studio UI -> Gateway/Exchange -> Products (Reactor/Yield/Catalyst/Echo/Navigator) -> Platform (Kernel/Daemon/Adapters).
+- [ ] **OBS-W10-02 — Workspace Evidence Record & Full Rollout Sign-Off.**
+  - Comprehensive evidence record updated across all 10 repositories.
+- [ ] **OBS-G10 — Full Workspace Rollout Gate.**
+  - Complete workspace coverage achieved.
