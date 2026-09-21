@@ -23,6 +23,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**COMPATIBILITY.md**](COMPATIBILITY.md): OpenAI API compatibility and scoped Plugin migration surfaces.
 - [**MIGRATION.md**](MIGRATION.md): Legacy surface final closure report and verification inventory.
 - [**CI Authority**](governance/ci-authority.md): GitHub Actions/Azure ownership, automatic trigger boundary, and evidence rules.
+- [**Logging & Error Standards**](standards/logging-and-errors.md): Unified structured logging format, stable error code taxonomy, and diagnostic boundaries (v0.1 draft).
 
 ---
 
