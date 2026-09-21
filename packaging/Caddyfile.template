@@ -1,0 +1,8 @@
+{$CYRENE_DOMAIN} {
+    reverse_proxy /v1/* localhost:8003    # Exchange 网关数据面（API Key 鉴权）
+    reverse_proxy /* localhost:7860       # Navigator Web Host（Cookie 鉴权）
+    
+    tls {
+        # 自动申请 Let's Encrypt 证书（生产模式）
+    }
+}

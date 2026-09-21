@@ -19,6 +19,7 @@ obj/
 out/
 target/
 build/
+dist/
 .gradle/
 
 # Python virtualenvs & caches
