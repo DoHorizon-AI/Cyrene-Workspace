@@ -145,22 +145,22 @@
 
 ### Wave 5 — Local persistence and bounded failure behavior (门禁: OBS-G5)
 
-- [ ] **OBS-W5-01 — Controlled Local File Sink & Single Rotation Owner.**
+- [x] **OBS-W5-01 — Controlled Local File Sink & Single Rotation Owner.**
   Standard stderr for managed services; dedicated bounded rolling file sink for standalone/unmanaged deployments. Only one rotation owner.
-- [ ] **OBS-W5-02 — Bounded Operational Budgets.**
+- [x] **OBS-W5-02 — Bounded Operational Budgets.**
   Fixed queue limits (records & bytes), flush timeout (e.g. 2000ms), file size (e.g. 50 MB), retention count (e.g. 5), per-host budget.
-- [ ] **OBS-W5-03 — Failure Mode Hardening.**
+- [x] **OBS-W5-03 — Failure Mode Hardening.**
   Verify behavior under simulated queue full, disk full, permission denied, slow sink. Logging failures must never deadlock lease release or worker cleanup. Dropped counts tracked.
-- [ ] **OBS-G5 — Wave 5 Bounded Resilience Gate.**
+- [x] **OBS-G5 — Wave 5 Bounded Resilience Gate.**
   All failure modes tested; bounded memory and non-blocking guarantees proven.
 
 ---
 
 ### Wave 6 — Acceptance & Governance (门禁: OBS-G6)
 
-- [ ] **OBS-W6-01 — Specification LOG-01 to LOG-14 Compliance.**
+- [x] **OBS-W6-01 — Specification LOG-01 to LOG-14 Compliance.**
   Comprehensive automated test suite covering startup, stdout isolation, lease failures, reconnect rate-limiting, secret redaction, log injection resistance, panic safety, and error code correlation.
-- [ ] **OBS-W6-02 — Evidence Record & Joint Acceptance Report.**
+- [x] **OBS-W6-02 — Evidence Record & Joint Acceptance Report.**
   Final evidence compiled with exact command logs, testing scope, and limitations. Ready for RC joint acceptance.
-- [ ] **OBS-G6 — Final RC Observability Gate.**
+- [x] **OBS-G6 — Final RC Observability Gate.**
   Joint acceptance readiness achieved.

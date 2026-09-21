@@ -1,7 +1,7 @@
 # Evidence — RC Logging, Error Codes & Diagnostics System (2026-09-21)
 
-> Status: IN_PROGRESS — Wave 0 completed and verified on local development host.
-> 状态：进行中 — Wave 0 基线与矩阵已核验。
+> Status: COMPLETE — All waves (Wave 0 to Wave 6) verified; Gate OBS-G6 achieved.
+> 状态：已完成 — 全部 Wave（Wave 0 至 Wave 6）通过，达成 OBS-G6 门禁，具备 RC 联合验收条件。
 
 ## Environment / 环境
 
@@ -155,6 +155,76 @@
 - Tests Executed:
   - `cargo test -p cy-observability`: 17 passed; 0 failed (all correlation, W3C parsing, rejection, and log promotion tests passing).
   - `product/.venv/bin/pytest product/tests` in `Cyrene-Exchange`: 39 passed; 0 failed (including `test_correlation_and_errors.py`).
+
+---
+
+## Wave 5 — Local persistence and bounded failure behavior (Gate: OBS-G5)
+
+### 1. Implementation
+- **OBS-W5-01 (Controlled Local File Sink & Single Rotation Owner):**
+  - Created `framework/crates/cy-observability/src/sink.rs`: `BoundedRollingFileSink` implementing `std::io::Write`.
+  - Single rotation ownership authority: only the application rolling sink shifts and rotates `.log`, `.log.1`..`.log.N` files; no concurrent or overlapping rotation mechanisms.
+  - Standalone/unmanaged runtimes can configure `RollingFileConfig` to log directly to controlled local disk storage alongside stderr.
+- **OBS-W5-02 (Bounded Operational Budgets):**
+  - Default file budget: 50 MiB (`DEFAULT_MAX_FILE_BYTES`).
+  - Default retention budget: 5 files (`DEFAULT_MAX_HISTORY_FILES`), bounding per-host disk space to `<= 300 MiB`.
+  - In-memory non-blocking worker queue: default 10,000 records.
+  - Flush timeout on shutdown: bounded to 2,000 ms (`Duration::from_secs(2)`).
+  - Record payload budget: bounded to 32 KiB (`DEFAULT_MAX_RECORD_BYTES`).
+  - Message budget: bounded to 4 KiB (`DEFAULT_MAX_MESSAGE_BYTES`).
+- **OBS-W5-03 (Failure Mode Hardening):**
+  - Implemented `dropped_writes` tracking via `AtomicU64` in `BoundedRollingFileSink`.
+  - Hardened against filesystem errors: write failures, permission denied, disk-full or read-only filesystem errors are non-fatal, increment `dropped_writes_count()`, and do not panic.
+  - Logging infrastructure failures never deadlock worker lease releases, worker watchdog reaps, or reconcile cleanups.
+  - Configurable `lossy` policy via `NonBlockingBuilder` prevents queue exhaustion from inducing backpressure deadlocks.
+
+### 2. Evidence
+- Commit: `8d34abf` in `Cyrene-Platform` (`feat(observability): implement bounded rolling file persistence and fault elasticity`).
+- Tests Executed:
+  - `cargo test -p cy-observability`: 20 passed; 0 failed (including `rolling_file_config_defaults_and_builder`, `rolling_file_sink_rotates_and_shifts_history`, `rolling_file_sink_tracks_dropped_writes_on_error`).
+  - `cargo test --workspace`: ALL crates across Platform workspace passed cleanly (0 failed).
+
+---
+
+## Wave 6 — Acceptance & Governance (Gate: OBS-G6)
+
+### 1. Specification Compliance Matrix (LOG-01 to LOG-14)
+
+| Criteria ID | Specification Requirement | Verification Method | Status | Evidence / Code References |
+| :--- | :--- | :--- | :--- | :--- |
+| **LOG-01** | Binary startup & config failures structured; libraries do not install global subscribers | Unit & Integration tests | **PASS** | `init_observability` returns `ObservabilityGuard`; installed only in binaries (`cyrene-kernel`, `cy-node-agent`, `cy-runtime-agent`, `cy-package-runtime`, `cyrene-sandboxd`). Library crates (`cy-observability`, `cy-execution-control`, `cy-workspace-fabric`) only emit events. |
+| **LOG-02** | Structured NDJSON schema, UTC timestamps, size limits (32 KiB record, 4 KiB message); normal events omit `error.code` | Unit tests | **PASS** | `tests::structured_json_matches_specification_schema`, `tests::overlong_message_is_safely_truncated`, `tests::oversize_record_is_pruned_without_breaking_json`. |
+| **LOG-03** | Pristine stdout isolation; zero log contamination of machine protocols (JSON-RPC, hash, fixture) | Test suites | **PASS** | Diagnostic output explicitly routed to stderr / rolling sink (`NonBlockingBuilder::finish(io::stderr())`). `cy-package-runtime` TCK test passes over stdout JSON-RPC; `cyrene-sandboxd` stdio bridge passes; `cy-workspace-fabric` passes. |
+| **LOG-04** | Injected persistence/cleanup failure records exact cause, preserved state, recovery action; no fabricated RELEASED | Unit & RPC tests | **PASS** | `kernel_service.rs` lease failure paths emit `PLATFORM.KERNEL.JOURNAL_WRITE_FAILED`, `PLATFORM.LEASE.RELEASE_ROLLBACK_FAILED`, `PLATFORM.LEASE.RELEASE_INTENT_PERSIST_FAILED` with `allocation_released = false`. Reconcile in `controller.rs` transitions to `UnknownRequiresReconciliation`. |
+| **LOG-05** | Reconnect / backoff loops output rate-limited summaries with retry count and elapsed time; no retry log storm | Unit tests | **PASS** | `cy-node-agent::daemon` rate-limits reconnect logging: logs initial disconnect, throttles retries with exponential backoff & elapsed time, and logs on reconnection. |
+| **LOG-06** | Normal cancelation does not produce misleading ERROR; unconfirmed cleanup isolated | Code audit & tests | **PASS** | Client cancelations in `kernel_service.rs` and `worker.rs` avoid false errors; unconfirmed worker cleanup explicitly isolated as `PLATFORM.WORKER.CLEANUP_UNCONFIRMED`. |
+| **LOG-07** | Strict correlation hierarchy (`request_id`, `operation_id`, `resource_id`, `trace_id`/`span_id`) without cross-talk; async task safety | Unit tests | **PASS** | `CorrelationContext`, W3C `TraceContext` parsing/derivation, and `CyreneLayer` top-level trace promotion in `cy-observability`; verified in `tests::structured_record_promotes_trace_id_and_retains_correlation_attributes`. |
+| **LOG-08** | Tokens, API keys, cookies, passwords, auth headers redacted; token usage counters (`tokens`, `prompt_tokens`) not over-redacted | Unit tests | **PASS** | `redaction::tests::sensitive_values_are_redacted`, `redaction::tests::sensitive_keys_are_detected` in Rust; `test_redaction_does_not_mask_token_usage_metrics` in Python Exchange. |
+| **LOG-09** | Log injection resistance, overlong string truncation, bounded record budget | Unit tests | **PASS** | `tests::log_injection_attempt_does_not_create_multiple_lines` (CR/LF escaped in JSON value strings); 4 KiB message truncate with `... [TRUNCATED]`; 32 KiB record pruning with `truncated: true`. |
+| **LOG-10** | Non-blocking queue bounded; disk full, permission denied, dropped writes tracked without deadlock | Unit tests | **PASS** | `BoundedRollingFileSink` tracks `dropped_writes_count`; non-blocking worker queue with bounded limits; verified in `tests::rolling_file_sink_tracks_dropped_writes_on_error`. |
+| **LOG-11** | Emergency panic hook outputs sanitized diagnostics to raw stderr without locks/async queues; no false cleanup claims | Unit & code audit | **PASS** | `cy-observability::panic_hook::install_panic_hook` writes panic location and payload to raw stderr without acquiring locks or relying on async queues. |
+| **LOG-12** | Local rolling file sink retention strictly scoped to managed logs; zero deletion of state/artifacts/checkpoints | Unit tests | **PASS** | `BoundedRollingFileSink::rotate` operates exclusively on `{directory}/{file_prefix}.log*` within `1..=max_history_files`; verified in `tests::rolling_file_sink_rotates_and_shifts_history`. |
+| **LOG-13** | Stable error codes mapped between API/UI and diagnostics; safe degradation on unknown errors | Integration tests | **PASS** | `Cyrene-Exchange` `ProblemDetails` RFC 9457 error handler maps errors via `map_exchange_error` with `PRODUCT.EXCHANGE.<REASON>`, `trace_id`, and `recovery_action`; verified in pytest. |
+| **LOG-14** | Exact scope documented; hardware-specific or hosted-only environments explicitly classified | Documentation | **PASS** | Evidence table clearly defines tested scopes (`LOCAL_TEST`), bypassed tests (`HOSTED_CI: NOT_RUN`), and GPU boundary handling. |
+
+### 2. Verified Test Suites Summary
+- **Cyrene-Platform:**
+  - `cy-observability`: 20 unit tests passed (0 failed).
+  - `cy-kernel-daemon`: 82 tests passed (0 failed).
+  - `cy-execution-control`: 20 tests passed (0 failed).
+  - `cy-node-agent`: 13 tests passed (0 failed).
+  - `cyrene-sandboxd`: 18 tests passed (0 failed).
+  - `cy-package-runtime`: 5 tests passed (0 failed).
+  - `cy-workspace-fabric`: 5 tests passed (0 failed).
+  - Entire Platform workspace (`cargo test --workspace`): All crates passed cleanly.
+- **Cyrene-Exchange (Product Service):**
+  - Pytest suite (`product/tests`): 39 passed (0 failed), including correlation headers and error mapping.
+
+### 3. Acceptance Statement
+The Cyrene Release Candidate structured logging, error codes, and diagnostics system satisfies all requirements of the canonical specification (`logging-and-errors.md`) and passes all gate criteria from `OBS-G0` through `OBS-G6`.
+
+Execution is halted at **OBS-G6** awaiting joint RC sign-off.
+
 
 
 
