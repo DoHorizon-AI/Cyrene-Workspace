@@ -3,8 +3,8 @@
   "schemaVersion": 1,
   "name": "cyrene-0.1.0-rc.1",
   "description": "Single release lock for the first usable Cyrene RC: supported environment, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine and plugin entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
-  "generatedAt": "2026-09-20T22:47:55Z",
-  "sourceState": "pre-release working tree; repository revisions are re-locked by the promotion commit, and the Workspace plugin package pins move to the same Plugins revision once that revision is pushed",
+  "generatedAt": "2026-09-22T14:46:14Z",
+  "sourceState": "completed integration revisions; the Cyrene-Workspace entry records the immediately preceding source commit because the release-lock commit cannot self-reference",
   "supportedEnvironment": {
     "os": "Ubuntu 24.04 x86_64",
     "gpu": {
@@ -86,13 +86,13 @@
   },
   "repositories": {
     "Cyrene-Platform": "a3917fb9e3bcc5c9abf6e2fb6265d08f02dd1e3a",
-    "Cyrene-Plugins-Official": "31147dd264de527eee6ad27882f3abe1718081fe",
-    "Cyrene-Workspace": "f3424b7d80cd192e8727cd7e00658d5a3cd766f2",
-    "Cyrene-Reactor": "44c5113ba246ab8894dea600ff95058d05c11e04",
-    "Cyrene-Yield": "941d6718fb963827ee1bd3d42970cf9e99eabc7c",
-    "Cyrene-Exchange": "7e5d132334f940b9e22450a489798fa1644b5772",
-    "Cyrene-Catalyst": "d4037bb2d11847dd489170ae4a7615461a4b7c31",
-    "Cyrene-Echo": "cb5ddb0ca7e10b50692bf1e92e9d05a9f5089b3b",
-    "Cyrene-Navigator": "09515e84e801bf42d989f1a7adab4fd7fb252d48"
+    "Cyrene-Plugins-Official": "4d6f80f1117ab8f7ba389eb9b9049085335ffe2b",
+    "Cyrene-Workspace": "5707aed82f3939fda12544a6a086059bf425ea96",
+    "Cyrene-Reactor": "23310bfc77e380c7c24617fb39335751498c1ae8",
+    "Cyrene-Yield": "54361279d8e0023f8ace2c8096a828b41c8400f4",
+    "Cyrene-Exchange": "4b34dcd0beee4fd762caea16d085c5a432375ce8",
+    "Cyrene-Catalyst": "2eb3582fbb6798ceeaf6786352a29c8e3fa2a435",
+    "Cyrene-Echo": "92fba4654523447a25671dd5b45dea54ec6706c8",
+    "Cyrene-Navigator": "408908827ecb623c108476bac4bfb5348b13f5f0"
   }
 }

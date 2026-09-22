@@ -23,6 +23,11 @@ def _document() -> dict:
     return json.loads((WORKSPACE_ROOT / "release-lock.json").read_text(encoding="utf-8"))
 
 
+def _lifecycle_sources() -> dict:
+    path = WORKSPACE_ROOT / "ci" / "text-lifecycle-v1" / "sources.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_repository_lock_is_structurally_valid() -> None:
     errors, _ = _module().validate(_document())
     assert errors == []
@@ -32,6 +37,18 @@ def test_repository_lock_names_current_blockers() -> None:
     _, blockers = _module().validate(_document())
     assert any("training.llama-factory.v1" in blocker for blocker in blockers)
     assert any("execution.engine.v1" in blocker for blocker in blockers)
+
+
+def test_lifecycle_sources_match_promoted_repository_revisions() -> None:
+    errors = _module().validate_lifecycle_sources(_document(), _lifecycle_sources())
+    assert errors == []
+
+
+def test_lifecycle_source_drift_is_rejected() -> None:
+    sources = _lifecycle_sources()
+    sources["products"]["Echo"] = "0" * 40
+    errors = _module().validate_lifecycle_sources(_document(), sources)
+    assert any("Cyrene-Echo" in error for error in errors)
 
 
 def test_lock_rejects_an_unpinned_acceptance_model() -> None:

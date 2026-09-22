@@ -19,6 +19,7 @@ from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = WORKSPACE_ROOT / "release-lock.json"
+LIFECYCLE_SOURCES_PATH = WORKSPACE_ROOT / "ci" / "text-lifecycle-v1" / "sources.json"
 
 REPOSITORIES = (
     "Cyrene-Platform",
@@ -100,9 +101,37 @@ def validate(document: dict[str, object]) -> tuple[list[str], list[str]]:
     return errors, blockers
 
 
+def validate_lifecycle_sources(
+    document: dict[str, object], sources: dict[str, object]
+) -> list[str]:
+    """Require lifecycle tests to use the revisions promoted by the RC lock."""
+
+    errors: list[str] = []
+    revisions = document.get("repositories")
+    products = sources.get("products")
+    if not isinstance(revisions, dict):
+        return ["repositories is required before lifecycle sources can be validated"]
+    if not isinstance(products, dict):
+        return ["lifecycle sources.products is required"]
+
+    expected = {"Cyrene-Platform": sources.get("platformRevision")}
+    expected.update({f"Cyrene-{name}": revision for name, revision in products.items()})
+    for repository, revision in expected.items():
+        if repository not in REPOSITORIES:
+            errors.append(f"lifecycle sources declare unknown repository {repository}")
+        elif revisions.get(repository) != revision:
+            errors.append(f"lifecycle source {repository} must match repositories.{repository}")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lock", type=Path, default=LOCK_PATH)
+    parser.add_argument(
+        "--lifecycle-sources",
+        type=Path,
+        default=LIFECYCLE_SOURCES_PATH,
+    )
     parser.add_argument(
         "--require-terminal",
         action="store_true",
@@ -119,7 +148,20 @@ def main() -> int:
     if not isinstance(document, dict):
         print(json.dumps({"status": "ERROR", "code": "RELEASE_LOCK_INVALID"}))
         return 1
+    try:
+        lifecycle_sources = json.loads(arguments.lifecycle_sources.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(
+            json.dumps(
+                {"status": "ERROR", "code": "LIFECYCLE_SOURCES_UNREADABLE", "detail": str(exc)}
+            )
+        )
+        return 1
+    if not isinstance(lifecycle_sources, dict):
+        print(json.dumps({"status": "ERROR", "code": "LIFECYCLE_SOURCES_INVALID"}))
+        return 1
     errors, blockers = validate(document)
+    errors.extend(validate_lifecycle_sources(document, lifecycle_sources))
     status = (
         "ERROR" if errors else ("BLOCKED" if blockers and arguments.require_terminal else "VALID")
     )
