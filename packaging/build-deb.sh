@@ -65,18 +65,41 @@ mkdir -p "${STAGE_DIR}/etc/cyrene"
 mkdir -p "${STAGE_DIR}/lib/systemd/system"
 mkdir -p "${STAGE_DIR}/var/lib/cyrene"
 
-# 1. /usr/bin/cyrene -> CLI
-cp "${WORKSPACE_ROOT}/cyrene" "${STAGE_DIR}/usr/bin/cyrene"
-chmod 755 "${STAGE_DIR}/usr/bin/cyrene"
+mkdir -p "${STAGE_DIR}/usr/lib/cyrene/scripts"
+
+# 1. CLI lives beside the other scripts under /usr/lib/cyrene, and /usr/bin/cyrene
+#    is a symlink. The CLI derives its workspace root from its own location, so
+#    installing the real file elsewhere made every data path resolve to the wrong
+#    directory.
+cp "${WORKSPACE_ROOT}/cyrene" "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene"
+chmod 755 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene"
+ln -s /usr/lib/cyrene/scripts/cyrene "${STAGE_DIR}/usr/bin/cyrene"
 
 # 2. /usr/lib/cyrene/ -> Python runtime (managed by uv) & helper scripts
-cp -r "${WORKSPACE_ROOT}/scripts" "${STAGE_DIR}/usr/lib/cyrene/"
+cp -r "${WORKSPACE_ROOT}/scripts/." "${STAGE_DIR}/usr/lib/cyrene/scripts/"
 if [[ -f "${WORKSPACE_ROOT}/pyproject.toml" ]]; then
     cp "${WORKSPACE_ROOT}/pyproject.toml" "${STAGE_DIR}/usr/lib/cyrene/"
 fi
 if [[ -f "${WORKSPACE_ROOT}/uv.lock" ]]; then
     cp "${WORKSPACE_ROOT}/uv.lock" "${STAGE_DIR}/usr/lib/cyrene/"
 fi
+# Ships the pinned engine versions and repository revisions so `cyrene doctor`
+# and the installation flows read pins from the package instead of inventing them.
+if [[ -f "${WORKSPACE_ROOT}/release-lock.json" ]]; then
+    cp "${WORKSPACE_ROOT}/release-lock.json" "${STAGE_DIR}/usr/lib/cyrene/"
+fi
+# Runtime bootstrap reads those pins and installs the engines into a venv.
+cp "${SCRIPT_DIR}/bootstrap.sh" "${STAGE_DIR}/usr/lib/cyrene/bootstrap.sh"
+chmod 755 "${STAGE_DIR}/usr/lib/cyrene/bootstrap.sh"
+# The Web Host launcher: `cyrene up` starts it to serve the console API.
+for candidate in \
+    "${WORKSPACE_ROOT}/../Cyrene-Services/Cyrene-Navigator" \
+    "${WORKSPACE_ROOT}/../Cyrene-Navigator"; do
+    [[ -f "${candidate}/scripts/serve-web.py" ]] || continue
+    cp "${candidate}/scripts/serve-web.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/serve-web.py"
+    chmod 755 "${STAGE_DIR}/usr/lib/cyrene/scripts/serve-web.py"
+    break
+done
 
 # 3. /etc/cyrene/ -> Default configuration template
 cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/cyrene.env"
@@ -231,9 +254,30 @@ mkdir -p /var/lib/cyrene /var/log/cyrene /etc/cyrene
 chown -R cyrene:cyrene /var/lib/cyrene /var/log/cyrene
 chmod 750 /var/lib/cyrene /var/log/cyrene
 
+# 安装 release-lock.json 锁定的 training/serving 引擎到隔离虚拟环境。
+# 这一步需要网络，失败不应让 dpkg 安装失败——允许用户之后手动重跑。
+if [ -x /usr/lib/cyrene/bootstrap.sh ]; then
+    if /usr/lib/cyrene/bootstrap.sh; then
+        echo "Cyrene runtime engines installed."
+    else
+        echo "WARNING: automatic engine installation failed." >&2
+        echo "         Re-run '/usr/lib/cyrene/bootstrap.sh' once network access is available." >&2
+    fi
+else
+    echo "WARNING: /usr/lib/cyrene/bootstrap.sh missing; engines were not installed." >&2
+fi
+
 # 重新加载 systemd units
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
+    # 只有 systemd 实际可用时才启用并启动服务。
+    systemctl enable cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst 2>/dev/null || true
+    systemctl restart cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst 2>/dev/null || true
+fi
+
+# 仅首次安装（而非升级）时生成配对凭据
+if [ "$1" = "configure" ] && [ -z "$2" ]; then
+    /usr/bin/cyrene init || true
 fi
 
 echo "Cyrene installed successfully."
