@@ -553,16 +553,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 print("[SKIP] Lock SHA: no pinned repositories are checked out locally")
             elif mismatched == 0:
                 noun = "repository" if checked_out == 1 else "repositories"
-                print(
-                    f"[OK] Lock SHA: {checked_out} checked-out {noun} match release-lock.json"
-                )
+                print(f"[OK] Lock SHA: {checked_out} checked-out {noun} match release-lock.json")
     except FileNotFoundError:
         print(f"[WARN] release-lock.json not found at {lock_path}")
     except (OSError, json.JSONDecodeError) as e:
         print(f"[WARN] release-lock.json could not be verified: {e}")
 
     # 7. systemd or proc available
-    has_systemd_or_proc = Path("/run/systemd/system").exists() or Path("/proc").exists() or shutil.which("systemctl") is not None
+    has_systemd_or_proc = (
+        Path("/run/systemd/system").exists()
+        or Path("/proc").exists()
+        or shutil.which("systemctl") is not None
+    )
     if has_systemd_or_proc:
         print("[OK] Process supervisor: Linux /proc or systemd available")
     else:

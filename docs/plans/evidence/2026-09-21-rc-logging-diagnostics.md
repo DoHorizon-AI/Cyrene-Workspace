@@ -1,7 +1,25 @@
 # Evidence — RC Logging, Error Codes & Diagnostics System (2026-09-21)
 
-> Status: COMPLETE — All waves (Wave 0 to Wave 6) verified; Gate OBS-G6 achieved.
-> 状态：已完成 — 全部 Wave（Wave 0 至 Wave 6）通过，达成 OBS-G6 门禁，具备 RC 联合验收条件。
+> Status: **LOCAL IMPLEMENTATION / NOT YET INTEGRATED** — 状态更正：本地实现、尚未集成。
+> Waves below were verified per repository in isolation on `docs/logging-and-errors-spec`; they are
+> component-level evidence for the logging/error work and are **not** an RC acceptance result.
+> Status restated 2026-09-22 (see "Status Correction" immediately below).
+>
+> ### Status Correction (2026-09-22)
+>
+> The original banner claimed `Status: COMPLETE — Gate OBS-G6 achieved` and the sign-off claimed
+> `OBS-G10 PASS`. Both overstated what was actually run. Corrected facts:
+>
+> - The 359 tests referenced below are **directed component tests** executed inside each repository
+>   separately. No cross-repository integration run was performed.
+> - Nothing below exercised the real Navigator → Product → Platform chain end to end, the packaged
+>   `.deb`, a clean Ubuntu 24.04 VM, or RTX 50 hardware.
+> - Hosted CI did not run (`NOT_RUN`); evidence is local only.
+> - The branch was behind `origin/develop` in most repositories, so the recorded SHAs were not on a
+>   converged baseline.
+>
+> - Whether these waves hold after integration is re-verified as part of RC1 Phase 0-4. Until then
+>   this document is retained verbatim as component-level evidence only.
 
 ## Environment / 环境
 
@@ -307,9 +325,16 @@ All 5 Product services have been equipped with:
 4. **No cross-language binary leakage**: Product services and plugins remain decoupled from Platform Rust crates, using independent lightweight adapters conforming to the unified format.
 5. **Preservation of external work**: All pre-existing modified files outside this task scope (`Cyrene-Workspace/cyrene`, `packaging/build-deb.sh`; `Cyrene-Plugins-Official/plugins/ui/navigator/src/*`; `Cyrene-Navigator/src/cyrene_navigator/web_host.py`) remain completely untouched and preserved.
 
-### 3. Final Sign-Off
-All 10 repositories across the Cyrene workspace are fully covered and verified.
-**Gate Status: OBS-G10 PASS.**
+### 3. Final Sign-Off (corrected 2026-09-22)
+
+All 10 repositories carry their logging, error code, and correlation implementation, and their own
+component tests pass. That is the full extent of this record.
+
+~~**Gate Status: OBS-G10 PASS.**~~ Superseded: gates OBS-G7 through OBS-G10 were self-declared from
+single-repository runs on a diverged branch. They are re-attested only once the work lands on a
+converged `develop` baseline and passes integration, packaging VM, and RTX 50 acceptance.
+
+Original text retained above for traceability; do not cite it as acceptance evidence.
 
 
 
