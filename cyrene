@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
+import importlib.util
 import json
 import os
 import secrets
@@ -24,11 +26,39 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-WORKSPACE_ROOT = Path(__file__).resolve().parent
+
+def _locate_workspace_root() -> Path:
+    """Locate the Workspace root for both a dev checkout and a packaged install.
+
+    The deb package installs this script to /usr/lib/cyrene/scripts/cyrene (with
+    /usr/bin/cyrene a symlink), while a checkout keeps it beside
+    release-lock.json. Falling back to the script's own directory rather than
+    raising keeps the CLI usable when no release lock is present.
+    """
+    self_path = Path(__file__).resolve()
+    parent = self_path.parent
+    # Packaged install: /usr/lib/cyrene/scripts/cyrene -> /usr/lib/cyrene
+    if parent.name == "scripts":
+        return parent.parent
+    for candidate in self_path.parents:
+        if (candidate / "release-lock.json").exists():
+            return candidate
+    return parent
+
+
+WORKSPACE_ROOT = _locate_workspace_root()
 CYRENE_ROOT = WORKSPACE_ROOT.parent
 DEFAULT_DEV_HOME = Path.home() / ".local" / "state" / "cyrene" / "dev"
 DEV_SCRIPT = WORKSPACE_ROOT / "scripts" / "cyrene-dev.py"
 SERVICES_SCRIPT = WORKSPACE_ROOT / "scripts" / "run-services.py"
+
+# Engines the RC pins to exact versions in release-lock.json ("engines").
+# Presence alone used to be assumed, so `cyrene doctor` reported a clean bill
+# of health on hosts that could neither train nor serve.
+REQUIRED_PYTHON_MODULES = {
+    "vllm": "required for model serving (pip install vllm)",
+    "llamafactory": "required for SFT training (pip install llamafactory)",
+}
 
 DEFAULT_PORTS = {
     "Navigator (7860)": 7860,
@@ -37,6 +67,25 @@ DEFAULT_PORTS = {
     "Exchange (8003)": 8003,
     "Catalyst (8004)": 8004,
 }
+
+# Product ports the Web Host proxies to, honouring the CYRENE_PORT_* overrides
+# written by /etc/cyrene/cyrene.env so a packaged install and a development
+# checkout resolve product origins from one place.
+PRODUCT_PORTS = {
+    "yield": int(os.environ.get("CYRENE_PORT_YIELD", "8001")),
+    "reactor": int(os.environ.get("CYRENE_PORT_REACTOR", "8002")),
+    "exchange": int(os.environ.get("CYRENE_PORT_EXCHANGE", "8000")),
+    "catalyst": int(os.environ.get("CYRENE_PORT_CATALYST", "8004")),
+    "navigator": int(os.environ.get("CYRENE_PORT_NAVIGATOR", "8012")),
+}
+WEB_HOST_PORT = int(os.environ.get("CYRENE_WEB_HOST_PORT", "7860"))
+SYSTEMD_UNITS = [
+    "cyrene-navigator",
+    "cyrene-yield",
+    "cyrene-reactor",
+    "cyrene-exchange",
+    "cyrene-catalyst",
+]
 
 SERVICES_LIST = [
     "reactor",
@@ -126,6 +175,108 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def _locate_web_host_launcher() -> Path | None:
+    """Locate serve-web.py for either a Navigator checkout or a packaged install."""
+
+    candidates = [
+        WORKSPACE_ROOT / "scripts" / "serve-web.py",
+        CYRENE_ROOT / "Cyrene-Navigator" / "scripts" / "serve-web.py",
+        CYRENE_ROOT / "Cyrene-Services" / "Cyrene-Navigator" / "scripts" / "serve-web.py",
+        Path("/usr/lib/cyrene/scripts/serve-web.py"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _running_under_systemd() -> bool:
+    """True when systemd itself invoked this process (i.e. from a unit)."""
+
+    return bool(os.environ.get("INVOCATION_ID") or os.environ.get("JOURNAL_STREAM"))
+
+
+def _start_units_with_systemd() -> bool:
+    """Start the packaged Product units when systemd actually owns them."""
+
+    if not Path("/run/systemd/system").exists() or shutil.which("systemctl") is None:
+        return False
+    probe = subprocess.run(
+        ["systemctl", "list-unit-files", *[f"{unit}.service" for unit in SYSTEMD_UNITS]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        return False
+    installed = [unit for unit in SYSTEMD_UNITS if f"{unit}.service" in probe.stdout]
+    if not installed:
+        return False
+    started = subprocess.run(["systemctl", "start", *installed], check=False)
+    if started.returncode != 0:
+        return False
+    print(f"Started {len(installed)} Cyrene unit(s) via systemd.")
+    return True
+
+
+def _web_host_command(launcher: Path) -> list[str]:
+    """Prefer the project's uv environment; fall back to this interpreter.
+
+    The Web Host needs its own dependencies, which `python3` alone usually does
+    not have. A packaged install keeps them under /usr/lib/cyrene, so the same
+    rule works for both layouts.
+    """
+
+    project_root = launcher.parent.parent
+    if (project_root / "pyproject.toml").is_file() and shutil.which("uv") is not None:
+        return ["uv", "run", "--project", str(project_root), "python", str(launcher)]
+    return [sys.executable, str(launcher)]
+
+
+def _start_web_host(home: Path, env: dict[str, str], pair_code: str) -> int | None:
+    """Start the Web Host detached so `cyrene up` does not hold the terminal."""
+
+    launcher = _locate_web_host_launcher()
+    if launcher is None:
+        print("[WARN] Navigator Web Host launcher (serve-web.py) was not found.")
+        print("       Products are up but the console API is unreachable.")
+        return None
+
+    logs_dir = home / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    argv = [
+        *_web_host_command(launcher),
+        "--host",
+        os.environ.get("CYRENE_WEB_HOST_HOST", "127.0.0.1"),
+        "--port",
+        str(WEB_HOST_PORT),
+        "--pairing-code",
+        pair_code,
+    ]
+    for product, port in PRODUCT_PORTS.items():
+        argv += ["--proxy", f"/api/v1/{product}=http://127.0.0.1:{port}"]
+    # A same-host HTTP console cannot set Secure cookies; suppress only that.
+    argv.append("--insecure-http")
+
+    try:
+        log_handle = (logs_dir / "navigator-web-host.log").open("ab")
+        try:
+            process = subprocess.Popen(
+                argv,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        finally:
+            log_handle.close()
+    except OSError as error:
+        print(f"[WARN] Could not start Navigator Web Host: {error}")
+        return None
+    return process.pid
+
+
 def cmd_up(args: argparse.Namespace) -> int:
     home = dev_home()
     prepare_data_dirs(home)
@@ -142,10 +293,28 @@ def cmd_up(args: argparse.Namespace) -> int:
     if issued_at:
         env["CYRENE_WEB_HOST_PAIR_CODE_ISSUED_AT"] = issued_at
 
+    # A packaged install is supervised by systemd; only fall back to launching
+    # the development stack ourselves when systemd does not own the units.
+    # When systemd invokes us it expects a foreground process, so we must never
+    # hand control back to systemctl from inside a unit (the navigator unit
+    # runs `cyrene up` and would otherwise exit immediately).
+    if not _running_under_systemd() and _start_units_with_systemd():
+        print(f"Navigator console ready: http://127.0.0.1:{WEB_HOST_PORT}")
+        return 0
+
     cmd = [sys.executable, str(DEV_SCRIPT), "up"]
     if getattr(args, "no_build", False):
         cmd.append("--no-build")
-    return subprocess.run(cmd, env=env, check=False).returncode
+    returncode = subprocess.run(cmd, env=env, check=False).returncode
+    if returncode != 0:
+        return returncode
+
+    pid = _start_web_host(home, env, pair_code)
+    if pid is None:
+        return 0
+    print(f"Navigator console ready: http://127.0.0.1:{WEB_HOST_PORT} (pair code: {pair_code})")
+    print(f"Web Host PID {pid}; see {home / 'logs' / 'navigator-web-host.log'} for its output.")
+    return 0
 
 
 def cmd_down(args: argparse.Namespace) -> int:
@@ -223,6 +392,37 @@ def check_port_free(port: int) -> bool:
             return True
         except OSError:
             return False
+
+
+def python_module_version(module_name: str) -> str | None:
+    """Installed version of `module_name`, or None when it is not importable.
+
+    Probing the current interpreter is deliberate: `cmd_up` launches Products
+    through `sys.executable`, so a package missing here is missing for them too.
+    """
+    if importlib.util.find_spec(module_name) is None:
+        return None
+    try:
+        return importlib.metadata.version(module_name)
+    except importlib.metadata.PackageNotFoundError:
+        return "present (version metadata unavailable)"
+
+
+def git_head(repo_path: Path) -> str | None:
+    """Current HEAD revision of a checkout, or None when it cannot be read."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    return out.stdout.strip() or None
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -308,26 +508,75 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"[FAIL] Disk space check failed: {e}")
         all_passed = False
 
-    # 5. systemd or proc available
-    has_systemd_or_proc = (
-        Path("/run/systemd/system").exists()
-        or Path("/proc").exists()
-        or shutil.which("systemctl") is not None
-    )
+    # 5. Training and serving engines.
+    # These used to be assumed present, so doctor reported a clean bill of
+    # health on hosts that could neither train nor serve. They must be
+    # resolvable to a version because release-lock.json pins exact ones.
+    for module, purpose in REQUIRED_PYTHON_MODULES.items():
+        version = python_module_version(module)
+        if version is None:
+            print(f"[FAIL] {module}: not installed — {purpose}")
+            all_passed = False
+        else:
+            print(f"[OK] {module}: {version}")
+
+    # 6. release-lock.json pins vs the revisions actually checked out.
+    # A mismatch only warns: it means you are running a different revision than
+    # the RC declares, which is legitimate during development but must not be
+    # silent when shipping acceptance evidence.
+    lock_path = WORKSPACE_ROOT / "release-lock.json"
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        pinned_repositories = lock.get("repositories", {})
+        if not pinned_repositories:
+            print("[WARN] release-lock.json declares no 'repositories' pins to verify")
+        else:
+            checked_out = 0
+            mismatched = 0
+            for repo, expected in sorted(pinned_repositories.items()):
+                repo_path = CYRENE_ROOT / repo
+                # A developer checkout is usually partial; absent repos are
+                # reported as skipped rather than as a mismatch.
+                if not (repo_path / ".git").exists():
+                    continue
+                checked_out += 1
+                actual = git_head(repo_path)
+                if actual is None:
+                    print(f"[WARN] Lock SHA unreadable: {repo} (cannot read git HEAD)")
+                elif actual != expected:
+                    mismatched += 1
+                    print(
+                        f"[WARN] Lock SHA mismatch: {repo} "
+                        f"(lock: {expected[:8]}, current: {actual[:8]})"
+                    )
+            if checked_out == 0:
+                print("[SKIP] Lock SHA: no pinned repositories are checked out locally")
+            elif mismatched == 0:
+                noun = "repository" if checked_out == 1 else "repositories"
+                print(
+                    f"[OK] Lock SHA: {checked_out} checked-out {noun} match release-lock.json"
+                )
+    except FileNotFoundError:
+        print(f"[WARN] release-lock.json not found at {lock_path}")
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[WARN] release-lock.json could not be verified: {e}")
+
+    # 7. systemd or proc available
+    has_systemd_or_proc = Path("/run/systemd/system").exists() or Path("/proc").exists() or shutil.which("systemctl") is not None
     if has_systemd_or_proc:
         print("[OK] Process supervisor: Linux /proc or systemd available")
     else:
         print("[FAIL] Neither systemd nor /proc is available")
         all_passed = False
 
-    # 6. Check required ports
+    # 8. Check required ports
     for label, port in DEFAULT_PORTS.items():
         if check_port_free(port):
             print(f"[OK] Port {label}: available")
         else:
             print(f"[WARN] Port {label}: occupied or in use")
 
-    # 7. Check Product services health if running
+    # 9. Check Product services health if running
     pids_file = home / "pids.json"
     if pids_file.is_file():
         print("\n--- Running Services Health Check ---")
@@ -348,7 +597,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print("Doctor assessment: ALL SYSTEM CHECKS PASSED.")
         return 0
     else:
-        print("Doctor assessment: ISSUES DETECTED. Review FAIL items above.")
+        print("Doctor assessment: ISSUES FOUND. Resolve blockers before running cyrene up.")
         return 1
 
 
