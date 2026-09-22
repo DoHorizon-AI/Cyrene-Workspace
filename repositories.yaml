@@ -424,9 +424,9 @@ repositories:
       - "console-surface"
     ci_authority:
       source: "github_actions"
-      delivery: "none"
+      delivery: "azure_pipelines"
       automatic_azure_scope: "none"
-      azure_scope: "none"
+      azure_scope: "delivery_only"
     ci_acceptance_environment: "GitHub Actions source, contract, build, and package checks"
     development_hosts: ["windows", "macos", "linux"]
     canonical_runtime_os: "client-desktop"
