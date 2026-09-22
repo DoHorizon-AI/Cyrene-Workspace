@@ -40,6 +40,21 @@ cargo check
 uv run pytest
 ```
 
+## 5. Backing Up and Restoring Local Data
+
+The unified CLI writes backups atomically and requires the destination to be
+outside `CYRENE_DEV_HOME` (by default `~/.local/state/cyrene/dev`):
+
+```bash
+./cyrene backup --dest ~/backups/
+./cyrene restore --src ~/backups/cyrene-backup-YYYYMMDD-HHMMSS.tar.gz
+```
+
+Restore accepts a CLI-created archive with one `cyrene-dev` root, or an
+unrelated directory. It stops active services, validates and stages the full
+backup, then atomically replaces the data directory. An invalid or incomplete
+backup leaves the existing directory in place.
+
 To start the API Gateway:
 
 ```bash

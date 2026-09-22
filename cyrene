@@ -17,11 +17,12 @@ import socket
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
+from pathlib import Path, PurePosixPath
 
 WORKSPACE_ROOT = Path(__file__).resolve().parent
 CYRENE_ROOT = WORKSPACE_ROOT.parent
@@ -90,7 +91,7 @@ def read_pair_code(home: Path) -> str:
 
 def write_credentials(home: Path, pair_code: str) -> None:
     creds_file = home / "credentials.env"
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(UTC).isoformat()
     creds = {
         "CYRENE_EXCHANGE_TOKEN": secrets.token_urlsafe(32),
         "CYRENE_NAVIGATOR_TOKEN": secrets.token_urlsafe(32),
@@ -152,7 +153,9 @@ def cmd_down(args: argparse.Namespace) -> int:
     env = os.environ.copy()
     env["CYRENE_DEV_HOME"] = str(home)
     env["CYRENE_RUNTIME_HOME"] = str(home)
-    return subprocess.run([sys.executable, str(DEV_SCRIPT), "down"], env=env, check=False).returncode
+    return subprocess.run(
+        [sys.executable, str(DEV_SCRIPT), "down"], env=env, check=False
+    ).returncode
 
 
 def get_gpu_info() -> list[dict[str, str]]:
@@ -174,12 +177,14 @@ def get_gpu_info() -> list[dict[str, str]]:
         for line in out.stdout.strip().splitlines():
             parts = [p.strip() for p in line.split(",")]
             if len(parts) >= 4:
-                gpus.append({
-                    "name": parts[0],
-                    "memory_total": parts[1],
-                    "memory_used": parts[2],
-                    "utilization": parts[3],
-                })
+                gpus.append(
+                    {
+                        "name": parts[0],
+                        "memory_total": parts[1],
+                        "memory_used": parts[2],
+                        "utilization": parts[3],
+                    }
+                )
         return gpus
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return []
@@ -192,7 +197,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     env["CYRENE_RUNTIME_HOME"] = str(home)
 
     print("=== Cyrene Services Status ===")
-    dev_res = subprocess.run([sys.executable, str(DEV_SCRIPT), "status"], env=env, check=False).returncode
+    dev_res = subprocess.run(
+        [sys.executable, str(DEV_SCRIPT), "status"], env=env, check=False
+    ).returncode
 
     print("\n=== GPU Information ===")
     gpus = get_gpu_info()
@@ -253,7 +260,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if has_12g:
             print(f"[OK] GPU: {len(gpus)} detected, with >= 12 GiB VRAM ({gpus[0]['name']})")
         else:
-            print(f"[FAIL] GPU: {len(gpus)} detected, but requires at least 1 GPU with >= 12 GiB VRAM")
+            print(
+                f"[FAIL] GPU: {len(gpus)} detected, but requires at least 1 GPU with >= 12 GiB VRAM"
+            )
             all_passed = False
 
     # 3. CUDA check
@@ -300,7 +309,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         all_passed = False
 
     # 5. systemd or proc available
-    has_systemd_or_proc = Path("/run/systemd/system").exists() or Path("/proc").exists() or shutil.which("systemctl") is not None
+    has_systemd_or_proc = (
+        Path("/run/systemd/system").exists()
+        or Path("/proc").exists()
+        or shutil.which("systemctl") is not None
+    )
     if has_systemd_or_proc:
         print("[OK] Process supervisor: Linux /proc or systemd available")
     else:
@@ -459,26 +472,105 @@ def cmd_model_import(args: argparse.Namespace) -> int:
 
 def cmd_backup(args: argparse.Namespace) -> int:
     home = dev_home()
-    if not home.exists():
+    if not home.is_dir():
         print(f"Data directory does not exist: {home}", file=sys.stderr)
         return 1
 
     dest = Path(args.dest).resolve()
     if dest.is_dir() or str(args.dest).endswith("/"):
-        dest.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         target_archive = dest / f"cyrene-backup-{timestamp}.tar.gz"
     else:
-        dest.parent.mkdir(parents=True, exist_ok=True)
         target_archive = dest
 
+    if target_archive == home or target_archive.is_relative_to(home):
+        print(
+            f"Backup destination must be outside the data directory: {target_archive}",
+            file=sys.stderr,
+        )
+        return 1
+
+    target_archive.parent.mkdir(parents=True, exist_ok=True)
+    temporary_archive = target_archive.with_name(
+        f".{target_archive.name}.{secrets.token_hex(8)}.tmp"
+    )
     print(f"Creating backup from {home} to {target_archive}...")
-    with tarfile.open(target_archive, "w:gz") as tar:
-        tar.add(home, arcname="cyrene-dev")
+    try:
+        with tarfile.open(temporary_archive, "w:gz") as tar:
+            tar.add(home, arcname="cyrene-dev")
+        os.replace(temporary_archive, target_archive)
+    except (OSError, tarfile.TarError) as exc:
+        temporary_archive.unlink(missing_ok=True)
+        print(f"Backup failed without replacing the destination: {exc}", file=sys.stderr)
+        return 1
 
     size_mb = target_archive.stat().st_size / (1024 * 1024)
     print(f"Backup completed successfully ({size_mb:.2f} MiB): {target_archive}")
     return 0
+
+
+def _validate_backup_members(members: list[tarfile.TarInfo]) -> None:
+    if not members:
+        raise ValueError("backup archive is empty")
+    for member in members:
+        name = member.name
+        path = PurePosixPath(name)
+        if (
+            not name
+            or "\\" in name
+            or path.is_absolute()
+            or ".." in path.parts
+            or not path.parts
+            or path.parts[0] != "cyrene-dev"
+        ):
+            raise ValueError(f"backup member escapes the cyrene-dev root: {name!r}")
+
+
+def _stage_restore_source(src: Path, staging_root: Path) -> Path:
+    staged_home = staging_root / "cyrene-dev"
+    if tarfile.is_tarfile(src):
+        with tarfile.open(src, "r:*") as archive:
+            members = archive.getmembers()
+            _validate_backup_members(members)
+            archive.extractall(path=staging_root, members=members, filter="data")
+    elif src.is_dir():
+        source_home = src / "cyrene-dev" if (src / "cyrene-dev").is_dir() else src
+        shutil.copytree(source_home, staged_home, symlinks=True)
+    else:
+        raise ValueError(f"unsupported backup format: {src}")
+
+    if not staged_home.is_dir() or staged_home.is_symlink():
+        raise ValueError("backup must contain a real cyrene-dev directory")
+    return staged_home
+
+
+def _replace_home(staged_home: Path, home: Path) -> None:
+    previous_home = home.parent / f".{home.name}.restore-previous-{secrets.token_hex(8)}"
+    moved_previous = False
+    try:
+        if home.exists():
+            os.replace(home, previous_home)
+            moved_previous = True
+        os.replace(staged_home, home)
+    except OSError as replace_error:
+        if moved_previous and previous_home.exists() and not home.exists():
+            try:
+                os.replace(previous_home, home)
+            except OSError as rollback_error:
+                raise OSError(
+                    f"restore replacement failed ({replace_error}); rollback also failed "
+                    f"({rollback_error}); previous data remains at {previous_home}"
+                ) from rollback_error
+        raise
+    if moved_previous:
+        try:
+            shutil.rmtree(previous_home)
+        except OSError as exc:
+            print(
+                f"Warning: restored data, but could not remove {previous_home}: {exc}",
+                file=sys.stderr,
+            )
+    home.chmod(0o700)
 
 
 def cmd_restore(args: argparse.Namespace) -> int:
@@ -488,19 +580,31 @@ def cmd_restore(args: argparse.Namespace) -> int:
         return 1
 
     home = dev_home()
+    if home.exists() and not home.is_dir():
+        print(f"Data path is not a directory: {home}", file=sys.stderr)
+        return 1
+    if src == home or src.is_relative_to(home) or home.is_relative_to(src):
+        print(
+            "Backup source and data directory must not contain one another.",
+            file=sys.stderr,
+        )
+        return 1
+
     pids_file = home / "pids.json"
     if pids_file.is_file():
         print("Warning: Cyrene services appear to be active. Stopping services before restore...")
-        cmd_down(args)
+        if cmd_down(args) != 0:
+            print("Restore aborted because Cyrene services could not be stopped.", file=sys.stderr)
+            return 1
 
     print(f"Restoring backup from {src} to {home}...")
-    if tarfile.is_tarfile(src):
-        with tarfile.open(src, "r:*") as tar:
-            tar.extractall(path=home.parent)
-    elif src.is_dir():
-        shutil.copytree(src, home, dirs_exist_ok=True)
-    else:
-        print(f"Unsupported backup format: {src}", file=sys.stderr)
+    home.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix=".cyrene-restore-", dir=home.parent) as staging:
+            staged_home = _stage_restore_source(src, Path(staging))
+            _replace_home(staged_home, home)
+    except (OSError, tarfile.TarError, ValueError) as exc:
+        print(f"Restore failed; the existing data directory was preserved: {exc}", file=sys.stderr)
         return 1
 
     print("Restore completed successfully.")
@@ -537,7 +641,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init
-    init_parser = subparsers.add_parser("init", help="Initialize Workspace, database, and internal credentials")
+    init_parser = subparsers.add_parser(
+        "init", help="Initialize Workspace, database, and internal credentials"
+    )
     init_parser.set_defaults(func=cmd_init)
 
     # up
@@ -550,7 +656,9 @@ def build_parser() -> argparse.ArgumentParser:
     down_parser.set_defaults(func=cmd_down)
 
     # status
-    status_parser = subparsers.add_parser("status", help="Print status of Product services and GPU info")
+    status_parser = subparsers.add_parser(
+        "status", help="Print status of Product services and GPU info"
+    )
     status_parser.set_defaults(func=cmd_status)
 
     # doctor
@@ -567,21 +675,29 @@ def build_parser() -> argparse.ArgumentParser:
     # model import
     model_parser = subparsers.add_parser("model", help="Manage model imports")
     model_subparsers = model_parser.add_subparsers(dest="model_command", required=True)
-    import_parser = model_subparsers.add_parser("import", help="Import a model via HuggingFace or local path")
+    import_parser = model_subparsers.add_parser(
+        "import", help="Import a model via HuggingFace or local path"
+    )
     import_parser.add_argument("--hf", help="HuggingFace model repository (e.g. org/repo)")
     import_parser.add_argument("--revision", help="HuggingFace model revision SHA or branch")
     import_parser.add_argument("--path", help="Local model directory path")
     import_parser.add_argument("--name", help="Custom model import name")
-    import_parser.add_argument("--binding", default="local-gpu", help="Serving binding id (default: local-gpu)")
+    import_parser.add_argument(
+        "--binding", default="local-gpu", help="Serving binding id (default: local-gpu)"
+    )
     import_parser.set_defaults(func=cmd_model_import)
 
     # backup
     backup_parser = subparsers.add_parser("backup", help="Backup Workspace data directory")
-    backup_parser.add_argument("--dest", required=True, help="Destination backup directory or file path")
+    backup_parser.add_argument(
+        "--dest", required=True, help="Destination backup directory or file path"
+    )
     backup_parser.set_defaults(func=cmd_backup)
 
     # restore
-    restore_parser = subparsers.add_parser("restore", help="Restore backup into Workspace data directory")
+    restore_parser = subparsers.add_parser(
+        "restore", help="Restore backup into Workspace data directory"
+    )
     restore_parser.add_argument("--src", required=True, help="Source backup file or directory")
     restore_parser.set_defaults(func=cmd_restore)
 
@@ -590,7 +706,9 @@ def build_parser() -> argparse.ArgumentParser:
     upgrade_parser.set_defaults(func=cmd_upgrade)
 
     # uninstall
-    uninstall_parser = subparsers.add_parser("uninstall", help="Stop services and print cleanup guidance")
+    uninstall_parser = subparsers.add_parser(
+        "uninstall", help="Stop services and print cleanup guidance"
+    )
     uninstall_parser.set_defaults(func=cmd_uninstall)
 
     return parser

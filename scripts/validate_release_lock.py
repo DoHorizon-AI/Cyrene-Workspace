@@ -112,13 +112,17 @@ def main() -> int:
     try:
         document = json.loads(arguments.lock.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        print(json.dumps({"status": "ERROR", "code": "RELEASE_LOCK_UNREADABLE", "detail": str(exc)}))
+        print(
+            json.dumps({"status": "ERROR", "code": "RELEASE_LOCK_UNREADABLE", "detail": str(exc)})
+        )
         return 1
     if not isinstance(document, dict):
         print(json.dumps({"status": "ERROR", "code": "RELEASE_LOCK_INVALID"}))
         return 1
     errors, blockers = validate(document)
-    status = "ERROR" if errors else ("BLOCKED" if blockers and arguments.require_terminal else "VALID")
+    status = (
+        "ERROR" if errors else ("BLOCKED" if blockers and arguments.require_terminal else "VALID")
+    )
     print(
         json.dumps(
             {"status": status, "errors": errors, "blockers": blockers},
