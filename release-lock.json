@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "name": "cyrene-0.1.0-rc.1",
   "description": "Single release lock for the first usable Cyrene RC: supported environment, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine and plugin entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
-  "generatedAt": "2026-09-22T23:46:45Z",
+  "generatedAt": "2026-09-22T23:51:54Z",
   "sourceState": "completed integration revisions; the Cyrene-Workspace entry records the immediately preceding source commit because the release-lock commit cannot self-reference",
   "supportedEnvironment": {
     "os": "Ubuntu 24.04 x86_64",
@@ -85,7 +85,7 @@
     }
   },
   "repositories": {
-    "Cyrene-Platform": "8c0bc8186da7a6d394cf701303540ab833bdbebd",
+    "Cyrene-Platform": "06a9bd75edfed1359b09770e749520162d75e242",
     "Cyrene-Plugins-Official": "0783ea5e5b722683ed0b75cd6d303039bb5f0241",
     "Cyrene-Workspace": "1943a0b8fd0ea3467f8a289af84a75691b01ca87",
     "Cyrene-Reactor": "58f96fef563092d2190443e7d0490b1d3eb39a95",
