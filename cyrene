@@ -25,6 +25,7 @@ import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 
 def _locate_workspace_root() -> Path:
@@ -101,6 +102,103 @@ SERVICES_LIST = [
 def dev_home() -> Path:
     configured = os.environ.get("CYRENE_DEV_HOME")
     return Path(configured).expanduser().resolve() if configured else DEFAULT_DEV_HOME.resolve()
+
+
+# A diagnostics bundle holds environment detail, so it is written for the
+# invoking user only and never uploaded anywhere.
+DIAGNOSTICS_BUNDLE_MODE = 0o600
+DIAGNOSTICS_PAGE_LIMIT = 500
+BOOTSTRAP_STATE_FILE = "bootstrap-state.json"
+RUNTIME_VENV_DIR = "runtime-venv"
+
+
+def install_root() -> Path:
+    configured = os.environ.get("CYRENE_INSTALL_ROOT")
+    return Path(configured).expanduser() if configured else Path("/usr/lib/cyrene")
+
+
+def _product_url(service: str) -> str:
+    return f"http://127.0.0.1:{PRODUCT_PORTS[service]}"
+
+
+def _request_json(url: str, timeout: float = 15.0, headers: dict[str, str] | None = None) -> Any:
+    """GET one local Product URL and decode JSON, with a stable failure message."""
+
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "CyreneCLI", "Accept": "application/json", **(headers or {})}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")[:400]
+        raise RuntimeError(f"{url} returned HTTP {error.code}: {detail}") from error
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{url} is unreachable: {error}") from error
+
+
+def _diagnostics_source(args: argparse.Namespace) -> tuple[str, str] | None:
+    """Resolve the requested diagnostics target to (kind, url)."""
+
+    run_id = getattr(args, "run", None)
+    deployment_id = getattr(args, "deployment", None)
+    if run_id:
+        return ("run", f"{_product_url('yield')}/api/v1/training-runs/{run_id}/diagnostics")
+    if deployment_id:
+        return (
+            "deployment",
+            f"{_product_url('reactor')}/api/v1/deployments/{deployment_id}/diagnostics",
+        )
+    return None
+
+
+def _format_diagnostic(record: dict[str, Any]) -> str:
+    timestamp = str(record.get("timestamp", ""))[:19]
+    level = str(record.get("level", "info")).upper()
+    stream = str(record.get("stream", "combined"))
+    code = record.get("code") or record.get("source") or ""
+    return f"{timestamp} {level:<5} {stream:<8} {code:<28} {record.get('message', '')}".rstrip()
+
+
+def _print_diagnostics_page(page: dict[str, Any], *, as_json: bool, lines: int) -> int:
+    items = page.get("items") or []
+    if as_json:
+        for item in items[-lines:] if lines else items:
+            print(json.dumps(item, ensure_ascii=False))
+    else:
+        for item in items[-lines:] if lines else items:
+            print(_format_diagnostic(item))
+    return int(page.get("nextSequence") or 0)
+
+
+def _scan_trace(trace_id: str, lines: int) -> int:
+    """Search locally written logs for one correlation id.
+
+    Product diagnostics are paged by resource, not by trace, so a trace lookup
+    reads the files this host already wrote and says where it looked.
+    """
+
+    home = dev_home()
+    searched: list[Path] = []
+    matches: list[str] = []
+    for path in sorted(home.rglob("*")):
+        if not path.is_file() or path.suffix not in {".log", ".ndjson"}:
+            continue
+        searched.append(path)
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in content.splitlines():
+            if trace_id in line:
+                matches.append(f"{path.name}: {line}")
+    if not matches:
+        print(f"No local record of trace {trace_id} in {len(searched)} file(s) under {home}.")
+        print("For a complete root cause, collect a bundle by --run or --deployment id.")
+        return 1
+    for line in matches[-lines:] if lines else matches:
+        print(line)
+    return 0
 
 
 def prepare_data_dirs(home: Path) -> None:
@@ -604,6 +702,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
+    source = _diagnostics_source(args)
+    trace_id = getattr(args, "trace", None)
+    if source is not None:
+        return _logs_from_diagnostics(source, args)
+    if trace_id:
+        return _scan_trace(trace_id, getattr(args, "lines", 50))
+
     home = dev_home()
     logs_dir = home / "logs"
     if not logs_dir.is_dir():
@@ -658,6 +763,230 @@ def cmd_logs(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             return 0
     return 0
+
+
+def _logs_from_diagnostics(source: tuple[str, str], args: argparse.Namespace) -> int:
+    """Print one resource's diagnostics, optionally following until terminal."""
+
+    kind, url = source
+    lines = getattr(args, "lines", 50)
+    as_json = bool(getattr(args, "json", False))
+    follow = bool(getattr(args, "follow", False))
+    cursor = 0
+    try:
+        while True:
+            page = _request_json(f"{url}?afterSequence={cursor}&limit={DIAGNOSTICS_PAGE_LIMIT}")
+            cursor = _print_diagnostics_page(page, as_json=as_json, lines=lines)
+            if not follow or page.get("terminal"):
+                if page.get("diagnostics_degraded") or page.get("diagnosticsDegraded"):
+                    print(
+                        f"WARNING: {kind} diagnostics are degraded; some output was lost.",
+                        file=sys.stderr,
+                    )
+                break
+            lines = 0  # only the first page is tailed; later pages print in full
+            time.sleep(0.5)
+    except RuntimeError as error:
+        print(f"ERROR: {error}")
+        return 1
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+def cmd_diagnostics_collect(args: argparse.Namespace) -> int:
+    """Write a redacted diagnostics bundle for one resource to a private file."""
+
+    source = _diagnostics_source(args)
+    trace_id = getattr(args, "trace", None)
+    output = Path(args.output).expanduser()
+    bundle: dict[str, Any] = {
+        "generatedAt": datetime.now(UTC).isoformat(),
+        "tool": "cyrene",
+        "correlation": {},
+        "versions": _version_manifest(),
+        "diagnostics": [],
+        "resource": None,
+        "cleanup": {"confirmed": False, "detail": "resource state was not read"},
+    }
+
+    exit_code = 0
+    if source is not None:
+        kind, url = source
+        cursor = 0
+        items: list[dict[str, Any]] = []
+        try:
+            while True:
+                page = _request_json(f"{url}?afterSequence={cursor}&limit={DIAGNOSTICS_PAGE_LIMIT}")
+                items.extend(page.get("items") or [])
+                next_cursor = int(page.get("nextSequence") or cursor)
+                terminal = bool(page.get("terminal"))
+                degraded = bool(page.get("diagnostics_degraded") or page.get("diagnosticsDegraded"))
+                if next_cursor == cursor or terminal:
+                    break
+                cursor = next_cursor
+        except RuntimeError as error:
+            print(f"ERROR: {error}")
+            return 1
+        bundle["correlation"][kind] = url.split("/")[-2]
+        bundle["diagnostics"] = items
+        bundle["cleanup"] = {
+            "confirmed": terminal,
+            "detail": "terminal state reached" if terminal else "resource is still running",
+        }
+        bundle["diagnosticsDegraded"] = degraded
+    elif trace_id:
+        bundle["correlation"]["trace"] = trace_id
+        home = dev_home()
+        matches = []
+        for path in sorted(home.rglob("*")):
+            if not path.is_file() or path.suffix not in {".log", ".ndjson"}:
+                continue
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            matches.extend(line for line in content.splitlines() if trace_id in line)
+        bundle["diagnostics"] = [{"source": "local_file", "message": line} for line in matches]
+        bundle["cleanup"] = {
+            "confirmed": False,
+            "detail": f"trace lookup searched {home} without a resource identity",
+        }
+        if not matches:
+            exit_code = 1
+    else:
+        print("ERROR: pass exactly one of --run, --deployment or --trace")
+        return 2
+
+    try:
+        _write_private_json(output, bundle)
+    except OSError as error:
+        print(f"ERROR: could not write {output}: {error}")
+        return 1
+    print(f"Wrote {output} (mode 0600). It is not uploaded anywhere.")
+    if exit_code:
+        print("No matching records were found; the bundle records where it looked.")
+    return exit_code
+
+
+def _version_manifest() -> dict[str, Any]:
+    """Collect the pinned versions and repository revisions in force."""
+
+    manifest: dict[str, Any] = {"releaseLock": None, "engines": {}, "repositories": {}}
+    lock_path = WORKSPACE_ROOT / "release-lock.json"
+    if not lock_path.is_file():
+        return manifest
+    try:
+        document = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        manifest["releaseLock"] = "unreadable"
+        return manifest
+    manifest["releaseLock"] = str(lock_path)
+    for entry in (document.get("engines") or {}).values():
+        if isinstance(entry, dict) and entry.get("package"):
+            manifest["engines"][entry["package"]] = entry.get("acceptedVersion") or entry.get(
+                "version"
+            )
+    for name, revision in (document.get("repositories") or {}).items():
+        manifest["repositories"][name] = revision
+    return manifest
+
+
+def _write_private_json(path: Path, document: dict[str, Any]) -> None:
+    """Write JSON readable only by the owner, creating parents as needed."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, DIAGNOSTICS_BUNDLE_MODE)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(document, stream, ensure_ascii=False, indent=2, sort_keys=True)
+        stream.write("\n")
+    os.chmod(path, DIAGNOSTICS_BUNDLE_MODE)
+
+
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    """Install, inspect, or repair the pinned training and serving runtime."""
+
+    root = install_root()
+    if getattr(args, "check", False):
+        return _bootstrap_check(root)
+    script = root / "bootstrap.sh"
+    if not script.is_file():
+        workspace_script = WORKSPACE_ROOT / "packaging" / "bootstrap.sh"
+        if not workspace_script.is_file():
+            print(f"ERROR: no bootstrap script found at {script} or {workspace_script}")
+            return 1
+        script = workspace_script
+    action = "Repairing" if getattr(args, "repair", False) else "Installing"
+    print(f"{action} the pinned runtime into {root} ...")
+    environment = dict(os.environ)
+    environment["INSTALL_ROOT"] = str(root)
+    completed = subprocess.run([str(script)], env=environment, check=False)
+    if completed.returncode != 0:
+        print("ERROR: the runtime was not installed; the previous runtime is unchanged.")
+        return completed.returncode
+    print("Runtime installed. Run 'cyrene doctor' to verify it.")
+    return 0
+
+
+def _bootstrap_check(root: Path) -> int:
+    """Report whether the pinned runtime is installed and complete."""
+
+    all_passed = True
+    lock_path = root / "release-lock.json"
+    if lock_path.is_file():
+        print(f"[OK] Release lock: {lock_path}")
+    else:
+        workspace_lock = WORKSPACE_ROOT / "release-lock.json"
+        lock_path = workspace_lock if workspace_lock.is_file() else lock_path
+        if lock_path.is_file():
+            print(f"[OK] Release lock: {lock_path}")
+        else:
+            print("[FAIL] No release-lock.json found; engine pins are unknown")
+            all_passed = False
+
+    marker = root / BOOTSTRAP_STATE_FILE
+    if marker.is_file():
+        try:
+            document = json.loads(marker.read_text(encoding="utf-8"))
+            print(f"[OK] Bootstrap: {document.get('state', 'UNKNOWN')}")
+        except (OSError, json.JSONDecodeError):
+            print(f"[FAIL] Bootstrap marker at {marker} is unreadable")
+            all_passed = False
+    else:
+        print(f"[FAIL] No bootstrap marker at {marker}; the runtime is not installed")
+        all_passed = False
+
+    venv_python = root / RUNTIME_VENV_DIR / "bin" / "python"
+    if not venv_python.is_file():
+        print(f"[FAIL] Runtime interpreter missing at {venv_python}")
+        print("Bootstrap assessment: ISSUES FOUND.")
+        return 1
+    print(f"[OK] Runtime interpreter: {venv_python}")
+
+    reporter = (
+        "import importlib.metadata as m\n"
+        "for name in ('vllm', 'llamafactory'):\n"
+        "    try:\n"
+        "        print(name, m.version(name))\n"
+        "    except m.PackageNotFoundError:\n"
+        "        print(name, 'MISSING')\n"
+    )
+    completed = subprocess.run(
+        [str(venv_python), "-c", reporter], capture_output=True, text=True, check=False
+    )
+    if completed.returncode != 0:
+        print(f"[FAIL] Runtime engines could not be inspected: {completed.stderr.strip()[:200]}")
+        return 1
+    for line in completed.stdout.strip().splitlines():
+        name, _, version = line.partition(" ")
+        if version == "MISSING":
+            print(f"[FAIL] {name}: not installed in the runtime environment")
+            all_passed = False
+        else:
+            print(f"[OK] {name}: {version}")
+
+    print("Bootstrap assessment: READY." if all_passed else "Bootstrap assessment: ISSUES FOUND.")
+    return 0 if all_passed else 1
 
 
 def cmd_model_import(args: argparse.Namespace) -> int:
@@ -917,11 +1246,45 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.set_defaults(func=cmd_doctor)
 
     # logs
-    logs_parser = subparsers.add_parser("logs", help="Tail or view logs for a service")
+    logs_parser = subparsers.add_parser(
+        "logs", help="Tail service logs, or read one resource's diagnostics"
+    )
     logs_parser.add_argument("service", nargs="?", choices=SERVICES_LIST, help="Service name")
     logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of lines to show")
     logs_parser.add_argument("-f", "--follow", action="store_true", help="Follow log output")
+    logs_parser.add_argument("--run", help="Read a training run's diagnostics by id")
+    logs_parser.add_argument("--deployment", help="Read a deployment's diagnostics by id")
+    logs_parser.add_argument("--trace", help="Search locally written logs for a trace id")
+    logs_parser.add_argument("--json", action="store_true", help="Emit raw diagnostic records")
     logs_parser.set_defaults(func=cmd_logs)
+
+    # diagnostics
+    diagnostics_parser = subparsers.add_parser(
+        "diagnostics", help="Collect a redacted diagnostics bundle"
+    )
+    diagnostics_subparsers = diagnostics_parser.add_subparsers(
+        dest="diagnostics_command", required=True
+    )
+    collect_parser = diagnostics_subparsers.add_parser(
+        "collect", help="Write versions, correlation ids and logs to one private file"
+    )
+    collect_parser.add_argument("--run", help="Training run id")
+    collect_parser.add_argument("--deployment", help="Deployment id")
+    collect_parser.add_argument("--trace", help="Trace id to search for locally")
+    collect_parser.add_argument("--output", required=True, help="Destination file (mode 0600)")
+    collect_parser.set_defaults(func=cmd_diagnostics_collect)
+
+    # bootstrap
+    bootstrap_parser = subparsers.add_parser(
+        "bootstrap", help="Install, inspect, or repair the pinned runtime"
+    )
+    bootstrap_parser.add_argument(
+        "--check", action="store_true", help="Report the runtime state without changing it"
+    )
+    bootstrap_parser.add_argument(
+        "--repair", action="store_true", help="Reinstall the pinned runtime"
+    )
+    bootstrap_parser.set_defaults(func=cmd_bootstrap)
 
     # model import
     model_parser = subparsers.add_parser("model", help="Manage model imports")

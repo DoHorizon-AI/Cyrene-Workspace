@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import tarfile
 from argparse import Namespace
 from importlib.machinery import SourceFileLoader
@@ -110,3 +111,171 @@ def test_restore_rejects_related_directory_source(
 
     assert module.cmd_restore(Namespace(src=str(home.parent))) == 1
     assert existing.read_text(encoding="utf-8") == "preserve"
+
+
+def test_logs_run_prints_diagnostics_and_flags_degradation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    _set_home(tmp_path, monkeypatch)
+    seen: list[str] = []
+
+    def fake_request(url: str, timeout: float = 15.0, headers: dict | None = None) -> dict:
+        seen.append(url)
+        return {
+            "resourceId": "abc",
+            "items": [
+                {
+                    "sequence": 1,
+                    "timestamp": "2026-09-22T10:00:00+00:00",
+                    "level": "error",
+                    "source": "trainer",
+                    "stream": "stderr",
+                    "code": "CUDA_OOM",
+                    "message": "CUDA out of memory",
+                    "truncated": False,
+                }
+            ],
+            "nextSequence": 1,
+            "terminal": True,
+            "diagnosticsDegraded": True,
+        }
+
+    monkeypatch.setattr(module, "_request_json", fake_request)
+    code = module.cmd_logs(
+        Namespace(
+            service=None, run="abc", deployment=None, trace=None, json=False, lines=50, follow=False
+        )
+    )
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "CUDA out of memory" in captured.out
+    assert "ERROR" in captured.out
+    assert "degraded" in captured.err
+    assert seen[0].endswith("/api/v1/training-runs/abc/diagnostics?afterSequence=0&limit=500")
+
+
+def test_logs_trace_reports_where_it_looked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    home = _set_home(tmp_path, monkeypatch)
+    logs = home / "logs"
+    logs.mkdir(parents=True)
+    (logs / "yield.stderr.log").write_text(
+        "trace=4bf92f3577b34da6a3ce929d0e0e4736 boom\nother line\n", encoding="utf-8"
+    )
+
+    found = module.cmd_logs(
+        Namespace(
+            service=None,
+            run=None,
+            deployment=None,
+            trace="4bf92f3577b34da6a3ce929d0e0e4736",
+            json=True,
+            lines=50,
+            follow=False,
+        )
+    )
+    assert found == 0
+    assert "boom" in capsys.readouterr().out
+
+    missing = module.cmd_logs(
+        Namespace(
+            service=None,
+            run=None,
+            deployment=None,
+            trace="ffffffffffffffffffffffffffffffff",
+            json=True,
+            lines=50,
+            follow=False,
+        )
+    )
+    assert missing == 1
+    assert "No local record of trace" in capsys.readouterr().out
+
+
+def test_diagnostics_collect_writes_a_private_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    _set_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        module,
+        "_request_json",
+        lambda url, timeout=15.0, headers=None: {
+            "items": [
+                {
+                    "sequence": 1,
+                    "timestamp": "t",
+                    "level": "warn",
+                    "stream": "stderr",
+                    "message": "boom",
+                }
+            ],
+            "nextSequence": 1,
+            "terminal": True,
+            "diagnosticsDegraded": False,
+        },
+    )
+    output = tmp_path / "bundle.json"
+    code = module.cmd_diagnostics_collect(
+        Namespace(run="abc", deployment=None, trace=None, output=str(output))
+    )
+    assert code == 0
+    assert output.stat().st_mode & 0o777 == 0o600
+    bundle = json.loads(output.read_text(encoding="utf-8"))
+    assert bundle["correlation"] == {"run": "abc"}
+    assert bundle["cleanup"]["confirmed"] is True
+    assert bundle["diagnostics"][0]["message"] == "boom"
+    assert "versions" in bundle
+    assert "not uploaded" in capsys.readouterr().out
+
+
+def test_diagnostics_output_is_repaired_to_owner_only(tmp_path: Path) -> None:
+    module = _module()
+    existing = tmp_path / "loose.json"
+    existing.write_text("{}", encoding="utf-8")
+    existing.chmod(0o644)
+    module._write_private_json(existing, {"a": 1})
+    assert existing.stat().st_mode & 0o777 == 0o600
+
+
+def test_bootstrap_check_reports_missing_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    root = tmp_path / "cyrene-install"
+    root.mkdir()
+    monkeypatch.setenv("CYRENE_INSTALL_ROOT", str(root))
+    assert module.cmd_bootstrap(Namespace(check=True, repair=False)) == 1
+    out = capsys.readouterr().out
+    assert "No bootstrap marker" in out
+    assert "ISSUES FOUND" in out
+
+
+def test_bootstrap_check_verifies_pinned_engines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    root = tmp_path / "cyrene-install"
+    (root / "runtime-venv" / "bin").mkdir(parents=True)
+    (root / "release-lock.json").write_text(
+        json.dumps(
+            {"engines": {"execution.engine.v1": {"package": "vllm", "acceptedVersion": "0.25.1"}}}
+        ),
+        encoding="utf-8",
+    )
+    (root / "bootstrap-state.json").write_text(json.dumps({"state": "READY"}), encoding="utf-8")
+    fake_python = root / "runtime-venv" / "bin" / "python"
+    fake_python.write_text(
+        "#!/bin/sh\necho 'vllm 0.25.1'\necho 'llamafactory 0.9.5'\n", encoding="utf-8"
+    )
+    fake_python.chmod(0o755)
+    monkeypatch.setenv("CYRENE_INSTALL_ROOT", str(root))
+
+    assert module.cmd_bootstrap(Namespace(check=True, repair=False)) == 0
+    out = capsys.readouterr().out
+    assert "vllm: 0.25.1" in out
+    assert "llamafactory: 0.9.5" in out
+    assert "READY" in out
