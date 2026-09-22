@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "name": "cyrene-0.1.0-rc.1",
   "description": "Single release lock for the first usable Cyrene RC: supported environment, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine and plugin entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
-  "generatedAt": "2026-09-22T14:46:14Z",
+  "generatedAt": "2026-09-22T23:46:45Z",
   "sourceState": "completed integration revisions; the Cyrene-Workspace entry records the immediately preceding source commit because the release-lock commit cannot self-reference",
   "supportedEnvironment": {
     "os": "Ubuntu 24.04 x86_64",
@@ -85,14 +85,14 @@
     }
   },
   "repositories": {
-    "Cyrene-Platform": "a3917fb9e3bcc5c9abf6e2fb6265d08f02dd1e3a",
-    "Cyrene-Plugins-Official": "4d6f80f1117ab8f7ba389eb9b9049085335ffe2b",
-    "Cyrene-Workspace": "a7b9f173b591ba95b654f0036efd173d65aa0097",
-    "Cyrene-Reactor": "23310bfc77e380c7c24617fb39335751498c1ae8",
-    "Cyrene-Yield": "54361279d8e0023f8ace2c8096a828b41c8400f4",
-    "Cyrene-Exchange": "4b34dcd0beee4fd762caea16d085c5a432375ce8",
-    "Cyrene-Catalyst": "2eb3582fbb6798ceeaf6786352a29c8e3fa2a435",
-    "Cyrene-Echo": "92fba4654523447a25671dd5b45dea54ec6706c8",
-    "Cyrene-Navigator": "408908827ecb623c108476bac4bfb5348b13f5f0"
+    "Cyrene-Platform": "8c0bc8186da7a6d394cf701303540ab833bdbebd",
+    "Cyrene-Plugins-Official": "0783ea5e5b722683ed0b75cd6d303039bb5f0241",
+    "Cyrene-Workspace": "1943a0b8fd0ea3467f8a289af84a75691b01ca87",
+    "Cyrene-Reactor": "58f96fef563092d2190443e7d0490b1d3eb39a95",
+    "Cyrene-Yield": "94ae40f35afe66b60955bad3d951dc4bd7f7c86c",
+    "Cyrene-Exchange": "84e7706f8a9e3d66a027c1065c906c6c615385d2",
+    "Cyrene-Catalyst": "8379e6fe37107111dc92f6ee75bd19e101d11ba4",
+    "Cyrene-Echo": "5016c072c7da71546abd79e500a57b180157a49c",
+    "Cyrene-Navigator": "f18a72ffa78df45c77fd387700d6ec3b30c6b220"
   }
 }
