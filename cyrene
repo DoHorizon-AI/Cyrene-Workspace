@@ -231,6 +231,18 @@ def read_pair_credentials(home: Path) -> tuple[str, str | None]:
     return pair_code, issued_at
 
 
+def _pair_code_notice(home: Path, pair_code: str) -> str:
+    """Tell an operator the code, or where to read it when output is captured.
+
+    A packaged unit runs this CLI with its output going to the journal, so
+    printing the code unconditionally would leave a live credential in a log.
+    """
+
+    if sys.stdout.isatty():
+        return f"Cyrene pair code: {pair_code}"
+    return f"Pair code written to {home / 'pair_code.txt'} (owner-only)."
+
+
 def read_pair_code(home: Path) -> str:
     code, _ = read_pair_credentials(home)
     return code
@@ -269,7 +281,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     prepare_data_dirs(home)
     pair_code = generate_pair_code()
     write_credentials(home, pair_code)
-    print(f"CYRENE PAIR CODE: {pair_code}")
+    print(_pair_code_notice(home, pair_code))
     return 0
 
 
@@ -410,7 +422,8 @@ def cmd_up(args: argparse.Namespace) -> int:
     pid = _start_web_host(home, env, pair_code)
     if pid is None:
         return 0
-    print(f"Navigator console ready: http://127.0.0.1:{WEB_HOST_PORT} (pair code: {pair_code})")
+    print(f"Navigator console ready: http://127.0.0.1:{WEB_HOST_PORT}")
+    print(_pair_code_notice(home, pair_code))
     print(f"Web Host PID {pid}; see {home / 'logs' / 'navigator-web-host.log'} for its output.")
     return 0
 

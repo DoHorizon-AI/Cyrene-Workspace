@@ -279,3 +279,22 @@ def test_bootstrap_check_verifies_pinned_engines(
     assert "vllm: 0.25.1" in out
     assert "llamafactory: 0.9.5" in out
     assert "READY" in out
+
+
+def test_pair_code_is_printed_only_to_a_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Captured output (a journal, a log file) must not receive the code."""
+
+    module = _module()
+    home = tmp_path / "state" / "cyrene" / "dev"
+    home.mkdir(parents=True)
+
+    monkeypatch.setattr(module.sys.stdout, "isatty", lambda: True, raising=False)
+    interactive = module._pair_code_notice(home, "ABCDEF")
+    assert "ABCDEF" in interactive
+
+    monkeypatch.setattr(module.sys.stdout, "isatty", lambda: False, raising=False)
+    captured = module._pair_code_notice(home, "ABCDEF")
+    assert "ABCDEF" not in captured
+    assert str(home / "pair_code.txt") in captured
