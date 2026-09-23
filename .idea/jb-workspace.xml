@@ -25,6 +25,9 @@
     <project name="Cyrene-Navigator" path="$PROJECT_DIR$/../Cyrene-Services/Cyrene-Navigator">
       <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Navigator.git" />
     </project>
+    <project name="Cyrene-Studio" path="$PROJECT_DIR$/../Cyrene-Studio">
+      <vcs id="Git" remoteUrl="https://github.com/DoHorizon-AI/Cyrene-Studio.git" />
+    </project>
     <project name="cyrene-plugin-contracts-jvm" path="$PROJECT_DIR$/../Cyrene-Plugins-Official/contracts/jvm" />
     <project name="model-provider-contract-tck" path="$PROJECT_DIR$/../Cyrene-Plugins-Official/contracts/tck/model-provider-v1/jvm" />
     <option name="workspace" value="true" />

@@ -75,10 +75,12 @@ $allRepos = @(
     @{ Name = "Cyrene-Exchange"; Path = "../Cyrene-Services/Cyrene-Exchange"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Exchange.git"; Policy = "public_zero_auth"; Profiles = @("full") },
     @{ Name = "Cyrene-Catalyst"; Path = "../Cyrene-Services/Cyrene-Catalyst"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"; Policy = "public_zero_auth"; Profiles = @("full") },
     @{ Name = "Cyrene-Echo"; Path = "../Cyrene-Services/Cyrene-Echo"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Echo.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "Cyrene-Navigator"; Path = "../Cyrene-Services/Cyrene-Navigator"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"; Policy = "public_zero_auth"; Profiles = @("full") }
+    @{ Name = "Cyrene-Navigator"; Path = "../Cyrene-Services/Cyrene-Navigator"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"; Policy = "public_zero_auth"; Profiles = @("full") },
+    @{ Name = "Cyrene-Studio"; Path = "../Cyrene-Studio"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Studio.git"; Slug = "DoHorizon-AI/Cyrene-Studio"; Policy = "github_auth_required"; Profiles = @("full") }
 )
 
 $activeRepos = $allRepos | Where-Object { $_.Profiles -contains $Profile }
+$missingRepos = [System.Collections.Generic.List[string]]::new()
 
 foreach ($repo in $activeRepos) {
     $targetPath = Join-Path $ScriptDir $repo.Path
@@ -88,10 +90,27 @@ foreach ($repo in $activeRepos) {
         Write-Host "  [ACQUIRING] $($repo.Name) (Policy: $($repo.Policy))..." -ForegroundColor Cyan
         if ($repo.Policy -eq "public_zero_auth") {
             git clone $repo.Remote $targetPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to clone public repository '$($repo.Name)'."
+            }
             Write-Host "    [CLONED] $($repo.Name) successfully." -ForegroundColor Green
         } elseif ($repo.Policy -eq "github_auth_required") {
-            Write-Warning "    [AUTH_REQUIRED] Private repository '$($repo.Name)' requires authentication. Run 'gh auth login' or clone manually."
+            $gh = Get-Command gh -ErrorAction SilentlyContinue
+            if ($gh) {
+                & gh auth status 2>$null | Out-Null
+            }
+            if ($gh -and $LASTEXITCODE -eq 0) {
+                & gh repo clone $repo.Slug $targetPath
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to clone authenticated GitHub repository '$($repo.Name)'."
+                }
+                Write-Host "    [CLONED] $($repo.Name) successfully with GitHub authentication." -ForegroundColor Green
+            } else {
+                $missingRepos.Add($repo.Name)
+                Write-Warning "    [AUTH_REQUIRED] Private repository '$($repo.Name)' requires an authenticated GitHub CLI. Run 'gh auth login', then rerun bootstrap."
+            }
         } elseif ($repo.Policy -eq "external_auth_required") {
+            $missingRepos.Add($repo.Name)
             Write-Warning "    [EXTERNAL_SOURCE] External private repository '$($repo.Name)' requires Azure DevOps authentication ($($repo.Remote))."
         }
     }
@@ -188,7 +207,12 @@ if ($ProvisionData) {
 
 # Summary
 Write-Host "`n==================================================" -ForegroundColor Cyan
-Write-Host " BOOTSTRAP COMPLETE FOR PROFILE: '$Profile'" -ForegroundColor Green
+if ($missingRepos.Count -eq 0) {
+    Write-Host " BOOTSTRAP COMPLETE FOR PROFILE: '$Profile'" -ForegroundColor Green
+} else {
+    Write-Host " BOOTSTRAP INCOMPLETE FOR PROFILE: '$Profile'" -ForegroundColor Yellow
+    Write-Warning "Missing authenticated repositories: $($missingRepos -join ', ')"
+}
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host "  To verify workspace: .\verify.ps1" -ForegroundColor Cyan
 Write-Host "  To open IntelliJ IDEA: .\open.ps1 -Ide idea -Profile $Profile" -ForegroundColor Cyan

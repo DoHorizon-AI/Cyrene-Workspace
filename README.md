@@ -48,11 +48,14 @@ Cyrene public API naming freeze begins with that release.
 | `Cyrene-Catalyst` | `../Cyrene-Services/Cyrene-Catalyst` | Dataset curation and sole authority for `DatasetVersion` |
 | `Cyrene-Echo` | `../Cyrene-Services/Cyrene-Echo` | Post-inference evaluation and sole authority for `EvaluationRun` / `HumanAnnotation` / `FeedbackSet` |
 | `Cyrene-Navigator` | `../Cyrene-Services/Cyrene-Navigator` | Desktop client experience and sole authority for `Conversation` / `AgentRun` sessions |
+| `Cyrene-Studio` | `../Cyrene-Studio` | React/TypeScript/Vite pipeline workbench and operator console surface |
 
 > [!NOTE]
 > **Repository vs. Subcomponent Boundary**  
-> Only the 8 canonical repositories above are top-level Git repositories in the Cyrene workspace.  
+> Only the 9 canonical repositories above are top-level Git repositories in the Cyrene workspace.
 > Current Gradle projects belong to the Plugins repository under `contracts/jvm` and `contracts/tck/model-provider-v1/jvm`; they are linked as build roots, not as standalone repositories. The retired Exchange coordinator, legacy Spring gateway, and Platform JVM control-plane paths are historical references only and must not be reintroduced into `repositories.yaml` or `.idea/jb-workspace.xml`.
+>
+> `Cyrene-Studio` is currently private. Authenticate the GitHub CLI with organization access (`gh auth login`) before running the full PowerShell bootstrap on a machine where Studio has not already been cloned.
 
 ---
 
@@ -78,7 +81,7 @@ cd Cyrene-Workspace
 ## 3. Opening in IDEs
 
 - **IntelliJ IDEA Ultimate / WebStorm / PyCharm / CLion**:
-  Open the `Cyrene-Workspace` folder. The workspace automatically mounts the 8 canonical repositories via `.idea/jb-workspace.xml`.
+  Open the `Cyrene-Workspace` folder. The workspace automatically mounts the 9 canonical repositories via `.idea/jb-workspace.xml`.
 - **JetBrains Rider / Visual Studio**:
   Open `Cyrene-Workspace/Cyrene.Workspace.slnx`.
 
@@ -93,7 +96,7 @@ See [`IDE_ACCEPTANCE.md`](IDE_ACCEPTANCE.md) for the manual acceptance checklist
 
 ### Usage
 
-Use canonical repository names (or clean 1:1 convenience aliases like `platform`, `plugins`, `reactor`, `yield`, `exchange`, `catalyst`, `echo`, `navigator`):
+Use canonical repository names (or clean 1:1 convenience aliases like `platform`, `plugins`, `reactor`, `yield`, `exchange`, `catalyst`, `echo`, `navigator`, `studio`):
 
 ```powershell
 # Create dedicated task worktree for writer agent
