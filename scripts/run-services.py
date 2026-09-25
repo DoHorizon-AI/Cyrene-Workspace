@@ -3,7 +3,7 @@ Orchestration manager for starting and stopping the Product services for Text Mo
 Lifecycle V1 acceptance. It starts the DirectPlugin endpoint supervisor first, waits
 for its published connection references, and only then starts the Product services.
 
-中文：用于 Text Model Lifecycle V1 验收的 Product services 启停编排器。它先启动 DirectPlugin endpoint supervisor，等待 supervisor 发布 connection references，然后才启动 Product services。
+中文:用于 Text Model Lifecycle V1 验收的 Product services 启停编排器。它先启动 DirectPlugin endpoint supervisor,等待 supervisor 发布 connection references,然后才启动 Product services。
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def load_credentials() -> dict[str, str]:
     lifecycle client exactly the credentials the Products were started with,
     instead of every script inventing its own constant.
 
-    中文：读取或创建 lifecycle commands 共用的 operator credentials。生成的 token 保存在 mode 0600 文件中，方便 cyrene-dev up 将与 Product 启动时相同的 credentials 交给 lifecycle client，而不是让每个脚本各自发明常量。
+    中文:读取或创建 lifecycle commands 共用的 operator credentials。生成的 token 保存在 mode 0600 文件中,方便 cyrene-dev up 将与 Product 启动时相同的 credentials 交给 lifecycle client,而不是让每个脚本各自发明常量。
     """
 
     if CREDENTIALS_FILE.is_file():
@@ -276,7 +276,7 @@ def materialize_reactor_config(credentials: dict[str, str]) -> Path:
     Plugins-owned vLLM runtime, so the workspace only materializes the private
     files the Product needs and never invents product state.
 
-    中文：写入 Reactor 私有控制配置和 binding credentials。Reactor 不再负责本地 bootstrap：其 serving backend 属于 Plugins 的 vLLM runtime，因此 Workspace 只准备 Product 所需的私有文件，不自行创建产品状态。
+    中文:写入 Reactor 私有控制配置和 binding credentials。Reactor 不再负责本地 bootstrap:其 serving backend 属于 Plugins 的 vLLM runtime,因此 Workspace 只准备 Product 所需的私有文件,不自行创建产品状态。
     """
 
     reactor = DEV_HOME / "reactor"
@@ -326,7 +326,7 @@ def materialize_reactor_config(credentials: dict[str, str]) -> Path:
 def load_endpoint_references() -> dict[str, str]:
     """Read the DirectPlugin connection references the supervisor published.
 
-    中文：读取 supervisor 已发布的 DirectPlugin connection references。
+    中文:读取 supervisor 已发布的 DirectPlugin connection references。
     """
 
     target = DEV_HOME / "endpoints.json"
@@ -346,7 +346,7 @@ def wait_for_endpoint_references(timeout: float = 30.0) -> dict[str, str]:
     is serving, so a cold start injects real references instead of the previous
     run's stale file (or none at all).
 
-    中文：等待 supervisor 发布完整的 endpoint reference 文件。Supervisor 只有在每个 endpoint 都开始服务后才会原子写入 endpoints.json，因此冷启动注入的是实际 references，而不是上一次运行遗留的文件或空值。
+    中文:等待 supervisor 发布完整的 endpoint reference 文件。Supervisor 只有在每个 endpoint 都开始服务后才会原子写入 endpoints.json,因此冷启动注入的是实际 references,而不是上一次运行遗留的文件或空值。
     """
 
     deadline = time.time() + timeout
@@ -384,7 +384,7 @@ def _environment(
 ) -> dict[str, str]:
     """Compose one service environment with operator and connection credentials.
 
-    中文：组合一个同时包含 operator credentials 和 connection credentials 的 service 环境。
+    中文:组合一个同时包含 operator credentials 和 connection credentials 的 service 环境。
     """
 
     environment = os.environ.copy()
@@ -400,7 +400,7 @@ def _environment(
 def _launch(service: dict, environment: dict[str, str], pids: dict[str, int]) -> None:
     """Start one service unless an optional payload is absent.
 
-    中文：若可选 payload 不存在，则不启动对应 service。
+    中文:若可选 payload 不存在,则不启动对应 service。
     """
 
     name = service["name"]

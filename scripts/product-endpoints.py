@@ -74,7 +74,7 @@ def dev_home() -> Path:
 def _serving_endpoint(capability: str, module: str, attribute: str) -> tuple[object, str]:
     """Start one endpoint in-process and return the server and its reference.
 
-    中文：在当前进程中启动一个 endpoint，并返回 server 对象和它的 connection reference。
+    中文:在当前进程中启动一个 endpoint,并返回 server 对象和它的 connection reference。
     """
 
     from cyrene_plugin_runtime import serve
@@ -87,7 +87,7 @@ def _serving_endpoint(capability: str, module: str, attribute: str) -> tuple[obj
 def up() -> int:
     """Serve every declared endpoint in one supervisor process.
 
-    中文：在同一个 supervisor process 中服务所有已声明的 endpoints。
+    中文:在同一个 supervisor process 中服务所有已声明的 endpoints。
     """
 
     home = dev_home()
@@ -143,7 +143,7 @@ def status() -> int:
 def down() -> int:
     """Endpoints run inside the supervisor process, so teardown follows it.
 
-    中文：Endpoints 运行在 supervisor process 内，因此由该进程负责 teardown。
+    中文:Endpoints 运行在 supervisor process 内,因此由该进程负责 teardown。
     """
 
     target = dev_home() / "endpoints.json"

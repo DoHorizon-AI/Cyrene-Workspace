@@ -61,7 +61,7 @@ def _head(path: Path) -> str:
 def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str, int]:
     """Verify one-authority convergence against exact local checkouts.
 
-中文：依据精确的本地检出结果，验证各领域是否收敛到唯一权威。
+中文:依据精确的本地检出结果,验证各领域是否收敛到唯一权威。
 """
 
     contract_root = workspace / "governance/product-contract-v1"
@@ -194,7 +194,7 @@ def verify(workspace: Path, platform: Path, roots: dict[str, Path]) -> dict[str,
 def main() -> None:
     """Parse exact roots and print the verified convergence counters.
 
-中文：解析精确的仓库根目录参数，并输出已经验证的收敛计数。
+中文:解析精确的仓库根目录参数,并输出已经验证的收敛计数。
 """
 
     parser = argparse.ArgumentParser()

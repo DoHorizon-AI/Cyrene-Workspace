@@ -5,7 +5,7 @@ local acceptance runs share one implementation for reading ``sources.json``,
 fetching each pinned revision, and exporting the ``CYRENE_*_WORKTREE``
 environment the cross-repository tests require.
 
-中文：生命周期 harness 会从精确 checkout 解析每个 Product，因此 CI 和本地验收共用同一实现，用于读取 sources.json、获取每个固定 revision，并导出跨仓测试所需的 CYRENE_*_WORKTREE 环境变量。
+中文:生命周期 harness 会从精确 checkout 解析每个 Product,因此 CI 和本地验收共用同一实现,用于读取 sources.json、获取每个固定 revision,并导出跨仓测试所需的 CYRENE_*_WORKTREE 环境变量。
 """
 
 from __future__ import annotations
@@ -117,11 +117,11 @@ def main() -> int:
             print("FAIL " + failure, file=sys.stderr)
         return 1
     # The summary goes to stderr so `--print-env` can be appended directly to
-    # 中文：摘要写入 stderr，因此可以将 `--print-env` 的输出直接追加到
-    # 中文：摘要输出到 stderr，使 --print-env 可以直接追加到 GITHUB_ENV；
+    # 中文:摘要写入 stderr,因此可以将 `--print-env` 的输出直接追加到
+    # 中文:摘要输出到 stderr,使 --print-env 可以直接追加到 GITHUB_ENV;
     # $GITHUB_ENV, which only accepts KEY=VALUE lines on stdout.
-    # 中文：$GITHUB_ENV；该文件只接受写到 stdout 的 KEY=VALUE 行。
-    # 中文：该文件的 stdout 只接受 KEY=VALUE 行。
+    # 中文:$GITHUB_ENV;该文件只接受写到 stdout 的 KEY=VALUE 行。
+    # 中文:该文件的 stdout 只接受 KEY=VALUE 行。
     print(
         f"Verified {len(_pins())} pinned revisions under {arguments.destination}", file=sys.stderr
     )

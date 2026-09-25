@@ -66,7 +66,7 @@ CODE_EXTENSIONS = (
 class PolicyAuthority:
     """Exact Platform authority metadata and machine-readable policy.
 
-    中文：Platform 精确版本的权威 metadata 和机器可读 policy。
+    中文:Platform 精确版本的权威 metadata 和机器可读 policy。
     """
 
     platform_path: Path
@@ -82,7 +82,7 @@ class PolicyAuthority:
     def load(cls, platform_path: Path) -> PolicyAuthority:
         """Resolve exact git SHA of Platform and load api-naming policy.
 
-        中文：解析 Platform 的精确 git SHA，并读取 api-naming policy。
+        中文:解析 Platform 的精确 git SHA,并读取 api-naming policy。
         """
         if not platform_path.is_dir():
             raise FileNotFoundError(f"Platform directory not found: {platform_path}")
@@ -155,7 +155,7 @@ class VerificationResult:
 def is_path_excluded(path_str: str, excluded_globs: Iterable[str]) -> bool:
     """Check if file matches any excluded glob pattern.
 
-    中文：检查文件路径是否匹配任一排除 glob pattern。
+    中文:检查文件路径是否匹配任一排除 glob pattern。
     """
     return any(fnmatch.fnmatch(path_str, pat) for pat in excluded_globs)
 
@@ -163,7 +163,7 @@ def is_path_excluded(path_str: str, excluded_globs: Iterable[str]) -> bool:
 class CrossRepoBoundaryVerifier:
     """Verifies Product repositories against exact Platform governance policy.
 
-    中文：依据 Platform 精确版本的治理 policy 检查 Product 仓库。
+    中文:依据 Platform 精确版本的治理 policy 检查 Product 仓库。
     """
 
     def __init__(
@@ -194,12 +194,12 @@ class CrossRepoBoundaryVerifier:
     ) -> VerificationResult:
         """Run naming and boundary checks against targeted Product repositories.
 
-        中文：对指定 Product 仓库运行命名和边界检查。
+        中文:对指定 Product 仓库运行命名和边界检查。
         """
         repo_configs = self._load_repositories_manifest()
 
         # Default to 6 Product Services
-        # 中文：默认检查六个 Product Services。
+        # 中文:默认检查六个 Product Services。
         default_target_names = {
             "Cyrene-Reactor",
             "Cyrene-Yield",
@@ -215,7 +215,7 @@ class CrossRepoBoundaryVerifier:
         total_files = 0
 
         # Boundary regex guards
-        # 中文：边界正则保护规则。
+        # 中文:边界正则保护规则。
         kernel_daemon_direct_import = re.compile(
             r"(?:from\s+cy_kernel_daemon\b|use\s+cy_kernel_daemon::|import\s+.*cy_kernel_daemon)"
         )
@@ -229,8 +229,8 @@ class CrossRepoBoundaryVerifier:
             repo_path = (self.workspace_root / repo_entry.get("path", "")).resolve()
 
             # Rule 1: Check prohibited retired files (e.g. service.json in Navigator)
-            # 中文：规则 1：检查已禁用的退役文件（例如 Navigator 中的 service.json）
-            # 中文：规则 1：检查已退役且禁止出现的文件，例如 Navigator 中的 service.json。
+            # 中文:规则 1:检查已禁用的退役文件(例如 Navigator 中的 service.json)
+            # 中文:规则 1:检查已退役且禁止出现的文件,例如 Navigator 中的 service.json。
             if repo_name == "Cyrene-Navigator":
                 legacy_service_json = repo_path / "service.json"
                 if legacy_service_json.exists():
@@ -247,7 +247,7 @@ class CrossRepoBoundaryVerifier:
                     )
 
             # Gather source roots
-            # 中文：收集源码根目录。
+            # 中文:收集源码根目录。
             pointers = repo_entry.get("pointers", {})
             source_roots: list[str] = pointers.get("primary_source_roots", [])
             api_roots: list[str] = pointers.get("api_contract_roots", [])
@@ -282,8 +282,8 @@ class CrossRepoBoundaryVerifier:
 
                         for line_idx, line in enumerate(content.splitlines(), 1):
                             # Naming Constitution Check: Forbidden symbols from Platform authority
-                            # 中文：命名章程检查：禁止出现属于 Platform 权威范围的符号
-                            # 中文：Naming Constitution 检查：Platform authority 禁止的符号。
+                            # 中文:命名章程检查:禁止出现属于 Platform 权威范围的符号
+                            # 中文:Naming Constitution 检查:Platform authority 禁止的符号。
                             for sym, pattern in self.authority.forbidden_patterns:
                                 if pattern.search(line):
                                     violations.append(
@@ -302,8 +302,8 @@ class CrossRepoBoundaryVerifier:
                                     )
 
                             # Boundary Check: Forbidden direct Kernel daemon internal import
-                            # 中文：边界检查：禁止直接导入 Kernel daemon 内部模块
-                            # 中文：边界检查：禁止直接导入 Kernel daemon 内部实现。
+                            # 中文:边界检查:禁止直接导入 Kernel daemon 内部模块
+                            # 中文:边界检查:禁止直接导入 Kernel daemon 内部实现。
                             if kernel_daemon_direct_import.search(line):
                                 violations.append(
                                     Violation(

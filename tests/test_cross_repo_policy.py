@@ -19,8 +19,8 @@ import pytest
 import yaml
 
 # The verifier is an executable Workspace script rather than an installed package.
-# 中文：该验证器是可执行的 Workspace 脚本，并非已安装的 Python 包。
-# 中文：该 verifier 是可直接运行的 Workspace 脚本，不是已安装的 package。
+# 中文:该验证器是可执行的 Workspace 脚本,并非已安装的 Python 包。
+# 中文:该 verifier 是可直接运行的 Workspace 脚本,不是已安装的 package。
 SCRIPTS_DIR = Path(__file__).parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -36,7 +36,7 @@ PLATFORM_DIR = (Path(__file__).parents[2] / "Cyrene-Platform").resolve()
 def test_platform_exact_authority_loaded() -> None:
     """Verifies that PolicyAuthority directly loads from Platform exact SHA without hardcoded vocabulary.
 
-    中文：验证 PolicyAuthority 直接从 Platform 精确 SHA 加载，不依赖硬编码词汇表。
+    中文:验证 PolicyAuthority 直接从 Platform 精确 SHA 加载,不依赖硬编码词汇表。
     """
     authority = PolicyAuthority.load(PLATFORM_DIR)
     assert len(authority.exact_sha) == 40, "Must load full 40-character commit SHA"
@@ -53,7 +53,7 @@ def test_verifier_detects_forbidden_naming_symbol(
 ) -> None:
     """Verifies that a forbidden naming symbol is detected with line number and snippet.
 
-    中文：验证检测到禁止使用的名称时，会报告行号和代码片段。
+    中文:验证检测到禁止使用的名称时,会报告行号和代码片段。
     """
     mock_repo_dir = tmp_path / "Cyrene-MockService"
     mock_src_dir = mock_repo_dir / "src"
@@ -97,7 +97,7 @@ def test_verifier_detects_forbidden_naming_symbol(
 def test_verifier_detects_kernel_internal_coupling(tmp_path: Path) -> None:
     """Verifies that direct coupling to Platform cy_kernel_daemon source is flagged.
 
-    中文：验证直接耦合 Platform cy_kernel_daemon 源码会被标记。
+    中文:验证直接耦合 Platform cy_kernel_daemon 源码会被标记。
     """
     mock_repo_dir = tmp_path / "Cyrene-MockService"
     mock_src_dir = mock_repo_dir / "src"
@@ -137,7 +137,7 @@ def test_verifier_detects_kernel_internal_coupling(tmp_path: Path) -> None:
 def test_verifier_detects_retired_service_json(tmp_path: Path) -> None:
     """Verifies that re-introducing retired service.json in Navigator is flagged.
 
-    中文：验证在 Navigator 中重新引入已退役 service.json 会被标记。
+    中文:验证在 Navigator 中重新引入已退役 service.json 会被标记。
     """
     mock_nav_dir = tmp_path / "Cyrene-Navigator"
     mock_nav_dir.mkdir(parents=True)
@@ -173,7 +173,7 @@ def test_verifier_detects_retired_service_json(tmp_path: Path) -> None:
 def test_all_six_product_repositories_live_conformance() -> None:
     """Integration gate: Verifies that all 6 live Product repositories pass naming and boundary policy.
 
-    中文：集成 gate：验证六个当前 Product 仓库都通过命名和边界 policy。
+    中文:集成 gate:验证六个当前 Product 仓库都通过命名和边界 policy。
     """
     workspace_root = Path(__file__).parents[1]
     verifier = CrossRepoBoundaryVerifier(

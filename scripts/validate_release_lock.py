@@ -9,7 +9,7 @@ The lock is the only authority for engine versions and acceptance fixtures.
 A structural error is fatal; a non-terminal status is a named blocker that the
 RC gate must resolve with real acceptance evidence before publication.
 
-中文：Release lock 是 engine versions 和 acceptance fixtures 的唯一 authority。结构错误必须立即失败；非终态 status 会列为具名 blocker，RC gate 必须在发布前通过真实验收证据解决。
+中文:Release lock 是 engine versions 和 acceptance fixtures 的唯一 authority。结构错误必须立即失败;非终态 status 会列为具名 blocker,RC gate 必须在发布前通过真实验收证据解决。
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ def validate_lifecycle_sources(
 ) -> list[str]:
     """Require lifecycle tests to use the revisions promoted by the RC lock.
 
-    中文：要求 lifecycle tests 使用 RC lock 所提升的 revisions。
+    中文:要求 lifecycle tests 使用 RC lock 所提升的 revisions。
     """
 
     errors: list[str] = []

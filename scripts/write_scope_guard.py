@@ -27,7 +27,7 @@ DEFAULT_SNAPSHOT = Path("/tmp/cyrene-write-scope.json")
 def _repositories() -> list[tuple[str, Path]]:
     """Read the canonical repository topology from repositories.yaml.
 
-    中文：从 repositories.yaml 读取规范仓库拓扑。
+    中文:从 repositories.yaml 读取规范仓库拓扑。
     """
 
     manifest = WORKSPACE_ROOT / "repositories.yaml"
@@ -48,7 +48,7 @@ def _repositories() -> list[tuple[str, Path]]:
 def _git(repo: Path, *args: str) -> str:
     """Run one read-only git query inside a repository.
 
-    中文：在一个仓库中运行只读 git 查询。
+    中文:在一个仓库中运行只读 git 查询。
     """
 
     result = subprocess.run(
@@ -67,7 +67,7 @@ def _git(repo: Path, *args: str) -> str:
 def _capture(repo: Path) -> dict:
     """Capture the observable state that defines a repository write scope.
 
-    中文：采集定义仓库写入范围的可观察状态。
+    中文:采集定义仓库写入范围的可观察状态。
     """
 
     return {
@@ -83,7 +83,7 @@ def _capture(repo: Path) -> dict:
 def _snapshot(snapshot_path: Path) -> int:
     """Write the current state of every repository to the snapshot file.
 
-    中文：将每个仓库的当前状态写入 snapshot 文件。
+    中文:将每个仓库的当前状态写入 snapshot 文件。
     """
 
     state = {
@@ -100,7 +100,7 @@ def _snapshot(snapshot_path: Path) -> int:
 def _verify(snapshot_path: Path, allowed: set[str]) -> int:
     """Fail when a repository outside the allowed set changed since the snapshot.
 
-    中文：如果允许集合之外的仓库在 snapshot 后发生变化，则失败。
+    中文:如果允许集合之外的仓库在 snapshot 后发生变化,则失败。
     """
 
     if not snapshot_path.is_file():
@@ -156,7 +156,7 @@ def _verify(snapshot_path: Path, allowed: set[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     """Snapshot or verify repository write scope from the command line.
 
-    中文：从命令行创建或验证 repository write-scope snapshot。
+    中文:从命令行创建或验证 repository write-scope snapshot。
     """
 
     parser = argparse.ArgumentParser(description=__doc__)
