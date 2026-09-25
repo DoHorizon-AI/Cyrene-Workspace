@@ -7,6 +7,8 @@
 
 Serving is owned by the Plugins vLLM runtime and is supervised by
 ``run-services.py``; this coordinator deliberately starts no serving component.
+
+中文：Serving 由 Plugins 所属的 vLLM runtime 提供，并由 run-services.py 监管；此 coordinator 有意不启动任何 serving 组件。
 """
 
 from __future__ import annotations
@@ -99,7 +101,10 @@ def _commands(args: argparse.Namespace, home: Path) -> dict[str, list[str]]:
 
 
 def _release_pid_files(runtime_home: Path) -> list[int]:
-    """Terminate and remove process ids recorded inside one runtime home."""
+    """Terminate and remove process ids recorded inside one runtime home.
+
+    中文：终止 runtime home 中记录的进程，并删除对应的进程 ID 文件。
+    """
 
     released: list[int] = []
     if not runtime_home.is_dir():

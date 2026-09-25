@@ -71,3 +71,36 @@ GPU Pool 只授权受信任 Pipeline，fork PR 不得自动进入。Windows+WSL2
 对固定 runtime home 执行 down，再 bootstrap/status；失败路径也必须通过 `always()`
 teardown。资源解析阶段取消时按上表授权 Service Connection 与 Repository Resource，
 不要反复改 YAML 或嵌入 Git 凭据。
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# Azure DevOps RTX 4080 验收环境
+
+使用专用 self-hosted Agent Pool，并设置 capability `cyrene.gpu=rtx4080`。Agent 服务账号独占一个私有工作目录和配置好的 runtime home。该账号不得持有任何个人 SSH、GitHub 或 Azure 凭据。仓库通过 Pipeline 的 `DoHorizon-AI` GitHub service connection 检出；运行时秘密只能通过 secret 变量或 secure file 注入，绝不写入诊断环境转储。
+
+只有受信任的 Pipeline 才能使用该 Pool。对公开 Fork pull request 禁用 Job 授权，不向项目级 Contributor 组授予 Pool 权限，并将 Pipeline 身份限制为只读所需仓库。GPU Job 还会检查 `Build.Reason != PullRequest`、规范分支名称和 RTX 4080 Agent capability。这些检查是 Azure Pool 授权的补充措施。
+
+明确记录主机证据：
+
+- 原生 Linux 主机：`HOST=Linux`、`GPU_RUNTIME=NATIVE_LINUX_CUDA`。
+- 使用 WSL2 Agent 的 Windows 主机：`HOST=Windows`、`GPU_RUNTIME=WSL2_CUDA`。
+
+不得把 WSL2 Agent 说成原生 Linux 隔离。规范发布验收应使用 `NATIVE_LINUX_PROFILE`；在发布策略另有接受前，WSL2 只作为显式开发证据保留。
+
+Workspace Pipeline 分两层。Hosted Job 会在 pull request 和分支更新时运行 lint、合约、schema、单元测试、洁净室构建和非 GPU 集成测试。参数化的 self-hosted Job 不向 pull request 开放，并从精确检出版本部署完整的 Platform/Yield/Reactor 运行时。随后由 Validation Captain 在同一受信任节点上运行文档规定的显式生命周期流程。发布候选版本必须提供完整生命周期证据；此证据与运行时 bootstrap 证据分开记录。
+
+每次 GPU 运行前，先在固定 Agent runtime home 上调用 `scripts/reference-runtime down`，然后运行 `bootstrap` 和 `status`。拆除时应先停止部署和 Product 进程，再调用 `down`。Azure steps 必须使用 `always()` 执行 teardown，确保训练或服务探测失败后仍尝试清理。
+
+## 资源授权
+
+GitHub service connection 名称为 `DoHorizon-AI`。请为以下 Azure Pipeline 定义和仓库资源授权：
+
+| Pipeline | 定义 ID | 仓库资源 |
+|---|---:|---|
+| Cyrene-Reactor | 21 | `DoHorizon-AI/Cyrene-Platform` |
+| Cyrene-Yield | 22 | `DoHorizon-AI/Cyrene-Platform` |
+| Cyrene-Workspace | 23 | Platform、Catalyst、Yield、Reactor、Exchange、Navigator、Echo |
+
+Azure Project Administrator 或 Endpoint Administrator 应打开 **Project Settings → Service connections → DoHorizon-AI → Security**，将 **Use** 权限授予这三个 Pipeline build-service 身份；然后打开各 Pipeline 的 **Settings → Resource authorizations**，为列出的仓库资源授权。如果 YAML / resource 解析期间取消运行，不要重写 YAML 或添加内嵌 Git 凭据。授权后使用相同提交重跑，并记录 Job 是否实际启动。
+
+查询 Pool 和 service connection 清单也需要通过 Azure DevOps 认证的 API 访问。如果调用方收到 `requires user authentication`，则不能只凭 Pipeline YAML 证明 Agent 是否存在、Pool 是否已授权或 endpoint 是否有权限。

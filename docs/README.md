@@ -30,3 +30,38 @@ This directory contains the canonical, current-first documentation for the Cyren
 ## 4. Plans & Evidence
 - [**Plans**](plans/): Detailed implementation plans and milestone roadmaps.
 - [**Text Model Lifecycle V1 Evidence**](text-model-lifecycle-v1-canonical-evidence.md): Canonical test evidence.
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene 文档索引
+
+本目录收录 Cyrene AI 生态系统以当前内容为先的规范文档。
+
+---
+
+## 1. 系统架构与产品
+- [**ARCHITECTURE.md**](ARCHITECTURE.md)：完整系统架构、三层模型和 Platform 边界。
+- [**PRODUCTS.md**](PRODUCTS.md)：产品目录及服务职责（Catalyst、Yield、Reactor、Exchange、Navigator、Echo）。
+- [**RUNTIME.md**](RUNTIME.md)：洁净室运行时执行模型和环境配置档。
+- [**PLUGINS.md**](PLUGINS.md)：插件架构、`plugin.manifest.json` 规范及目录治理。
+
+---
+
+## 2. 工程与开发者指南
+- [**QUICKSTART.md**](QUICKSTART.md)：前置条件、引导流程和开发者入门。
+- [**DEVELOPMENT.md**](DEVELOPMENT.md)：多仓库拓扑、Agent 工作树隔离、JetBrains IDE 集成和质量门禁。
+
+---
+
+## 3. 规范与治理
+- [**TEXT_MODEL_LIFECYCLE.md**](TEXT_MODEL_LIFECYCLE.md)：从数据工程到评估反馈的六阶段闭环。
+- [**COMPATIBILITY.md**](COMPATIBILITY.md)：OpenAI API 兼容性及限定范围的插件迁移代码面。
+- [**MIGRATION.md**](MIGRATION.md)：旧版代码面最终清理报告及验证清单。
+- [**CI Authority**](governance/ci-authority.md)：GitHub Actions/Azure 的职责归属、自动触发边界和证据规则。
+- [**Logging & Error Standards**](standards/logging-and-errors.md)：统一结构化日志格式、稳定错误码分类和诊断边界（v0.1 草案）。
+
+---
+
+## 4. 计划与证据
+- [**Plans**](plans/)：详细实施计划和里程碑路线图。
+- [**Text Model Lifecycle V1 Evidence**](text-model-lifecycle-v1-canonical-evidence.md)：规范测试证据。

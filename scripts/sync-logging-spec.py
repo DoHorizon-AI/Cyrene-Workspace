@@ -46,10 +46,15 @@ class TargetRepo(NamedTuple):
 
 
 def discover_repositories() -> list[TargetRepo]:
-    """Discover all repositories and their docs directories."""
+    """Discover all repositories and their docs directories.
+
+    中文：发现所有仓库及其 docs 目录。
+    """
     repo_dirs: dict[str, Path] = {}
 
     # 1. Attempt discovery via repositories.yaml if PyYAML is available
+    # 中文：1. 如果已安装 PyYAML，则尝试从 repositories.yaml 中发现仓库
+    # 中文：1. 如果 PyYAML 可用，先尝试通过 repositories.yaml 发现仓库。
     yaml_file = WORKSPACE_ROOT / "repositories.yaml"
     if yaml is not None and yaml_file.exists():
         try:
@@ -66,6 +71,8 @@ def discover_repositories() -> list[TargetRepo]:
             print(f"Warning: Failed to parse repositories.yaml: {err}", file=sys.stderr)
 
     # 2. Add known default paths if not discovered
+    # 中文：2. 如果未发现仓库，则添加已知的默认路径
+    # 中文：2. 对尚未发现的仓库补充已知默认路径。
     known_paths = [
         ("Cyrene-Workspace", WORKSPACE_ROOT),
         ("Cyrene-Platform", DEV_ROOT / "Cyrene-Platform"),
@@ -93,14 +100,20 @@ def discover_repositories() -> list[TargetRepo]:
 
 
 def build_synced_content(canonical_content: str, is_canonical_file: bool = False) -> str:
-    """Prepare content for target file."""
+    """Prepare content for target file.
+
+    中文：为目标文件生成要同步的内容。
+    """
     if is_canonical_file:
         return canonical_content
     return SYNC_HEADER + canonical_content
 
 
 def sync_specs(*, check_only: bool = False, dry_run: bool = False) -> int:
-    """Synchronize or verify the logging spec across all repositories."""
+    """Synchronize or verify the logging spec across all repositories.
+
+    中文：同步日志规范，或验证各仓库中的副本是否一致。
+    """
     if not CANONICAL_SPEC_FILE.exists():
         print(f"Error: Canonical spec not found at {CANONICAL_SPEC_FILE}", file=sys.stderr)
         return 1
@@ -114,6 +127,8 @@ def sync_specs(*, check_only: bool = False, dry_run: bool = False) -> int:
 
     for target in targets:
         # Determine whether this is the canonical file itself
+        # 中文：判断当前文件是否就是规范源文件本身
+        # 中文：判断当前文件是否就是 canonical 文件。
         is_canonical = (target.target_file == CANONICAL_SPEC_FILE)
         expected_content = build_synced_content(canonical_content, is_canonical)
 

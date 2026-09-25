@@ -31,7 +31,10 @@ _TRAINING_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELED", "CANCE
 
 
 class ProductClient:
-    """URLs and bearer credentials are operator configuration, never saved in bookmarks."""
+    """URLs and bearer credentials are operator configuration, never saved in bookmarks.
+
+    中文：URL 和 bearer credentials 属于 operator 配置，不能保存在书签中。
+    """
 
     def request(
         self,
@@ -117,7 +120,10 @@ def _runtime_config(path: Path | None) -> dict[str, Any]:
 
 
 def import_base_artifact(path: Path | None, repository: str, revision: str) -> dict[str, Any]:
-    """Prepare an immutable base Artifact without requiring a Reactor deployment host."""
+    """Prepare an immutable base Artifact without requiring a Reactor deployment host.
+
+    中文：准备不可变的 base Artifact，无需 Reactor deployment host。
+    """
 
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
         raise ValueError("Base model must be a Hugging Face owner/repository")
@@ -160,7 +166,10 @@ def import_base_artifact(path: Path | None, repository: str, revision: str) -> d
 
 
 def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClient) -> Any:
-    """Each branch performs only the named user action through documented APIs."""
+    """Each branch performs only the named user action through documented APIs.
+
+    中文：每个分支只通过文档化 API 执行指定的用户操作。
+    """
     action = args.action
     api = client.request
     if action == "dataset-import":
@@ -490,7 +499,11 @@ def perform(args: argparse.Namespace, state: dict[str, Any], client: ProductClie
             raise
         if not getattr(args, "keep_resources", False):
             # A passing acceptance must not leave a route serving traffic, a
+            # 中文：通过的验收不得遗留仍在承接流量的 Route，
+            # 中文：验收通过后不得留下仍在承接流量的路由、
             # deployment resident on an accelerator, or a queued TrainingRun.
+            # 中文：仍驻留在加速器上的部署，或排队中的 TrainingRun。
+            # 中文：仍部署在 accelerator 上的部署，或仍在队列中的 TrainingRun。
             release_acceptance_resources(state, api)
         return result
     raise ValueError("Unknown action")
@@ -502,6 +515,8 @@ def release_acceptance_resources(state: dict[str, Any], api: Any) -> None:
     A failed acceptance run must not leave a route serving traffic, a deployment
     resident on an accelerator, or a queued TrainingRun consuming the scheduler,
     so every release is attempted even when an earlier Product is unreachable.
+
+    中文：释放被中断的验收闭环仍持有的所有资源。失败的验收运行不能遗留仍承接流量的 route、占用 accelerator 的 deployment 或消耗 scheduler 的排队 TrainingRun；因此即使较早的 Product 无法访问，也要尝试执行每项释放操作。
     """
 
     endpoint = state.get("gatewayEndpoint")
@@ -537,11 +552,14 @@ def release_acceptance_resources(state: dict[str, Any], api: Any) -> None:
 
 
 def _attempt_release(label: str, release: Any) -> None:
-    """Release one resource without masking the failure that triggered cleanup."""
+    """Release one resource without masking the failure that triggered cleanup.
+
+    中文：释放单个资源，但不能掩盖触发清理的原始失败。
+    """
 
     try:
         release()
-    except Exception as exc:  # noqa: BLE001 - cleanup must never mask the original error
+    except Exception as exc:  # noqa: BLE001 - cleanup must never mask the original error | 清理过程绝不能掩盖原始错误
         print(f"Acceptance cleanup could not release {label}: {exc}", file=sys.stderr)
 
 
@@ -553,10 +571,14 @@ def run_acceptance(
     """Execute the complete non-interactive 30-step Text Model Lifecycle V1 acceptance loop.
 
     Consumes only canonical returned resource references across all steps.
+
+    中文：执行完整、非交互式的 30 步 Text Model Lifecycle V1 验收闭环。全流程只消费每一步返回的规范资源引用。
     """
     api = client.request
 
     # 1-5. Dataset preparation and publish DatasetVersion v1
+    # 中文：1-5. 准备数据集并发布 DatasetVersion v1
+    # 中文：第 1–5 步：准备 Dataset 并发布 DatasetVersion v1。
     dataset_name = args.name or f"Acceptance Dataset {int(time.time())}"
     dataset = api(
         "catalyst",
@@ -642,6 +664,7 @@ def run_acceptance(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     # 6. Send to Yield
+    # 中文：第 6 步：提交给 Yield。
     yield_receipt = api(
         "catalyst",
         "POST",
@@ -650,6 +673,8 @@ def run_acceptance(
     training_draft_id = yield_receipt["targetResource"]["id"]
 
     # 7. Immutable Base Model Import / Reference
+    # 中文：7. 导入 / 引用不可变基础模型
+    # 中文：第 7 步：导入或引用不可变 Base Model。
     if "baseImport" not in state:
         try:
             bindings = api("reactor", "GET", "/api/v1/serving-bindings")
@@ -671,6 +696,7 @@ def run_acceptance(
     base_source = state["baseImport"]["modelInfo"]["source"]
 
     # 8. Configure TrainingDraft
+    # 中文：第 8 步：配置 TrainingDraft。
     params: dict[str, Any] = {
         "epochs": args.epochs,
         "maxSequenceLength": args.max_length,
@@ -691,6 +717,8 @@ def run_acceptance(
     )
 
     # 9. Start TrainingRun and poll until COMPLETED
+    # 中文：9. 启动 TrainingRun 并持续轮询，直到状态为 COMPLETED
+    # 中文：第 9 步：启动 TrainingRun 并轮询至 COMPLETED。
     training_run = api(
         "yield",
         "POST",
@@ -714,6 +742,8 @@ def run_acceptance(
         raise TimeoutError("Timed out waiting for training run to complete")
 
     # 10-12. Verify TrainingResult, adapter artifact, BASE_PLUS_LORA ModelVersion
+    # 中文：10-12. 验证 TrainingResult、adapter 制品及 BASE_PLUS_LORA ModelVersion
+    # 中文：第 10–12 步：验证 TrainingResult、adapter artifact 和 BASE_PLUS_LORA ModelVersion。
     training_result = completed_run["result"]
     state["trainingResult"] = training_result
     adapter_artifact = training_result["adapterArtifact"]
@@ -730,6 +760,7 @@ def run_acceptance(
     )
 
     # 13-14. Send to Reactor -> DeploymentDraft
+    # 中文：第 13–14 步：提交给 Reactor，创建 DeploymentDraft。
     reactor_receipt = api(
         "yield",
         "POST",
@@ -738,6 +769,8 @@ def run_acceptance(
     deployment_draft_id = reactor_receipt["targetResource"]["id"]
 
     # 15. Select serving binding and nodeRef, deploy
+    # 中文：15. 选择服务 binding 与 nodeRef，然后部署
+    # 中文：第 15 步：选择 serving binding 和 nodeRef，然后部署。
     bindings = api("reactor", "GET", "/api/v1/serving-bindings")
     binding = select(bindings, args.binding_index, "serving binding")
     binding_id = binding.get("bindingId") or binding.get("id")
@@ -757,6 +790,8 @@ def run_acceptance(
     state["deployment"] = deployment
 
     # 16. Poll until deployment status == READY
+    # 中文：16. 持续轮询，直到部署状态变为 READY
+    # 中文：第 16 步：轮询直至 deployment status 为 READY。
     deployment_id = deployment["id"]
     ready_deployment = None
     deadline = time.time() + args.timeout
@@ -774,6 +809,8 @@ def run_acceptance(
     state["deployment"] = ready_deployment
 
     # 17-18. Create GatewayEndpoint & Route to Exchange
+    # 中文：17-18. 创建 GatewayEndpoint，并将 Route 指向 Exchange
+    # 中文：第 17–18 步：创建 GatewayEndpoint，并配置 Route 指向 Exchange。
     endpoint = api("reactor", "GET", f"/api/v1/endpoints/{ready_deployment['endpointId']}")
     receivers = api("reactor", "GET", "/api/v1/exchange-receivers")
     receiver = select(receivers, args.receiver_index, "Exchange receiver")
@@ -809,6 +846,8 @@ def run_acceptance(
     state["route"] = route
 
     # 19-20. Confirm Route and poll until ACTIVE
+    # 中文：19-20. 确认 Route，并持续轮询，直到状态变为 ACTIVE
+    # 中文：第 19–20 步：确认 Route 并轮询直至 ACTIVE。
     current_route = api("exchange", "GET", f"/api/v1/gateway-routes/{route['id']}")
     api(
         "exchange",
@@ -836,6 +875,8 @@ def run_acceptance(
     state["route"] = active_route
 
     # 21-22. Real Chat Completion via Exchange
+    # 中文：21-22. 通过 Exchange 发起真实 Chat Completion 请求
+    # 中文：第 21–22 步：通过 Exchange 执行真实 Chat Completion。
     chat_req = {
         "model": args.model_pattern,
         "messages": [{"role": "user", "content": "What is Cyrene?"}],
@@ -847,6 +888,8 @@ def run_acceptance(
     assert model_response, "Model response text must not be empty"
 
     # 23. Record Session in Navigator and Send to Echo
+    # 中文：23. 在 Navigator 中记录 Session，并发送给 Echo
+    # 中文：第 23 步：在 Navigator 中记录 Session 并发送给 Echo。
     session_id = f"acceptance-session-{int(time.time())}"
     nav_prefix = f"/api/v1/harness/workspaces/{quote(args.workspace, safe='')}/sessions"
     nav_handle = api(
@@ -900,6 +943,8 @@ def run_acceptance(
     snapshot = api("navigator", "GET", f"{nav_prefix}/{session_id}")
 
     # Send to Echo with complete lineage provenance refs
+    # 中文：向 Echo 发送完整的 lineage 来源引用
+    # 中文：向 Echo 发送包含完整 lineage provenance 引用的数据。
     lineage = [
         model_version["id"],
         dataset_version_v1["uri"],
@@ -920,6 +965,8 @@ def run_acceptance(
     state["evaluationInput"] = eval_input
 
     # 24-26. Echo Evaluation, Annotation, FeedbackSet
+    # 中文：24-26. 在 Echo 中完成评估、标注并生成 FeedbackSet
+    # 中文：第 24–26 步：Echo 评估、标注并生成 FeedbackSet。
     suite = api(
         "echo",
         "POST",
@@ -975,6 +1022,8 @@ def run_acceptance(
     state["feedbackSet"] = feedback_set
 
     # 27-29. Send FeedbackSet to Catalyst & Publish DatasetVersion v2
+    # 中文：27-29. 将 FeedbackSet 发送给 Catalyst，并发布 DatasetVersion v2
+    # 中文：第 27–29 步：将 FeedbackSet 发送给 Catalyst 并发布 DatasetVersion v2。
     cat_receipt = api(
         "echo",
         "POST",
@@ -999,6 +1048,8 @@ def run_acceptance(
     state["datasetVersionV2"] = dataset_version_v2
 
     # 30. Lineage Audit & First Usable Loop Verification
+    # 中文：30. 审计 lineage 并验证首个可用闭环
+    # 中文：第 30 步：审计 lineage 并验证第一个可用闭环。
     lineage_audit = {
         "datasetVersionV1": dataset_version_v1["uri"],
         "trainingRun": training_run["uri"],
@@ -1154,6 +1205,8 @@ def main() -> None:
         state = json.loads(args.selection.read_text()) if args.selection.exists() else {}
         result = perform(args, state, ProductClient())
         # This file contains returned resources, never environment values or credentials.
+        # 中文：此文件只包含返回的资源，不包含环境变量值或凭据。
+        # 中文：此文件只保存返回的资源，不保存环境值或凭据。
         pending = args.selection.with_suffix(".pending")
         fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as stream:

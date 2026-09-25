@@ -64,3 +64,38 @@ v2、Python 3.12、Rust、`uv`，并保留 Reactor 10 GiB 显存准入下限。
 所有 socket、peer UID、签名密钥、Cargo 输出及 Python 环境路径均由私有 manifest
 生成并传给 Product。验证者只需指定三个仓库 checkout 与一个 runtime home，执行
 bootstrap 和 status；失败会关闭本轮已启动的 Platform 进程。
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# CYRENE_TEXT_LIFECYCLE_V1_LOCAL_GPU
+
+这是面向单机和单块 NVIDIA GPU 的 Public Alpha 参考运行时配置档。规范 GPU 验收由 RTX 4080 节点上的受信任 Azure DevOps self-hosted Agent 执行。运行时操作系统是 Linux。如果该节点是运行 WSL2 Agent 的 Windows 主机，证据必须写明 `HOST=Windows` 和 `GPU_RUNTIME=WSL2_CUDA`；这不属于原生 Linux 隔离。
+
+受支持的生产模式为 `NATIVE_LINUX_PROFILE`。它要求 NVIDIA 驱动兼容已锁定的 Yield CUDA 12.8 和 Reactor CUDA 13.0 运行时；`sandboxd` 可获得委托的 cgroup v2 访问权限；安装 Python 3.12、Rust 和 `uv`；并且 GPU 有足够可用显存满足 Reactor 10 GiB 准入下限。`WSL_DEV_PROFILE` 是必须显式选择的开发者专用模式。它启用现有 WSL 共享设备准入和沙箱开发模式，并报告 `hardIsolation=false`。它不会改变生产环境 10 GiB 的默认值。
+
+| 层 | 规范组件或合约 |
+|---|---|
+| Platform 运行时 manifest | `CYRENE_PLATFORM_RUNTIME_V1_LOCAL_GPU` |
+| Artifact Plane | Platform `LocalArtifactProvider`，一个由运行时拥有的根目录 |
+| 硬件 | `cyrene-nvidia-adapter`、服务账号 UID 策略 |
+| 沙箱 | `cyrene-sandboxd`、服务账号 UID 策略 |
+| 执行 | `cyrene-kernel`、UDS worker/provider 控制、签名安装 |
+| 放置 | 精确源码构建的 `cyrene-reactor-host-placement`，安装在 runtime home 中 |
+| 训练 | Yield 锁定的 Python 3.12 / PyTorch CUDA / LLaMA-Factory bundle |
+| 服务 | Reactor 锁定的 Python 3.12 / vLLM bundle；Host 监听 loopback 端口 19301 |
+| 控制 | Reactor Product 控制接口监听 loopback 端口 19300 |
+
+Socket 名称、peer UID、签名密钥路径、Cargo 输出路径和 Python 环境路径都是私有 manifest 字段。Product 消费生成的运行时配置。公开验收证据只包含配置档、模式、组件状态、源码修订版、包版本、CUDA 信息以及二进制 / 协议摘要。
+
+启动顺序为：NVIDIA adapter → sandboxd → Kernel → trainer probe → placement 和 serving probe → Reactor Host → Reactor control → 其余 Product。关闭时，先停止 Product 流量和部署，再停止 Reactor 进程，最后依次停止 Kernel → sandboxd → NVIDIA adapter。Pipeline teardown 在 `always()` 下运行。
+
+```bash
+export CYRENE_PLATFORM_WORKTREE=/opt/cyrene/Cyrene-Platform
+export CYRENE_YIELD_WORKTREE=/opt/cyrene/Cyrene-Yield
+export CYRENE_REACTOR_WORKTREE=/opt/cyrene/Cyrene-Reactor
+export CYRENE_RUNTIME_HOME=/srv/cyrene/reference-runtime
+scripts/reference-runtime bootstrap
+scripts/reference-runtime status
+```
+
+self-hosted Agent 必须限制为受信任的 Pipeline，使用专用的最小权限服务账号和工作目录，并且只能通过 Pipeline secret 变量接收秘密。Fork pull request 不得进入 GPU 任务。

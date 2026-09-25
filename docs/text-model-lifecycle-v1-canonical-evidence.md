@@ -115,3 +115,123 @@ Residual GPU Processes:  0
   - `Yield` is the authority for **`TrainingRun`**, **`TrainingAttempt`**, **`TrainingResult`**, and **`ModelVersion`**.
   - Upon training run completion, Yield produces the canonical `ModelVersion` manifest containing `composition: BASE_PLUS_LORA`, adapter artifact digest, base model provenance, chat template, and training lineage.
   - Yield directly hands off the `ModelVersion` to `Reactor` via `POST /api/v1/training-results/{id}/actions/send-to-reactor`.
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# 文本模型生命周期 V1：规范本地验收证据
+
+本文记录通过规范驱动程序（`scripts/text-lifecycle-v1.py`）执行的 **Text Model Lifecycle V1** 端到端本地规范验收证据。所有主机专属路径、用户名、主机名、私有 IP 和认证令牌均已脱敏。
+
+---
+
+## 1. 环境与硬件配置
+
+| 字段 | 值 |
+|---|---|
+| **运行时配置档** | `WSL_DEV_PROFILE` |
+| **主机操作系统** | Windows 11，运行 WSL2 Linux 内核 |
+| **GPU 型号** | NVIDIA GeForce RTX 5070（Compute Capability 12.0）|
+| **GPU 总显存** | 12,227 MiB |
+| **NVIDIA 驱动 / CUDA** | 驱动 `615.65.06` / CUDA UMD `13.4` |
+| **基础模型** | `Qwen/Qwen2.5-0.5B-Instruct` |
+| **基础模型修订版** | `7ae557604adf67be50417f59c2c2f167def9a775` |
+| **基础模型制品摘要** | `sha256:b328f12190709857ce73ffe417b9fe86807aa275c9b55baa35e731556b1d345a` |
+
+---
+
+## 2. 规范 Git 提交 SHA
+
+| 组件 / 仓库 | 提交 SHA | 状态 |
+|---|---|:---:|
+| `Cyrene-Workspace` | `7012a4d178a7a832dc6cb77c5c151d8ccb2dbab1` | 已验证 |
+| `Cyrene-Platform` | `7bda74bd3410dc2c5b5c5e66e12485519c2b5e54` | 已验证 |
+| `Cyrene-Catalyst` | `d0114bd914a1f4cf171e38e73408f1e72086efd0` | 已验证 |
+| `Cyrene-Yield` | `c5f86a5c861915ac1d8488b8715b798b6f40b67a` | 已验证 |
+| `Cyrene-Reactor` | `6d7092fa52c9a62f4fdc4bd84eeacbc7fefe9b3b` | 已验证 |
+| `Cyrene-Exchange` | `f2c8182d6758783a17d5ccabe69561d991fd4629` | 已验证 |
+| `Cyrene-Navigator` | `4e4b7edeb690af6e8e37006b9db278cf940193e9` | 已验证 |
+| `Cyrene-Echo` | `63f27aac7f4dfeda9161f917a4a20d44b830f449` | 已验证 |
+
+---
+
+## 3. 端到端规范链路标识
+
+```mermaid
+flowchart TD
+    D1["DatasetVersion v1"] --> Y1["Yield SFT LoRA（第 3 次尝试）"]
+    Y1 --> TR["TrainingResult"]
+    TR --> LA["LoRA Adapter 制品"]
+    TR --> MV["ModelVersion（BASE_PLUS_LORA）"]
+    MV --> RD["Reactor 部署（READY）"]
+    RD --> ER["Exchange 路由（ACTIVE）"]
+    ER --> NV["Navigator 聊天响应"]
+    NV --> EE["Echo 评估与修正"]
+    EE --> FS["Echo FeedbackSet"]
+    FS --> D2["Catalyst DatasetVersion v2"]
+```
+
+| 生命周期阶段 | 资源类型 | 标识 / 摘要 / 值 |
+|---|---|---|
+| **Catalyst 模型** | `Model` | `0199252c-c7ea-7589-a51f-6a7516d00dc2`（`Acceptance-1788798937`）|
+| **Catalyst 数据集** | `Dataset` | `0199252c-cb0a-73d8-a83d-3b951475739e` |
+| **初始数据集版本** | `DatasetVersion`（v1）| `0199252c-cffb-7c70-877d-7b2eeadcf981`；`artifact://sha256/00b048b47ed4ccabcb6395c493388a1e47583c0ed08039dbc9f6d69ada08bb51` |
+| **Yield 训练运行** | `TrainingRun` | `cyrene://yield/training-runs/6b6cb64a-0448-47e4-9faa-9c68a0aa11d3` |
+| ↳ *预检尝试* | `TrainingAttempt`（1）| `0199252c-d2d4-729f-a8ea-bbba861d875a`（状态：`succeeded`）|
+| ↳ *空跑尝试* | `TrainingAttempt`（2）| `0199252d-0348-709d-ad02-39c20a484501`（状态：`succeeded`）|
+| ↳ *执行尝试* | `TrainingAttempt`（3）| `0199252d-1bf9-7387-a25e-04f7ca11fb85`（状态：`succeeded`，执行了 1 步真实 CUDA LoRA）|
+| **Yield 训练结果** | `TrainingResult` | `5ee94cb5-ed1b-55eb-a831-e7f2d66599a1`（内部 ID `0199252d-71ee-70d3-b1d7-2f6a9c14828f`）|
+| **LoRA Adapter 制品** | `Artifact` | `artifact://sha256/090eb4dc5567c8f795ea1d14fd10fcf767d11df1332f2a1d2726d2cedd6aa014`（17,641,047 字节）|
+| **ModelVersion** | `ModelVersion` | `model-version://sha256/31a73c6be3e4704a3db3b955d9b1ef77c49a88ada90dfae62d0f5bfe9c17dfe8`；组合：`BASE_PLUS_LORA` |
+| **Reactor 部署** | `Deployment` | `350cce97-a933-41f5-a418-e882d0052a94`（内部 ID `0199252d-7521-7290-b184-5f111818bfa9`）；Serving Binding：`local-gpu`；状态：`READY`（提供了真实推理）|
+| **Exchange 路由** | `GatewayRoute` | `0199252d-fc54-722a-8c88-e214da39a739`；状态：`ACTIVE` |
+| **Navigator 会话** | `ConversationSession` | `0199252d-fd83-70ae-9ae6-70e2815ecb91` |
+| **Navigator 推理响应** | 真实文本响应 | `"Hello! How can I help you today?"` |
+| **Echo 评估** | `Evaluation` | `0199252e-067f-720d-83cb-1ee6b6cfbdf9` |
+| **Echo 反馈** | `Feedback` | `0199252e-0731-7004-954f-178b66da9d10` |
+| **Echo FeedbackSet** | `FeedbackSet` | `0199252e-07df-7223-bdce-668b57111e3b` |
+| **Echo 导出回执** | `ExportReceipt` | `0199252e-08c3-71e9-a78d-5eb685b8c9d0`（状态：`EXPORTED`）|
+| **第二个数据集版本** | `DatasetVersion`（v2）| `0199252e-0967-73d6-a2e6-76ddadbf2b6b`；`artifact://sha256/264e107db75479be0ef421d0339d332616ce5cbb81e7d825ddb19e99a868470a` |
+
+---
+
+## 4. 停机与资源清理审计
+
+### 4.1 八项强制清理门禁
+
+| 门禁条件 | 预期值 | 已验证结果 | 状态 |
+|---|:---:|:---:|:---:|
+| `TRAINING_WORKERS_REMAINING` | `0` | `0`（完成时已终止 LLaMA-Factory Worker）| **PASS** |
+| `REACTOR_DEPLOYMENTS_REMAINING` | `0` | `0`（部署状态已转为 `STOPPED`）| **PASS** |
+| `KERNEL_MANAGED_CHILDREN` | `0` | `0`（vLLM 进程已停止，所有子进程管道均已关闭）| **PASS** |
+| `LEASES_REMAINING` | `0` | `0`（Kernel 租约已释放）| **PASS** |
+| `NVIDIA_ADAPTER` | `STOPPED` | 通过 `reference-runtime.py down` 终止进程 | **PASS** |
+| `SANDBOXD` | `STOPPED` | 通过 `reference-runtime.py down` 终止进程 | **PASS** |
+| `KERNEL` | `STOPPED` | 通过 `reference-runtime.py down` 终止进程 | **PASS** |
+| `REFERENCE_RUNTIME` | `DOWN` | 已确认 `{"status": "DOWN"}` | **PASS** |
+
+### 4.2 残留进程扫描
+```bash
+ps aux | grep -E "vllm|llamafactory|cyrene|sandbox|nvidia-adapter" | grep -v grep
+# 输出为空（退出码 1）
+```
+已确认**没有残留进程**。
+
+### 4.3 GPU 显存生命周期审计
+
+```
+运行前基线：        1,934 MiB / 12,227 MiB（Windows 桌面基础占用）
+服务运行期间：      9,509 MiB / 12,227 MiB（Qwen2.5-0.5B 基础模型 + LoRA + KV Cache）
+清理后：            1,936 MiB / 12,227 MiB（变化：+2 MiB，来自操作系统窗口重绘波动）
+残留 GPU 进程：     0
+```
+
+---
+
+## 5. 架构说明：`ModelVersion` 的权威归属
+
+- **规范权威**：**`Yield`**。
+- **目录中的职责区分**：
+  - `Catalyst` 独占 `Dataset`、`DatasetVersion` 和 `Preparation` 的权威，不注册或拥有模型版本。
+  - `Yield` 拥有 `TrainingRun`、`TrainingAttempt`、`TrainingResult` 和 `ModelVersion`。
+  - 训练运行完成后，Yield 会生成规范 `ModelVersion` 清单，其中包含 `composition: BASE_PLUS_LORA`、适配器制品摘要、基础模型来源、聊天模板和训练血缘。
+  - Yield 通过 `POST /api/v1/training-results/{id}/actions/send-to-reactor` 将 `ModelVersion` 直接交接给 `Reactor`。

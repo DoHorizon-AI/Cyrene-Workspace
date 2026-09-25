@@ -1,4 +1,7 @@
-"""Reference runtime coordination tests. | Reference runtime 协调测试。"""
+"""Reference runtime coordination tests.
+
+中文：参考运行时（Reference Runtime）的协调测试。
+"""
 
 from __future__ import annotations
 

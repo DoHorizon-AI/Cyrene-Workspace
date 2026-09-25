@@ -54,3 +54,27 @@ the selected CD run; it does not replace GitHub CI or prove a merge.
 
 每次提升都应记录源/目标 SHA、required checks 结论、正常 PR 合并、远端回读与祖先
 关系。Azure 成功只证明该次 CD run，不能替代 GitHub CI，也不能证明已经完成合并。
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# CI/CD 与分支权威
+
+本策略适用于全部九个规范仓库：Workspace、Platform、Plugins、Reactor、Yield、Exchange、Catalyst、Echo 和 Navigator。
+
+## Provider 权威
+
+1. GitHub Actions 是唯一的仓库 CI 权威，负责源码、合约、测试、构建、打包和不可变制品生成。
+2. Azure Pipelines 只负责 CD。它没有自动触发器，不检出源码、不构建、不测试；只接受显式指定且成功的 GitHub Actions run 及其精确 SHA 制品。
+3. Azure 在部署或交接前校验仓库身份、run 结论、commit SHA、制品身份、manifest 内容和载荷摘要。
+4. skipped、simulated、blocked 或未运行的检查绝不能报告为通过。
+
+## 分支生命周期
+
+- `develop` 是默认开发分支。有意不设置 GitHub branch protection 或 ruleset，因此维护者可以正常合并或推送。每次 `develop` 变更仍会运行 GitHub Actions。
+- `main` 受保护，只接受从 `develop` 发起的提升 PR，并要求仓库指定的 GitHub CI 检查全部通过。
+- `release` 受保护，只接受从 `main` 发起的提升 PR；且对应的精确 `main` revision 必须已经生成可构建的不可变 GitHub 制品。
+- `main` 和 `release` 禁止强制推送和删除分支。常规提升流程不得绕过保护。
+
+## 提升证据
+
+每次提升都应记录源与目标 SHA、必需检查结论、常规 PR 合并、远端 fetch/read-back 和祖先关系。Azure 成功只证明所选 CD run 成功；不能替代 GitHub CI，也不能证明已经合并。
