@@ -43,6 +43,9 @@
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/dist" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/bin" />
       <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/obj" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/serving/vllm-runtime/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/../Cyrene-Plugins-Official/plugins/tools/dataset-preparation/.venv" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

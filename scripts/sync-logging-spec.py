@@ -77,7 +77,7 @@ def discover_repositories() -> list[TargetRepo]:
         ("Cyrene-Workspace", WORKSPACE_ROOT),
         ("Cyrene-Platform", DEV_ROOT / "Cyrene-Platform"),
         ("Cyrene-Plugins-Official", DEV_ROOT / "Cyrene-Plugins-Official"),
-        ("Cyrene-Studio", DEV_ROOT / "Cyrene-Studio"),
+        ("Cyrene-Client", DEV_ROOT / "Cyrene-Client"),
         ("Cyrene-Catalyst", DEV_ROOT / "Cyrene-Services" / "Cyrene-Catalyst"),
         ("Cyrene-Echo", DEV_ROOT / "Cyrene-Services" / "Cyrene-Echo"),
         ("Cyrene-Exchange", DEV_ROOT / "Cyrene-Services" / "Cyrene-Exchange"),

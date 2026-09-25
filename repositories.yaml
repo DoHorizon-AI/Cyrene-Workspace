@@ -409,9 +409,9 @@ repositories:
         test: "uv run pytest ; pnpm --dir harness test ; cargo test --manifest-path native/Cargo.toml"
         build: "pnpm --dir harness build ; cargo build --manifest-path native/Cargo.toml"
 
-  - name: "Cyrene-Studio"
-    path: "../Cyrene-Studio"
-    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Studio.git"
+  - name: "Cyrene-Client"
+    path: "../Cyrene-Client"
+    canonical_remote: "https://github.com/DoHorizon-AI/Cyrene-Client.git"
     visibility: "private"
     clone_policy: "github_auth_required"
     default_branch: "develop"
@@ -432,17 +432,17 @@ repositories:
     canonical_runtime_os: "client-desktop"
     canonical_build_target: "static-web"
     ide:
-      node_root: "../Cyrene-Studio"
+      node_root: "../Cyrene-Client"
     pointers:
       primary_source_roots:
-        - "../Cyrene-Studio/apps"
-        - "../Cyrene-Studio/packages"
-        - "../Cyrene-Studio/tooling"
+        - "../Cyrene-Client/apps"
+        - "../Cyrene-Client/packages"
+        - "../Cyrene-Client/tooling"
       test_roots:
-        - "../Cyrene-Studio/tests/unit"
-        - "../Cyrene-Studio/tests/e2e"
+        - "../Cyrene-Client/tests/unit"
+        - "../Cyrene-Client/tests/e2e"
       api_contract_roots:
-        - "../Cyrene-Studio/docs"
+        - "../Cyrene-Client/docs"
       developer_commands:
         test: "npm test ; npm run test:e2e"
         build: "npm run build"
@@ -459,7 +459,7 @@ profiles:
       - "Cyrene-Catalyst"
       - "Cyrene-Navigator"
       - "Cyrene-Echo"
-      - "Cyrene-Studio"
+      - "Cyrene-Client"
     dotnet_solutions:
       - "Cyrene.Workspace.slnx"
 

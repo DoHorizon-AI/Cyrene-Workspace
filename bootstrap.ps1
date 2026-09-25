@@ -76,7 +76,7 @@ $allRepos = @(
     @{ Name = "Cyrene-Catalyst"; Path = "../Cyrene-Services/Cyrene-Catalyst"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Catalyst.git"; Policy = "public_zero_auth"; Profiles = @("full") },
     @{ Name = "Cyrene-Echo"; Path = "../Cyrene-Services/Cyrene-Echo"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Echo.git"; Policy = "public_zero_auth"; Profiles = @("full") },
     @{ Name = "Cyrene-Navigator"; Path = "../Cyrene-Services/Cyrene-Navigator"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Navigator.git"; Policy = "public_zero_auth"; Profiles = @("full") },
-    @{ Name = "Cyrene-Studio"; Path = "../Cyrene-Studio"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Studio.git"; Slug = "DoHorizon-AI/Cyrene-Studio"; Policy = "github_auth_required"; Profiles = @("full") }
+    @{ Name = "Cyrene-Client"; Path = "../Cyrene-Client"; Remote = "https://github.com/DoHorizon-AI/Cyrene-Client.git"; Slug = "DoHorizon-AI/Cyrene-Client"; Policy = "github_auth_required"; Profiles = @("full") }
 )
 
 $activeRepos = $allRepos | Where-Object { $_.Profiles -contains $Profile }

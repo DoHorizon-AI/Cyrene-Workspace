@@ -327,7 +327,8 @@ function Resolve-Repository([string]$Query) {
         "catalyst"  = "Cyrene-Catalyst"
         "echo"      = "Cyrene-Echo"
         "navigator" = "Cyrene-Navigator"
-        "studio"    = "Cyrene-Studio"
+        "client"    = "Cyrene-Client"
+        "studio"    = "Cyrene-Client"
     }
     $aliasKey = $Query.Trim().ToLowerInvariant()
     if ($aliases.ContainsKey($aliasKey)) {

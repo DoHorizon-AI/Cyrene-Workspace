@@ -36,11 +36,16 @@ def test_clone_policies_match_declared_visibility() -> None:
         else:
             assert repository["clone_policy"] != "public_zero_auth"
 
-    studio = next(
-        repository for repository in repositories if repository["name"] == "Cyrene-Studio"
+    client = next(
+        repository for repository in repositories if repository["name"] == "Cyrene-Client"
     )
-    assert studio["visibility"] == "private"
-    assert studio["clone_policy"] == "github_auth_required"
+    assert client["visibility"] == "private"
+    assert client["clone_policy"] == "github_auth_required"
+    assert client["path"] == "../Cyrene-Client"
+    assert client["canonical_remote"] == (
+        "https://github.com/DoHorizon-AI/Cyrene-Client.git"
+    )
+    assert (ROOT / client["path"]).resolve().is_dir()
 
 
 def test_workspace_entrypoints_cover_the_full_profile() -> None:
@@ -60,4 +65,5 @@ def test_workspace_entrypoints_cover_the_full_profile() -> None:
         assert f"`{name}`" in readme
 
     worktree_helper = (ROOT / "agent-worktree.ps1").read_text(encoding="utf-8")
-    assert re.search(r'"studio"\s*=\s*"Cyrene-Studio"', worktree_helper)
+    assert re.search(r'"client"\s*=\s*"Cyrene-Client"', worktree_helper)
+    assert re.search(r'"studio"\s*=\s*"Cyrene-Client"', worktree_helper)

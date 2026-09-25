@@ -49,7 +49,7 @@ def test_repository_discovery() -> None:
     expected_repos = {
         "Cyrene-Platform",
         "Cyrene-Plugins-Official",
-        "Cyrene-Studio",
+        "Cyrene-Client",
         "Cyrene-Workspace",
         "Cyrene-Catalyst",
         "Cyrene-Echo",

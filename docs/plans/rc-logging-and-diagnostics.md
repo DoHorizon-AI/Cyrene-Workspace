@@ -206,14 +206,14 @@
 
 ---
 
-### Wave 9 — Frontend Studio Diagnostics & Error Experience (门禁: OBS-G9)
+### Wave 9 — Frontend Client Diagnostics & Error Experience (门禁: OBS-G9)
 
 - [x] **OBS-W9-01 — RFC 9457 Problem Details & Correlation Client.**
-  - In `Cyrene-Studio`: robust parser for Problem Details responses extracting stable `code`, `trace_id`, `operation_id`, `request_id`, and `recovery_action`.
+  - In `Cyrene-Client`: robust parser for Problem Details responses extracting stable `code`, `trace_id`, `operation_id`, `request_id`, and `recovery_action`.
 - [x] **OBS-W9-02 — Safe Error Display & Correlation Copying.**
   - Display human-readable message, machine error code badge, copyable trace/operation IDs, and actionable recovery buttons.
   - Safe fallback when encountering unknown error codes without crashing or leaking raw stack traces.
-- [x] **OBS-G9 — Wave 9 Studio UI Gate.**
+- [x] **OBS-G9 — Wave 9 Client UI Gate.**
   - Vitest test suites verify error decoding, safe fallback, and correlation propagation.
 
 ---
@@ -221,7 +221,7 @@
 ### Wave 10 — Full Workspace Cross-Repository Acceptance (门禁: OBS-G10)
 
 - [x] **OBS-W10-01 — End-to-End Cross-Repository Correlation Audit.**
-  - Verified correlation flow from Studio UI -> Gateway/Exchange -> Products (Reactor/Yield/Catalyst/Echo/Navigator) -> Platform (Kernel/Daemon/Adapters).
+  - Verified correlation flow from Client UI -> Gateway/Exchange -> Products (Reactor/Yield/Catalyst/Echo/Navigator) -> Platform (Kernel/Daemon/Adapters).
 - [x] **OBS-W10-02 — Workspace Evidence Record & Full Rollout Sign-Off.**
   - Comprehensive evidence record updated across all 10 repositories.
 - [x] **OBS-G10 — Full Workspace Rollout Gate.**
@@ -361,14 +361,14 @@
 - [x] **OBS-W8-02 — Plugin 错误命名空间与契约：** 统一格式 `PLUGIN.<NAME>.<REASON>`；Plugin 作为 stdio/MCP connector 运行时须保持 stdout 机器协议不受污染。
 - [x] **OBS-G8 — Wave 8 Plugins 门：** Official plugins 仓库合规已验证；契约和测试通过。
 
-### Wave 9 — Studio 前端诊断与错误体验（门禁：OBS-G9）
+### Wave 9 — Client 前端诊断与错误体验（门禁：OBS-G9）
 
-- [x] **OBS-W9-01 — RFC 9457 Problem Details 与关联客户端：** 在 `Cyrene-Studio` 中稳健解析 Problem Details，提取稳定 `code`、`trace_id`、`operation_id`、`request_id` 和 `recovery_action`。
+- [x] **OBS-W9-01 — RFC 9457 Problem Details 与关联客户端：** 在 `Cyrene-Client` 中稳健解析 Problem Details，提取稳定 `code`、`trace_id`、`operation_id`、`request_id` 和 `recovery_action`。
 - [x] **OBS-W9-02 — 安全错误展示与关联信息复制：** 显示人类可读消息、机器错误码 badge、可复制 trace/operation ID 和可操作恢复按钮。遇到未知错误码时安全 fallback，不崩溃也不泄露原始 stack trace。
-- [x] **OBS-G9 — Wave 9 Studio UI 门：** Vitest 验证错误解码、安全 fallback 和关联传播。
+- [x] **OBS-G9 — Wave 9 Client UI 门：** Vitest 验证错误解码、安全 fallback 和关联传播。
 
 ### Wave 10 — Workspace 跨仓库验收（门禁：OBS-G10）
 
-- [x] **OBS-W10-01 — 端到端跨仓库关联审计：** 已验证关联从 Studio UI → Gateway/Exchange → Products（Reactor/Yield/Catalyst/Echo/Navigator）→ Platform（Kernel/Daemon/Adapters）传播。
+- [x] **OBS-W10-01 — 端到端跨仓库关联审计：** 已验证关联从 Client UI → Gateway/Exchange → Products（Reactor/Yield/Catalyst/Echo/Navigator）→ Platform（Kernel/Daemon/Adapters）传播。
 - [x] **OBS-W10-02 — Workspace 证据记录与推广签署：** 已更新覆盖全部 10 个仓库的综合证据记录。
 - [x] **OBS-G10 — Workspace 全面推广门：** 已完成 Workspace 全范围覆盖。
