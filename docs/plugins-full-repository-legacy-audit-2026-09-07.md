@@ -600,3 +600,326 @@ Astrbot-Rev 当前 exact `develop@8787db7a` 有 GitHub Actions `CI` run 33997906
 - Catalyst 主源码、Echo 主源码、Yield Product controller 没有出现新的明显空实现；其主要问题分别是文档/元数据、凭据验收边界、vendored backend 治理。
 - 本轮是静态审计、构建/CI 证据回读和已有测试账本复核，没有执行真实 GPU、企微、外部模型 API、Windows UI 或生产部署。
 - 报告只覆盖第 14 节列出的远端提交，不覆盖未合并 PR、历史分支和 ignored 本地文件。
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene 全仓疑似老代码与规范偏差审计（中文译文）
+
+> **历史快照（2026-09-07）：** 审计时 `Astrbot-Rev` 和 `DH-System-Internal` 仍是 canonical workspace member；此后两仓已退役，迁移代码位于 `Cyrene-Plugins-Official/plugins/`。当前权威仓库清单是 `repositories.yaml`。
+
+**审计日期：** 2026-09-07。**首轮目标：** `DoHorizon-AI/Cyrene-Plugins-Official`，`develop@0b13720e76184dc122e91726a0168ac12fc7030d`。**扩展范围：** Workspace `repositories.yaml` 中 10 个成员仓库，加 Workspace 自身，共 11 个。**报告状态：** 只读源码审计；未修改被审计仓库代码，不构成能力发布、真实硬件验收或生产验收。
+
+## 摘要
+
+Plugins 的 `develop` 树已无未登记的根级 `archive/`、`legacy/` 目录、旧 manifest authority 或跟踪构建/缓存产物。但在完整 Cyrene 拓扑内，仍有活动的旧别名、模拟成功实现、错置的 Product authority、明确可运行的兼容 runtime、仅 mock 的 Product 壳、对已删路径的过期引用以及仓库治理漂移。Azure Hosted CI 为多数当前 head 建立了首轮集成基线，但不会让 skipped、simulated、凭据阻塞、真实 GPU 或未排队 exact-head 工作变成通过。第 1–12 节记录 Plugins 审计；第 13 节以后扩展到跨仓清单及下一阶段清理门。
+
+## 1. Plugins 结论
+
+当前 `develop` 已清除表面遗留物：没有跟踪中的根级 `archive/`、`legacy/`、`plugin.legacy.toml`、`LEGACY_PLUGIN.md`、cache、build artifact 或空文件。主要问题有四类：
+
+1. **能力状态失真：** 7 个 `COMPATIBILITY_SHIM` 无法经 manifest 声明入口独立加载，但 Catalog Set 将其中 6 个标为 `RESOLVED`。
+2. **原型被写成已交付：** TensorRT 缺库自动进入 mock；Seedance 默认返回样例视频且 wheel 为空；Dataset Validator 宣称支持 CSV 却会拒绝；ASP.NET Gateway 只有 health 与统一 `503` 骨架。
+3. **边界债务仍大：** 11 组已登记兼容路径共 559 个源码文件、169,552 行；Spring Gateway 仍是包含租户、计费、训练、部署语义的 Product snapshot。
+4. **验证口径不完整：** 默认 `pytest` 只运行 `conformance/tests`；主 CI 未覆盖 Spring、.NET、Agent、Skills、新增插件或 Ruff；Evidence Validator 只查证据字符串，不核验测试是否存在或通过。
+
+所以“无老代码”只表示已删除旧 manifest/archive 外壳，不代表兼容实现迁完、22 个插件都能装载，或全仓测试通过。
+
+## 2. 审计范围与方法
+
+审查当前提交的全部 1,029 个跟踪文件，包括 292 个 Python、337 个 C#、88 个 Kotlin、2 个 Java、208 个 Markdown，以及 manifest、catalog、lifecycle、CI、构建和治理文件。方法包括实时回读 `develop`/`main`、可见性/默认分支/Actions/Azure Pipeline；比对 22 个 `plugin.manifest.json` 与 Catalog/Lifecycle/Boundary Registry；检查 Python 入口、符号、独立包、测试收集、Ruff 和格式；检查 C#、Spring/Gradle、Wrapper、测试及编译告警；扫描 TODO/未实现/弃用/静默异常/mock fallback/兼容树/重复文件；再与 Workspace 交付报告交叉核对。
+
+抽象基类 `NotImplementedError`、测试 mock、生成代码和已登记兼容树不按关键字直接判为缺陷，而是分别分类。
+
+## 3. 先处理的高优先级问题
+
+### P0-1：七个 Shim 的 manifest 入口不可独立加载
+
+| Plugin | 声明入口 | 发现 |
+| --- | --- | --- |
+| `cyrene.agents.agent-system` | `astrbot.core.agent.runner:AgentRunner` | `runner` 模块不存在；测试又因缺 `astrbot.core.provider` 而无法收集 |
+| `cyrene.agents.skills-runtime` | `astrbot.core.skills:SkillManager` | `skill_manager.py` 导入未打包的 `astrbot.core.utils`；3 个测试文件收集失败 |
+| `cyrene.connectors.im` | `im_connector:ImConnector` | 模块不存在；Registry 记为 `NONE_TRACKED` |
+| `cyrene.gateway.python` | `main:app` | `main.py` 不存在，实际只有 `python_gateway_lite.py` 和兼容 worker |
+| `cyrene.policy.content-safety` | `content_policy:ContentPolicyEvaluator` | 模块不存在，无跟踪测试 |
+| `cyrene.policy.model-routing` | `model_api_router:ModelApiRouter` | 模块不存在，无跟踪测试 |
+| `cyrene.tools.mcp` | `mcp_provider:McpToolProvider` | 模块不存在，无跟踪测试 |
+
+原因之一是 [`validator.py`](../../Cyrene-Plugins-Official/conformance/harness/validator.py) 只解析 `GENERIC` 的入口；`COMPATIBILITY_SHIM` 只检查声明字段、能力和 removal gate，因此不可加载入口仍能通过 Conformance。
+
+### P0-2：Catalog Set 的 `RESOLVED` 与可运行性不符
+
+`agent-tools.set.json` 把 `skill.runtime.v1`、`tool.provider.v1`、`message.connector.v1` 标为 `RESOLVED`，候选实现恰为不可加载的 Skills、MCP、IM。`gateway.set.json` 也把 `gateway.runtime.v1`、`model.routing.v1`、`policy.evaluator.v1` 标为 `RESOLVED`，但 Python gateway 缺 `main:app`，ASP.NET 只返回 `503`，另两个入口不存在。入口可加载、方法可调用且对应 TCK 通过前，状态应降为 `DECLARED`、`INCUBATING` 或明确的 compatibility-only。
+
+### P0-3：自定义脚本插件绕过 Kernel 进程监管
+
+`repository-policy.yaml` 规定 Plugins 不拥有 Generic Kernel process supervision；但 `custom_script_runner.py` 自行管理 job/process/thread，直接 `subprocess.Popen`、轮询、kill/terminate，并从父进程复制整个环境再叠加调用方环境。它没有容器、cgroup、权限、文件系统、网络或环境隔离，旧 Workspace 报告却称其有沙箱。应改为经 Platform/CES 受管执行契约发起任务；完成前只称本地开发 runner。
+
+### P0-4：模拟路径把未执行能力记为成功
+
+| 位置 | 行为 | 后果 |
+| --- | --- | --- |
+| TensorRT `tensorrt_llm_engine.py:46-70,100-111` | 缺 `tensorrt_llm` 自动 mock；模型目录不存在也返回 `LOADED_MOCK`；测试同时接受 `LOADED`/`LOADED_MOCK` | CPU CI 不能证明 TensorRT、GPU、KV Cache、量化或推理 |
+| Seedance `seedance_video_gen.py:79-117`、`_adapter.py:143-167` | 默认 `mock=True`，无配置则返回公共样例 URL | 调用方不检查 mock 时会把样例当生成结果 |
+| Docker Builder `docker_uv_builder.py:137-153,202-215` | 缺 Docker 时自动返回模拟 build/publish 计划 | 虽有 `is_simulated` 字段，上层仍可能误判镜像已构建 |
+
+生产入口应显式选择 mock；真实能力缺失时 fail closed。CI 将模拟测试与真实硬件/服务验收分开记录。
+
+## 4. 22 个插件盘点
+
+| Plugin | 边界/证据状态 | 疑似遗留或缺口 |
+| --- | --- | --- |
+| `cyrene.agents.agent-system` | Shim / `INCUBATING` | 入口不存在、测试收集失败；大量 AstrBot API、TODO、弃用方法及进程/工具循环 |
+| `cyrene.agents.skills-runtime` | Shim / `DECLARED` | wheel 缺运行所需 `astrbot.core.utils`，测试收集失败 |
+| `cyrene.connectors.im` | Shim / `DECLARED` | 入口/测试缺失；保留 AstrBot Python/.NET adapter 快照 |
+| `cyrene.connectors.onebot-v11` | Generic / `CI_VERIFIED` | 核心测试可运行；主要噪声为生成 protobuf |
+| `cyrene.engines.tensorrt-llm` | Generic / `DECLARED` | 缺库自动 mock、未声明 TensorRT 依赖，测试只证明 mock lifecycle |
+| `cyrene.environment.docker-uv-builder` | Generic / `DECLARED` | 缺 Docker 自动模拟；真实 daemon/image/push 不在主 CI |
+| `cyrene.gateway.aspnetcore` | skeleton / `DECLARED` | 只有 health 与 catch-all `503`；manifest 宣称 start/forward；`.NET >=8` 与 `net10.0` 冲突 |
+| `cyrene.gateway.prompt-cache` | Generic / `DECLARED` | 名称称 Semantic Cache，实际只是 prompt/model/参数的 SHA-256 精确缓存；无相似检索、测试或独立构建元数据 |
+| `cyrene.gateway.python` | Shim / `DECLARED` | `main:app` 缺失，留下 legacy filter 和兼容 worker |
+| `cyrene.gateway.spring` | Product snapshot / `DECLARED` | 有 relocation debt，含租户/计费/训练/部署/worker 语义；4 个业务 TODO、空断言测试和构建约束冲突 |
+| `cyrene.models.hf-analyzer` | Generic / `CI_VERIFIED` | 未发现实质入口遗留；宽异常捕获可后续收窄 |
+| `cyrene.policy.circuit-breaker` | Generic / `DECLARED` | 仅内存三态机，无健康探测/真实 failover、测试或独立构建元数据 |
+| `cyrene.policy.compat-rules` | Generic / `CI_VERIFIED` | 本轮未发现实质老代码 |
+| `cyrene.policy.content-safety` | Shim / `DECLARED` | 入口/测试缺失，保留 moderation/rate-limit 快照 |
+| `cyrene.policy.model-routing` | Shim / `DECLARED` | 入口/测试缺失，保留 ProviderManager/.NET router 快照 |
+| `cyrene.providers.model-api-connector` | Generic + compat / `CI_VERIFIED` | Generic core 可测试，另有 29 个兼容源码文件；`embeddings.py` 的三个 `NotImplementedError` 是子类 hook，不算清理缺陷 |
+| `cyrene.tools.dataset-validator` | Generic / `DECLARED` | manifest 声明 JSONL/JSON/CSV，实际只支持前两者；CSV 报 `Unsupported format`，无测试/构建元数据 |
+| `cyrene.tools.mcp` | Shim / `DECLARED` | 入口/测试缺失；只有 3 个 AstrBot MCP 兼容文件 |
+| `cyrene.tools.media` | Generic + compat / `CI_VERIFIED` | Generic core 和 Platform TCK 可跑；仍有 9 个兼容文件及重复 Shiki/template 资产 |
+| `cyrene.tools.seedance-video-gen` | Generic + sample SDK / `DECLARED` | 默认 mock、无测试；wheel 没有代码 payload；保留未建模 legacy task alias |
+| `cyrene.training.custom-script` | Generic / `DECLARED` | 自管进程且无隔离；静默吞异常；只有 happy-path subprocess 测试 |
+| `cyrene.training.distributed-deepspeed` | Generic / `DECLARED` | 只生成配置/显存启发式/`torchrun` 命令，不调用 DeepSpeed、torchrun 或 GPU，依赖为空，orchestrator 描述过强 |
+
+## 5. 已登记兼容代码清单
+
+这些是公开登记的技术债，不应算暗藏老代码；但删除 archive 不等于迁移完成。按 `.py/.cs/.kt/.java/.js/.ts/.rs/.go` 统计：Agent System 177 文件/42,932 行；Skills 3/1,301；IM 42/10,288；ASP.NET Gateway 227/80,843；Python Gateway 41/18,459；Content Safety 23/2,706；Model Routing 4/2,674；Model API Connector 29/5,599；MCP 3/1,138；Media 9/3,458；Seedance Java SDK 1/154。合计 11 组路径、559 文件、169,552 行。
+
+四个 migration marker 仍为 `pending` 或 `compatibility-snapshot`：ASP.NET gateway、Spring gateway、Model Routing 和 Model API Connector 各自的 `docs/CYRENE_MIGRATION_MARKER.md`。Agent System、Skills、IM 兼容代码在 `src/...` 而非 `compatibility/` 目录，需由 Boundary Registry 识别。
+
+## 6. 源码级问题
+
+### 6.1 未实现/TODO/占位/弃用
+
+问题位置包括：Agent System 的 `core/agent/tool.py`（多处抽象未实现/弃用 API）、`computer/booters/local.py`（平台操作未实现）、`message/components.py`（5 组 TODO/旧字段）、pipeline 策略/预处理/stage hook；.NET `IAiClient.cs` 的 rerank/TTS/STT 默认抛 `NotSupportedException`；IM Python platform 多个方法未实现，Wecom webhook 图片处理是 placeholder；Spring AlertService severity 固定 `WARNING`、BillingController pricing count 固定 0、`usageByDay` 恒为空、QuotaService 未用 actualTokens 修正预估扣费、InferenceServiceTest 仅 `assertTrue(true)`；Custom Script runner 宽异常捕获并静默忽略日志 JSON/pipe reader 错误。
+
+Model API Connector 的 embeddings 子类 hook、Spring `DatabaseConfig.kt` 和部分基类 `NotImplementedError`/`UnsupportedOperationException` 属明确扩展点/框架保护，不应仅按关键字删除。
+
+### 6.2 重复/大体积兼容资产
+
+Agent System 和 Media 各自重复四份 T2I 资产：`shiki_runtime.iife.js` 每份 1,267,458 bytes、`astrbot_vitepress.html` 14,132 bytes、`base.html` 7,407 bytes、`astrbot_powershell.html` 5,122 bytes。合计可减少约 1.29 MB 重复跟踪；若需兼容，应指定唯一来源或生成规则。
+
+### 6.3 Python 质量债
+
+对 292 个 Python 文件执行 Ruff 0.16.5：`ruff check --statistics` 报 765 项，包括 `BLE001` 215、`TRY002` 74、旧 typing 133、import 顺序 61、异步函数阻塞文件 I/O 22、未用 import 21、静默 except 27、可变 class 默认值 8、未显式 check 的 subprocess 5；265 项可安全自动修复，57 项仅 unsafe-fix；24 个文件需格式化。仓库没有统一 Ruff 配置，主 CI 无 Ruff/format job。很多告警来自已登记 AstrBot 快照和 protobuf 生成物；建议先强制 `GENERIC implementationPaths`，再为生成/兼容目录设置有理由和截止日期的排除。
+
+## 7. 构建与打包问题
+
+1. Seedance `uv build --wheel` 成功但 wheel 无代码 payload：代码是顶层 `.py` 模块，却未声明 `py-modules`。
+2. 9 个以 manifest 为根的 Python 项目构建 wheel 后，wheel 均不含 `plugin.manifest.json`；若安装器不注入 manifest，独立包会失去 metadata authority。
+3. 22 个插件中 11 个根目录无独立构建元数据；需决定是源码型插件还是缺 package contract。
+4. ASP.NET manifest/catalog 说 `.NET >=8.0`，项目却 target `net10.0`；代码只有 health/统一 `503`，无所称 YARP forwarding。
+5. Spring manifest 说 Java `>=17`、README 说 JDK 21、Gradle 强制 Java/JVM 25；`gradlew` 为 `100644` 且缺 `gradle-wrapper.jar`，两种启动方式都不能构建。
+6. Repository Policy 声称自动发布且以 GitHub Releases 为权威，但无 release/package workflow 或 tag。
+
+独立验证中，ASP.NET 主项目和 Agent compat C# 项目以 Release + warnings-as-errors 通过；Spring 用缓存 Gradle 9.5 通过 109 tests、0 failures、0 errors、2 skipped，但仍有 deprecated API、unchecked cast、恒真/恒假条件和 Gradle 10 不兼容告警。测试通过不消除分发/能力边界问题。
+
+## 8. Catalog/Lifecycle/治理文档漂移
+
+### 8.1 数量与时间
+
+Canonical manifest、Catalog、Boundary Registry 都有 22 项；`plugins-lifecycle.yaml` 只有 15 项，缺 TensorRT、Prompt Cache、Circuit Breaker、Dataset Validator、Seedance、Custom Script、DeepSpeed 七项。Lifecycle `updated_at` 为 2026-08-27，Catalog `updatedAt` 为 2026-08-30，部分条目却到 2026-09-07 才加入。Boundary inventory 仍称 14 manifests，并列出当前不存在的四个 `plugins/data/*` manifest，active inventory 也只有 14 项。
+
+### 8.2 Repository Policy 与远端不符
+
+Policy 写 visibility `public`，远端实际 `PRIVATE`；写默认分支 `develop`，GitHub default 实际 `main`（develop 是集成分支）；Policy 写 CI authority 为 GitHub，但因付款/额度问题 4 个 job 在 0 steps 结束，而同 SHA Azure build 425 成功；Policy 漏掉实际参与验证的两个 `.csproj`；还写自动 release 为 true，但无 workflow/tag。GitHub 失败是环境阻塞，不是源码失败；Azure 425 也只是有限矩阵。
+
+### 8.3 Evidence Validator 结论过强
+
+`validate_evidence.py` 对 `CI_VERIFIED` 只检查证据字符串非空且含 `::` 或 `test`，不确认引用存在或运行结果，却宣称所有证据已严格验证。22 项中实际只有 5 个 `CI_VERIFIED`、16 个 `DECLARED`、1 个 `INCUBATING`。应诚实称为 metadata-reference validation，或接入不可变 CI ledger。
+
+### 8.4 Backlog 过期路径
+
+贡献 backlog、issue 文件、Astrbot extraction readiness、Plugin contract readiness、third-party inventory 仍引用不存在的 `plugins/data/memory`、旧 `spring-gateway` 或“等待 Platform Plugin Contract 定稿”。逐项标明仍有效、被替代、路径已移除或已完成，避免贡献者向不存在目录提交。
+
+## 9. 测试与 CI 覆盖
+
+默认 `uv run --frozen python -m pytest -q` 为 43 passed、7 skipped，只覆盖 `conformance/tests`，skip 与 Platform resolver/worker gate 有关；对 Platform `develop@a402b7b8` 的 Conformance 为 50 passed；TensorRT/Docker/Custom Script/DeepSpeed 共 9 passed，只证明 mock、计划和本地 happy path；Model Provider 109 passed（live API 仍需凭据）；Connector lifecycle 4 passed；OneBot 21 passed；Python Gateway compatibility worker 85 passed，但不证明 `main:app`；Agent System 因缺 `astrbot.core.provider` collection error；Skills Runtime 因缺 `astrbot.core.utils` 有 3 个 collection error；Spring 109 passed、2 skipped（完整 Spring context 集成测试禁用）；两个 .NET 项目 0 warnings、0 errors，但只编译各自 `.csproj` 明确包含的源集。
+
+README/CONTRIBUTING 建议执行 `python -m pytest`，但根 `pyproject.toml` 只收集 `conformance/tests`。主 GitHub/Azure CI 仅覆盖 Conformance、两个 evaluator、Provider、Connector lifecycle、OneBot；未覆盖 Ruff、format、Spring、.NET、Agent、Skills、Gateway worker、TensorRT、Docker、Prompt Cache、Circuit Breaker、Dataset Validator、Seedance、Custom Script、DeepSpeed。`cross-repo.yml` 固定 Platform `2924c64b`，当前 develop 已为 `a402b7b8`；固定 accepted SHA 可作可复现基线，但仍需另测当前受支持分支。
+
+## 10. Workspace 旧结论需同步修正
+
+`cyrene-architecture-refactor-report.md` 对 Plugins 的现状有多处过度表述：把 3 个插件说成 100% Conformance/单测验证（但 TensorRT 只走 mock、DeepSpeed 未真实训练、Custom Script 无 sandbox）；称 Inflight Batching/KV Cache/FP4/FP8/INT4 已交付（实际只是传参）；称 Custom Script 在 sandbox（实际继承父环境 Popen）；把三个 Gateway 说成生产实现（ASP.NET 骨架、Python 入口缺失、Spring Product snapshot）；称 Prompt Cache 为语义缓存（实际是 hash 精确匹配）；以及把 manifest/schema 通过说成 40+5 全 PASS。Workspace `docs/README.md` 和 `docs/COMPATIBILITY.md` 还称规范是 `plugin.toml` V1，而当前 authority 是 `plugin.manifest.json`。
+
+## 11. 建议处置顺序
+
+1. 先校准状态真值：不可加载 Shim 与 Catalog `RESOLVED` 对齐；Lifecycle 补 22 项；Evidence Validator 改诚实表述。
+2. 关闭假成功：真实模式缺依赖时 fail closed；mock 仅显式开发配置，并在返回值/ledger 标示。
+3. 恢复边界：Custom Script 使用 Platform/CES；Spring Product snapshot 明确迁出 owner、目标仓和 removal gate。
+4. 修入口和独立打包：七个 Shim 决定补 adapter 入口或取消可安装声明；修 Seedance 空 wheel 并明确 manifest 打包机制。
+5. 建分层 CI：Generic、Compatibility、当前/固定基线跨仓 gate、Spring/.NET、真实 GPU/服务验收独立记账；skipped/mock 不能算 PASS。
+6. 最后处理风格/重复资产：先整理 Generic Ruff/format，再缩减兼容快照和合并重复 T2I，避免格式化掩盖语义变更。
+
+## 12. 明确未发现的遗留物
+
+未发现跟踪根级 `archive/`/`legacy/`、旧 manifest、构建/cache/log/temp/bak 产物、空文件或除四组已列 T2I 资产外的完全相同源码 blob；审计前 Plugins/Workspace 工作树干净。这些阴性结论只适用于 `develop@0b13720e` 的跟踪内容，不覆盖 ignored 本地文件、远端历史分支和未合并 PR。
+
+## 13. 扩展审计结论
+
+项目可进入“闭环后的清理阶段”，但不宜把现状直接冻结为下一阶段干净起点。主要风险不是是否还存在 `legacy/` 文件夹，而是六类仍可达或被治理文件当作当前事实的实现：DH/Plugins 的未实现成功返回；Exchange 仍运行训练服务、Reactor 仍运行 Hybrid/TensorRT；Astrbot-Rev 仍可构建约 5.1 万行的 Python compatibility image；Navigator Windows 壳只接 mock；多个文档/数据库表仍引用已删目录；以及 visibility/default branch/build systems/baseline/CI authority 持续漂移。
+
+抽象 hook、测试 double、生成 protobuf、Python namespace 空 `__init__.py`、固定依赖 SHA、来源与同步策略明确的 vendored code 不直接算老代码；仅在与可达性、声明或 owner 冲突时纳入台账。
+
+## 14. 全仓审计快照
+
+以 `repositories.yaml` 的 integration branch 为入口并实时回读。Astrbot-Rev/DH 的本地 checkout 不在规范分支，因此用干净 exact checkout 审计 develop/main，未写入文件。
+
+| Repository | 审计基线 | 跟踪文件 | 源码文件/行数 | Hosted CI |
+| --- | --- | ---: | ---: | --- |
+| Workspace | `main@2e53b7fc` | 135 | 16 / 4,216 | Azure 431 成功 |
+| Platform | `develop@a402b7b8` | 866 | 298 / 99,763 | 合并前等价源码 `cd454002` 的 Azure 401 成功；合并 SHA 无 exact-head run |
+| Plugins | `develop@0b13720e` | 1,029 | 721 / 207,180 | Azure 425 成功 |
+| Astrbot-Rev | `develop@8787db7a` | 1,760 | 793 / 243,948 | GitHub Actions 33997906381 成功 |
+| DH-System-Internal | 拓扑指定 `main@e10f998f` | 178 | 83 / 19,124 | 无 Azure Pipeline definition/run |
+| Reactor | `develop@3b8d4e92` | 277 | 142 / 30,372 | Azure 427 成功 |
+| Yield | `develop@c71057f6` | 709 | 392 / 76,569 | Azure 388 成功 |
+| Exchange | `develop@3379bb4e` | 137 | 60 / 13,433 | Azure 428 成功 |
+| Catalyst | `develop@cf568ae9` | 43 | 14 / 3,505 | Azure 432 成功 |
+| Echo | `develop@8f51170e` | 41 | 13 / 3,993 | Azure 426 成功 |
+| Navigator | `develop@41a42e86` | 198 | 80 / 24,982 | Azure 433 成功 |
+| **合计** | **11 仓** | **5,373** | **2,612 / 727,085** | 口径限制见第 25 节 |
+
+DH 还有远端默认分支 `develop@ad52b2d7`。因 Workspace 仍指定 main，本报告按 main 作为规范基线，同时额外审查 develop，以免把开发分支已修问题误说成当前事实。`Reference-code/` 不属 canonical topology，未纳入。
+
+## 15. 跨仓清理优先级台账
+
+| ID | 优先级 | 路径 | 判断与处置 |
+| --- | --- | --- | --- |
+| X-01 | P0 | DH main/develop | Workspace 指 main，远端 HEAD/Policy 指 develop，两者差 110 文件、+8,577/-389 行；先统一 integration authority，再更新 Workspace/Policy/CI/baseline，所有清理只在选定分支做。 |
+| X-02 | P0 | DH OpenAI/Azure provider | health 可只凭配置报好；Chat 返回正常“未实现”，Embed 返回空向量，Azure 四个 capability service 为 null。未实现能力 fail closed；health 要真实探测。 |
+| X-03 | P0 | Exchange coordinator | 活动 gRPC 注册训练/custom-script 队列、worker 选择和取消，与 Exchange gateway owner 冲突；迁出训练 authority。 |
+| X-04 | P0 | Reactor Hybrid | Core/Pro 活动注册并吞所有异常后切 backend；移除默认注册或采用明确类型 placement policy，禁止宽异常 fallback。 |
+| X-05 | P0 | Plugins | 七个不可加载 Shim 被写成 RESOLVED，Custom Script 越过 Kernel；先修状态/进程边界。 |
+| X-06 | P1 | Reactor/Plugins TensorRT | Reactor 内置并注册 400+ 行 engine，Plugins 也有实现；确定唯一 owner，Reactor 留 lifecycle/selection，engine 由 plugin contract 提供。 |
+| X-07 | P1 | Reactor Pro/sidecar | LoRA 操作用 sleep 假成功；token count placeholder；telemetry 为 0、不发 coordinator/不应用反馈。从 production profile 隔离 simulated，真实 backend 通过后再提升。 |
+| X-08 | P1 | Astrbot Python compatibility | 239 文件/约 50,701 行仍构建镜像；明确 profile、调用量、截止版与删除门，不与 .NET 双向演进。 |
+| X-09 | P1 | Navigator Windows mock | 5 个 mock 文件/1,568 行由 MainWindow 直接实例化；隔离 prototype build/release profile，接真实 API 前不得称 Product。 |
+| X-10 | P1 | Workspace databases.yaml | 四处指向删除的 Navigator legacy-dh compose；改指实际 owner manifest 或删旧权威。 |
+| X-11 | P1 | 多个 Product 文档 | Exchange/Catalyst/Echo/Navigator 仍说 legacy 目录存在并标 COMPATIBILITY_SHIM；随代码迁移修文档，历史内容进入带日期的非权威 ledger。 |
+| X-12 | P1 | GitHub Repository Policy | 九仓写 public/develop default，实际全 PRIVATE/main；修远端或 Policy，字段要可自动验证。 |
+| X-13 | P1 | accepted-baseline.yaml | 11 项中 10 项落后当前规范分支；当前基线更新，或把它版本化为历史快照并增加 current pointer。 |
+| X-14 | P1 | Platform compatibility | 16 文件/2,225 行；两个 K8s renderer 仅差空行，且一份与 Astrbot 一致；建立唯一生成器 authority。 |
+| X-15 | P1 | Platform JVM integration | 全链路测试永久 ignore，缺依赖时提前返回；单列环境 gate 并记 NOT_RUN。 |
+| X-16 | P2 | Yield vendored LLaMA Factory | 586 文件/约 64,211 行，含非训练上游源码和空模块；建 upstream/patch/保留清单，决定 fork 或 Official plugin。 |
+| X-17 | P2 | build metadata | 多仓漏报 build systems，Astrbot 漏 .NET，Exchange 多报不存在 Cargo；从真实 build entry 生成并验证。 |
+
+## 16. 系统性治理漂移
+
+### 16.1 Visibility 与默认分支
+
+实时 `gh repo view` 显示 Platform、Plugins、Astrbot-Rev、Reactor、Yield、Exchange、Catalyst、Echo、Navigator 全为 PRIVATE，默认分支全为 main；九份 Policy 却声明 public/develop。Workspace `repositories.yaml` 除 Plugins 外还把八仓标 public，可能导致 clone/public dependency/PR base 规则错误。`integration_branch: develop` 可保留，但不能说成 remote default。DH 则相反：远端和 Policy 为 develop，Workspace 指 main，导致脚本、IDE、CI、PR 可能指向不同树。
+
+### 16.2 build systems/交付物
+
+Catalyst/Echo 有可构建 wheel 的 pyproject，但 Policy/Workspace 报空；Navigator Policy 漏 Python 和 Windows `.csproj`，Workspace 整项为空；Astrbot .NET composition root 未列入 build systems；Exchange Policy 多报 Cargo（无 `Cargo.toml`）；多份 Policy 把单一 GitHub/Azure 写为唯一 CI authority，而首次闭环主要依赖 Azure，GitHub 同 SHA 未启动。
+
+### 16.3 Accepted baseline 语义
+
+`accepted-baseline.yaml` 时间为 2026-08-30；实时比较中除 DH main 外，其余记录 SHA 均落后。不可变历史 baseline 合理，但当前文件名和 description 没说它是历史快照。闭环后要区分“历史可复现 baseline”和“当前接受基线”。
+
+## 17. Platform 详查
+
+`infrastructure/**/compatibility` 仍有 16 文件/2,225 行 Astrbot/NapCat K8s、NGINX 和 Docker template，需要 owner/consumer/removal gate/generation rule。三份 renderer（677 行、676 行，仅差末尾空行、以及与后一份 SHA 相同的 Astrbot 副本）形成重复权威，应保留一个工具并让消费者固定版本或使用生成结果。
+
+`cy-local-transport/src/lib.rs:153` 仍导出无字段实现的 `UnixSocketTransport`、`WindowsNamedPipeTransport`；非公开兼容类型应删，必须保 ABI 则标弃用/removal version。JVM wire lifecycle 测试长期 `#[ignore]`，缺 Java/JAR 时也成功退出，sandboxd 接线仍 TODO，只打印 skeleton；ledger 应保持 `NOT_RUN`。两份 2026-08-20 检查报告和 ADR legacy cutover 应标为 dated/superseded，避免与当前规范混淆。
+
+## 18. Astrbot-Rev 详查
+
+### 18.1 Python runtime
+
+精确 `develop@8787db7a` 的 MIGRATION_STATUS 说 .NET Host 为 canonical，根 `main.py`/`astrbot/` 为 compatibility-only；仍跟踪 239 个 runtime 文件、约 50,701 行，Dockerfile 继续构建/启动 `python-compat`。它是显式 build target，不能直接当死代码删。下一阶段前要确认使用者、尚未迁出的第三方 plugin 和允许删除版本；否则 Python/.NET 双向漂移。
+
+### 18.2 行为未收口
+
+根 Python 有 plugin-extracted/message TODO、`zip_updator`/cron/filter 的 `NotImplementedError` 和静默 `pass`。默认 production image 不复制它，因此优先先决策是否移除；若继续发布 `python-compat`，它就是真实支持面，要独立测试，不能只依靠 .NET CI。
+
+### 18.3 重复/旧标记
+
+存在与 Platform 完全相同的 renderer；Shiki runtime 在 Astrbot 与两个 Plugins 副本间重复约 3.80 MB；Dockerfile 写本机 `C:\Users\Baiji\DHDev\Cyrene\plugins\cy-plugin-docker` 路径和 `compatibility-retained`；sandbox 文档为 0 bytes 却由 README 链出；Policy 漏 production .NET 并误报 public/develop-default。
+
+## 19. DH-System-Internal 详查
+
+### 19.1 Branch authority
+
+Workspace 指定的 `main@e10f998f` 只有最早两个 .NET foundation commit，没有 Policy、README、service manifest 或 pipeline YAML；远端默认 `develop@ad52b2d7` 已新增 Policy、产品文档、MCP/Azure DevOps、RunPod REST client 和测试，但未合并回 main。按 main 清理会重复修复 develop 已改代码；按 develop 又不符合 Workspace topology。X-01 是所有清理前置项。
+
+### 19.2 可能假成功的 provider
+
+默认 `OpenAiCompatibleModelProvider` 不探网就回 `HealthResult(true, "configured")`；Chat 正常终止地说未实现；Embed 返回空向量；ListModels 宣称默认模型可用。虽只有 OpenRouter 子类继承并覆盖主要调用，这些 public virtual 默认仍危险，应设为 abstract 或抛明确 `NotSupportedException`。Azure provider 声明 Compute/Storage/Identity，但四个 service property 为 null；仅字段非空就报健康。应标 declared/not-ready，或真实执行 Azure probe。
+
+### 19.3 其他缺口
+
+多个 WeCom client 未设 tenant endpoint 时 fail closed 抛 `NotSupportedException`，但 UI/API/Catalog 只能公布实际可用 action；Plan 把 webhook/action stub 记成完成，真库与真企业微信 E2E 未跑，应分开“骨架完成/能力完成”；Policy 说 `ci: azure_devops`，实际无 pipeline definition/YAML，DH 不能算所有 canonical current SHA 均通过 CI。
+
+## 20. Reactor 详查
+
+### 20.1 Hybrid 仍活动
+
+Core `engine_factory.py` 仍注册 `nvidia`、`cuda`、`ascend`、`npu` 旧别名及 `hybrid`，Pro selector 也注册 Hybrid。`hybrid_engine.py` 顺序尝试 NVIDIA/Ascend，捕获任何 Exception 再换 backend，会把模型损坏、参数、权限和硬件不兼容都吞掉。应从默认 registry 移除，或只对明确的 backend-unavailable 做审计过的策略切换。
+
+### 20.2 Engine owner
+
+README 将 TensorRT-LLM 叫 canonical runtime；Core 和 Pro 都注册 `trt_engine.py`；architecture 文档却把 TensorRT/vLLM/Ascend 列为待抽取插件，Plugins 也有 TensorRT 实现。需明确单一 owner：Reactor 留 Deployment/Serving lifecycle 和选择策略，backend 实现由 capability binding 注入。
+
+### 20.3 模拟 Pro/sidecar
+
+Hot swapper 只用 sleep 模拟 LoRA load/unload/switch，却记 `loaded=True`、成功次数和耗时；UDS token count 是 placeholder；无 Rust scheduler 时 fallback 不是真正 production scheduler。Legacy gRPC sidecar 将 queue/KV/GPU telemetry 写成 0、不发送 coordinator，client 不应用新 weight/capacity。README 还指向不存在的 `Backup/` 和“Pro training package remains in enterprise bundle”。这些可作研发骨架，但 production profile/CI ledger 必须排除 simulated success。
+
+## 21. Yield 详查
+
+主训练控制将 Kernel 生产路径与 test-only `InProcessKernelPort` 分开，且有 guard 禁用旧 `AgentService/ExecuteCommandStream`；`NotImplementedError` 主要是接口 hook，没有新根级 archive/cache 或第二套 TrainingRun authority。`training/core/README.md` 固定过期 Platform `27e69c46`（当前约 `a402b7b8`）并链接不存在的 `docs/KERNEL_CANONICAL_BASE.md`，还记录 `KernelAuthority has no Configure RPC`。SHA 应移入可机器验证 ledger，README 链接有效契约。Vendored LLaMA Factory 有 586 文件、约 64,211 行 Python，来源写 `hiyouga/LLaMA-Factory`/`Icy-Lunar/LlamaFactory@f5a4a8f8`，却没有 upstream/provenance 或 patch queue；保留大量 API/eval/chat/v1 plugin 非训练代码。先建 upstream、license/NOTICE、patch、模块清单和回归矩阵；它是真实 backend，不能当死代码批删。若 Yield 继续拥有 fork，须同步修改“Yield 不拥有 engine internals”的 Policy；否则标成 Official 管理的插件依赖。
+
+## 22. Exchange 详查
+
+源码树中已无 `legacy/**`，但 README/docs 仍多处描述 former Rust/Python gateway 和 CLI 位于 legacy，属于确定的过期引用。`components/coordinator` 有 58 文件、约 4,622 行活动 Kotlin main source；gRPC 注册 inference 与 training，`CoordinatorTrainingService` 管训练队列和自定义脚本，`WorkerGrpcClient` 直接调用 worker training/script RPC。这与 Exchange gateway/routing owner、Yield TrainingRun 和 Platform 执行边界冲突，应迁出或删除训练/脚本服务，仅保留需要的 routing/worker health。Policy 还多报 Cargo；`awaitClose` 空块未显式取消 gRPC call；legacy `token_validator` 仍能创建固定 `legacy-validator`/`legacy-workspace` principal，若 production builder 可用则设 removal version，否则移入测试 adapter。
+
+## 23. Catalyst、Echo、Navigator 详查
+
+### 23.1 Catalyst
+
+无跟踪 `legacy/`，但 README/API 仍说对话语料在 `legacy/CY_LLM_Training`，实际已移出仓库，样例 README 已解释。将文档改为当前 DatasetVersion/sample 状态。Policy/Workspace 漏记可构建 `cyrene-catalyst` wheel 的 pyproject；未发现新的主源码 TODO/NotImplemented 或第二 DatasetVersion authority。
+
+### 23.2 Echo
+
+无跟踪 `legacy/`，但 README/API 仍称 Navigator feedback panel 在已删除的 `legacy/navigator-feedback/`。Policy owner 仍写 `Audio & Realtime Team`、职责是旧实时音频，与当前模型评估/反馈不符。Policy/Workspace 漏报 pyproject/wheel。真实 Exchange judge 如实记 `WIRED_NOT_RUN`，本轮不把凭据门槛当缺陷。
+
+### 23.3 Navigator
+
+无跟踪 `legacy-dh/`，但 README/API 仍声称完整 Dh codebase 在该目录；Workspace `governance/databases.yaml` 也用它作为三个数据库/Redis container authority。Windows 原型 README 明确只有 mock data、无 backend/Harness/Exchange/session persistence；但可构建 executable，MainWindow 直接绑定 mock services。需隔离到 prototype profile，或接真实 API 后再作为 release artifact。根还含 Python、3 Cargo manifest、2 C# project；Policy 只列 Cargo/NPM，Workspace 空。未发现跟踪 `.navigator/proof`、cache、DB/build artifact；ignored 本地目录不属源码结论。
+
+## 24. Workspace 内需清理的旧事实
+
+`governance/databases.yaml` 多处仍指向 Navigator 已删除的 `legacy-dh` compose；`repositories.yaml` 把 Catalyst/Echo/Navigator build system 留空；accepted baseline 尚未记录本轮闭环当前集合；`docs/PRODUCTS.md` 把 Reactor TensorRT/HuggingFace fallback 写成已交付；架构报告称 Hybrid 已弃用/TensorRT 已插件化，却与当前 registry 冲突。Workspace 16 个源码文件中未发现新的 runtime duplicate authority，问题主要是跨仓事实投影。
+
+## 25. 第一次完整闭环 CI 的准确边界
+
+Azure Hosted 成功记录：Workspace build 431（exact `main@2e53b7fc`）；Platform 401（PR head `cd454002`，tree 与 develop `a402b7b8` 相同但非 merge SHA exact-head）；Plugins 425（`develop@0b13720e`）；Reactor 427（`3b8d4e92`）；Yield 388（`c71057f6`）；Exchange 428（`3379bb4e`）；Catalyst 432（`cf568ae9`）；Echo 426（`8f51170e`）；Navigator 433（`41a42e86`），均成功。Astrbot-Rev exact `develop@8787db7a` 的 GitHub Actions 33997906381 成功；DH 无当前 pipeline definition/run。
+
+准确状态是：**核心产品闭环和多数规范分支已有 Hosted CI 基线，但尚无“11 个 canonical repository 当前 exact head 全部通过 CI”的证明。** 同一批 SHA 的 GitHub Actions 在多个仓库 1–13 秒内、0 steps 因付款/额度失败，这是环境阻塞，不是源码测试失败。
+
+这些 CI 仍未证明真实 TensorRT/LoRA/Hybrid、多 backend、Yield CUDA LLaMA Factory/checkpoint resume/v1→v2、Echo 有凭据的 Exchange judge、DH 真实企业微信/DB/cloud、Navigator Windows mock 壳真实接线，或被 ignore/skipped/mock 的路径。
+
+## 26. 下一阶段开发前建议清理门
+
+1. **Truth gate：** 统一 DH 分支权威；修九个 GitHub repo visibility/default branch、build systems 和所有过期路径/状态表。
+2. **Fail-closed gate：** 修 DH provider 与 Plugins mock 默认成功；将 Reactor simulated Pro 隔离；所有结果标明 REAL/SIMULATED/NOT_RUN。
+3. **Ownership gate：** Exchange 迁出训练/script service；Reactor/Plugins 确定唯一 engine owner；Custom Script 使用 Platform 受管执行。
+4. **Compatibility gate：** 为 Astrbot `python-compat`、Platform infrastructure 和 Plugins 11 组兼容树登记 consumer、支持终版、removal gate、调用量证据；去重 renderer/Shiki。
+5. **Acceptance gate：** 给 DH 补 pipeline；对 canonical exact head 重跑源 CI；真实 GPU、凭据、Windows UI 和 skipped 环境单独验收，不以单测/mock 代替。
+
+每批以“小范围迁移/删除 + 对应 guard + 当前 exact SHA CI”交付。不要把大规模格式化、兼容树删除和 owner 迁移放进一个 PR，否则难以证明行为未回退。
+
+## 27. 阴性结果与审计限制
+
+Platform/Reactor/Exchange/Catalyst/Echo/Navigator 规范分支无跟踪根级 legacy/archive/backup；Astrbot 旧面通过 `python-compat` target 明确暴露；Yield 大型第三方面位于已登记 vendored plugin。除已列 renderer/Shiki 外，未发现跨仓完全相同且超过 20 行的源码 blob。canonical Git tree 未跟踪 `.venv`、测试/lint cache、`__pycache__`、SQLite/WAL、log 或 `.navigator/proof`。Catalyst/Echo 主源码、Yield Product controller 未发现新空实现；主要问题分别是文档/元数据、凭据验收边界、vendored backend 治理。本轮只做静态审计、构建/CI 回读及已有测试台账复核，不执行真实 GPU、企微、外部模型 API、Windows UI 或生产部署；结论只覆盖第 14 节远端提交，不包括未合并 PR、历史分支和 ignored 本地文件。

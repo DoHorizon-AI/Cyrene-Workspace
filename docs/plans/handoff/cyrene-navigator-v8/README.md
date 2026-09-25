@@ -292,3 +292,114 @@ not an additional acceptance claim.
 
 权威验收状态请以 Workspace lifecycle plan 和 Phase 0 evidence record 为准；本 README 只是
 操作连接指南，不新增任何验收结论。
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene Navigator V8 连接交接
+
+> **历史安装包快照：** 本目录只说明当时固定的 V8 Alpha 安装包，不代表当前开发架构或依赖权威。当前 Platform–Plugins 边界以 `docs/platform-plugin-direct-boundary-remediation-2026-09-08.md` 为准；新代码不得恢复此快照中的 Platform CES 业务代理路径。
+
+本文是 Windows Alpha 安装包的操作说明，介绍已安装桌面客户端如何连接已经部署的 Cyrene 服务。最终 package handoff 会在 installer 旁附带 `release-lock.json`、`SOURCE_VERSIONS.md` 和 `WINDOWS_ACCEPTANCE.md`；这些 release 文档是安装包及依赖版本 pin 的权威来源。
+
+安装包包含 Tauri 壳、固定版本的 DeepSeek Harness/Profile、随包 Node runtime 和获准的 native tools。它**不包含或启动** Exchange、Cyrene persistence、Workspace/Identity、Reactor 或外部模型服务。
+
+```text
+Navigator 安装包
+  └─ Tauri → 固定 Harness/Profile → 动态 loopback WebView
+       ├─ Exchange URL/token → Exchange → Reactor endpoint 或外部 provider
+       └─ Persistence URL/token + Workspace/device → Cyrene persistence service
+```
+
+默认 `cyrene-navigator` profile 通过 Exchange provider 路由模型请求。桌面壳从安装后的 resource tree 解析 native host 和 `cy-manifest`；用户不需要手工选择服务器路径。
+
+## 文件与阅读顺序
+
+| 文件 | 用途 |
+| --- | --- |
+| `installers/Cyrene-Navigator-V8-x64-setup.exe` | 已验收 NSIS 安装包；保留默认的 per-user 安装目录 |
+| `SOURCE_VERSIONS.md`、`release-lock.json`、`SHA256SUMS` | 精确源码、依赖、安装包和交付校验和 |
+| [connection.example.json](connection.example.json)、[Connect-Navigator.ps1](Connect-Navigator.ps1) | 复制非敏感配置，再执行校验和启动 |
+| [BACKENDS.md](BACKENDS.md) | 服务管理员查看启动方式和版本组合 |
+| [WINDOWS_ACCEPTANCE.md](WINDOWS_ACCEPTANCE.md) | 已验收场景和已知限制 |
+
+先阅读下方连接步骤；管理员按 `BACKENDS.md` 准备独立服务。安装前按 `SOURCE_VERSIONS.md` 核对 installer；归档中携带了已验收的 NSIS 路径。
+
+## 安装与连接
+
+1. 从私有 Alpha handoff 获取精确的 V8 Windows installer 及配套 release 文档（`release-lock.json`、`SOURCE_VERSIONS.md`、`WINDOWS_ACCEPTANCE.md`）。安装包未签名，只用于私有 proof；按组织策略处理 Windows 常规安全提示。使用 Windows installer 安装，再用下方 connector 启动已安装程序。此流程不得使用 source checkout 或开发 runtime。
+
+2. 使用与本 README 一起交付的 connector。它从 `connection.json` 读取非敏感字段、验证默认安装的 executable，并在每次真实启动时通过隐藏输入询问 Exchange 和 persistence token。token 只放入子进程环境，不写入文件、命令行、proof record 或 WebView。缺少必需配置时桌面壳会 fail closed。
+
+   | 配置项 | 用途 |
+   | --- | --- |
+   | `CYRENE_EXCHANGE_URL` | Exchange provider API 基础 URL |
+   | `CYRENE_EXCHANGE_TOKEN` | Exchange 认证 secret |
+   | `CYRENE_HARNESS_MODEL` | Exchange 已注册且可路由的模型 ID |
+   | `CYRENE_PERSISTENCE_URL` | Cyrene Session persistence service 基础 URL |
+   | `CYRENE_SESSION_TOKEN` | 访问 persistence 的 secret |
+   | `CYRENE_WORKSPACE_ID` | persistence 和恢复所使用的 Workspace 范围 |
+   | `CYRENE_ACCOUNT_PROFILE_ID` | retained input 使用的稳定本地 account-profile 命名空间 |
+   | `CYRENE_DEVICE_ID`（可选） | writer fencing 使用的稳定唯一客户端 identity，默认值为 `navigator` |
+   | `CYRENE_HARNESS_CONTEXT_WINDOW`、`CYRENE_HARNESS_MAX_TOKENS`（可选） | profile 需要覆盖时设置模型请求限制 |
+
+   `CYRENE_ACCOUNT_PROFILE_ID` 和 `CYRENE_DEVICE_ID` 只标识本地/客户端命名空间，不授予 Workspace 权限；授权来自账户和服务凭据。多个客户端可能读取或接管同一个 Session 时，每台设备都应使用稳定、互不相同的 device ID。
+
+   最低连接前提：Exchange 服务管理员提供 Exchange URL、bearer token 和可路由的模型 ID；Cyrene persistence 服务管理员提供 Persistence URL、bearer token 和 Workspace ID；本机操作员提供稳定的 account-profile ID 和独立的 device ID。已安装的桌面程序本身不提供任何一个 backend。
+
+   connector 将 JSON key 映射为这些环境变量名。将 [`connection.example.json`](connection.example.json) 复制为 `connection.json`，只替换非敏感占位值后运行命令。Windows PowerShell 5.1 应使用进程级 execution policy；`Bypass` 只作用于运行脚本的子进程，不改变 User 或 LocalMachine policy：
+
+   ```powershell
+   # 从 README 和脚本所在目录运行。
+   Copy-Item .\connection.example.json .\connection.json
+   # 编辑 .\connection.json，填写服务 URL、ID、设备和模型。
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Connect-Navigator.ps1 -ConfigPath .\connection.json -ValidateOnly
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Connect-Navigator.ps1 -ConfigPath .\connection.json
+   ```
+
+   `-ValidateOnly` 检查 JSON、URL 策略、默认安装路径和 V8 executable digest，不询问 token，也不启动 Navigator。真实启动会询问两个 token，并在 `Start-Process` 返回后退出；子进程继续使用继承的 Process 级环境变量。目前没有 GUI connection editor；更改连接时需编辑非敏感 JSON 并重新启动 connector。connector 不会启动 Exchange、persistence 或其他 backend。
+
+3. 确认配置的 Exchange 和 persistence 服务可从本机访问，并确认 Workspace identity 在两边均已授权。远程服务必须使用 HTTPS 和组织信任的证书链。随包 Harness 使用系统 CA 校验，不能关闭证书验证。本地 Harness 页面使用系统分配的 `127.0.0.1` 端口，不是公开服务 endpoint。
+
+4. 若启动页面显示 `Configuration is required` 及缺失设置名称，编辑 JSON 并重新运行 connector。runtime 启动失败会显示 `Navigator could not start`。脱敏 runtime status 位于 `%LOCALAPPDATA%\Cyrene\Navigator` 下的应用数据目录，包含 state、port 和通用消息，不包含 ready URL 或凭据。
+
+5. Harness 页面 ready 后，发送一条普通文本消息，确认所选模型可通过 Exchange 使用。聊天成功不代表 Reactor 部署通过；Exchange 可能把请求路由到 Reactor endpoint，也可能路由到单独配置的外部 provider。
+
+## Exchange 与可替换模型端点
+
+默认 Navigator 路径中的模型认证、路由、协议适配、usage 和请求审计由 Exchange 负责。Navigator 只需 Exchange URL、token 和模型 ID。Reactor 仍是 Cyrene 管理的服务路径；也可以在 Exchange 后接入兼容 OpenAI 的外部 endpoint，而不改变 Navigator Session persistence。
+
+上游 Harness provider settings 也允许用户 profile 添加直接外部 provider。这是一条独立路由，不属于采用证明的 Exchange 路径；不得假定直接 Provider 请求具有 Exchange usage/audit 行为。相关凭据应保存在该 provider 自己支持的账户存储中；connector 只处理前述两个 Cyrene 服务 token。
+
+## 导入与 Session 恢复
+
+当前桌面导入入口为 **File → Import Codex Session**：
+
+1. 选择 Codex JSONL archive，检查只读预览和 conversion report。
+2. 选择本地绝对工作目录，必要时选择 `cyrene-navigator` agent preset。
+3. 点击 Continue 创建新的活动 Session。导入的 Tool Calls、Tool Results 和 approvals 只作为归档记录，绝不会执行。
+
+恢复已有 Session 时，打开 **Recover Session**、刷新授权列表、选择 Session 并检查只读 ownership 状态。若设备可在不接管 ownership 的情况下继续，使用 **Continue here**。只有在检查 observed epoch 后，才由用户明确选择 **Take over writing here**。旧 writer 会被 fencing 并收到 conflict，不会自动 takeover。若 runtime 失去 ownership 后仍保留陈旧的本地 Session，应先关闭并重新打开 Navigator，再执行接管。
+
+恢复要求记录的工作目录在当前设备存在。若目录不存在，请使用 Import，或在 Continue 时选择本机 workspace；不会在 Windows 上静默复用 Linux 路径。
+
+## 常见故障
+
+| 现象 | 处理方法 |
+| --- | --- |
+| `Configuration is required` / `configuration_required` | 修改非敏感 JSON 后重新运行 `Connect-Navigator.ps1`；没有本地默认 backend |
+| Exchange 或 persistence 返回 HTTP 401/403 | 检查对应 token、Workspace 授权和 trusted origin policy；不要另建 Session 以绕过拒绝 |
+| TLS 或证书错误 | 使用正确 HTTPS service URL，并通过常规 OS 管理方式安装组织批准的 CA；不要禁用系统 CA 验证 |
+| Exchange 超时或网络断开 | 检查 Session 和服务状态。客户端可能保留尚未确认的本地副本；只有 durable receipt 才能确认交付。Restore/Retry/Send 都须显式操作，不会自动重发模型请求 |
+| ownership 改变 / `SESSION_ALREADY_LOCAL` | 刷新并重新查看状态；若本地仍有 stale runtime，先关闭并重开，再显式 takeover |
+| 记录的 workspace 不可用 | 通过 Import 或 Continue 选择本机可用目录 |
+| Native Tool 或 runtime 失败 | 保持安装资源树完整；资源缺失时重装精确 package。不要将 native path 指向开发 checkout |
+| Runtime 停止或失败 | 按可见的通用提示关闭并重新打开 Navigator；历史 Tool 记录不会重放 |
+
+## 当前 Alpha 限制
+
+- Exchange 和 Cyrene persistence 是分别部署的服务。安装包不提供生产 server、database、GPU scheduler 或 Workspace/SSO/RBAC onboarding 流程。
+- adoption proof 使用的 fixture service 和 loopback 地址不是受管生产部署。使用 `Connect-Navigator.ps1` 配置真实服务 URL 并输入两个服务 token；脚本不会 provision 或管理这些服务。
+- Linux NVIDIA/CUDA 训练和 Reactor serving vertical 属于独立 Platform/Yield/Reactor 工作流，不随此 Windows client 交付。
+- 当前 hosted Navigator CI 存在 billing/spending-limit 环境阻塞。本文不据此推断 CI 全绿，也不表示 Phase 0 gate 已完成。
+
+权威验收状态应查阅 Workspace lifecycle plan 和 Phase 0 evidence record。此 README 只提供操作连接说明，不新增验收结论。

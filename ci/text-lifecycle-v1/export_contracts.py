@@ -93,6 +93,8 @@ def main() -> None:
     else:
         existing = set(original["paths"])
         # Already-linked paths remain included on a repeat export.
+        # 中文:重复导出时,已关联的路径仍会保留在结果中。
+        # 中文:重复导出时,已链接的路径仍会保留。
         paths = {
             path: document
             for path, document in generated["paths"].items()
@@ -167,6 +169,8 @@ def main() -> None:
                 text = text.replace("components:\n", entry + "components:\n", 1)
         if args.product == "catalyst":
             # Add the Product provenance projection to existing preparation responses.
+            # 中文:将 Product 来源信息投影添加到现有 preparation 响应中。
+            # 中文:将 Product provenance 投影补入已有的 preparation 响应。
             parsed = yaml.safe_load(text)
             for name in ("Preparation", "DatasetVersionSummary"):
                 properties = parsed["components"]["schemas"].get(name, {}).get("properties", {})

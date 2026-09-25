@@ -92,6 +92,7 @@ def test_acceptance_driver_orchestrates_entire_loop(
     runtime = _runtime(tmp_path)
 
     # Mock snapshot download
+    # 中文:Mock 快照下载。
     def snapshot_download(**_kwargs: object) -> str:
         snapshot = tmp_path / "cache" / "huggingface" / "snapshots" / "pinned"
         snapshot.mkdir(parents=True, exist_ok=True)
@@ -268,6 +269,8 @@ def test_acceptance_driver_orchestrates_entire_loop(
     assert result["status"] == "PASS"
     assert result["lifecycleLoop"] == "TEXT_MODEL_LIFECYCLE_V1_FIRST_USABLE_LOOP"
     # A passing acceptance releases the live route, deployment, and run.
+    # 中文:验收通过时会释放正在使用的 Route、部署和运行任务。
+    # 中文:验收通过后释放活动 route、deployment 和 run。
     assert ("exchange", "POST", "/api/v1/gateway-endpoints/gep-1/actions/disable") in calls
     assert ("reactor", "POST", "/api/v1/deployments/dep-1/actions/stop") in calls
     assert ("yield", "POST", "/api/v1/training-runs/trun-1/actions/cancel") in calls

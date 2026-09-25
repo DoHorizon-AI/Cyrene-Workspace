@@ -30,7 +30,10 @@ MODEL_ARTIFACT_KIND = ArtifactKind("model")
 
 
 def weights(path: Path) -> None:
-    """One bounded safetensors member for Artifact contract tests only."""
+    """One bounded safetensors member for Artifact contract tests only.
+
+    中文:仅为 Artifact contract 测试生成一个有限大小的 safetensors 成员。
+    """
     header = json.dumps(
         {
             "layer.lora_A.weight": {
@@ -44,7 +47,10 @@ def weights(path: Path) -> None:
 
 
 class FixtureExecutor:
-    """No model training occurs in this fixture; Product and Artifact code is real."""
+    """No model training occurs in this fixture; Product and Artifact code is real.
+
+    中文:此 fixture 不会训练模型;Product 和 Artifact 代码使用真实实现。
+    """
 
     def __init__(self):
         self.launches = []
@@ -77,7 +83,10 @@ class FixtureExecutor:
 
 
 def http_bus(apps):
-    """Send actual HTTP bodies through ASGI; only the network transport is in-process."""
+    """Send actual HTTP bodies through ASGI; only the network transport is in-process.
+
+    中文:通过 ASGI 发送真实 HTTP 请求正文;只有网络传输仍在进程内执行。
+    """
 
     def handle(request):
         async def dispatch():
@@ -265,6 +274,8 @@ def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
     assert str(tmp_path) not in json.dumps(result)
 
     # The completed text events are fixtures. No inference or GPU acceptance is claimed.
+    # 中文:完成的文本事件仅为 fixture;这里不声称已完成推理或 GPU 验收。
+    # 中文:这些已完成的 text events 是测试夹具,不代表执行过推理或通过了 GPU 验收。
     nav = "http://navigator/api/v1/harness/workspaces/unit-workspace/sessions"
     auth = {"Authorization": "Bearer unit-principal"}
     handle = call(

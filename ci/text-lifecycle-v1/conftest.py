@@ -70,7 +70,10 @@ for repository, source in (
 
 
 def _serve(capability: str, module: str, attribute: str, environment: str) -> None:
-    """Start one canonical Plugin owner endpoint and publish its connection reference."""
+    """Start one canonical Plugin owner endpoint and publish its connection reference.
+
+    中文:启动一个规范的 Plugin owner endpoint,并发布其 connection reference。
+    """
 
     owner = getattr(__import__(module, fromlist=[attribute]), attribute)
     server, connection_ref = serve(owner(), capability, "1", "127.0.0.1:0")
@@ -86,6 +89,8 @@ def pytest_configure() -> None:
     packages instead of any in-repository capability implementation.  The
     LLaMA-Factory trainer is the real Plugins package; only its accelerator
     process is out of scope for this profile.
+
+    中文:每个 Product 都通过不透明 connection references 解析自己的 capability engines。因此,跨仓 fixture 必须服务真实 owner packages,不能改用仓库内部的 capability 实现。LLaMA-Factory trainer 使用真实 Plugins package;本 profile 不负责其 accelerator process。
     """
 
     for capability, module, attribute, environment in _OWNER_ENDPOINTS:
@@ -93,7 +98,10 @@ def pytest_configure() -> None:
 
 
 def pytest_unconfigure() -> None:
-    """Stop every Plugin owner endpoint after the test session."""
+    """Stop every Plugin owner endpoint after the test session.
+
+    中文:测试会话结束后,停止所有 Plugin owner endpoints。
+    """
 
     for _capability, _module, _attribute, environment in _OWNER_ENDPOINTS:
         os.environ.pop(environment, None)

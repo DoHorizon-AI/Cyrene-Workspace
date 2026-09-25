@@ -575,3 +575,336 @@ Dependencies：<task IDs that must already be READ_BACK or VERIFIED>
 
 大规模格式化、兼容树删除和 owner 迁移必须分开交付。若执行中发现新的遗留项，应新增独立任务 ID，
 补充源证据、优先级、难度、owner 和依赖，不得静默扩大已有任务范围。
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene 全仓遗留问题修复分工计划
+
+> **历史计划，已被后续计划取代（2026-09-07）**：本文对应退休前的仓库拓扑。所有任务均已按
+> `docs/platform-plugin-direct-boundary-remediation-2026-09-08.md` 关闭。`Astrbot-Rev` 与
+> `DH-System-Internal` 已退休，其代码现位于 `Cyrene-Plugins-Official/plugins/`。
+
+- **源审计**：`docs/plugins-full-repository-legacy-audit-2026-09-07.md`
+- **审计快照日期**：2026-09-07
+- **计划状态**：执行中；Platform 业务边界复查，以及对应的 Plugins、Yield、Reactor 权威迁移已关闭并完成远端回读。
+- **最近状态更新**：2026-09-08
+- **范围**：Workspace `repositories.yaml` 中的 10 个成员仓库，加上 Workspace，共 11 个仓库。
+- **完成规则**：所有 P0、P1、P2 项关闭后，才能继续下一阶段开发或建立当前 accepted baseline。
+- **Platform 纯净目标**：一次性迁出适配后，上层软件应能基于冻结的 Platform 通用契约继续开发，Platform 不再随每个产品或插件一同修改。
+
+## 1. 执行摘要
+
+本计划将源审计中的每项正向发现对应到唯一负责且可独立验证的任务。优先级决定执行次序，不表示低优先级任务可选。只有冻结权威决策后，才允许不同仓库并行；同一仓库同一时刻只能有一个写入者。Mock、skipped、仅完成测试收集、仅 Hosted CI 成功或受凭据阻塞的证据必须如实保留原状态，不能报告为生产验收通过。
+
+源审计是只读快照。执行者不得直接依赖其中的历史 SHA、PR 或 CI 状态。开始工作时，必须先读取当前远端 integration branch、default branch、HEAD、开放 PR、CI、Repository Policy 和实际构建入口，形成新的 exact-SHA 任务基线。
+
+### 1.1 当前执行台账
+
+本台账用于避免重复处理已完成或已领取的工作，领取任务前必须先阅读。源码任务状态为 `CLOSED` 时，不能仅因环境验收仍归 T24 负责而重新修改源码。状态为 `READ_BACK` 的任务只允许继续表中明确列出的验收工作；若发现新的源码缺陷，必须先登记证据。
+
+| 任务 | 仓库及精确基线 | 处置与负责范围 | 状态 | Canonical 与 CI 证据 | 剩余工作 |
+| --- | --- | --- | --- | --- | --- |
+| T03、T15 | Cyrene-Platform 基线 `8091a53176627e51c507eddae99442be8518849e`；历史关闭点 `1fa286c4071546c0d4ebb980fe24675e7f13d79e` | `REMOVE/MOVE/ISOLATE`；产品部署、兼容快照、空 transport、组件重复、边界 guard、Policy/文档/CI | `CLOSED` | [PR #38](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/38) 已合并；Azure build 440 成功；任务 head `1c9b858ce957e8d5706d21f28d6c2914a6aa3c2e` 是远端 `develop` 的祖先 | T26 已取代这个历史纯净基线候选。不得将 `1fa286c4` 当作当前基线，也不得重复执行同一源码清理。 |
+| T05、T06、T07、T10、T10A、T10B、T11、T12、T13 | Cyrene-Plugins-Official 基线 `d6117175577720a79a975961e2e7c87e26806531`；canonical `b759e32f0a497020e0f05d3eb1339ef56f81387e` | `REMOVE/SUPPORT/ISOLATE`；旧 shim/Catalog 真值、模拟结果、Custom Script、不完整插件、Spring/Python Gateway、打包、Product 副本、分层 CI | `CLOSED` | [PR #12](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/12) 已合并；Azure build 444 的八个 job 全部成功；任务 head `f6dca75145219d8c5186891fc46c78ec64518ef6` 是远端 `develop` 的祖先 | 真实 GPU、provider service 和生产 Docker 证据仍由 T24 负责。针对干净 Platform worktree 的 7 个 fixture conformance case 曾在本地通过，但在单仓 Azure lane 中是 skipped，不能计作通过。不得重复源码清理。 |
+| T14 | Astrbot-Rev 基线 `d14d60858a9c6b43b0b68a69a01ac76b69739b8b`；canonical `685978cdff6fb06150e05e7aa9f66ebb87c85f0f` | `MOVE/SUPPORT/ISOLATE`；可复用的模型/媒体/OneBot 插件端口、Product 自有 .NET 边界、陈旧兼容与分支/CI 真值 | `READ_BACK` | [PR #13](https://github.com/DoHorizon-AI/Astrbot-Rev/pull/13) 已合并；Azure build 443 成功，包含 1,073 项 .NET/PostgreSQL 测试；任务 head `e2bcfc2497d9da4af5aef6f0482d32523f3a08f0` 是远端 `develop` 的祖先 | 需要预先准备 Platform executable 和 Official plugin archive 的四套测试，在单仓 lane 中明确标为 `NOT_RUN`；跨仓执行由 T24 负责。同一边界不得再分配 Astrbot 源码 writer。 |
+| T26 | Cyrene-Platform 基线 `1fa286c4071546c0d4ebb980fe24675e7f13d79e`；当前纯净基线 `1b496733d725680dc999f925c99b20c8ecad178a` | `REMOVE/MOVE/ISOLATE`；剩余 Product run/preflight/media 权威、消费端工具/TCK、Product JVM shell、迁移隔离和回流 guard | `CLOSED` | [PR #39](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/39) 与 [PR #40](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/40) 已合并；Azure build 463、464 在精确任务 head 成功；新 target 全量 Cargo build 通过；两个任务 head 均为远端 `develop` 的祖先 | 已实现的 v0 typed SPI、registry、本地 transport、内存存储、插件分类和 AI manifest/schema 记录保留为 `MIGRATING_COMPATIBILITY`，已通过构建验证并冻结；每个具名 SPI proto 都有该标记，CI 阻止移除。真实 GPU、Kubernetes、外部 provider 和特权多账户执行仍属 T24。没有已接受的 `PLATFORM_GAP` 时，不得新增 Platform 源码任务。 |
+| T27 | Cyrene-Plugins-Official 基线 `b759e32f0a497020e0f05d3eb1339ef56f81387e`；canonical `4f730e1f13fbc64b04b533dbf7f4e90d06460604` | `MOVE/SUPPORT`；将通用 worker payload 适配为 typed media request | `CLOSED` | [PR #13](https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/pull/13) 已合并；Azure build 448 成功；任务 head `ac6931a2b4de9beacf611d2d54b85e699fd73bf9` 的 54 项跨仓测试通过，且该 head 是远端 `develop` 的祖先 | 真实外部媒体 provider 执行仍由 T24 负责。不得在 Platform 或 Product host 重建媒体转换。 |
+| T28 | Cyrene-Yield 基线 `c71057f69a8f744c02110c0942a70d69254c7fce`；canonical `0f402e0fff5d07a001d90f97c35e211ffd1875b0` | `MOVE/SUPPORT`；Product run/attempt/retry/persistence 及 Product 模型分析/兼容性预检契约 | `CLOSED` | [PR #11](https://github.com/DoHorizon-AI/Cyrene-Yield/pull/11) 已合并；Azure build 461 在任务 head `292971f6907294d59184d3a390c97974804b33aa` 成功；canonical Azure build 462 也成功 | 自托管 GPU 训练仍属 T24。不得把 Product 生命周期或模型策略请求重新放回 Platform preflight。 |
+| T29 | Cyrene-Reactor 基线 `3b8d4e922ed65b179e14176583c89edaced37636`；canonical `997078c4b9fedb9b99bfbe485dd036fbf4497630` | `SUPPORT`；消费通用 Platform runtime profile，不修改 Platform 源码 | `CLOSED` | [PR #12](https://github.com/DoHorizon-AI/Cyrene-Reactor/pull/12) 已合并；Azure build 450 在任务 head `e8315050730c45dafbdd44cfb33bdc26dd34d915` 成功，该 head 是远端 `develop` 的祖先 | 真实 GPU serving 仍属 T24。Reactor 后续 profile 应组合通用 Platform runtime contract，不得引入 Product 专用 Platform 名称。 |
+| T20 | Cyrene-Catalyst 基线 `cf568ae9874b9969d14fa2f9ee05e6d13919f02c`；canonical `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d` | `REMOVE/SUPPORT`；Product 自有、可替换的 Artifact Plane adapter、开放 `ArtifactRef` wire shape、dataset/datasetversion 真值 | `CLOSED` | [PR #7](https://github.com/DoHorizon-AI/Cyrene-Catalyst/pull/7) 已合并；Azure build 526 在候选 head `c510e06244466d6aca0d4cbc5815a77fc10c81e8` 成功，该 head 是远端 `develop` 的祖先 | Yield/Echo 真实远程交接仍是 `WIRED_NOT_RUN`。不得把 Platform 源码 checkout 加回 Catalyst。 |
+| T21 | Cyrene-Echo 基线 `8f51170ed372741a81bcfad4a6fd386ad5dfc936`；canonical `128b051c555efe881eff2311cb481e0093cf0cd7` | `REMOVE/SUPPORT`；Product 自有、可替换的 Artifact Plane adapter、开放 `ArtifactRef` wire shape、Exchange judge 真值 | `CLOSED` | [PR #8](https://github.com/DoHorizon-AI/Cyrene-Echo/pull/8) 已合并；Azure build 528 在候选 head `dd34cdd7cccdab1b7cf441b0b2d645c603622264` 成功，该 head 是远端 `develop` 的祖先 | 真实 Exchange judge 仍是 `WIRED_NOT_RUN`。不得把 Platform 源码 checkout 加回 Echo。 |
+| T22 | Cyrene-Navigator 基线 `41a42e8608d2fe74d4283dd5599192aef568d163`；canonical `f83a701b885b3b6cfffde5af15c233b13904bdfb` | `REMOVE/SUPPORT/ISOLATE`；Product 自有、可替换的 Artifact Plane adapter、开放 artifact kind；移除 `cy-manifest` 与旧 typed SPI，隔离 mock service | `CLOSED` | [PR #6](https://github.com/DoHorizon-AI/Cyrene-Navigator/pull/6) 已合并；Azure build 533 在候选 head `12199b30cccf3fafc2c42a024211e837ade6fe96` 成功，该 head 是远端 `develop` 的祖先 | 真实远程 Echo 交接仍是 `WIRED_NOT_RUN`。不得把 Platform 源码 checkout 加回 Navigator。 |
+| T24 | 跨仓库验收协调人 | 只执行 exact-head 环境验收，不拥有源码 | `OPEN` | 上述源码 CI 证据是不可变的路由输入 | 运行并记录 Platform/Plugins/Astrbot fixture lane，以及剩余真实硬件和外部服务证据。只有证据证明源码缺陷时，才将失败退回唯一对应的源码任务。 |
+
+## 2. 合法处置方式
+
+每项发现都必须在中央台账中选择并完成一种处置：
+
+| 处置 | 定义 | 必需证据 |
+| --- | --- | --- |
+| `REMOVE` | 删除旧实现、所有可达入口、能力声明和当前文档引用。 | 不可达 guard、删除 diff、相关回归测试。 |
+| `MOVE` | 将能力迁至唯一的新 owner，旧 owner 不再提供活动实现。 | 新 owner 的契约与验收、旧 owner 删除证明、跨仓集成测试。 |
+| `SUPPORT` | 将能力补全为正式支持面。 | 可加载入口、可调用方法、包内容、针对性测试，以及所需的真实环境证据。 |
+| `ISOLATE` | 将其保留为 compatibility、prototype 或 simulated profile。 | 证明生产路径不可达，并注明状态、owner、消费者、最后支持版本、调用量和 removal gate。 |
+
+仅将状态降为 `DECLARED` 只能纠正真值失真。如果旧实现仍可达，还必须完成 `REMOVE`、`MOVE`、`SUPPORT` 或 `ISOLATE`。拿不到真实环境证据的能力，必须降级、隔离或撤销生产声明。
+
+### 2.1 Platform 纯净边界目标（P0 / XL）
+
+Platform 只拥有跨产品稳定的通用契约和运行时原语，包括 CES、WorkerControl、Sandbox、Lease/Fence、ArtifactRef 与通用 transport contract。可独立安装并由多个产品复用的 backend/protocol adapter 属于 Plugins；具体产品的 composition、部署模板、源码快照和兼容版本适配属于相应 Product 或 integration repository。两类适配都不应放入 Platform。
+
+本轮允许对 Platform 做一次性清理，但范围仅限迁出或删除产品适配和兼容快照、删除无实现占位项、补充边界 guard，以及纠正文档和 Repository Policy 真值。清理后登记 `PLATFORM_CLEAN_BASELINE`；后续上层软件任务必须基于该精确 SHA 完成，不得把“需要同时修改 Platform”当作常规接入方式。
+
+适配迁移必须先建立目标端，再清理来源端：
+
+1. 在中央台账登记旧路径、真实消费者、目标仓库和路径、处置类型；没有真实消费者的适配直接删除。
+2. 目标仓库 writer 先接管源码、配置、生成器和测试，并证明其可基于现有 Platform 契约独立运行。
+3. 随后 Platform writer 删除旧副本和入口；禁止在 Plugins 或新建的 shared compatibility 目录里再复制一份。
+4. 为 Platform 增加仓库边界检查，阻止产品名称、产品 manifest、产品部署模板和 compatibility snapshot 回流。
+
+若 Platform 确实缺少通用原语，必须独立建立 `PLATFORM_GAP` 决策项，并以至少两个独立消费者或 Kernel 级不变量为依据，与适配迁移分开交付。单一产品或插件的便利需求不能扩大 Platform API。
+
+### 2.2 Gateway 与迁移处置（P0 / XL）
+
+Gateway 清理按以下已确认的处置执行，不得重新解释为删除所有 Gateway：
+
+1. Java/Kotlin 保留可独立使用的对话、租户与计费能力。对话采用行业通用、OpenAI-compatible 的 `POST /v1/chat/completions` 请求和响应；租户与计费采用常规 Spring Boot REST 路径、状态码和 JSON DTO。三个功能按模块独立启用，并继续归类在 `plugins/gateway/spring/` 下。
+2. Spring Gateway 删除 Training、Deployment、Custom Script、Dataset lifecycle 等 Product authority，不再携带旧训练/推理 protobuf，也不再自行启动 worker。
+3. Python Gateway 保留，收敛为最小可运行且仅依赖 Python 的模块化 Gateway。认证、路由、上游调用、错误映射和生命周期通过小型可替换接口注入；默认实现简单且 fail closed，不复制 Astrbot worker 或 .NET Host。
+4. Astrbot .NET Host 先建立复用矩阵。只有跨产品重复出现、边界独立且通过 Generic contract/TCK 的能力才提取为标准插件；Dashboard、Iris、Astrbot storage/pipeline/composition 等产品实现留在 Astrbot。
+5. 完全没有具体实现的旧插件执行 `REMOVE`。有具体实现但尚未标准化的插件保留源码并统一标记 `MIGRATING`，从 `RESOLVED`、`CI_VERIFIED` 和生产能力声明中退出，直到独立入口、package 与 TCK 全部通过。
+
+配套 README、Catalog、Lifecycle、Boundary Registry、migration marker、测试矩阵和 CI 必须同步状态。默认 CI、mock 或测试收集不得把 `MIGRATING` 计作可用能力。
+
+## 3. 优先级与难度
+
+| 标记 | 含义 |
+| --- | --- |
+| `P0` | 假成功、重复 authority、错误分支、进程监管边界或最终验收的阻断项。 |
+| `P1` | 兼容面、打包、产品声明、生产 profile、CI 覆盖或治理漂移。 |
+| `P2` | 质量债务、vendored 治理或历史资料；仍须在最终 gate 前关闭。 |
+| `S` | 单仓、文件较少且行为边界明确。 |
+| `M` | 单仓多文件，或需要增加针对性测试。 |
+| `L` | 跨语言、构建系统、CI 或兼容性决策。 |
+| `XL` | 跨仓迁移、authority 收敛或真实环境验收。 |
+
+## 4. 依赖关系
+
+依赖顺序为：T00 当前真值锁定 → T01 authority 决策 → T02 分工台账与写锁 → P0 仓库修复 → P1/P2 兼容与治理 → T23 Workspace 真值投影 → T24 exact-head 和环境验收 → T25 canonical baseline 回读。
+
+`T00 → T01 → T02` 必须串行。T02 完成后，仓库间可以并行；同一仓库的任务仍按本计划顺序串行。
+
+## 5. 第 0 批：真值与权威
+
+### T00 当前事实锁定（P0 / M）
+
+- **写入范围**：无，全程只读。
+- **工作**：实时读取 11 个仓库远端的 integration/default branch、HEAD、开放 PR、required checks、Hosted CI、Repository Policy、实际构建入口和 package units。
+- **交付物**：每个仓库一条 exact-SHA 基线，注明源码 CI、凭据、硬件和外部服务状态。
+- **验收**：历史报告中的 SHA 只作定位线索；后续任务统一引用这份当前基线。
+
+### T01 权威与处置决策记录（P0 / L）
+
+- **写入范围**：只写 Workspace 决策记录，不修改成员仓库代码。
+- **工作**：冻结 DH integration authority、remote default 与 integration branch 的区别、跨仓 owner、模拟状态模型，以及每个不完整插件的 `REMOVE/MOVE/SUPPORT/ISOLATE` 选择。
+- **建议默认值**：Platform 拥有通用受管执行、进程和环境隔离、Lease/Fence；不拥有具体产品、协议、第三方平台或部署形态适配；通用可安装 adapter 归 Plugins，产品 composition、部署模板和兼容源码归实际 Product/integration repository。Yield 拥有 TrainingRun 生命周期；Reactor 拥有部署、Serving 生命周期和选择策略；Plugins 拥有具体 backend adapter；Exchange 拥有路由、发布和 Product gateway seam。Astrbot-Rev 是 Astrbot/NapCat Kubernetes renderer、部署模板及 Astrbot T2I/Shiki 兼容资产来源，Platform 副本应在目标仓验收后删除。GitHub 成员仓库分别记录 `remote_default_branch: main` 和 `integration_branch: develop`。DH 优先评估 `develop` 为 integration authority，最终选择以 T00 实时事实和治理决策为准。
+- **验收**：执行者无需重新推导 owner 或处置类型。
+
+### T02 分工台账与仓库写锁（P0 / M）
+
+- **写入范围**：中央任务台账。
+- **必填字段**：任务 ID、源审计章节/行号、repository、allowed/forbidden paths、处置类型、依赖、执行者、base SHA、状态、测试、未运行项、提交/PR、canonical read-back。
+- **状态模型**：`OPEN → CLAIMED → IMPLEMENTED → VERIFIED → MERGED → READ_BACK → CLOSED`。
+- **验收**：每项发现只对应一个任务 ID；一个仓库同一时刻至多有一个 `CLAIMED` writer。
+
+## 6. 第 1 批：P0 修复
+
+### T03 Platform 契约冻结与零改动扩展（P0 / L）
+
+在 Cyrene-Platform 冻结现有 CES、WorkerControl、Sandbox、Lease/Fence 与通用 transport contract；以契约测试证明环境白名单、取消、日志、资源限制和失败传播边界。禁止为 Custom Script、Astrbot 或单一消费者新增专用 RPC、命令、manifest 字段或运行时分支。发现真正通用缺口时，只登记独立 `PLATFORM_GAP`。验收要求：调用方不再实现通用进程监管；至少一个 Plugin 和一个 Product 可基于冻结的 exact SHA 接入且无 Platform 源码 diff；形成供 T15 使用的 `PLATFORM_CLEAN_BASELINE` 候选。
+
+### T04 DH 权威与 fail-closed provider（P0 / XL）
+
+在 DH-System-Internal 执行，依赖 T00、T01。统一分支权威；模型基类的未实现操作必须 fail closed；Azure capability 不得仅凭配置字段报告健康；Catalog/UI 只公布已配置且可用的 action；区分“骨架完成”和“能力完成”；补齐 pipeline 定义。验收时不得存在正常 final chunk 下的 `not implemented`、成功空 embedding、虚假 health 或 `null` capability service，并且 exact-head pipeline 可排队。
+
+### T05 Plugins shim 与 Catalog 真值（P0 / XL）
+
+独占 Agent System、Skills Runtime、IM、Content Safety、Model Routing、MCP 六个旧 shim，以及 Catalog、Lifecycle、Evidence Validator、inventory/backlog；Python Gateway 仅由 T10B 负责。无具体实现的 shim 删除；有实现的保留源码并标为 `MIGRATING`，取消可安装、`RESOLVED`、`CI_VERIFIED` 和生产能力声明。Catalog Set 状态须与运行性一致；Lifecycle 覆盖所有活动插件；Evidence Validator 只声明实际验证过的 metadata，或读取不可变 CI ledger。验收时不得出现入口无法加载但状态为 `RESOLVED`；六个旧 shim 都须有唯一处置，Python Gateway 状态只能由 T10B 更新。
+
+### T06 Plugins 模拟成功闭环（P0 / L）
+
+独占 TensorRT-LLM、Seedance、Docker UV Builder 的运行行为和结果类型。真实模式缺依赖时必须 fail closed；mock 必须显式启用；结果必须标记 `REAL/SIMULATED/NOT_RUN`；模拟测试与真实 GPU、服务、daemon 验收分开记账。不得在缺少模型目录、生成配置或 Docker daemon 时返回普通成功。
+
+### T07 Plugins Custom Script 边界恢复（P0 / XL）
+
+依赖 T03，独占 Custom Script 插件的执行实现及测试。默认建议删除当前没有真实消费者的实现；若 T01 登记了真实 owner，则移除插件自行拥有的 `Popen`、线程、轮询、kill/terminate 和父环境复制，由消费仓领域 adapter 调用冻结的 Platform/CES 契约。日志解析和 pipe reader 异常不得静默吞掉，也不得以此为由修改 Platform。删除处置须证明入口不可达；迁出处置须通过取消、失败、环境隔离和日志可观测性测试。Plugin/消费仓只持有领域适配状态，Platform 相对冻结 SHA 不产生源码 diff。
+
+### T08 Reactor Hybrid 与 engine owner 收敛（P0 / XL）
+
+依赖 T01，具体绑定可依赖 T06。移除或正式弃用旧 backend aliases；删除吞掉任意异常的 Hybrid fallback，或将其改为只处理明确 `backend unavailable` 的可审计 placement policy；移除 Reactor 内第二份 concrete TensorRT authority。最终 Reactor 只拥有 Product 生命周期和选择策略；具体 backend 通过单一插件契约注入；模型、权限和配置错误不能触发静默 backend 切换。
+
+### T09 Exchange 训练/脚本权威迁出（P0 / XL）
+
+在 Cyrene-Exchange 执行，依赖 T01、T03 和已确认的 Yield seam。删除 coordinator 中训练和 Custom Script 的 service 注册、队列、worker 选择和调用；保留的 Gateway 只消费 Yield/Platform 契约。生产 composition root 不再暴露 Exchange 自有的 TrainingRun 或通用脚本生命周期。
+
+## 7. 第 2 批：兼容、打包与产品真值
+
+### T10 Plugins 不完整能力声明（P1 / XL）
+
+独占 ASP.NET Gateway、Prompt Cache、Circuit Breaker、Dataset Validator、Distributed DeepSpeed；Spring/Python Gateway 分别由 T10A/T10B 负责。删除只有健康检查和统一 `503` 的 ASP.NET Gateway 空壳；其他插件若有具体实现，则收缩名称、manifest、catalog 和生产状态并标为 `MIGRATING`；无实现则删除。CSV 声明必须与实现一致；空断言、固定业务值和未闭环 TODO 不得继续支撑 `RESOLVED` 或生产声明。验收要求代码、名称、manifest、测试和实际能力一致。
+
+### T10A Spring 模块化 Gateway（P0 / XL）
+
+独占 `plugins/gateway/spring/**`。将 Spring 目录收敛成可分别启用的 Conversation、Tenant、Billing 模块；Conversation 只公开 OpenAI-compatible chat API，Tenant/Billing 使用常规 Spring Boot REST DTO。删除 Training、Deployment、Custom Script、Dataset lifecycle、自管 worker、旧 protobuf 及对应配置、文档、测试。三个模块须可独立构建和测试；常见客户端可直接调用 `/v1/chat/completions`；源码与产物不得含训练/部署生命周期 authority。
+
+### T10B Python 模块化 Gateway（P0 / L）
+
+独占 `plugins/gateway/python/**`。实现最小可运行的 Python Gateway；以 typed protocol/ABC 分隔认证、路由、上游 transport、错误映射和生命周期，提供可替换的默认组件与 application factory。删除 Astrbot .NET/Python worker compatibility snapshot；补 package、入口、健康检查、请求路由、关闭和组件替换测试。验收要求：wheel 安装后 entrypoint 可加载；默认配置 fail closed；测试可替换每个模块而不修改 Gateway core；范围保持纯 Python，无需修改 Platform 或 Astrbot。
+
+### T11 Plugins 打包与发布契约（P1 / L）
+
+独占构建 metadata、wheel 内容、Wrapper、版本约束和 release workflow。修复 Seedance 空 wheel；确定随包分发 manifest 的唯一机制；为 11 个缺少构建 metadata 的插件明确源码型或 package contract；解决 .NET/Java/Gradle Wrapper 版本矛盾；使 release 声明与 workflow 一致。独立构建产物须包含预期 payload 和 metadata，声明的构建命令可在干净环境执行。
+
+### T12 Plugins 非 shim 兼容树（P1 / XL）
+
+依赖 T01、T10A、T10B、T14 及 T02 登记的其他目标仓接管任务。独占 ASP.NET compatibility、Model Provider compatibility、Media compatibility、Seedance Java sample，以及相关 migration marker 和重复资产。Plugins 只保留可独立安装、具备 Generic contract/TCK 且可由多个产品复用的 adapter。产品源码、composition、部署模板和 compatibility snapshot 按 destination-first 规则迁回真实消费仓；无消费者则删除；Plugins 不保留 Astrbot、Shiki/T2I 或其他产品私有副本。本任务不得重做 T05 负责的 shim。验收时，审计登记的 11 组 Plugins 兼容路径分别由 T05/T12 唯一覆盖，Plugins 不再有以 compatibility 名义保留的产品源码仓副本。
+
+### T13 Plugins 分层质量与 CI（P1 / L）
+
+依赖 T05、T06、T07、T10、T10A、T10B、T11、T12。先为 Generic 实现路径建立 Ruff/format gate；兼容和生成路径只能按有理由且有截止条件的规则排除。默认 pytest 不再代表全仓测试；Spring、.NET、Agent、Skills、Gateway worker 和新增插件纳入明确矩阵；保留固定 accepted SHA 与 current compatibility 两类跨仓 gate。CI 输出须区分每层覆盖的能力，skipped/mock 不计入真实通过数量。
+
+### T14 Astrbot 兼容产品（P1 / XL）
+
+在 Astrbot-Rev 按实际调用点，将 .NET Host 功能划分为 `GENERIC_PLUGIN_CANDIDATE`、`PRODUCT_OWNED`、`OBSOLETE`。候选功能只有证明跨产品复用、配置/状态独立且通过 Generic contract/TCK 后，才能交给 Plugins 的 T12 标准化。其他实现留在或迁回 Astrbot，再清理重复副本。根据真实消费者决定是否保留 `python-compat`；接管 Astrbot/NapCat Kubernetes renderer、manifests、NGINX/Docker templates，以及 Platform/Plugins 中确需保留的 Astrbot 产品源码与 T2I/Shiki 资产；清理 Policy 和过时 marker。验收要求旧 Python/.NET 主路径不再双向演进；兼容镜像有 removal gate 或已删除；每项 .NET 提取能力均有消费者与 TCK；Product-owned 代码不复制到 Plugins；Astrbot 部署及兼容资产可基于冻结的 Platform exact SHA 独立构建、渲染和验收。
+
+### T15 Platform 适配迁出与纯净基线（P0 / XL）
+
+依赖 T03、T14 和 T02 中全部 Platform 适配目标仓任务。按 destination-first 台账删除已由消费仓接管的 adapter，删除无人消费的兼容快照；Platform 不再跟踪 Astrbot/NapCat Kubernetes renderer、manifests、NGINX/Docker templates 或其他产品部署资产。删除无实现的 transport 类型，或登记 ABI deprecation/removal version。JVM skeleton 不得算成功测试；完整 wire-protocol lifecycle 纳入独立环境 gate。标记历史报告、修正 Policy metadata，并增加边界检查以阻止产品标识和 compatibility snapshot 回流。验收要求 Platform 产品适配文件为零、跨仓 renderer 不再重复、目标仓 exact-head 验收通过；真实执行前 JVM 全链路保持 `NOT_RUN`；登记 accepted `PLATFORM_CLEAN_BASELINE`，后续 Plugins/Product 修复均基于该 SHA 且无需 Platform 伴随修改。
+
+### T16 Reactor Pro 与 sidecar 真值（P1 / L）
+
+依赖 T08。将模拟 LoRA、占位 token count 和零值 telemetry 从 production profile 移除；若保留则强制标为 `SIMULATED`。修正 sidecar 尚未发送或应用反馈的声明；删除不存在的 Backup/enterprise bundle 当前引用；修正 Policy metadata。模拟状态不得更新成普通成功，也不得作为 Reactor 生产能力证据。
+
+### T17 Yield 当前契约真值（P1 / M）
+
+删除 README 中陈旧 Platform SHA 和不存在的路径；将依赖 SHA 纳入机器可验证 lock/ledger；关闭 Configure RPC gap 或如实登记；修正 build、branch 和 Policy metadata。README 只引用存在且当前的契约，机器 gate 和文档使用同一依赖 authority。
+
+### T18 Yield LLaMA Factory 治理（P2 / XL）
+
+依赖 T01、T17。记录 upstream commit、许可证/通知、Cyrene patch queue、允许保留/禁用的模块、更新流程和回归矩阵；决定它是受管理的 Official engine/plugin dependency，还是由 Yield 明确拥有的 fork。上游 TODO、空文件和非训练模块均须由 provenance/裁剪规则解释；禁止无依据地批量删除。
+
+### T19 Exchange 其余漂移（P1 / L）
+
+依赖 T09。修正所有仍指向已删除 `legacy/` 的当前文档；证明或修复 gRPC cancellation 的底层资源释放；将旧 token validator 移到 test adapter 或增加 removal version；删除不存在的 Cargo 声明并修正 Policy metadata。验收要求文档、构建系统、取消语义及 production builder 与实际代码一致。
+
+### T20 Catalyst 契约与真值清理（P1 / M）
+
+移除 `cyrene-artifacts`、lock 文件及 Azure 对 Platform 源码的 checkout/guard。改用 Catalyst 自有且可替换的 Artifact Plane adapter，输出开放的 `ArtifactRef` wire protocol；Product schema 不再复制封闭的 Platform Product 分类；删除旧训练语料目录声明；README/API 反映当前 DatasetVersion 和样例事实；登记实际 pyproject/wheel、visibility 和 branch metadata。只修改 Catalyst 消费端，不为此恢复或修改 Platform Product API。验收时不存在 `ArtifactKind.DATASET` 等已删除常量或封闭 kind 投影；Azure exact-head 按当前 Artifact 契约成功；当前文档不指向已删除路径，Workspace verifier 覆盖实际构建入口。PR #7 合入 `35b7d3ec5cc3741348a07ea85cfd5b6c39aa7c8d`，权威 develop 祖先关系已验证；真实 Yield/Echo 远程交接保持 `WIRED_NOT_RUN`。状态为 `CLOSED`，不含 Platform 源码修改。
+
+### T21 Echo 契约与真值清理（P1 / M）
+
+移除 `cyrene-artifacts`、lock 文件和 Azure 对 Platform 源码的 checkout/guard；改用 Echo 自有、可替换的 Artifact Plane adapter，输出开放 `ArtifactRef` wire protocol；Product schema 不复制封闭 Platform Product 分类；删除 Navigator legacy feedback 引用；修正 owner/职责、pyproject/wheel、visibility 和 branch metadata。取得凭据前，真实 Exchange judge 保持 `WIRED_NOT_RUN`。只修改 Echo 消费端，不恢复 Platform Product API。验收时不存在已删除的 `ArtifactKind.DATASET` 等常量或封闭 kind 投影；Azure exact-head 按当前 Artifact 契约成功；不得以缺少凭据的路径冒充通过，Policy 与当前产品职责一致。PR #8 合入 `128b051c555efe881eff2311cb481e0093cf0cd7`，权威 develop 祖先关系已验证；真实 Exchange judge 仍为 `WIRED_NOT_RUN`。状态为 `CLOSED`，不含 Platform 源码修改。
+
+### T22 Navigator Platform 解耦与原型隔离（P0 / L）
+
+生产 `EchoHandoff` 改用 Navigator 自有、可替换的 Artifact Plane adapter 和开放 artifact kind；删除无消费者的 `cy-manifest`、旧 typed SPI、`legacy-dh` 及 Platform ModelVersion 当前声明；普通构建不再 checkout Platform 源码。Windows mock executable 从 release profile 移除，或注入真实 Session/Exchange adapter；补齐 Python、Cargo、.NET、NPM 构建和 package metadata；修正 Policy。生产和普通构建均不得依赖旧 Platform Product API 或 Platform 源码 checkout；Navigator 到 Echo/Plugin 的业务调用保持直连；release artifact 不直接绑定 mock service；prototype 状态明确且生产不可达。不得修改 Platform 源码。PR #6 合入 `f83a701b885b3b6cfffde5af15c233b13904bdfb`，权威 develop 祖先关系已验证；真实 Echo 交接保持 `WIRED_NOT_RUN`。状态为 `CLOSED`，不含 Platform 源码修改。
+
+### T23 Workspace 真值投影（P1 / L）
+
+依赖所有仓库本地真值任务完成。独占 `repositories.yaml`、数据库治理和当前产品/架构文档；暂不更新 `governance/accepted-baseline.yaml`。同步 visibility、remote default、integration branch、build systems 和 package units；删除 Navigator `legacy-dh` 数据库 authority；将旧 `plugin.toml` V1 表述改为当前 canonical manifest；修正 PRODUCTS 和架构报告中对 TensorRT、Hybrid、Custom Script sandbox、Gateway 与 Plugins 的过度声明。验收要求 Workspace verifier 从实际仓库入口得出同一组当前事实。
+
+### T26 Platform 剩余业务 authority 迁出（P0 / XL）
+
+依赖 T14、T27、T28。迁出 Product run、attempt、retry、persistence、模型分析与兼容策略、媒体请求适配；删除 Product JVM shell、消费仓工具链和跨仓具体 TCK；对必须暂存的已实现 v0 compatibility surface 统一标记 `MIGRATING_COMPATIBILITY`，阻止新增生产依赖。验收时 Platform 只保留 Artifact/Runtime/Environment、Node/Resource facts、CES、WorkerControl、Placement、Lease/Fence、Sandbox、通用 resolver 和 wire contracts；从新 target 目录完成全 Workspace 构建，全部语言 gate 通过，正常合并并回读当前 `PLATFORM_CLEAN_BASELINE`。状态为 `CLOSED`，详见 §1.1，不得重复领取这些源码路径。
+
+### T27 Plugins 媒体 worker 适配接管（P0 / L）
+
+依赖 T12，且必须先于从 Platform 删除副本。由可安装 media plugin 接管通用 worker payload 到 image/audio typed request 的严格转换，保留直接 typed API 和错误语义。跨仓 conformance 与插件测试须通过，Platform 不再识别媒体 operation 名称或请求类。状态为 `CLOSED`；真实 provider 环境仍属 T24。
+
+### T28 Yield Product 生命周期与预检 authority（P0 / XL）
+
+依赖 T17，且必须先于从 Platform 删除副本。由 Yield 接管 Python Product run/attempt/retry/persistence、JVM migration snapshot，以及模型分析、VRAM 和兼容性策略的 request/result 与可替换 ports；Platform preflight 只提供通用资源事实和结果。Python 契约/训练套件及 JVM snapshot 必须在任务 head 和 canonical merge 上通过 Azure；Platform 删除 Product store、reconciler 和 policy types。状态为 `CLOSED`；自托管 GPU 训练仍属 T24。
+
+### T29 Reactor 消费通用 runtime profile（P1 / M）
+
+依赖 T03。将 Product 命名的 Platform runtime profile 改为通用 profile，由 Reactor 管理 Product serving 组合和选择策略。Reactor bootstrap 测试与 Azure source CI 须通过，且不得产生 Platform 源码 diff。状态为 `CLOSED`；真实 GPU serving 仍属 T24。
+
+## 8. 第 3 批：验收与 canonical 关闭
+
+### T24 全仓 exact-head 验收矩阵（P0-final / XL）
+
+写入范围仅限运行、部署和收集证据，禁止顺手修改业务源码。依赖 T03–T23 及执行期登记的 T26–T29。对 11 个 canonical exact head 运行 source CI，建立并排队 DH pipeline；分别记录真实 GPU、Docker daemon、DeepSpeed、凭据、Windows 原生构建、JVM 和其他 skipped 环境测试。GitHub 付款/额度导致的 0-step failure 归为 CI 环境阻塞。验收要求：每项活动生产能力均有必要的真实证据；无法执行的能力已退回前序任务降级、隔离或撤销。
+
+### T25 Accepted baseline 与远端回读（P0-final / M）
+
+在 Cyrene-Workspace 执行，依赖 T24。区分不可变历史 baseline 与当前 accepted baseline；required checks 通过并正常合并后，fetch 远端、验证 ancestry 和 canonical 文件回读，再更新当前集合。只有全部审计发现均为 `CLOSED`，且 baseline 指向远端 canonical accepted commit，而非本地提交、Draft PR 或合并前源码树，才能验收。
+
+## 9. 仓库写入者分配
+
+同一仓库的任务必须串行，不得同时启动多个 writer：
+
+| 仓库 | 串行任务 | 并行规则 |
+| --- | --- | --- |
+| Workspace | T01 → T02 → T23 → T25 | T01/T02 完成后等待成员仓库；T23/T25 分别在依赖完成后执行。 |
+| Platform | T03 → T15 → T26 | T26 在 T27/T28 目标仓接管后关闭；Platform 以 T26 canonical SHA 进入零随动修改状态。 |
+| Plugins | T05 → T06 → T07 → T10 → T10A → T10B → T11 → T12 → T13 → T27 | 建议由一个模型连续负责；T27 已关闭，禁止在 Platform 或 Product host 重做媒体转换。 |
+| DH | T04 | 可在 T01 后独立执行。 |
+| Reactor | T08 → T16；T29 已关闭 | T08 的绑定决策依赖 T01，可能等待 T06；后续 profile 使用 T29 的通用 Platform 名称。 |
+| Exchange | T09 → T19 | T09 等待 Platform/Yield seam；T19 不得提前修改相同 composition/文档。 |
+| Yield | T17 → T28 → T18 | T28 已关闭；T18 串行治理 vendored engine，不得回改已迁出的生命周期 owner。 |
+| Astrbot-Rev | T14 | 先接管并验收 Astrbot/NapCat 部署与兼容资产；T15 再删除 Platform 副本。 |
+| Catalyst | T20 已关闭 | 已合并到 develop 并完成回读。 |
+| Echo | T21 已关闭 | 已合并到 develop 并完成回读。 |
+| Navigator | T22 已关闭 | 已合并到 develop 并完成回读。 |
+| 验收协调人 | T00 → T24 | 全程只读；发现失败时退回唯一原任务，不直接修源码。 |
+
+每个仓库的 `repository-policy.yaml` 只能由该仓库 writer 更新；Workspace 的 `repositories.yaml` 仅由 T23 更新。跨仓模型可读取其他仓库验证契约，但不得顺手写入。
+
+## 10. 源审计覆盖范围
+
+| 源审计章节 | 唯一覆盖任务 |
+| --- | --- |
+| §3–§4 Plugins P0 与 22 个插件盘点 | T05、T06、T07、T10、T10A、T10B、T27 |
+| §5–§6 兼容树、TODO、重复资产、Python 质量 | T05、T07、T10、T10A、T10B、T12、T13、T14、T15、T27 |
+| §7 构建与打包 | T10、T10A、T10B、T11 |
+| §8 Catalog、Lifecycle、Policy、Evidence、backlog | T05、T11、T23 |
+| §9 测试与 CI | T13、T24 |
+| §10 Workspace 旧结论 | T23 |
+| §15 X-01～X-17 | T01、T03–T29 |
+| §16 系统治理漂移 | 各仓库本地任务、T23、T25 |
+| §17 Platform 详查及执行期边界复查 | T03、T15、T26 |
+| §18 Astrbot-Rev 详查 | T14 |
+| §19 DH 详查 | T04 |
+| §20 Reactor 详查 | T08、T16、T29 |
+| §21 Yield 详查 | T17、T18、T28 |
+| §22 Exchange 详查 | T09、T19 |
+| §23 Catalyst、Echo、Navigator | T20、T21、T22 |
+| §24 Workspace | T23、T25 |
+| §25–§26 验收边界与清理门 | T24、T25 |
+
+§12 与 §27 的阴性结果用于防止误改，不产生清理任务。不得只因关键字命中而修改：抽象基类的显式 hook、测试 double、生成的 protobuf/gRPC 源码、Python namespace 空 `__init__.py`、有明确用途的固定 accepted dependency SHA、有来源及治理计划的 vendored backend，以及已经验证的 OneBot、Compat Rules 和 Model Provider Generic core。
+
+Model Provider compatibility tree 由 T12 负责。其 Generic `chat_completion` 和 embeddings 路径只有在当前基线回归证明确有缺陷时才允许修改，避免重复处理已闭环能力。
+
+## 11. 任务分配提示模板
+
+```text
+任务：Txx <任务名称>
+Repository：<一个仓库>
+Base：<T00 提供的 canonical branch 与精确 SHA>
+Allowed paths：<由 T02 填写>
+Forbidden paths：<由 T02 填写>
+Disposition：REMOVE | MOVE | SUPPORT | ISOLATE
+Dependencies：<必须已 READ_BACK 或 VERIFIED 的任务 ID>
+
+只执行本任务。不得处理其他任务、其他仓库或顺手格式化。
+开始前重新读取远端 head、开放 PR、CI 和中央台账；发现基线漂移时停止写入并报告。
+发现路径已被其他任务领取时，标记 BLOCKED_BY: Txx，不得重复修改。
+
+交付必须包含：
+1. 覆盖的源审计章节/行号；
+2. 修改路径和未修改的相邻路径；
+3. 代码、声明与文档如何重新保持一致；
+4. 执行的测试及覆盖范围；
+5. NOT_RUN、SIMULATED、SKIPPED、凭据/CI 环境阻塞项；
+6. commit/PR、required checks、合并状态和 canonical read-back。
+
+本地提交、Draft PR、Hosted unit/mock CI 或未执行的测试都不等于 CLOSED。
+```
+
+## 12. 总体验收条件
+
+只有同时满足下列条件，才能宣布遗留清理完成：
+
+1. 源审计的每项正向发现都映射到且仅映射到一个 `CLOSED` 任务。
+2. 所有生产路径都不存在默认 mock、占位成功、健康假阳性或静默跨 backend fallback。
+3. 每项能力只有一个生命周期/领域 authority；旧 owner 的活动入口已删除。
+4. 所有保留的兼容面都有消费者、owner、最后支持版本、调用量和 removal gate。
+5. Manifest、Catalog、Lifecycle、Repository Policy、Workspace topology、README/API 与代码一致。
+6. 构建产物含声明的 payload 和 metadata；所有实际语言/项目都记录在 CI 台账中。
+7. 分别记录 exact-head source CI、真实硬件、真实凭据、Windows/JVM 及 skipped 测试。
+8. required checks 通过后，完成正常合并、远端 fetch、ancestry 验证和 canonical 文件回读。
+9. 仅在以上条件满足后更新 `accepted-baseline`，并区分历史快照与当前接受集合。
+10. Platform 已登记 `PLATFORM_CLEAN_BASELINE`；通用可安装 adapter 位于 Plugins，产品专用适配位于 Product/integration repository；后续上层软件修复基于该精确 SHA 通过，且不引入 Platform 伴随修改。
+
+大规模格式化、兼容树删除和 owner 迁移必须分开交付。执行中发现新遗留项时，应新建任务 ID，补上源证据、优先级、难度、owner 和依赖，不得静默扩大已有任务范围。

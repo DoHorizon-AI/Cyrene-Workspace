@@ -367,3 +367,175 @@ deployment environment and cannot be inferred from either launcher.
 - Acceptance requires real service responses, durable database state, and the real provider/CES
   path. A startup banner or an accepted prompt is not proof of a completed model turn, deployment,
   or end-to-end usability.
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene Navigator V8 后端交接
+
+> **历史安装包快照：** 以下 CES 组合只记录 V8 Alpha 当时固定的后端，不是当前实现指南。当前能力的业务调用由 Product 直接连接 Plugins 所有的契约。
+
+本文面向操作员和同事，说明已安装 Navigator V8 所使用、且已验证的受控 Alpha 后端组合。它不是生产部署系统，也没有完成 Workspace、SSO 或 RBAC 的实现。
+
+```text
+Navigator 桌面端 / 固定 Harness profile
+        │
+        ├── Session event API ──> Cyrene persistence（SQLite 权威）
+        │
+        └── Model API ──────────> Exchange Product gateway
+                                  │
+                                  └── Platform resolver + CES
+                                          └── Official model-api connector
+                                                  └── 独立 vLLM /v1
+```
+
+Navigator 也可以直接连接外部 Provider。这条独立客户端路径不会自动获得 Exchange 的路由、usage 或 audit 语义。本文只说明采用证明和本地模型消费所需的 Exchange 路径。
+
+## 版本与已核对入口
+
+下列 revision 是 15:48 UTC 后端真实启动记录中的固定输入，并不表示要跟随 `latest`。
+
+| 组件 | 源码入口 | 记录版本 |
+| --- | --- | --- |
+| Navigator persistence | `Cyrene-Navigator/scripts/serve-persistence.py`；`pyproject.toml`；`uv.lock` | `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` |
+| Exchange Product | `Cyrene-Exchange/product/scripts/run_product_vllm_smoke.py`；`product/pyproject.toml`；`product/uv.lock` | `91c509904add26de941e2e14bc3b2b4752233d28` |
+| Platform resolver/CES | `Cyrene-Platform/framework/crates/cy-platform-api/src/bin/cyrene-capability-resolver.rs`；`framework/crates/cy-capability-execution-service/src/main.rs`；`Cargo.toml`；`Cargo.lock` | `30272145b9c11df9948465359479c3d95d08a1dc` |
+| Official provider | `Cyrene-Plugins-Official/plugins/providers/model-api-connector/plugin.manifest.json` | `261a78fd36c7cb2da85a504a89ec7c9c353ecc19` |
+
+V8 安装包内嵌的 `cy-manifest` 仍固定引用 Platform revision `185527f82c83700d4f567ac563a393a2e1c18c87`。这是桌面包的 provenance，与本次 CES/resolver 后端所用的 Platform `30272145...` 是两个版本边界，不得静默互换。
+
+前置检查记录显示：Platform CES/resolver 通过 `cargo build --locked` 构建；Navigator 和 Exchange Product 分别执行 `uv sync --locked --dry-run` 后均无依赖变更。Navigator 与 Exchange Product 声明以 Python 3.12 为运行基线；Exchange 根包另声明 `>=3.11`。Exchange checkout 同时有根目录 `uv.lock` 和 `product/uv.lock`：根锁对应 `cyrene-exchange`，Product 锁对应 `cyrene-exchange-product` 及 `product/pyproject.toml` 依赖。
+
+## 组件职责
+
+### 1. Cyrene persistence
+
+入口为 `Cyrene-Navigator/scripts/serve-persistence.py`，应用工厂为 `cyrene_navigator.persistence.create_persistence_app`。启动器从 `--principal-config` 读取严格校验的 `principals` 列表，每项包含 `token_env`、`actor_id`、`workspace_ids` 和可选的 `can_takeover`。它只从 `token_env` 指定的进程环境变量读取 bearer credential，没有 token CLI 参数，也不会把 token 写入 principal 文件或 readiness 输出。
+
+启动器将 `(workspace, session)` 事件写到指定 `--database`，使用 SQLite WAL、`synchronous=FULL`、服务端 lease/epoch fencing 和只追加的上游事件。默认绑定 `127.0.0.1`；`--port 0` 请求操作系统分配端口，启动时只输出不含凭据的 host/port JSON。
+
+principal 文件只是 Phase 0 的受信 bootstrap 映射，不是用户目录、Identity Provider、SSO 或完整 RBAC。`workspace_ids` 由服务端执行授权；请求 JSON 自报的 actor/workspace 不能授予权限。共享 Session 的 Navigator 设备必须使用同一受管 SQLite authority，不能各自维护可写会话历史。
+
+无密钥配置示例：真实 credential 由 secret provider 或隐藏输入注入环境。
+
+```json
+{
+  "principals": [
+    {
+      "token_env": "CYRENE_PERSISTENCE_TOKEN",
+      "actor_id": "operator-actor",
+      "workspace_ids": ["workspace-dev"],
+      "can_takeover": false
+    }
+  ]
+}
+```
+
+### 2. Exchange Product gateway
+
+入口为 `Cyrene-Exchange/product/scripts/run_product_vllm_smoke.py`。`--serve` 模式先检查 Platform resolver、CES binary 和 Official provider manifest；启动 CES 子进程并组合 Platform resolver/CES/Official connector 执行路径；通过 Exchange Product SQLite authority 幂等创建或复用 `GatewayEndpoint`、`GatewayRoute`，重复使用同一 `--database` 可保持 endpoint/route identity。随后在 loopback 启动 `create_reference_server`，默认由 `--listen-port 0` 分配临时端口。ready JSON 和 `--ready-file` 只含 URL、资源引用及状态 metadata，不含 bearer 或 provider key。收到 SIGINT/SIGTERM 时关闭 HTTP server、CES client、SQLite store 和 CES 子进程。
+
+Exchange Product 拥有 endpoint/route 选择和请求账本；Platform 执行已经选定的 capability，不是第二套路由 authority。此入口是可重复运行的 Alpha Product proof/reference transport，不是进程监管器、TLS terminator、GPU scheduler 或生产级 HA gateway。
+
+### 3. 独立 vLLM
+
+`run_product_vllm_smoke.py` 不安装、启动或管理 vLLM。必须已有独立 vLLM 进程提供兼容 OpenAI 的 `/v1` API。脚本默认地址是 `http://127.0.0.1:19180/v1`；可通过已核对的 `CYRENE_VLLM_BASE_URL` 或 `--vllm-base-url` 指定端点，通过 `CYRENE_VLLM_MODEL` 或 `--model` 指定模型。
+
+手动启动 vLLM 不算 Reactor 部署验收。模型文件、CUDA、NVIDIA GPU、vLLM 参数和服务健康属于独立的 Reactor/Platform slice；Exchange 只消费兼容端点。
+
+## 构建与启动顺序
+
+命令使用各项目 checkout 目录。尖括号表示操作员自有路径或非敏感标识；命令不含 secret。按 `release-lock.json` 检出精确提交并保留以下相对目录布局：
+
+```text
+Cyrene/
+├── Cyrene-Platform/
+├── Cyrene-Plugins-Official/
+└── Services/
+    ├── Cyrene-Exchange/
+    └── Cyrene-Navigator/
+```
+
+Exchange Product lock 使用相对路径的 editable Platform Python SDK；`--platform-root` 只改变运行时查找位置，不会改变锁定安装路径。启动服务前先安装 locked dependencies。
+
+### 1. 验证并构建 Platform
+
+```bash
+cd <Cyrene-Platform-checkout>
+cargo build --locked -p cy-platform-api --bin cyrene-capability-resolver
+cargo build --locked -p cy-capability-execution-service --bin cy-capability-execution-service
+```
+
+Product script 默认从 Platform checkout 的 `target/debug/` 查找这两个 binary；checkout 不在相邻目录时使用 `--platform-root`。同时将 `--plugins-root` 指向含有 `plugins/providers/model-api-connector/plugin.manifest.json` 的 Official checkout。
+
+### 2. 准备并启动 persistence
+
+使用受管且权限受限的持久目录，例如管理员为 SQLite 与 readiness/log 文件分别准备的 Alpha 数据目录。数据库不得放入临时目录，也不得复制数据库形成第二个可写 Session authority。
+
+```bash
+cd <Cyrene-Navigator-checkout>
+uv sync --locked
+# 从隐藏输入或 secret provider 读取，不要将值粘贴到命令行。
+read -r -s CYRENE_PERSISTENCE_TOKEN
+export CYRENE_PERSISTENCE_TOKEN
+uv run --locked --project . python scripts/serve-persistence.py \
+  --database <private-persistence-dir>/navigator-sessions.sqlite3 \
+  --principal-config <private-config-dir>/principals.json \
+  --host 127.0.0.1 \
+  --port 0 \
+  --lease-seconds 120
+```
+
+`principals.json` 的 `token_env` 必须与环境变量名一致。操作员为每个受信 principal 选择非敏感的 `actor_id` 和 `workspace_ids`。共享 Workspace 的设备必须各有合法 credential，并配置稳定且互不相同的 client device ID。启动 banner 所示 loopback 端口应交给受控 relay 或本机 Navigator 配置。
+
+### 3. 启动 Exchange Product gateway
+
+先确认独立 vLLM 已在兼容 OpenAI 的 URL 监听。Exchange bearer credential 通过 `CYRENE_EXCHANGE_BEARER_TOKEN` 注入；需要 provider key 时通过已核对的 `CYRENE_VLLM_API_KEY` 注入。任何 key 都不能出现在 CLI 参数、提交文件或 ready 文件中。
+
+```bash
+cd <Cyrene-Exchange-checkout>
+uv sync --locked --project product
+# 从隐藏输入或 secret provider 读取；这里不显示实际值。
+read -r -s CYRENE_EXCHANGE_BEARER_TOKEN
+export CYRENE_EXCHANGE_BEARER_TOKEN
+export CYRENE_VLLM_BASE_URL=http://127.0.0.1:19180/v1
+export CYRENE_VLLM_MODEL=cyrene-proof-text
+export CYRENE_EXCHANGE_ACTOR_ID=operator-actor
+export CYRENE_EXCHANGE_WORKSPACE_ID=workspace-dev
+export CYRENE_EXCHANGE_CREDENTIAL_REF=credential-operator
+uv run --locked --project product python product/scripts/run_product_vllm_smoke.py \
+  --serve \
+  --database <private-exchange-dir>/exchange-product.sqlite3 \
+  --listen-port 0 \
+  --ready-file <private-exchange-dir>/exchange-product.ready.json
+```
+
+`--serve` 必须使用持久 `--database`，且不能与 `--tool-smoke` 同时运行。若要对真实服务做一次性 unary、streaming、tool call/tool result smoke，应使用另一份受控数据库：
+
+```bash
+uv run --locked --project product python product/scripts/run_product_vllm_smoke.py \
+  --vllm-base-url http://127.0.0.1:19180/v1 \
+  --model cyrene-proof-text \
+  --tool-smoke
+```
+
+Product script 运行时创建临时 `0600` binding 文件，把 vLLM 配置交给 CES。Exchange SQLite 持久保存 endpoint/route 和受控 credential reference，不保存 raw provider token。ready JSON 中 URL 是内部 loopback 地址；Navigator 远程连接必须使用 HTTPS relay 地址。
+
+### 4. 配置已安装 Navigator
+
+Navigator 安装包不会启动 persistence、Exchange、Reactor 或 vLLM。通过现有 connector 或组织受控配置提供 `CYRENE_EXCHANGE_URL`、`CYRENE_EXCHANGE_TOKEN`、`CYRENE_PERSISTENCE_URL`、`CYRENE_SESSION_TOKEN`、`CYRENE_WORKSPACE_ID`、`CYRENE_HARNESS_MODEL`。`CYRENE_ACCOUNT_PROFILE_ID` 和 `CYRENE_DEVICE_ID` 用于本地客户端命名空间。两个 token 只能通过隐藏输入或 secret provider 注入子进程。
+
+## HTTPS 入口和网络边界
+
+两个 launcher 自身提供明文 HTTP：persistence 使用 Uvicorn socket，Exchange 使用标准库 `ThreadingHTTPServer`。默认只绑定 loopback，未配置证书、hostname、CA、firewall 或公网监听。独立 vLLM 默认也只提供本机 HTTP。
+
+第二台设备或远程 Navigator 所用的受控 HTTPS relay/reverse proxy 负责外部 bind、hostname、TLS certificate、受信 CA、HTTP 到 loopback 的转发；负责 firewall/allowlist、origin 策略及将 guest/device 限制到指定 backend port；也负责公布 HTTPS URL 和证书轮换。
+
+后端仍须各自执行 bearer authentication 和 Workspace 检查；relay 不能靠信任请求 JSON 自报 actor/workspace 来取代后端 authority。Navigator 使用系统 CA 验证，不能使用 `SkipCertificateCheck` 或关闭 TLS 验证。relay 私有命令和证书路径属于部署环境，不能从两个 launcher 源码推断，因此本文不指定。
+
+## Alpha 边界
+
+- 这是 persistence、Exchange Product、Platform CES/resolver、Official connector 与独立 vLLM 的受控组合，不是统一控制面板。
+- Reactor 仍拥有 Deployment、Loaded Model 和 Endpoint readiness。本文件里的 Product route 连接既有兼容端点，不等于 Reactor P1 验收。
+- Persistence principal 文件不构成 SSO/RBAC。完整 quota、cost、组织策略和密钥轮换仍属于后续 Workspace/Identity/Exchange 工作。
+- SQLite 路径、HTTPS relay、进程监管、备份和恢复策略由管理员负责；当前脚本不提供生产 HA、自动 GPU placement 或多节点调度。
+- 必须以真实服务响应、持久数据库和真实 provider/CES 路径复核成功状态。启动 banner 或 prompt accepted 不等于模型回答、部署或端到端可用。

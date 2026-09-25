@@ -557,3 +557,479 @@ P0-GATE 通过后，Navigator 的长期路线正式以 DeepSeek Harness Profile/
 继续自研通用 Harness Runtime；随后按本文 Phase 1→Phase 2→Phase 3→Phase 4 顺序推进真实
 模型消费、CUDA 训练、反馈闭环和企业多设备能力。当前 V8 证据不提前勾选任何后续阶段或最终
 Text Model Lifecycle V1 gate。
+---
+<!-- Chinese Translation / 中文翻译 -->
+
+# Cyrene 文本模型生命周期 V1
+
+> **中文主计划：** 将 Cyrene 从基础设施基线推进为可真实使用、开放且不强制绑定的文本模型生命周期工具。本文持续维护实施计划与验收清单；完成度以稳定检查 ID 和证据记录表示。
+>
+> **英文摘要译文：** Cyrene V1 为 Catalyst、Yield、Reactor、Exchange、Navigator 和 Echo 提供开放且可独立使用的生命周期。首个交付范围仅包括 Linux NVIDIA CUDA 节点上的文本大语言模型；Navigator 转向以 DeepSeek Harness 为基础前，必须先完成采用证明。产品权威仍归 Cyrene；开源组件作为可替换引擎或插件。
+
+## 0. 文档控制
+
+| 字段 | 值 |
+| --- | --- |
+| 计划 ID | `CYRENE-TEXT-LIFECYCLE-V1` |
+| 当前状态 | 正在实施：限定范围内的 Phase 0 组件检查有 30/32 项具备 Actual PASS 证据；P0-12、P0-29 和 P0-GATE 尚待完成 |
+| 基线权威 | Workspace `origin/main`，提交 `eb5fb2cf1af5c3dd0cbadbe6167bc388b643e318`（2026-09-05）；Product contract registry 仍位于 `governance/product-contract-v1/` |
+| 实施分支 | 用户已授权从 Workspace `main` 基线向 Develop 推进实施；本计划维护在任务分支上 |
+| 运行时范围 | Linux 执行节点、NVIDIA GPU、CUDA；Navigator 采用证明也支持 Windows 桌面客户端 |
+| 模型范围 | 仅文本大语言模型；首条训练路径使用现有 LLaMA Factory 运行时执行 SFT + LoRA/PEFT |
+| 服务范围 | vLLM 是 Reactor 的首个服务引擎 |
+| Harness 证明固定版本 | `dsh-v0.1.3-alpha.1` / `d347e703908d0406b7a7ef80e3a0e594d86b2215` |
+| 上游参考 | [DeepSeek Harness 固定版本源码树](https://github.com/deepseek-ai/deepseek-harness/tree/d347e703908d0406b7a7ef80e3a0e594d86b2215) |
+| 进度 | 限定范围内 Phase 0 检查通过 30/32 项；P0-12、P0-29、P0-GATE 以及所有后续阶段门槛仍待完成 |
+
+### 0.1 本文的用途与边界
+
+本文将目标拆解为可执行工作和可复核证据，并不声称当前代码已实现这些功能。用户已授权开始实施；以后每项代码变更都必须更新对应检查 ID 的证据。
+
+当前 Workspace 主分支是基础设施和 Product contract 的全绿基线。全绿只说明已声明的仓库检查在各自覆盖范围内通过，不表示真实 CUDA 训练、真实模型加载、真实桌面安装包、真实远程恢复或完整生命周期已经通过。本计划将这些真实行为单独列为 Actual PASS。
+
+### 0.2 基线观察
+
+以下是启动计划时主分支上的事实，仅用于说明工作起点和缺口，不代表新功能通过验收：
+
+| 领域 | 当前证据 | 对计划的影响 |
+| --- | --- | --- |
+| Workspace | `README.md`、`repositories.yaml` 和 Product contract registry 描述多仓库拓扑与边界 | 所有跨仓库资源必须通过规范契约、ArtifactRef 或 Product API 交接 |
+| Catalyst | 已有 Dataset/DatasetVersion、JSONL 到 Parquet 的 DuckDB 参考处理端口和本地 CAS；完整清洗、字段映射、审核、去重、拆分和反馈整理仍需产品化 | Phase 2/3 必须先落实可审核的 DatasetVersion 和可导出的训练输入 |
+| Yield | 已有 TrainingSpec、LLaMA Factory adapter、preflight/tiny-dry-run、checkpoint/output lineage 和本地生命周期模型；默认执行路径及 Kernel 实时权威尚未证明真实 CUDA 训练 | 不得把 fake executor、tiny checkpoint 或兼容接缝当成真实 CUDA 验收 |
+| Reactor | 已有 vLLM runtime adapter、Deployment/Endpoint 产品端口和 reference server；真实模型下载、GPU 加载、健康检查和推理链路仍需端到端验证 | Phase 1 只有在真实模型首次推理后才可报告 ready |
+| Exchange | 已有持久化 route、Platform resolver/CES worker 连接和流式基础；首版协议仍需端到端补齐 tools、tool results、取消、usage、认证和路由证据 | Navigator 采用证明必须经过 Exchange 完整的 tool continuation；普通 chat 不足以通过 |
+| Navigator | 当前产品端主要是无头、只读的 Workspace snapshot；旧 Tauri/Rust 客户端有可复用的 session、agent、import 能力，但不再是新权威 | Phase 0 必须建立 DeepSeek Harness Profile/Bundle、Cyrene persistence backend 和新的 Conversation/AgentRun 产品语义 |
+| Echo | 已有本地 SQLite、EvaluationSuite/Run/Result/GateDecision 和确定性 JSONL evaluator；真实模型/会话评估及 Inspect adapter 仍待接入 | Phase 3 保留用户对反馈的选择权，不得自动把所有失败样本送回训练 |
+| Platform | 已有 Execution Fabric、Node/Runtime Agent、Placement、Lease/Fence、Artifact Transfer、Workspace Fabric 等通用基础 | Platform 继续拥有设备、执行和 Artifact 权威；产品不得另建 GPU scheduler 或资源真源 |
+| Plugins | Official catalog 已具备 provider/agent/runtime 契约方向，但训练与服务引擎 catalog 仍需实际绑定和发布 | 优先采用成熟现有运行时；新增插件必须具备 allowlist、版本和来源证据 |
+
+历史 Alpha 契约将 Navigator MVP 定义为 WorkspaceSnapshotPresentation。V1 已接受的边界演进记录在 [Navigator Harness authority](../../governance/product-contract-v1/navigator-harness-v1.md)：Navigator 拥有 Conversation 和 AgentRun 产品语义。registry 中已合并提交的历史证据继续保留以供追溯；新实现另行验收。
+
+## 1. 产品结果
+
+Cyrene V1 的首条真实用户路径是：用户将数据整理为 DatasetVersion，在 NVIDIA CUDA 节点训练文本模型，得到可部署的 ModelVersion，启动 vLLM Endpoint，通过 Exchange 使用模型，在 Navigator 中进行 Chat/Agent/Tool 会话，再将选定会话交给 Echo 评估、交给 Catalyst 整理，并开始下一轮训练。
+
+```text
+Catalyst：导入、预览、整理数据并生成 DatasetVersion
+  → 发送给 Yield：TrainingSpec、CUDA SFT LoRA、Checkpoint、ModelVersion
+  → 发送给 Reactor：Deployment、vLLM、Endpoint
+  → 发送给 Exchange：Route、Chat API、Streaming、Tool Calls、Usage
+  → 在 Navigator 中打开：DeepSeek Harness Profile、Conversation、AgentRun、Approval
+  → 发送给 Echo：评估、比较、选择反馈
+  → 返回 Catalyst：DatasetVersion v2
+```
+
+这是开放闭环，而非封闭流水线。每个产品都必须能独立进入、运行和导出：Import 将外部资源导入产品；Export 以可携带格式导出产品资源；Open in 在另一个产品中打开只读引用或当前资源；Send to 则由用户明确触发一次携带资源引用的交接。
+
+任一交接箭头都可以跳过、替换，或由外部工具承担：
+
+| 产品 | 拥有的资源 | 可独立进入 | 可独立退出 |
+| --- | --- | --- | --- |
+| Catalyst | Dataset、DatasetVersion、来源/lineage、Schema、Split、QualityReport、TransformationRecipe、TrainingCandidate | 导入 JSONL/Parquet/外部 DatasetVersion | 导出标准 JSONL/Parquet、训练候选和 lineage |
+| Yield | TrainingRun、TrainingSpec、TrainingAttempt、Checkpoint、Training Result、ModelVersion | 导入 DatasetVersion、外部 JSONL 或模型基座 | 导出 TrainingSpec、checkpoint、合并模型和 ModelVersion manifest |
+| Reactor | Deployment、已加载模型的观察信息、服务生命周期、Endpoint | 直接部署外部 Hugging Face ModelVersion/模型目录 | 导出 Endpoint 连接信息、Deployment manifest、运行状态和日志引用 |
+| Exchange | Route、API Credential、Usage、Quota、请求路由、协议兼容性 | 连接 Reactor Endpoint 或任意受支持的外部 Provider/Endpoint | 导出兼容 OpenAI 的 endpoint/config 和 usage/audit reports |
+| Navigator | Conversation、AgentRun、Tool Approval、Session 导入/分享、客户端体验 | 通过 Exchange、直接连接外部 Provider、导入外部 Harness 会话 | 导出 conversation/session/分享引用；发送至 Echo/Catalyst |
+| Echo | EvaluationRun、EvaluationSuite、EvaluationResult、Comparison、GateDecision、FeedbackSet | 导入会话、模型、Endpoint 或外部结果 | 导出评估报告和用户选择的 FeedbackSet |
+
+Navigator 采用证明中的模型请求必须经过 Exchange，以证明 Cyrene 统一认证、路由、tool call continuation 和 usage 链路；这不改变 Navigator 将来可以直接连接外部 Provider 的产品能力。外部 Provider 是 Navigator 合法的独立入口；Exchange 是采用证明和 Cyrene 托管模型的统一入口。
+
+## 2. 权威边界与整体架构
+
+### 2.1 产品权威
+
+| 权威主体 | 拥有 | 不应拥有 |
+| --- | --- | --- |
+| DeepSeek Harness | Agent Loop、Tool Call 生命周期、Session event model、通用 Approval/Skill/Workflow/Plugin runtime、主要 Harness UI 基础 | Cyrene 组织/身份真源、GPU/Artifact 权威、第二套可写 Session 数据库 |
+| Navigator | Conversation、AgentRun、客户端共享体验、会话导入、审批呈现、团队/多设备恢复语义、Send to 交互 | DatasetVersion、TrainingRun、Deployment、Route、Platform Operation 生命周期真源 |
+| Cyrene Workspace / Identity | User、Organization、Workspace membership、device identity、SSO/OIDC、RBAC、plugin governance | Agent loop、训练器内部状态、模型推理协议的业务实现 |
+| Exchange | 模型路由、Provider authentication、Gateway API、Usage/Quota/Cost/Audit、协议适配 | Reactor Deployment、Provider package identity、secret plaintext、Conversation message history |
+| Platform | 设备登记、GPU/资源发现、Placement、Execution、Lease/Fence、Artifact bytes/transfer | Product lifecycle、Conversation、Route、Dataset/Training/Evaluation 语义 |
+| Catalyst | Dataset、DatasetVersion、lineage、schema/split/quality/recipe、TrainingCandidate、反馈整理 | Trainer process、GPU 权威、ModelVersion bytes 的运行时加载 |
+| Yield | TrainingRun、TrainingSpec、Checkpoint、Training Result、ModelVersion 发布决定 | GPU scheduler、Node/Lease 权威、trainer process 权威、Artifact bytes 本身 |
+| Reactor | Deployment、Loaded Model、服务生命周期、Endpoint | GPU/Node 权威、模型 bytes、gateway route policy、Conversation |
+| Echo | EvaluationSuite、EvaluationRun、EvaluationResult、Comparison、GateDecision、FeedbackSet | Dataset/Training/Deployment 权威、会话写入真源、provider secrets |
+
+边界规则如下：
+
+1. Product domain state 与 Platform Kernel operation state 分离。PID、Lease、worker、package binding 或单个事件都不能单独证明 Product ready/success。
+2. Artifact bytes 与 Product metadata 分开。跨产品优先传递规范 ArtifactRef、manifest、resource URI/version；目标产品若需离线使用，必须支持可验证的导出包。
+3. Deployment、Endpoint 和 GatewayEndpoint 是不同资源。Reactor 决定 Deployment/Endpoint；Exchange 决定对外 Gateway 发布；Navigator 只消费经过授权的来源。
+4. Node Agent、Runtime Agent、worker 和 executor 是不同角色。产品通过 Platform port 请求执行，不得另建 GPU 权威。
+5. 跨产品 CloudEvents 是通知；消费者根据 resourceUri 和 resourceVersion 回读 owning API。Harness Session events 是本产品的持久化记录模型，由单一 Cyrene persistence backend 按序保存。二者不能混为同一种权威。
+6. Navigator 显示的 Token estimate 可以是估算；真实 Usage、Cost、Quota 和归属以 Exchange 请求记录为准。
+
+### 2.2 平面划分
+
+整体由 Product plane（Catalyst Dataset、Yield Training、Reactor Serving、Echo Evaluation、Exchange Route/Usage、Navigator Conversation/AgentRun）、Common platform plane（Workspace/Identity、Device、Placement、Execution、Lease/Fence、ArtifactRef/transfer/integrity、audit 和 trace context），以及 Harness plane（DeepSeek Profile 与 Cyrene session）和 Model data plane（vLLM/Exchange、Chat/Tool/Usage）组成。产品通过引用和命令连接公共平台；事件只是通知。
+
+共享资源选择器只展示已加入 Workspace、且当前用户有权查看和使用的 Compute/Artifact/Endpoint；它不会把六个产品合并成一个控制面板。即使其他产品不在线，各产品仍可 Import、Export、Open in 或使用外部资源。
+
+### 2.3 规范资源交接
+
+优先复用 Workspace/Platform 现有 schema 和 API，不为每个产品复制 ID：
+
+| 资源 | 规范所有者 | 交接规则 |
+| --- | --- | --- |
+| ArtifactRef、artifact manifest、完整性、lineage | Platform Artifact plane | 使用 `artifact://sha256/<hex>` 和完整 digest/size/kind；目标产品回读并校验，URI 本身不代表拥有 bytes |
+| DatasetVersion、training candidate | Catalyst | Yield 引用不可变版本；处理 recipe、source、split、quality report 必须可追溯 |
+| TrainingSpec、TrainingRun、Checkpoint、ModelVersion | Yield | ModelVersion 包含 base model、adapter/merged weights、tokenizer/chat template、runtime compatibility 和 lineage |
+| Deployment、Endpoint | Reactor | 只有真实模型加载并成功推理后才可标记 ready；Endpoint 不能替代 Deployment |
+| GatewayRoute、GatewayEndpoint、Usage | Exchange | Navigator 采用证明中的所有托管模型请求都从此进入；外部 Provider 仍可由 Navigator 独立连接 |
+| Conversation、AgentRun、Session events | Navigator + Cyrene persistence backend | Harness 事件是 session 记录模型；Navigator 产品 metadata 另存，message history 不得有第二个可写真源 |
+| EvaluationRun、EvaluationResult、FeedbackSet | Echo | 评估结果可导出；只有用户明确选择的 feedback 才交给 Catalyst |
+
+每次 Send to 都应记录来源资源 URI/version、目标动作、发起用户、权限决定、输入 artifact digest、目标 Product response URI 和 idempotency key。交接失败必须保留可诊断的 RFC 9457 Problem Details 或产品原生数据面错误。
+
+## 3. 完成度与证据协议
+
+### 3.1 三种完成状态
+
+每个检查 ID 必须分别记录以下三个层级：
+
+| 层级 | 含义 | 是否足以勾选 `[x]` |
+| --- | --- | --- |
+| `CODE_COMPLETE` | 实现、配置、迁移或打包产物已落盘，且可通过代码审查定位 | 否 |
+| `LOCAL_TEST_PASS` | 在目标仓库声明的本地环境执行了有针对性的测试/静态检查 | 否 |
+| `ACTUAL_PASS` | 在真实跨进程、真实硬件、真实安装包、真实身份或真实恢复场景完成该 ID 的验收 | 是，但必须具备完整证据 |
+
+单元测试、fake peer、fake executor、模拟 GPU、只有 HTTP 200、只有 package binding、只能在开发机启动，都不能单独构成 ACTUAL_PASS。某项若不需要真实硬件，其验收说明必须写明可替代的真实边界。
+
+### 3.2 证据记录
+
+勾选检查 ID 时，必须在该项下或所链接的验收报告中填写所有字段；有空字段就不得勾选：
+
+```text
+<CHECK-ID> 的证据
+- Commit / PR：精确提交、PR 或不可变 artifact digest
+- Commands：精确命令、配置和测试选择
+- Result：通过/失败、数量、endpoint/session/model 标识
+- Environment：OS、CUDA、driver、GPU/VRAM、runtime 版本、身份拓扑
+- Limitations：已知缺口、跳过场景、凭据或外部服务阻塞
+```
+
+证据至少包含：精确 commit/PR 或不可变制品 digest（不能只写分支名或 latest）；完整命令、配置、测试选择和退出结果；OS、CUDA、driver、GPU/VRAM、模型/数据 artifact、服务拓扑等真实环境；资源 ID、Session ID、Deployment/Endpoint、Usage 或 trace ID；限制、失败、重试、未覆盖项及是否属于环境阻塞；依赖远程 CI 时，区分 LOCAL_ACCEPTANCE、REMOTE_CI_BLOCKED 和 CANONICAL_PENDING。
+
+### 3.3 更新规则
+
+1. 代码落盘时只更新对应 ID 的 CODE_COMPLETE，不勾选主复选框。
+2. 局部测试通过时只写 LOCAL_TEST_PASS 和命令结果，不得用把测试名称改成 PASS 来掩盖集成缺口。
+3. 只有 Actual PASS 的真实证据完整后，才能把 `[ ]` 改为 `[x]`，并填写日期、环境和限制。
+4. 阶段总项只有在所有必选 ID 和阶段 gate 均通过后才能勾选。
+5. 代码、上游 pin 或环境变化，或证据失效时，应将相关检查恢复为 `[ ]` 并解释原因。
+6. 失败和阻塞不勾选；用 BLOCKED 或 FAILED 状态及证据说明。不得通过 continue-on-error、跳过测试、fake lifecycle 或静默 fallback 制造绿色结果。
+
+### 3.4 已知环境证据
+
+本机 WSL2 可访问 NVIDIA RTX 5070 12 GB，并能运行真实 Windows PowerShell。DeepSeek Harness 精确源码、pnpm 11.7.0 frozen install 和 Linux official build 已完成；该预发布版本尚未发布到 npm，因此使用固定源码构建。上游来源审计结果为 Core patches = 0。
+
+真实 vLLM 0.25.1 已加载固定 revision 的 Qwen3-4B-Instruct-2507 并通过 health；这只是 Phase 0 的外部 Provider 环境，不是 Reactor/Platform 部署验收。WSL 使用 loopback rendezvous、V1 Model Runner、非 FlashInfer sampler 和带开发头文件的 Python 3.12.11，未修改 vLLM 源码。
+
+当前组件验证包括：Python persistence 最新全仓测试为 17 passed（早期证据中的 13 passed 已过期）；真实上游 TypeScript、Rust stdio、Codex import/continue 和 Web Profile 集成已有通过记录；独立 Native Rust 为 18 passed。Navigator persistence boundary 集成在 `bc0dd31fb81d50b5b61398cd72f8f017f658a82b` 上的 4 项测试全部通过，覆盖崩溃/重启、丢 ACK 后重连、append 前故障以及历史 Tool 结果安全重放边界。真实 Web Profile 已完成模型→Rust Tool→模型续答，并完成 Session 保存、列出、恢复及服务重启后的读取；实时流证据包括 119 个 assistant frames、87 个文本增量和持久化事件。Navigator Product metadata 已在 `c53e9db6957bc260f89d060620ca9c3967f405dc` 稳定落盘，真实服务测试证明 owner/workspace 与唯一可写 event log 分离；旧记录迁移时未知 owner 继续保持未知，新 Session 使用可信 creator/owner。Product route 已具备真实成功 usage、认证拒绝、失败终态、取消时 unknown usage、通过 X-Request-Id 合并回读及 gateway 重启后台账保持的证据，因此 P0-11 达到 Actual PASS；取消 latency 尚未测量，P4 的 Cost/Quota/RBAC/SSO 扩展仍属于后续范围。Windows V8 最终安装包已在干净 guest 和 host 安装，完成真实 Rust Tool→模型续答、持久化恢复、旧 writer fencing、服务故障后的 retained input 恢复及正常关闭清理；P0-17、P0-21、P0-28、P0-31 已在各自声明范围内达到 Actual PASS。第二客户端证据来自隔离 Windows VM，不等于第二台物理 GPU 节点；P4-02/P4-05 仍需真实多节点证据。P0-29 的同一 V8 升级失败诊断尚未完成，P0-12 仍跟踪独立外部 Provider 入口，P0-GATE 保持未通过。V7 证据、VCRUNTIME140.dll 失败以及 billing/spending-limit 阻塞的 hosted CI 仍保留在当前证据报告的历史段落中。当前证据见 [Phase 0 证据（2026-09-06）](evidence/2026-09-06-phase-0.md)，旧记录见 [历史证据（2026-09-05）](evidence/2026-09-05-phase-0.md)。
+
+### 3.5 当前证据增量（2026-09-06）
+
+本节只更新当前摘要，不改写既有历史证据。当前 Phase 0 组件检查 30/32 项达到 Actual PASS；P0-12、P0-29 和 P0-GATE 仍未完成。P0-17 的第二客户端证据来自隔离 Windows VM，不等于第二台物理 GPU 节点。
+
+- Navigator V8 source `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` 由正式脚本构建，使用 97 个精确 committed inputs，无未提交变更、无 skip flags、上游 Core patches = 0。NSIS package SHA-256 为 `792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90`；安装后的 desktop executable SHA-256 为 `0acf4412a424c91139dcc23fd943491fb168f5a932f6a34e902bb6618f19bcd1`。
+- V8 clean guest 和 host 均完成安装；installed Windows native quality 为 14/14，失败和跳过均为 0。V8 静态 CRT 且 clean guest 不依赖 `VCRUNTIME140.dll`，消除了旧 V7 运行时依赖阻塞，支持 P0-28 范围内的 Actual PASS。
+- Clean guest 的真实 GUI proof 完成 Rust Tool→模型续答；持久化结果从 53 增至 67 events、从 3 增至 4 Tools、Exchange requests 从 52 增至 54。Guest 明确 takeover 后 Host 旧 writer 的 append 被拒绝；完整 backend snapshot 复核仍为 67/4/54，实际台账字段为 `requestId`。
+- Guest persistence service 故障/重启、明确 takeover、旧 writer fencing 和 retained input recovery 均已完成：service fault 后数据库保持 68 events、4 Tools、54 requests；第三次启动时明确 takeover，Restore input 恢复原文且 history 不变；用户明确 Send 后达到 77 events、4 Tools、55 requests，收到 durable receipt 后 retained input 归零。
+- V8 主窗口正常关闭两次均通过：guest receipt 为 925 ms、9 个 owned processes，原 CDP/Harness listeners 均归零；第二次主窗口关闭用时 868 ms。两次都只向可见主窗口投递关闭消息；旧 V7 遍历内部消息窗口和强制清理的记录仍作为历史失败保留。
+- P0-29 仍未完成：已有 V8 clean guest 首次启动/安装及正常退出/重启证据，但同一 V8 包的升级失败诊断还没有真实证据。Hosted CI 的 billing/spending-limit 阻塞继续单独归类，不把未执行 jobs 写成 source green。
+
+详细哈希、命令和限制见 [Phase 0 当前证据增量](evidence/2026-09-06-phase-0.md#current-evidence-delta)。最终后端已从固定 Exchange/Platform/Plugins 提交重新启动，并使用同一 V8 Guest 完成 Tool 与 Usage 复验。完整版本组合和同事连接说明见 [V8 交接](handoff/cyrene-navigator-v8/README.md)及[后端冻结证据](evidence/2026-09-06-phase-0.md#v8-frozen-backends-and-handoff)。
+
+## 4. Phase 0 — Navigator 采用证明
+
+### 目标
+
+回答一个可验证的问题：**DeepSeek Harness 能否在不维护第二套 Session 真源、不过度修改上游 Core 的前提下，成为 Navigator V1 的上游 Agent Runtime、Session、Tool、Plugin 和主要交互基础。**
+
+Phase 0 通过前，Navigator 保留当前实现作为对照；通过后，停止继续自研通用 Agent Loop、Session engine、Tool lifecycle 和 plugin manager，只实现 DeepSeek Harness 缺失或不适合企业场景的差异化能力。
+
+### 4.1 固定上游
+
+- [x] **P0-01 — 固定精确上游版本：** 锁定 `dsh-v0.1.3-alpha.1` 和提交 `d347e703908d0406b7a7ef80e3a0e594d86b2215`，记录 package lock、构建工具链、依赖 digest、Bundle 版本及来源。参见[固定来源证据](evidence/2026-09-06-phase-0.md)和[历史固定来源证据](evidence/2026-09-05-phase-0.md)。
+- [x] **P0-02 — 可复现的上游构建：** 在 Linux 开发环境和 Windows packaging 环境分别依 lock 重建，证明依赖没有漂移，失败时 fail closed。2026-09-06 限定范围 Actual PASS：Linux 使用 exact Node 24.13.0、pnpm 11.7.0 frozen install 和 official build，退出码为 0，upstream Core patches = 0。最终 V8 source receipt 记录 97 个精确 committed inputs，无未提交文件、无 skip flags。Linux 证明文件 `linux-v7-upstream-rebuild-20260906.json` 的 SHA-256 为 `c970c0330cc1ac63c53c873b1642cf71e3465a42492fd666acbac169f8c66270`。此项证明上游构建路径和版本已冻结；Windows package 可安装性由 P0-28 单独验收。
+- [x] **P0-03 — Core 补丁审计：** 对上游 Core 变更做不可变 diff 审计，目标为 `UPSTREAM_CORE_PATCHES = 0`。如有补丁，必须记录理由、影响、是否可上游化及移除条件。2026-09-06 固定源码审计结果为 0，见 [Phase 0 证据](evidence/2026-09-06-phase-0.md)。
+- [x] **P0-04 — 兼容性台账：** 记录上游 Session v2、SessionHandle、单写者锁、flush 语义、历史加载性能限制及已知兼容风险；未经验证的上游承诺不得写成 Cyrene guarantee。见[兼容性台账](evidence/2026-09-06-phase-0.md#compatibility-ledger)。
+
+### 4.2 Profile / Bundle / 插件策略
+
+- [x] **P0-05 — Navigator Profile：** 在 cyrene-navigator 中建立独立 Profile/Bundle，固定上游 runtime、UI extension、配置覆盖入口和构建产物布局。Linux 真实启动时默认 preset 为 `cyrene-navigator`，见[Profile 与 Bundle 证据](evidence/2026-09-06-phase-0.md#profile-and-bundle)。
+- [x] **P0-06 — Bundle 清单：** Phase 0 固定并审计实际加载插件、来源、版本及默认禁用项。企业动态插件 allowlist、签名、管理员策略和版本治理属于 P4-13，不得提前作为采用证明的前置条件。见[实际 Bundle 清单](evidence/2026-09-06-phase-0.md#profile-and-bundle)。
+- [x] **P0-07 — 禁用默认项：** 通过配置关闭不适合 Navigator 的默认本地 session log、未经 Exchange 管理的默认路由、未治理的 telemetry 或插件入口；必须以启动日志/诊断证明关闭行为，不能只隐藏 UI。Profile 诊断记录 JSONL persistence、telemetry、默认 DeepSeek route 和 title LLM defaults 均已禁用；企业 allowlist 仍属于 P4。
+- [x] **P0-08 — Cyrene 扩展边界：** Profile 只注册 Exchange、Workspace/Identity、persistence、usage/audit、conversation import、native bridge、Send to 和 UI extension；不把 Cyrene Product 生命周期塞进 Harness Core。2026-09-06 限定范围 Actual PASS：Profile authority proof 为 `PASS`，上游 Core patches = 0。V7 authenticated inventory receipt（SHA-256 `108091f7f818f6e25ea31a2329e5391e26cc73ca368e65803110b83f722416c3`）记录 155 个 host entries，其中 6 个 Cyrene host entries active、4 个默认项已禁用；默认 `cyrene-navigator` preset 的 active compaction row 是 `@cyrene/navigator-harness/compaction`。Browser delivery extension 单独计数。企业 plugin allowlist、签名和管理员版本治理仍属 P4，本项不提前覆盖，见[Profile 与 Bundle 证据](evidence/2026-09-06-phase-0.md#profile-and-bundle)。
+
+### 4.3 Exchange 路径
+
+采用证明中的模型请求必须经过 Exchange。Navigator 直接连接外部 Provider 是后续和日常使用所允许的独立能力，但不能替代证明所要求的 Exchange 路径。
+
+- [x] **P0-09 — Exchange 流式聊天：** Harness 发起真实 streaming chat；请求、首 token、结束、错误和 usage 均能关联到同一 request/trace ID。真实 Exchange 证明的帧、增量、请求 ID、usage 和终止事件见[流式证据](evidence/2026-09-06-phase-0.md#exchange-streaming-and-tool-continuation)。
+- [x] **P0-10 — Exchange 工具续答：** 完成真实 Tool Call → Tool execution → Tool Result → model continuation；顶层 tools、tool choice、结构化参数、结果关联及流事件在 Gateway 全链路保真。真实 `cy-manifest` Tool 及匹配的 Tool Result 已被模型消费并用于续答，见[流式/工具证据](evidence/2026-09-06-phase-0.md#exchange-streaming-and-tool-continuation)。
+- [x] **P0-11 — Exchange 取消/认证/用量：** 真实取消能停止下游生成并返回可判断状态；认证、权限、token/usage 记录和失败审计可回读；取消后不得重试成另一条模型请求。2026-09-06 Actual PASS：真实 Product route 证明两条成功请求的 provider usage 与 request ID 精确对应，未认证审计读取返回 401；真实 provider 失败 HTTP 502 可通过响应 `X-Request-Id` 经受认证 API 回读为 `failed`；plain streaming 取消回读为 `cancelled` 且 usage 为 `unknown`（不是 0），没有重试；gateway 重启后四条台账及 Endpoint/Route identity 保持，且会话可继续。取消 latency 尚未测量；P4 的 Cost/Quota/RBAC/SSO 不属本项，见[取消子场景证据](evidence/2026-09-06-phase-0.md#cancellation-sub-scenario)和[Product route 台账切片](evidence/2026-09-06-phase-0.md#exchange-product-route-and-ledger-slice)。
+- [ ] **P0-12 — 隔离外部 Provider（在 P1-12 跟踪）：** Navigator 可通过独立配置连接一个外部 Provider，并明确标示其不经过 Exchange 的来源、usage owner 和权限边界；此入口不改变 Cyrene persistence 和 Navigator session authority。这是 V1 独立使用要求，不阻塞 Phase 0 Exchange 采用证明。
+
+### 4.4 Cyrene 会话持久化
+
+目标是让 Harness Session event model 写入 Cyrene persistence backend。Harness 本地数据库不能与 Cyrene 服务端数据库形成两套都可写的 message history 真源。
+
+- [x] **P0-13 — Persistence contract adapter：** 实现并版本化上游 SessionPersistence/SessionHandle 所需的 Cyrene backend adapter；保存原生 event、schema/version、source metadata 和 resource identity。见[持久化证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)及[历史接口证据](evidence/2026-09-05-phase-0.md)。
+- [x] **P0-14 — 只追加且有序：** 事件按序追加，支持 single writer、ordered append、幂等 batch/retry 和 flush barrier；分别记录 append 成功与 durable flush 语义。见[持久化证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)及[历史持久化证据](evidence/2026-09-05-phase-0.md)。
+- [x] **P0-15 — 重启恢复：** 重启 Harness 后正确恢复 Session、Conversation projection、AgentRun 状态和未完成 turn 边界；恢复只读取事件，不重新执行历史 Tool。第二个 Web process 接管、服务重启后恢复及后续新 turn 均已通过，见[恢复证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)。
+- [x] **P0-16 — Persistence service 重启：** 单独重启 persistence service 后 Session 内容和 writer ownership 不丢失；重启期间故障可诊断，且不会产生两个 writer。见[service kill/restart 证据](evidence/2026-09-06-phase-0.md#cyrene-persistence-and-recovery)及[历史证据](evidence/2026-09-05-phase-0.md)。
+- [x] **P0-17 — 多设备读取/接管：** 第二客户端设备使用已授权 Workspace identity 读取会话，并在明确 takeover 后取得 writer；旧 writer append 会被拒绝并返回可诊断冲突。2026-09-06 Actual PASS：隔离的干净 Windows VM 作为第二客户端，通过受控 Workspace identity 读取同一 Session；明确 takeover 后 epoch 前进，旧 writer 完整 backend append 复核时 event 数保持 67、Tools 为 4、requests 为 54。该 VM 只证明第二客户端设备，不是第二台物理 GPU 节点；完整组织 RBAC/OIDC 仍由 P4-08/P4-09 验收，见[V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+- [x] **P0-18 — Product metadata 分离：** 证明 Navigator metadata 与唯一可写 event log 的边界，并审计 owner/workspace。title、sharing policy、tags、permissions 和 audit projection 的完整产品体验在后续企业阶段继续实现，但不能复制可写 message history。真实服务迁移、trusted creator/owner 和 metadata boundary 测试已通过，见[Product metadata boundary 证据](evidence/2026-09-06-phase-0.md#product-metadata-boundary)。
+- [x] **P0-19 — 崩溃与重放边界：** 模拟 append 前后崩溃、重复 batch、断线恢复和读取较新 resourceVersion，证明事件重放既不执行历史工具，也不丢失或重排已提交事件。Navigator persistence boundary 的四项真实测试已通过；服务 SIGKILL 后未追加事件，原 writer 可恢复。未提交的失败发送草稿不属于 durable event；runtime crash 的 Reload 已改为提示用户关闭并重新打开；完整桌面恢复仍待复验，见[崩溃与重放边界证据](evidence/2026-09-06-phase-0.md#crash-and-replay-boundary)。
+
+### 4.5 Rust 原生桥接
+
+保留现有 Rust 能力，不改写为 TypeScript，不引入 Node Native Addon，也不把固定监听端口作为默认依赖：
+
+```text
+DeepSeek Harness
+      ↓
+thin Cordis Plugin
+      ↓ inherited stdio / versioned IPC
+Rust binary or cyrene-native-host
+```
+
+- [x] **P0-20 — IPC 协议：** 定义并实现 protocol version、request id、method、params、result、error、cancel、event；stdout 只传协议，stderr 传日志。Rust stdio 集成和协议测试已通过，见[Rust bridge 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
+- [x] **P0-21 — 进程生命周期：** Cordis plugin 能启动、握手、取消、超时、回收和重启 Rust child；异常退出映射为可见 Tool error，不把僵尸进程留给桌面端。2026-09-06 Actual PASS：V8 已安装包的 native integration 为 14/14（失败、跳过均为 0）；clean guest 完成真实 Rust Tool、错误/取消路径和模型续答。正常关闭验证记录 9 个 owned processes 在 20 秒内全部归零，原 CDP/Harness listeners 也归零。本项仅覆盖 native child lifecycle 与桌面回收，不扩展为 Phase 1 GPU 或完整企业恢复验收，见[V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+- [x] **P0-22 — 真实 Rust Tool：** 使用已有 Rust binary（优先 cy-manifest 或等价 Platform artifact utility）作为真实 Tool，由模型实际调用并消费结果，不能使用内存 fake。真实 `cy-manifest` 返回 Artifact manifest 后已由模型续答，见[真实 Rust Tool 证据](evidence/2026-09-06-phase-0.md#rust-stdio-bridge)。
+- [x] **P0-23 — Rust 错误/取消：** 验证非法参数、binary 不存在、stderr 日志、超时、用户取消、child crash、协议版本不兼容和大结果边界。2026-09-06 Actual PASS（明确的 native bridge 范围）：Windows 和 Linux native matrix 均为 13/13，覆盖上述错误、取消、崩溃、协议和输出边界。Windows UI 完整重启后 takeover 属于 P0-21/P0-31，不计入此项，见[Windows native matrix 证据](evidence/2026-09-06-phase-0.md#windows-native-matrix-and-desktop-sub-scenarios)。
+- [x] **P0-24 — 可移植性：** Linux 与 Windows 均通过 inherited stdio 工作；不要求固定监听端口；记录启动环境、路径、编码和权限。2026-09-06 Actual PASS（明确的 portability 范围）：Windows 和 Linux native matrix 均为 13/13。矩阵中一项检查只适用于 Windows Node pin，不能解释为 Linux 也覆盖 Node pin。报告记录 inherited stdio、动态本地传输和平台环境边界；桌面安装包 readiness 由 P0-02/P0-28 至 P0-32 单独验收，见[Windows native matrix 证据](evidence/2026-09-06-phase-0.md#windows-native-matrix-and-desktop-sub-scenarios)。
+
+### 4.6 外部会话导入
+
+- [x] **P0-25 — 真实 Codex fixture：** 导入至少一个真实 Codex 会话样本，保留来源标识、原始内容 hash/bytes、转换报告、分支关系及不支持内容说明。真实 Codex CLI 0.152.1 样本的来源字段、bytes/hash 和 conversion report 已保存在 event log，见[Codex import 证据](evidence/2026-09-06-phase-0.md#codex-import-and-safety)。
+- [x] **P0-26 — 导入安全：** 导入的历史 tool call、approval、permission 和命令只作为历史事件/展示数据；不得自动执行、取得当前设备权限或进入新的执行队列。历史记录均为 `executable: false`；unknown content 保留且不触发执行，见[Codex import safety](evidence/2026-09-06-phase-0.md#codex-import-and-safety)。
+- [x] **P0-27 — 恢复语义：** 导入会话可作为只读历史打开；只有用户明确建立新的 AgentRun 后才继续，新 turn 的权限、模型和 Workspace 来源重新判定，见[Windows GUI 恢复证据](evidence/2026-09-06-phase-0.md#windows-codex-ui-resume)。2026-09-06 Actual PASS：Windows 安装包 GUI 完成 Codex 文件选择、只读预览、明确的“作为新会话继续”和 GUI 发送。新 Session `codex-continue-b6c7ca93-1450-4e2a-a196-1224c41b56f1` 记录 32 events；新 AgentRun 边界为 seq 16，permission/sandbox/policy 分别在 seq 17/18/19 重新记录。导入历史的 2 个 Tool Call/Result 仅归档，`newToolExecutions=0`。真实 Exchange request `chatcmpl-b3246e9df7624e9c9b1f66e5da9cf199` 的 provider usage 为 6103/8/6111；trusted owner/workspace metadata 已回读。脱敏 proof JSON 位于 Navigator `.navigator/proof/windows-codex-ui-result.json`，SHA-256 为 `49ff09a5d7bb8bf54c8bf0ce03c8c251a218b20132fe8483a28ccdf779f70de2`。同一 Session 的 takeover、完整 permission projection 和 Windows recovery package 仍由其他检查项验收。
+
+### 4.7 Windows 桌面证明
+
+优先复用现有 Tauri shell 承载 DeepSeek Harness Web UI 和 Cyrene UI extension；桌面壳不得成为第二个 Session 真源。
+
+- [x] **P0-28 — 可复现安装包：** 生成可安装的 Windows 桌面包，含锁定版本 Harness/Profile、native host 和必要运行时，不依赖源码开发环境。2026-09-06 Actual PASS：Navigator source `a297d1cae54c5fbb8bffa68d748c59a9e7c1aabe` 使用 97 个精确 committed inputs 生成正式 NSIS 包（非 intermediate），SHA-256 为 `792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90`。clean guest 与 host 安装后的 desktop executable SHA-256 均为 `0acf4412a424c91139dcc23fd943491fb168f5a932f6a34e902bb6618f19bcd1`。V8 installed native quality 为 14/14，失败和跳过均为 0；静态 CRT 且 clean guest 无 `VCRUNTIME140.dll`。见[V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+- [ ] **P0-29 — 首次启动：** 在干净 Windows 环境安装、启动、退出并再次启动；网络、证书、配置目录、日志目录及升级失败均可诊断。V8 clean guest 已证明安装、启动、正常退出/重启以及证书/配置边界；同一 V8 包的升级失败诊断仍无真实证据，因此本项保持 `[ ]`，验收标准不变。
+- [x] **P0-30 — 桌面聊天/工具：** 安装包完成 Exchange chat、streaming、真实 Rust Tool、approval、错误和取消。2026-09-06 Actual PASS：最终 V8 NSIS digest `792d21adbbc2b95945dd61bfe43c68097a3d93d1f987dcb6e1cbc07687943a90` 完成 GUI 模型→Rust Tool→续答、审批、错误和取消；clean guest 持久化结果从 53 增至 67 events、3 增至 4 Tools，见[V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+- [x] **P0-31 — 桌面恢复：** 关闭/重启桌面端后从 Cyrene persistence 恢复 Session；验证 persistence service 重启、网络断开和拒绝旧 writer。2026-09-06 Actual PASS：V8 clean guest/host 完成正常关闭清理、服务故障后的 retained input 保存、重启后显式 takeover、旧 writer fencing 和再次启动后的明确 Restore。数据库先保持 68 events、4 Tools、54 requests；用户明确 Send 后达到 77 events、4 Tools、55 requests；durable receipt 到达后 retained input 为 0，历史 Tool 未重放。正常关闭两次分别耗时 925 ms 和 868 ms，9 个 owned processes 与 CDP/Harness listeners 均归零。本项使用隔离 Windows VM 作为第二客户端；P0-29 的升级失败诊断、P0-GATE 和后续企业能力仍分别待验收，见[V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+- [x] **P0-32 — 动态本地传输：** Harness UI server 若使用本地 HTTP，只使用系统分配的 loopback 临时端口或等价受监管通道；不写死 server 端口，也不要求手工配置。2026-09-06 Actual PASS（传输范围）：V8 clean guest/host 使用动态 loopback ports，启动和关闭由受监管 launcher 管理；V8 重启后仍可使用新端口并恢复。本项不覆盖 package reproducibility、干净 Windows 或桌面恢复，见[V8 Windows 安装与恢复证据](evidence/2026-09-06-phase-0.md#windows-v8-final-installed-and-recovery)。
+
+### 4.8 Phase 0 总门槛
+
+- [ ] **P0-GATE — 采用证明通过：** 固定上游及 Profile/Bundle、真实 Exchange streaming/chat/tool continuation、单一 Cyrene persistence、Harness/service 重启、第二客户端读取与 writer fencing、真实 Rust Tool、Codex 导入及 Windows 安装包均通过；`UPSTREAM_CORE_PATCHES = 0`，或每项例外均有完整移除记录。P0-12 在 Phase 1 验收；P0-06/P0-17/P0-18 的企业扩展在 Phase 4 验收，不提前将后续范围扩成 adoption 前提。
+
+只有 P0-GATE 通过后，才正式停止 Navigator 自研通用 Harness Runtime。若采用证明失败，先记录失败边界，再决定补充 Cyrene extension、向上游提交可移植改进，或暂时保留当前 Navigator；不能悄然 fork 成无法升级的第二套 Core。
+
+## 5. Phase 1 — 模型消费闭环
+
+### 目标
+
+先让用户能够使用一个已有的普通文本模型：ModelVersion/外部模型 → Reactor → vLLM → Endpoint → Exchange → Navigator。首版通过一张 NVIDIA GPU 完成真实消费路径；多节点资源体验放在 Phase 4。
+
+前置能力进度：共享 V2 目录 Artifact 契约和 Python provider 已在 Platform 提交 `1b0bb98253b9ca48cb56b6b3b73f2f53f6c81065` 上通过本地与 hosted 检查，详见[目录产物前置证据](evidence/2026-09-06-artifact-prerequisite.md)。随后 Linux Rust 目录落盘在 `30272145b9c11df9948465359479c3d95d08a1dc` 上通过 15 项单测、8 项集成测试及 CI。RuntimeAgent/Reactor/GPU 集成仍需单独验收；这些进展并未使下面的产品检查或阶段总门通过。
+
+- [ ] **P1-01 — 固定模型 fixture：** 选择可再分发且可验证的文本模型 fixture，锁定 revision、tokenizer、chat template、precision、context limit、license 和目标 GPU/VRAM。候选可评估 `Qwen/Qwen3-4B-Instruct-2507`，但验收前必须写入最终配置。
+- [ ] **P1-02 — 导入外部模型：** Reactor 可直接导入/引用外部 Hugging Face 模型或本地可验证模型目录，不依赖 Yield 在线运行。
+- [ ] **P1-03 — 选择算力：** Reactor 使用 Platform resource/placement port 选择一张已加入 Workspace 的 NVIDIA GPU；产品不保存独立 SSH/IP/GPU 权威。
+- [ ] **P1-04 — 启动真实 vLLM：** 通过 Platform execution 启动真实 vLLM，并传入 CUDA/device binding、model artifact、tokenizer/chat template 及受控 runtime config。
+- [ ] **P1-05 — 加载就绪：** 只有在 vLLM 真实加载目标模型、完成健康检查并成功返回一次推理后，Deployment 才能报告 ready。reference server 或 `served:<content>` 不能作为本项证据。
+- [ ] **P1-06 — Endpoint 生命周期：** Endpoint 与 Deployment 分离；完成 create/start/stop/restart/failed-load/cleanup，观察状态不能冒充实际进程状态。
+- [ ] **P1-07 — Exchange 路由：** Exchange 可将 GatewayRoute 指向该 Endpoint，并处理认证、模型名映射、超时、不可用和错误；route 不拥有 Reactor Deployment。
+- [ ] **P1-08 — Chat 与 streaming：** 真实客户端完成普通 chat、streaming、finish reason 和 prompt/completion usage；区分 usage 的真实来源与估算值。
+- [ ] **P1-09 — Tool 调用路径：** 真实 vLLM/模型/Exchange/Navigator 完成 tool call、tool result 和模型续答。若模型或 backend 不支持，必须明确返回 capability error，不能静默降级为纯文本。
+- [ ] **P1-10 — 取消：** Navigator 或 Exchange 取消请求后，vLLM generation、Gateway stream 和客户端 UI 均进入一致终态；不得错误地 fallback 到另一 Endpoint。
+- [ ] **P1-11 — 在 Navigator 中打开：** Reactor/Exchange 可通过 Open in 或 Send to 将 Endpoint/Route 交给 Navigator；Navigator 显示来源、权限和模型路由信息。
+- [ ] **P1-12 — 外部 Provider 独立连接：** Navigator 无需创建 Reactor Deployment 即可连接外部 Provider；该路径有独立的 provider credential、usage source 和错误边界。
+- [ ] **P1-GATE — 日常模型消费通过：** 在一张 NVIDIA GPU 上，从 external model 或 ModelVersion 到 Navigator chat 的真实路径完成 deploy、health、streaming、tool、cancel、usage、stop 和 restart；证据完整。
+
+## 6. Phase 2 — 真实训练闭环
+
+### 目标
+
+将 Catalyst 可审核的 DatasetVersion 交给 Yield，在 Linux NVIDIA CUDA 节点上使用现有 LLaMA Factory 完成真实 SFT + LoRA/PEFT，生成可部署的 ModelVersion，再交回 Reactor。
+
+### 6.1 Catalyst 数据路径
+
+- [ ] **P2-01 — 导入数据集：** 导入 JSONL/Parquet/标准外部数据，保留 source、digest、schema、license/provenance 和原始 artifact。
+- [ ] **P2-02 — 预览和映射：** 提供可检查的 preview、字段映射、消息格式校验、错误行报告和可重复的 TransformationRecipe。
+- [ ] **P2-03 — 转换与质量：** 支持清洗、去重、质量检查、敏感/无效样本标记及人工 review；失败行不得静默丢弃。
+- [ ] **P2-04 — 确定性拆分：** 生成可复现的 train/validation split，并记录 seed、规则、输入 digest 和样本数；训练过程不得自动覆盖评估 holdout。
+- [ ] **P2-05 — 发布 DatasetVersion：** 只有处理、review、integrity 和 lineage 均完整后才能发布 immutable DatasetVersion，并生成 canonical ArtifactRef。
+- [ ] **P2-06 — 导出/发送数据集：** 可导出标准训练文件，或通过 Send to Yield 传递 DatasetVersion URI/version、ArtifactRef、recipe、split 和 quality report；Yield 不写入 Catalyst 数据库。
+
+### 6.2 Yield 训练路径
+
+- [ ] **P2-07 — TrainingSpec 契约：** 明确 model base revision、dataset version、SFT format、LoRA/PEFT params、precision、sequence length、batch/accumulation、output policy、compute selector 和 cancellation policy。
+- [ ] **P2-08 — 规范算力准入：** Yield 通过 Platform 通用资源、Placement、Lease 和进程生命周期接口申请并监督执行，再直接调用实现 owner 的窄契约。旧 `training.engine.v1` 因没有真实 capability consumer 已删除；不启用私有 GPU scheduler，也不从 CUDA_VISIBLE_DEVICES 推断资源所有权。
+- [ ] **P2-09 — 真实 CUDA 预检：** 在目标节点验证 driver、CUDA、GPU UUID/VRAM、Python/runtime、model/dataset access、disk 和写权限；预检失败必须持久化到 TrainingRun。
+- [ ] **P2-10 — 真实 LLaMA Factory SFT LoRA：** 使用锁定版本 LLaMA Factory/现有 Yield adapter 启动真实 CUDA SFT + LoRA/PEFT；必须有真实 GPU utilization、进程、loss/progress 和 artifact 证据。
+- [ ] **P2-11 — 训练生命周期：** TrainingRun/Attempt 正确表示 queued/running/progress/failed/cancelling/cancelled/completed/awaiting_retry；Product state 与 Kernel operation、PID、worker state 分离。
+- [ ] **P2-12 — 取消并释放：** 用户取消后真实训练进程停止，记录终态、释放 Lease/GPU，并说明 failure/partial artifact；只设置 cancel flag 或杀掉本地 wrapper 不算通过。
+- [ ] **P2-13 — Checkpoint 与恢复：** 训练中生成可校验 Checkpoint；控制服务断开或重启后可按明确的 attempt/resume policy 继续，不重复发布同一 ModelVersion，也不损坏 artifact。
+- [ ] **P2-14 — 导出与 ModelVersion：** 完成 adapter/merged export、tokenizer/chat template/model manifest、base/dataset/checkpoint lineage 和 integrity；说明 QLoRA/adapter 部署是否需要 base model。
+- [ ] **P2-15 — 交给 Reactor：** 通过 Send to Reactor 部署真实 ModelVersion；只有模型真实加载并推理后，Reactor 才报告 ready。
+- [ ] **P2-16 — 禁止模拟验收：** 现有 tiny dry-run/fake executor 可用于开发回归；本阶段 Actual PASS 必须来自 NVIDIA CUDA、真实 LLaMA Factory process、真实 checkpoint、真实 restart/resume 和真实 inference。
+- [ ] **P2-GATE — 真实训练通过：** Catalyst DatasetVersion → Yield CUDA SFT LoRA → checkpoint/resume/export/ModelVersion → Reactor inference 的链路真实通过；所有输入/输出 digest、GPU、命令、状态和限制均有证据。
+
+## 7. Phase 3 — 反馈闭环
+
+### 目标
+
+有选择地把 Navigator 的真实 Conversation/AgentRun 交给 Echo，执行确定性或 Inspect evaluator、比较和失败分析；只有用户明确选择的 FeedbackSet 才送回 Catalyst 生成 DatasetVersion v2。
+
+- [ ] **P3-01 — 导出会话：** Navigator 可导出包含 source、model/route、tool/approval events、usage、timestamps、session/version 和 provenance 的会话包。
+- [ ] **P3-02 — 发送至 Echo：** Send to Echo 创建 EvaluationRun，并引用 Conversation、Endpoint/ModelVersion、suite、evaluator config 和 input artifact；不复制或拥有原会话。
+- [ ] **P3-03 — Evaluation runner adapter：** Echo 通过自身的 EvaluationExecutionPort 接入确定性 evaluator，并可选接入 Inspect AI adapter；evaluator 进程状态不能冒充 Echo EvaluationRun 权威。
+- [ ] **P3-04 — 真实评估：** 对真实 Conversation/Endpoint/ModelVersion 执行 expected score、custom scorer、trace/tool correctness 或 judge；记录逐样本日志、usage、错误和可复现配置。
+- [ ] **P3-05 — 比较：** 比较不同 ModelVersion、Endpoint、Route 或 EvaluationRun，展示样本差异、质量指标、成本/usage 和失败类别。
+- [ ] **P3-06 — 失败分析：** 用户可查看失败样本、原始输入/输出、tool event、judge explanation 和 provenance；任何自动裁剪或脱敏都必须可见且可重现。
+- [ ] **P3-07 — 选择反馈：** 用户在 Echo 中选择、修订或标注 FeedbackSet；GateDecision 不会自动变成“送回训练”。
+- [ ] **P3-08 — 导入 Catalyst 反馈：** Send to Catalyst 只发送所选 FeedbackSet 及原始/修订数据引用，并保留 Echo EvaluationResult、选择者、时间和原因。
+- [ ] **P3-09 — DatasetVersion v2：** Catalyst 根据反馈生成新 DatasetVersion v2，重新执行 preview、quality、去重、split 和 review；训练 holdout 与 evaluation holdout 必须明确隔离。
+- [ ] **P3-10 — V1/V2 闭环：** Yield 训练 v2、Reactor 部署 v2，Echo 使用同一套 suite 比较 v1/v2；用户可以决定是否发布或继续迭代。
+- [ ] **P3-GATE — 用户选择的反馈闭环通过：** 至少完成两轮真实会话/模型比较；反馈只有经用户选择才进入 DatasetVersion v2；v1/v2 评估和训练 holdout 可追溯，且没有自动全量回流。
+
+## 8. Phase 4 — 多设备与企业能力
+
+### 目标
+
+让 GPU 设备加入 Workspace 一次后，可由 Yield、Reactor 和其他获授权产品通过同一资源选择器使用；补齐生产身份、团队、usage、插件治理和恢复能力。
+
+```text
+我的 RTX 4090              Online / Idle / 24 GB
+办公 GPU Server             Online / Training / RTX 6000
+
+Yield    Compute：自动 | 我的 RTX 4090 | 办公 GPU Server
+Reactor  Compute：自动 | 我的 RTX 4090 | 办公 GPU Server
+```
+
+- [ ] **P4-01 — Workspace 登记：** 设备通过 Workspace/Platform enrollment 加入一次，生成 device identity、capability snapshot、owner/workspace membership 和撤销路径。
+- [ ] **P4-02 — 双节点清单：** 至少发现两台真实 NVIDIA CUDA Linux execution node，展示 GPU UUID/VRAM/CUDA/driver/状态，并能区分 offline、idle、training、serving 和 unknown。
+- [ ] **P4-03 — 共享资源选择器：** Yield 与 Reactor 使用同一授权资源选择器；用户可选择 Auto 或指定设备，产品不要求分别填写 SSH/IP/API server。
+- [ ] **P4-04 — Placement 与 lease：** Platform 为真实训练/服务创建正确 placement/lease/fence；同一 exclusive GPU 的冲突、排队、释放和失败重试状态可观察。
+- [ ] **P4-05 — 远程执行：** Yield 在远程 GPU 节点完成真实 CUDA training；Reactor 在另一台或同一台节点完成真实 vLLM serving；分别证明 control reachability 和 inference endpoint reachability。
+- [ ] **P4-06 — 离线与重连：** Node 或 control connection 短暂断开后，运行状态、artifact transfer、lease 和恢复策略符合声明；unknown 不得伪装为 completed/running。
+- [ ] **P4-07 — Artifact 可移植性：** 训练产物、模型、数据和评估包可通过 Artifact plane 跨节点传输、断点续传、校验并原子发布；损坏包会被拒绝。
+- [ ] **P4-08 — OIDC/SSO：** Workspace 用户、组织、设备和 service identity 分离；以真实证据验证 OIDC/SSO 登录、过期、撤销和多组织边界。
+- [ ] **P4-09 — RBAC：** 按 Workspace/Organization/user/service account 校验 Dataset、TrainingRun、Deployment、Route、Conversation、EvaluationRun、device 和 plugin 权限；默认拒绝。
+- [ ] **P4-10 — 团队共享：** Navigator Conversation/session sharing、takeover、审计和撤销可用；共享不得建立第二份可写 message history。
+- [ ] **P4-11 — Usage/成本归属：** Exchange 将请求、tokens、latency、provider/model/route、cost estimate/actual cost 关联到用户/组织/Workspace；Navigator 和其他产品只读取，不改写 Exchange usage 真源。
+- [ ] **P4-12 — API token/quota：** 为第三方程序和内部服务提供 scoped token、过期/撤销、quota/rate limit、错误和审计；token plaintext 不进入 Product metadata 或客户端日志。
+- [ ] **P4-13 — 插件治理：** 企业 allowlist、版本锁定、来源/hash、权限声明、启停、升级/回滚和不兼容诊断可用；Navigator Bundle 不得任意加载未经审查插件。
+- [ ] **P4-14 — 备份/恢复：** Product metadata、Cyrene persistence、Artifact references、Workspace membership、route/usage audit 和恢复点具备备份/恢复演练；恢复后权威与 writer 不分叉。
+- [ ] **P4-15 — 运维准备：** 在目标环境演练关键指标、trace、audit、告警、升级、凭据轮换、失败重试和数据保留策略。
+- [ ] **P4-GATE — 多设备企业能力通过：** 两台以上真实 GPU 节点、Workspace enrollment、共同资源选择器、远程训练/服务、OIDC/SSO、RBAC、usage/cost/audit、插件治理和备份恢复全部取得 Actual PASS。
+
+## 9. 横向质量门槛
+
+以下检查贯穿所有阶段，不替代阶段 gate；任意一项缺失都可阻止最终 V1 宣布可用。
+
+- [ ] **X-01 — 契约一致：** Product contract registry、Navigator Conversation/AgentRun authority、ArtifactRef、ModelVersion、DatasetVersion、Endpoint、GatewayRoute 和事件 envelope 的 owner/版本/兼容规则一致。
+- [ ] **X-02 — 产品独立运行：** Catalyst、Yield、Reactor、Exchange、Navigator 和 Echo 在缺少其他产品时，均能完成各自声明的 Import/Export/独立入口；只在确实需要的交接边界暴露失败。
+- [ ] **X-03 — 无隐式绑定：** 产品不默认硬编码其他产品数据库、SSH、IP、provider secret、PID、训练路径或本地 session store；所有跨产品依赖都可通过配置/授权/资源引用观察。
+- [ ] **X-04 — 幂等与顺序：** 创建、Send to、Import、Export、cancel、retry、resume、publish 和 route mutation 遵循 idempotency、resourceVersion 和 ordering 语义。
+- [ ] **X-05 — 如实呈现失败：** service restart、node disconnect、bad artifact、model load failure、permission revoke、quota、tool crash、provider timeout、client crash 和 stale writer 都有可判定终态或明确 unknown 状态。
+- [ ] **X-06 — 安全边界：** 检查 secrets、tokens、session events、tool approvals、device grants、artifact tickets 和 audit logs 的权限、加密/传输、脱敏、保留和撤销规则。
+- [ ] **X-07 — 可复现：** 上游 engine、model、dataset、plugin、CUDA/runtime、container/package、config 和命令都能以 exact version/digest 重建；没有未记录的 latest。
+- [ ] **X-08 — 可观测：** 每项跨产品操作可通过 resource ID、operation/attempt/session/request/trace ID 关联；日志、指标、审计和用户可见错误互相一致。
+- [ ] **X-09 — 导出可移植：** 每个产品的 Export 都能被同产品重新 Import，或被声明的外部工具消费；导出包含 schema/version/integrity/provenance 和限制说明。
+- [ ] **X-10 — 许可证与再分发：** 要打包或发布的上游/插件/模型/运行时 license、NOTICE、依赖来源和再分发限制均已审计；许可证缺口不能由 CI green 抵消。
+
+## 10. 最终用户旅程
+
+最终 V1 的成功条件是用户在声明的真实环境中亲自完成完整路径，且每个交接箭头都可替换或跳过。最终演练使用以下稳定检查 ID：
+
+- [ ] **V1-01 — Catalyst 导入：** 导入外部 JSONL/Parquet，并查看 preview、schema、mapping、quality、split 和 lineage。
+- [ ] **V1-02 — 发布数据集：** 发布 immutable DatasetVersion 和 ArtifactRef，导出结果并校验 digest。
+- [ ] **V1-03 — 发送至 Yield：** 明确发送 DatasetVersion，选择 Workspace Compute，并看到 TrainingSpec/TrainingRun。
+- [ ] **V1-04 — 训练：** 在真实 NVIDIA CUDA 节点执行 SFT + LoRA，并看到真实 progress/loss 和 GPU utilization。
+- [ ] **V1-05 — Checkpoint/恢复：** 训练期间生成 checkpoint；取消或重启后 resume，最终得到可验证 ModelVersion。
+- [ ] **V1-06 — 发送至 Reactor：** 将 ModelVersion 部署至 vLLM、选择 GPU，并看到真实 model load、health 和 Endpoint。
+- [ ] **V1-07 — 发送至 Exchange：** 创建 route，完成认证、streaming chat、tool call/result、cancel 和 usage。
+- [ ] **V1-08 — 在 Navigator 中打开：** 在 Navigator 打开 route/endpoint，使用 DeepSeek Harness Profile 完成 Chat/Agent/Approval/Rust Tool。
+- [ ] **V1-09 — 会话恢复/共享：** 重启 Navigator/persistence service，在第二设备读取或 takeover；同一 Session 不存在第二份可写 message history。
+- [ ] **V1-10 — 发送至 Echo：** 将真实 Conversation/Model/Endpoint 交给 Echo，运行 evaluator 并查看逐样本结果和比较。
+- [ ] **V1-11 — 反馈至 Catalyst：** 用户选择 feedback 后送回 Catalyst 并生成 DatasetVersion v2；未选择内容不会自动进入训练。
+- [ ] **V1-12 — 迭代并导出：** 训练/部署/比较 v2 并导出各产品资源；至少一个阶段由外部工具独立消费，证明闭环不是强绑定管线。
+- [ ] **V1-GATE — 文本模型生命周期 V1 可用：** P0-GATE、P1-GATE、P2-GATE、P3-GATE、P4-GATE 及必选 X-*、V1-* 均具备完整 Actual PASS 证据；用户能在目标环境完成一轮成功迭代和一轮有价值的反馈迭代。
+
+最终质量标准不是“十个仓库 CI green”，而是用户能否在真实环境完成上述旅程，并在失败、恢复、权限、usage、artifact 和数据反馈环节看到诚实且可复核的结果。
+
+## 11. 开源组件采用原则
+
+Cyrene 拥有 Product semantics、authority、UX 和跨产品交接；成熟开源软件作为可替换的 engine、adapter 或 plugin 使用：
+
+| 组件 | V1 角色 | 规则 |
+| --- | --- | --- |
+| DeepSeek Harness | Navigator 上游 Agent Runtime/Session/Tool/Plugin/UI | 固定 pin；优先通过 Profile/Bundle/plugin/UI extension 扩展；上游 Core patch 目标为 0 |
+| LLaMA Factory | Yield 训练引擎 | 复用现有 adapter 和 UI/engine；Yield 拥有 TrainingRun/ModelVersion；只有真实 CUDA 才算验收 |
+| vLLM | Reactor 服务引擎 | Reactor 拥有 Deployment/Endpoint；只有真实模型加载/推理才算 ready |
+| DuckDB | Catalyst 嵌入式数据处理器 | 处理端口可替换；Catalyst 拥有 Dataset/DatasetVersion |
+| Inspect AI | Echo 可选评估 adapter | 通过 EvaluationExecutionPort 接入；Echo 拥有 EvaluationRun/Result/FeedbackSet |
+| Cleanlab | Catalyst 质量 adapter/plugin | 只负责质量检测，不拥有 Dataset/Workspace/permissions |
+| Distilabel | Catalyst/Echo 可选数据/反馈 adapter | 只有真实需求、许可证和运行时证据充分时才接入 |
+| Argilla/Label Studio | UX 参考或可选外部导入/导出 | 不把其 User/Workspace/Dataset/Backend 整体嵌入 Product Core |
+| Exchange | Cyrene 自有 gateway/routing | Route/Auth/Usage 继续由 Cyrene 拥有；首版不引入第二套路由真源 |
+
+Navigator 的 TypeScript/Cordis 层只负责 Harness Service/Tool 注册、配置、生命周期、取消、事件和错误适配。既有 Rust 能力继续由受监管 binary/cyrene-native-host 承载。默认使用 inherited stdio 和 versioned IPC，不使用固定监听端口，也不要求 Node Native Addon。
+
+## 12. 明确延后的范围
+
+以下事项不阻塞 Text Model Lifecycle V1 首条真实路径：
+
+- 多模态模型，以及图像/音频/视频输入输出；
+- AMD、TPU、其他 accelerator 和异构后端；
+- 多节点联合训练、复杂分布式 optimizer、弹性训练和全局高级 scheduler；
+- 完整 OpenAI API surface、所有 provider 特性和所有 tool schema；
+- 自动化数据闭环、自动 gate 发布，或未经用户选择的 feedback 回流；
+- AutoML、不受限的工作流 marketplace，或把所有产品合成一个控制面板；
+- 将 Argilla/Label Studio 等外部系统的完整用户、权限、数据库和 backend 嵌入 Catalyst；
+- 为新路线大规模迁移或将已有 Rust 能力重写为 TypeScript；
+- adoption proof 之前继续扩张自研通用 Harness Core。
+
+## 13. 执行顺序
+
+按依赖顺序实施：
+
+1. **Phase 0：** 固定 DeepSeek Harness、Profile/Bundle、Exchange tool path、Cyrene persistence、Rust stdio Tool、Codex import、Windows package 和 Core patch audit。
+2. **Phase 1：** 先打通一张 NVIDIA GPU 上的现有文本模型消费路径，形成 Reactor/vLLM/Exchange/Navigator 每日可见的 vertical。
+3. **Phase 2：** 将 Catalyst DatasetVersion 接入 Yield 的真实 CUDA SFT LoRA、checkpoint/resume/export/ModelVersion，再交回 Reactor。
+4. **Phase 3：** 将真实 Navigator 会话交给 Echo；用户选择 feedback 后生成 Catalyst DatasetVersion v2，完成第二轮比较。
+5. **Phase 4：** 最后补齐两台以上 GPU 节点共享、Workspace enrollment、SSO/RBAC、usage/cost/audit、plugin governance、团队恢复和运维能力。
+6. **最终验收：** 按 V1-* 旅程完整演练；未通过的阶段保持未勾选并记录限制，不以文档或单仓库绿色替代真实证据。
+
+各阶段可并行完成局部 contract、fixture、UI 和测试，但不得绕过 Phase 0 的 Navigator adoption decision，也不能让一个产品暗中成为另一个产品的 authority。
+
+## 14. 尚待决定但不阻塞计划创建的问题
+
+这些问题必须在对应阶段首个实施任务中确定并写入证据；本文不假装它们已经决定：
+
+- Phase 0 的 Cyrene persistence backend 部署形态、数据库技术和事件 schema 版本。约束是单一可写 Session 真源、ordered append、flush、takeover 和审计。
+- Windows Tauri shell 承载上游 Web UI 的最终打包方式、嵌入运行时及签名流程。约束是干净机器可运行、无固定端口、无 Node Native Addon。
+- 第一条 Phase 1 模型 fixture 及 GPU/VRAM profile。候选模型不能代替最终锁定的 revision、license、chat template 和资源证据。
+- Exchange tool-call/usage 协议对 vLLM、外部 Provider 和 Navigator Harness 的最小交集；不能为兼容所有 OpenAI API 而扩张 V1。
+- ModelVersion manifest 如何表达 adapter-only、merged weights、quantized artifact、tokenizer 和 runtime compatibility；训练成功不自动代表可以部署。
+- 多设备阶段采用何种最小资源调度策略。V1 可先保证一张 GPU 对应一个作业，并明确 queue/lease/failure，再扩展复杂调度。
+
+## 15. 证据台账模板
+
+所有阶段检查项使用相同台账字段。实施者可在对应章节追加行或链接独立报告；下表只是模板，不表示任何 gate 已通过：
+
+| 检查 ID | Commit / PR | Commands | Result | Environment | Limitations | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `<P0/P1/P2/P3/P4/X/V1-ID>` | 不可变 SHA 或 PR | 精确命令/配置 | 数量、ID、结果 | OS/CUDA/GPU/runtime/identity | 缺口/阻塞 | CODE_COMPLETE / LOCAL_TEST_PASS / ACTUAL_PASS / FAILED / BLOCKED |
+
+阶段结束时，必须将该阶段所有检查 ID 映射到台账；缺少对应行、链接或完整字段的 `[x]` 应在 review 中退回。远程 CI 认证失败、外部服务不可用、Windows runner 不可用、GPU 不足等都属于限制或阻塞，必须与源代码失败分别报告。
+
+## 16. 当前实施交接
+
+Phase 0 的主要 adoption proof 已完成 32 项组件检查中的 30 项。V8 版本冻结、clean guest/host 安装、真实 Rust Tool、第二客户端 writer fencing、persistence service 故障恢复、retained input 明确 Restore 及正常桌面关闭清理均有 Actual PASS 证据。目前剩余工作为：
+
+1. 完成 P0-12 独立外部 Provider 入口及其来源/usage-owner 边界证明；
+2. 为同一 V8 包补齐 P0-29 所需的真实升级失败诊断；
+3. 重新核对 hosted CI billing/spending-limit 环境阻塞，再决定 P0-GATE 的 canonical adoption read-back。
+
+P0-GATE 通过后，Navigator 长期路线正式基于 DeepSeek Harness Profile/Bundle，停止继续自研通用 Harness Runtime；随后依本文 Phase 1→Phase 2→Phase 3→Phase 4 顺序推进真实模型消费、CUDA 训练、反馈闭环和企业多设备能力。当前 V8 证据不会提前勾选任何后续阶段或最终 Text Model Lifecycle V1 gate。

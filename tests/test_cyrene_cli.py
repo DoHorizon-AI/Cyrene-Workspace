@@ -284,7 +284,10 @@ def test_bootstrap_check_verifies_pinned_engines(
 def test_pair_code_is_printed_only_to_a_terminal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Captured output (a journal, a log file) must not receive the code."""
+    """Captured output (a journal, a log file) must not receive the code.
+
+    中文:捕获的输出(例如 journal 或日志文件)不能收到该 code。
+    """
 
     module = _module()
     home = tmp_path / "state" / "cyrene" / "dev"
