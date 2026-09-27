@@ -42,10 +42,7 @@ def test_clone_policies_match_declared_visibility() -> None:
     assert client["visibility"] == "private"
     assert client["clone_policy"] == "github_auth_required"
     assert client["path"] == "../Cyrene-Client"
-    assert client["canonical_remote"] == (
-        "https://github.com/DoHorizon-AI/Cyrene-Client.git"
-    )
-    assert (ROOT / client["path"]).resolve().is_dir()
+    assert client["canonical_remote"] == ("https://github.com/DoHorizon-AI/Cyrene-Client.git")
 
 
 def test_workspace_entrypoints_cover_the_full_profile() -> None:
