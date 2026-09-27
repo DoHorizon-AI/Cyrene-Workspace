@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cyrene 通用插件开发"
+  short_description: "开发 Cyrene 插件能力与运行时，统一节点、MCP、监控和日志接入"
+  default_prompt: "使用 $cyrene-plugin-development 核对现有契约，设计并实现当前 Cyrene 插件及其适用的节点、MCP 和 Navigator 接入。"
