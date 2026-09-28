@@ -39,8 +39,8 @@ def test_clone_policies_match_declared_visibility() -> None:
     client = next(
         repository for repository in repositories if repository["name"] == "Cyrene-Client"
     )
-    assert client["visibility"] == "private"
-    assert client["clone_policy"] == "github_auth_required"
+    assert client["visibility"] == "public"
+    assert client["clone_policy"] == "public_zero_auth"
     assert client["path"] == "../Cyrene-Client"
     assert client["canonical_remote"] == ("https://github.com/DoHorizon-AI/Cyrene-Client.git")
 

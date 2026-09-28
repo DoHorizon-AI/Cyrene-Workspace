@@ -55,7 +55,7 @@ Cyrene public API naming freeze begins with that release.
 > Only the 9 canonical repositories above are top-level Git repositories in the Cyrene workspace.
 > Current Gradle projects belong to the Plugins repository under `contracts/jvm` and `contracts/tck/model-provider-v1/jvm`; they are linked as build roots, not as standalone repositories. The retired Exchange coordinator, legacy Spring gateway, and Platform JVM control-plane paths are historical references only and must not be reintroduced into `repositories.yaml` or `.idea/jb-workspace.xml`.
 >
-> `Cyrene-Client` is currently private. Authenticate the GitHub CLI with organization access (`gh auth login`) before running the full PowerShell bootstrap on a machine where Client has not already been cloned.
+> `Cyrene-Client` is public and uses the `public_zero_auth` clone policy. The full PowerShell bootstrap can clone it without organization authentication.
 
 ---
 
@@ -153,7 +153,7 @@ Platform 是共享术语的语言来源。仓库不得为既有 Platform 概念�
 
 > [!NOTE]
 > **仓库与子组件边界**
-> 上述 8 个规范仓库是 Cyrene 工作区中仅有的顶层 Git 仓库。
+> 上述 9 个规范仓库是 Cyrene 工作区中仅有的顶层 Git 仓库。
 > 当前 Gradle 项目属于 Plugins 仓库，位于 `contracts/jvm` 和 `contracts/tck/model-provider-v1/jvm`；它们作为构建根链接，不是独立仓库。已退役的 Exchange 协调器、旧版 Spring 网关和 Platform JVM 控制平面路径仅供历史参考，绝不能重新加入 `repositories.yaml` 或 `.idea/jb-workspace.xml`。
 
 ---
