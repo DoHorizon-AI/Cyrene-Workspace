@@ -10,7 +10,7 @@
 
 | 仓库 | HEAD（短） | 工作树改动项 | 主要声明索引 |
 | --- | --- | ---: | --- |
-| Workspace | `ff7508c911df` | 15 | json_schema: 4 |
+| Workspace | `db67dd4a918c` | 2 | json_schema: 4 |
 | Platform | `b8c8e0bee669` | 0 | rust_trait_declaration: 37, proto_contract: 30, proto_rpc: 120, json_schema: 5 |
 | Plugins | `ab7be45a2c28` | 0 | c_abi_header: 3, capability_catalog: 14, json_schema: 18, proto_contract: 7, proto_rpc: 3, plugin_manifest: 15, rust_trait_declaration: 10 |
 | Client | `b6727ef577e8` | 61 | client_http_group: 6, client_http_route: 20, mcp_resource: 2, mcp_prompt: 1, typescript_interface: 16, client_command: 43 |
