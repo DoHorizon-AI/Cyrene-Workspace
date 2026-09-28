@@ -18,7 +18,16 @@ import subprocess
 import yaml
 
 EXCLUDE = {"node_modules", "target", ".venv", "dist", "tests", "test", "__tests__", "fixtures", "examples", "test-results"}
+INVENTORY_STATUS_FILES = {
+    ".agents/skills/cyrene-plugin-development/references/interface-inventory.json",
+    ".agents/skills/cyrene-plugin-development/references/system-interfaces.md",
+}
 VERBS = {"get", "post", "put", "patch", "delete", "head", "options"}
+
+# Exclude the inventory's two generated artifacts from status to avoid self-counting.
+def worktree_change_count(root):
+    changes = git(root, "status", "--porcelain").splitlines()
+    return sum(change[3:] not in INVENTORY_STATUS_FILES for change in changes)
 
 def git(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args], encoding="utf-8", errors="strict").strip()
@@ -145,7 +154,7 @@ def scan(name, root):
             if len(entries)>before: sources[relative]=hashlib.sha256(raw).hexdigest()
         except (ValueError, SyntaxError, UnicodeError, yaml.YAMLError) as error:
             errors.append({"source":relative,"reason":type(error).__name__})
-    return {"name":name,"head":git(root,"rev-parse","HEAD"),"branch":git(root,"branch","--show-current"),"worktree_changes":len(git(root,"status","--porcelain").splitlines()),"source_hashes":sources,"counts":dict(Counter(e["kind"] for e in entries)),"entries":entries,"scan_errors":errors}
+    return {"name":name,"head":git(root,"rev-parse","HEAD"),"branch":git(root,"branch","--show-current"),"worktree_changes":worktree_change_count(root),"source_hashes":sources,"counts":dict(Counter(e["kind"] for e in entries)),"entries":entries,"scan_errors":errors}
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
