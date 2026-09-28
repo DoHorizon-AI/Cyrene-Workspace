@@ -36,6 +36,13 @@ bash tooling/ci/check-no-legacy-surface.sh .
 cd Cyrene-Plugins-Official
 uv run pytest conformance/tests/test_no_legacy_surface.py
 ```
+
+## 5. Shared Agent Skills
+Repository-wide development skills live under [`.agents/skills`](../.agents/skills). The
+[`cyrene-plugin-development`](../.agents/skills/cyrene-plugin-development/SKILL.md) skill
+captures the shared plugin contracts, ownership boundaries, node and Navigator integration,
+MCP exposure, logging, validation, and delivery requirements. Update its references and
+interface inventory after material changes to those surfaces.
 ---
 <!-- Chinese Translation / 中文翻译 -->
 
@@ -78,3 +85,9 @@ bash tooling/ci/check-no-legacy-surface.sh .
 cd Cyrene-Plugins-Official
 uv run pytest conformance/tests/test_no_legacy_surface.py
 ```
+
+## 5. 共享 Agent Skill
+跨仓库开发 Skill 位于 [`.agents/skills`](../.agents/skills)。
+[`cyrene-plugin-development`](../.agents/skills/cyrene-plugin-development/SKILL.md)
+记录插件通用契约、模块职责、节点与 Navigator 接入、MCP 暴露、日志、验证和交付要求。
+这些接口发生重大变化后，应同步更新相关参考文档和接口清单。

@@ -55,7 +55,7 @@ Cyrene public API naming freeze begins with that release.
 > Only the 9 canonical repositories above are top-level Git repositories in the Cyrene workspace.
 > Current Gradle projects belong to the Plugins repository under `contracts/jvm` and `contracts/tck/model-provider-v1/jvm`; they are linked as build roots, not as standalone repositories. The retired Exchange coordinator, legacy Spring gateway, and Platform JVM control-plane paths are historical references only and must not be reintroduced into `repositories.yaml` or `.idea/jb-workspace.xml`.
 >
-> `Cyrene-Client` is currently private. Authenticate the GitHub CLI with organization access (`gh auth login`) before running the full PowerShell bootstrap on a machine where Client has not already been cloned.
+> `Cyrene-Client` is public and uses the `public_zero_auth` clone policy. The full PowerShell bootstrap can clone it without organization authentication.
 
 ---
 
