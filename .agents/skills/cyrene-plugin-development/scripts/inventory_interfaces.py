@@ -26,7 +26,12 @@ VERBS = {"get", "post", "put", "patch", "delete", "head", "options"}
 
 # Exclude the inventory's two generated artifacts from status to avoid self-counting.
 def worktree_change_count(root):
-    changes = git(root, "status", "--porcelain").splitlines()
+    status = subprocess.check_output(
+        ["git", "-C", str(root), "status", "--porcelain"],
+        encoding="utf-8",
+        errors="strict",
+    )
+    changes = status.splitlines()
     return sum(change[3:] not in INVENTORY_STATUS_FILES for change in changes)
 
 def git(root, *args):
