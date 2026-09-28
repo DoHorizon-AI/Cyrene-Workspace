@@ -47,7 +47,7 @@ Cyrene public API naming freeze begins with that release.
 | `Cyrene-Exchange` | `../Cyrene-Services/Cyrene-Exchange` | Service exchange gateway, dispatch contracts, and backend coordinator |
 | `Cyrene-Catalyst` | `../Cyrene-Services/Cyrene-Catalyst` | Dataset curation and sole authority for `DatasetVersion` |
 | `Cyrene-Echo` | `../Cyrene-Services/Cyrene-Echo` | Post-inference evaluation and sole authority for `EvaluationRun` / `HumanAnnotation` / `FeedbackSet` |
-| `Cyrene-Navigator` | `../Cyrene-Services/Cyrene-Navigator` | Desktop client experience and sole authority for `Conversation` / `AgentRun` sessions |
+| `Cyrene-Navigator` | `../Cyrene-Services/Cyrene-Navigator` | Built-in Harness component for Native Client (based on DeepSeek harness), owning session loop coordination and authoritative local persistence (no UI) |
 | `Cyrene-Client` | `../Cyrene-Client` | React/TypeScript/Vite pipeline workbench and operator console surface |
 
 > [!NOTE]
@@ -149,11 +149,12 @@ Platform 是共享术语的语言来源。仓库不得为既有 Platform 概念�
 | `Cyrene-Exchange` | `../Cyrene-Services/Cyrene-Exchange` | 服务交换网关、分发合约和后端协调器 |
 | `Cyrene-Catalyst` | `../Cyrene-Services/Cyrene-Catalyst` | 数据集整理，以及 `DatasetVersion` 的唯一权威 |
 | `Cyrene-Echo` | `../Cyrene-Services/Cyrene-Echo` | 推理后评估，以及 `EvaluationRun` / `HumanAnnotation` / `FeedbackSet` 的唯一权威 |
-| `Cyrene-Navigator` | `../Cyrene-Services/Cyrene-Navigator` | 桌面客户端体验，以及 `Conversation` / `AgentRun` 会话的唯一权威 |
+| `Cyrene-Navigator` | `../Cyrene-Services/Cyrene-Navigator` | Native Client 内置 Harness 组件（基于 DeepSeek harness 二次开发），负责会话执行循环协调与本地权威持久化（不含 UI） |
+| `Cyrene-Client` | `../Cyrene-Client` | 基于 React/TypeScript/Vite 的可视化工作台与操作员控制台 |
 
 > [!NOTE]
 > **仓库与子组件边界**
-> 上述 8 个规范仓库是 Cyrene 工作区中仅有的顶层 Git 仓库。
+> 上述 9 个规范仓库是 Cyrene 工作区中仅有的顶层 Git 仓库。
 > 当前 Gradle 项目属于 Plugins 仓库，位于 `contracts/jvm` 和 `contracts/tck/model-provider-v1/jvm`；它们作为构建根链接，不是独立仓库。已退役的 Exchange 协调器、旧版 Spring 网关和 Platform JVM 控制平面路径仅供历史参考，绝不能重新加入 `repositories.yaml` 或 `.idea/jb-workspace.xml`。
 
 ---

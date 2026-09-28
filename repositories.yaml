@@ -382,8 +382,8 @@ repositories:
       - "node"
       - "cargo"
     roles:
-      - "product-service"
-      - "desktop-navigation"
+      - "native-client-harness"
+      - "deepseek-harness-runtime"
     ci_authority:
       source: "github_actions"
       delivery: "azure_pipelines"
@@ -391,7 +391,7 @@ repositories:
       azure_scope: "delivery_only"
     ci_acceptance_environment: "GitHub Actions source, contract, build, and package checks"
     development_hosts: ["windows", "macos", "linux"]
-    canonical_runtime_os: "client-desktop"
+    canonical_runtime_os: "linux"
     canonical_build_target: "multi-target"
     ide:
       python_root: "../Cyrene-Services/Cyrene-Navigator"

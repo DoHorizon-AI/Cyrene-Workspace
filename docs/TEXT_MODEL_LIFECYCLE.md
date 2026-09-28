@@ -52,8 +52,8 @@ sequenceDiagram
 - Enforces `TenantQuota` and records token consumption in `UsageRecord`.
 - Proxies requests to healthy `Cyrene-Reactor` worker instances.
 
-### Stage 6: Client Orchestration & Feedback (`Cyrene-Navigator` & `Cyrene-Echo`)
-- `Cyrene-Navigator` renders user interface and manages multi-turn conversation context.
+### Stage 6: Client Execution & Feedback (`Cyrene-Client` / `Cyrene-Navigator` & `Cyrene-Echo`)
+- Native Client (`Cyrene-Client`) renders the user interface; its built-in `Cyrene-Navigator` component (based on DeepSeek harness) executes agent turns and manages multi-turn conversation context.
 - `Cyrene-Echo` collects explicit user feedback (thumbs up/down, edits) and implicit metrics (latency, cost, downgrade display).
 - Metrics feed back into `Cyrene-Catalyst` for continuous dataset enhancement.
 ---
@@ -112,7 +112,7 @@ sequenceDiagram
 - 执行 `TenantQuota` 限制，并在 `UsageRecord` 中记录令牌用量。
 - 将请求代理到健康的 `Cyrene-Reactor` Worker 实例。
 
-### 阶段 6：客户端编排与反馈（`Cyrene-Navigator` 与 `Cyrene-Echo`）
-- `Cyrene-Navigator` 渲染用户界面并管理多轮对话上下文。
+### 阶段 6：客户端执行与反馈（`Cyrene-Client` / `Cyrene-Navigator` 与 `Cyrene-Echo`）
+- 由 Native Client（`Cyrene-Client`）渲染工作台用户界面；内置组件 `Cyrene-Navigator`（基于 DeepSeek harness 二次开发）执行智能体轮次并管理多轮对话上下文。
 - `Cyrene-Echo` 收集显式用户反馈（赞 / 踩、编辑）和隐式指标（延迟、成本、降级显示）。
 - 指标回流到 `Cyrene-Catalyst`，用于持续增强数据集。

@@ -15,7 +15,7 @@ graph TD
     Catalyst -->|Publishes DatasetVersion| Yield
     
     Reactor --> Exchange[Cyrene-Exchange<br/>API Gateway & Governance]
-    Exchange --> Navigator[Cyrene-Navigator<br/>Desktop Client & UI Harness]
+    Exchange --> Navigator[Cyrene-Navigator<br/>Native Client Built-in Harness]
     Navigator --> Echo[Cyrene-Echo<br/>Feedback & Analytics Engine]
     Echo -->|Feedback Insights| Catalyst
     
@@ -40,7 +40,7 @@ Cyrene decomposes AI engineering into six specialized service repositories with 
 2. **Cyrene-Yield**: Model training orchestrator and **Sole Authority** for canonical `ModelVersion` creation, hashing, and publishing.
 3. **Cyrene-Reactor**: High-throughput inference serving engine (Rust core + Python serving layer) and sole authority for `ServingBinding` / `DeploymentDraft`.
 4. **Cyrene-Exchange**: Multi-tenant API Gateway and sole authority for routing, API keys, tenant quotas, token billing, and audit logs.
-5. **Cyrene-Navigator**: Front-end orchestration harness, desktop client experience, and sole authority for `Conversation` / `AgentRun` sessions.
+5. **Cyrene-Navigator**: Built-in Harness component of the Native Client (`Cyrene-Client`), developed based on DeepSeek harness. Provides session loop coordination and authoritative local session persistence. Carries no UI and no unrelated features.
 6. **Cyrene-Echo**: Post-inference evaluation, quality metrics, and sole authority for `EvaluationRun` / `HumanAnnotation` / `FeedbackSet`.
 
 ### Tier 3: Extensibility (`Cyrene-Plugins-Official`)
@@ -69,7 +69,7 @@ graph TD
     Yield -->|发布 ModelVersion| Reactor
     Catalyst -->|发布 DatasetVersion| Yield
     Reactor --> Exchange[Cyrene-Exchange<br/>API 网关与治理]
-    Exchange --> Navigator[Cyrene-Navigator<br/>桌面客户端与 UI Harness]
+    Exchange --> Navigator[Cyrene-Navigator<br/>Native Client 内置 Harness]
     Navigator --> Echo[Cyrene-Echo<br/>反馈与分析引擎]
     Echo -->|反馈洞察| Catalyst
     Platform -->|安装、解析、启动、停止、健康状态| Plugins[Cyrene-Plugins-Official<br/>能力合约与实现]
@@ -93,7 +93,7 @@ Cyrene 将 AI 工程能力拆分到六个各自拥有单一概念权威的专业
 2. **Cyrene-Yield**：模型训练编排器，也是创建、哈希和发布规范 `ModelVersion` 的**唯一权威**。
 3. **Cyrene-Reactor**：高吞吐推理服务引擎（Rust 核心层与 Python 服务层），并且是 `ServingBinding` / `DeploymentDraft` 的唯一权威。
 4. **Cyrene-Exchange**：多租户 API 网关，是路由、API 密钥、租户配额、令牌计费和审计日志的唯一权威。
-5. **Cyrene-Navigator**：前端编排 Harness 和桌面客户端体验，是 `Conversation` / `AgentRun` 会话的唯一权威。
+5. **Cyrene-Navigator**：Native Client 内置 Harness 组件（基于 DeepSeek harness 二次开发），负责会话执行循环协调与本地权威会话持久化；本身不带 UI，也不承担其他无关服务功能。
 6. **Cyrene-Echo**：负责推理后的评估与质量指标，是 `EvaluationRun` / `HumanAnnotation` / `FeedbackSet` 的唯一权威。
 
 ### 第 3 层：扩展能力（`Cyrene-Plugins-Official`）

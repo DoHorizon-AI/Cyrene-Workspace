@@ -52,12 +52,14 @@ Cyrene organizes functional capabilities into specialized, decoupled product rep
 
 ---
 
-## 5. Cyrene-Navigator (Desktop Orchestrator & Client UI)
+## 5. Cyrene-Navigator (Built-in Harness Component for Native Client)
 - **Repo**: `DoHorizon-AI/Cyrene-Navigator`
 - **Primary Responsibility**:
-  - Front-end user interface and desktop integration.
-  - Local session orchestration and capability dispatch.
-  - Connects to Exchange for inference and Echo for feedback submission.
+  - Built-in Harness component of the Native Client (`Cyrene-Client`), developed as a secondary development of DeepSeek harness (`deepseek-harness`).
+  - Owns the Harness runtime adapter, Agent loop coordination, and authoritative local session persistence.
+  - **Carries NO UI** (all presentation/UI is owned by Native Client).
+  - **Carries NO unrelated product features** (no training, serving, dataset processing, or gateway governance).
+  - Connects directly to Exchange for model inference and Echo for feedback submission.
 
 ---
 
@@ -126,11 +128,13 @@ Cyrene 将功能能力组织为专业化、解耦的产品仓库。每个产品�
 
 ---
 
-## 5. Cyrene-Navigator（桌面编排器与客户端 UI）
+## 5. Cyrene-Navigator（Native Client 内置 Harness 组件）
 - **仓库**：`DoHorizon-AI/Cyrene-Navigator`
 - **主要职责**：
-  - 提供前端用户界面和桌面集成。
-  - 编排本地会话并分发能力调用。
+  - 作为 Native Client（`Cyrene-Client`）的内置 Harness 组件，基于 DeepSeek harness（`deepseek-harness`）进行二次开发。
+  - 负责 Harness 运行时适配、Agent 执行循环协调以及权威本地会话持久化。
+  - **不带 UI**（所有界面与展示层均完全归属于 Native Client）。
+  - **不带其他无关功能**（不承担训练、推理服务、数据集管理或网关治理等其他领域功能）。
   - 连接 Exchange 进行推理，并连接 Echo 提交反馈。
 
 ---
