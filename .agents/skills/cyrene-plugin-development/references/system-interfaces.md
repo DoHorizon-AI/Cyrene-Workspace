@@ -1,6 +1,6 @@
 # 系统接口导航与盘点
 
-观察时间（UTC）：2026-09-28 01:50:21.542041。范围为10个本地 checkout 的工作树；索引是静态源码声明，不代表运行部署。本次未启动业务服务或重跑各 Product 验收。另以只读 live-ref 查询核对了十仓 `origin/develop`：各仓 canonical `develop` checkout 均与远端头部一致；下表 Workspace 行使用待审 PR 的 `docs/cyrene-plugin-development-skill` 分支（`4c0d137f71e1`），其 canonical `develop` 为 `64f05a82d1f2`。机器索引见 [interface-inventory.json](interface-inventory.json)。
+观察时间（UTC）：2026-09-28 01:55:08.584116。范围为10个 canonical `develop` checkout；索引是静态源码声明，不代表运行部署。本次未启动业务服务或重跑各 Product 验收。另以只读 live-ref 查询核对了十仓 `origin/develop`：各仓 canonical checkout 均与远端头部一致。机器索引见 [interface-inventory.json](interface-inventory.json)。
 
 ## 证据范围
 
@@ -10,7 +10,7 @@
 
 | 仓库 | HEAD（短） | 工作树改动项 | 主要声明索引 |
 | --- | --- | ---: | --- |
-| Workspace | `4c0d137f71e1` | 0 | json_schema: 4 |
+| Workspace | `64f05a82d1f2` | 0 | json_schema: 4 |
 | Platform | `6ea1fd552f55` | 1 | rust_trait_declaration: 77, openapi_operation: 15, proto_contract: 34, proto_rpc: 144, json_schema: 5 |
 | Plugins | `4dcadf4edce1` | 0 | c_abi_header: 2, capability_catalog: 14, json_schema: 18, proto_contract: 7, proto_rpc: 3, plugin_manifest: 15, rust_trait_declaration: 10 |
 | Client | `1df9d0f2d1f7` | 0 | client_http_group: 6, client_http_route: 20, mcp_resource: 2, mcp_prompt: 1, typescript_interface: 16, client_command: 43 |
