@@ -1,27 +1,27 @@
 # 系统接口导航与盘点
 
-观察日期：2026-09-27。范围为10个本地 checkout 的工作树，不是远端最新状态或运行部署；本次没有 fetch、启动业务服务或重跑各 Product 验收。机器索引见 [interface-inventory.json](interface-inventory.json)。
+观察时间（UTC）：2026-09-28 01:50:21.542041。范围为10个本地 checkout 的工作树；索引是静态源码声明，不代表运行部署。本次未启动业务服务或重跑各 Product 验收。另以只读 live-ref 查询核对了十仓 `origin/develop`：各仓 canonical `develop` checkout 均与远端头部一致；下表 Workspace 行使用待审 PR 的 `docs/cyrene-plugin-development-skill` 分支（`4c0d137f71e1`），其 canonical `develop` 为 `64f05a82d1f2`。机器索引见 [interface-inventory.json](interface-inventory.json)。
 
 ## 证据范围
 
-逐项记录公开契约/源码路由声明的所属仓库、文件、适用行号、名称/方法、HEAD、工作树改动数和文件 SHA-256。索引还包括 MCP资源/提示、声明式 schema、能力目录、插件清单、C ABI 头与 Rust/TypeScript 接口入口。
+逐项记录公开契约/源码路由声明的所属仓库、文件、适用行号、名称/方法、HEAD、工作树改动数和文件 SHA-256。工作树改动数排除本索引 JSON 与本摘要文档这两份生成物，避免状态自计。索引还包括 MCP资源/提示、声明式 schema、能力目录、插件清单、C ABI 头与 Rust/TypeScript 接口入口。
 
 它不是整个系统所有函数列表，也不是运行时注册表：动态挂载、反向代理、配置条件、私有服务凭据、编译特性及版本兼容仍要沿调用路径核对。不同类别不可相加当成唯一 API 数量；Platform proto 有源码镜像，部分 Product 保存其它 Product 的契约副本。Rust pub(crate) trait 已保留 visibility 标记，不代表插件可用公共 API。
 
 | 仓库 | HEAD（短） | 工作树改动项 | 主要声明索引 |
 | --- | --- | ---: | --- |
-| Workspace | `db67dd4a918c` | 2 | json_schema: 4 |
-| Platform | `b8c8e0bee669` | 0 | rust_trait_declaration: 37, proto_contract: 30, proto_rpc: 120, json_schema: 5 |
-| Plugins | `ab7be45a2c28` | 0 | c_abi_header: 3, capability_catalog: 14, json_schema: 18, proto_contract: 7, proto_rpc: 3, plugin_manifest: 15, rust_trait_declaration: 10 |
-| Client | `b6727ef577e8` | 61 | client_http_group: 6, client_http_route: 20, mcp_resource: 2, mcp_prompt: 1, typescript_interface: 16, client_command: 43 |
-| Yield | `a673e9902ad3` | 0 | json_schema: 6, openapi_operation: 11, python_route_declaration: 28 |
-| Echo | `8887c0ca7112` | 0 | json_schema: 9, openapi_operation: 24, python_route_declaration: 31 |
-| Catalyst | `6b67205febe7` | 0 | json_schema: 6, openapi_operation: 30, python_route_declaration: 22 |
-| Reactor | `5cc2deb1aa5a` | 0 | json_schema: 5, openapi_operation: 21, python_route_declaration: 24, proto_contract: 1, proto_rpc: 3 |
-| Exchange | `1061a59b0bdb` | 0 | json_schema: 3, openapi_operation: 15, python_route_declaration: 38 |
-| Navigator | `7d8c1e79ffd6` | 0 | json_schema: 2, openapi_operation: 12, python_route_declaration: 27 |
+| Workspace | `4c0d137f71e1` | 0 | json_schema: 4 |
+| Platform | `6ea1fd552f55` | 1 | rust_trait_declaration: 77, openapi_operation: 15, proto_contract: 34, proto_rpc: 144, json_schema: 5 |
+| Plugins | `4dcadf4edce1` | 0 | c_abi_header: 2, capability_catalog: 14, json_schema: 18, proto_contract: 7, proto_rpc: 3, plugin_manifest: 15, rust_trait_declaration: 10 |
+| Client | `1df9d0f2d1f7` | 0 | client_http_group: 6, client_http_route: 20, mcp_resource: 2, mcp_prompt: 1, typescript_interface: 16, client_command: 43 |
+| Reactor | `86578baf39e3` | 0 | json_schema: 5, openapi_operation: 23, python_route_declaration: 26, proto_contract: 1, proto_rpc: 3 |
+| Yield | `ab5ab32bdaa1` | 0 | json_schema: 6, openapi_operation: 16, python_route_declaration: 28 |
+| Exchange | `83d32c264b37` | 0 | json_schema: 4, openapi_operation: 17, python_route_declaration: 32 |
+| Catalyst | `ad485581ce2b` | 0 | json_schema: 6, openapi_operation: 32, python_route_declaration: 24 |
+| Echo | `e6ba8b24fa11` | 0 | json_schema: 9, openapi_operation: 26, python_route_declaration: 28 |
+| Navigator | `c7630a9e6a8d` | 0 | json_schema: 2, openapi_operation: 13, python_route_declaration: 30 |
 
-本次优先采用已有整合 worktree 的 Platform/Client/Yield/Echo；其它仓库按 Workspace 拓扑定位。仓库绝对路径不写入可移植接口规范。所有自动扫描的 scan_errors 为空，只表示解析器覆盖内未发生错误，不等于无遗漏。Client 当前未提交变更必须结合 source_hashes；单靠 HEAD 无法复现新增 MCP/监控功能。
+所有自动扫描的 scan_errors 为空，只表示解析器覆盖内未发生错误，不等于无遗漏。Platform 的1个工作树改动项是未跟踪的嵌套 worktree 目录；脚本只处理文件，不会递归重复索引这些 checkout。仓库绝对路径不写入可移植接口规范。
 
 ## 所有者与主调用路径
 
