@@ -13,9 +13,11 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -87,6 +89,49 @@ SYSTEMD_UNITS = [
     "cyrene-exchange",
     "cyrene-catalyst",
 ]
+SYSTEMD_SERVICES = tuple(unit.removeprefix("cyrene-") for unit in SYSTEMD_UNITS)
+SYSTEMD_HEALTH_PORTS = {
+    "navigator": 7860,
+    "yield": 8001,
+    "reactor": 8002,
+    "exchange": 8003,
+    "catalyst": 8004,
+}
+SYSTEMD_HEALTH_ENV_KEYS = {
+    "navigator": "CYRENE_PORT_NAVIGATOR",
+    "yield": "CYRENE_PORT_YIELD",
+    "reactor": "CYRENE_PORT_REACTOR",
+    "exchange": "CYRENE_PORT_EXCHANGE",
+    "catalyst": "CYRENE_PORT_CATALYST",
+}
+SERVICE_UPDATE_TIMEOUT_SECONDS = 90
+SERVICE_UPDATE_JOURNAL_NAME = "update-journal.json"
+SERVICE_RELEASE_VERSION_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+SERVICE_UPDATE_RUNTIME_DIR = Path("/run/cyrene")
+
+# Preserve the historical module entrypoints until each systemd service has a
+# staged immutable artifact. The service runner prefers that artifact and only
+# uses these commands as the existing-install fallback.
+LEGACY_SERVICE_COMMANDS = {
+    "yield": ["/usr/bin/python3", "-m", "cy_exec.training.product_cli", "--port", "8001"],
+    "reactor": [
+        "/usr/bin/python3",
+        "-m",
+        "cyrene_reactor_product.cli",
+        "control",
+        "--port",
+        "8002",
+    ],
+    "exchange": [
+        "/usr/bin/python3",
+        "-m",
+        "cyrene_exchange_product.cli",
+        "serve",
+        "--port",
+        "8003",
+    ],
+    "catalyst": ["/usr/bin/python3", "-m", "cyrene_catalyst", "--port", "8004"],
+}
 
 SERVICES_LIST = [
     "reactor",
@@ -115,6 +160,46 @@ RUNTIME_VENV_DIR = "runtime-venv"
 def install_root() -> Path:
     configured = os.environ.get("CYRENE_INSTALL_ROOT")
     return Path(configured).expanduser() if configured else Path("/usr/lib/cyrene")
+
+
+def service_install_root() -> Path:
+    """Keep packaged release state under the Debian-owned installation root."""
+
+    if WORKSPACE_ROOT == Path("/usr/lib/cyrene"):
+        return Path("/usr/lib/cyrene")
+    return install_root()
+
+
+def _load_service_bundle_module() -> Any:
+    """Load the packaged immutable-service release helper.
+
+    Checkouts keep the helper under ``packaging/``; the Debian package places
+    the same file beside the installed CLI under ``scripts/``.
+    """
+
+    candidates = [
+        WORKSPACE_ROOT / "scripts" / "service_bundle.py",
+        WORKSPACE_ROOT / "packaging" / "service_bundle.py",
+    ]
+    module_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if module_path is None:
+        raise FileNotFoundError(
+            "service bundle helper is missing; reinstall the Cyrene package that provides "
+            "packaging/service_bundle.py"
+        )
+
+    module_name = "_cyrene_service_bundle"
+    module_spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if module_spec is None or module_spec.loader is None:
+        raise ImportError(f"could not load service bundle helper from {module_path}")
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_name] = module
+    try:
+        module_spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
 
 
 def _product_url(service: str) -> str:
@@ -387,6 +472,49 @@ def _start_web_host(home: Path, env: dict[str, str], pair_code: str) -> int | No
     return process.pid
 
 
+def _navigator_web_host_invocation() -> tuple[list[str], dict[str, str]] | None:
+    """Prepare the foreground Navigator Web Host command for its own unit.
+
+    The returned command starts only the Web Host. It deliberately does not
+    delegate to ``cyrene up`` or the development stack, which systemd owns as
+    separate service units.
+    """
+
+    home = dev_home()
+    prepare_data_dirs(home)
+    pair_code, issued_at = read_pair_credentials(home)
+    if not pair_code:
+        pair_code = generate_pair_code()
+        write_credentials(home, pair_code)
+        _, issued_at = read_pair_credentials(home)
+
+    launcher = _locate_web_host_launcher()
+    if launcher is None:
+        print("ERROR: Navigator Web Host launcher (serve-web.py) was not found.", file=sys.stderr)
+        return None
+
+    env = os.environ.copy()
+    env["CYRENE_DEV_HOME"] = str(home)
+    env["CYRENE_RUNTIME_HOME"] = str(home)
+    env["CYRENE_WEB_HOST_PAIR_CODE"] = pair_code
+    if issued_at:
+        env["CYRENE_WEB_HOST_PAIR_CODE_ISSUED_AT"] = issued_at
+
+    argv = [
+        *_web_host_command(launcher),
+        "--host",
+        os.environ.get("CYRENE_WEB_HOST_HOST", "127.0.0.1"),
+        "--port",
+        str(WEB_HOST_PORT),
+        "--pairing-code",
+        pair_code,
+    ]
+    for product, port in PRODUCT_PORTS.items():
+        argv += ["--proxy", f"/api/v1/{product}=http://127.0.0.1:{port}"]
+    argv.append("--insecure-http")
+    return argv, env
+
+
 def cmd_up(args: argparse.Namespace) -> int:
     home = dev_home()
     prepare_data_dirs(home)
@@ -403,11 +531,8 @@ def cmd_up(args: argparse.Namespace) -> int:
     if issued_at:
         env["CYRENE_WEB_HOST_PAIR_CODE_ISSUED_AT"] = issued_at
 
-    # A packaged install is supervised by systemd; only fall back to launching
-    # the development stack ourselves when systemd does not own the units.
-    # When systemd invokes us it expects a foreground process, so we must never
-    # hand control back to systemctl from inside a unit (the navigator unit
-    # runs `cyrene up` and would otherwise exit immediately).
+    # A manual packaged start delegates to the installed service units. A unit
+    # itself must keep foreground ownership and never recursively call systemctl.
     if not _running_under_systemd() and _start_units_with_systemd():
         print(f"Navigator console ready: http://127.0.0.1:{WEB_HOST_PORT}")
         return 0
@@ -428,7 +553,146 @@ def cmd_up(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_service_run(args: argparse.Namespace) -> int:
+    """Run exactly one packaged service in the foreground for systemd."""
+
+    service = args.service
+    packaged = WORKSPACE_ROOT == Path("/usr/lib/cyrene")
+    bundle_module: Any | None = None
+    try:
+        bundle_module = _load_service_bundle_module()
+    except FileNotFoundError as error:
+        if packaged:
+            print(f"ERROR: cannot load packaged service release metadata: {error}", file=sys.stderr)
+            return 1
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        print(f"ERROR: cannot resolve the installed {service} release: {error}", file=sys.stderr)
+        return 1
+
+    release = None
+    if bundle_module is not None:
+        try:
+            if _service_update_journal_exists(bundle_module, service) and not (
+                _service_update_in_progress(service)
+            ):
+                print(
+                    f"ERROR: {service} has an interrupted release update; refusing to launch "
+                    f"until recovery. Run `sudo cyrene upgrade {service}`.",
+                    file=sys.stderr,
+                )
+                return 1
+            service_root = service_install_root() / "services" / service
+            if service_root.exists() or service_root.is_symlink():
+                release = bundle_module.resolve_active_release(
+                    service, install_root=service_install_root()
+                )
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            print(
+                f"ERROR: cannot resolve the installed {service} release: {error}", file=sys.stderr
+            )
+            return 1
+
+    service_args = list(args.service_args)
+    if release is not None:
+        entrypoint, version = release
+        print(f"Starting {service} release {version}.", flush=True)
+        try:
+            os.execv(str(entrypoint), [str(entrypoint), *service_args])
+        except OSError as error:
+            print(f"ERROR: cannot execute {service} release {version}: {error}", file=sys.stderr)
+            return 1
+
+    if packaged:
+        print(
+            f"ERROR: packaged {service} has no active immutable release; "
+            "refusing to launch a mutable system-Python fallback.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Development-mode units may keep their historical module entrypoints.
+    # The packaged mode above fails closed because these installs have no
+    # immutable release identity that the updater could restore.
+    if service == "navigator":
+        invocation = _navigator_web_host_invocation()
+        if invocation is None:
+            return 1
+        argv, env = invocation
+        try:
+            os.execvpe(argv[0], argv, env)
+        except OSError as error:
+            print(f"ERROR: cannot start Navigator Web Host: {error}", file=sys.stderr)
+            return 1
+
+    command = LEGACY_SERVICE_COMMANDS.get(service)
+    if command is None:
+        print(f"ERROR: no launch command is registered for {service}.", file=sys.stderr)
+        return 2
+    try:
+        os.execv(command[0], [*command, *service_args])
+    except OSError as error:
+        print(f"ERROR: cannot start {service}: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_service_bootstrap(args: argparse.Namespace) -> int:
+    """Stage package-provided immutable releases during Debian installation."""
+
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        print("ERROR: service release bootstrap must run as root.", file=sys.stderr)
+        return 1
+    if WORKSPACE_ROOT == Path("/usr/lib/cyrene"):
+        fixed_roots = {
+            "CYRENE_INSTALL_ROOT": Path("/usr/lib/cyrene"),
+            "CYRENE_SERVICE_ARTIFACTS_ROOT": Path("/usr/share/cyrene/service-artifacts"),
+        }
+        for variable, fixed_root in fixed_roots.items():
+            configured = os.environ.get(variable)
+            if configured and Path(configured).expanduser().resolve() != fixed_root:
+                print(
+                    f"ERROR: packaged bootstrap does not accept a custom {variable}.",
+                    file=sys.stderr,
+                )
+                return 1
+    try:
+        bundle_module = _load_service_bundle_module()
+        interrupted = [
+            service
+            for service in SYSTEMD_SERVICES
+            if _service_update_journal_exists(bundle_module, service)
+        ]
+        if interrupted:
+            raise RuntimeError(
+                "interrupted service update journal(s) require recovery before package "
+                f"configuration: {', '.join(interrupted)}"
+            )
+        staged = bundle_module.bootstrap_package_bundles(
+            activate_missing=bool(args.activate_missing)
+        )
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        print(f"ERROR: could not stage packaged service releases: {error}", file=sys.stderr)
+        return 1
+    print(f"Staged {staged} immutable service release(s).")
+    return 0
+
+
 def cmd_down(args: argparse.Namespace) -> int:
+    loaded_units = _loaded_systemd_units()
+    if loaded_units:
+        result = subprocess.run(
+            ["systemctl", "stop", *loaded_units], capture_output=True, text=True, check=False
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            print(
+                f"Could not stop managed Cyrene unit(s): {detail or result.returncode}",
+                file=sys.stderr,
+            )
+            return result.returncode or 1
+        print(f"Stopped {len(loaded_units)} managed Cyrene systemd unit(s).")
+        return 0
+
     home = dev_home()
     env = os.environ.copy()
     env["CYRENE_DEV_HOME"] = str(home)
@@ -471,6 +735,46 @@ def get_gpu_info() -> list[dict[str, str]]:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    loaded_units = _loaded_systemd_units()
+    if loaded_units:
+        print("=== Cyrene Managed systemd Services ===")
+        try:
+            bundle_module = _load_service_bundle_module()
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            bundle_module = None
+            print(f"Release metadata unavailable: {error}")
+        for service in SYSTEMD_SERVICES:
+            unit = f"cyrene-{service}.service"
+            unit_state = _systemd_unit_state(unit)
+            if unit_state is None:
+                print(f"  {service}: unit status unavailable")
+            else:
+                load_state, active_state, sub_state = unit_state
+                print(f"  {service}: {load_state}, {active_state}/{sub_state}")
+            if bundle_module is not None:
+                try:
+                    if _service_update_journal_exists(bundle_module, service):
+                        print(
+                            "    update: INTERRUPTED; run `sudo cyrene upgrade "
+                            + service
+                            + "` to recover"
+                        )
+                        continue
+                    release = bundle_module.resolve_active_release(
+                        service, install_root=service_install_root()
+                    )
+                except (OSError, RuntimeError, ValueError) as error:
+                    print(f"    release: INVALID ({error})")
+                else:
+                    if release is None:
+                        print("    release: unsupported (no active immutable artifact)")
+                    else:
+                        print(f"    release: {release[1]}")
+        print("  echo: unmanaged by the native Debian systemd path")
+        print("\n=== GPU Information ===")
+        _print_gpu_status()
+        return 0
+
     home = dev_home()
     env = os.environ.copy()
     env["CYRENE_DEV_HOME"] = str(home)
@@ -482,6 +786,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     ).returncode
 
     print("\n=== GPU Information ===")
+    _print_gpu_status()
+    return dev_res
+
+
+def _print_gpu_status() -> None:
+    """Print host GPU status for both packaged and development operations."""
+
     gpus = get_gpu_info()
     if not gpus:
         print("No GPU detected or nvidia-smi unavailable.")
@@ -492,7 +803,6 @@ def cmd_status(args: argparse.Namespace) -> int:
                 f"Memory: {g['memory_used']} / {g['memory_total']} MiB | "
                 f"Utilization: {g['utilization']}%"
             )
-    return dev_res
 
 
 def check_port_free(port: int) -> bool:
@@ -1204,11 +1514,951 @@ def cmd_restore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _open_service_state_directory(
+    bundle_module: Any, service: str, *, create: bool
+) -> tuple[Path, int]:
+    """Open one verified root-owned service directory without following its final link."""
+
+    root = bundle_module.ensure_secure_service_root(
+        service, install_root=service_install_root(), create=create
+    )
+    descriptor = os.open(
+        root,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    info = os.fstat(descriptor)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+        os.close(descriptor)
+        raise ValueError(f"service state directory is not secure: {root}")
+    return root, descriptor
+
+
+def _service_update_journal_exists(bundle_module: Any, service: str) -> bool:
+    """Fail closed when any journal entry exists, without needing service-user read access."""
+
+    root_path = service_install_root() / "services" / service
+    if not root_path.exists() and not root_path.is_symlink():
+        return False
+    _, directory_fd = _open_service_state_directory(bundle_module, service, create=False)
+    try:
+        try:
+            os.stat(SERVICE_UPDATE_JOURNAL_NAME, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
+    finally:
+        os.close(directory_fd)
+
+
+def _read_service_update_journal(bundle_module: Any, service: str) -> dict[str, Any] | None:
+    """Read and validate the private root-owned update intent record."""
+
+    if not _service_update_journal_exists(bundle_module, service):
+        return None
+    _, directory_fd = _open_service_state_directory(bundle_module, service, create=False)
+    try:
+        file_fd = os.open(
+            SERVICE_UPDATE_JOURNAL_NAME,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        with os.fdopen(file_fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise ValueError("service update journal is not a root-owned 0600 regular file")
+            try:
+                value = json.loads(stream.read().decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise ValueError(f"service update journal is invalid: {error}") from error
+    finally:
+        os.close(directory_fd)
+
+    expected_keys = {
+        "schema_version",
+        "service",
+        "previous_version",
+        "candidate_version",
+    }
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise ValueError("service update journal has an unsupported shape")
+    if (
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or value["service"] != service
+    ):
+        raise ValueError("service update journal identity does not match this service")
+    previous_version = value["previous_version"]
+    candidate_version = value["candidate_version"]
+    if (
+        not isinstance(previous_version, str)
+        or not SERVICE_RELEASE_VERSION_PATTERN.fullmatch(previous_version)
+        or not isinstance(candidate_version, str)
+        or not SERVICE_RELEASE_VERSION_PATTERN.fullmatch(candidate_version)
+        or previous_version == candidate_version
+    ):
+        raise ValueError("service update journal contains invalid release identities")
+    return value
+
+
+def _write_service_update_journal(
+    bundle_module: Any, service: str, previous_version: str, candidate_version: str
+) -> None:
+    """Durably record intent before the active release pointer can change."""
+
+    if not SERVICE_RELEASE_VERSION_PATTERN.fullmatch(previous_version):
+        raise ValueError("previous service release identity is invalid")
+    if not SERVICE_RELEASE_VERSION_PATTERN.fullmatch(candidate_version):
+        raise ValueError("candidate service release identity is invalid")
+    root, directory_fd = _open_service_state_directory(bundle_module, service, create=True)
+    temporary_name = f".update-journal-{os.getpid()}-{secrets.token_hex(8)}.tmp"
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "service": service,
+            "previous_version": previous_version,
+            "candidate_version": candidate_version,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    descriptor: int | None = None
+    try:
+        try:
+            os.stat(SERVICE_UPDATE_JOURNAL_NAME, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError(f"an unresolved service update journal already exists under {root}")
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+            raise ValueError("temporary service update journal is not a root-owned regular file")
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = None
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(
+            temporary_name,
+            SERVICE_UPDATE_JOURNAL_NAME,
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        os.fsync(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        os.close(directory_fd)
+
+
+def _remove_service_update_journal(bundle_module: Any, service: str) -> None:
+    """Remove a verified transaction record and persist its directory update."""
+
+    _, directory_fd = _open_service_state_directory(bundle_module, service, create=False)
+    try:
+        try:
+            file_fd = os.open(
+                SERVICE_UPDATE_JOURNAL_NAME,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+        except FileNotFoundError:
+            return
+        with os.fdopen(file_fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise ValueError("refusing to remove an unsafe service update journal")
+        os.unlink(SERVICE_UPDATE_JOURNAL_NAME, dir_fd=directory_fd)
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _active_version_from_pointer(bundle_module: Any, service: str) -> str | None:
+    """Read the active symlink identity even when its pointed-to candidate is invalid."""
+
+    _, directory_fd = _open_service_state_directory(bundle_module, service, create=False)
+    try:
+        try:
+            info = os.stat("active", dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0:
+            raise ValueError("active service release pointer is not a root-owned symlink")
+        target = os.readlink("active", dir_fd=directory_fd)
+    finally:
+        os.close(directory_fd)
+    match = re.fullmatch(r"releases/([0-9a-f]{64})", target)
+    if match is None:
+        raise ValueError(f"active service release pointer is unsafe: {target!r}")
+    return match.group(1)
+
+
+def _root_update_process_holds_lock(lock_info: os.stat_result, service: str) -> bool:
+    """Verify the exclusive lock owner is a root `cyrene upgrade <service>` process."""
+
+    lock_identity = (
+        f"{os.major(lock_info.st_dev):02x}:{os.minor(lock_info.st_dev):02x}:{lock_info.st_ino}"
+    )
+    try:
+        lock_records = Path("/proc/locks").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for record in lock_records:
+        fields = record.split()
+        if (
+            len(fields) < 6
+            or fields[1] != "FLOCK"
+            or fields[3] != "WRITE"
+            or fields[5].lower() != lock_identity.lower()
+            or not fields[4].isdigit()
+        ):
+            continue
+        pid = fields[4]
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        uid_line = next((line for line in status.splitlines() if line.startswith("Uid:")), "")
+        uid_values = uid_line.split()
+        arguments = [value.decode("utf-8", errors="surrogateescape") for value in command if value]
+        if (
+            len(uid_values) >= 2
+            and uid_values[1] == "0"
+            and "upgrade" in arguments
+            and service in arguments
+            and any(Path(argument).name == "cyrene" for argument in arguments)
+        ):
+            return True
+    return False
+
+
+def _open_update_runtime_directory(service_gid: int, *, create: bool) -> int:
+    """Open `/run/cyrene` after enforcing its root-controlled ownership and mode."""
+
+    run_info = Path("/run").lstat()
+    if not stat.S_ISDIR(run_info.st_mode) or run_info.st_uid != 0 or run_info.st_mode & 0o022:
+        raise OSError("/run is not a root-owned, non-writable directory")
+    if create:
+        try:
+            os.mkdir(SERVICE_UPDATE_RUNTIME_DIR, mode=0o750)
+        except FileExistsError:
+            pass
+
+    path_info = SERVICE_UPDATE_RUNTIME_DIR.lstat()
+    if not stat.S_ISDIR(path_info.st_mode) or path_info.st_uid != 0 or path_info.st_mode & 0o022:
+        raise OSError("/run/cyrene is not a safe root-owned directory")
+    directory_fd = os.open(
+        SERVICE_UPDATE_RUNTIME_DIR,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        if create:
+            os.fchown(directory_fd, 0, service_gid)
+            os.fchmod(directory_fd, 0o750)
+        info = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != service_gid
+            or stat.S_IMODE(info.st_mode) != 0o750
+        ):
+            raise OSError("/run/cyrene must be root:cyrene with mode 0750")
+        return directory_fd
+    except OSError:
+        os.close(directory_fd)
+        raise
+
+
+def _service_update_in_progress(service: str) -> bool:
+    """Allow journaled service startup only while a verified root updater holds its lock."""
+
+    directory_fd: int | None = None
+    try:
+        import fcntl
+        import grp
+
+        service_gid = grp.getgrnam("cyrene").gr_gid
+        directory_fd = _open_update_runtime_directory(service_gid, create=False)
+        lock_fd = os.open(
+            f"service-update-{service}.lock",
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+    except (ImportError, KeyError, OSError):
+        if directory_fd is not None:
+            os.close(directory_fd)
+        return False
+    try:
+        info = os.fstat(lock_fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != service_gid
+            or stat.S_IMODE(info.st_mode) != 0o640
+        ):
+            return False
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return _root_update_process_holds_lock(info, service)
+        else:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return False
+    finally:
+        os.close(lock_fd)
+        os.close(directory_fd)
+
+
+def _systemd_update_preflight(service: str, *, require_active: bool = True) -> tuple[bool, str]:
+    """Confirm systemd owns a unit whose ExecStart uses the foreground service runner."""
+
+    if not Path("/run/systemd/system").exists() or shutil.which("systemctl") is None:
+        return (
+            False,
+            "systemd is unavailable; source-checkout cyrene up mode has no immutable updater",
+        )
+
+    unit = f"cyrene-{service}.service"
+    loaded = subprocess.run(
+        ["systemctl", "show", "--property=LoadState", "--value", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if loaded.returncode != 0 or loaded.stdout.strip() != "loaded":
+        return False, f"systemd unit {unit} is not loaded"
+
+    exec_start = subprocess.run(
+        ["systemctl", "show", "--property=ExecStart", "--value", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    expected_command = f"argv[]=/usr/bin/cyrene service-run {service}"
+    if exec_start.returncode != 0 or expected_command not in exec_start.stdout:
+        return False, f"{unit} does not use the per-service foreground runner"
+
+    active = subprocess.run(
+        ["systemctl", "is-active", "--quiet", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if require_active and active.returncode != 0:
+        return False, f"{unit} is not active; refusing to start a service that was stopped"
+    return True, unit
+
+
+def _systemd_unit_loaded(service: str) -> bool:
+    """Report whether systemd has loaded this packaged service unit."""
+
+    if not Path("/run/systemd/system").exists() or shutil.which("systemctl") is None:
+        return False
+    result = subprocess.run(
+        ["systemctl", "show", "--property=LoadState", "--value", f"cyrene-{service}.service"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "loaded"
+
+
+def _loaded_systemd_units() -> list[str]:
+    """Return only the five Cyrene units this package owns and systemd loaded."""
+
+    if not Path("/run/systemd/system").exists() or shutil.which("systemctl") is None:
+        return []
+    return [
+        f"{unit}.service"
+        for unit in SYSTEMD_UNITS
+        if _systemd_unit_loaded(unit.removeprefix("cyrene-"))
+    ]
+
+
+def _systemd_unit_state(unit: str) -> tuple[str, str, str] | None:
+    """Read the load, active, and sub-state fields for one managed unit."""
+
+    result = subprocess.run(
+        ["systemctl", "show", "--property=LoadState,ActiveState,SubState", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    fields = dict(line.partition("=")[::2] for line in result.stdout.splitlines() if "=" in line)
+    load_state = fields.get("LoadState")
+    active_state = fields.get("ActiveState")
+    sub_state = fields.get("SubState")
+    if load_state is None or active_state is None or sub_state is None:
+        return None
+    return load_state, active_state, sub_state
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep health probes on loopback instead of following external redirects."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def _validate_health_path(health_path: str) -> None:
+    """Reject release health targets that could leave the local service path."""
+
+    parsed_path = PurePosixPath(health_path)
+    if (
+        not health_path.startswith("/")
+        or "?" in health_path
+        or "#" in health_path
+        or ".." in parsed_path.parts
+    ):
+        raise ValueError("release manifest health.path must be a local absolute URL path")
+
+
+def _service_health_port(service: str) -> int:
+    """Read the service port from its systemd EnvironmentFile or unit default."""
+
+    key = SYSTEMD_HEALTH_ENV_KEYS[service]
+    configured: str | None = None
+    environment_file = Path("/etc/cyrene/cyrene.env")
+    if environment_file.is_file():
+        for line in environment_file.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            name, separator, value = stripped.partition("=")
+            if separator and name.strip() == key:
+                configured = value.strip().strip("\"'")
+    value = configured or str(SYSTEMD_HEALTH_PORTS[service])
+    try:
+        port = int(value)
+    except ValueError as error:
+        raise ValueError(f"{key} in /etc/cyrene/cyrene.env must be an integer") from error
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{key} must be between 1 and 65535")
+    return port
+
+
+def _service_health_probe(service: str, health_path: str) -> tuple[bool, str]:
+    """Check the service's local health endpoint without following redirects."""
+
+    try:
+        _validate_health_path(health_path)
+    except ValueError as error:
+        return False, str(error)
+    try:
+        port = _service_health_port(service)
+    except (OSError, ValueError) as error:
+        return False, f"health port configuration is invalid: {error}"
+    url = f"http://127.0.0.1:{port}{health_path}"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "CyreneUpdater/1", "Accept": "application/json"},
+    )
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    try:
+        with opener.open(request, timeout=3.0) as response:
+            status = int(response.status)
+    except urllib.error.HTTPError as error:
+        return False, f"health endpoint returned HTTP {error.code}"
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        return False, f"health endpoint is unavailable: {error}"
+    if not 200 <= status < 300:
+        return False, f"health endpoint returned HTTP {status}"
+    return True, f"HTTP {status}"
+
+
+def _systemd_process_uses_release(unit: str, entrypoint: Path) -> tuple[bool, str]:
+    """Confirm the main process inherited PYTHONPATH from the selected immutable release."""
+
+    result = subprocess.run(
+        ["systemctl", "show", "--property=MainPID", "--value", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip().isdigit():
+        return False, f"{unit} has no readable MainPID"
+    pid = int(result.stdout.strip())
+    if pid <= 1:
+        return False, f"{unit} has no running main process"
+    try:
+        environment = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        executable = Path(f"/proc/{pid}/exe").resolve().name
+    except OSError as error:
+        return False, f"cannot inspect {unit} process {pid} release identity: {error}"
+    expected_pythonpath = os.fsencode(str(entrypoint.parent / "python"))
+    observed_pythonpath = next(
+        (value.partition(b"=")[2] for value in environment if value.startswith(b"PYTHONPATH=")),
+        None,
+    )
+    if "python" not in executable.lower() or observed_pythonpath != expected_pythonpath:
+        return False, f"{unit} MainPID {pid} is not bound to the selected immutable release"
+    return True, f"MainPID {pid} is bound to the selected immutable release"
+
+
+def _wait_for_service_ready(
+    service: str, unit: str, health_path: str, entrypoint: Path
+) -> tuple[bool, str]:
+    """Wait for the selected unit process and its service-specific endpoint to be ready."""
+
+    deadline = time.monotonic() + SERVICE_UPDATE_TIMEOUT_SECONDS
+    last_reason = "service has not reported ready"
+    while time.monotonic() < deadline:
+        active = subprocess.run(
+            ["systemctl", "is-active", "--quiet", unit],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if active.returncode == 0:
+            process_ok, process_reason = _systemd_process_uses_release(unit, entrypoint)
+            if process_ok:
+                healthy, reason = _service_health_probe(service, health_path)
+                if healthy:
+                    return True, f"{process_reason}; {reason}"
+                last_reason = reason
+            else:
+                last_reason = process_reason
+        else:
+            last_reason = f"{unit} is not active"
+        time.sleep(2.0)
+    return False, last_reason
+
+
+def _restart_service_unit(unit: str) -> tuple[bool, str]:
+    """Restart one systemd unit and preserve its diagnostic on failure."""
+
+    result = subprocess.run(
+        ["systemctl", "restart", unit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True, ""
+    detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+    return False, detail
+
+
+def _packaged_service_bundle(service: str, bundle_module: Any) -> Path | None:
+    """Find and validate the single bundle staged by the current Debian package."""
+
+    service_dir = Path("/usr/share/cyrene/service-artifacts") / service
+    if not service_dir.exists() and not service_dir.is_symlink():
+        return None
+    if service_dir.is_symlink() or not service_dir.is_dir():
+        raise ValueError(f"packaged {service} artifact path is unsafe: {service_dir}")
+    candidates = sorted(path for path in service_dir.iterdir() if path.is_dir())
+    if len(candidates) != 1:
+        raise ValueError(
+            f"expected one package-provided {service} bundle in {service_dir}, "
+            f"found {len(candidates)}"
+        )
+    manifest = bundle_module.validate_bundle(candidates[0], expected_service=service)
+    if candidates[0].name != manifest["version"]:
+        raise ValueError(f"package bundle directory does not match its {service} manifest version")
+    return candidates[0]
+
+
+def _recover_service_update_locked(service: str, unit: str) -> tuple[bool, bool, str]:
+    """Restore the journaled prior release before allowing a unit to launch."""
+
+    try:
+        bundle_module = _load_service_bundle_module()
+        journal = _read_service_update_journal(bundle_module, service)
+        if journal is None:
+            return False, True, ""
+        previous_version = journal["previous_version"]
+        candidate_version = journal["candidate_version"]
+        previous_dir = service_install_root() / "services" / service / "releases" / previous_version
+        previous_manifest = bundle_module.validate_bundle(previous_dir, expected_service=service)
+        if previous_manifest["version"] != previous_version:
+            raise ValueError("journaled previous release directory does not match its identity")
+        health_path = str(previous_manifest["health"]["path"])
+        _validate_health_path(health_path)
+        current_version = _active_version_from_pointer(bundle_module, service)
+        if current_version not in {None, previous_version, candidate_version}:
+            raise ValueError(
+                f"active release {current_version} is neither journaled release; refusing recovery"
+            )
+        if current_version != previous_version:
+            bundle_module.activate_release(
+                service,
+                previous_version,
+                install_root=service_install_root(),
+                expected_current_version=current_version,
+            )
+        selected = bundle_module.resolve_active_release(
+            service, install_root=service_install_root()
+        )
+        if selected is None or selected[1] != previous_version:
+            raise RuntimeError("the previous release did not become active during recovery")
+        previous_entrypoint = selected[0]
+    except (ImportError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        return True, False, f"could not restore the journaled prior release: {error}"
+
+    restart_ok, restart_error = _restart_service_unit(unit)
+    if not restart_ok:
+        return (
+            True,
+            False,
+            f"restored {previous_version}, but restarting {unit} failed: {restart_error}",
+        )
+    ready, reason = _wait_for_service_ready(service, unit, health_path, previous_entrypoint)
+    if not ready:
+        return True, False, f"restored {previous_version}, but readiness failed: {reason}"
+    try:
+        _remove_service_update_journal(bundle_module, service)
+    except (OSError, RuntimeError, ValueError) as error:
+        return (
+            True,
+            False,
+            f"restored and verified {previous_version}, but journal cleanup failed: {error}",
+        )
+    return True, True, f"restored and verified prior release {previous_version} ({reason})"
+
+
+def _upgrade_service_locked(service: str, bundle_path: Path) -> int:
+    """Stage, activate, verify, and roll back one immutable service release."""
+
+    try:
+        bundle_module = _load_service_bundle_module()
+        old_active = bundle_module.resolve_active_release(
+            service, install_root=service_install_root()
+        )
+        if old_active is None:
+            print(
+                f"UNSUPPORTED: {service} has no active immutable release to restore; "
+                "the mutable legacy install is not a rollback-safe baseline.",
+                file=sys.stderr,
+            )
+            return 2
+        _old_entrypoint, old_version = old_active
+        old_release_dir = service_install_root() / "services" / service / "releases" / old_version
+        old_manifest = bundle_module.validate_bundle(old_release_dir, expected_service=service)
+        new_manifest = bundle_module.validate_bundle(bundle_path, expected_service=service)
+        new_version = str(new_manifest["version"])
+        new_health_path = str(new_manifest["health"]["path"])
+        old_health_path = str(old_manifest["health"]["path"])
+        _validate_health_path(new_health_path)
+        _validate_health_path(old_health_path)
+        _service_health_port(service)
+    except (ImportError, KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        print(f"ERROR: service release validation failed: {error}", file=sys.stderr)
+        return 1
+
+    if new_version == old_version:
+        print(f"{service} is already on release {old_version}; no restart was performed.")
+        return 0
+
+    release_dir = service_install_root() / "services" / service / "releases" / new_version
+    try:
+        if release_dir.exists():
+            # Reuse a failed candidate only when its complete manifest is identical.
+            staged_manifest = bundle_module.validate_bundle(release_dir, expected_service=service)
+            if staged_manifest != new_manifest:
+                raise ValueError("an existing release has different manifest contents")
+        else:
+            staged_release = bundle_module.stage_release(
+                bundle_path, install_root=service_install_root()
+            )
+            staged_manifest = bundle_module.validate_bundle(
+                staged_release, expected_service=service
+            )
+            if staged_manifest != new_manifest:
+                raise ValueError("staged release manifest differs from the validated bundle")
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        print(f"ERROR: could not stage {service} {new_version}: {error}", file=sys.stderr)
+        return 1
+
+    try:
+        _write_service_update_journal(bundle_module, service, old_version, new_version)
+        bundle_module.activate_release(
+            service,
+            new_version,
+            install_root=service_install_root(),
+            expected_current_version=old_version,
+        )
+        active_release = bundle_module.resolve_active_release(
+            service, install_root=service_install_root()
+        )
+        if active_release is None or active_release[1] != new_version:
+            raise RuntimeError("new release did not become the active service version")
+        new_entrypoint = active_release[0]
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        recovered, restored, recovery_reason = _recover_service_update_locked(
+            service, f"cyrene-{service}.service"
+        )
+        if recovered and restored:
+            print(
+                f"ERROR: could not activate {service} {new_version}: {error}. {recovery_reason}.",
+                file=sys.stderr,
+            )
+        elif not recovered:
+            print(
+                f"ERROR: could not activate {service} {new_version}: {error}; "
+                "the active release was not changed and no transaction journal remains.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ROLLBACK REQUIRED: could not activate {service} {new_version}: {error}. "
+                f"{recovery_reason or 'transaction journal remains for recovery'}.",
+                file=sys.stderr,
+            )
+        return 1
+
+    unit = f"cyrene-{service}.service"
+    restart_ok, restart_error = _restart_service_unit(unit)
+    if restart_ok:
+        ready, ready_reason = _wait_for_service_ready(
+            service, unit, new_health_path, new_entrypoint
+        )
+    else:
+        ready, ready_reason = False, f"systemd restart failed: {restart_error}"
+    if ready:
+        try:
+            active_release = bundle_module.resolve_active_release(
+                service, install_root=service_install_root()
+            )
+            if active_release is None or active_release[1] != new_version:
+                raise RuntimeError("active release pointer changed during readiness verification")
+        except (OSError, RuntimeError, ValueError) as error:
+            ready, ready_reason = False, f"release verification failed: {error}"
+    if ready:
+        try:
+            _remove_service_update_journal(bundle_module, service)
+        except (OSError, RuntimeError, ValueError) as error:
+            print(
+                f"ERROR: {service} {new_version} is healthy, but its update journal could not "
+                f"be cleared ({error}); service-run will fail closed until recovery.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"Updated {service} from {old_version} to {new_version}; only {unit} was restarted "
+            f"and its health endpoint returned {ready_reason}."
+        )
+        return 0
+
+    print(
+        f"{service} release {new_version} did not become ready ({ready_reason}); "
+        f"restoring {old_version}.",
+        file=sys.stderr,
+    )
+    recovered, restored, recovery_reason = _recover_service_update_locked(service, unit)
+    if not recovered or not restored:
+        print(
+            f"ROLLBACK INCOMPLETE: {recovery_reason or 'the update journal is missing'}; "
+            "service-run will fail closed until recovery.",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"Rolled {service} back to {old_version}; {recovery_reason}.", file=sys.stderr)
+    return 1
+
+
+def _upgrade_service(service: str, bundle_path: Path | None) -> int:
+    """Serialize root-owned per-service update transactions with a lock file."""
+
+    if not Path("/run/systemd/system").exists() or shutil.which("systemctl") is None:
+        print(
+            "UNSUPPORTED: cyrene up development mode uses source checkouts and has no "
+            "immutable systemd release to roll back to; no process was changed.",
+            file=sys.stderr,
+        )
+        return 2
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        print("ERROR: per-service updates must run as root (use sudo).", file=sys.stderr)
+        return 1
+
+    directory_fd: int | None = None
+    try:
+        import fcntl
+        import grp
+
+        service_gid = grp.getgrnam("cyrene").gr_gid
+        directory_fd = _open_update_runtime_directory(service_gid, create=True)
+        lock_fd = os.open(
+            f"service-update-{service}.lock",
+            os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+    except (ImportError, KeyError, OSError) as error:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        print(f"ERROR: cannot create the service update lock: {error}", file=sys.stderr)
+        return 1
+
+    try:
+        lock_stat = os.fstat(lock_fd)
+        if (
+            not stat.S_ISREG(lock_stat.st_mode)
+            or lock_stat.st_uid != 0
+            or (lock_stat.st_mode & 0o022)
+        ):
+            print("ERROR: service update lock is not root-owned and private.", file=sys.stderr)
+            return 1
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"ERROR: another {service} update is already in progress.", file=sys.stderr)
+            return 1
+
+        try:
+            service_gid = grp.getgrnam("cyrene").gr_gid
+            os.fchown(lock_fd, 0, service_gid)
+            os.fchmod(lock_fd, 0o640)
+        except (KeyError, OSError) as error:
+            print(
+                f"ERROR: cannot expose the update lock safely to the service runner: {error}",
+                file=sys.stderr,
+            )
+            return 1
+        lock_stat = os.fstat(lock_fd)
+        if (
+            lock_stat.st_uid != 0
+            or lock_stat.st_gid != service_gid
+            or stat.S_IMODE(lock_stat.st_mode) != 0o640
+        ):
+            print("ERROR: service update lock permissions are invalid.", file=sys.stderr)
+            return 1
+
+        ready, detail = _systemd_update_preflight(service, require_active=False)
+        if not ready:
+            print(f"UNSUPPORTED: {detail}; no service was changed.", file=sys.stderr)
+            return 2
+
+        try:
+            bundle_module = _load_service_bundle_module()
+            pending = _read_service_update_journal(bundle_module, service)
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as error:
+            print(f"ERROR: cannot inspect {service} update state: {error}", file=sys.stderr)
+            return 1
+        if pending is not None:
+            recovered, restored, recovery_reason = _recover_service_update_locked(
+                service, f"cyrene-{service}.service"
+            )
+            if recovered and restored:
+                print(
+                    f"Interrupted update recovered: {recovery_reason}. "
+                    "The requested candidate was not retried; run the upgrade command again "
+                    "after reviewing service status."
+                )
+                return 0
+            print(f"ROLLBACK INCOMPLETE: {recovery_reason}.", file=sys.stderr)
+            return 1
+
+        ready, detail = _systemd_update_preflight(service)
+        if not ready:
+            print(f"UNSUPPORTED: {detail}; no service was changed.", file=sys.stderr)
+            return 2
+        if bundle_path is None:
+            try:
+                bundle_path = _packaged_service_bundle(service, bundle_module)
+            except (OSError, RuntimeError, ValueError) as error:
+                print(f"ERROR: package update bundle is invalid: {error}", file=sys.stderr)
+                return 1
+        if bundle_path is None:
+            print(
+                f"No staged update bundle exists for {service}. Install a package containing "
+                "service artifacts or pass --artifact <bundle-directory>.",
+                file=sys.stderr,
+            )
+            return 2
+        return _upgrade_service_locked(service, bundle_path)
+    finally:
+        os.close(lock_fd)
+        os.close(directory_fd)
+
+
 def cmd_upgrade(args: argparse.Namespace) -> int:
-    print("Automatic upgrade is not currently supported.")
-    print("To upgrade Cyrene:")
-    print("  1. Pull the latest release repository: git pull")
-    print("  2. If using deb packaging: sudo apt install ./cyrene_<version>_amd64.deb")
+    """Inspect native Linux release status or update one systemd service."""
+
+    service = args.service
+    artifact = args.artifact
+    if service == "echo":
+        print(
+            "Echo is not managed by the native Debian systemd path; no cyrene-echo.service "
+            "or update target exists.",
+            file=sys.stderr,
+        )
+        return 2
+    if service is not None and service not in SYSTEMD_SERVICES:
+        print(f"ERROR: unknown native Linux service {service!r}.", file=sys.stderr)
+        print(f"Managed services: {', '.join(SYSTEMD_SERVICES)}", file=sys.stderr)
+        return 2
+    if service is None and artifact is not None:
+        print("ERROR: specify a service when using --artifact.", file=sys.stderr)
+        return 2
+
+    if service is not None:
+        return _upgrade_service(service, artifact)
+
+    try:
+        bundle_module = _load_service_bundle_module()
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
+        print(f"ERROR: cannot load service release metadata: {error}", file=sys.stderr)
+        return 1
+
+    if not _loaded_systemd_units():
+        print(
+            "UNSUPPORTED: this checkout is using the cyrene up development fallback "
+            "(cyrene-dev.py/run-services.py); it has no immutable rollback-safe service artifacts."
+        )
+        return 0
+    print("Native Debian systemd service release status:")
+    for managed_service in SYSTEMD_SERVICES:
+        try:
+            if _service_update_journal_exists(bundle_module, managed_service):
+                print(
+                    f"  {managed_service}: INTERRUPTED UPDATE; run `sudo cyrene upgrade "
+                    f"{managed_service}` to restore the prior release"
+                )
+                continue
+            release = bundle_module.resolve_active_release(
+                managed_service, install_root=service_install_root()
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            print(f"  {managed_service}: INVALID ({error})")
+            continue
+        if release is None:
+            print(
+                f"  {managed_service}: UNSUPPORTED (no active immutable release; "
+                "legacy baseline cannot be rolled back safely)"
+            )
+        else:
+            print(f"  {managed_service}: {release[1]} ({release[0]})")
+    print("\nUpdate one service with: sudo cyrene upgrade <service>")
+    print(
+        "Or provide a verified bundle: sudo cyrene upgrade <service> --artifact <bundle-directory>"
+    )
+    print(
+        "The selected service is restarted and health-checked; failures restore its prior release."
+    )
     return 0
 
 
@@ -1328,8 +2578,31 @@ def build_parser() -> argparse.ArgumentParser:
     restore_parser.add_argument("--src", required=True, help="Source backup file or directory")
     restore_parser.set_defaults(func=cmd_restore)
 
+    # systemd invokes one foreground service per unit; users normally manage
+    # these commands through systemctl rather than calling them directly.
+    service_run_parser = subparsers.add_parser("service-run", help=argparse.SUPPRESS)
+    service_run_parser.add_argument("service", choices=SYSTEMD_SERVICES)
+    service_run_parser.add_argument("service_args", nargs=argparse.REMAINDER)
+    service_run_parser.set_defaults(func=cmd_service_run)
+
+    service_bootstrap_parser = subparsers.add_parser("service-bootstrap", help=argparse.SUPPRESS)
+    service_bootstrap_parser.add_argument(
+        "--activate-missing",
+        action="store_true",
+        help="Activate a packaged release only when the service has no active release",
+    )
+    service_bootstrap_parser.set_defaults(func=cmd_service_bootstrap)
+
     # upgrade
-    upgrade_parser = subparsers.add_parser("upgrade", help="Check or perform stack upgrade")
+    upgrade_parser = subparsers.add_parser(
+        "upgrade", help="Inspect service releases or update one native systemd service"
+    )
+    upgrade_parser.add_argument("service", nargs="?", help="Managed service to update")
+    upgrade_parser.add_argument(
+        "--artifact",
+        type=Path,
+        help="Override the immutable bundle staged by the installed Debian package",
+    )
     upgrade_parser.set_defaults(func=cmd_upgrade)
 
     # uninstall

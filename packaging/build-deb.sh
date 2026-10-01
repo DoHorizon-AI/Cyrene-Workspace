@@ -10,6 +10,7 @@ WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERSION="0.1.0-rc.1"
 OUTPUT_DIR="${WORKSPACE_ROOT}/dist"
 ARCH="amd64"
+SERVICE_WHEELHOUSE="${CYRENE_SERVICE_WHEELHOUSE:-${SCRIPT_DIR}/service-wheelhouse}"
 
 print_help() {
     cat <<EOF
@@ -20,7 +21,9 @@ Build a Debian/Ubuntu .deb package for Cyrene.
 Options:
   --version <version>   Package version (default: 0.1.0-rc.1)
   --output <dir>        Output directory for .deb package (default: ./dist/)
-  --arch <arch>         Architecture (default: amd64)
+  --arch <arch>         Architecture (amd64 only for this release)
+  --service-wheelhouse <dir>
+                        Offline five-service wheelhouse (default: packaging/service-wheelhouse)
   -h, --help            Show this help message
 EOF
 }
@@ -39,6 +42,10 @@ while [[ $# -gt 0 ]]; do
             ARCH="$2"
             shift 2
             ;;
+        --service-wheelhouse)
+            SERVICE_WHEELHOUSE="$2"
+            shift 2
+            ;;
         -h|--help)
             print_help
             exit 0
@@ -50,6 +57,28 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ "${ARCH}" != "amd64" ]]; then
+    echo "ERROR: release-lock.json supports Ubuntu 24.04 x86_64 (amd64) only; refusing --arch ${ARCH}." >&2
+    exit 2
+fi
+
+if ! command -v dpkg >/dev/null 2>&1; then
+    echo "ERROR: dpkg is required to verify the native Debian build architecture." >&2
+    exit 2
+fi
+HOST_ARCH="$(dpkg --print-architecture)"
+if [[ "${HOST_ARCH}" != "amd64" ]]; then
+    echo "ERROR: this RC supports native amd64 builds only; build host reports ${HOST_ARCH}." >&2
+    exit 2
+fi
+
+if [[ ! -d "${SERVICE_WHEELHOUSE}" ]]; then
+    echo "ERROR: service wheelhouse is missing: ${SERVICE_WHEELHOUSE}" >&2
+    echo "Build a pinned offline wheelhouse first; see ${SCRIPT_DIR}/service-bundle.md." >&2
+    echo "The Debian package will not contain non-runnable placeholder services." >&2
+    exit 2
+fi
 
 mkdir -p "${OUTPUT_DIR}"
 STAGE_DIR="$(mktemp -d -t cyrene-deb-XXXXXX)"
@@ -64,6 +93,7 @@ mkdir -p "${STAGE_DIR}/usr/lib/cyrene"
 mkdir -p "${STAGE_DIR}/etc/cyrene"
 mkdir -p "${STAGE_DIR}/lib/systemd/system"
 mkdir -p "${STAGE_DIR}/var/lib/cyrene"
+mkdir -p "${STAGE_DIR}/usr/share/cyrene/service-artifacts"
 
 mkdir -p "${STAGE_DIR}/usr/lib/cyrene/scripts"
 
@@ -77,6 +107,8 @@ ln -s /usr/lib/cyrene/scripts/cyrene "${STAGE_DIR}/usr/bin/cyrene"
 
 # 2. /usr/lib/cyrene/ -> Python runtime (managed by uv) & helper scripts
 cp -r "${WORKSPACE_ROOT}/scripts/." "${STAGE_DIR}/usr/lib/cyrene/scripts/"
+cp "${SCRIPT_DIR}/service_bundle.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
 if [[ -f "${WORKSPACE_ROOT}/pyproject.toml" ]]; then
     cp "${WORKSPACE_ROOT}/pyproject.toml" "${STAGE_DIR}/usr/lib/cyrene/"
 fi
@@ -91,15 +123,15 @@ fi
 # Runtime bootstrap reads those pins and installs the engines into a venv.
 cp "${SCRIPT_DIR}/bootstrap.sh" "${STAGE_DIR}/usr/lib/cyrene/bootstrap.sh"
 chmod 755 "${STAGE_DIR}/usr/lib/cyrene/bootstrap.sh"
-# The Web Host launcher: `cyrene up` starts it to serve the console API.
-for candidate in \
-    "${WORKSPACE_ROOT}/../Cyrene-Services/Cyrene-Navigator" \
-    "${WORKSPACE_ROOT}/../Cyrene-Navigator"; do
-    [[ -f "${candidate}/scripts/serve-web.py" ]] || continue
-    cp "${candidate}/scripts/serve-web.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/serve-web.py"
-    chmod 755 "${STAGE_DIR}/usr/lib/cyrene/scripts/serve-web.py"
-    break
-done
+
+# Every managed process ships as an immutable release bundle. The helper checks
+# the accepted source SHA from release-lock.json, the complete hash-pinned
+# offline wheel set, and the bundle file manifest before the .deb is assembled.
+python3 "${SCRIPT_DIR}/service_bundle.py" build \
+    --wheelhouse "${SERVICE_WHEELHOUSE}" \
+    --release-lock "${WORKSPACE_ROOT}/release-lock.json" \
+    --output "${STAGE_DIR}/usr/share/cyrene/service-artifacts" \
+    --arch "${ARCH}"
 
 # 3. /etc/cyrene/ -> Default configuration template
 cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/cyrene.env"
@@ -134,7 +166,7 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
-ExecStart=/usr/bin/cyrene up
+ExecStart=/usr/bin/cyrene service-run navigator
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
@@ -155,7 +187,7 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
-ExecStart=/usr/bin/python3 -m cy_exec.training.product_cli --port 8001
+ExecStart=/usr/bin/cyrene service-run yield
 Restart=on-failure
 RestartSec=5
 
@@ -175,7 +207,7 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
-ExecStart=/usr/bin/python3 -m cyrene_reactor_product.cli control --port 8002
+ExecStart=/usr/bin/cyrene service-run reactor
 Restart=on-failure
 RestartSec=5
 
@@ -195,7 +227,7 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
-ExecStart=/usr/bin/python3 -m cyrene_exchange_product.cli serve --port 8003
+ExecStart=/usr/bin/cyrene service-run exchange
 Restart=on-failure
 RestartSec=5
 
@@ -215,7 +247,7 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
-ExecStart=/usr/bin/python3 -m cyrene_catalyst --port 8004
+ExecStart=/usr/bin/cyrene service-run catalyst
 Restart=on-failure
 RestartSec=5
 
@@ -233,6 +265,7 @@ Section: devel
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Cyrene Team <team@cyrene.dev>
+Depends: python3 (>= 3.12), python3 (<< 3.13), systemd
 Description: Cyrene Unified Local LLM Stack
  Cyrene provides a complete local LLM development and inference platform,
  including model importation (Reactor), training drafts (Yield), dataset preparation
@@ -267,24 +300,123 @@ else
     echo "WARNING: /usr/lib/cyrene/bootstrap.sh missing; engines were not installed." >&2
 fi
 
-# 重新加载 systemd units
+# Validate and stage all five release bundles. Existing active symlinks are
+# retained on upgrade; the CLI activates only missing releases on first install.
+/usr/bin/cyrene service-bootstrap --activate-missing
+
+# 仅首次安装（而非升级）时生成 cyrene 用户拥有的配对凭据。
+if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
+    runuser -u cyrene -- env CYRENE_DEV_HOME=/var/lib/cyrene CYRENE_DATA_DIR=/var/lib/cyrene /usr/bin/cyrene init
+fi
+
+# Reload unit definitions on install and upgrade. Preserve the administrator's
+# enabled/running state on upgrades; a first install enables and starts units.
+SYSTEMD_RUNNING=0
 if [ -d /run/systemd/system ]; then
-    systemctl daemon-reload || true
-    # 只有 systemd 实际可用时才启用并启动服务。
-    systemctl enable cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst 2>/dev/null || true
-    systemctl restart cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst 2>/dev/null || true
+    SYSTEMD_RUNNING=1
+    if ! systemctl daemon-reload; then
+        echo "ERROR: systemd could not reload the installed Cyrene units." >&2
+        exit 1
+    fi
+    if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
+        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
+            if ! systemctl enable "$unit"; then
+                echo "ERROR: systemd could not enable ${unit}.service." >&2
+                exit 1
+            fi
+        done
+        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
+            if ! systemctl start "$unit"; then
+                echo "ERROR: initial start failed for ${unit}.service; package configuration is incomplete." >&2
+                systemctl status --no-pager --full "$unit" >&2 || true
+                journalctl --no-pager -n 40 -u "$unit" >&2 || true
+                exit 1
+            fi
+        done
+        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
+            if ! systemctl is-active --quiet "$unit"; then
+                echo "ERROR: ${unit}.service exited during initial startup; package configuration is incomplete." >&2
+                systemctl status --no-pager --full "$unit" >&2 || true
+                journalctl --no-pager -n 40 -u "$unit" >&2 || true
+                exit 1
+            fi
+        done
+    fi
+else
+    if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
+        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
+            if ! systemctl --root=/ enable "${unit}.service"; then
+                echo "ERROR: systemd could not enable ${unit}.service for the next boot." >&2
+                exit 1
+            fi
+        done
+    fi
+    echo "WARNING: systemd is not running; Cyrene units were installed but not started." >&2
 fi
 
-# 仅首次安装（而非升级）时生成配对凭据
-if [ "$1" = "configure" ] && [ -z "$2" ]; then
-    /usr/bin/cyrene init || true
+if [ "$SYSTEMD_RUNNING" -eq 1 ]; then
+    echo "Cyrene installed successfully."
+else
+    echo "Cyrene package files are installed; systemd is not running, so services were not started."
 fi
-
-echo "Cyrene installed successfully."
 echo "Run 'cyrene init' or 'cyrene doctor' to get started."
 exit 0
 EOF
 chmod 755 "${STAGE_DIR}/DEBIAN/postinst"
+
+# Stop and disable services only when the package is being removed. During
+# upgrades dpkg passes "upgrade", so currently running services stay untouched.
+cat <<'EOF' > "${STAGE_DIR}/DEBIAN/prerm"
+#!/bin/sh
+set -e
+
+if [ "${1:-}" = "remove" ]; then
+    if [ -d /run/systemd/system ]; then
+        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
+            if ! systemctl stop "${unit}.service"; then
+                echo "ERROR: could not stop ${unit}.service before removing Cyrene." >&2
+                exit 1
+            fi
+            if ! systemctl disable "${unit}.service"; then
+                echo "ERROR: could not disable ${unit}.service before removing Cyrene." >&2
+                exit 1
+            fi
+        done
+    else
+        echo "WARNING: systemd is not running; Cyrene services could not be stopped." >&2
+        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
+            if ! systemctl --root=/ disable "${unit}.service"; then
+                echo "ERROR: systemd could not disable ${unit}.service from the offline root." >&2
+                exit 1
+            fi
+        done
+    fi
+fi
+
+exit 0
+EOF
+chmod 755 "${STAGE_DIR}/DEBIAN/prerm"
+
+# Remove stale unit definitions after dpkg removes the unit files. Keep the
+# service release history and /var/lib/cyrene data for a possible reinstall.
+cat <<'EOF' > "${STAGE_DIR}/DEBIAN/postrm"
+#!/bin/sh
+set -e
+
+case "${1:-}" in
+    remove|purge)
+        if [ -d /run/systemd/system ]; then
+            if ! systemctl daemon-reload; then
+                echo "ERROR: systemd could not reload after removing Cyrene units." >&2
+                exit 1
+            fi
+        fi
+        ;;
+esac
+
+exit 0
+EOF
+chmod 755 "${STAGE_DIR}/DEBIAN/postrm"
 
 # 7. Build .deb package
 OUTPUT_PACKAGE="${OUTPUT_DIR}/cyrene_${VERSION}_${ARCH}.deb"
