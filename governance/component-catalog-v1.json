@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 1,
+  "generation": 2,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -154,7 +154,7 @@
   ],
   "activitySourceCatalog": {
     "managedBy": "cyrene-runtime-maintenance",
-    "path": "/etc/cyrene/runtime-activity-sources.json",
+    "path": "/var/lib/cyrene/runtime/activity-sources.json",
     "generationSource": "install_catalog_generation",
     "minimumSources": 1
   },
@@ -498,7 +498,12 @@
         "group": "single-service",
         "unit": "cyrene-navigator.service"
       },
-      "dependencies": [],
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
+        }
+      ],
       "systemdUnit": "cyrene-navigator.service",
       "pythonBundleService": "navigator"
     },
@@ -526,7 +531,16 @@
         "group": "single-service",
         "unit": "cyrene-yield.service"
       },
-      "dependencies": [],
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
       "systemdUnit": "cyrene-yield.service",
       "pythonBundleService": "yield",
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-yield"
@@ -555,7 +569,16 @@
         "group": "single-service",
         "unit": "cyrene-reactor.service"
       },
-      "dependencies": [],
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
       "systemdUnit": "cyrene-reactor.service",
       "pythonBundleService": "reactor",
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-reactor"
@@ -584,7 +607,16 @@
         "group": "single-service",
         "unit": "cyrene-exchange.service"
       },
-      "dependencies": [],
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
       "systemdUnit": "cyrene-exchange.service",
       "pythonBundleService": "exchange",
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-exchange"
@@ -613,7 +645,16 @@
         "group": "single-service",
         "unit": "cyrene-catalyst.service"
       },
-      "dependencies": [],
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
       "systemdUnit": "cyrene-catalyst.service",
       "pythonBundleService": "catalyst",
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-catalyst"
@@ -641,7 +682,16 @@
       "restart": {
         "group": "single-service"
       },
-      "dependencies": [],
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-echo"
     },
     {

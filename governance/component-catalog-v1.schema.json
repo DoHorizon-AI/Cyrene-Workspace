@@ -73,7 +73,7 @@
           "const": "cyrene-runtime-maintenance"
         },
         "path": {
-          "const": "/etc/cyrene/runtime-activity-sources.json"
+          "const": "/var/lib/cyrene/runtime/activity-sources.json"
         },
         "generationSource": {
           "const": "install_catalog_generation"
