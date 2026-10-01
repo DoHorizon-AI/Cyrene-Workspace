@@ -16,6 +16,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -67,6 +68,10 @@ class WheelArtifact:
     version: str
     sha256: str
     provenance: str
+
+
+RUNTIME_SDK_COMPONENT_ID = "cyrene-runtime-maintenance-sdk"
+RUNTIME_SDK_DISTRIBUTION = "cyrene-runtime-maintenance"
 
 
 SERVICE_SPECS = (
@@ -582,15 +587,42 @@ def _verify_wheelhouse(service_dir: Path, spec: ServiceSpec, source_commit: str)
     lock = service_dir / "requirements.lock"
     allowed = _requirement_hashes(lock)
     source = _read_json_object(service_dir / "source.json", f"{spec.service} source.json")
+    runtime_dependencies = source.get("runtime_dependencies")
     expected_source = {
-        "schema_version": 1,
+        "schema_version": 2,
         "service": spec.service,
         "source_repository": spec.repository,
         "source_commit": source_commit,
         "requirements_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+        "runtime_dependencies": runtime_dependencies,
     }
-    if source != expected_source:
+    if set(source) != set(expected_source) or source != expected_source:
         raise ProducerError(f"{spec.service}/source.json differs from its pinned source or lock")
+    if not isinstance(runtime_dependencies, list) or len(runtime_dependencies) != 1:
+        raise ProducerError(f"{spec.service}/source.json must pin exactly one runtime SDK dependency")
+    sdk = runtime_dependencies[0]
+    expected_sdk_fields = {
+        "component_id",
+        "manifest_digest",
+        "artifact_digest",
+        "distribution",
+        "version",
+        "wheel_sha256",
+    }
+    if (
+        not isinstance(sdk, dict)
+        or set(sdk) != expected_sdk_fields
+        or sdk.get("component_id") != RUNTIME_SDK_COMPONENT_ID
+        or sdk.get("distribution") != RUNTIME_SDK_DISTRIBUTION
+        or not isinstance(sdk.get("manifest_digest"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", sdk["manifest_digest"]) is None
+        or not isinstance(sdk.get("artifact_digest"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", sdk["artifact_digest"]) is None
+        or not isinstance(sdk.get("version"), str)
+        or not isinstance(sdk.get("wheel_sha256"), str)
+        or SHA256_PATTERN.fullmatch(sdk["wheel_sha256"]) is None
+    ):
+        raise ProducerError(f"{spec.service}/source.json has invalid runtime SDK provenance")
     expected_entries = {"requirements.lock", "source.json"}
     if spec.service == "navigator":
         expected_entries.add("serve-web.py")
@@ -603,7 +635,10 @@ def _verify_wheelhouse(service_dir: Path, spec: ServiceSpec, source_commit: str)
         elif child.name not in expected_entries:
             raise ProducerError(f"unexpected {spec.service} wheelhouse entry: {child.name}")
 
-    required_names = {_normalize_distribution(name) for name in spec.application_distributions}
+    required_names = {
+        _normalize_distribution(name)
+        for name in (*spec.application_distributions, RUNTIME_SDK_DISTRIBUTION)
+    }
     locked_names = {name for name, _ in allowed}
     if not required_names.issubset(locked_names):
         raise ProducerError(f"{spec.service}/requirements.lock omits an application distribution")
@@ -624,6 +659,17 @@ def _verify_wheelhouse(service_dir: Path, spec: ServiceSpec, source_commit: str)
         raise ProducerError(
             f"{spec.service} wheelhouse is missing application wheel(s): {', '.join(missing)}"
         )
+    sdk_identity = (_normalize_distribution(RUNTIME_SDK_DISTRIBUTION), sdk["version"])
+    sdk_matches = []
+    for wheel in wheel_paths:
+        name, version = _wheel_metadata(wheel)
+        if (
+            (_normalize_distribution(name), version) == sdk_identity
+            and hashlib.sha256(wheel.read_bytes()).hexdigest() == sdk["wheel_sha256"]
+        ):
+            sdk_matches.append(wheel)
+    if sdk_identity not in allowed or sdk["wheel_sha256"] not in allowed[sdk_identity] or len(sdk_matches) != 1:
+        raise ProducerError(f"{spec.service} wheelhouse is missing the exactly pinned runtime SDK wheel")
     if not wheel_paths:
         raise ProducerError(f"{spec.service} wheelhouse contains no wheels")
 
@@ -645,6 +691,59 @@ def _native_target() -> str:
     return "amd64"
 
 
+def _load_runtime_sdk_wheel(args: argparse.Namespace) -> tuple[WheelArtifact, str, str]:
+    """Verify the independently attested SDK wheel passed by the release workflow."""
+
+    values = (
+        args.runtime_sdk_wheel,
+        args.runtime_sdk_version,
+        args.runtime_sdk_sha256,
+        args.runtime_sdk_manifest_digest,
+        args.runtime_sdk_artifact_digest,
+    )
+    if any(value is None for value in values):
+        raise ProducerError(
+            "Product wheelhouses require --runtime-sdk-wheel, --runtime-sdk-version, "
+            "--runtime-sdk-sha256, --runtime-sdk-manifest-digest, and "
+            "--runtime-sdk-artifact-digest from the verified SDK release"
+        )
+    path = Path(args.runtime_sdk_wheel).expanduser().absolute()
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise ProducerError(f"cannot inspect runtime SDK wheel {path}: {error}") from error
+    if not stat.S_ISREG(info.st_mode):
+        raise ProducerError("runtime SDK wheel must be a regular non-symlink file")
+    if not SHA256_PATTERN.fullmatch(args.runtime_sdk_sha256):
+        raise ProducerError("--runtime-sdk-sha256 must be 64 lowercase hexadecimal characters")
+    for flag, value in (
+        ("--runtime-sdk-manifest-digest", args.runtime_sdk_manifest_digest),
+        ("--runtime-sdk-artifact-digest", args.runtime_sdk_artifact_digest),
+    ):
+        if not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
+            raise ProducerError(f"{flag} must be sha256 followed by 64 lowercase hexadecimal characters")
+    if not args.runtime_sdk_version or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", args.runtime_sdk_version):
+        raise ProducerError("--runtime-sdk-version must be a concrete version")
+    name, version = _wheel_metadata(path)
+    if _normalize_distribution(name) != _normalize_distribution(RUNTIME_SDK_DISTRIBUTION):
+        raise ProducerError(
+            f"runtime SDK wheel distribution must be {RUNTIME_SDK_DISTRIBUTION}, got {name}"
+        )
+    if version != args.runtime_sdk_version:
+        raise ProducerError(
+            f"runtime SDK wheel version differs from its verified manifest: "
+            f"expected {args.runtime_sdk_version}, got {version}"
+        )
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if digest != args.runtime_sdk_sha256:
+        raise ProducerError("runtime SDK wheel SHA-256 differs from the verified wheel digest")
+    return (
+        WheelArtifact(path, name, version, digest, RUNTIME_SDK_COMPONENT_ID),
+        args.runtime_sdk_manifest_digest,
+        args.runtime_sdk_artifact_digest,
+    )
+
+
 def _write_service(
     *,
     spec: ServiceSpec,
@@ -656,6 +755,10 @@ def _write_service(
     uv_executable: str,
     python_executable: str,
     command_env: dict[str, str],
+    service_commit_override: str | None = None,
+    runtime_sdk: WheelArtifact,
+    runtime_sdk_manifest_digest: str,
+    runtime_sdk_artifact_digest: str,
 ) -> Path:
     """Build one complete service wheelhouse from pinned service and Git sources."""
 
@@ -665,7 +768,11 @@ def _write_service(
             f"repositories.yaml repository path must be relative: {relative_repo_path}"
         )
     try:
-        service_commit = release_lock["repositories"][spec.repository]
+        service_commit = (
+            service_commit_override
+            if service_commit_override is not None
+            else release_lock["repositories"][spec.repository]
+        )
     except (KeyError, TypeError) as error:
         raise ProducerError(f"release-lock.json is missing {spec.repository}") from error
     if not isinstance(service_commit, str) or not COMMIT_PATTERN.fullmatch(service_commit):
@@ -693,6 +800,7 @@ def _write_service(
     service_stage.mkdir(parents=True, exist_ok=False)
     source_wheels = staging_root / ".built-wheels" / spec.service
     source_wheels.mkdir(parents=True, exist_ok=False)
+    shutil.copy2(runtime_sdk.path, source_wheels / runtime_sdk.path.name)
     local_artifacts: list[WheelArtifact] = []
 
     for index, (package, project_root) in enumerate(local_packages):
@@ -796,6 +904,25 @@ def _write_service(
         built_git[source.identity] = artifact
         shutil.copy2(artifact.path, source_wheels / artifact.path.name)
 
+    if any(
+        _normalize_distribution(item.name) == _normalize_distribution(runtime_sdk.name)
+        for item in local_artifacts
+    ) or any(
+        _normalize_distribution(item.name) == _normalize_distribution(runtime_sdk.name)
+        for item in built_git.values()
+    ):
+        raise ProducerError("service lock already contains the separately pinned runtime SDK")
+    local_artifacts.append(
+        WheelArtifact(
+            runtime_sdk.path,
+            runtime_sdk.name,
+            runtime_sdk.version,
+            runtime_sdk.sha256,
+            f"{RUNTIME_SDK_COMPONENT_ID}@{runtime_sdk_manifest_digest}"
+            f" artifact={runtime_sdk_artifact_digest}",
+        )
+    )
+
     uv_lock_digest = hashlib.sha256(lock_path.read_bytes()).hexdigest()
     requirements_path = service_stage / "requirements.lock"
     requirements_path.write_text(
@@ -813,11 +940,21 @@ def _write_service(
     )
 
     source_record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "service": spec.service,
         "source_repository": spec.repository,
         "source_commit": service_commit,
         "requirements_lock_sha256": hashlib.sha256(requirements_path.read_bytes()).hexdigest(),
+        "runtime_dependencies": [
+            {
+                "component_id": RUNTIME_SDK_COMPONENT_ID,
+                "manifest_digest": runtime_sdk_manifest_digest,
+                "artifact_digest": runtime_sdk_artifact_digest,
+                "distribution": runtime_sdk.name,
+                "version": runtime_sdk.version,
+                "wheel_sha256": runtime_sdk.sha256,
+            }
+        ],
     }
     (service_stage / "source.json").write_text(
         json.dumps(source_record, indent=2, sort_keys=False) + "\n", encoding="utf-8"
@@ -914,8 +1051,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     workspace_default = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
         description=(
-            "Build five exact-SHA Linux/Python 3.12 service wheelhouses from "
-            "release-lock.json and each repository's frozen uv.lock."
+            "Build one or all exact-SHA Linux/Python 3.12 Product service "
+            "wheelhouses from release-lock.json and frozen uv.lock files."
         )
     )
     parser.add_argument(
@@ -928,8 +1065,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--output",
         type=Path,
         required=True,
-        help="destination root for navigator/, yield/, reactor/, exchange/, and catalyst/",
+        help="destination root for the selected service directory or all five service directories",
     )
+    parser.add_argument(
+        "--service",
+        choices=[spec.service for spec in SERVICE_SPECS],
+        help="prepare one independently published Product instead of all five",
+    )
+    parser.add_argument(
+        "--service-commit",
+        help="override release-lock.json for the selected service with this exact 40-character source SHA",
+    )
+    parser.add_argument("--runtime-sdk-wheel", type=Path, help="wheel extracted from the verified cyrene-runtime-maintenance-sdk bundle")
+    parser.add_argument("--runtime-sdk-version", help="version declared by the verified SDK release manifest")
+    parser.add_argument("--runtime-sdk-sha256", help="raw 64-character SHA-256 of the SDK wheel")
+    parser.add_argument("--runtime-sdk-manifest-digest", help="sha256:<64hex> SDK public manifest digest")
+    parser.add_argument("--runtime-sdk-artifact-digest", help="sha256:<64hex> SDK bundle archive digest")
     parser.add_argument(
         "--uv",
         default=shutil.which("uv") or "uv",
@@ -943,6 +1094,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         args = _parse_args(argv)
+        if args.service_commit is not None:
+            if args.service is None:
+                raise ProducerError("--service-commit requires --service")
+            if not COMMIT_PATTERN.fullmatch(args.service_commit):
+                raise ProducerError("--service-commit must be a lowercase 40-character Git SHA")
         architecture = _native_target()
         workspace_root = args.workspace_root.resolve()
         output_root = args.output.expanduser().absolute()
@@ -972,6 +1128,12 @@ def main(argv: list[str] | None = None) -> int:
                 "wheelhouse target must match release-lock.json Python runtime 3.12"
             )
         repository_metadata = _load_repository_remotes(workspace_root / "repositories.yaml")
+        selected_specs = tuple(
+            spec for spec in SERVICE_SPECS if args.service is None or spec.service == args.service
+        )
+        runtime_sdk, runtime_sdk_manifest_digest, runtime_sdk_artifact_digest = (
+            _load_runtime_sdk_wheel(args)
+        )
         uv_executable = shutil.which(args.uv)
         if uv_executable is None:
             raise ProducerError(f"uv executable was not found: {args.uv}")
@@ -981,13 +1143,13 @@ def main(argv: list[str] | None = None) -> int:
             raise ProducerError(f"output root must be a real directory: {output_root}")
         if output_root.exists():
             existing_names = sorted(child.name for child in output_root.iterdir())
-            expected_names = sorted(spec.service for spec in SERVICE_SPECS)
+            expected_names = sorted(spec.service for spec in selected_specs)
             if existing_names and existing_names != expected_names:
                 raise ProducerError(
-                    "output root must be empty or contain exactly these service directories: "
+                    "output root must be empty or contain exactly these selected service directories: "
                     + ", ".join(expected_names)
                 )
-            for spec in SERVICE_SPECS:
+            for spec in selected_specs:
                 destination = output_root / spec.service
                 if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
                     raise ProducerError(f"service output path must be a directory: {destination}")
@@ -1005,7 +1167,7 @@ def main(argv: list[str] | None = None) -> int:
             staging_root.mkdir()
             checkout_cache: dict[tuple[str, str], Path] = {}
             staged_services: list[tuple[str, Path]] = []
-            for spec in SERVICE_SPECS:
+            for spec in selected_specs:
                 staged = _write_service(
                     spec=spec,
                     repository_metadata=repository_metadata,
@@ -1016,11 +1178,20 @@ def main(argv: list[str] | None = None) -> int:
                     uv_executable=uv_executable,
                     python_executable=python_executable,
                     command_env=command_env,
+                    service_commit_override=(
+                        args.service_commit if spec.service == args.service else None
+                    ),
+                    runtime_sdk=runtime_sdk,
+                    runtime_sdk_manifest_digest=runtime_sdk_manifest_digest,
+                    runtime_sdk_artifact_digest=runtime_sdk_artifact_digest,
                 )
                 staged_services.append((spec.service, staged))
             _publish_service_directories(output_root, staged_services, transaction_root)
+        service_names = ", ".join(spec.service for spec in selected_specs)
+        noun = "wheelhouse" if len(selected_specs) == 1 else "wheelhouses"
         print(
-            f"Published five offline service wheelhouses to {output_root} (linux/{architecture}, Python 3.12)"
+            f"Published {noun} for {service_names} to {output_root} "
+            f"(linux/{architecture}, Python 3.12)"
         )
         return 0
     except (OSError, ProducerError, KeyError, TypeError) as error:
