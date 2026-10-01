@@ -1,0 +1,580 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/component-release-manifest-v1.schema.json",
+  "title": "Cyrene Component Release Manifest v1",
+  "description": "A cross-platform, single-component, single-target release envelope. Product v2 manifests remain a separate contract. Digests use RFC 8785 JCS UTF-8 canonical JSON with only safe integers and omit the digest field itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "releaseId",
+    "componentId",
+    "version",
+    "channel",
+    "target",
+    "artifact",
+    "dependencies",
+    "restart",
+    "source",
+    "provenance",
+    "manifestDigest"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "releaseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "componentId": {
+      "$ref": "#/$defs/componentId"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "channel": {
+      "enum": [
+        "stable",
+        "preview"
+      ]
+    },
+    "target": {
+      "$ref": "#/$defs/target"
+    },
+    "artifact": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/nativeBinaryArtifact"
+        },
+        {
+          "$ref": "#/$defs/pythonBundleArtifact"
+        },
+        {
+          "$ref": "#/$defs/ociImageArtifact"
+        }
+      ]
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dependency"
+      },
+      "uniqueItems": true
+    },
+    "restart": {
+      "$ref": "#/$defs/restart"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "health": {
+      "$ref": "#/$defs/health"
+    },
+    "manifestDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    }
+  },
+  "$defs": {
+    "componentId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?(/|$))(?!.*\\\\)[^\\u0000-\\u001f]+$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "osVersion",
+        "architecture"
+      ],
+      "properties": {
+        "os": {
+          "enum": [
+            "linux",
+            "windows"
+          ]
+        },
+        "osVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "distribution": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "distributionVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "architecture": {
+          "enum": [
+            "x86_64",
+            "aarch64"
+          ]
+        },
+        "abi": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      }
+    },
+    "files": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/relativePath"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/digest"
+      }
+    },
+    "nativeBinaryArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "format",
+        "uri",
+        "sha256",
+        "sizeBytes",
+        "files",
+        "entrypoint"
+      ],
+      "properties": {
+        "kind": {
+          "const": "native-binary"
+        },
+        "format": {
+          "enum": [
+            "tar.gz",
+            "tar.zst",
+            "zip"
+          ]
+        },
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "files": {
+          "$ref": "#/$defs/files"
+        },
+        "entrypoint": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "arguments": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 512
+          },
+          "maxItems": 64
+        }
+      }
+    },
+    "pythonBundleArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "format",
+        "uri",
+        "sha256",
+        "sizeBytes",
+        "files"
+      ],
+      "properties": {
+        "kind": {
+          "const": "python-bundle"
+        },
+        "format": {
+          "enum": [
+            "tar.gz",
+            "tar.zst",
+            "zip"
+          ]
+        },
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "files": {
+          "$ref": "#/$defs/files"
+        }
+      }
+    },
+    "ociImageArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "repository",
+        "digest",
+        "platform"
+      ],
+      "properties": {
+        "kind": {
+          "const": "oci-image"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+$"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "platform": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "os",
+            "architecture"
+          ],
+          "properties": {
+            "os": {
+              "enum": [
+                "linux",
+                "windows"
+              ]
+            },
+            "architecture": {
+              "enum": [
+                "amd64",
+                "arm64"
+              ]
+            },
+            "variant": {
+              "type": "string",
+              "maxLength": 32
+            }
+          }
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "versionRange": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "restart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group"
+      ],
+      "properties": {
+        "group": {
+          "enum": [
+            "core-runtime",
+            "single-service",
+            "none"
+          ]
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "unit": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.@-]+\\.service$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "group": {
+                "const": "core-runtime"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "order",
+              "unit"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "group": {
+                "const": "none"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "order"
+                  ]
+                },
+                {
+                  "required": [
+                    "unit"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "ref",
+        "commit"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "attempt",
+        "url"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9]{1,30}$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://github\\.com/"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestation"
+      ],
+      "properties": {
+        "attestation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "subjectName",
+            "repository",
+            "workflow",
+            "predicateType",
+            "run"
+          ],
+          "properties": {
+            "kind": {
+              "const": "github-artifact-attestation"
+            },
+            "uri": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://github\\.com/"
+            },
+            "subjectName": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255
+            },
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "workflow": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$"
+            },
+            "predicateType": {
+              "const": "https://slsa.dev/provenance/v1"
+            },
+            "run": {
+              "$ref": "#/$defs/run"
+            }
+          }
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "systemd-active",
+            "http"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/[^?#]*$",
+          "maxLength": 1024
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "http"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "path",
+              "port"
+            ]
+          }
+        }
+      ]
+    },
+    "contractLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "groupId",
+        "contractApiVersion",
+        "wireApiVersion",
+        "contractLock"
+      ],
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+        },
+        "contractApiVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "wireApiVersion": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+        },
+        "contractLock": {
+          "$ref": "#/$defs/contractLock"
+        }
+      }
+    }
+  }
+}
