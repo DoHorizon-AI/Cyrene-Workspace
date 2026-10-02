@@ -823,4 +823,3 @@ def test_manifest_v2_dual_read_support() -> None:
     }
     manifest_v2["manifestDigest"] = updates._digest_json(manifest_v2, "manifestDigest")
     assert manifest_v2["manifestDigest"].startswith("sha256:")
-
