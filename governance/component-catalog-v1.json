@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 3,
+  "generation": 4,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -951,8 +951,15 @@
   "compatibilityGroups": [
     {
       "groupId": "workspace-product-v2",
+      "groupVersion": "2",
       "contractApiVersion": "0.1.0",
       "wireApiVersion": "cyrene.workspace.product.v2",
+      "contractLock": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "commit": "f1b1cb54c5a1715b5f99635ea75ccf395ecabc39",
+        "path": "governance/workspace-connection-protocols-v2.lock.json",
+        "sha256": "sha256:0ad41eb1a9585f53d8ff2af3d28866902faace9f2d36837cb0d8a862683b643c"
+      },
       "members": [
         {
           "componentId": "cy-workspace-relay",
@@ -989,8 +996,7 @@
           "requiredForAdoption": false,
           "protocolVersion": "cyrene.workspace.product.v2"
         }
-      ],
-      "groupVersion": "2"
+      ]
     }
   ],
   "dataBundleTrust": {

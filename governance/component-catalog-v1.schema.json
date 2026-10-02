@@ -423,6 +423,9 @@
           "type": "string",
           "pattern": "^[a-z][a-z0-9._-]{0,127}$"
         },
+        "contractLock": {
+          "$ref": "component-release-manifest-v2.schema.json#/$defs/contractLock"
+        },
         "members": {
           "type": "array",
           "minItems": 1,
@@ -431,7 +434,17 @@
           },
           "uniqueItems": true
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["groupVersion"]
+          },
+          "then": {
+            "required": ["contractLock"]
+          }
+        }
+      ]
     },
     "compatibilityGroupMember": {
       "type": "object",
