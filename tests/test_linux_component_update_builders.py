@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -138,6 +137,83 @@ def test_single_service_wheelhouse_carries_exact_sdk_dependency_provenance(tmp_p
     (service_dir / "source.json").write_text(json.dumps(source), encoding="utf-8")
     with pytest.raises(prepare.ProducerError, match="exactly pinned runtime SDK wheel"):
         prepare._verify_wheelhouse(service_dir, prepare.SERVICE_SPECS[0], "a" * 40)
+
+
+def test_service_bundle_build_reads_sdk_wheel_metadata_and_packages_exact_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheelhouse = tmp_path / "wheelhouse"
+    service_dir = wheelhouse / "navigator"
+    service_dir.mkdir(parents=True)
+    app_wheel, _ = _wheel(service_dir, "cyrene-navigator", "1.2.3")
+    sdk_wheel, _ = _wheel(service_dir, "cyrene-runtime-maintenance", "0.1.0")
+    with zipfile.ZipFile(sdk_wheel, "a") as archive:
+        archive.writestr("cyrene_runtime_maintenance/__init__.py", "SDK_MARKER = True\n")
+    sdk_sha = hashlib.sha256(sdk_wheel.read_bytes()).hexdigest()
+    lock = service_dir / "requirements.lock"
+    lock.write_text(_requirements([app_wheel, sdk_wheel]), encoding="utf-8")
+    source = {
+        "schema_version": 2,
+        "service": "navigator",
+        "source_repository": "Cyrene-Navigator",
+        "source_commit": "a" * 40,
+        "requirements_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+        "runtime_dependencies": [_sdk_record(sdk_sha)],
+    }
+    (service_dir / "source.json").write_text(json.dumps(source), encoding="utf-8")
+    (service_dir / "serve-web.py").write_text(
+        'parser.add_argument("--pairing-code-file")\ncontract = "pairingCodeFile"\n',
+        encoding="utf-8",
+    )
+    build_calls: list[list[str]] = []
+
+    def offline_install(arguments: list[str], **kwargs: object) -> None:
+        build_calls.append(arguments)
+        if "--target" not in arguments:
+            return
+        target = Path(arguments[arguments.index("--target") + 1])
+        target.mkdir(parents=True, exist_ok=True)
+        for wheel in service_dir.glob("*.whl"):
+            with zipfile.ZipFile(wheel) as archive:
+                archive.extractall(target)
+
+    monkeypatch.setattr(bundle.subprocess, "run", offline_install)
+
+    result = bundle._build_one_bundle(
+        service="navigator",
+        wheelhouse=wheelhouse,
+        output_root=tmp_path / "releases",
+        source_commit="a" * 40,
+        source_repository="Cyrene-Navigator",
+        debian_arch="amd64",
+        python_executable=tmp_path / "python3.12",
+        builder_python=tmp_path / "builder-python",
+    )
+
+    assert len(build_calls) == 2
+    assert (result / "python" / "cyrene_runtime_maintenance" / "__init__.py").read_text(
+        encoding="utf-8"
+    ) == "SDK_MARKER = True\n"
+    manifest = bundle.validate_bundle(result, expected_service="navigator")
+    assert manifest["dependencies"]["runtime"] == source["runtime_dependencies"]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "Metadata-Version: 2.1\nName: cyrene-runtime-maintenance\n\n",
+        "Metadata-Version: 2.1\nName: cyrene-runtime-maintenance\nVersion: 0.1.0\nVersion: 0.1.1\n\n",
+    ],
+)
+def test_service_bundle_wheel_metadata_rejects_missing_or_duplicate_fields(
+    tmp_path: Path, metadata: str
+) -> None:
+    wheel = tmp_path / "invalid.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("cyrene_runtime_maintenance-0.1.0.dist-info/METADATA", metadata)
+
+    with pytest.raises(bundle.ServiceBundleError, match="one valid Name and Version"):
+        bundle._wheel_metadata(wheel)
 
 
 def test_inner_service_manifest_binds_sdk_to_lock_and_file_hashes(tmp_path: Path) -> None:

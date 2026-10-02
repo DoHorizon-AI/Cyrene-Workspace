@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import email.parser
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import venv
+import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -552,6 +554,35 @@ def activate_release(
 
 def _normalize_distribution(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _wheel_metadata(path: Path) -> tuple[str, str]:
+    """Read the single validated Name and Version pair inside one wheel."""
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            metadata_paths = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA") and name.count("/") == 1
+            ]
+            if len(metadata_paths) != 1:
+                raise ServiceBundleError(f"wheel must contain one dist-info/METADATA: {path}")
+            metadata = email.parser.Parser().parsestr(
+                archive.read(metadata_paths[0]).decode("utf-8", errors="replace")
+            )
+    except (OSError, zipfile.BadZipFile) as error:
+        raise ServiceBundleError(f"cannot inspect wheel metadata {path}: {error}") from error
+    names = metadata.get_all("Name", [])
+    versions = metadata.get_all("Version", [])
+    if (
+        len(names) != 1
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", names[0]) is None
+        or len(versions) != 1
+        or VERSION_PATTERN.fullmatch(versions[0]) is None
+    ):
+        raise ServiceBundleError(f"wheel metadata must contain one valid Name and Version: {path}")
+    return names[0], versions[0]
 
 
 def _wheel_requirement_names(lock_path: Path) -> set[str]:
