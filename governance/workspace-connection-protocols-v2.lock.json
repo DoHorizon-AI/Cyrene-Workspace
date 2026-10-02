@@ -1,0 +1,58 @@
+{
+  "lockVersion": 1,
+  "lockId": "workspace-connection-protocols-v2",
+  "protocols": [
+    {
+      "apiVersion": "cyrene.workspace.authority.v2",
+      "definition": {
+        "repository": "DoHorizon-AI/Cyrene-Platform",
+        "path": "contracts/proto/cyrene/workspace/authority/v2/workspace_authority.proto",
+        "sha256": "3f81dd6004a5c2747ff0a9140d6f1f5884cf3e36738fa9cea6f1233e46fb0349"
+      },
+      "mirror": {
+        "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+        "path": "contracts/proto/cyrene/workspace/authority/v2/workspace_authority.proto",
+        "sha256": "3f81dd6004a5c2747ff0a9140d6f1f5884cf3e36738fa9cea6f1233e46fb0349"
+      }
+    },
+    {
+      "apiVersion": "cyrene.workspace.tunnel.v1",
+      "definition": {
+        "repository": "DoHorizon-AI/Cyrene-Platform",
+        "path": "contracts/proto/cyrene/workspace/tunnel/v1/workspace_tunnel.proto",
+        "sha256": "65e7cee26af09ab3bfa81b90a74fa6cb719bc520ca89d7c36fda224f3afd15dc"
+      },
+      "mirror": {
+        "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+        "path": "contracts/proto/cyrene/workspace/tunnel/v1/workspace_tunnel.proto",
+        "sha256": "65e7cee26af09ab3bfa81b90a74fa6cb719bc520ca89d7c36fda224f3afd15dc"
+      }
+    },
+    {
+      "apiVersion": "cyrene.workspace.local.v2",
+      "definition": {
+        "repository": "DoHorizon-AI/Cyrene-Platform",
+        "path": "contracts/proto/cyrene/workspace/local/v2/workspace_sidecar.proto",
+        "sha256": "459bff8d375dd2a095387121479209f384db9ca6392adf5dbac8f8320085182f"
+      },
+      "mirror": {
+        "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+        "path": "contracts/proto/cyrene/workspace/local/v2/workspace_sidecar.proto",
+        "sha256": "459bff8d375dd2a095387121479209f384db9ca6392adf5dbac8f8320085182f"
+      }
+    },
+    {
+      "apiVersion": "cyrene.workspace.product.v2",
+      "definition": {
+        "repository": "DoHorizon-AI/Cyrene-Platform",
+        "path": "contracts/proto/cyrene/workspace/product/v2/product_api.proto",
+        "sha256": "2a5adf164ecf26d02e728ac16d7bde6f227c286b0d1e51342472df29d0785441"
+      },
+      "mirror": {
+        "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+        "path": "contracts/proto/cyrene/workspace/product/v2/product_api.proto",
+        "sha256": "2a5adf164ecf26d02e728ac16d7bde6f227c286b0d1e51342472df29d0785441"
+      }
+    }
+  ]
+}
