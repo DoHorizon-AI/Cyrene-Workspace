@@ -1,6 +1,6 @@
 # Connection components and controlled updates V2
 
-Status: **IMPLEMENTING**. Checkboxes below require actual evidence; a source change or unit test alone does not complete a deployment check.
+Status: **SOURCE IMPLEMENTED; DEPLOYMENT ACCEPTANCE PENDING**. Checkboxes below require actual evidence; a source change or unit test alone does not complete a deployment check.
 
 Current source and environment evidence is recorded in [the execution log](connection-components-v2-evidence.md).
 
@@ -29,9 +29,9 @@ Preserve unrelated Gemini edits in the canonical Platform and Yield worktrees. S
 
 ## Acceptance checks
 
-- [ ] CCV2-DEP: Client/Sidecar normal dependency closure excludes database, WebAuthn and server implementation packages.
-- [ ] CCV2-EXT: A new Product operation is accepted through owner catalog plus approved policy data without modifying Platform core source.
-- [ ] CCV2-AUTH: Unknown operations, unauthorized calls, catalog corruption, incompatible pins and cross-Workspace/session responses are rejected.
+- [x] CCV2-DEP: SDK/Sidecar normal dependency closure excludes database, WebAuthn and Platform server implementation packages. Sidecar retains the Tonic/HTTP implementation for its own local IPC host.
+- [x] CCV2-EXT: A new Product operation is accepted through owner catalog plus approved policy data without modifying Platform core source. Verified by the dynamic-operation integration fixture.
+- [x] CCV2-AUTH: Unknown operations, unauthorized calls, catalog corruption, incompatible pins and cross-Workspace/session responses are rejected in executable source tests. Deployed authorization acceptance remains part of CCV2-REMOTE.
 - [ ] CCV2-STAGE: Real active or queued workloads permit download/stage while UI, CLI and API reject apply.
 - [ ] CCV2-RACE: Explicit apply and a concurrent new task cannot both acquire admission; task completion never triggers automatic installation.
 - [ ] CCV2-CORE: Core-runtime apply requires released Worker/Lease/allocation state; idle resource holders require explicit owner cleanup.
@@ -43,12 +43,14 @@ Preserve unrelated Gemini edits in the canonical Platform and Yield worktrees. S
 
 Each evidence record must identify check ID, source commits/artifact digests, environment, command or workflow run, observed result, and remaining limitations. This round creates no Azure resources; tailnet evidence is not public no-port or ACA production-ingress evidence.
 
+The source implementation and eight component-repository integrations are recorded in the execution log. Final Workspace source delivery is tracked by [PR #27](https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/27), including this plan/evidence revision. Its merge and remote read-back cannot be self-referenced inside the same commit; they are added to the external final delivery record. Immutable component publication remains blocked on settings authorization and the dedicated read credential; real Linux host-root, Windows and two-host checks remain open.
+
 ---
 <!-- Chinese Translation / 中文翻译 -->
 
 # 连接组件与受控更新 V2
 
-状态：**实施中**。源码落盘或单元测试通过不能勾选真实部署验收。
+状态：**源码已实现，部署验收待完成**。源码落盘或单元测试通过不能勾选真实部署验收。
 
 当前源码与环境证据见[执行记录](connection-components-v2-evidence.md)。
 
@@ -58,6 +60,8 @@ Workspace 管理发行目录和原生安装器；Client 管理 Windows 安装器
 
 首轮 v2 按兼容组件组协调切换；请求只提交 owner/operation、原始 JSON、资源 ID 和幂等键，不选择 URL、凭据、角色或目录版本。保留原十三项操作的权限与 Workspace/session 检查，不静默回退 v1。
 
-以上 CCV2 检查均从未验收开始。真实双机采用本机 Linux/WSL 控制与身份组件、ruanyun-GTi 的 GPU/Product/Connector，通过现有 Tailscale 网络强制走 Cyrene RELAY。本轮不新增 Azure 资源，不把双机结果宣称为公网免端口或 ACA 生产证明。
+CCV2-DEP、EXT 和 AUTH 已完成依赖与可执行源码验收；Sidecar 为自身本机 IPC 保留 Tonic/HTTP 实现。新增操作由动态目录与策略 fixture 验证，权限检查通过源码测试，部署权限仍归双机验收。更新器已完成真实 broker 与 systemd-user 的本机流程，但 GitHub provenance、任务内容和硬件范围的限制见执行记录，不能替代真实 Product、主机 root 或双机验收。真实双机采用本机 Linux/WSL 控制与身份组件、ruanyun-GTi 的 GPU/Product/Connector，通过现有 Tailscale 网络强制走 Cyrene RELAY。本轮不新增 Azure 资源，不把双机结果宣称为公网免端口或 ACA 生产证明。
 
 每项证据记录检查 ID、提交和产物摘要、环境、命令或 workflow run、观察结果与限制。保留 Gemini 的无关修改；逐仓核对正常集成和远端读回后交付。
+
+八个组件仓的源码集成见执行记录，Workspace 最终源码交付由 [PR #27](https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/27) 跟踪；本提交不能包含自身最终合并 SHA，合并、CI 与远端读回记录在外部最终交付 JSON。不可变组件发布仍需设置授权和专用只读凭据；Linux 主机 root、Windows 与双机部署检查保持未完成。

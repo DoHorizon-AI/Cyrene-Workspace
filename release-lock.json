@@ -3,8 +3,8 @@
   "schemaVersion": 1,
   "name": "cyrene-0.1.0-rc.1",
   "description": "Single release lock for the first usable Cyrene RC: supported environment, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine and plugin entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
-  "generatedAt": "2026-10-01T19:12:16Z",
-  "sourceState": "repository revisions are pinned build inputs; Navigator advances to the file-backed pairing-code launcher after CI and contract checks, while native RC acceptance remains pending. The Cyrene-Workspace entry records a preceding source commit because the release-lock commit cannot self-reference",
+  "generatedAt": "2026-10-02T01:35:42Z",
+  "sourceState": "Repository revisions are pinned build inputs for connection components V2, maintenance-aware Products and controlled component updates. Source CI and scoped local acceptance do not establish immutable publication or native GPU/two-host RC acceptance. The Cyrene-Workspace entry records the validated source predecessor because the release-lock commit cannot self-reference.",
   "supportedEnvironment": {
     "os": "Ubuntu 24.04 x86_64",
     "gpu": {
@@ -85,15 +85,15 @@
     }
   },
   "repositories": {
-    "Cyrene-Platform": "06a9bd75edfed1359b09770e749520162d75e242",
+    "Cyrene-Platform": "bbbafeeb242c28555b47b0bfa2c8e74e618a2c3f",
     "Cyrene-Plugins-Official": "a41284c2ffe71a7412f556841f9ccc4a91864138",
-    "Cyrene-Workspace": "1943a0b8fd0ea3467f8a289af84a75691b01ca87",
-    "Cyrene-Reactor": "58f96fef563092d2190443e7d0490b1d3eb39a95",
-    "Cyrene-Yield": "94ae40f35afe66b60955bad3d951dc4bd7f7c86c",
-    "Cyrene-Exchange": "84e7706f8a9e3d66a027c1065c906c6c615385d2",
-    "Cyrene-Catalyst": "8379e6fe37107111dc92f6ee75bd19e101d11ba4",
-    "Cyrene-Echo": "5016c072c7da71546abd79e500a57b180157a49c",
-    "Cyrene-Navigator": "c7630a9e6a8d1d435a1ec2400c9a81fcd34f56f9",
-    "Cyrene-Client": "32af357e135bc01d06a7e37253fa6fbda6863d05"
+    "Cyrene-Workspace": "cec19d36ab7eaeb10daada52dc5c1e9166ea30d0",
+    "Cyrene-Reactor": "8d3cec973bc51c21a07bb5bd8dec1f9c596f7069",
+    "Cyrene-Yield": "19d25f37cb02c07dac574aef7ec98118e92ada89",
+    "Cyrene-Exchange": "0bec57a5fc593d7eb3ae1e71f38bf0b6dd8ab22b",
+    "Cyrene-Catalyst": "074d0b38d616946793800f2e9db212e9c519d404",
+    "Cyrene-Echo": "7480d72c3d2520ccf7684ae43e2f2558c5c6e828",
+    "Cyrene-Navigator": "73a0b56e11c24a67d740a262334a2ea78dee96f0",
+    "Cyrene-Client": "d04c310fffdcfc82976dec8bbadedecfd07608d8"
   }
 }
