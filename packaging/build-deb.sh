@@ -321,7 +321,7 @@ Section: devel
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Cyrene Team <team@cyrene.dev>
-Depends: python3 (>= 3.12), python3 (<< 3.13), systemd, policykit-1
+Depends: python3 (>= 3.12), python3 (<< 3.13), systemd, policykit-1, acl
 Description: Cyrene Unified Local LLM Stack
  Cyrene provides a complete local LLM development and inference platform,
  including model importation (Reactor), training drafts (Yield), dataset preparation
@@ -337,6 +337,54 @@ set -e
 if ! id -u cyrene >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --shell /bin/false cyrene
 fi
+
+# Product contract data has separate read domains: Authority can read source
+# metadata and plans, while the BFF can read only immutable activated versions.
+for bundle_group in cyrene-authority cyrene-product-bundle-reader; do
+    if ! getent group "$bundle_group" >/dev/null 2>&1; then
+        groupadd --system "$bundle_group"
+    fi
+done
+ensure_bundle_directory() {
+    path="$1"
+    owner_group="$2"
+    mode="$3"
+    if [ -L "$path" ]; then
+        echo "ERROR: $path is a symlink; refusing to alter Product bundle trust data." >&2
+        exit 1
+    elif [ ! -e "$path" ]; then
+        install -d -o root -g "$owner_group" -m "$mode" "$path"
+    fi
+    expected="0:$(getent group "$owner_group" | cut -d: -f3):$mode"
+    actual="$(stat -c '%u:%g:%a' -- "$path")"
+    if [ ! -d "$path" ] || [ "$actual" != "$expected" ]; then
+        echo "ERROR: $path must be $expected; found $actual. Refusing to repair trusted state in place." >&2
+        exit 1
+    fi
+}
+bundle_root=/var/lib/cyrene-product-bundles
+if [ -L "$bundle_root" ]; then
+    echo "ERROR: $bundle_root is a symlink; refusing to alter Product bundle trust data." >&2
+    exit 1
+elif [ ! -e "$bundle_root" ]; then
+    install -d -o root -g root -m 0700 "$bundle_root"
+fi
+if [ ! -d "$bundle_root" ] || [ "$(stat -c '%u:%g' -- "$bundle_root")" != "0:0" ]; then
+    echo "ERROR: $bundle_root must be a root-owned directory." >&2
+    exit 1
+fi
+AUTHORITY_BUNDLE_GID="$(getent group cyrene-authority | cut -d: -f3)"
+BUNDLE_READER_GID="$(getent group cyrene-product-bundle-reader | cut -d: -f3)"
+setfacl -m "u::rwx,g::---,g:${AUTHORITY_BUNDLE_GID}:--x,g:${BUNDLE_READER_GID}:--x,m::--x,o::---" "$bundle_root"
+if [ "$(stat -c '%u:%g:%a' -- "$bundle_root")" != "0:0:710" ] \
+    || ! getfacl -cpn -- "$bundle_root" | grep -Fxq "group:${AUTHORITY_BUNDLE_GID}:--x" \
+    || ! getfacl -cpn -- "$bundle_root" | grep -Fxq "group:${BUNDLE_READER_GID}:--x"; then
+    echo "ERROR: $bundle_root traversal ACL does not match the two trusted service groups." >&2
+    exit 1
+fi
+ensure_bundle_directory /var/lib/cyrene-product-bundles/archives cyrene-authority 750
+ensure_bundle_directory /var/lib/cyrene-product-bundles/metadata cyrene-authority 750
+ensure_bundle_directory /var/lib/cyrene-product-bundles/versions cyrene-product-bundle-reader 750
 
 # 设置数据目录与配置目录权限
 if [ -L /var/lib/cyrene ]; then
@@ -371,6 +419,11 @@ fi
 CYRENE_UID="$(id -u cyrene)"
 CYRENE_GID="$(id -g cyrene)"
 AUTHORITY_GID="$(getent group cyrene-runtime-maintenance | cut -d: -f3)"
+AUTHORITY_IDENTITY_TMP="$(mktemp /etc/cyrene/.workspace-authority-identity.env.XXXXXX)"
+printf 'CYRENE_AUTHORITY_BFF_PEER_UID=%s\n' "$CYRENE_UID" > "$AUTHORITY_IDENTITY_TMP"
+chown root:root "$AUTHORITY_IDENTITY_TMP"
+chmod 644 "$AUTHORITY_IDENTITY_TMP"
+mv -f "$AUTHORITY_IDENTITY_TMP" /etc/cyrene/workspace-authority-identity.env
 RUNTIME_STATE_DIR=/var/lib/cyrene/runtime
 if [ -L "$RUNTIME_STATE_DIR" ]; then
     echo "ERROR: $RUNTIME_STATE_DIR is a symlink; refusing to follow it." >&2

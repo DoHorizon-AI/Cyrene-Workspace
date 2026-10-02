@@ -1,0 +1,260 @@
+name: Immutable Workspace Product data bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      catalyst_commit: { description: Full Catalyst commit SHA, required: true, type: string }
+      echo_commit: { description: Full Echo commit SHA, required: true, type: string }
+      exchange_commit: { description: Full Exchange commit SHA, required: true, type: string }
+      navigator_commit: { description: Full Navigator commit SHA, required: true, type: string }
+      reactor_commit: { description: Full Reactor commit SHA, required: true, type: string }
+      yield_commit: { description: Full Yield commit SHA, required: true, type: string }
+      policy_commit: { description: Full Platform policy commit SHA, required: true, type: string }
+  pull_request:
+    branches: [develop, main, release]
+    paths:
+      - packaging/build_data_bundle_release.py
+      - packaging/data-bundle-release-requirements.txt
+      - governance/data-bundle-proof-v1.schema.json
+      - .github/workflows/data-bundle-release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: data-bundle-release-${{ github.repository }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      REPOSITORY: ${{ github.repository }}
+      SOURCE_COMMIT: ${{ github.sha }}
+      SOURCE_REF: ${{ github.ref }}
+      CHANNEL: ${{ github.ref == 'refs/heads/develop' && 'preview' || 'stable' }}
+      RELEASE_ID: ${{ (github.ref == 'refs/heads/develop' && 'preview-' || 'stable-') }}${{ github.sha }}
+      CATALYST_COMMIT: ${{ inputs.catalyst_commit }}
+      ECHO_COMMIT: ${{ inputs.echo_commit }}
+      EXCHANGE_COMMIT: ${{ inputs.exchange_commit }}
+      NAVIGATOR_COMMIT: ${{ inputs.navigator_commit }}
+      REACTOR_COMMIT: ${{ inputs.reactor_commit }}
+      YIELD_COMMIT: ${{ inputs.yield_commit }}
+      POLICY_COMMIT: ${{ inputs.policy_commit }}
+      CATALOG_COMMIT: 86932722960083f1d84a5e70bb0d6b9e3f31a0f6
+      CATALOG_SHA256: 28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Validate all exact SHA inputs before source fetches
+        run: |
+          set -euo pipefail
+          for commit in \
+            "$CATALYST_COMMIT" "$ECHO_COMMIT" "$EXCHANGE_COMMIT" \
+            "$NAVIGATOR_COMMIT" "$REACTOR_COMMIT" "$YIELD_COMMIT" "$POLICY_COMMIT"; do
+            [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "all source pins must be full lowercase Git SHA-1" >&2
+              exit 2
+            }
+          done
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the pinned component catalog
+        uses: actions/checkout@v5
+        with:
+          repository: DoHorizon-AI/Cyrene-Workspace
+          ref: ${{ env.CATALOG_COMMIT }}
+          path: workspace-catalog
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install packaging and schema tools
+        run: python -m pip install --disable-pip-version-check -r packaging/data-bundle-release-requirements.txt
+      - name: Check out exact Platform policy source
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/product-sources"
+          git clone --no-checkout https://github.com/DoHorizon-AI/Cyrene-Platform.git "$RUNNER_TEMP/platform"
+          git -C "$RUNNER_TEMP/platform" fetch --no-tags origin "$POLICY_COMMIT"
+          test "$(git -C "$RUNNER_TEMP/platform" rev-parse FETCH_HEAD^{commit})" = "$POLICY_COMMIT"
+          git -C "$RUNNER_TEMP/platform" checkout --detach "$POLICY_COMMIT"
+      - name: Validate all exact SHA inputs and preflight immutable Workspace release
+        env:
+          CYRENE_IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.CYRENE_IMMUTABLE_RELEASES_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          test "$(sha256sum workspace-catalog/governance/component-catalog-v1.json | cut -d ' ' -f 1)" = "$CATALOG_SHA256"
+          case "$CHANNEL:$SOURCE_REF" in
+            stable:refs/heads/main|stable:refs/heads/release|preview:refs/heads/develop) ;;
+            *) echo "Workspace release channel does not match exact source ref" >&2; exit 2 ;;
+          esac
+          python - "$SOURCE_COMMIT" "$CHANNEL" "$SOURCE_REF" "$RUNNER_TEMP/platform/tooling/release" <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path(sys.argv[4]).resolve()))
+          from preflight_component_release import preflight
+          commit, channel, ref = sys.argv[1:4]
+          preflight(repository="DoHorizon-AI/Cyrene-Workspace", release_id=f"{channel}-{commit}",
+                    channel=channel, source_ref=ref, source_commit=commit,
+                    repository_root=Path.cwd(), release_namespace="component")
+          PY
+      - name: Check out exact Platform policy source and Product owner commits
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/product-sources" "$RUNNER_TEMP/owner-assets" "$RUNNER_TEMP/policy-assets"
+          for row in \
+            "catalyst Cyrene-Catalyst $CATALYST_COMMIT" \
+            "echo Cyrene-Echo $ECHO_COMMIT" \
+            "exchange Cyrene-Exchange $EXCHANGE_COMMIT" \
+            "navigator Cyrene-Navigator $NAVIGATOR_COMMIT" \
+            "reactor Cyrene-Reactor $REACTOR_COMMIT" \
+            "yield Cyrene-Yield $YIELD_COMMIT"; do
+            read -r owner repository commit <<< "$row"
+            source="$RUNNER_TEMP/product-sources/$repository"
+            git clone --no-checkout "https://github.com/DoHorizon-AI/$repository.git" "$source"
+            git -C "$source" fetch --no-tags origin "$commit"
+            test "$(git -C "$source" rev-parse FETCH_HEAD^{commit})" = "$commit"
+            git -C "$source" checkout --detach "$commit"
+            release="product-contract-v2-$CHANNEL-$commit"
+            assets="$RUNNER_TEMP/owner-assets/$owner"
+            mkdir -p "$assets"
+            gh release download "$release" --repo "DoHorizon-AI/$repository" --dir "$assets" \
+              --pattern product-catalog-v2.json \
+              --pattern product-catalog-v2.attestation.jsonl \
+              --pattern owner-publication-v1.json
+            publication="$assets/owner-publication-v1.json"
+            source_ref="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"]["ref"])' "$publication")"
+            source_commit="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"]["commit"])' "$publication")"
+            test "$source_commit" = "$commit"
+            gh attestation verify "$assets/product-catalog-v2.json" \
+              --bundle "$assets/product-catalog-v2.attestation.jsonl" \
+              --repo "DoHorizon-AI/$repository" \
+              --signer-workflow "DoHorizon-AI/$repository/.github/workflows/product-contract.yml" \
+              --source-ref "$source_ref" --source-digest "$commit" \
+              --predicate-type https://slsa.dev/provenance/v1
+          done
+          policy_release="product-policy-v2-$CHANNEL-$POLICY_COMMIT"
+          gh release download "$policy_release" --repo DoHorizon-AI/Cyrene-Platform \
+            --dir "$RUNNER_TEMP/policy-assets" \
+            --pattern workspace-product-policy-v2.json \
+            --pattern workspace-product-policy-v2.attestation.jsonl \
+            --pattern policy-publication-v1.json
+          policy_ref="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"]["ref"])' "$RUNNER_TEMP/policy-assets/policy-publication-v1.json")"
+          policy_source_commit="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"]["commit"])' "$RUNNER_TEMP/policy-assets/policy-publication-v1.json")"
+          test "$policy_source_commit" = "$POLICY_COMMIT"
+          gh attestation verify "$RUNNER_TEMP/policy-assets/workspace-product-policy-v2.json" \
+            --bundle "$RUNNER_TEMP/policy-assets/workspace-product-policy-v2.attestation.jsonl" \
+            --repo DoHorizon-AI/Cyrene-Platform \
+            --signer-workflow DoHorizon-AI/Cyrene-Platform/.github/workflows/product-policy-release.yml \
+            --source-ref "$policy_ref" --source-digest "$policy_source_commit" \
+            --predicate-type https://slsa.dev/provenance/v1
+      - name: Build the exact Product API v2 source closure
+        env:
+          CATALYST_COMMIT: ${{ inputs.catalyst_commit }}
+          ECHO_COMMIT: ${{ inputs.echo_commit }}
+          EXCHANGE_COMMIT: ${{ inputs.exchange_commit }}
+          NAVIGATOR_COMMIT: ${{ inputs.navigator_commit }}
+          REACTOR_COMMIT: ${{ inputs.reactor_commit }}
+          YIELD_COMMIT: ${{ inputs.yield_commit }}
+        run: |
+          set -euo pipefail
+          args=()
+          for row in \
+            "catalyst Cyrene-Catalyst $CATALYST_COMMIT" \
+            "echo Cyrene-Echo $ECHO_COMMIT" \
+            "exchange Cyrene-Exchange $EXCHANGE_COMMIT" \
+            "navigator Cyrene-Navigator $NAVIGATOR_COMMIT" \
+            "reactor Cyrene-Reactor $REACTOR_COMMIT" \
+            "yield Cyrene-Yield $YIELD_COMMIT"; do
+            read -r owner repository commit <<< "$row"
+            args+=(--source "$owner=$RUNNER_TEMP/product-sources/$repository" --commit "$owner=$commit")
+          done
+          mkdir -p "$RUNNER_TEMP/product-bundle-parent"
+          python "$RUNNER_TEMP/platform/tooling/workspace-product-contract-bundle/build_v2_bundle.py" \
+            "${args[@]}" \
+            --policy "$RUNNER_TEMP/policy-assets/workspace-product-policy-v2.json" \
+            --output "$RUNNER_TEMP/product-bundle-parent/bundle"
+      - name: Create signed-source proof, data archive, and publisher metadata
+        env:
+          CATALYST_COMMIT: ${{ inputs.catalyst_commit }}
+          ECHO_COMMIT: ${{ inputs.echo_commit }}
+          EXCHANGE_COMMIT: ${{ inputs.exchange_commit }}
+          NAVIGATOR_COMMIT: ${{ inputs.navigator_commit }}
+          REACTOR_COMMIT: ${{ inputs.reactor_commit }}
+          YIELD_COMMIT: ${{ inputs.yield_commit }}
+        run: |
+          set -euo pipefail
+          args=()
+          for row in \
+            "catalyst $CATALYST_COMMIT" "echo $ECHO_COMMIT" "exchange $EXCHANGE_COMMIT" \
+            "navigator $NAVIGATOR_COMMIT" "reactor $REACTOR_COMMIT" "yield $YIELD_COMMIT"; do
+            read -r owner commit <<< "$row"
+            args+=(--owner-publication "$owner=$RUNNER_TEMP/owner-assets/$owner/owner-publication-v1.json" \
+                   --owner-assets "$owner=$RUNNER_TEMP/owner-assets/$owner" \
+                   --owner-commit "$owner=$commit")
+          done
+          version="$(python - "$RUNNER_TEMP/platform/framework/crates/cy-workspace-product-contracts/Cargo.toml" <<'PY'
+          import sys, tomllib
+          with open(sys.argv[1], "rb") as source:
+              print(tomllib.load(source)["package"]["version"])
+          PY
+          )"
+          python packaging/build_data_bundle_release.py \
+            --catalog workspace-catalog/governance/component-catalog-v1.json \
+            --channel "$CHANNEL" --source-ref "$SOURCE_REF" --source-commit "$SOURCE_COMMIT" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --version "$version" \
+            --bundle-root "$RUNNER_TEMP/product-bundle-parent/bundle" \
+            "${args[@]}" \
+            --policy-publication "$RUNNER_TEMP/policy-assets/policy-publication-v1.json" \
+            --policy-assets "$RUNNER_TEMP/policy-assets" \
+            --policy-commit "$POLICY_COMMIT" \
+            --output "$RUNNER_TEMP/data-bundle-release"
+      - name: Attest archive, exact manifest, and publisher index
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ runner.temp }}/data-bundle-release/*
+      - name: Save detached attestations for offline verification
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/data-bundle-release"
+          for subject in *.tar.zst *.manifest.json component-release-index-v1.json; do
+            [[ -f "$subject" ]] || continue
+            digest="sha256:$(sha256sum "$subject" | cut -d ' ' -f 1)"
+            gh attestation download "$subject" --repo "$REPOSITORY" --predicate-type https://slsa.dev/provenance/v1
+            mv "$digest.jsonl" "$subject.attestation.jsonl"
+          done
+      - name: Publish immutable data-bundle release assets
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/data-bundle-release"
+          mapfile -d '' assets < <(find . -maxdepth 1 -type f -print0 | sort -z)
+          test "${#assets[@]}" -gt 0
+          gh release create "$RELEASE_ID" "${assets[@]}" --draft --target "$SOURCE_COMMIT" \
+            --title "Workspace Product data bundle $RELEASE_ID" \
+            --notes "Immutable portable Product contract archive with independently verifiable owner and Platform policy proofs."
+          release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_ID" --jq .id)"
+          gh api --method PATCH "repos/$REPOSITORY/releases/$release_id" -F draft=false >/dev/null
+          test "$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_ID" --jq .immutable)" = true
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --disable-pip-version-check -r packaging/data-bundle-release-requirements.txt
+      - run: python -m compileall -q packaging/build_data_bundle_release.py
