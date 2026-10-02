@@ -34,6 +34,85 @@ jobs:
           tests/test_cyrene_cli.py tests/test_release_lock.py tests/test_workspace_topology.py governance/product-contract-v1/tests
       - run: python scripts/validate_release_lock.py
 
+  component-updates:
+    name: ci / component-updates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the pinned CI tools and schema validators
+        run: >-
+          python -m pip install uv==0.12.3 jsonschema==4.26.0 PyYAML==6.0.3
+      - name: Lint component updater and bundle producers
+        run: >-
+          uvx ruff==0.16.5 check
+          packaging/component_updates.py packaging/prepare_service_wheelhouse.py
+          packaging/service_bundle.py tests/test_cyrene_cli.py
+          tests/test_linux_component_update_builders.py
+          tests/test_linux_component_update_identity.py
+          tests/test_linux_component_updates.py
+      - name: Check component updater and bundle producer formatting
+        run: >-
+          uvx ruff==0.16.5 format --check
+          packaging/component_updates.py packaging/prepare_service_wheelhouse.py
+          packaging/service_bundle.py tests/test_cyrene_cli.py
+          tests/test_linux_component_update_builders.py
+          tests/test_linux_component_update_identity.py
+          tests/test_linux_component_updates.py
+      - name: Test updater, identity, and bundle metadata paths
+        run: >-
+          uvx --from pytest==9.1.1 --with jsonschema==4.26.0 --with PyYAML==6.0.3 pytest -q
+          tests/test_linux_component_update_builders.py
+          tests/test_linux_component_update_identity.py
+          tests/test_linux_component_updates.py tests/test_cyrene_cli.py
+      - name: Check package and privileged helper shell syntax
+        run: |
+          bash -n packaging/build-deb.sh
+          bash -n packaging/cyrene-component-update-helper
+      - name: Validate component release schemas and trusted catalog
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from jsonschema import Draft202012Validator, RefResolver
+
+          governance = Path("governance")
+          names = (
+              "component-release-manifest-v1.schema.json",
+              "component-release-index-v1.schema.json",
+              "component-catalog-v1.schema.json",
+          )
+          schemas = {
+              (governance / name).resolve(): json.loads(
+                  (governance / name).read_text(encoding="utf-8")
+              )
+              for name in names
+          }
+          for schema in schemas.values():
+              Draft202012Validator.check_schema(schema)
+
+          catalog_path = (governance / "component-catalog-v1.schema.json").resolve()
+          catalog_schema = schemas[catalog_path]
+          store = {schema["$id"]: schema for schema in schemas.values()}
+          validator = Draft202012Validator(
+              catalog_schema,
+              resolver=RefResolver.from_schema(catalog_schema, store=store),
+          )
+          catalog = json.loads(
+              (governance / "component-catalog-v1.json").read_text(encoding="utf-8")
+          )
+          errors = sorted(
+              validator.iter_errors(catalog),
+              key=lambda error: (list(error.absolute_path), error.message),
+          )
+          if errors:
+              raise SystemExit("\n".join(error.message for error in errors))
+          print("component release schemas and catalog are valid")
+          PY
+
   lifecycle-integration:
     name: ci / lifecycle-integration
     runs-on: ubuntu-latest
@@ -60,7 +139,7 @@ jobs:
   publish-artifact:
     name: ci / immutable-artifact
     if: github.event_name != 'pull_request'
-    needs: [integration-profile, lifecycle-integration]
+    needs: [integration-profile, component-updates, lifecycle-integration]
     runs-on: ubuntu-latest
     permissions:
       contents: read
