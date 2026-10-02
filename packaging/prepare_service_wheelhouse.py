@@ -599,7 +599,9 @@ def _verify_wheelhouse(service_dir: Path, spec: ServiceSpec, source_commit: str)
     if set(source) != set(expected_source) or source != expected_source:
         raise ProducerError(f"{spec.service}/source.json differs from its pinned source or lock")
     if not isinstance(runtime_dependencies, list) or len(runtime_dependencies) != 1:
-        raise ProducerError(f"{spec.service}/source.json must pin exactly one runtime SDK dependency")
+        raise ProducerError(
+            f"{spec.service}/source.json must pin exactly one runtime SDK dependency"
+        )
     sdk = runtime_dependencies[0]
     expected_sdk_fields = {
         "component_id",
@@ -663,13 +665,18 @@ def _verify_wheelhouse(service_dir: Path, spec: ServiceSpec, source_commit: str)
     sdk_matches = []
     for wheel in wheel_paths:
         name, version = _wheel_metadata(wheel)
-        if (
-            (_normalize_distribution(name), version) == sdk_identity
-            and hashlib.sha256(wheel.read_bytes()).hexdigest() == sdk["wheel_sha256"]
-        ):
+        if (_normalize_distribution(name), version) == sdk_identity and hashlib.sha256(
+            wheel.read_bytes()
+        ).hexdigest() == sdk["wheel_sha256"]:
             sdk_matches.append(wheel)
-    if sdk_identity not in allowed or sdk["wheel_sha256"] not in allowed[sdk_identity] or len(sdk_matches) != 1:
-        raise ProducerError(f"{spec.service} wheelhouse is missing the exactly pinned runtime SDK wheel")
+    if (
+        sdk_identity not in allowed
+        or sdk["wheel_sha256"] not in allowed[sdk_identity]
+        or len(sdk_matches) != 1
+    ):
+        raise ProducerError(
+            f"{spec.service} wheelhouse is missing the exactly pinned runtime SDK wheel"
+        )
     if not wheel_paths:
         raise ProducerError(f"{spec.service} wheelhouse contains no wheels")
 
@@ -721,8 +728,12 @@ def _load_runtime_sdk_wheel(args: argparse.Namespace) -> tuple[WheelArtifact, st
         ("--runtime-sdk-artifact-digest", args.runtime_sdk_artifact_digest),
     ):
         if not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None:
-            raise ProducerError(f"{flag} must be sha256 followed by 64 lowercase hexadecimal characters")
-    if not args.runtime_sdk_version or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", args.runtime_sdk_version):
+            raise ProducerError(
+                f"{flag} must be sha256 followed by 64 lowercase hexadecimal characters"
+            )
+    if not args.runtime_sdk_version or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9.+_-]{0,63}", args.runtime_sdk_version
+    ):
         raise ProducerError("--runtime-sdk-version must be a concrete version")
     name, version = _wheel_metadata(path)
     if _normalize_distribution(name) != _normalize_distribution(RUNTIME_SDK_DISTRIBUTION):
@@ -1076,11 +1087,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--service-commit",
         help="override release-lock.json for the selected service with this exact 40-character source SHA",
     )
-    parser.add_argument("--runtime-sdk-wheel", type=Path, help="wheel extracted from the verified cyrene-runtime-maintenance-sdk bundle")
-    parser.add_argument("--runtime-sdk-version", help="version declared by the verified SDK release manifest")
+    parser.add_argument(
+        "--runtime-sdk-wheel",
+        type=Path,
+        help="wheel extracted from the verified cyrene-runtime-maintenance-sdk bundle",
+    )
+    parser.add_argument(
+        "--runtime-sdk-version", help="version declared by the verified SDK release manifest"
+    )
     parser.add_argument("--runtime-sdk-sha256", help="raw 64-character SHA-256 of the SDK wheel")
-    parser.add_argument("--runtime-sdk-manifest-digest", help="sha256:<64hex> SDK public manifest digest")
-    parser.add_argument("--runtime-sdk-artifact-digest", help="sha256:<64hex> SDK bundle archive digest")
+    parser.add_argument(
+        "--runtime-sdk-manifest-digest", help="sha256:<64hex> SDK public manifest digest"
+    )
+    parser.add_argument(
+        "--runtime-sdk-artifact-digest", help="sha256:<64hex> SDK bundle archive digest"
+    )
     parser.add_argument(
         "--uv",
         default=shutil.which("uv") or "uv",

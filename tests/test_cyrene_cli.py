@@ -456,7 +456,11 @@ def test_install_missing_component_units_verifies_payload_and_never_overwrites(
 
     def root_owned_lstat(path: Path) -> os.stat_result:
         info = real_lstat(path)
-        if path in privileged_paths or path.is_relative_to(release) or path.is_relative_to(unit_dir):
+        if (
+            path in privileged_paths
+            or path.is_relative_to(release)
+            or path.is_relative_to(unit_dir)
+        ):
             return SimpleNamespace(st_mode=info.st_mode, st_uid=0)  # type: ignore[return-value]
         return info
 

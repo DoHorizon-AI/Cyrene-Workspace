@@ -105,7 +105,9 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
     )
 
 
-def _configure_unmanaged_runtime_agent(updater: updates.ComponentUpdater, unit_dir: Path) -> dict[str, object]:
+def _configure_unmanaged_runtime_agent(
+    updater: updates.ComponentUpdater, unit_dir: Path
+) -> dict[str, object]:
     target_id = "linux-test-x86_64-systemd"
     component_id = "cy-runtime-agent"
     updater.targets[target_id] = {
@@ -197,7 +199,9 @@ def test_unmanaged_native_apply_refuses_before_begin_or_pointer_switch(
     monkeypatch.setattr(
         updater,
         "_readiness_for",
-        lambda *args, **kwargs: pytest.fail("unmanaged components must be rejected before readiness or Begin"),
+        lambda *args, **kwargs: pytest.fail(
+            "unmanaged components must be rejected before readiness or Begin"
+        ),
     )
     monkeypatch.setattr(
         updater,
@@ -410,7 +414,9 @@ def test_begin_payload_preserves_sha256_artifact_digest_prefix(
     monkeypatch.setattr(updater, "_broker_request", broker_request)
     confirmation = {"planId": plan_id, "planDigest": plan_digest, "confirmed": True}
     transaction_path = updater.state_root / "transactions" / f"{plan_id}.json"
-    with pytest.raises(updates.UpdateError, match="changed readiness before the maintenance gate") as error:
+    with pytest.raises(
+        updates.UpdateError, match="changed readiness before the maintenance gate"
+    ) as error:
         updater.apply(plan_id, plan_digest, confirmation, channel="stable")
 
     assert error.value.code == "STALE_READINESS"
@@ -463,7 +469,9 @@ def test_begin_normal_no_token_status_is_classified_as_no_acquire(
         "planDigest": "sha256:" + "b" * 64,
         "componentArtifactDigests": {"cyrene-test": "sha256:" + "c" * 64},
         "phase": "begin_pending",
-        "targetKind": "CORE_RUNTIME" if status == "IDLE_RUNTIME_REQUIRES_UNLOAD" else "PACKAGE_ONLY",
+        "targetKind": "CORE_RUNTIME"
+        if status == "IDLE_RUNTIME_REQUIRES_UNLOAD"
+        else "PACKAGE_ONLY",
         "expectedCatalogGeneration": 9,
         "expectedActivitySources": ["cyrene-test"],
         "expectedGateGeneration": 7,
@@ -485,8 +493,17 @@ def test_begin_normal_no_token_status_is_classified_as_no_acquire(
     "result",
     [
         {"status": "READY", "maintenance_token": None, "gate_generation": 7, "blocker_codes": []},
-        {"status": "FUTURE_STATUS", "maintenance_token": None, "gate_generation": 7, "blocker_codes": []},
-        {"status": "STALE_READINESS", "gate_generation": 7, "blocker_codes": ["READINESS_GENERATION_STALE"]},
+        {
+            "status": "FUTURE_STATUS",
+            "maintenance_token": None,
+            "gate_generation": 7,
+            "blocker_codes": [],
+        },
+        {
+            "status": "STALE_READINESS",
+            "gate_generation": 7,
+            "blocker_codes": ["READINESS_GENERATION_STALE"],
+        },
     ],
 )
 def test_begin_unknown_or_malformed_result_keeps_transaction_recoverable(
@@ -590,12 +607,15 @@ def test_privileged_helper_has_a_fixed_root_only_command() -> None:
     assert 'if [ "$(/usr/bin/id -u)" -ne 0 ]' in helper
     assert "exec /usr/bin/cyrene update --json" in helper
     assert "$@" not in helper
-    assert subprocess.run(
-        [str(HELPER_PATH), "--executable", "/bin/sh"],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).returncode == 2
+    assert (
+        subprocess.run(
+            [str(HELPER_PATH), "--executable", "/bin/sh"],
+            check=False,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 2
+    )
 
 
 def test_polkit_policy_requires_active_admin_authentication() -> None:
@@ -609,9 +629,7 @@ def test_polkit_policy_requires_active_admin_authentication() -> None:
     assert defaults.findtext("allow_any") == "no"
     assert defaults.findtext("allow_inactive") == "no"
     assert defaults.findtext("allow_active") == "auth_admin_keep"
-    annotations = {
-        item.attrib.get("key"): item.text for item in action.findall("annotate")
-    }
+    annotations = {item.attrib.get("key"): item.text for item in action.findall("annotate")}
     assert annotations["org.freedesktop.policykit.exec.path"] == (
         "/usr/libexec/cyrene-component-update-helper"
     )
@@ -630,8 +648,10 @@ def test_deb_provisions_runtime_state_directory_fail_closed() -> None:
     builder = DEB_BUILDER_PATH.read_text(encoding="utf-8")
 
     assert "RUNTIME_STATE_DIR=/var/lib/cyrene/runtime" in builder
-    assert 'install -d -o root -g cyrene-runtime-maintenance -m 2770 "$RUNTIME_STATE_DIR"' in builder
-    assert 'stat -c \'%u:%g:%a\' -- "$RUNTIME_STATE_DIR"' in builder
+    assert (
+        'install -d -o root -g cyrene-runtime-maintenance -m 2770 "$RUNTIME_STATE_DIR"' in builder
+    )
+    assert "stat -c '%u:%g:%a' -- \"$RUNTIME_STATE_DIR\"" in builder
     assert '"0:${AUTHORITY_GID}:2770"' in builder
     assert "Refusing to repair existing runtime state in place" in builder
     assert "! -name runtime" in builder
@@ -773,9 +793,13 @@ def test_native_runner_requires_service_user_to_read_public_manifest(
 
     monkeypatch.setattr(Path, "lstat", root_owned_active)
     monkeypatch.setattr(updates.os, "access", service_user_access)
-    monkeypatch.setattr(updates.os, "execve", lambda *args, **kwargs: pytest.fail("must reject before exec"))
+    monkeypatch.setattr(
+        updates.os, "execve", lambda *args, **kwargs: pytest.fail("must reject before exec")
+    )
 
-    with pytest.raises(updates.UpdateError, match="manifest is not root-owned and readable") as error:
+    with pytest.raises(
+        updates.UpdateError, match="manifest is not root-owned and readable"
+    ) as error:
         updates.run_component(component_id, install_root=tmp_path)
 
     assert error.value.code == "INVALID_INSTALLED_RELEASE"

@@ -91,7 +91,10 @@ def _check_identity(
     monkeypatch.setattr(
         updater,
         "_target_for",
-        lambda value: {"target": "linux-x86_64", "artifactKind": candidate.manifest["artifact"]["kind"]},
+        lambda value: {
+            "target": "linux-x86_64",
+            "artifactKind": candidate.manifest["artifact"]["kind"],
+        },
     )
     monkeypatch.setattr(updater, "_candidate", lambda *args, **kwargs: candidate)
     monkeypatch.setattr(updater, "_installed", lambda value: installed)
@@ -221,8 +224,12 @@ def test_native_same_version_releases_have_distinct_identity_and_exact_rollback(
     new_payload = tmp_path / "new-payload"
     _native_payload(old_payload, "old")
     _native_payload(new_payload, "new")
-    old_candidate = SimpleNamespace(component=component, manifest=old_manifest, manifest_digest=old_manifest["manifestDigest"])
-    new_candidate = SimpleNamespace(component=component, manifest=new_manifest, manifest_digest=new_manifest["manifestDigest"])
+    old_candidate = SimpleNamespace(
+        component=component, manifest=old_manifest, manifest_digest=old_manifest["manifestDigest"]
+    )
+    new_candidate = SimpleNamespace(
+        component=component, manifest=new_manifest, manifest_digest=new_manifest["manifestDigest"]
+    )
 
     old_release = updater._install_native_release(old_candidate, old_payload)
     new_release = updater._install_native_release(new_candidate, new_payload)
@@ -256,14 +263,16 @@ def test_native_same_version_releases_have_distinct_identity_and_exact_rollback(
     previous = updater._capture_active_versions([{"componentId": component_id}])
     transaction = {
         "targetKind": "PACKAGE_ONLY",
-        "components": [{
-            "componentId": component_id,
-            "version": version,
-            "manifestDigest": new_manifest["manifestDigest"],
-            "artifactDigest": new_manifest["artifact"]["sha256"],
-            "releasePath": str(new_release),
-            "manifest": new_manifest,
-        }],
+        "components": [
+            {
+                "componentId": component_id,
+                "version": version,
+                "manifestDigest": new_manifest["manifestDigest"],
+                "artifactDigest": new_manifest["artifact"]["sha256"],
+                "releasePath": str(new_release),
+                "manifest": new_manifest,
+            }
+        ],
         "previous": previous,
     }
     monkeypatch.setattr(updater, "_restart_transaction", lambda value: None)
@@ -309,7 +318,10 @@ def _legacy_v1_bundle(root: Path, marker: str = "legacy") -> dict[str, Any]:
         "files": files,
         "source_repository": "Cyrene-Navigator",
         "source_commit": "c" * 40,
-        "dependencies": {"lock_file": "requirements.lock", "lock_sha256": files["requirements.lock"]},
+        "dependencies": {
+            "lock_file": "requirements.lock",
+            "lock_sha256": files["requirements.lock"],
+        },
         "target": {"debian_arch": "amd64", "python": "3.12"},
         "artifact_digest": "",
     }
@@ -328,19 +340,20 @@ def _v2_bundle(root: Path, marker: str) -> dict[str, Any]:
     wheel_hash = "d" * 64
     lock = root / "requirements.lock"
     lock.write_text(
-        "cyrene-runtime-maintenance==0.1.0 \\\n"
-        "    --hash=sha256:" + wheel_hash + "\n",
+        "cyrene-runtime-maintenance==0.1.0 \\\n    --hash=sha256:" + wheel_hash + "\n",
         encoding="utf-8",
     )
     lock_digest = hashlib.sha256(lock.read_bytes()).hexdigest()
-    runtime = [{
-        "component_id": bundle.RUNTIME_SDK_COMPONENT_ID,
-        "manifest_digest": "sha256:" + "e" * 64,
-        "artifact_digest": "sha256:" + "f" * 64,
-        "distribution": bundle.RUNTIME_SDK_DISTRIBUTION,
-        "version": "0.1.0",
-        "wheel_sha256": wheel_hash,
-    }]
+    runtime = [
+        {
+            "component_id": bundle.RUNTIME_SDK_COMPONENT_ID,
+            "manifest_digest": "sha256:" + "e" * 64,
+            "artifact_digest": "sha256:" + "f" * 64,
+            "distribution": bundle.RUNTIME_SDK_DISTRIBUTION,
+            "version": "0.1.0",
+            "wheel_sha256": wheel_hash,
+        }
+    ]
     source = {
         "schema_version": 2,
         "service": "navigator",
@@ -373,7 +386,9 @@ def _use_fixture_bundle_paths(
         if create:
             path.mkdir(parents=True, exist_ok=True)
         elif path.is_symlink() or not path.is_dir():
-            raise bundle.ServiceBundleError(f"fixture service directory is missing or unsafe: {path}")
+            raise bundle.ServiceBundleError(
+                f"fixture service directory is missing or unsafe: {path}"
+            )
         return path
 
     monkeypatch.setattr(bundle, "_ensure_secure_directory", ensure_directory)
@@ -419,7 +434,15 @@ def _write_python_receipt(
     receipt_path.chmod(0o600)
     active_path = installed_root / "active.json"
     active_path.write_text(
-        json.dumps({"schemaVersion": 1, "componentId": component_id, "releaseIdentity": release_identity, "bundleIdentity": bundle_identity}, sort_keys=True),
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "componentId": component_id,
+                "releaseIdentity": release_identity,
+                "bundleIdentity": bundle_identity,
+            },
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
     active_path.chmod(0o600)
@@ -452,9 +475,7 @@ def test_python_receipt_is_bound_to_the_verified_inner_active_pointer(
     second_manifest = _v2_bundle(tmp_path / "bundle-b", "second")
     first_release = bundle.stage_release(tmp_path / "bundle-a", install_root=install_root)
     second_release = bundle.stage_release(tmp_path / "bundle-b", install_root=install_root)
-    bundle.activate_release(
-        "navigator", first_manifest["version"], install_root=install_root
-    )
+    bundle.activate_release("navigator", first_manifest["version"], install_root=install_root)
     outer_manifest = _outer_manifest(
         component_id,
         "0.4.0",
@@ -527,19 +548,24 @@ def test_legacy_python_v1_is_readable_for_rollback_but_never_attested_current(
     transaction = {
         "targetKind": "PACKAGE_ONLY",
         "previous": previous,
-        "components": [{
-            "componentId": component_id,
-            "manifest": later,
-            "bundleIdentity": later["artifact_digest"],
-            "pointerIdentity": later["version"],
-        }],
+        "components": [
+            {
+                "componentId": component_id,
+                "manifest": later,
+                "bundleIdentity": later["artifact_digest"],
+                "pointerIdentity": later["version"],
+            }
+        ],
     }
     monkeypatch.setattr(updater, "_restart_transaction", lambda value: None)
     monkeypatch.setattr(updater, "_health_transaction", lambda value: None)
     healthy, _ = updater._rollback_transaction(transaction)
 
     assert healthy is True
-    assert bundle.resolve_active_release("navigator", install_root=install_root)[1] == legacy_manifest["version"]
+    assert (
+        bundle.resolve_active_release("navigator", install_root=install_root)[1]
+        == legacy_manifest["version"]
+    )
     assert updater._installed(component).get("identityAttested") is False
 
 
@@ -560,35 +586,50 @@ def test_recovery_compares_exact_native_identity_even_when_version_matches(
         "bundleIdentity": None,
         "identityAttested": True,
     }
-    changed = {**expected, "releaseIdentity": "sha256:" + "e" * 64, "pointerIdentity": "1.2.3--" + "e" * 64, "manifestDigest": "sha256:" + "e" * 64}
+    changed = {
+        **expected,
+        "releaseIdentity": "sha256:" + "e" * 64,
+        "pointerIdentity": "1.2.3--" + "e" * 64,
+        "manifestDigest": "sha256:" + "e" * 64,
+    }
     transaction = {
         "schemaVersion": 2,
         "planId": plan_id,
         "planDigest": plan_digest,
         "phase": "success_end_pending",
         "targetKind": "PACKAGE_ONLY",
-        "components": [{
-            "componentId": component_id,
-            "version": expected["version"],
-            "releaseIdentity": expected["releaseIdentity"],
-            "pointerIdentity": expected["pointerIdentity"],
-            "manifestDigest": expected["manifestDigest"],
-            "artifactDigest": expected["artifactDigest"],
-        }],
+        "components": [
+            {
+                "componentId": component_id,
+                "version": expected["version"],
+                "releaseIdentity": expected["releaseIdentity"],
+                "pointerIdentity": expected["pointerIdentity"],
+                "manifestDigest": expected["manifestDigest"],
+                "artifactDigest": expected["artifactDigest"],
+            }
+        ],
         "previous": [],
     }
     transaction_path = tmp_path / "transaction.json"
     transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
-    monkeypatch.setattr(updater, "_readiness_for", lambda *args, **kwargs: {"status": "MAINTENANCE_ACTIVE"})
+    monkeypatch.setattr(
+        updater, "_readiness_for", lambda *args, **kwargs: {"status": "MAINTENANCE_ACTIVE"}
+    )
     monkeypatch.setattr(updater, "_capture_active_versions", lambda components: [changed])
     monkeypatch.setattr(updater, "_health_transaction", lambda value: None)
-    monkeypatch.setattr(updater, "_end_maintenance", lambda *args, **kwargs: pytest.fail("must keep gate held on identity mismatch"))
+    monkeypatch.setattr(
+        updater,
+        "_end_maintenance",
+        lambda *args, **kwargs: pytest.fail("must keep gate held on identity mismatch"),
+    )
 
     with pytest.raises(updates.UpdateError) as error:
         updater._recover_end_pending(transaction, transaction_path)
 
     assert error.value.code == "TRANSACTION_STATE_MISMATCH"
-    assert json.loads(transaction_path.read_text(encoding="utf-8"))["phase"] == "success_end_pending"
+    assert (
+        json.loads(transaction_path.read_text(encoding="utf-8"))["phase"] == "success_end_pending"
+    )
 
 
 def test_recovery_accepts_the_exact_captured_release_identity(
@@ -619,7 +660,9 @@ def test_recovery_accepts_the_exact_captured_release_identity(
     }
     transaction_path = tmp_path / "transaction.json"
     transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
-    monkeypatch.setattr(updater, "_readiness_for", lambda *args, **kwargs: {"status": "MAINTENANCE_ACTIVE"})
+    monkeypatch.setattr(
+        updater, "_readiness_for", lambda *args, **kwargs: {"status": "MAINTENANCE_ACTIVE"}
+    )
     monkeypatch.setattr(updater, "_capture_active_versions", lambda components: [active])
     monkeypatch.setattr(updater, "_health_transaction", lambda value: None)
     monkeypatch.setattr(updater, "_end_maintenance", lambda *args, **kwargs: None)
@@ -648,7 +691,11 @@ def test_recovery_refuses_legacy_journal_without_captured_release_identity(
     }
     transaction_path = tmp_path / "legacy-transaction.json"
     transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
-    monkeypatch.setattr(updater, "_rollback_transaction", lambda value: pytest.fail("legacy identity must fail held before rollback"))
+    monkeypatch.setattr(
+        updater,
+        "_rollback_transaction",
+        lambda value: pytest.fail("legacy identity must fail held before rollback"),
+    )
     confirmation = {"planId": plan_id, "planDigest": plan_digest}
 
     with pytest.raises(updates.UpdateError):

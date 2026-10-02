@@ -780,7 +780,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             if bundle_module is not None:
                 try:
                     if _service_update_journal_exists(bundle_module, service):
-                        print("    update: INTERRUPTED LEGACY TRANSACTION; service launch remains fail-closed")
+                        print(
+                            "    update: INTERRUPTED LEGACY TRANSACTION; service launch remains fail-closed"
+                        )
                         continue
                     release = bundle_module.resolve_active_release(
                         service, install_root=service_install_root()
@@ -2421,7 +2423,10 @@ def cmd_update(args: argparse.Namespace) -> int:
     """Run the single fixed JSON stdin/stdout component-update helper."""
 
     if not getattr(args, "json", False):
-        print("ERROR: component updates require the fixed `cyrene update --json` protocol.", file=sys.stderr)
+        print(
+            "ERROR: component updates require the fixed `cyrene update --json` protocol.",
+            file=sys.stderr,
+        )
         return 2
     try:
         module = _load_component_updates_module()
@@ -2478,7 +2483,9 @@ def cmd_component_run(args: argparse.Namespace) -> int:
             or len(argument.encode("utf-8")) > 512
             for argument in startup_arguments
         ):
-            raise ValueError("Startup arguments must be non-empty UTF-8 values of at most 512 bytes each (64 maximum).")
+            raise ValueError(
+                "Startup arguments must be non-empty UTF-8 values of at most 512 bytes each (64 maximum)."
+            )
 
         return module.run_component(
             args.component_id,
@@ -2486,7 +2493,9 @@ def cmd_component_run(args: argparse.Namespace) -> int:
             startup_arguments=startup_arguments,
         )
     except Exception as error:  # noqa: BLE001 - report component startup failures through the CLI boundary.
-        print(f"ERROR: cannot start trusted component {args.component_id}: {error}", file=sys.stderr)
+        print(
+            f"ERROR: cannot start trusted component {args.component_id}: {error}", file=sys.stderr
+        )
         return 1
 
 
@@ -2514,7 +2523,9 @@ def _validate_installed_native_component(
             or info.st_uid != 0
             or stat.S_IMODE(info.st_mode) & 0o022
         ):
-            raise ValueError(f"Active release path is not a root-owned real directory for {component_id}: {directory}.")
+            raise ValueError(
+                f"Active release path is not a root-owned real directory for {component_id}: {directory}."
+            )
     active_info = active.lstat()
     if active_info.st_uid != 0:
         raise ValueError(f"Active release pointer is not root-owned for {component_id}.")
@@ -2531,7 +2542,9 @@ def _validate_installed_native_component(
     release_info = release.lstat()
     if release_info.st_uid != 0 or stat.S_IMODE(release_info.st_mode) & 0o022:
         raise ValueError(f"Active release directory is not root-controlled for {component_id}.")
-    manifest = module._read_object(release / "component-manifest.json", f"{component_id} release manifest")
+    manifest = module._read_object(
+        release / "component-manifest.json", f"{component_id} release manifest"
+    )
     manifest_info = (release / "component-manifest.json").lstat()
     if manifest_info.st_uid != 0 or stat.S_IMODE(manifest_info.st_mode) & 0o022:
         raise ValueError(f"Active component manifest is not root-controlled for {component_id}.")
@@ -2540,23 +2553,32 @@ def _validate_installed_native_component(
     if (
         manifest.get("componentId") != component_id
         or manifest.get("version") != version
-        or (pointer_digest is not None and manifest.get("manifestDigest") != "sha256:" + pointer_digest)
+        or (
+            pointer_digest is not None
+            and manifest.get("manifestDigest") != "sha256:" + pointer_digest
+        )
         or (pointer_digest is None and pointer_identity != version)
         or not isinstance(artifact, dict)
         or artifact.get("kind") != "native-binary"
         or module.DIGEST_PATTERN.fullmatch(artifact.get("sha256", "")) is None
         or not isinstance(artifact.get("files"), dict)
     ):
-        raise ValueError(f"Active release identity or artifact file map is invalid for {component_id}.")
+        raise ValueError(
+            f"Active release identity or artifact file map is invalid for {component_id}."
+        )
 
     files: dict[str, str] = artifact["files"]
     unit_relative = f"systemd/{unit}"
     unit_digest = files.get(unit_relative)
     if not isinstance(unit_digest, str) or module.DIGEST_PATTERN.fullmatch(unit_digest) is None:
-        raise ValueError(f"Active release does not pin its declared systemd unit for {component_id}.")
+        raise ValueError(
+            f"Active release does not pin its declared systemd unit for {component_id}."
+        )
     entrypoint = module._safe_relative(artifact.get("entrypoint"), field="artifact.entrypoint")
     if entrypoint.as_posix() not in files:
-        raise ValueError(f"Active release entrypoint is not covered by its file map for {component_id}.")
+        raise ValueError(
+            f"Active release entrypoint is not covered by its file map for {component_id}."
+        )
 
     for relative_name, expected_digest in files.items():
         if not isinstance(relative_name, str) or not isinstance(expected_digest, str):
@@ -2577,17 +2599,19 @@ def _validate_installed_native_component(
                     or stat.S_IMODE(info.st_mode) & 0o022
                 )
             ):
-                raise ValueError(f"Active release file path is unsafe for {component_id}: {relative_name}.")
+                raise ValueError(
+                    f"Active release file path is unsafe for {component_id}: {relative_name}."
+                )
         info = payload_path.lstat()
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != 0
-            or stat.S_IMODE(info.st_mode) & 0o022
-        ):
-            raise ValueError(f"Active release file is not root-controlled for {component_id}: {relative_name}.")
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+            raise ValueError(
+                f"Active release file is not root-controlled for {component_id}: {relative_name}."
+            )
         actual_digest = "sha256:" + _sha256_file(payload_path)
         if actual_digest != expected_digest:
-            raise ValueError(f"Active release file digest mismatch for {component_id}: {relative_name}.")
+            raise ValueError(
+                f"Active release file digest mismatch for {component_id}: {relative_name}."
+            )
 
     return release, manifest, (release / unit_relative).read_bytes()
 
@@ -2620,7 +2644,8 @@ def install_missing_component_units(
             or component_id == "cy-runtime-agent"
             or not component.get("systemdUnit")
             or not any(
-                target.get("artifactKind") == "native-binary" and target.get("support") == "supported"
+                target.get("artifactKind") == "native-binary"
+                and target.get("support") == "supported"
                 for target in component.get("targets", [])
             )
         ):
@@ -2634,19 +2659,29 @@ def install_missing_component_units(
         active = install_root_path / "components" / component["componentId"] / "active"
         if not active.exists() and not active.is_symlink():
             if existing_locations:
-                raise FileExistsError(f"Existing systemd unit has no active trusted release to verify: {unit}")
+                raise FileExistsError(
+                    f"Existing systemd unit has no active trusted release to verify: {unit}"
+                )
             continue
-        _, _, unit_bytes = _validate_installed_native_component(module, updater, component, install_root_path)
+        _, _, unit_bytes = _validate_installed_native_component(
+            module, updater, component, install_root_path
+        )
         expected_digest = hashlib.sha256(unit_bytes).hexdigest()
         if existing_locations:
             for existing_path in existing_locations:
                 if existing_path.is_symlink() or not existing_path.is_file():
-                    raise FileExistsError(f"Existing systemd unit is not a regular file: {existing_path}")
+                    raise FileExistsError(
+                        f"Existing systemd unit is not a regular file: {existing_path}"
+                    )
                 info = existing_path.lstat()
                 if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
-                    raise FileExistsError(f"Existing systemd unit is not root-controlled: {existing_path}")
+                    raise FileExistsError(
+                        f"Existing systemd unit is not root-controlled: {existing_path}"
+                    )
                 if _sha256_file(existing_path) != expected_digest:
-                    raise FileExistsError(f"Existing systemd unit conflicts with the trusted payload: {existing_path}")
+                    raise FileExistsError(
+                        f"Existing systemd unit conflicts with the trusted payload: {existing_path}"
+                    )
             existing.append(unit)
             continue
 
@@ -2658,7 +2693,9 @@ def install_missing_component_units(
             or destination_info.st_uid != 0
             or stat.S_IMODE(destination_info.st_mode) & 0o022
         ):
-            raise ValueError(f"Systemd unit destination is not a root-owned real directory: {destination}")
+            raise ValueError(
+                f"Systemd unit destination is not a root-owned real directory: {destination}"
+            )
         target_path = destination / unit
         temporary = destination / f".{unit}.{secrets.token_hex(8)}.tmp"
         descriptor = os.open(
@@ -2709,7 +2746,9 @@ def cmd_component_install_missing_units(args: argparse.Namespace) -> int:
             if reload_result.returncode != 0:
                 detail = reload_result.stderr.strip()[:500]
                 raise RuntimeError(f"systemctl daemon-reload failed: {detail}")
-        print(json.dumps({"installed": installed, "alreadyPresent": existing}, separators=(",", ":")))
+        print(
+            json.dumps({"installed": installed, "alreadyPresent": existing}, separators=(",", ":"))
+        )
         return 0
     except Exception as error:  # noqa: BLE001 - report unit validation and installation failures uniformly.
         print(f"ERROR: cannot install trusted component units: {error}", file=sys.stderr)

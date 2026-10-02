@@ -115,8 +115,10 @@ def _validate_runtime_dependencies(value: Any) -> list[dict[str, str]]:
 def _service_root(service: str, install_root: Path | None = None) -> Path:
     if service not in SERVICES:
         raise ServiceBundleError(f"unsupported service name: {service}")
-    root = Path(install_root) if install_root is not None else Path(
-        os.environ.get("CYRENE_INSTALL_ROOT", "/usr/lib/cyrene")
+    root = (
+        Path(install_root)
+        if install_root is not None
+        else Path(os.environ.get("CYRENE_INSTALL_ROOT", "/usr/lib/cyrene"))
     )
     return root / "services" / service
 
@@ -150,7 +152,9 @@ def _ensure_secure_directory(path: Path, *, create: bool) -> Path:
             current.chmod(0o755)
             info = current.lstat()
         if (info.st_mode & 0o005) != 0o005:
-            raise ServiceBundleError(f"service directory must be traversable by the service user: {current}")
+            raise ServiceBundleError(
+                f"service directory must be traversable by the service user: {current}"
+            )
     return absolute
 
 
@@ -184,7 +188,9 @@ def _assert_secure_tree(root: Path) -> None:
             if stat.S_ISDIR(info.st_mode) and (info.st_mode & 0o005) != 0o005:
                 raise ServiceBundleError(f"installed release directory is not traversable: {path}")
             if stat.S_ISREG(info.st_mode) and not (info.st_mode & stat.S_IROTH):
-                raise ServiceBundleError(f"installed release file is not readable by the service user: {path}")
+                raise ServiceBundleError(
+                    f"installed release file is not readable by the service user: {path}"
+                )
 
 
 def _normalize_release_modes(root: Path, entrypoint: str) -> None:
@@ -299,7 +305,9 @@ def validate_bundle(bundle_dir: Path, expected_service: str | None = None) -> di
         raise ServiceBundleError(f"manifest keys differ; missing={missing}, extra={extra}")
     schema_version = manifest["schema_version"]
     if type(schema_version) is not int or schema_version not in {1, 2}:
-        raise ServiceBundleError(f"unsupported bundle schema version: {manifest['schema_version']!r}")
+        raise ServiceBundleError(
+            f"unsupported bundle schema version: {manifest['schema_version']!r}"
+        )
     service = manifest["service"]
     if service not in SERVICES:
         raise ServiceBundleError(f"unsupported manifest service: {service!r}")
@@ -344,7 +352,9 @@ def validate_bundle(bundle_dir: Path, expected_service: str | None = None) -> di
         raise ServiceBundleError(f"manifest entrypoint is not in the payload: {entrypoint}")
     executable = root.joinpath(*entrypoint_path.parts)
     if not executable.is_file() or not (executable.stat().st_mode & stat.S_IXOTH):
-        raise ServiceBundleError(f"bundle entrypoint must be executable by the service user: {entrypoint}")
+        raise ServiceBundleError(
+            f"bundle entrypoint must be executable by the service user: {entrypoint}"
+        )
 
     source_repository = manifest["source_repository"]
     source_commit = manifest["source_commit"]
@@ -400,7 +410,9 @@ def validate_bundle(bundle_dir: Path, expected_service: str | None = None) -> di
             runtime_dependencies[0]["version"],
         )
         if runtime_dependencies[0]["wheel_sha256"] not in lock_pins.get(sdk_identity, set()):
-            raise ServiceBundleError("requirements.lock does not contain the pinned runtime SDK wheel")
+            raise ServiceBundleError(
+                "requirements.lock does not contain the pinned runtime SDK wheel"
+            )
 
     digest = _artifact_digest(manifest)
     if version != digest or manifest["artifact_digest"] != digest:
@@ -468,7 +480,9 @@ def stage_release(bundle_dir: Path, install_root: Path | None = None) -> Path:
         _assert_secure_tree(destination)
         existing = validate_bundle(destination, expected_service=manifest["service"])
         if existing["artifact_digest"] != manifest["artifact_digest"]:
-            raise ServiceBundleError(f"immutable release already exists with different content: {destination}")
+            raise ServiceBundleError(
+                f"immutable release already exists with different content: {destination}"
+            )
         return destination
 
     staging = Path(tempfile.mkdtemp(prefix=f".{manifest['version']}.stage-", dir=releases))
@@ -600,7 +614,9 @@ def _wheel_requirement_names(lock_path: Path) -> set[str]:
         if "@" in line or "://" in line or "git+" in line:
             raise ServiceBundleError("requirements.lock must not contain direct URLs or VCS inputs")
         requirement_part = line.split(";", 1)[0].rstrip("\\").strip()
-        requirement_tokens = [token for token in requirement_part.split() if not token.startswith("--hash=")]
+        requirement_tokens = [
+            token for token in requirement_part.split() if not token.startswith("--hash=")
+        ]
         if len(requirement_tokens) != 1:
             raise ServiceBundleError(f"invalid hash-pinned requirement line: {line}")
         match = WHEEL_REQUIREMENT_PATTERN.fullmatch(requirement_tokens[0])
@@ -630,7 +646,9 @@ def _wheel_requirement_hashes(lock_path: Path) -> dict[tuple[str, str], set[str]
         requirement = line.split(";", 1)[0].rstrip("\\").strip()
         match = WHEEL_REQUIREMENT_PATTERN.fullmatch(requirement)
         if match is None:
-            raise ServiceBundleError(f"requirements.lock entries must use exact package==version pins: {line}")
+            raise ServiceBundleError(
+                f"requirements.lock entries must use exact package==version pins: {line}"
+            )
         current = (_normalize_distribution(match.group(1)), match.group(2))
         pins.setdefault(current, set())
     if any(not hashes for hashes in pins.values()):
@@ -663,20 +681,18 @@ def _debian_arch_for_host() -> str:
 def _entrypoint_text(service: str) -> str:
     commands = {
         "yield": (
-            'exec python3 -s -m cy_exec.training.product_cli '
+            "exec python3 -s -m cy_exec.training.product_cli "
             '--state-directory "${CYRENE_DATA_DIR:-/var/lib/cyrene}/yield" '
             '--port "${CYRENE_PORT_YIELD:-8001}" "$@"'
         ),
-        "reactor": (
-            ""
-        ),
+        "reactor": (""),
         "exchange": (
-            'exec python3 -s -m cyrene_exchange_product.cli '
+            "exec python3 -s -m cyrene_exchange_product.cli "
             '--database "${CYRENE_DATA_DIR:-/var/lib/cyrene}/exchange.sqlite3" '
             'serve --port "${CYRENE_PORT_EXCHANGE:-8003}" "$@"'
         ),
         "catalyst": (
-            'exec python3 -s -m cyrene_catalyst.cli serve '
+            "exec python3 -s -m cyrene_catalyst.cli serve "
             '--home "${CYRENE_DATA_DIR:-/var/lib/cyrene}/catalyst" '
             '--port "${CYRENE_PORT_CATALYST:-8004}" "$@"'
         ),
@@ -810,7 +826,9 @@ def _write_bundle_manifest(
     manifest["version"] = digest
     manifest["artifact_digest"] = digest
     manifest_path = bundle_root / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return manifest
 
 
@@ -901,17 +919,20 @@ def _build_one_bundle(
         if not wheel.name.endswith(".whl"):
             continue
         wheel_name, wheel_version = _wheel_metadata(wheel)
-        if (
-            (_normalize_distribution(wheel_name), wheel_version) == sdk_identity
-            and _sha256_file(wheel) == sdk["wheel_sha256"]
-        ):
+        if (_normalize_distribution(wheel_name), wheel_version) == sdk_identity and _sha256_file(
+            wheel
+        ) == sdk["wheel_sha256"]:
             sdk_wheels.append(wheel)
     if len(sdk_wheels) != 1:
-        raise ServiceBundleError(f"{service} wheelhouse does not contain the exact pinned Runtime Maintenance SDK wheel")
+        raise ServiceBundleError(
+            f"{service} wheelhouse does not contain the exact pinned Runtime Maintenance SDK wheel"
+        )
     lock_pins = _wheel_requirement_hashes(lock_path)
     sdk_identity = (_normalize_distribution(sdk["distribution"]), sdk["version"])
     if sdk["wheel_sha256"] not in lock_pins.get(sdk_identity, set()):
-        raise ServiceBundleError(f"{service}/requirements.lock does not pin the exact runtime SDK wheel")
+        raise ServiceBundleError(
+            f"{service}/requirements.lock does not pin the exact runtime SDK wheel"
+        )
     requirement_names = {name for name, _ in lock_pins}
     missing_distributions = [
         distribution
@@ -1011,7 +1032,10 @@ def build_service_bundles(
         raise ServiceBundleError(f"unsupported service name: {service!r}")
     if service_commit_override is not None and service is None:
         raise ServiceBundleError("--service-commit requires --service")
-    if service_commit_override is not None and COMMIT_PATTERN.fullmatch(service_commit_override) is None:
+    if (
+        service_commit_override is not None
+        and COMMIT_PATTERN.fullmatch(service_commit_override) is None
+    ):
         raise ServiceBundleError("--service-commit must be a lowercase 40-character Git SHA")
 
     wheelhouse = Path(wheelhouse_root)
@@ -1042,7 +1066,11 @@ def build_service_bundles(
     if not python.is_file():
         raise ServiceBundleError(f"build Python interpreter is missing: {python}")
     version = subprocess.run(
-        [str(python), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        [
+            str(python),
+            "-c",
+            "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+        ],
         check=True,
         capture_output=True,
         text=True,
@@ -1069,7 +1097,11 @@ def build_service_bundles(
         results: list[Path] = []
         for service_name in selected_services:
             repository = REPOSITORIES[service_name]
-            commit = service_commit_override if service_name == service and service_commit_override else repositories.get(repository)
+            commit = (
+                service_commit_override
+                if service_name == service and service_commit_override
+                else repositories.get(repository)
+            )
             if not isinstance(commit, str) or not COMMIT_PATTERN.fullmatch(commit):
                 raise ServiceBundleError(
                     f"release-lock.json has no immutable source commit for {repository}"
@@ -1164,8 +1196,13 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--output", type=Path, required=True)
     build.add_argument("--arch", required=True)
     build.add_argument("--python", type=Path, default=Path(sys.executable))
-    build.add_argument("--service", choices=SERVICES, help="build only this independent Product bundle")
-    build.add_argument("--service-commit", help="override release-lock.json for the selected service with this exact 40-character source SHA")
+    build.add_argument(
+        "--service", choices=SERVICES, help="build only this independent Product bundle"
+    )
+    build.add_argument(
+        "--service-commit",
+        help="override release-lock.json for the selected service with this exact 40-character source SHA",
+    )
     build.set_defaults(handler=_build_command)
     arguments = parser.parse_args(argv)
     try:
