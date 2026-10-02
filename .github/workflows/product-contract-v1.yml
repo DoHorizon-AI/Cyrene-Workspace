@@ -82,7 +82,9 @@ jobs:
           governance = Path("governance")
           names = (
               "component-release-manifest-v1.schema.json",
+              "component-release-manifest-v2.schema.json",
               "component-release-index-v1.schema.json",
+              "data-bundle-proof-v1.schema.json",
               "component-catalog-v1.schema.json",
           )
           schemas = {
