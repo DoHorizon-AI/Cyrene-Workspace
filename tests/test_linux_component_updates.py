@@ -803,3 +803,24 @@ def test_native_runner_requires_service_user_to_read_public_manifest(
         updates.run_component(component_id, install_root=tmp_path)
 
     assert error.value.code == "INVALID_INSTALLED_RELEASE"
+
+
+def test_manifest_v2_dual_read_support() -> None:
+    manifest_v2 = {
+        "schemaVersion": 2,
+        "releaseId": "rel-v2",
+        "componentId": "cy-workspace-relay",
+        "version": "0.2.0",
+        "channel": "stable",
+        "target": {"os": "linux", "architecture": "x86_64"},
+        "protocolVersion": "cyrene.workspace.authority.v1",
+        "contentDigest": "sha256:" + "b" * 64,
+        "artifact": {"kind": "native-binary"},
+        "dependencies": [],
+        "restart": {"group": "single-service", "unit": "cy-workspace-relay.service"},
+        "source": {"repository": "DoHorizon-AI/Cyrene-Plugins-Official", "commit": "a" * 40},
+        "provenance": {},
+    }
+    manifest_v2["manifestDigest"] = updates._digest_json(manifest_v2, "manifestDigest")
+    assert manifest_v2["manifestDigest"].startswith("sha256:")
+

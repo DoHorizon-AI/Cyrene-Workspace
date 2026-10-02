@@ -416,7 +416,7 @@ class ComponentUpdater:
         if not isinstance(catalog_value, dict):
             raise UpdateError("INVALID_CATALOG", "The component catalog must be a JSON object.")
         self.catalog = catalog_value
-        if self.catalog.get("schemaVersion") != 1 or not isinstance(
+        if self.catalog.get("schemaVersion") not in (1, 2) or not isinstance(
             self.catalog.get("components"), list
         ):
             raise UpdateError(
@@ -2159,7 +2159,7 @@ class ComponentUpdater:
             "provenance",
             "manifestDigest",
         }
-        allowed = required | {"health", "compatibility"}
+        allowed = required | {"health", "compatibility", "protocolVersion", "contentDigest"}
         if (
             not isinstance(manifest, dict)
             or set(manifest) - allowed
@@ -2170,7 +2170,7 @@ class ComponentUpdater:
                 f"Manifest for {component['componentId']} has an invalid object shape.",
             )
         if (
-            manifest.get("schemaVersion") != 1
+            manifest.get("schemaVersion") not in (1, 2)
             or manifest.get("componentId") != component["componentId"]
             or manifest.get("version") != entry.get("version")
             or manifest.get("target") != target["target"]
