@@ -150,6 +150,14 @@
         "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Echo/releases?per_page=100",
         "indexAssetName": "component-release-index-v1.json"
       }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "workflow": "DoHorizon-AI/Cyrene-Plugins-Official/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Plugins-Official/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
     }
   ],
   "activitySourceCatalog": {

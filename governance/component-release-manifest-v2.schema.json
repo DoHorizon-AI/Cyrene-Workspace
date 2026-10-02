@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/component-release-manifest-v2.schema.json",
+  "title": "Cyrene Component Release Manifest v2",
+  "description": "Component release manifest v2 separating protocol compatibility versions from content digests, enabling independent connection and data bundle updates.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "releaseId",
+    "componentId",
+    "version",
+    "channel",
+    "target",
+    "protocolVersion",
+    "contentDigest",
+    "artifact",
+    "dependencies",
+    "restart",
+    "source",
+    "provenance",
+    "manifestDigest"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "releaseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "componentId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+    },
+    "channel": {
+      "enum": [
+        "stable",
+        "preview"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "required": ["os", "architecture"],
+      "properties": {
+        "os": { "type": "string" },
+        "osVersion": { "type": "string" },
+        "architecture": { "type": "string" },
+        "distribution": { "type": "string" },
+        "distributionVersion": { "type": "string" },
+        "abi": { "type": "string" },
+        "runtime": { "type": "string" }
+      }
+    },
+    "protocolVersion": {
+      "type": "string",
+      "description": "Wire/RPC contract version, e.g. cyrene.workspace.authority.v1"
+    },
+    "contentDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "RFC 8785 canonical content digest separate from protocol compatibility"
+    },
+    "artifact": {
+      "type": "object"
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["componentId"],
+        "properties": {
+          "componentId": { "type": "string" },
+          "minimumVersion": { "type": "string" }
+        }
+      }
+    },
+    "restart": {
+      "type": "object",
+      "required": ["group"],
+      "properties": {
+        "group": { "type": "string" },
+        "unit": { "type": "string" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["repository", "commit"],
+      "properties": {
+        "repository": { "type": "string" },
+        "commit": { "type": "string" },
+        "ref": { "type": "string" }
+      }
+    },
+    "provenance": {
+      "type": "object"
+    },
+    "manifestDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
