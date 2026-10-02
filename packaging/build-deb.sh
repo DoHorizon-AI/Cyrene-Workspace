@@ -89,11 +89,14 @@ echo "==> Staging Cyrene .deb package (version: ${VERSION}, arch: ${ARCH})..."
 # Directory structure
 mkdir -p "${STAGE_DIR}/DEBIAN"
 mkdir -p "${STAGE_DIR}/usr/bin"
+mkdir -p "${STAGE_DIR}/usr/libexec"
 mkdir -p "${STAGE_DIR}/usr/lib/cyrene"
 mkdir -p "${STAGE_DIR}/etc/cyrene"
 mkdir -p "${STAGE_DIR}/lib/systemd/system"
 mkdir -p "${STAGE_DIR}/var/lib/cyrene"
 mkdir -p "${STAGE_DIR}/usr/share/cyrene/service-artifacts"
+mkdir -p "${STAGE_DIR}/usr/share/cyrene"
+mkdir -p "${STAGE_DIR}/usr/share/polkit-1/actions"
 
 mkdir -p "${STAGE_DIR}/usr/lib/cyrene/scripts"
 
@@ -105,10 +108,23 @@ cp "${WORKSPACE_ROOT}/cyrene" "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene"
 chmod 755 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene"
 ln -s /usr/lib/cyrene/scripts/cyrene "${STAGE_DIR}/usr/bin/cyrene"
 
+# Polkit executes a root-owned fixed wrapper. The JSON request can select only
+# an updater operation; it cannot change the executable or its arguments.
+cp "${SCRIPT_DIR}/cyrene-component-update-helper" \
+    "${STAGE_DIR}/usr/libexec/cyrene-component-update-helper"
+chmod 755 "${STAGE_DIR}/usr/libexec/cyrene-component-update-helper"
+cp "${SCRIPT_DIR}/org.cyrene.component-update.policy" \
+    "${STAGE_DIR}/usr/share/polkit-1/actions/org.cyrene.component-update.policy"
+chmod 644 "${STAGE_DIR}/usr/share/polkit-1/actions/org.cyrene.component-update.policy"
+
 # 2. /usr/lib/cyrene/ -> Python runtime (managed by uv) & helper scripts
 cp -r "${WORKSPACE_ROOT}/scripts/." "${STAGE_DIR}/usr/lib/cyrene/scripts/"
 cp "${SCRIPT_DIR}/service_bundle.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
+cp "${SCRIPT_DIR}/component_updates.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
+cp "${WORKSPACE_ROOT}/governance/component-catalog-v1.json" "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
+chmod 644 "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
 if [[ -f "${WORKSPACE_ROOT}/pyproject.toml" ]]; then
     cp "${WORKSPACE_ROOT}/pyproject.toml" "${STAGE_DIR}/usr/lib/cyrene/"
 fi
@@ -166,6 +182,14 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
+EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-navigator
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
+Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
+LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-navigator.token
+PrivateMounts=yes
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 ExecStart=/usr/bin/cyrene service-run navigator
 Restart=on-failure
 RestartSec=5
@@ -187,6 +211,14 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
+EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-yield
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
+Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
+LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-yield.token
+PrivateMounts=yes
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 ExecStart=/usr/bin/cyrene service-run yield
 Restart=on-failure
 RestartSec=5
@@ -207,6 +239,14 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
+EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-reactor
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
+Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
+LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-reactor.token
+PrivateMounts=yes
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 ExecStart=/usr/bin/cyrene service-run reactor
 Restart=on-failure
 RestartSec=5
@@ -227,6 +267,14 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
+EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-exchange
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
+Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
+LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-exchange.token
+PrivateMounts=yes
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 ExecStart=/usr/bin/cyrene service-run exchange
 Restart=on-failure
 RestartSec=5
@@ -247,6 +295,14 @@ User=cyrene
 Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
+EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-catalyst
+Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
+Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
+LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-catalyst.token
+PrivateMounts=yes
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 ExecStart=/usr/bin/cyrene service-run catalyst
 Restart=on-failure
 RestartSec=5
@@ -265,7 +321,7 @@ Section: devel
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Cyrene Team <team@cyrene.dev>
-Depends: python3 (>= 3.12), python3 (<< 3.13), systemd
+Depends: python3 (>= 3.12), python3 (<< 3.13), systemd, policykit-1
 Description: Cyrene Unified Local LLM Stack
  Cyrene provides a complete local LLM development and inference platform,
  including model importation (Reactor), training drafts (Yield), dataset preparation
@@ -283,9 +339,82 @@ if ! id -u cyrene >/dev/null 2>&1; then
 fi
 
 # 设置数据目录与配置目录权限
+if [ -L /var/lib/cyrene ]; then
+    echo "ERROR: /var/lib/cyrene is a symlink; refusing to change runtime state through it." >&2
+    exit 1
+fi
 mkdir -p /var/lib/cyrene /var/log/cyrene /etc/cyrene
-chown -R cyrene:cyrene /var/lib/cyrene /var/log/cyrene
+chown cyrene:cyrene /var/lib/cyrene /var/log/cyrene
+find /var/lib/cyrene -mindepth 1 -maxdepth 1 ! -name runtime \
+    -exec chown -hR cyrene:cyrene -- {} +
 chmod 750 /var/lib/cyrene /var/log/cyrene
+
+# The Platform broker owns the durable runtime catalog and maintenance journal.
+# Require its authority group and binary before Product units are admitted.
+if ! getent group cyrene-runtime-maintenance >/dev/null 2>&1; then
+    echo "ERROR: cyrene-runtime-maintenance authority group is missing; install the verified Platform runtime-maintenance component first." >&2
+    exit 1
+fi
+if [ ! -x /usr/bin/cyrene-runtime-maintenance ]; then
+    echo "ERROR: /usr/bin/cyrene-runtime-maintenance is missing; install the verified Platform runtime-maintenance component first." >&2
+    exit 1
+fi
+if ! /usr/bin/cyrene component-install-missing-units; then
+    echo "ERROR: could not install or validate catalog-pinned Platform systemd units." >&2
+    exit 1
+fi
+if [ ! -f /lib/systemd/system/cyrene-runtime-maintenance.service ] && [ ! -f /usr/lib/systemd/system/cyrene-runtime-maintenance.service ] && [ ! -f /etc/systemd/system/cyrene-runtime-maintenance.service ]; then
+    echo "ERROR: cyrene-runtime-maintenance.service is missing; install the verified Platform runtime-maintenance component first." >&2
+    exit 1
+fi
+
+CYRENE_UID="$(id -u cyrene)"
+CYRENE_GID="$(id -g cyrene)"
+AUTHORITY_GID="$(getent group cyrene-runtime-maintenance | cut -d: -f3)"
+RUNTIME_STATE_DIR=/var/lib/cyrene/runtime
+if [ -L "$RUNTIME_STATE_DIR" ]; then
+    echo "ERROR: $RUNTIME_STATE_DIR is a symlink; refusing to follow it." >&2
+    exit 1
+elif [ -e "$RUNTIME_STATE_DIR" ]; then
+    if [ ! -d "$RUNTIME_STATE_DIR" ]; then
+        echo "ERROR: $RUNTIME_STATE_DIR exists but is not a directory." >&2
+        exit 1
+    fi
+    RUNTIME_STATE_OWNER_GROUP_MODE="$(stat -c '%u:%g:%a' -- "$RUNTIME_STATE_DIR")"
+    if [ "$RUNTIME_STATE_OWNER_GROUP_MODE" != "0:${AUTHORITY_GID}:2770" ]; then
+        echo "ERROR: $RUNTIME_STATE_DIR must be root:cyrene-runtime-maintenance mode 2770; found ${RUNTIME_STATE_OWNER_GROUP_MODE}." >&2
+        echo "       Refusing to repair existing runtime state in place. Stop Cyrene and repair the directory during offline maintenance." >&2
+        exit 1
+    fi
+else
+    install -d -o root -g cyrene-runtime-maintenance -m 2770 "$RUNTIME_STATE_DIR"
+fi
+RUNTIME_STATE_OWNER_GROUP_MODE="$(stat -c '%u:%g:%a' -- "$RUNTIME_STATE_DIR")"
+if [ -L "$RUNTIME_STATE_DIR" ] || [ "$RUNTIME_STATE_OWNER_GROUP_MODE" != "0:${AUTHORITY_GID}:2770" ]; then
+    echo "ERROR: $RUNTIME_STATE_DIR is not a root-owned 2770 authority directory." >&2
+    exit 1
+fi
+ACTIVITY_INIT_JSON="$(/usr/bin/cyrene-runtime-maintenance init-catalog \
+    --catalog "$RUNTIME_STATE_DIR/activity-sources.json" \
+    --token-dir /etc/cyrene/runtime-activity-source-tokens \
+    --catalog-gid "${AUTHORITY_GID}" \
+    --source "cyrene-navigator=${CYRENE_UID}:${CYRENE_GID}" \
+    --source "cyrene-yield=${CYRENE_UID}:${CYRENE_GID}" \
+    --source "cyrene-reactor=${CYRENE_UID}:${CYRENE_GID}" \
+    --source "cyrene-exchange=${CYRENE_UID}:${CYRENE_GID}" \
+    --source "cyrene-catalyst=${CYRENE_UID}:${CYRENE_GID}")"
+ACTIVITY_GENERATION="$(printf '%s' "$ACTIVITY_INIT_JSON" | /usr/bin/python3.12 -c 'import json,sys; value=json.load(sys.stdin); generation=value.get("generation"); print(generation) if isinstance(generation,int) and not isinstance(generation,bool) and generation > 0 else sys.exit("invalid activity catalog generation")')"
+case "$ACTIVITY_GENERATION" in
+    ''|*[!0-9]*)
+        echo "ERROR: runtime-maintenance init-catalog returned an invalid generation." >&2
+        exit 1
+        ;;
+esac
+ACTIVITY_ENV_TMP="$(mktemp /etc/cyrene/.runtime-activity-sources.env.XXXXXX)"
+printf 'CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION=%s\n' "$ACTIVITY_GENERATION" > "$ACTIVITY_ENV_TMP"
+chown root:root "$ACTIVITY_ENV_TMP"
+chmod 644 "$ACTIVITY_ENV_TMP"
+mv -f "$ACTIVITY_ENV_TMP" /etc/cyrene/runtime-activity-sources.env
 
 # 安装 release-lock.json 锁定的 training/serving 引擎到隔离虚拟环境。
 # 这一步需要网络，失败不应让 dpkg 安装失败——允许用户之后手动重跑。
@@ -319,6 +448,22 @@ if [ -d /run/systemd/system ]; then
         exit 1
     fi
     if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
+        if ! systemctl enable cyrene-runtime-maintenance.service; then
+            echo "ERROR: systemd could not enable cyrene-runtime-maintenance.service." >&2
+            exit 1
+        fi
+    fi
+    if ! systemctl start cyrene-runtime-maintenance.service; then
+        echo "ERROR: runtime maintenance broker failed to start; Product services will not be started." >&2
+        systemctl status --no-pager --full cyrene-runtime-maintenance.service >&2 || true
+        journalctl --no-pager -n 40 -u cyrene-runtime-maintenance.service >&2 || true
+        exit 1
+    fi
+    if ! systemctl is-active --quiet cyrene-runtime-maintenance.service; then
+        echo "ERROR: runtime maintenance broker is not active; Product services will not be started." >&2
+        exit 1
+    fi
+    if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
         for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
             if ! systemctl enable "$unit"; then
                 echo "ERROR: systemd could not enable ${unit}.service." >&2
@@ -344,6 +489,10 @@ if [ -d /run/systemd/system ]; then
     fi
 else
     if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
+        if ! systemctl --root=/ enable cyrene-runtime-maintenance.service; then
+            echo "ERROR: systemd could not enable cyrene-runtime-maintenance.service for the next boot." >&2
+            exit 1
+        fi
         for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
             if ! systemctl --root=/ enable "${unit}.service"; then
                 echo "ERROR: systemd could not enable ${unit}.service for the next boot." >&2

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
+import os
+import stat
+import sys
 import tarfile
 from argparse import Namespace
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -252,6 +257,249 @@ def test_bootstrap_check_reports_missing_runtime(
     out = capsys.readouterr().out
     assert "No bootstrap marker" in out
     assert "ISSUES FOUND" in out
+
+
+def test_component_run_uses_catalog_id_fixed_install_root_and_unit_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    calls: dict[str, object] = {}
+
+    class FakeUpdater:
+        components: ClassVar[dict[str, dict[str, object]]] = {
+            "cyrene-kernel": {
+                "componentId": "cyrene-kernel",
+                "kind": "native-binary",
+                "systemdUnit": "cyrene-kernel.service",
+            }
+        }
+
+        @staticmethod
+        def _target_for(component: dict[str, str]) -> dict[str, str]:
+            return {"artifactKind": "native-binary"}
+
+    class FakeUpdates:
+        DEFAULT_INSTALL_ROOT = Path("/usr/lib/cyrene")
+
+        @staticmethod
+        def ComponentUpdater() -> FakeUpdater:
+            return FakeUpdater()
+
+        @staticmethod
+        def run_component(
+            component_id: str, *, install_root: Path, startup_arguments: list[str]
+        ) -> int:
+            calls.update(
+                component_id=component_id,
+                install_root=install_root,
+                startup_arguments=startup_arguments,
+            )
+            return 0
+
+    monkeypatch.setattr(module, "_load_component_updates_module", lambda: FakeUpdates)
+    monkeypatch.setenv("CYRENE_INSTALL_ROOT", str(tmp_path / "caller-selected-root"))
+    args = module.build_parser().parse_args(
+        [
+            "component-run",
+            "cyrene-kernel",
+            "--",
+            "--listen-socket",
+            "/run/cyrene/kernel.sock",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert calls == {
+        "component_id": "cyrene-kernel",
+        "install_root": Path("/usr/lib/cyrene"),
+        "startup_arguments": ["--listen-socket", "/run/cyrene/kernel.sock"],
+    }
+
+
+def test_component_run_rejects_ids_not_in_the_trusted_native_catalog(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+
+    class FakeUpdater:
+        components: ClassVar[dict[str, dict[str, str]]] = {}
+
+    class FakeUpdates:
+        DEFAULT_INSTALL_ROOT = Path("/usr/lib/cyrene")
+        ComponentUpdater = FakeUpdater
+
+        @staticmethod
+        def run_component(*args: object, **kwargs: object) -> int:
+            pytest.fail("unknown component IDs must be rejected before execution")
+
+    monkeypatch.setattr(module, "_load_component_updates_module", lambda: FakeUpdates)
+    result = module.cmd_component_run(
+        Namespace(component_id="cyrene-untrusted", startup_arguments=[])
+    )
+
+    assert result == 1
+    assert "not a supported native systemd component" in capsys.readouterr().err
+
+
+def test_install_missing_component_units_verifies_payload_and_never_overwrites(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    updates_path = WORKSPACE_ROOT / "packaging" / "component_updates.py"
+    updates_loader = SourceFileLoader("cyrene_component_updates_units_test", str(updates_path))
+    updates_spec = importlib.util.spec_from_loader(updates_loader.name, updates_loader)
+    assert updates_spec is not None
+    updates = importlib.util.module_from_spec(updates_spec)
+    sys.modules[updates_spec.name] = updates
+    updates_loader.exec_module(updates)
+
+    component_id = "cyrene-kernel"
+    unit = "cyrene-kernel.service"
+    version = "1.2.3"
+    install_root_path = tmp_path / "install"
+    release_root = install_root_path / "components" / component_id / "releases"
+    release = release_root / version
+    unit_bytes = b"[Service]\nExecStart=/usr/bin/cyrene component-run cyrene-kernel\n"
+    entrypoint_bytes = b"kernel-binary"
+    files = {
+        "bin/cyrene-kernel": "sha256:" + hashlib.sha256(entrypoint_bytes).hexdigest(),
+        f"systemd/{unit}": "sha256:" + hashlib.sha256(unit_bytes).hexdigest(),
+    }
+    artifact = {
+        "kind": "native-binary",
+        "sha256": "sha256:" + "a" * 64,
+        "entrypoint": "bin/cyrene-kernel",
+        "files": files,
+    }
+    manifest = {
+        "schemaVersion": 1,
+        "componentId": component_id,
+        "version": version,
+        "artifact": artifact,
+    }
+    manifest["manifestDigest"] = updates._digest_json(manifest, "manifestDigest")
+    (release / "bin").mkdir(parents=True)
+    (release / "systemd").mkdir()
+    entrypoint_path = release / "bin" / "cyrene-kernel"
+    unit_payload_path = release / "systemd" / unit
+    entrypoint_path.write_bytes(entrypoint_bytes)
+    entrypoint_path.chmod(0o755)
+    unit_payload_path.write_bytes(unit_bytes)
+    unit_payload_path.chmod(0o644)
+    manifest_path = release / "component-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_path.chmod(0o644)
+    active = install_root_path / "components" / component_id / "active"
+    active.symlink_to(f"releases/{version}")
+    for directory in (
+        install_root_path,
+        install_root_path / "components",
+        install_root_path / "components" / component_id,
+        release_root,
+        release,
+        release / "bin",
+        release / "systemd",
+    ):
+        directory.chmod(0o755)
+
+    class FakeUpdater:
+        components: ClassVar[dict[str, dict[str, object]]] = {
+            component_id: {
+                "componentId": component_id,
+                "publisher": "DoHorizon-AI/Cyrene-Platform",
+                "kind": "native-binary",
+                "systemdUnit": unit,
+                "targets": [
+                    {
+                        "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+                        "artifactKind": "native-binary",
+                        "support": "supported",
+                    }
+                ],
+            },
+            "cy-runtime-agent": {
+                "componentId": "cy-runtime-agent",
+                "publisher": "DoHorizon-AI/Cyrene-Platform",
+                "kind": "native-binary",
+                "systemdUnit": "cy-runtime-agent.service",
+                "targets": [
+                    {
+                        "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+                        "artifactKind": "native-binary",
+                        "support": "supported",
+                    }
+                ],
+            },
+        }
+
+        @staticmethod
+        def _validate_manifest_digest(value: dict[str, object], expected: str) -> None:
+            updates.ComponentUpdater._validate_manifest_digest(FakeUpdater, value, expected)
+
+        @staticmethod
+        def _target_for(component: dict[str, object]) -> dict[str, str]:
+            return {"artifactKind": "native-binary"}
+
+    real_lstat = Path.lstat
+    privileged_paths = {
+        install_root_path,
+        install_root_path / "components",
+        install_root_path / "components" / component_id,
+        release_root,
+        release,
+        active,
+    }
+    unit_dir = tmp_path / "usr" / "lib" / "systemd" / "system"
+    unit_dir.mkdir(parents=True)
+    unit_dir.chmod(0o755)
+    privileged_paths.add(unit_dir)
+
+    def root_owned_lstat(path: Path) -> os.stat_result:
+        info = real_lstat(path)
+        if (
+            path in privileged_paths
+            or path.is_relative_to(release)
+            or path.is_relative_to(unit_dir)
+        ):
+            return SimpleNamespace(st_mode=info.st_mode, st_uid=0)  # type: ignore[return-value]
+        return info
+
+    monkeypatch.setattr(Path, "lstat", root_owned_lstat)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    search_directories = (tmp_path / "etc" / "systemd", unit_dir)
+
+    installed, existing = module.install_missing_component_units(
+        updates,
+        FakeUpdater(),
+        install_root_path=install_root_path,
+        destination=unit_dir,
+        search_directories=search_directories,
+    )
+    target_unit = unit_dir / unit
+    assert installed == [unit]
+    assert existing == []
+    assert target_unit.read_bytes() == unit_bytes
+    assert stat.S_IMODE(target_unit.stat().st_mode) == 0o644
+
+    installed, existing = module.install_missing_component_units(
+        updates,
+        FakeUpdater(),
+        install_root_path=install_root_path,
+        destination=unit_dir,
+        search_directories=search_directories,
+    )
+    assert installed == []
+    assert existing == [unit]
+
+    target_unit.write_text("[Service]\nExecStart=/bin/false\n", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="conflicts with the trusted payload"):
+        module.install_missing_component_units(
+            updates,
+            FakeUpdater(),
+            install_root_path=install_root_path,
+            destination=unit_dir,
+            search_directories=search_directories,
+        )
 
 
 def test_bootstrap_check_verifies_pinned_engines(

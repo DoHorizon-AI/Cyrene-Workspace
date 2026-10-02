@@ -1,0 +1,359 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/component-catalog-v1.schema.json",
+  "title": "Cyrene Component Catalog v1",
+  "description": "Static component identity, platform matrix, restart topology, and provenance trust pins. This is independent of Product v2 contracts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generation",
+    "defaultChannel",
+    "channels",
+    "targets",
+    "publishers",
+    "activitySourceCatalog",
+    "components",
+    "compatibilityGroups"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "defaultChannel": {
+      "const": "stable"
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stable",
+        "preview"
+      ],
+      "properties": {
+        "stable": {
+          "$ref": "#/$defs/channel"
+        },
+        "preview": {
+          "$ref": "#/$defs/channel"
+        }
+      }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "$ref": "#/$defs/platformTarget"
+      },
+      "uniqueItems": true
+    },
+    "publishers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/publisher"
+      },
+      "uniqueItems": true
+    },
+    "activitySourceCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "managedBy",
+        "path",
+        "generationSource",
+        "minimumSources"
+      ],
+      "properties": {
+        "managedBy": {
+          "const": "cyrene-runtime-maintenance"
+        },
+        "path": {
+          "const": "/var/lib/cyrene/runtime/activity-sources.json"
+        },
+        "generationSource": {
+          "const": "install_catalog_generation"
+        },
+        "minimumSources": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/component"
+      },
+      "uniqueItems": true
+    },
+    "compatibilityGroups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/compatibilityGroup"
+      },
+      "maxItems": 100,
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "componentId": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/componentId"
+    },
+    "target": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/target"
+    },
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releasePrerelease",
+        "sourceRefs"
+      ],
+      "properties": {
+        "releasePrerelease": {
+          "type": "boolean"
+        },
+        "sourceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "platformTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "target",
+        "hostSupport"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,80}$"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "hostSupport": {
+          "enum": [
+            "supported",
+            "contract-only",
+            "unsupported"
+          ]
+        }
+      }
+    },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "workflow",
+        "releaseDiscovery"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "workflow": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$"
+        },
+        "releaseDiscovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "apiUri",
+            "indexAssetName"
+          ],
+          "properties": {
+            "apiUri": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://api\\.github\\.com/repos/"
+            },
+            "indexAssetName": {
+              "const": "component-release-index-v1.json"
+            }
+          }
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "kind",
+        "publisher",
+        "artifactKinds",
+        "targets",
+        "restart",
+        "dependencies"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "kind": {
+          "enum": [
+            "native-binary",
+            "python-bundle",
+            "oci-image"
+          ]
+        },
+        "publisher": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "artifactKinds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "native-binary",
+              "python-bundle",
+              "oci-image"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/componentTarget"
+          },
+          "uniqueItems": true
+        },
+        "restart": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/restart"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "component-release-manifest-v1.schema.json#/$defs/dependency"
+          },
+          "uniqueItems": true
+        },
+        "systemdUnit": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.@-]+\\.service$"
+        },
+        "pythonBundleService": {
+          "enum": [
+            "navigator",
+            "yield",
+            "reactor",
+            "exchange",
+            "catalyst"
+          ]
+        },
+        "ociImageRepository": {
+          "type": "string",
+          "pattern": "^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+$"
+        },
+        "compatibilityGroup": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+        },
+        "role": {
+          "enum": [
+            "service",
+            "build-dependency"
+          ]
+        }
+      }
+    },
+    "componentTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetId",
+        "artifactKind",
+        "support"
+      ],
+      "properties": {
+        "targetId": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,80}$"
+        },
+        "artifactKind": {
+          "enum": [
+            "native-binary",
+            "python-bundle",
+            "oci-image"
+          ]
+        },
+        "support": {
+          "enum": [
+            "supported",
+            "contract-only",
+            "unsupported"
+          ]
+        }
+      }
+    },
+    "compatibilityGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "groupId",
+        "contractApiVersion",
+        "wireApiVersion",
+        "members"
+      ],
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+        },
+        "contractApiVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "wireApiVersion": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/compatibilityGroupMember"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "compatibilityGroupMember": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "requiredForAdoption"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "requiredForAdoption": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

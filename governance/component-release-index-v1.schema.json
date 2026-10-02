@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/component-release-index-v1.schema.json",
+  "title": "Cyrene Component Release Index v1",
+  "description": "An attested, repository-scoped list of immutable one-target release manifests. indexDigest uses RFC 8785 JCS and omits indexDigest; compatibility groups pin exact member manifest digests without cross-manifest self-reference.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "repository",
+    "channel",
+    "generatedAt",
+    "source",
+    "provenance",
+    "releases",
+    "indexDigest",
+    "compatibilityGroups"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "channel": {
+      "enum": [
+        "stable",
+        "preview"
+      ]
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/source"
+    },
+    "provenance": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/provenance"
+    },
+    "releases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/release"
+      },
+      "maxItems": 500,
+      "uniqueItems": true
+    },
+    "indexDigest": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+    },
+    "compatibilityGroups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/compatibilityGroup"
+      },
+      "maxItems": 100,
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "componentId": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/componentId"
+    },
+    "target": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/target"
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "version",
+        "target",
+        "manifestUri",
+        "manifestDigest"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "manifestUri": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://github\\.com/"
+        },
+        "manifestDigest": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+        }
+      }
+    },
+    "contractLock": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/contractLock"
+    },
+    "compatibilityGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "groupId",
+        "contractApiVersion",
+        "wireApiVersion",
+        "contractLock",
+        "members"
+      ],
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+        },
+        "contractApiVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "wireApiVersion": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+        },
+        "contractLock": {
+          "$ref": "#/$defs/contractLock"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/member"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "target",
+        "version",
+        "manifestDigest"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"
+        },
+        "manifestDigest": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+        }
+      }
+    }
+  }
+}

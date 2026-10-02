@@ -116,6 +116,21 @@ def call(client, method, url, expected=200, **kwargs):
     return response.json()
 
 
+def test_unconfigured_reactor_control_api_fails_closed(tmp_path: Path):
+    app = reactor_app(database_path=tmp_path / "reactor-unconfigured.db")
+    try:
+        with http_bus({"reactor": app}) as client:
+            response = call(
+                client,
+                "GET",
+                "http://reactor/api/v1/deployment-drafts",
+                expected=503,
+            )
+        assert response["code"] == "REACTOR_CONTROL_AUTH_UNAVAILABLE"
+    finally:
+        app.state.reactor_store.close()
+
+
 def publish_preparation(client, preparation_id):
     prefix = f"http://catalyst/api/v1/preparations/{preparation_id}"
     call(client, "PATCH", prefix + "/split", json={"split": {"trainRatio": 1}})
@@ -130,8 +145,11 @@ def publish_preparation(client, preparation_id):
 
 
 def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
-    tmp_path,
+    tmp_path: Path,
+    reactor_control_credential_file: Path,
 ):
+    reactor_credential_file = reactor_control_credential_file
+    reactor_control_token = reactor_credential_file.read_text(encoding="utf-8")
     artifacts = LocalArtifactProvider(tmp_path / "artifacts")
     executor = FixtureExecutor()
     hardware = HardwareFacts.from_node_resource_inventory(
@@ -167,8 +185,12 @@ def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
             artifact_root=tmp_path / "artifacts",
             control=control,
             reactor_url="http://reactor",
+            reactor_bearer_token=reactor_control_token,
         ),
-        "reactor": reactor_app(database_path=tmp_path / "reactor.db"),
+        "reactor": reactor_app(
+            database_path=tmp_path / "reactor.db",
+            credential_file=reactor_credential_file,
+        ),
         "echo": echo_app(
             database_path=tmp_path / "echo.db",
             artifact_root=tmp_path / "artifacts",
@@ -184,6 +206,10 @@ def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
         ),
     }
     client = http_bus(apps)
+    unauthorized_reactor_read = call(
+        client, "GET", "http://reactor/api/v1/deployment-drafts", expected=403
+    )
+    assert unauthorized_reactor_read["code"] == "REACTOR_PERMISSION_DENIED"
     apps["catalyst"].state.lifecycle_actions.client = client
     apps["yield"].state.yield_service._http = client
     apps["echo"].state.echo_lifecycle.client = client
@@ -267,7 +293,12 @@ def test_explicit_http_handoffs_keep_artifact_identity_and_feedback_provenance(
         "POST",
         f"http://yield/api/v1/training-results/{result['id']}/actions/send-to-reactor",
     )
-    draft = call(client, "GET", handoff["openIn"])
+    draft = call(
+        client,
+        "GET",
+        handoff["openIn"],
+        headers={"Authorization": "Bearer " + reactor_control_token},
+    )
     assert draft["state"] == "DRAFT"
     assert draft["modelVersion"] == result["modelVersion"]
     assert apps["reactor"].state.reactor_store.list_deployments() == []

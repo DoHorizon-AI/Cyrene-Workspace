@@ -1,10 +1,12 @@
 """Require exact Product checkouts for integration tests. | 强制使用指定产品检出。"""
 
 import os
+import secrets
 import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
 from cyrene_plugin_runtime import serve
 
 DATASET_PREPARATION_CONNECTION_ENV = "CYRENE_DATASET_PREPARATION_CONNECTION_REF"
@@ -15,6 +17,21 @@ DATASET_VALIDATOR_CONNECTION_ENV = "CYRENE_DATASET_VALIDATOR_CONNECTION_REF"
 LLAMA_FACTORY_CONNECTION_ENV = "CYRENE_LLAMA_FACTORY_CONNECTION_REF"
 
 _PLUGIN_SERVERS: list[Any] = []
+
+
+@pytest.fixture
+def reactor_control_credential_file(tmp_path: Path) -> Path:
+    """Create a private test-only bearer credential for Reactor control calls.
+
+    中文:为 Reactor control handoff 创建仅供测试使用的私有 bearer credential。
+    """
+
+    credential_file = tmp_path / "reactor-control.token"
+    token = secrets.token_urlsafe(48)
+    credential_file.write_text(token, encoding="utf-8")
+    credential_file.chmod(0o600)
+    return credential_file
+
 
 _OWNER_ENDPOINTS = (
     (
