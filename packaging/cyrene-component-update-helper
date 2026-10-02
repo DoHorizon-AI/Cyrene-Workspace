@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 0 ]; then
+    printf '%s\n' 'cyrene-component-update-helper: arguments are not accepted.' >&2
+    exit 2
+fi
+
+if [ "$(/usr/bin/id -u)" -ne 0 ]; then
+    printf '%s\n' 'cyrene-component-update-helper: invoke through pkexec or sudo.' >&2
+    exit 1
+fi
+
+exec /usr/bin/cyrene update --json

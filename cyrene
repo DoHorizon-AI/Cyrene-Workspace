@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -196,6 +197,31 @@ def _load_service_bundle_module() -> Any:
     sys.modules[module_name] = module
     try:
         module_spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def _load_component_updates_module() -> Any:
+    """Load the fixed Linux helper from an installed package or this checkout."""
+
+    candidates = [
+        WORKSPACE_ROOT / "scripts" / "component_updates.py",
+        WORKSPACE_ROOT / "packaging" / "component_updates.py",
+        Path(__file__).resolve().with_name("component_updates.py"),
+    ]
+    module_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if module_path is None:
+        raise FileNotFoundError("component update helper is missing; reinstall the Cyrene package")
+    module_name = "_cyrene_component_updates"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load component update helper from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
     except Exception:
         sys.modules.pop(module_name, None)
         raise
@@ -576,8 +602,8 @@ def cmd_service_run(args: argparse.Namespace) -> int:
                 _service_update_in_progress(service)
             ):
                 print(
-                    f"ERROR: {service} has an interrupted release update; refusing to launch "
-                    f"until recovery. Run `sudo cyrene upgrade {service}`.",
+                    f"ERROR: {service} has an interrupted legacy release update; refusing to launch "
+                    "until an administrator completes the verified maintenance-gate recovery.",
                     file=sys.stderr,
                 )
                 return 1
@@ -754,11 +780,7 @@ def cmd_status(args: argparse.Namespace) -> int:
             if bundle_module is not None:
                 try:
                     if _service_update_journal_exists(bundle_module, service):
-                        print(
-                            "    update: INTERRUPTED; run `sudo cyrene upgrade "
-                            + service
-                            + "` to recover"
-                        )
+                        print("    update: INTERRUPTED LEGACY TRANSACTION; service launch remains fail-closed")
                         continue
                     release = bundle_module.resolve_active_release(
                         service, install_root=service_install_root()
@@ -2395,71 +2417,316 @@ def _upgrade_service(service: str, bundle_path: Path | None) -> int:
         os.close(directory_fd)
 
 
-def cmd_upgrade(args: argparse.Namespace) -> int:
-    """Inspect native Linux release status or update one systemd service."""
+def cmd_update(args: argparse.Namespace) -> int:
+    """Run the single fixed JSON stdin/stdout component-update helper."""
 
-    service = args.service
-    artifact = args.artifact
-    if service == "echo":
-        print(
-            "Echo is not managed by the native Debian systemd path; no cyrene-echo.service "
-            "or update target exists.",
-            file=sys.stderr,
-        )
+    if not getattr(args, "json", False):
+        print("ERROR: component updates require the fixed `cyrene update --json` protocol.", file=sys.stderr)
         return 2
-    if service is not None and service not in SYSTEMD_SERVICES:
-        print(f"ERROR: unknown native Linux service {service!r}.", file=sys.stderr)
-        print(f"Managed services: {', '.join(SYSTEMD_SERVICES)}", file=sys.stderr)
-        return 2
-    if service is None and artifact is not None:
-        print("ERROR: specify a service when using --artifact.", file=sys.stderr)
-        return 2
-
-    if service is not None:
-        return _upgrade_service(service, artifact)
-
     try:
-        bundle_module = _load_service_bundle_module()
-    except (ImportError, OSError, RuntimeError, ValueError) as error:
-        print(f"ERROR: cannot load service release metadata: {error}", file=sys.stderr)
-        return 1
-
-    if not _loaded_systemd_units():
+        module = _load_component_updates_module()
+        updater = module.ComponentUpdater()
+    except Exception as error:  # noqa: BLE001 - convert every helper startup failure to the fixed JSON response.
         print(
-            "UNSUPPORTED: this checkout is using the cyrene up development fallback "
-            "(cyrene-dev.py/run-services.py); it has no immutable rollback-safe service artifacts."
+            json.dumps(
+                {
+                    "protocolVersion": "cyrene.component-updates.helper.v1",
+                    "ok": False,
+                    "operation": "status",
+                    "error": {
+                        "code": "HELPER_UNAVAILABLE",
+                        "message": f"The trusted component update helper is unavailable: {error}",
+                        "retryable": True,
+                    },
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         )
         return 0
-    print("Native Debian systemd service release status:")
-    for managed_service in SYSTEMD_SERVICES:
-        try:
-            if _service_update_journal_exists(bundle_module, managed_service):
-                print(
-                    f"  {managed_service}: INTERRUPTED UPDATE; run `sudo cyrene upgrade "
-                    f"{managed_service}` to restore the prior release"
+    return module.run_json_stdio(updater)
+
+
+def cmd_component_run(args: argparse.Namespace) -> int:
+    """Execute one catalog-pinned native release for a systemd unit.
+
+    Startup arguments are accepted only on this direct CLI path. They come
+    from the root-owned unit definition, never from the update JSON protocol.
+    """
+
+    try:
+        module = _load_component_updates_module()
+        updater = module.ComponentUpdater()
+        component = updater.components.get(args.component_id)
+        target = updater._target_for(component) if component is not None else None
+        if (
+            component is None
+            or component.get("kind") != "native-binary"
+            or target is None
+            or target.get("artifactKind") != "native-binary"
+            or not component.get("systemdUnit")
+        ):
+            raise ValueError(f"{args.component_id!r} is not a supported native systemd component.")
+
+        startup_arguments = list(getattr(args, "startup_arguments", []))
+        if startup_arguments and startup_arguments[0] == "--":
+            startup_arguments.pop(0)
+        if len(startup_arguments) > 64 or any(
+            not isinstance(argument, str)
+            or not argument
+            or "\x00" in argument
+            or len(argument.encode("utf-8")) > 512
+            for argument in startup_arguments
+        ):
+            raise ValueError("Startup arguments must be non-empty UTF-8 values of at most 512 bytes each (64 maximum).")
+
+        return module.run_component(
+            args.component_id,
+            install_root=Path(module.DEFAULT_INSTALL_ROOT),
+            startup_arguments=startup_arguments,
+        )
+    except Exception as error:  # noqa: BLE001 - report component startup failures through the CLI boundary.
+        print(f"ERROR: cannot start trusted component {args.component_id}: {error}", file=sys.stderr)
+        return 1
+
+
+def _validate_installed_native_component(
+    module: Any,
+    updater: Any,
+    component: dict[str, Any],
+    install_root_path: Path,
+) -> tuple[Path, dict[str, Any], bytes]:
+    """Validate an active native release and return its exact unit payload."""
+
+    component_id = component["componentId"]
+    unit = component.get("systemdUnit")
+    if not isinstance(unit, str) or re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", unit) is None:
+        raise ValueError(f"Trusted unit name is invalid for {component_id}.")
+    root = install_root_path / "components" / component_id
+    active = root / "active"
+    if not active.is_symlink():
+        raise ValueError(f"No active native release is installed for {component_id}.")
+    for directory in (install_root_path, install_root_path / "components", root, root / "releases"):
+        info = directory.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or directory.is_symlink()
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise ValueError(f"Active release path is not a root-owned real directory for {component_id}: {directory}.")
+    active_info = active.lstat()
+    if active_info.st_uid != 0:
+        raise ValueError(f"Active release pointer is not root-owned for {component_id}.")
+    match = re.fullmatch(r"releases/([^/]+)", os.readlink(active))
+    if match is None:
+        raise ValueError(f"Active release pointer is unsafe for {component_id}.")
+    pointer_identity = match.group(1)
+    version, pointer_digest = module._native_release_directory_identity(pointer_identity)
+    if module.VERSION_PATTERN.fullmatch(version) is None:
+        raise ValueError(f"Active release pointer has an invalid version for {component_id}.")
+    release = root / "releases" / pointer_identity
+    if release.is_symlink() or not release.is_dir():
+        raise ValueError(f"Active release directory is unsafe for {component_id}.")
+    release_info = release.lstat()
+    if release_info.st_uid != 0 or stat.S_IMODE(release_info.st_mode) & 0o022:
+        raise ValueError(f"Active release directory is not root-controlled for {component_id}.")
+    manifest = module._read_object(release / "component-manifest.json", f"{component_id} release manifest")
+    manifest_info = (release / "component-manifest.json").lstat()
+    if manifest_info.st_uid != 0 or stat.S_IMODE(manifest_info.st_mode) & 0o022:
+        raise ValueError(f"Active component manifest is not root-controlled for {component_id}.")
+    updater._validate_manifest_digest(manifest, manifest.get("manifestDigest"))
+    artifact = manifest.get("artifact")
+    if (
+        manifest.get("componentId") != component_id
+        or manifest.get("version") != version
+        or (pointer_digest is not None and manifest.get("manifestDigest") != "sha256:" + pointer_digest)
+        or (pointer_digest is None and pointer_identity != version)
+        or not isinstance(artifact, dict)
+        or artifact.get("kind") != "native-binary"
+        or module.DIGEST_PATTERN.fullmatch(artifact.get("sha256", "")) is None
+        or not isinstance(artifact.get("files"), dict)
+    ):
+        raise ValueError(f"Active release identity or artifact file map is invalid for {component_id}.")
+
+    files: dict[str, str] = artifact["files"]
+    unit_relative = f"systemd/{unit}"
+    unit_digest = files.get(unit_relative)
+    if not isinstance(unit_digest, str) or module.DIGEST_PATTERN.fullmatch(unit_digest) is None:
+        raise ValueError(f"Active release does not pin its declared systemd unit for {component_id}.")
+    entrypoint = module._safe_relative(artifact.get("entrypoint"), field="artifact.entrypoint")
+    if entrypoint.as_posix() not in files:
+        raise ValueError(f"Active release entrypoint is not covered by its file map for {component_id}.")
+
+    for relative_name, expected_digest in files.items():
+        if not isinstance(relative_name, str) or not isinstance(expected_digest, str):
+            raise TypeError(f"Active release file map is malformed for {component_id}.")
+        relative = module._safe_relative(relative_name, field="artifact.files path")
+        if module.DIGEST_PATTERN.fullmatch(expected_digest) is None:
+            raise ValueError(f"Active release file digest is malformed for {component_id}.")
+        payload_path = release.joinpath(*relative.parts)
+        current = release
+        for part in relative.parts:
+            current = current / part
+            info = current.lstat()
+            if current.is_symlink() or (
+                current != payload_path
+                and (
+                    not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != 0
+                    or stat.S_IMODE(info.st_mode) & 0o022
                 )
-                continue
-            release = bundle_module.resolve_active_release(
-                managed_service, install_root=service_install_root()
+            ):
+                raise ValueError(f"Active release file path is unsafe for {component_id}: {relative_name}.")
+        info = payload_path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise ValueError(f"Active release file is not root-controlled for {component_id}: {relative_name}.")
+        actual_digest = "sha256:" + _sha256_file(payload_path)
+        if actual_digest != expected_digest:
+            raise ValueError(f"Active release file digest mismatch for {component_id}: {relative_name}.")
+
+    return release, manifest, (release / unit_relative).read_bytes()
+
+
+def install_missing_component_units(
+    module: Any,
+    updater: Any,
+    *,
+    install_root_path: Path = Path("/usr/lib/cyrene"),
+    destination: Path = Path("/usr/lib/systemd/system"),
+    search_directories: tuple[Path, ...] = (
+        Path("/etc/systemd/system"),
+        Path("/run/systemd/system"),
+        Path("/lib/systemd/system"),
+        Path("/usr/lib/systemd/system"),
+    ),
+) -> tuple[list[str], list[str]]:
+    """Install only verified Platform units that are absent from systemd paths."""
+
+    if os.geteuid() != 0:
+        raise PermissionError("Installing systemd units requires the root OS identity.")
+    platform_publisher = "DoHorizon-AI/Cyrene-Platform"
+    installed: list[str] = []
+    existing: list[str] = []
+    for component in sorted(updater.components.values(), key=lambda item: item["componentId"]):
+        component_id = component.get("componentId")
+        if (
+            component.get("publisher") != platform_publisher
+            or component.get("kind") != "native-binary"
+            or component_id == "cy-runtime-agent"
+            or not component.get("systemdUnit")
+            or not any(
+                target.get("artifactKind") == "native-binary" and target.get("support") == "supported"
+                for target in component.get("targets", [])
             )
-        except (OSError, RuntimeError, ValueError) as error:
-            print(f"  {managed_service}: INVALID ({error})")
+        ):
             continue
-        if release is None:
-            print(
-                f"  {managed_service}: UNSUPPORTED (no active immutable release; "
-                "legacy baseline cannot be rolled back safely)"
+        target = updater._target_for(component)
+        if target is None or target.get("artifactKind") != "native-binary":
+            continue
+        unit = component["systemdUnit"]
+        unit_locations = [directory / unit for directory in search_directories]
+        existing_locations = [path for path in unit_locations if path.exists() or path.is_symlink()]
+        active = install_root_path / "components" / component["componentId"] / "active"
+        if not active.exists() and not active.is_symlink():
+            if existing_locations:
+                raise FileExistsError(f"Existing systemd unit has no active trusted release to verify: {unit}")
+            continue
+        _, _, unit_bytes = _validate_installed_native_component(module, updater, component, install_root_path)
+        expected_digest = hashlib.sha256(unit_bytes).hexdigest()
+        if existing_locations:
+            for existing_path in existing_locations:
+                if existing_path.is_symlink() or not existing_path.is_file():
+                    raise FileExistsError(f"Existing systemd unit is not a regular file: {existing_path}")
+                info = existing_path.lstat()
+                if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+                    raise FileExistsError(f"Existing systemd unit is not root-controlled: {existing_path}")
+                if _sha256_file(existing_path) != expected_digest:
+                    raise FileExistsError(f"Existing systemd unit conflicts with the trusted payload: {existing_path}")
+            existing.append(unit)
+            continue
+
+        destination.mkdir(parents=True, exist_ok=True, mode=0o755)
+        destination_info = destination.lstat()
+        if (
+            not stat.S_ISDIR(destination_info.st_mode)
+            or destination.is_symlink()
+            or destination_info.st_uid != 0
+            or stat.S_IMODE(destination_info.st_mode) & 0o022
+        ):
+            raise ValueError(f"Systemd unit destination is not a root-owned real directory: {destination}")
+        target_path = destination / unit
+        temporary = destination / f".{unit}.{secrets.token_hex(8)}.tmp"
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(unit_bytes)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o644)
+            os.link(temporary, target_path, follow_symlinks=False)
+            temporary.unlink()
+            directory_fd = os.open(destination, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception:
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
+            raise
+        installed.append(unit)
+    return installed, existing
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cmd_component_install_missing_units(args: argparse.Namespace) -> int:
+    """Install absent, pinned Platform systemd units without starting services."""
+
+    try:
+        module = _load_component_updates_module()
+        updater = module.ComponentUpdater()
+        installed, existing = install_missing_component_units(module, updater)
+        if installed and Path("/run/systemd/system").is_dir():
+            reload_result = subprocess.run(
+                ["/usr/bin/systemctl", "daemon-reload"], capture_output=True, text=True, check=False
             )
-        else:
-            print(f"  {managed_service}: {release[1]} ({release[0]})")
-    print("\nUpdate one service with: sudo cyrene upgrade <service>")
+            if reload_result.returncode != 0:
+                detail = reload_result.stderr.strip()[:500]
+                raise RuntimeError(f"systemctl daemon-reload failed: {detail}")
+        print(json.dumps({"installed": installed, "alreadyPresent": existing}, separators=(",", ":")))
+        return 0
+    except Exception as error:  # noqa: BLE001 - report unit validation and installation failures uniformly.
+        print(f"ERROR: cannot install trusted component units: {error}", file=sys.stderr)
+        return 1
+
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    """Keep the legacy command from bypassing the gated update protocol."""
+
     print(
-        "Or provide a verified bundle: sudo cyrene upgrade <service> --artifact <bundle-directory>"
+        "The legacy upgrade command no longer changes service releases. Use `cyrene update --json` "
+        "to check, stage, then apply the exact confirmed plan through the runtime maintenance gate.",
+        file=sys.stderr,
     )
-    print(
-        "The selected service is restarted and health-checked; failures restore its prior release."
-    )
-    return 0
+    if getattr(args, "service", None) == "echo":
+        print("Echo has no native Linux Python bundle target.", file=sys.stderr)
+    return 2
 
 
 def cmd_uninstall(args: argparse.Namespace) -> int:
@@ -2593,15 +2860,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     service_bootstrap_parser.set_defaults(func=cmd_service_bootstrap)
 
+    component_run_parser = subparsers.add_parser("component-run", help=argparse.SUPPRESS)
+    component_run_parser.add_argument("component_id", help="Trusted native component ID")
+    component_run_parser.add_argument(
+        "startup_arguments",
+        nargs=argparse.REMAINDER,
+        help="Root-owned systemd startup arguments after `--`",
+    )
+    component_run_parser.set_defaults(func=cmd_component_run)
+
+    component_units_parser = subparsers.add_parser(
+        "component-install-missing-units", help=argparse.SUPPRESS
+    )
+    component_units_parser.set_defaults(func=cmd_component_install_missing_units)
+
+    # update
+    update_parser = subparsers.add_parser(
+        "update", help="Check, stage, or apply trusted components through the maintenance gate"
+    )
+    update_parser.add_argument(
+        "--json",
+        action="store_true",
+        required=True,
+        help="Use the fixed single-line JSON stdin/stdout helper protocol",
+    )
+    update_parser.set_defaults(func=cmd_update)
+
     # upgrade
     upgrade_parser = subparsers.add_parser(
-        "upgrade", help="Inspect service releases or update one native systemd service"
+        "upgrade", help="Deprecated compatibility entry point; does not mutate component releases"
     )
-    upgrade_parser.add_argument("service", nargs="?", help="Managed service to update")
+    upgrade_parser.add_argument("service", nargs="?", help="Legacy Product service name")
     upgrade_parser.add_argument(
         "--artifact",
         type=Path,
-        help="Override the immutable bundle staged by the installed Debian package",
+        help="Rejected legacy direct-update option; stage and confirm through cyrene update instead",
     )
     upgrade_parser.set_defaults(func=cmd_upgrade)
 
