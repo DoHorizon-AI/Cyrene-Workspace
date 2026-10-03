@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 4,
+  "generation": 5,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -956,9 +956,9 @@
       "wireApiVersion": "cyrene.workspace.product.v2",
       "contractLock": {
         "repository": "DoHorizon-AI/Cyrene-Workspace",
-        "commit": "f1b1cb54c5a1715b5f99635ea75ccf395ecabc39",
+        "commit": "c7dea28958a97ccab3a9cc3199faf0ac5819a2a5",
         "path": "governance/workspace-connection-protocols-v2.lock.json",
-        "sha256": "sha256:0ad41eb1a9585f53d8ff2af3d28866902faace9f2d36837cb0d8a862683b643c"
+        "sha256": "sha256:00fd59fb76d7144b6e1b554feadf035328b216231e0a323178836abf2b8bdd5a"
       },
       "members": [
         {
