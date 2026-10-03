@@ -51,7 +51,7 @@ jobs:
       REACTOR_COMMIT: ${{ inputs.reactor_commit }}
       YIELD_COMMIT: ${{ inputs.yield_commit }}
       POLICY_COMMIT: ${{ inputs.policy_commit }}
-      CATALOG_RELEASE_ID: ${{ inputs.catalog_release_id || (github.ref == 'refs/heads/develop' && vars.CYRENE_PREVIEW_COMPONENT_CATALOG_RELEASE_ID) || (github.ref != 'refs/heads/develop' && vars.CYRENE_STABLE_COMPONENT_CATALOG_RELEASE_ID) }}
+      CATALOG_RELEASE_ID: ${{ inputs.catalog_release_id || (github.ref == 'refs/heads/develop' && vars.CYRENE_PREVIEW_COMPONENT_CATALOG_RELEASE_ID) || (github.ref != 'refs/heads/develop' && vars.CYRENE_STABLE_COMPONENT_CATALOG_RELEASE_ID) || '' }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Validate all exact SHA inputs before source fetches
