@@ -276,6 +276,8 @@ jobs:
             args+=(--source "$owner=$RUNNER_TEMP/product-sources/$repository" --commit "$owner=$commit")
           done
           mkdir -p "$RUNNER_TEMP/product-bundle-parent"
+          python -m pip install --disable-pip-version-check \
+            -r "$RUNNER_TEMP/platform/tooling/workspace-product-contract-bundle/requirements.txt"
           python "$RUNNER_TEMP/platform/tooling/workspace-product-contract-bundle/build_v2_bundle.py" \
             "${args[@]}" \
             --policy "$RUNNER_TEMP/policy-assets/workspace-product-policy-v2.json" \
