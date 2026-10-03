@@ -670,7 +670,9 @@ class ComponentUpdater:
             ACTIVE_CATALOG_POINTER, "active component-catalog pointer"
         )
         try:
-            pointer = json.loads(pointer_bytes.decode("utf-8"))
+            pointer = json.loads(
+                pointer_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise UpdateError(
                 "INVALID_CATALOG", f"Active catalog pointer is invalid: {error}"
@@ -753,7 +755,9 @@ class ComponentUpdater:
             ACTIVE_CATALOG_ROOT / attestation_name, "active catalog detached attestation"
         )
         try:
-            catalog_value = json.loads(catalog_bytes.decode("utf-8"))
+            catalog_value = json.loads(
+                catalog_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise UpdateError(
                 "INVALID_CATALOG", f"Active catalog JSON is invalid: {error}"
@@ -1027,10 +1031,12 @@ class ComponentUpdater:
                 and active[1]["catalogSha256"] == metadata["catalogSha256"]
                 and candidate_generation == current_generation
             ):
-                if floor is None or floor["generation"] < candidate_generation:
-                    self._write_catalog_floor(metadata)
                 self._refresh_active_catalog()
-                return {"status": "already_active", "active": metadata, "activated": False}
+                return {
+                    "status": "already_active",
+                    "active": active[1],
+                    "activated": False,
+                }
 
             self._assert_no_pending_catalog_intent()
             digest_hex = metadata["catalogSha256"].removeprefix("sha256:")
@@ -1124,7 +1130,9 @@ class ComponentUpdater:
             if floor is None or floor["generation"] < metadata["generation"]:
                 self._write_catalog_floor(metadata)
         try:
-            catalog_value = json.loads(catalog_bytes.decode("utf-8"))
+            catalog_value = json.loads(
+                catalog_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise UpdateError(
                 "INVALID_CATALOG", f"Active catalog JSON is invalid: {error}"

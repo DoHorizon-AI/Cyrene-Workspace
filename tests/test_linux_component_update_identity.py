@@ -37,6 +37,7 @@ def _updater(tmp_path: Path) -> Any:
         json.dumps(
             {
                 "schemaVersion": 1,
+                "generation": 1,
                 "defaultChannel": "stable",
                 "channels": {"stable": {}, "preview": {}},
                 "components": [],
