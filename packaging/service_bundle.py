@@ -978,11 +978,12 @@ def _build_one_bundle(
     env = os.environ.copy()
     env["PYTHONPATH"] = str(site_packages)
     distribution_check = (
-        "import importlib.metadata as m; "
-        f"required={(*REQUIRED_DISTRIBUTIONS[service], RUNTIME_SDK_DISTRIBUTION)!r}; "
+        "import importlib.metadata as m\n"
+        f"required={(*REQUIRED_DISTRIBUTIONS[service], RUNTIME_SDK_DISTRIBUTION)!r}\n"
         "missing=[name for name in required if not any("
-        "d.metadata.get('Name','').lower().replace('_','-') == name for d in m.distributions())]; "
-        "raise SystemExit('missing installed distributions: '+', '.join(missing)) if missing else None"
+        "d.metadata.get('Name','').lower().replace('_','-') == name for d in m.distributions())]\n"
+        "if missing:\n"
+        "    raise SystemExit('missing installed distributions: '+', '.join(missing))\n"
     )
     subprocess.run([str(python_executable), "-c", distribution_check], env=env, check=True)
 
