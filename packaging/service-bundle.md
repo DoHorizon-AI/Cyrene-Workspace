@@ -162,6 +162,38 @@ release, restarts only that service, and health-checks it. The former
 `cyrene upgrade` entry point is disabled so it cannot bypass the update gate.
 The post-install script starts units only on first installation.
 
+The embedded component catalog digest pins the bootstrap policy snapshot only.
+To inspect or verify later catalog metadata, use `cyrene catalog status` and
+`cyrene catalog check --channel stable --latest` (or provide an exact
+`--release-id catalog-stable-<40-hex-source-SHA>`). Use `--channel preview`
+with `--latest` or a `catalog-preview-<40-hex-source-SHA>` tag to inspect the
+preview channel. A check verifies and reports the immutable Workspace catalog
+release but does not activate it. Explicitly run
+`sudo cyrene catalog import --channel stable --release-id <exact-tag>` to
+activate a verified catalog; import requires an exact release tag and changes
+updater metadata only, without downloading or installing component releases.
+
+The Workspace catalog publisher emits `component-catalog-v1.json` and the
+detached GitHub attestation bundle `component-catalog-v1.json.attestation.jsonl`
+in an immutable `catalog-{stable|preview}-<40-hex-source-SHA>` release.
+Stable provenance is limited to `main` or `release`; preview provenance is
+limited to `develop`. The updater verifies the exact Workspace workflow, source
+ref and commit, subject name, raw-byte SHA-256, release tag, and immutable
+release assets before import. Catalog schemas for v1 and v2 component manifests
+are shipped with the package and validated before activation.
+
+Catalog generations increase strictly. Repeating the same generation and raw
+catalog digest is idempotent; a generation collision or rollback is refused.
+Checked plans bind both the active generation and raw-byte digest, so a catalog
+change invalidates older plans. Import shares the updater lock and waits until
+pending maintenance or service recovery intents have been resolved. Its first
+activation stages a complete root-owned catalog directory and exposes it with
+one atomic rename; the separate root-owned, user-readable state pointer at
+`/usr/share/cyrene/component-catalog-state.json` records the active generation
+and digest outside the snapshot directory. A missing or damaged snapshot after
+that marker is present blocks updater and component startup instead of selecting
+the embedded bootstrap catalog.
+
 The manifest health paths are checked on loopback after systemd reports the
 unit active:
 
@@ -205,3 +237,25 @@ Maintenance 原子重检准入、激活版本、重启目标服务并执行健�
 model。broker journal 位于 `/var/lib/cyrene/runtime`，updater 计划和事务位于 root 私有
 的 `/var/lib/cyrene-updates`。密钥和业务数据不随版本目录切换。移除软件包时会停止、禁用
 单位，并在 unit 文件移除后重载 systemd；不可变 release 和 `/var/lib/cyrene` 数据会保留。
+
+内嵌 component catalog 的摘要只固定 bootstrap 策略快照。查看当前目录可运行
+`cyrene catalog status`；候选目录可运行 `cyrene catalog check --channel stable --latest`，
+或传入精确的 `--release-id catalog-stable-<40-hex-source-SHA>`。预览通道需显式使用
+`--channel preview` 和 `catalog-preview-<40-hex-source-SHA>`。check 会验证并报告
+Workspace 不可变目录 release，但不会切换活动目录。只有显式运行
+`sudo cyrene catalog import --channel stable --release-id <exact-tag>` 才会激活已验证目录；
+导入必须指定精确 tag，且只更新 updater metadata，不会下载或安装组件 release。
+Workspace publisher 在不可变 `catalog-{stable|preview}-<40-hex-source-SHA>` release 中发布
+`component-catalog-v1.json` 与 detached GitHub attestation bundle
+`component-catalog-v1.json.attestation.jsonl`。stable 来源仅允许 `main`/`release`，preview
+仅允许 `develop`。导入前会验证固定 Workspace workflow、source ref/commit、subject 名称、原始
+字节 SHA-256、release tag 和 immutable assets；catalog v1 与 v2 manifest schemas 随包提供并
+在激活前校验。
+
+generation 必须严格递增；相同 generation 与原始摘要可幂等重复，generation 冲突或回滚会拒绝。
+check 计划绑定活动 generation 和原始字节摘要，因此目录变化后旧计划失效。目录导入与 updater
+共用锁；有未完成维护事务或服务恢复意图时，必须先完成恢复。首次激活会先在活动目录外构造完整
+root-owned 目录，再通过一次原子 rename 发布；root-owned 且用户可读的
+`/usr/share/cyrene/component-catalog-state.json` 在目录之外记录活动 generation 和摘要。
+该标记存在但目录缺失或损坏时，updater 与组件启动都会拒绝回退到内嵌 bootstrap catalog。
+后续激活通过原子替换受保护指针完成。

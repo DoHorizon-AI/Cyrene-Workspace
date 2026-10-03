@@ -10,6 +10,10 @@ on:
       reactor_commit: { description: Full Reactor commit SHA, required: true, type: string }
       yield_commit: { description: Full Yield commit SHA, required: true, type: string }
       policy_commit: { description: Full Platform policy commit SHA, required: true, type: string }
+      catalog_release_id:
+        description: Exact immutable Workspace catalog release tag; blank selects the latest release in this channel
+        required: false
+        type: string
   pull_request:
     branches: [develop, main, release]
     paths:
@@ -47,8 +51,7 @@ jobs:
       REACTOR_COMMIT: ${{ inputs.reactor_commit }}
       YIELD_COMMIT: ${{ inputs.yield_commit }}
       POLICY_COMMIT: ${{ inputs.policy_commit }}
-      CATALOG_COMMIT: 7e6d410017420de72d7688859ae81d675e4555ea
-      CATALOG_SHA256: f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816
+      CATALOG_RELEASE_ID: ${{ inputs.catalog_release_id || (github.ref == 'refs/heads/develop' && vars.CYRENE_PREVIEW_COMPONENT_CATALOG_RELEASE_ID) || (github.ref != 'refs/heads/develop' && vars.CYRENE_STABLE_COMPONENT_CATALOG_RELEASE_ID) }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Validate all exact SHA inputs before source fetches
@@ -67,19 +70,111 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Check out the pinned component catalog
-        uses: actions/checkout@v5
-        with:
-          repository: DoHorizon-AI/Cyrene-Workspace
-          ref: ${{ env.CATALOG_COMMIT }}
-          path: workspace-catalog
-          fetch-depth: 0
-          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install packaging and schema tools
-        run: python -m pip install --disable-pip-version-check -r packaging/data-bundle-release-requirements.txt
+        run: |
+          python -m pip install --disable-pip-version-check -r packaging/data-bundle-release-requirements.txt
+          python -m pip install --disable-pip-version-check --upgrade jsonschema==4.26.0
+      - name: Fetch and verify the immutable Workspace component catalog
+        id: catalog
+        env:
+          CHANNEL: ${{ env.CHANNEL }}
+          CATALOG_RELEASE_ID: ${{ env.CATALOG_RELEASE_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p workspace-catalog/governance
+          args=(--output workspace-catalog/governance/component-catalog-v1.json \
+            --metadata-output workspace-catalog/component-catalog-release.json \
+            --schema-root governance)
+          if [[ -n "$CATALOG_RELEASE_ID" ]]; then
+            args+=(--release-id "$CATALOG_RELEASE_ID")
+          else
+            args+=(--latest-channel "$CHANNEL")
+          fi
+          python packaging/fetch_component_catalog.py "${args[@]}"
+          catalog_sha256="$(python - workspace-catalog/component-catalog-release.json \
+            workspace-catalog/governance/component-catalog-v1.json <<'PY'
+          import hashlib, json, os, re, sys
+          metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+          channel = os.environ["CHANNEL"]
+          commit = metadata.get("sourceCommit")
+          refs = {
+              "preview": {"refs/heads/develop"},
+              "stable": {"refs/heads/main", "refs/heads/release"},
+          }
+          if metadata.get("schemaVersion") != 1 or metadata.get("channel") != channel:
+              raise SystemExit("verified catalog metadata channel or version differs from this release")
+          if (
+              metadata.get("repository") != "DoHorizon-AI/Cyrene-Workspace"
+              or metadata.get("workflow")
+              != "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml"
+          ):
+              raise SystemExit("verified catalog metadata does not identify the trusted publisher")
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit("verified catalog metadata source commit is invalid")
+          if (
+              metadata.get("releaseId") != f"catalog-{channel}-{commit}"
+              or metadata.get("sourceRef") not in refs[channel]
+          ):
+              raise SystemExit("verified catalog release tag or source ref does not match its channel")
+          if not isinstance(metadata.get("generation"), int) or isinstance(metadata.get("generation"), bool):
+              raise SystemExit("verified catalog generation is not an integer")
+          if metadata.get("subjectName") != "component-catalog-v1.json" or metadata.get("attestationAssetName") != "component-catalog-v1.json.attestation.jsonl":
+              raise SystemExit("verified catalog metadata names unexpected release assets")
+          digest = metadata.get("catalogSha256")
+          if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+              raise SystemExit("verified catalog metadata digest is malformed")
+          with open(sys.argv[2], "rb") as source:
+              actual = hashlib.sha256(source.read()).hexdigest()
+          if actual != digest.removeprefix("sha256:"):
+              raise SystemExit("verified catalog bytes do not match release metadata")
+          print(actual)
+          PY
+          )"
+          echo "catalog_sha256=$catalog_sha256" >> "$GITHUB_OUTPUT"
+          echo "CATALOG_SHA256=$catalog_sha256" >> "$GITHUB_ENV"
+          for schema in \
+            component-catalog-v1.schema.json \
+            component-release-manifest-v1.schema.json \
+            component-release-manifest-v2.schema.json \
+            component-release-index-v1.schema.json \
+            data-bundle-proof-v1.schema.json; do
+            cp "governance/$schema" "workspace-catalog/governance/$schema"
+          done
+          git -C workspace-catalog init --quiet
+          read -r lock_repository lock_commit lock_path lock_digest < <(python - \
+            workspace-catalog/governance/component-catalog-v1.json <<'PY'
+          import json, re, sys
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          group = next((row for row in value.get("compatibilityGroups", []) if row.get("groupId") == "workspace-product-v2"), None)
+          lock = group.get("contractLock") if isinstance(group, dict) else None
+          if not isinstance(lock, dict):
+              raise SystemExit("verified catalog has no pinned Workspace protocol lock")
+          repository, commit, path, digest = (
+              lock.get("repository"),
+              lock.get("commit"),
+              lock.get("path"),
+              lock.get("sha256"),
+          )
+          if repository != "DoHorizon-AI/Cyrene-Workspace" or path != "governance/workspace-connection-protocols-v2.lock.json":
+              raise SystemExit("verified catalog protocol lock source is not trusted")
+          if (
+              not isinstance(commit, str)
+              or not re.fullmatch(r"[0-9a-f]{40}", commit)
+              or not isinstance(digest, str)
+              or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+          ):
+              raise SystemExit("verified catalog protocol lock commit or digest is malformed")
+          print(repository, commit, path, digest)
+          PY
+          )
+          git -C workspace-catalog fetch --quiet --no-tags --depth=1 \
+            "https://github.com/$lock_repository.git" "$lock_commit"
+          test "$(git -C workspace-catalog rev-parse FETCH_HEAD^{commit})" = "$lock_commit"
+          actual_lock_digest="$(git -C workspace-catalog show "$lock_commit:$lock_path" | sha256sum | cut -d ' ' -f 1)"
+          test "$actual_lock_digest" = "${lock_digest#sha256:}"
       - name: Check out exact Platform policy source
         run: |
           set -euo pipefail
@@ -257,4 +352,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --disable-pip-version-check -r packaging/data-bundle-release-requirements.txt
-      - run: python -m compileall -q packaging/build_data_bundle_release.py
+      - run: python -m compileall -q packaging/build_data_bundle_release.py packaging/fetch_component_catalog.py packaging/catalog_metadata.py packaging/component_updates.py

@@ -2452,6 +2452,29 @@ def cmd_update(args: argparse.Namespace) -> int:
     return module.run_json_stdio(updater)
 
 
+def cmd_catalog(args: argparse.Namespace) -> int:
+    """Inspect, verify, or explicitly import the trusted component catalog."""
+
+    try:
+        module = _load_component_updates_module()
+        updater = module.ComponentUpdater(allow_incomplete_catalog=args.catalog_action == "import")
+        if args.catalog_action == "status":
+            result = updater.catalog_status()
+        elif args.catalog_action == "check":
+            result = updater.catalog_check(
+                channel=args.channel,
+                release_id=args.release_id,
+                latest=args.latest,
+            )
+        else:
+            result = updater.catalog_import(channel=args.channel, release_id=args.release_id)
+    except Exception as error:  # noqa: BLE001 - keep CLI errors actionable and concise.
+        print(f"ERROR: catalog operation failed: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_component_run(args: argparse.Namespace) -> int:
     """Execute one catalog-pinned native release for a systemd unit.
 
@@ -2922,6 +2945,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use the fixed single-line JSON stdin/stdout helper protocol",
     )
     update_parser.set_defaults(func=cmd_update)
+
+    catalog_parser = subparsers.add_parser(
+        "catalog", help="Inspect, verify, or explicitly activate trusted component metadata"
+    )
+    catalog_commands = catalog_parser.add_subparsers(dest="catalog_action", required=True)
+    catalog_status_parser = catalog_commands.add_parser(
+        "status", help="Show the active catalog generation and digest"
+    )
+    catalog_status_parser.set_defaults(func=cmd_catalog)
+    catalog_check_parser = catalog_commands.add_parser(
+        "check", help="Verify a catalog release without activating it"
+    )
+    catalog_check_parser.add_argument("--channel", choices=("stable", "preview"), required=True)
+    catalog_check_selector = catalog_check_parser.add_mutually_exclusive_group(required=True)
+    catalog_check_selector.add_argument("--release-id", help="Exact immutable catalog release tag")
+    catalog_check_selector.add_argument(
+        "--latest", action="store_true", help="Verify the latest immutable release for this channel"
+    )
+    catalog_check_parser.set_defaults(func=cmd_catalog)
+    catalog_import_parser = catalog_commands.add_parser(
+        "import",
+        help="Activate an exact verified catalog release; this does not install components",
+    )
+    catalog_import_parser.add_argument("--channel", choices=("stable", "preview"), required=True)
+    catalog_import_parser.add_argument("--release-id", required=True)
+    catalog_import_parser.set_defaults(func=cmd_catalog)
 
     # upgrade
     upgrade_parser = subparsers.add_parser(
