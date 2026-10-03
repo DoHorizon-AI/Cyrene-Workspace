@@ -2629,18 +2629,16 @@ def install_missing_component_units(
         Path("/usr/lib/systemd/system"),
     ),
 ) -> tuple[list[str], list[str]]:
-    """Install only verified Platform units that are absent from systemd paths."""
+    """Install absent systemd units from catalog-pinned component releases."""
 
     if os.geteuid() != 0:
         raise PermissionError("Installing systemd units requires the root OS identity.")
-    platform_publisher = "DoHorizon-AI/Cyrene-Platform"
     installed: list[str] = []
     existing: list[str] = []
     for component in sorted(updater.components.values(), key=lambda item: item["componentId"]):
         component_id = component.get("componentId")
         if (
-            component.get("publisher") != platform_publisher
-            or component.get("kind") != "native-binary"
+            component.get("kind") != "native-binary"
             or component_id == "cy-runtime-agent"
             or not component.get("systemdUnit")
             or not any(

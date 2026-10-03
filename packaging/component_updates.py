@@ -15,6 +15,7 @@ import platform
 import re
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -51,8 +52,10 @@ DEFAULT_SOCKET = Path("/run/cyrene/runtime-maintenance.sock")
 DEFAULT_BROKER = Path("/usr/bin/cyrene-runtime-maintenance")
 DEFAULT_INSTALL_ROOT = Path("/usr/lib/cyrene")
 DEFAULT_STATE_ROOT = Path("/var/lib/cyrene-updates")
+DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
+DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
 DEFAULT_CHANNEL = "stable"
-TRUSTED_CATALOG_DIGEST = "sha256:248a9a3b27f3d1daa4c0a6fdc405c612fd492483bb4157ff46b6d2836ffd0d35"
+TRUSTED_CATALOG_DIGEST = "sha256:28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc"
 USER_AGENT = "CyreneComponentUpdater/1"
 BEGIN_NO_TOKEN_STATUSES = frozenset(
     {
@@ -98,6 +101,7 @@ class Candidate:
     manifest_uri: str
     index: dict[str, Any]
     index_uri: str
+    manifest_bytes: bytes | None = None
 
 
 def _jcs_string(value: str) -> str:
@@ -150,8 +154,43 @@ def _digest_json(value: dict[str, Any], field: str) -> str:
     return "sha256:" + hashlib.sha256(canonical_jcs(material)).hexdigest()
 
 
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
 def _valid_digest(value: Any) -> bool:
     return isinstance(value, str) and DIGEST_PATTERN.fullmatch(value) is not None
+
+
+def _trusted_contract_lock(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {"repository", "commit", "path", "sha256"}:
+        return False
+    if (
+        value.get("repository") != "DoHorizon-AI/Cyrene-Workspace"
+        or not isinstance(value.get("commit"), str)
+        or re.fullmatch(r"[0-9a-f]{40}", value["commit"]) is None
+        or value.get("path") != "governance/workspace-connection-protocols-v2.lock.json"
+        or not _valid_digest(value.get("sha256"))
+    ):
+        return False
+    try:
+        _safe_relative(value["path"], field="compatibility.contractLock.path")
+    except UpdateError:
+        return False
+    return True
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise UpdateError("INVALID_JSON", f"JSON object contains duplicate key {key!r}.")
+        value[key] = item
+    return value
 
 
 def _running_as_root() -> bool:
@@ -366,6 +405,8 @@ class ComponentUpdater:
         opener: Callable[..., Any] = urllib.request.urlopen,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         systemd_unit_dirs: tuple[Path, ...] | None = None,
+        data_bundle_root: Path = DEFAULT_DATA_BUNDLE_ROOT,
+        authority_admin_socket: Path = DEFAULT_AUTHORITY_ADMIN_SOCKET,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.activity_catalog_path = Path(activity_catalog_path)
@@ -373,6 +414,8 @@ class ComponentUpdater:
         self.broker_path = Path(broker_path)
         self.install_root = Path(install_root)
         self.state_root = Path(state_root)
+        self.data_bundle_root = Path(data_bundle_root)
+        self.authority_admin_socket = Path(authority_admin_socket)
         self.opener = opener
         self.runner = runner
         self.systemd_unit_dirs = (
@@ -416,8 +459,10 @@ class ComponentUpdater:
         if not isinstance(catalog_value, dict):
             raise UpdateError("INVALID_CATALOG", "The component catalog must be a JSON object.")
         self.catalog = catalog_value
-        if self.catalog.get("schemaVersion") != 1 or not isinstance(
-            self.catalog.get("components"), list
+        if (
+            isinstance(self.catalog.get("schemaVersion"), bool)
+            or self.catalog.get("schemaVersion") != 1
+            or not isinstance(self.catalog.get("components"), list)
         ):
             raise UpdateError(
                 "INVALID_CATALOG", "The installed component catalog has an unsupported schema."
@@ -820,7 +865,9 @@ class ComponentUpdater:
         try:
             for plan_component in plan["components"]:
                 candidate = candidate_map[plan_component["componentId"]]
-                staged_components.append(self._stage_candidate(candidate, plan_root))
+                staged_components.append(
+                    self._stage_candidate(candidate, plan_root, plan_id, plan_digest)
+                )
             record = {
                 "schemaVersion": 2,
                 "plan": plan,
@@ -946,6 +993,7 @@ class ComponentUpdater:
         artifact_digests = {
             item["componentId"]: item["artifactDigest"] for item in record["components"]
         }
+        authority_activation = self._prepare_authority_activation(record, plan_id, plan_digest)
         transaction = {
             "schemaVersion": 2,
             "planId": plan_id,
@@ -960,6 +1008,7 @@ class ComponentUpdater:
             "expectedActivitySources": gate_sources,
             "components": record["components"],
             "previous": self._capture_active_versions(record["components"]),
+            "authorityActivation": authority_activation,
             "createdAt": int(time.time()),
         }
         _atomic_json(transaction_path, transaction)
@@ -976,6 +1025,7 @@ class ComponentUpdater:
             self._activate_transaction(transaction)
             self._restart_transaction(transaction)
             self._health_transaction(transaction)
+            self._activate_authority_bundle(transaction)
         except Exception as failure:
             healthy_rollback, rollback_message = self._rollback_transaction(transaction)
             transaction["phase"] = (
@@ -1064,7 +1114,7 @@ class ComponentUpdater:
             host = platform.freedesktop_os_release()
         except OSError:
             return None
-        if host.get("ID") != "ubuntu" or host.get("VERSION_ID") != "24.04":
+        if host.get("ID") != "ubuntu" or host.get("VERSION_ID") not in {"22.04", "24.04"}:
             return None
         host_arch = platform.machine().lower()
         architecture = (
@@ -1074,6 +1124,9 @@ class ComponentUpdater:
             if host_arch in {"aarch64", "arm64"}
             else host_arch
         )
+        libc_name, libc_version = platform.libc_ver()
+        host_abi = f"{libc_name}-{libc_version}" if libc_name and libc_version else None
+        host_version = host.get("VERSION_ID")
         for entry in component.get("targets", []):
             target = self.targets.get(entry.get("targetId"))
             if target is None or entry.get("support") != "supported":
@@ -1081,16 +1134,29 @@ class ComponentUpdater:
             spec = target.get("target", {})
             if spec.get("os") != "linux" or spec.get("architecture") != architecture:
                 continue
-            if spec.get("distribution") != "ubuntu" or spec.get("distributionVersion") != "24.04":
+            portable_data_target = (
+                entry.get("artifactKind") == "data-bundle"
+                and entry.get("targetId") == "portable-contract-data-v1"
+            )
+            if not portable_data_target and (
+                spec.get("distribution") != "ubuntu"
+                or spec.get("distributionVersion") != host_version
+            ):
                 continue
-            if (
-                entry.get("artifactKind") == "python-bundle"
-                and spec.get("runtime") != "python:3.12"
+            if spec.get("abi") is not None and spec.get("abi") != host_abi:
+                continue
+            if entry.get("artifactKind") == "python-bundle" and (
+                spec.get("runtime") != "python:3.12" or host_version != "24.04"
             ):
                 continue
             if entry.get("artifactKind") == "python-bundle" and sys.version_info[:2] != (3, 12):
                 continue
             if entry.get("artifactKind") == "native-binary" and spec.get("runtime") != "systemd":
+                continue
+            if (
+                entry.get("artifactKind") == "data-bundle"
+                and spec.get("runtime") != "cyrene-authority-data"
+            ):
                 continue
             return {**target, "artifactKind": entry["artifactKind"]}
         return None
@@ -1111,7 +1177,7 @@ class ComponentUpdater:
                 "blockers": [
                     {
                         "code": "UNSUPPORTED_TARGET",
-                        "message": "This component has no supported Linux 24.04 target in the trusted catalog.",
+                        "message": "This component has no supported exact Ubuntu/glibc target in the trusted catalog.",
                     }
                 ],
             },
@@ -1138,7 +1204,10 @@ class ComponentUpdater:
         actions = ["check"]
         if target is not None and update_available is True:
             actions.append("stage")
-        service_managed = target is not None and self._unit_exists(component)
+        is_data_bundle = component.get("kind") == "data-bundle"
+        service_managed = target is not None and (
+            self._authority_available() if is_data_bundle else self._unit_exists(component)
+        )
         if (
             target is not None
             and phase == "staged"
@@ -1163,13 +1232,68 @@ class ComponentUpdater:
         if target is not None and not service_managed:
             result["blockers"] = [
                 {
-                    "code": "SERVICE_NOT_MANAGED",
-                    "message": "The OS target is available, but no catalog-matched local systemd service is installed.",
+                    "code": "AUTHORITY_NOT_MANAGED" if is_data_bundle else "SERVICE_NOT_MANAGED",
+                    "message": "Authority's restricted local activation socket is unavailable."
+                    if is_data_bundle
+                    else "The OS target is available, but no catalog-matched local systemd service is installed.",
                 }
             ]
         return {key: value for key, value in result.items() if value is not None}
 
     def _installed(self, component: dict[str, Any]) -> dict[str, Any]:
+        if component.get("kind") == "data-bundle":
+            if not self._authority_available():
+                return self._empty_installed()
+            status = self._authority_request({"action": "status"})
+            artifact_id = status.get("activeArtifactId")
+            if artifact_id is None:
+                return self._empty_installed()
+            if not _valid_digest(artifact_id):
+                raise UpdateError(
+                    "AUTHORITY_STATUS_INVALID",
+                    "Authority returned an invalid active artifact identity.",
+                )
+            receipt_directory = self._installed_component_directory(component["componentId"])
+            releases = receipt_directory / "releases" if receipt_directory else None
+            if releases is not None and releases.is_dir() and not releases.is_symlink():
+                for receipt_path in releases.glob("*.json"):
+                    identity = "sha256:" + receipt_path.stem
+                    receipt = self._read_release_receipt(component["componentId"], identity)
+                    if receipt is None or receipt.get("artifactDigest") != artifact_id:
+                        continue
+                    manifest = receipt.get("manifest")
+                    self._validate_manifest_digest(manifest, identity)
+                    if _artifact_kind_from_manifest(manifest) != "data-bundle":
+                        raise UpdateError(
+                            "INVALID_INSTALLED_RELEASE",
+                            "Authority data-bundle receipt has the wrong artifact kind.",
+                        )
+                    return {
+                        "activeVersion": manifest["version"],
+                        "manifest": manifest,
+                        "active": True,
+                        "identityAttested": True,
+                        "releaseIdentity": identity,
+                        "manifestDigest": identity,
+                        "artifactDigest": artifact_id,
+                        "pointerIdentity": artifact_id.removeprefix("sha256:"),
+                        "bundleIdentity": artifact_id,
+                        "authorityGeneration": status.get("highestGeneration"),
+                        "authorityActivationEpoch": status.get("activationEpoch"),
+                    }
+            return {
+                "activeVersion": artifact_id,
+                "manifest": None,
+                "active": True,
+                "identityAttested": True,
+                "releaseIdentity": artifact_id,
+                "manifestDigest": None,
+                "artifactDigest": artifact_id,
+                "pointerIdentity": artifact_id.removeprefix("sha256:"),
+                "bundleIdentity": artifact_id,
+                "authorityGeneration": status.get("highestGeneration"),
+                "authorityActivationEpoch": status.get("activationEpoch"),
+            }
         service = component.get("pythonBundleService")
         if service:
             try:
@@ -1323,6 +1447,99 @@ class ComponentUpdater:
             "pointerIdentity": None,
             "bundleIdentity": None,
         }
+
+    def _authority_available(self) -> bool:
+        try:
+            info = self.authority_admin_socket.lstat()
+        except OSError:
+            return False
+        mode = stat.S_IMODE(info.st_mode)
+        return stat.S_ISSOCK(info.st_mode) and info.st_uid == 0 and not (mode & 0o007)
+
+    def _authority_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        if not self._authority_available():
+            raise UpdateError(
+                "AUTHORITY_NOT_MANAGED",
+                "Authority's restricted local activation socket is unavailable.",
+            )
+        if not isinstance(request.get("action"), str) or request["action"] not in {
+            "status",
+            "validateArtifact",
+            "activateArtifact",
+        }:
+            raise UpdateError("AUTHORITY_REQUEST_INVALID", "Authority action is not supported.")
+        request_fields = {
+            "status": {"action"},
+            "validateArtifact": {"action", "planId", "planDigest", "artifactId"},
+            "activateArtifact": {
+                "action",
+                "planId",
+                "planDigest",
+                "expectedGeneration",
+                "artifactId",
+            },
+        }[request["action"]]
+        if set(request) != request_fields:
+            raise UpdateError(
+                "AUTHORITY_REQUEST_INVALID", "Authority request contains an unexpected field."
+            )
+        if request["action"] != "status" and (
+            not isinstance(request.get("planId"), str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", request["planId"]) is None
+            or not _valid_digest(request.get("planDigest"))
+            or not _valid_digest(request.get("artifactId"))
+            or (
+                request["action"] == "activateArtifact"
+                and (
+                    not isinstance(request.get("expectedGeneration"), int)
+                    or isinstance(request.get("expectedGeneration"), bool)
+                    or request["expectedGeneration"] < 0
+                )
+            )
+        ):
+            raise UpdateError(
+                "AUTHORITY_REQUEST_INVALID", "Authority plan or artifact identity is invalid."
+            )
+        try:
+            payload = (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(15)
+                connection.connect(str(self.authority_admin_socket))
+                connection.sendall(payload)
+                response = bytearray()
+                while len(response) <= 1024 * 1024:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    response.extend(chunk)
+                    if b"\n" in chunk:
+                        break
+            line, separator, rest = response.partition(b"\n")
+            if not separator or rest.strip():
+                raise UpdateError(
+                    "AUTHORITY_PROTOCOL_ERROR", "Authority returned an incomplete JSONL response."
+                )
+            value = json.loads(line.decode("utf-8"))
+        except UpdateError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, TimeoutError) as error:
+            raise UpdateError(
+                "AUTHORITY_UNAVAILABLE", f"Authority admin request failed: {error}", retryable=True
+            ) from error
+        expected_status = {
+            "status": "ok",
+            "validateArtifact": "valid",
+            "activateArtifact": "activated",
+        }[request["action"]]
+        if not isinstance(value, dict) or value.get("status") != expected_status:
+            code = value.get("code") if isinstance(value, dict) else None
+            message = value.get("message") if isinstance(value, dict) else None
+            raise UpdateError(
+                "AUTHORITY_REQUEST_REJECTED",
+                str(message or code or "Authority rejected the restricted activation request."),
+                retryable=bool(value.get("retryable")) if isinstance(value, dict) else False,
+            )
+        return value
 
     def _installed_component_directory(
         self, component_id: str, *, create: bool = False
@@ -2117,7 +2334,7 @@ class ComponentUpdater:
         self._require_github_asset_uri(entry.get("manifestUri"), publisher["repository"])
         manifest_bytes = self._get_bytes(entry["manifestUri"])
         try:
-            manifest = json.loads(manifest_bytes)
+            manifest = json.loads(manifest_bytes, object_pairs_hook=_unique_json_object)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise UpdateError(
                 "INVALID_MANIFEST", f"Manifest for {component['componentId']} is invalid JSON."
@@ -2133,6 +2350,7 @@ class ComponentUpdater:
             entry["manifestUri"],
             index,
             index_uri,
+            manifest_bytes,
         )
 
     def _validate_manifest(
@@ -2159,7 +2377,16 @@ class ComponentUpdater:
             "provenance",
             "manifestDigest",
         }
+        schema_version = manifest.get("schemaVersion") if isinstance(manifest, dict) else None
+        if isinstance(schema_version, bool) or schema_version not in (1, 2):
+            raise UpdateError(
+                "UNSUPPORTED_MANIFEST_VERSION",
+                f"Manifest for {component['componentId']} uses an unsupported schema version.",
+            )
         allowed = required | {"health", "compatibility"}
+        if schema_version == 2:
+            required |= {"protocolVersion", "contentDigest"}
+            allowed |= {"protocolVersion", "contentDigest", "dataBundle"}
         if (
             not isinstance(manifest, dict)
             or set(manifest) - allowed
@@ -2170,7 +2397,7 @@ class ComponentUpdater:
                 f"Manifest for {component['componentId']} has an invalid object shape.",
             )
         if (
-            manifest.get("schemaVersion") != 1
+            manifest.get("schemaVersion") != schema_version
             or manifest.get("componentId") != component["componentId"]
             or manifest.get("version") != entry.get("version")
             or manifest.get("target") != target["target"]
@@ -2191,7 +2418,129 @@ class ComponentUpdater:
             raise UpdateError(
                 "INVALID_MANIFEST", "Release version is not a safe immutable path segment."
             )
-        self._validate_manifest_dependencies(manifest.get("dependencies"), component)
+        if schema_version == 2:
+            protocol_version = manifest.get("protocolVersion")
+            if (
+                not isinstance(protocol_version, str)
+                or re.fullmatch(r"[a-z][a-z0-9._-]{0,127}", protocol_version) is None
+            ):
+                raise UpdateError("INVALID_MANIFEST", "Manifest protocolVersion is invalid.")
+            expected_protocol = component.get("protocolVersion")
+            group_id = component.get("compatibilityGroup")
+            if group_id:
+                group = next(
+                    (
+                        item
+                        for item in self.catalog.get("compatibilityGroups", [])
+                        if isinstance(item, dict) and item.get("groupId") == group_id
+                    ),
+                    None,
+                )
+                member = (
+                    next(
+                        (
+                            item
+                            for item in group.get("members", [])
+                            if isinstance(item, dict)
+                            and item.get("componentId") == component["componentId"]
+                        ),
+                        None,
+                    )
+                    if group
+                    else None
+                )
+                member_protocol = (
+                    member.get("protocolVersion") if isinstance(member, dict) else None
+                )
+                if schema_version == 2 and (
+                    not isinstance(member_protocol, str)
+                    or (expected_protocol is not None and expected_protocol != member_protocol)
+                ):
+                    raise UpdateError(
+                        "INVALID_CATALOG",
+                        f"V2 group member {component['componentId']} must have a matching explicit protocol pin.",
+                    )
+                expected_protocol = member_protocol or expected_protocol
+            if not isinstance(expected_protocol, str) or protocol_version != expected_protocol:
+                raise UpdateError(
+                    "PROTOCOL_VERSION_UNSUPPORTED",
+                    f"No trusted client support is pinned for {component['componentId']} protocol {protocol_version!r}.",
+                )
+            artifact_descriptor = manifest.get("artifact")
+            artifact_content_digest = (
+                artifact_descriptor.get("digest")
+                if isinstance(artifact_descriptor, dict)
+                and artifact_descriptor.get("kind") == "oci-image"
+                else artifact_descriptor.get("sha256")
+                if isinstance(artifact_descriptor, dict)
+                else None
+            )
+            content_digest = manifest.get("contentDigest")
+            if not _valid_digest(content_digest) or content_digest != artifact_content_digest:
+                raise UpdateError(
+                    "CONTENT_DIGEST_MISMATCH",
+                    f"Manifest content digest is invalid for {component['componentId']}.",
+                )
+            compatibility_group = component.get("compatibilityGroup")
+            if compatibility_group and not isinstance(manifest.get("compatibility"), dict):
+                raise UpdateError(
+                    "COMPATIBILITY_MISSING",
+                    f"{component['componentId']} v2 release omits its trusted compatibility pins.",
+                )
+            elif compatibility_group:
+                group = next(
+                    (
+                        item
+                        for item in self.catalog.get("compatibilityGroups", [])
+                        if item.get("groupId") == compatibility_group
+                    ),
+                    None,
+                )
+                compatibility = manifest["compatibility"]
+                if (
+                    group is None
+                    or compatibility.get("groupId") != compatibility_group
+                    or compatibility.get("groupVersion") != group.get("groupVersion")
+                    or compatibility.get("wireApiVersion") != group.get("wireApiVersion")
+                    or compatibility.get("contractApiVersion") != group.get("contractApiVersion")
+                ):
+                    raise UpdateError(
+                        "COMPATIBILITY_GROUP_MISMATCH",
+                        f"{component['componentId']} compatibility tuple differs from the trusted group.",
+                    )
+                if schema_version == 2 and (
+                    not _trusted_contract_lock(group.get("contractLock"))
+                    or compatibility.get("contractLock") != group.get("contractLock")
+                ):
+                    raise UpdateError(
+                        "COMPATIBILITY_LOCK_UNTRUSTED",
+                        f"{component['componentId']} contractLock differs from the trusted catalog pin.",
+                    )
+            data_bundle = manifest.get("dataBundle")
+            artifact_kind = (
+                manifest.get("artifact", {}).get("kind")
+                if isinstance(manifest.get("artifact"), dict)
+                else None
+            )
+            if artifact_kind == "data-bundle":
+                if (
+                    not isinstance(data_bundle, dict)
+                    or set(data_bundle) != {"proofPath", "proofSha256"}
+                    or data_bundle.get("proofPath") != "data-bundle-proof-v1.json"
+                    or not _valid_digest(data_bundle.get("proofSha256"))
+                ):
+                    raise UpdateError(
+                        "INVALID_DATA_BUNDLE_PROOF",
+                        "V2 data-bundle manifest must pin the fixed proof path and digest.",
+                    )
+            elif data_bundle is not None:
+                raise UpdateError(
+                    "INVALID_MANIFEST",
+                    "Only data-bundle artifacts may declare dataBundle proof metadata.",
+                )
+        self._validate_manifest_dependencies(
+            manifest.get("dependencies"), component, require_version_range=schema_version == 2
+        )
         source = manifest.get("source")
         index_source = index["source"]
         publisher_repo_url = f"https://github.com/{publisher['repository']}"
@@ -2238,7 +2587,9 @@ class ComponentUpdater:
         if (
             not _valid_digest(artifact.get("sha256"))
             or not isinstance(artifact.get("sizeBytes"), int)
+            or isinstance(artifact.get("sizeBytes"), bool)
             or artifact["sizeBytes"] < 1
+            or artifact["sizeBytes"] > MAX_SAFE_INTEGER
         ):
             raise UpdateError(
                 "INVALID_MANIFEST",
@@ -2254,11 +2605,12 @@ class ComponentUpdater:
                     "INVALID_MANIFEST",
                     f"Native artifact payload map is invalid for {component['componentId']}.",
                 )
-        elif artifact["kind"] == "python-bundle":
+        elif artifact["kind"] in {"python-bundle", "data-bundle"}:
             if (
                 artifact.get("format") not in {"tar.gz", "tar.zst", "zip"}
                 or not isinstance(artifact.get("files"), dict)
                 or not artifact["files"]
+                or (artifact["kind"] == "data-bundle" and schema_version != 2)
             ):
                 raise UpdateError(
                     "INVALID_MANIFEST",
@@ -2296,7 +2648,9 @@ class ComponentUpdater:
                 f"Manifest restart policy differs from the trusted catalog for {component['componentId']}.",
             )
 
-    def _validate_manifest_dependencies(self, value: Any, component: dict[str, Any]) -> None:
+    def _validate_manifest_dependencies(
+        self, value: Any, component: dict[str, Any], *, require_version_range: bool = False
+    ) -> None:
         """Require publisher dependencies to match the trusted component catalog exactly."""
 
         if not isinstance(value, list):
@@ -2315,10 +2669,12 @@ class ComponentUpdater:
             normalized: list[dict[str, str]] = []
             seen: set[str] = set()
             for item in items:
-                if not isinstance(item, dict) or set(item) not in (
-                    {"componentId"},
-                    {"componentId", "versionRange"},
-                ):
+                expected_shapes = (
+                    ({"componentId", "versionRange"},)
+                    if require_version_range
+                    else ({"componentId"}, {"componentId", "versionRange"})
+                )
+                if not isinstance(item, dict) or set(item) not in expected_shapes:
                     raise UpdateError(
                         "INVALID_MANIFEST_DEPENDENCIES",
                         f"{source} dependency record is malformed for {component['componentId']}.",
@@ -2336,6 +2692,11 @@ class ComponentUpdater:
                 seen.add(dependency_id)
                 row = {"componentId": dependency_id}
                 if "versionRange" in item:
+                    if not isinstance(item["versionRange"], str) or not item["versionRange"]:
+                        raise UpdateError(
+                            "DEPENDENCY_RANGE_UNSUPPORTED",
+                            f"{source} dependency range is empty for {component['componentId']}.",
+                        )
                     _parse_supported_version_range(item["versionRange"])
                     row["versionRange"] = item["versionRange"]
                 normalized.append(row)
@@ -2408,16 +2769,35 @@ class ComponentUpdater:
                 raise UpdateError(
                     "COMPATIBILITY_UNTRUSTED", f"Unknown compatibility group {group_id!r}."
                 )
-            if compatibility.get("wireApiVersion") != group.get(
-                "wireApiVersion"
-            ) or compatibility.get("contractApiVersion") != group.get("contractApiVersion"):
+            if (
+                compatibility.get("wireApiVersion") != group.get("wireApiVersion")
+                or compatibility.get("contractApiVersion") != group.get("contractApiVersion")
+                or (
+                    candidate.manifest.get("schemaVersion") == 2
+                    and compatibility.get("groupVersion") != group.get("groupVersion")
+                )
+            ):
                 raise UpdateError(
                     "COMPATIBILITY_API_UNSUPPORTED",
                     f"No client support is pinned for {group_id} compatibility API.",
                 )
+            if candidate.manifest.get("schemaVersion") == 2:
+                trusted_lock = group.get("contractLock")
+                if (
+                    not _trusted_contract_lock(trusted_lock)
+                    or compatibility.get("contractLock") != trusted_lock
+                ):
+                    raise UpdateError(
+                        "COMPATIBILITY_LOCK_UNTRUSTED",
+                        f"{group_id} does not match its exact trusted protocol lock.",
+                    )
             current_members: list[tuple[dict[str, Any], dict[str, Any]]] = []
             adoption_needed = False
-            candidate_pin = compatibility["contractLock"]
+            candidate_pin = (
+                group.get("contractLock")
+                if candidate.manifest.get("schemaVersion") == 2
+                else compatibility["contractLock"]
+            )
             members = group["members"]
             for member in members:
                 member_component = self.components[member["componentId"]]
@@ -2435,13 +2815,27 @@ class ComponentUpdater:
                         adoption_needed = True
                     continue
                 installed_compat = (installed.get("manifest") or {}).get("compatibility")
-                if not isinstance(installed_compat, dict) or (
-                    installed_compat.get("groupId") != group_id
-                    or installed_compat.get("contractApiVersion")
-                    != compatibility["contractApiVersion"]
-                    or installed_compat.get("wireApiVersion") != compatibility["wireApiVersion"]
-                    or installed_compat.get("contractLock", {}).get("sha256")
-                    != candidate_pin.get("sha256")
+                if (
+                    (installed.get("manifest") or {}).get("schemaVersion")
+                    != candidate.manifest.get("schemaVersion")
+                    or not isinstance(installed_compat, dict)
+                    or (
+                        installed_compat.get("groupId") != group_id
+                        or installed_compat.get("contractApiVersion")
+                        != compatibility["contractApiVersion"]
+                        or installed_compat.get("wireApiVersion") != compatibility["wireApiVersion"]
+                        or (
+                            candidate.manifest.get("schemaVersion") == 2
+                            and installed_compat.get("groupVersion")
+                            != compatibility.get("groupVersion")
+                        )
+                        or (
+                            installed_compat.get("contractLock") != candidate_pin
+                            if candidate.manifest.get("schemaVersion") == 2
+                            else installed_compat.get("contractLock", {}).get("sha256")
+                            != candidate_pin.get("sha256")
+                        )
+                    )
                 ):
                     adoption_needed = True
                 current_members.append((member_component, member_target))
@@ -2449,55 +2843,32 @@ class ComponentUpdater:
                 continue
 
             required_ids = {
-                member["componentId"] for member in members if member.get("requiredForAdoption")
+                member["componentId"]
+                for member in members
+                if member.get("requiredForAdoption")
+                or self.components.get(member["componentId"], {}).get("kind") == "data-bundle"
+            }
+            required_ids = {
+                component_id
+                for component_id in required_ids
+                if self._target_for(self.components[component_id]) is not None
             }
             include_ids = required_ids | {
                 component["componentId"] for component, _ in current_members
             }
-            index_group = next(
-                (
-                    item
-                    for item in candidate.index.get("compatibilityGroups", [])
-                    if item.get("groupId") == group_id
-                ),
-                None,
-            )
-            if not isinstance(index_group, dict):
-                raise UpdateError(
-                    "COMPATIBILITY_GROUP_INCOMPLETE",
-                    f"Release index omits compatibility group {group_id}.",
-                )
-            if (
-                index_group.get("contractApiVersion") != compatibility["contractApiVersion"]
-                or index_group.get("wireApiVersion") != compatibility["wireApiVersion"]
-                or index_group.get("contractLock") != candidate_pin
-            ):
-                raise UpdateError(
-                    "COMPATIBILITY_GROUP_MISMATCH",
-                    f"Release index compatibility pins differ for {group_id}.",
-                )
-            index_members = index_group.get("members")
-            if not isinstance(index_members, list):
-                raise UpdateError(
-                    "COMPATIBILITY_GROUP_INCOMPLETE",
-                    f"Release index has no member pins for {group_id}.",
-                )
-            pinned_ids = {
-                item.get("componentId") for item in index_members if isinstance(item, dict)
-            }
-            if not include_ids.issubset(pinned_ids):
-                missing = sorted(include_ids - pinned_ids)
-                raise UpdateError(
-                    "COMPATIBILITY_GROUP_INCOMPLETE",
-                    f"Compatibility group {group_id} is missing releases for {', '.join(missing)}.",
-                )
             for component_id in sorted(include_ids):
                 member_component = self.components[component_id]
                 member_target = self._target_for(member_component)
-                assert member_target is not None
+                if member_target is None:
+                    raise UpdateError(
+                        "COMPATIBILITY_MEMBER_UNSUPPORTED",
+                        f"Required {group_id} member {component_id} has no supported target.",
+                    )
                 if component_id not in expanded:
-                    expanded[component_id] = self._candidate_from_index(
-                        candidate, member_component, member_target, channel
+                    # Compatibility groups may span repositories. Resolve each
+                    # member through its own trusted publisher and attested index.
+                    expanded[component_id] = self._candidate(
+                        member_component, member_target, channel
                     )
                 member_candidate = expanded[component_id]
                 member_compat = member_candidate.manifest.get("compatibility")
@@ -2508,75 +2879,22 @@ class ComponentUpdater:
                     != compatibility["contractApiVersion"]
                     or member_compat.get("wireApiVersion") != compatibility["wireApiVersion"]
                     or member_compat.get("contractLock") != candidate_pin
+                    or member_candidate.manifest.get("schemaVersion")
+                    != candidate.manifest.get("schemaVersion")
+                    or (
+                        member_candidate.manifest.get("schemaVersion") == 2
+                        and (
+                            member_compat.get("groupVersion") != group.get("groupVersion")
+                            or member_candidate.manifest.get("protocolVersion")
+                            != member_component.get("protocolVersion")
+                        )
+                    )
                 ):
                     raise UpdateError(
                         "COMPATIBILITY_GROUP_MISMATCH",
                         f"Member {component_id} does not share the exact {group_id} contract pins.",
                     )
-                exact_index_member = next(
-                    (
-                        item
-                        for item in index_members
-                        if item.get("componentId") == component_id
-                        and item.get("target") == member_target["target"]
-                    ),
-                    None,
-                )
-                if (
-                    exact_index_member is None
-                    or exact_index_member.get("version") != member_candidate.manifest["version"]
-                    or exact_index_member.get("manifestDigest") != member_candidate.manifest_digest
-                ):
-                    raise UpdateError(
-                        "COMPATIBILITY_MEMBER_PIN_MISMATCH",
-                        f"Index member digest does not match {component_id} release manifest.",
-                    )
         return expanded
-
-    def _candidate_from_index(
-        self, owner: Candidate, component: dict[str, Any], target: dict[str, Any], channel: str
-    ) -> Candidate:
-        publisher = self.publishers[component["publisher"]]
-        if publisher["repository"] != owner.index["repository"]:
-            raise UpdateError(
-                "COMPATIBILITY_GROUP_CROSS_REPOSITORY",
-                "Compatibility group members must be published by one trusted repository index.",
-            )
-        entries = [
-            item
-            for item in owner.index["releases"]
-            if isinstance(item, dict)
-            and item.get("componentId") == component["componentId"]
-            and item.get("target") == target["target"]
-        ]
-        if len(entries) != 1:
-            raise UpdateError(
-                "COMPATIBILITY_GROUP_INCOMPLETE",
-                f"Release index has no unique manifest for group member {component['componentId']}.",
-            )
-        entry = entries[0]
-        self._require_github_asset_uri(entry.get("manifestUri"), publisher["repository"])
-        raw = self._get_bytes(entry["manifestUri"])
-        manifest = json.loads(raw)
-        digest = manifest.get("manifestDigest") if isinstance(manifest, dict) else None
-        if digest != entry.get("manifestDigest") or digest != _digest_json(
-            manifest, "manifestDigest"
-        ):
-            raise UpdateError(
-                "MANIFEST_DIGEST_MISMATCH",
-                f"Digest mismatch for compatibility member {component['componentId']}.",
-            )
-        self._validate_manifest(manifest, entry, component, target, publisher, channel, owner.index)
-        artifact_digest = manifest["artifact"].get("digest", manifest["artifact"].get("sha256"))
-        return Candidate(
-            component,
-            manifest,
-            digest,
-            artifact_digest,
-            entry["manifestUri"],
-            owner.index,
-            owner.index_uri,
-        )
 
     def _resolve_plan_candidates(self, plan: dict[str, Any], channel: str) -> dict[str, Candidate]:
         component_ids = [item["componentId"] for item in plan["components"]]
@@ -2613,7 +2931,394 @@ class ComponentUpdater:
             )
         return selected
 
-    def _stage_candidate(self, candidate: Candidate, plan_root: Path) -> dict[str, Any]:
+    def _validate_data_bundle_proof(
+        self, candidate: Candidate, payload_root: Path, channel: str
+    ) -> dict[str, Any]:
+        """Verify every immutable source subject and its detached SLSA bundle."""
+        manifest = candidate.manifest
+        envelope = manifest.get("dataBundle")
+        trust = self.catalog.get("dataBundleTrust")
+        if (
+            not isinstance(envelope, dict)
+            or set(envelope) != {"proofPath", "proofSha256"}
+            or envelope.get("proofPath") != "data-bundle-proof-v1.json"
+            or not _valid_digest(envelope.get("proofSha256"))
+            or not isinstance(trust, dict)
+        ):
+            raise UpdateError("INVALID_DATA_BUNDLE_PROOF", "Data-bundle proof envelope is invalid.")
+        proof_path = payload_root.joinpath(
+            *_safe_relative(envelope["proofPath"], field="dataBundle.proofPath").parts
+        )
+        if proof_path.is_symlink() or not proof_path.is_file():
+            raise UpdateError(
+                "INVALID_DATA_BUNDLE_PROOF",
+                "The fixed data-bundle proof file is missing or unsafe.",
+            )
+        proof_bytes = proof_path.read_bytes()
+        proof_digest = "sha256:" + hashlib.sha256(proof_bytes).hexdigest()
+        if proof_digest != envelope["proofSha256"]:
+            raise UpdateError(
+                "DATA_BUNDLE_PROOF_DIGEST_MISMATCH", "Data-bundle proof digest is invalid."
+            )
+        try:
+            proof = json.loads(proof_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_DATA_BUNDLE_PROOF", "Data-bundle proof is not valid UTF-8 JSON."
+            ) from error
+        expected_proof_fields = {
+            "schemaVersion",
+            "protocolVersion",
+            "contractApiVersion",
+            "manifestPath",
+            "manifestSha256",
+            "policyPath",
+            "policySha256",
+            "policySchemaVersion",
+            "owners",
+            "policySource",
+        }
+        if (
+            not isinstance(proof, dict)
+            or set(proof) != expected_proof_fields
+            or isinstance(proof.get("schemaVersion"), bool)
+            or proof.get("schemaVersion") != 1
+            or proof.get("protocolVersion") != trust.get("protocolVersion")
+            or proof.get("protocolVersion") != manifest.get("protocolVersion")
+            or proof.get("contractApiVersion") != trust.get("contractApiVersion")
+            or proof.get("manifestPath") != trust.get("manifestPath")
+        ):
+            raise UpdateError(
+                "INVALID_DATA_BUNDLE_PROOF", "Data-bundle proof identity or shape is invalid."
+            )
+
+        def read_subject(relative: Any, digest: Any, *, label: str) -> bytes:
+            path = payload_root.joinpath(*_safe_relative(relative, field=label).parts)
+            if path.is_symlink() or not path.is_file() or not _valid_digest(digest):
+                raise UpdateError("INVALID_DATA_BUNDLE_PROOF", f"{label} is missing or unsafe.")
+            data = path.read_bytes()
+            if "sha256:" + hashlib.sha256(data).hexdigest() != digest:
+                raise UpdateError(
+                    "DATA_BUNDLE_SOURCE_DIGEST_MISMATCH", f"{label} digest is invalid."
+                )
+            return data
+
+        manifest_bytes = read_subject(
+            proof.get("manifestPath"), proof.get("manifestSha256"), label="data bundle manifest"
+        )
+        try:
+            manifest_value = json.loads(manifest_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_DATA_BUNDLE_PROOF", "The inner bundle manifest is invalid JSON."
+            ) from error
+        if not isinstance(manifest_value, dict):
+            raise UpdateError(
+                "INVALID_DATA_BUNDLE_PROOF", "The inner bundle manifest must be an object."
+            )
+        if manifest_value.get("formatVersion") != 2 or manifest_value.get(
+            "wireApiVersion"
+        ) != proof.get("protocolVersion"):
+            raise UpdateError(
+                "DATA_BUNDLE_MANIFEST_MISMATCH",
+                "Inner contract-bundle manifest does not bind the declared Product wire protocol.",
+            )
+
+        policy_trust = trust.get("policySource")
+        policy_source = proof.get("policySource")
+        if (
+            not isinstance(policy_trust, dict)
+            or not isinstance(policy_source, dict)
+            or set(policy_source) != {"source", "path", "sha256", "provenance"}
+            or policy_source.get("path") != policy_trust.get("path")
+            or policy_source.get("sha256") != proof.get("policySha256")
+            or proof.get("policyPath") != "workspace-product-policy-v2.json"
+            or proof.get("policySchemaVersion") != policy_trust.get("schemaVersion")
+        ):
+            raise UpdateError(
+                "UNTRUSTED_POLICY_SOURCE",
+                "Data-bundle policy source differs from the trusted Platform policy.",
+            )
+        policy_source_identity = policy_source.get("source")
+        if (
+            not isinstance(policy_source_identity, dict)
+            or set(policy_source_identity) != {"repository", "ref", "commit"}
+            or policy_source_identity.get("repository") != policy_trust.get("repository")
+        ):
+            raise UpdateError(
+                "UNTRUSTED_POLICY_SOURCE", "Data-bundle policy source identity is not trusted."
+            )
+        policy_payload = read_subject(
+            proof.get("policyPath"), proof.get("policySha256"), label="policy file"
+        )
+        try:
+            policy_value = json.loads(policy_payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_POLICY", "Bundled workspace policy is not valid UTF-8 JSON."
+            ) from error
+        if not isinstance(policy_value, dict) or policy_value.get("schemaVersion") != proof.get(
+            "policySchemaVersion"
+        ):
+            raise UpdateError(
+                "INVALID_POLICY",
+                "Bundled policy schema version differs from its trusted proof pin.",
+            )
+        owners = proof.get("owners")
+        owner_trust = trust.get("owners")
+        if not isinstance(owners, list) or not isinstance(owner_trust, list):
+            raise UpdateError("INVALID_DATA_BUNDLE_PROOF", "Data-bundle owner list is invalid.")
+        trusted_owners = {
+            item.get("ownerId"): item for item in owner_trust if isinstance(item, dict)
+        }
+        owner_ids = [item.get("ownerId") for item in owners if isinstance(item, dict)]
+        if (
+            len(owner_ids) != len(owners)
+            or len(set(owner_ids)) != len(owner_ids)
+            or set(owner_ids) != set(trusted_owners)
+        ):
+            raise UpdateError(
+                "DATA_BUNDLE_OWNERS_MISMATCH",
+                "Proof does not contain each trusted owner exactly once.",
+            )
+        for owner in owners:
+            expected_owner = trusted_owners[owner["ownerId"]]
+            if (
+                set(owner) != {"ownerId", "source", "catalogPath", "catalogSha256", "provenance"}
+                or owner.get("catalogPath")
+                != f"{expected_owner.get('repository')}/{expected_owner.get('catalogPath')}"
+            ):
+                raise UpdateError(
+                    "DATA_BUNDLE_OWNER_MISMATCH",
+                    f"Owner {owner['ownerId']} does not match trusted catalog identity.",
+                )
+            source = owner.get("source")
+            if (
+                not isinstance(source, dict)
+                or set(source) != {"repository", "ref", "commit"}
+                or source.get("repository") != expected_owner.get("repository")
+            ):
+                raise UpdateError(
+                    "DATA_BUNDLE_OWNER_MISMATCH",
+                    f"Owner {owner['ownerId']} source identity is not trusted.",
+                )
+            subject = read_subject(
+                owner.get("catalogPath"),
+                owner.get("catalogSha256"),
+                label=f"owner {owner['ownerId']} catalog",
+            )
+            self._verify_data_bundle_subject(
+                payload_root,
+                subject,
+                owner,
+                label=f"owner {owner['ownerId']} catalog",
+                channel=channel,
+            )
+        self._validate_inner_bundle_files(
+            manifest_value, proof, payload_root, policy_source, trusted_owners
+        )
+        self._verify_data_bundle_subject(
+            payload_root, policy_payload, policy_source, label="policy source", channel=channel
+        )
+        return proof
+
+    def _validate_inner_bundle_files(
+        self,
+        manifest: dict[str, Any],
+        proof: dict[str, Any],
+        payload_root: Path,
+        policy_source: dict[str, Any],
+        trusted_owners: dict[str, dict[str, Any]],
+    ) -> None:
+        proof_owners = {owner["ownerId"]: owner for owner in proof["owners"]}
+        manifest_owners = manifest.get("owners")
+        files = manifest.get("files")
+        if not isinstance(manifest_owners, list) or not isinstance(files, list):
+            raise UpdateError(
+                "INVALID_DATA_BUNDLE_MANIFEST",
+                "Inner bundle manifest owner/file lists are missing.",
+            )
+        seen_owners: set[str] = set()
+        expected_files: dict[str, str] = {}
+        for owner in manifest_owners:
+            fields = {"ownerId", "repository", "sourceSha", "catalogPath", "catalogSha256"}
+            if not isinstance(owner, dict) or set(owner) != fields:
+                raise UpdateError(
+                    "INVALID_DATA_BUNDLE_MANIFEST", "Inner bundle owner entry has an invalid shape."
+                )
+            owner_id = owner["ownerId"]
+            if not isinstance(owner_id, str):
+                raise UpdateError(
+                    "INVALID_DATA_BUNDLE_MANIFEST", "Inner bundle owner identifier is invalid."
+                )
+            proof_owner = proof_owners.get(owner_id)
+            trusted = trusted_owners.get(owner_id)
+            catalog_path = f"{trusted['repository']}/{trusted['catalogPath']}" if trusted else None
+            if (
+                owner_id in seen_owners
+                or proof_owner is None
+                or trusted is None
+                or owner.get("repository") != trusted["repository"]
+                or owner.get("sourceSha") != proof_owner["source"]["commit"]
+                or owner.get("catalogPath") != catalog_path
+                or owner.get("catalogSha256")
+                != proof_owner["catalogSha256"].removeprefix("sha256:")
+            ):
+                raise UpdateError(
+                    "DATA_BUNDLE_MANIFEST_MISMATCH",
+                    f"Inner bundle owner {owner_id!r} differs from its verified proof.",
+                )
+            seen_owners.add(owner_id)
+            expected_files[catalog_path] = owner["catalogSha256"].removeprefix("sha256:")
+        if seen_owners != set(proof_owners):
+            raise UpdateError(
+                "DATA_BUNDLE_MANIFEST_MISMATCH", "Inner bundle manifest omits a proved owner."
+            )
+        expected_files["workspace-product-policy-v2.json"] = proof["policySha256"].removeprefix(
+            "sha256:"
+        )
+        seen_files: dict[str, str] = {}
+        for item in files:
+            if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+                raise UpdateError(
+                    "INVALID_DATA_BUNDLE_MANIFEST", "Inner bundle file entry has an invalid shape."
+                )
+            path, digest = item.get("path"), item.get("sha256")
+            if (
+                not isinstance(path, str)
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+                or path in seen_files
+            ):
+                raise UpdateError(
+                    "INVALID_DATA_BUNDLE_MANIFEST", "Inner bundle file path or digest is invalid."
+                )
+            file_path = payload_root.joinpath(
+                *_safe_relative(path, field="inner bundle file path").parts
+            )
+            if (
+                file_path.is_symlink()
+                or not file_path.is_file()
+                or _file_digest(file_path) != "sha256:" + digest
+            ):
+                raise UpdateError(
+                    "DATA_BUNDLE_FILE_MISMATCH", f"Inner bundle file {path!r} digest is invalid."
+                )
+            seen_files[path] = digest
+        if any(seen_files.get(path) != digest for path, digest in expected_files.items()):
+            raise UpdateError(
+                "DATA_BUNDLE_MANIFEST_MISMATCH", "Inner manifest omits proved owner/policy files."
+            )
+
+    def _verify_data_bundle_subject(
+        self,
+        payload_root: Path,
+        payload: bytes,
+        record: dict[str, Any],
+        *,
+        label: str,
+        channel: str,
+    ) -> None:
+        source = record.get("source")
+        provenance = record.get("provenance")
+        attested = provenance.get("attestation") if isinstance(provenance, dict) else None
+        publisher = (
+            self.publishers.get(source.get("repository")) if isinstance(source, dict) else None
+        )
+        subject_path = record.get("catalogPath", record.get("path"))
+        if (
+            not isinstance(source, dict)
+            or not isinstance(provenance, dict)
+            or set(provenance)
+            != {"attestation", "bundlePath", "bundleSha256", "subjectPath", "subjectDigest"}
+            or publisher is None
+            or source.get("ref")
+            not in self.catalog.get("channels", {}).get(channel, {}).get("sourceRefs", [])
+            or re.fullmatch(r"[0-9a-f]{40}", str(source.get("commit", ""))) is None
+            or not isinstance(attested, dict)
+            or not isinstance(subject_path, str)
+        ):
+            raise UpdateError(
+                "UNTRUSTED_DATA_BUNDLE_SOURCE", f"{label} source proof is incomplete or untrusted."
+            )
+        attestation = attested.get("attestation")
+        _safe_relative(subject_path, field=f"{label} subject path")
+        attestation_run = attestation.get("run") if isinstance(attestation, dict) else None
+        if (
+            not isinstance(attestation, dict)
+            or set(attestation)
+            - {"kind", "uri", "subjectName", "repository", "workflow", "predicateType", "run"}
+            or attestation.get("kind") != "github-artifact-attestation"
+            or attestation.get("repository") != source["repository"]
+            or attestation.get("workflow") != publisher.get("workflow")
+            or attestation.get("predicateType") != "https://slsa.dev/provenance/v1"
+            or not {
+                "kind",
+                "subjectName",
+                "repository",
+                "workflow",
+                "predicateType",
+                "run",
+            }.issubset(attestation)
+            or attestation.get("subjectName") != PurePosixPath(subject_path).name
+            or not isinstance(attestation_run, dict)
+            or set(attestation_run) != {"id", "attempt", "url"}
+            or not isinstance(attestation_run.get("id"), str)
+            or re.fullmatch(r"[0-9]{1,30}", attestation_run["id"]) is None
+            or not isinstance(attestation_run.get("attempt"), int)
+            or isinstance(attestation_run.get("attempt"), bool)
+            or attestation_run["attempt"] < 1
+            or attestation_run.get("url")
+            != f"https://github.com/{source['repository']}/actions/runs/{attestation.get('run', {}).get('id')}/attempts/{attestation.get('run', {}).get('attempt')}"
+        ):
+            raise UpdateError(
+                "UNTRUSTED_DATA_BUNDLE_ATTESTATION", f"{label} attestation identity is not trusted."
+            )
+        bundle_path = payload_root.joinpath(
+            *_safe_relative(
+                provenance["bundlePath"], field=f"{label} attestation bundle path"
+            ).parts
+        )
+        if (
+            bundle_path.is_symlink()
+            or not bundle_path.is_file()
+            or not _valid_digest(provenance.get("bundleSha256"))
+        ):
+            raise UpdateError(
+                "INVALID_DATA_BUNDLE_ATTESTATION",
+                f"{label} attestation bundle is missing or unsafe.",
+            )
+        bundle_bytes = bundle_path.read_bytes()
+        if "sha256:" + hashlib.sha256(bundle_bytes).hexdigest() != provenance["bundleSha256"]:
+            raise UpdateError(
+                "INVALID_DATA_BUNDLE_ATTESTATION", f"{label} attestation bundle digest is invalid."
+            )
+        declared_subject_path = provenance.get("subjectPath")
+        if declared_subject_path != subject_path or provenance.get("subjectDigest") != record.get(
+            "catalogSha256", record.get("sha256")
+        ):
+            raise UpdateError(
+                "DATA_BUNDLE_SUBJECT_MISMATCH",
+                f"{label} attestation does not bind the declared source file.",
+            )
+        self._verify_attestation(
+            payload,
+            subject_name=PurePosixPath(subject_path).name,
+            digest=provenance["subjectDigest"],
+            repository=source["repository"],
+            workflow=publisher["workflow"],
+            source_ref=source["ref"],
+            source_commit=source["commit"],
+            bundle_path=bundle_path,
+        )
+
+    def _stage_candidate(
+        self,
+        candidate: Candidate,
+        plan_root: Path,
+        plan_id: str | None = None,
+        plan_digest: str | None = None,
+    ) -> dict[str, Any]:
         manifest = candidate.manifest
         artifact = manifest["artifact"]
         filename = PurePosixPath(urllib.parse.urlsplit(artifact["uri"]).path).name
@@ -2701,6 +3406,17 @@ class ComponentUpdater:
                 raise UpdateError(
                     "INVALID_BUNDLE", f"Installed {service} bundle pointer identity is invalid."
                 )
+        elif artifact["kind"] == "data-bundle":
+            payload_root = self._extract_data_bundle_archive(archive_path, payload_root, artifact)
+            proof = self._validate_data_bundle_proof(candidate, payload_root, manifest["channel"])
+            installed_path = self._install_data_bundle(
+                candidate,
+                archive_path,
+                payload_root,
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+            bundle_identity = artifact["sha256"]
         else:
             raise UpdateError(
                 "UNSUPPORTED_ARTIFACT",
@@ -2721,8 +3437,459 @@ class ComponentUpdater:
             "releasePath": str(installed_path),
             "archivePath": str(archive_path),
         }
+        if artifact["kind"] == "data-bundle":
+            item["dataBundle"] = {
+                "artifactId": artifact["sha256"],
+                "proofSha256": manifest["dataBundle"]["proofSha256"],
+                "proofSchemaVersion": proof["schemaVersion"],
+            }
         self._write_release_receipt(item)
         return item
+
+    def _extract_data_bundle_archive(
+        self, archive: Path, destination: Path, artifact: dict[str, Any]
+    ) -> Path:
+        """Expand a bounded zstd tar without following links or trusting archive paths."""
+        if shutil.which("zstd") is None:
+            raise UpdateError(
+                "DATA_BUNDLE_TOOL_MISSING", "The zstd utility is required to inspect a data bundle."
+            )
+        compressed = artifact.get("format")
+        if compressed not in {"tar.zst", "tar.zstd"}:
+            raise UpdateError("INVALID_ARTIFACT", "Data bundle must use the pinned tar.zst format.")
+        if (
+            artifact.get("sizeBytes") != archive.stat().st_size
+            or archive.stat().st_size > 64 * 1024 * 1024
+        ):
+            raise UpdateError(
+                "UNSAFE_ARTIFACT", "Data-bundle archive exceeds its compressed-size limit."
+            )
+        tar_path = archive.with_suffix(".tar")
+
+        def limit_tar_output() -> None:
+            import resource
+
+            output_limit = 320 * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_FSIZE, (output_limit, output_limit))
+
+        try:
+            with tar_path.open("xb") as output:
+                completed = self.runner(
+                    ["zstd", "--decompress", "--stdout", str(archive)],
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                    timeout=180,
+                    check=False,
+                    preexec_fn=limit_tar_output,
+                )
+                output.flush()
+                os.fsync(output.fileno())
+            if completed.returncode != 0 or tar_path.stat().st_size > 320 * 1024 * 1024:
+                raise UpdateError(
+                    "INVALID_ARTIFACT",
+                    "Cannot decompress data-bundle archive within its expanded-size limit.",
+                )
+            self._extract_tar(
+                tar_path,
+                destination,
+                expected_files=artifact.get("files"),
+                max_entries=1024,
+                max_member_bytes=16 * 1024 * 1024,
+                max_expanded_bytes=256 * 1024 * 1024,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UpdateError(
+                "INVALID_ARTIFACT", f"Cannot safely decompress data bundle: {error}"
+            ) from error
+        finally:
+            tar_path.unlink(missing_ok=True)
+        return destination
+
+    def _install_data_bundle(
+        self,
+        candidate: Candidate,
+        archive_path: Path,
+        payload_root: Path,
+        *,
+        plan_id: str | None = None,
+        plan_digest: str | None = None,
+    ) -> Path:
+        """Install immutable bytes and their extracted view under Authority's fixed root."""
+        artifact_id = candidate.manifest["artifact"]["sha256"]
+        raw_hex = artifact_id.removeprefix("sha256:")
+        if not re.fullmatch(r"[0-9a-f]{64}", raw_hex):
+            raise UpdateError("INVALID_DATA_BUNDLE", "Data-bundle artifact identity is invalid.")
+        archive_root = self.data_bundle_root / "archives"
+        versions_root = self.data_bundle_root / "versions"
+        metadata_root = self.data_bundle_root / "metadata"
+        try:
+            import grp
+
+            authority_group_id = grp.getgrnam("cyrene-authority").gr_gid
+            bundle_reader_group_id = grp.getgrnam("cyrene-product-bundle-reader").gr_gid
+        except (ImportError, KeyError) as error:
+            raise UpdateError(
+                "AUTHORITY_GROUP_MISSING",
+                "The cyrene-authority and cyrene-product-bundle-reader groups are required for data bundles.",
+            ) from error
+        group_by_directory = {
+            archive_root: authority_group_id,
+            versions_root: bundle_reader_group_id,
+            metadata_root: authority_group_id,
+        }
+        try:
+            root_info = self.data_bundle_root.lstat()
+        except OSError as error:
+            raise UpdateError(
+                "UNSAFE_DATA_BUNDLE_ROOT",
+                "Authority data-bundle root must be provisioned with restricted traversal ACLs.",
+            ) from error
+        if (
+            self.data_bundle_root.is_symlink()
+            or not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != 0
+            or stat.S_IMODE(root_info.st_mode) & 0o022
+        ):
+            raise UpdateError("UNSAFE_DATA_BUNDLE_ROOT", "Authority data-bundle root is unsafe.")
+        for directory, group_id in group_by_directory.items():
+            directory.mkdir(mode=0o750, exist_ok=True)
+            info = directory.lstat()
+            if (
+                directory.is_symlink()
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise UpdateError(
+                    "UNSAFE_DATA_BUNDLE_ROOT", "Authority data-bundle root is unsafe."
+                )
+            os.chown(directory, 0, group_id)
+            directory.chmod(0o750)
+        archive_target = archive_root / f"sha256-{raw_hex}.tar.zst"
+        version_target = versions_root / raw_hex
+        metadata_directory = metadata_root / raw_hex
+        metadata_directory.mkdir(mode=0o750, exist_ok=True)
+        metadata_info = metadata_directory.lstat()
+        if (
+            metadata_directory.is_symlink()
+            or not stat.S_ISDIR(metadata_info.st_mode)
+            or metadata_info.st_uid != 0
+            or stat.S_IMODE(metadata_info.st_mode) & 0o022
+        ):
+            raise UpdateError("UNSAFE_DATA_BUNDLE_ROOT", "Authority metadata path is unsafe.")
+        os.chown(metadata_directory, 0, authority_group_id)
+        metadata_directory.chmod(0o750)
+        if (
+            candidate.manifest_bytes is None
+            or _digest_json(candidate.manifest, "manifestDigest") != candidate.manifest_digest
+            or candidate.manifest.get("manifestDigest") != candidate.manifest_digest
+        ):
+            raise UpdateError(
+                "INVALID_MANIFEST", "Data-bundle import requires its verified outer manifest bytes."
+            )
+        try:
+            imported_manifest = json.loads(
+                candidate.manifest_bytes, object_pairs_hook=_unique_json_object
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_MANIFEST", "Verified data-bundle manifest bytes are invalid."
+            ) from error
+        if imported_manifest != candidate.manifest:
+            raise UpdateError(
+                "INVALID_MANIFEST", "Outer manifest bytes differ from the validated manifest."
+            )
+        metadata_path = metadata_directory / "component-manifest-v2.json"
+        import_record_path = metadata_directory / "import-record-v1.json"
+        import_record = {
+            "schemaVersion": 1,
+            "artifactId": artifact_id,
+            "componentId": candidate.component["componentId"],
+            "channel": candidate.manifest.get("channel"),
+            "manifestDigest": candidate.manifest_digest,
+            "manifestUri": candidate.manifest_uri,
+            "indexUri": candidate.index_uri,
+            "indexDigest": candidate.index.get("indexDigest"),
+            "indexSource": candidate.index.get("source"),
+            "publisherRepository": candidate.component["publisher"],
+        }
+        if metadata_path.exists() or metadata_path.is_symlink():
+            self._validate_authority_metadata_file(metadata_path, authority_group_id)
+            if metadata_path.read_bytes() != candidate.manifest_bytes:
+                raise UpdateError(
+                    "DATA_BUNDLE_COLLISION", "Existing outer manifest metadata differs."
+                )
+        else:
+            self._write_authority_metadata(metadata_path, candidate.manifest_bytes)
+        if import_record_path.exists() or import_record_path.is_symlink():
+            self._validate_authority_metadata_file(import_record_path, authority_group_id)
+            existing_record = _read_object(import_record_path, "existing data-bundle import record")
+            if any(existing_record.get(key) != value for key, value in import_record.items()):
+                raise UpdateError(
+                    "DATA_BUNDLE_COLLISION", "Existing data-bundle import record differs."
+                )
+        else:
+            self._write_authority_metadata(
+                import_record_path,
+                json.dumps(import_record, ensure_ascii=False, sort_keys=True, indent=2).encode()
+                + b"\n",
+            )
+        if (
+            not isinstance(plan_id, str)
+            or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+            or not _valid_digest(plan_digest)
+        ):
+            raise UpdateError(
+                "INVALID_PLAN", "Data-bundle import requires a digest-bound checked plan."
+            )
+        plan_refs = metadata_directory / "plans"
+        plan_refs.mkdir(mode=0o750, exist_ok=True)
+        plan_refs_info = plan_refs.lstat()
+        if plan_refs.is_symlink() or not stat.S_ISDIR(plan_refs_info.st_mode):
+            raise UpdateError("UNSAFE_DATA_BUNDLE_ROOT", "Authority plan metadata path is unsafe.")
+        os.chown(plan_refs, 0, authority_group_id)
+        plan_refs.chmod(0o750)
+        plan_reference_path = plan_refs / f"{plan_id}.json"
+        plan_reference = {
+            "schemaVersion": 1,
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "artifactId": artifact_id,
+            "manifestDigest": candidate.manifest_digest,
+            "proofSha256": candidate.manifest["dataBundle"]["proofSha256"],
+        }
+        plan_reference_bytes = (
+            json.dumps(plan_reference, ensure_ascii=False, sort_keys=True, indent=2).encode()
+            + b"\n"
+        )
+        if plan_reference_path.exists() or plan_reference_path.is_symlink():
+            self._validate_authority_metadata_file(plan_reference_path, authority_group_id)
+            existing_reference = _read_object(
+                plan_reference_path, "existing data-bundle plan reference"
+            )
+            if existing_reference != plan_reference:
+                raise UpdateError("DATA_BUNDLE_COLLISION", "Existing plan reference differs.")
+        else:
+            self._write_authority_metadata(plan_reference_path, plan_reference_bytes)
+        if archive_target.exists() or archive_target.is_symlink():
+            archive_info = archive_target.lstat()
+            if (
+                archive_target.is_symlink()
+                or not stat.S_ISREG(archive_info.st_mode)
+                or archive_info.st_uid != 0
+                or archive_info.st_gid != authority_group_id
+                or stat.S_IMODE(archive_info.st_mode) != 0o640
+                or _file_digest(archive_target) != artifact_id
+            ):
+                raise UpdateError(
+                    "DATA_BUNDLE_COLLISION",
+                    "Existing content-addressed archive is unsafe or mismatched.",
+                )
+        else:
+            temporary_archive = archive_root / f".{raw_hex}.{uuid.uuid4().hex}.tmp"
+            descriptor = os.open(
+                temporary_archive,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                0o640,
+            )
+            with os.fdopen(descriptor, "wb") as output, archive_path.open("rb") as source:
+                shutil.copyfileobj(source, output)
+                output.flush()
+                os.fsync(output.fileno())
+            try:
+                import grp
+
+                os.chown(temporary_archive, 0, grp.getgrnam("cyrene-authority").gr_gid)
+                os.chmod(temporary_archive, 0o640)
+            except (ImportError, KeyError) as error:
+                temporary_archive.unlink(missing_ok=True)
+                raise UpdateError(
+                    "AUTHORITY_GROUP_MISSING",
+                    "The cyrene-authority group is required for staged bundles.",
+                ) from error
+            os.replace(temporary_archive, archive_target)
+            self._fsync_directory(archive_root)
+        if version_target.exists() or version_target.is_symlink():
+            version_info = version_target.lstat()
+            if (
+                version_target.is_symlink()
+                or not stat.S_ISDIR(version_info.st_mode)
+                or version_info.st_uid != 0
+                or version_info.st_gid != bundle_reader_group_id
+                or stat.S_IMODE(version_info.st_mode) != 0o750
+            ):
+                raise UpdateError(
+                    "DATA_BUNDLE_COLLISION", "Existing data-bundle version path is unsafe."
+                )
+            proof = version_target / "data-bundle-proof-v1.json"
+            if (
+                proof.is_symlink()
+                or not proof.is_file()
+                or _file_digest(proof) != candidate.manifest["dataBundle"]["proofSha256"]
+            ):
+                raise UpdateError(
+                    "DATA_BUNDLE_COLLISION", "Existing extracted data-bundle proof differs."
+                )
+            self._verify_existing_bundle_tree(version_target, payload_root, bundle_reader_group_id)
+            return version_target
+        temporary = versions_root / f".{raw_hex}.{uuid.uuid4().hex}.tmp"
+        shutil.copytree(payload_root, temporary, symlinks=False)
+        try:
+            self._set_bundle_reader_permissions(temporary)
+            os.replace(temporary, version_target)
+            self._fsync_directory(versions_root)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+        return version_target
+
+    @staticmethod
+    def _verify_existing_bundle_tree(
+        installed_root: Path, verified_root: Path, group_id: int
+    ) -> None:
+        """Require a reused content-addressed tree to exactly match newly verified payloads."""
+        expected_files: dict[str, str] = {}
+        expected_directories: set[str] = set()
+        for current, directory_names, file_names in os.walk(verified_root, followlinks=False):
+            current_path = Path(current)
+            for name in directory_names:
+                path = current_path / name
+                if path.is_symlink() or not path.is_dir():
+                    raise UpdateError(
+                        "UNSAFE_DATA_BUNDLE", "Verified bundle has an unsafe directory."
+                    )
+                expected_directories.add(path.relative_to(verified_root).as_posix())
+            for name in file_names:
+                path = current_path / name
+                if path.is_symlink() or not path.is_file():
+                    raise UpdateError("UNSAFE_DATA_BUNDLE", "Verified bundle has an unsafe file.")
+                expected_files[path.relative_to(verified_root).as_posix()] = _file_digest(path)
+
+        actual_files: dict[str, str] = {}
+        actual_directories: set[str] = set()
+        for current, directory_names, file_names in os.walk(installed_root, followlinks=False):
+            current_path = Path(current)
+            info = current_path.lstat()
+            if (
+                current_path.is_symlink()
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or info.st_gid != group_id
+                or stat.S_IMODE(info.st_mode) != 0o750
+            ):
+                raise UpdateError(
+                    "UNSAFE_DATA_BUNDLE", "Installed bundle directory permissions are unsafe."
+                )
+            if current_path != installed_root:
+                actual_directories.add(current_path.relative_to(installed_root).as_posix())
+            for name in directory_names:
+                path = current_path / name
+                if path.is_symlink() or not path.is_dir():
+                    raise UpdateError(
+                        "UNSAFE_DATA_BUNDLE", "Installed bundle has an unsafe directory."
+                    )
+            for name in file_names:
+                path = current_path / name
+                info = path.lstat()
+                if (
+                    path.is_symlink()
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != 0
+                    or info.st_gid != group_id
+                    or stat.S_IMODE(info.st_mode) != 0o640
+                ):
+                    raise UpdateError(
+                        "UNSAFE_DATA_BUNDLE", "Installed bundle file permissions are unsafe."
+                    )
+                actual_files[path.relative_to(installed_root).as_posix()] = _file_digest(path)
+        if actual_files != expected_files or actual_directories != expected_directories:
+            raise UpdateError(
+                "DATA_BUNDLE_COLLISION",
+                "Existing data-bundle tree differs from its verified archive.",
+            )
+
+    @staticmethod
+    def _write_authority_metadata(path: Path, payload: bytes) -> None:
+        """Atomically publish read-only import evidence for Authority's fixed-root reader."""
+        try:
+            import grp
+
+            group_id = grp.getgrnam("cyrene-authority").gr_gid
+        except (ImportError, KeyError) as error:
+            raise UpdateError(
+                "AUTHORITY_GROUP_MISSING",
+                "The cyrene-authority group is required for data-bundle metadata.",
+            ) from error
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            0o640,
+        )
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            os.chown(temporary, 0, group_id)
+            os.chmod(temporary, 0o640)
+            os.replace(temporary, path)
+            ComponentUpdater._fsync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _validate_authority_metadata_file(path: Path, group_id: int) -> None:
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise UpdateError(
+                "UNSAFE_DATA_BUNDLE_ROOT", "Authority metadata file is unavailable."
+            ) from error
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != group_id
+            or stat.S_IMODE(info.st_mode) != 0o640
+        ):
+            raise UpdateError(
+                "UNSAFE_DATA_BUNDLE_ROOT", "Authority metadata file permissions are unsafe."
+            )
+
+    @staticmethod
+    def _set_bundle_reader_permissions(root: Path) -> None:
+        try:
+            import grp
+
+            group_id = grp.getgrnam("cyrene-product-bundle-reader").gr_gid
+        except (ImportError, KeyError) as error:
+            raise UpdateError(
+                "AUTHORITY_GROUP_MISSING",
+                "The cyrene-product-bundle-reader group is required for staged bundles.",
+            ) from error
+        for current, directories, files in os.walk(root, followlinks=False):
+            directory = Path(current)
+            if directory.is_symlink():
+                raise UpdateError("UNSAFE_DATA_BUNDLE", "Extracted data bundle contains a symlink.")
+            os.chown(directory, 0, group_id)
+            directory.chmod(0o750)
+            for name in directories + files:
+                path = directory / name
+                if path.is_symlink():
+                    raise UpdateError(
+                        "UNSAFE_DATA_BUNDLE", "Extracted data bundle contains a symlink."
+                    )
+                if path.is_dir():
+                    os.chown(path, 0, group_id)
+                    path.chmod(0o750)
+                elif path.is_file():
+                    os.chown(path, 0, group_id)
+                    path.chmod(0o640)
+                else:
+                    raise UpdateError(
+                        "UNSAFE_DATA_BUNDLE", "Extracted data bundle contains a special file."
+                    )
 
     @staticmethod
     def _write_private_file(path: Path, value: bytes) -> None:
@@ -2745,16 +3912,45 @@ class ComponentUpdater:
         self._normalize_payload(destination, entrypoint.as_posix())
 
     def _extract_tar(
-        self, archive: Path, destination: Path, expected_files: dict[str, str] | None
+        self,
+        archive: Path,
+        destination: Path,
+        expected_files: dict[str, str] | None,
+        *,
+        max_entries: int | None = None,
+        max_member_bytes: int | None = None,
+        max_expanded_bytes: int | None = None,
     ) -> None:
         destination.mkdir(mode=0o700)
         found: dict[str, str] = {}
+        seen_entries: set[str] = set()
+        expanded_bytes = 0
         try:
             with tarfile.open(archive, "r:*") as tar:
-                for member in tar.getmembers():
-                    path = _safe_relative(member.name.rstrip("/"), field="tar member")
+                entry_count = 0
+                for member in tar:
+                    entry_count += 1
+                    if max_entries is not None and entry_count > max_entries:
+                        raise UpdateError(
+                            "UNSAFE_ARTIFACT", "Archive contains too many files or directories."
+                        )
+                    raw_path = member.name
+                    if member.isdir() and raw_path.endswith("/"):
+                        raw_path = raw_path[:-1]
+                    path = _safe_relative(raw_path, field="tar member")
+                    normalized = path.as_posix()
+                    if normalized in seen_entries:
+                        raise UpdateError(
+                            "UNSAFE_ARTIFACT", f"Archive contains a duplicate entry: {member.name}"
+                        )
+                    seen_entries.add(normalized)
                     target = destination.joinpath(*path.parts)
                     if member.isdir():
+                        if member.size != 0:
+                            raise UpdateError(
+                                "UNSAFE_ARTIFACT",
+                                f"Archive directory has unexpected content: {member.name}",
+                            )
                         target.mkdir(parents=True, exist_ok=True, mode=0o755)
                         continue
                     if not member.isfile():
@@ -2762,9 +3958,14 @@ class ComponentUpdater:
                             "UNSAFE_ARTIFACT",
                             f"Archive contains a link or special file: {member.name}",
                         )
-                    if member.size > 2_000_000_000:
+                    if member.size > (max_member_bytes or 2_000_000_000):
                         raise UpdateError(
                             "UNSAFE_ARTIFACT", f"Archive member is too large: {member.name}"
+                        )
+                    expanded_bytes += member.size
+                    if max_expanded_bytes is not None and expanded_bytes > max_expanded_bytes:
+                        raise UpdateError(
+                            "UNSAFE_ARTIFACT", "Archive exceeds its expanded-size limit."
                         )
                     target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
                     source = tar.extractfile(member)
@@ -2946,6 +4147,11 @@ class ComponentUpdater:
                 "bundleIdentity",
             }
             if (
+                isinstance(item, dict)
+                and self.components.get(item.get("componentId"), {}).get("kind") == "data-bundle"
+            ):
+                item_fields.add("dataBundle")
+            if (
                 not isinstance(item, dict)
                 or set(item) != item_fields
                 or not isinstance(item.get("componentId"), str)
@@ -2989,7 +4195,35 @@ class ComponentUpdater:
 
             component = self.components[component_id]
             service = component.get("pythonBundleService")
-            if service:
+            if component.get("kind") == "data-bundle":
+                artifact_descriptor = manifest.get("artifact")
+                artifact_id = (
+                    artifact_descriptor.get("sha256")
+                    if isinstance(artifact_descriptor, dict)
+                    else None
+                )
+                expected_release = (
+                    self.data_bundle_root / "versions" / artifact_id.removeprefix("sha256:")
+                    if _valid_digest(artifact_id)
+                    else Path("/")
+                )
+                expected_pointer = (
+                    artifact_id.removeprefix("sha256:") if _valid_digest(artifact_id) else None
+                )
+                bundle_record = item.get("dataBundle")
+                if (
+                    not isinstance(bundle_record, dict)
+                    or set(bundle_record) != {"artifactId", "proofSha256", "proofSchemaVersion"}
+                    or bundle_record.get("artifactId") != artifact_id
+                    or bundle_record.get("proofSha256")
+                    != manifest.get("dataBundle", {}).get("proofSha256")
+                    or bundle_record.get("proofSchemaVersion") != 1
+                    or item.get("bundleIdentity") != artifact_id
+                ):
+                    raise UpdateError(
+                        "INVALID_STAGE", "Data-bundle staged identity differs from its manifest."
+                    )
+            elif service:
                 bundle_identity = item.get("bundleIdentity")
                 if (
                     not isinstance(bundle_identity, str)
@@ -3027,11 +4261,44 @@ class ComponentUpdater:
                 raise UpdateError(
                     "INVALID_STAGE", f"Staged release is missing or unsafe for {component_id}."
                 )
-            if not self._path_is_under(release_path, self.install_root):
+            allowed_release_root = (
+                self.data_bundle_root
+                if component.get("kind") == "data-bundle"
+                else self.install_root
+            )
+            if not self._path_is_under(release_path, allowed_release_root):
                 raise UpdateError(
-                    "INVALID_STAGE", f"Staged release escaped the install root for {component_id}."
+                    "INVALID_STAGE", f"Staged release escaped its trusted root for {component_id}."
                 )
-            if service:
+            if component.get("kind") == "data-bundle":
+                authority_archive = (
+                    self.data_bundle_root
+                    / "archives"
+                    / f"sha256-{item['artifactDigest'].removeprefix('sha256:')}.tar.zst"
+                )
+                if (
+                    authority_archive.is_symlink()
+                    or not authority_archive.is_file()
+                    or _file_digest(authority_archive) != item["artifactDigest"]
+                ):
+                    raise UpdateError(
+                        "INVALID_STAGE",
+                        "Authority's content-addressed bundle archive is missing or changed.",
+                    )
+                self._validate_data_bundle_proof(
+                    Candidate(
+                        component,
+                        manifest,
+                        item["manifestDigest"],
+                        item["artifactDigest"],
+                        "",
+                        {},
+                        "",
+                    ),
+                    release_path,
+                    record["channel"],
+                )
+            elif service:
                 try:
                     inner = self._load_service_bundle().validate_bundle(
                         release_path, expected_service=service
@@ -3061,24 +4328,26 @@ class ComponentUpdater:
                         "INVALID_STAGE", f"Staged native manifest changed for {component_id}."
                     )
 
-            receipt = self._read_release_receipt(component_id, item["releaseIdentity"])
-            if (
-                receipt is None
-                or receipt.get("manifest") != manifest
-                or receipt.get("artifactDigest") != item["artifactDigest"]
-                or receipt.get("version") != item["version"]
-                or receipt.get("bundleIdentity") != item.get("bundleIdentity")
-            ):
-                raise UpdateError(
-                    "INVALID_STAGE",
-                    f"Verified release receipt is missing or inconsistent for {component_id}.",
-                )
+            if component.get("kind") != "data-bundle":
+                receipt = self._read_release_receipt(component_id, item["releaseIdentity"])
+                if (
+                    receipt is None
+                    or receipt.get("manifest") != manifest
+                    or receipt.get("artifactDigest") != item["artifactDigest"]
+                    or receipt.get("version") != item["version"]
+                    or receipt.get("bundleIdentity") != item.get("bundleIdentity")
+                ):
+                    raise UpdateError(
+                        "INVALID_STAGE",
+                        f"Verified release receipt is missing or inconsistent for {component_id}.",
+                    )
 
             archive_path = Path(item["archivePath"])
             if (
                 archive_path.parent != stage_root / component_id
                 or archive_path.is_symlink()
                 or not archive_path.is_file()
+                or _file_digest(archive_path) != item["artifactDigest"]
             ):
                 raise UpdateError(
                     "INVALID_STAGE", f"Staged archive is missing or unsafe for {component_id}."
@@ -3098,7 +4367,31 @@ class ComponentUpdater:
         captured = []
         for item in components:
             component_id = item["componentId"]
-            installed = self._installed(self.components[component_id])
+            component = self.components[component_id]
+            installed = self._installed(component)
+            if component.get("kind") == "data-bundle" and installed.get("active") is True:
+                artifact_id = installed.get("artifactDigest")
+                captured.append(
+                    {
+                        "componentId": component_id,
+                        "version": installed.get("activeVersion")
+                        if installed.get("manifest")
+                        else "0.0.0",
+                        "releaseIdentity": installed.get("releaseIdentity")
+                        if installed.get("manifest")
+                        else None,
+                        "manifestDigest": installed.get("manifestDigest")
+                        if installed.get("manifest")
+                        else None,
+                        "artifactDigest": artifact_id,
+                        "pointerIdentity": artifact_id.removeprefix("sha256:")
+                        if _valid_digest(artifact_id)
+                        else None,
+                        "bundleIdentity": artifact_id,
+                        "identityAttested": True,
+                    }
+                )
+                continue
             captured.append(
                 {
                     "componentId": component_id,
@@ -3112,6 +4405,439 @@ class ComponentUpdater:
                 }
             )
         return captured
+
+    def _prepare_authority_activation(
+        self, record: dict[str, Any], plan_id: str, plan_digest: str
+    ) -> dict[str, Any] | None:
+        data_bundle = next(
+            (
+                item
+                for item in record["components"]
+                if self.components[item["componentId"]].get("kind") == "data-bundle"
+            ),
+            None,
+        )
+        if data_bundle is None:
+            return None
+        status = self._authority_request({"action": "status"})
+        generation = status.get("highestGeneration")
+        current = status.get("activeArtifactId")
+        if (
+            not isinstance(generation, int)
+            or isinstance(generation, bool)
+            or generation < 0
+            or (current is not None and not _valid_digest(current))
+        ):
+            raise UpdateError(
+                "AUTHORITY_STATUS_INVALID",
+                "Authority status omitted a valid generation or artifact identity.",
+            )
+        data = data_bundle.get("dataBundle")
+        artifact_id = data.get("artifactId") if isinstance(data, dict) else None
+        if not _valid_digest(artifact_id):
+            raise UpdateError("INVALID_STAGE", "Staged data-bundle artifact identity is invalid.")
+        validation = self._authority_request(
+            {
+                "action": "validateArtifact",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "artifactId": artifact_id,
+            }
+        )
+        if (
+            validation.get("artifactId") != artifact_id
+            or validation.get("planId") != plan_id
+            or validation.get("planDigest") != plan_digest
+            or validation.get("highestGeneration") != generation
+            or validation.get("nextGeneration") != generation + 1
+            or validation.get("currentGeneration") != status.get("currentGeneration")
+        ):
+            raise UpdateError(
+                "AUTHORITY_PLAN_MISMATCH",
+                "Authority validation response differs from the confirmed staged plan.",
+            )
+        return {
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "artifactId": artifact_id,
+            "expectedGeneration": generation,
+            "previousArtifactId": current,
+            "validationResponse": validation,
+        }
+
+    def _activate_authority_bundle(self, transaction: dict[str, Any]) -> None:
+        activation = transaction.get("authorityActivation")
+        if activation is None:
+            return
+        response = self._authority_request(
+            {
+                "action": "activateArtifact",
+                "planId": activation["planId"],
+                "planDigest": activation["planDigest"],
+                "expectedGeneration": activation["expectedGeneration"],
+                "artifactId": activation["artifactId"],
+            }
+        )
+        status = self._authority_request({"action": "status"})
+        current = status.get("activeArtifactId")
+        generation = status.get("highestGeneration")
+        if (
+            current != activation["artifactId"]
+            or not isinstance(generation, int)
+            or generation != activation["expectedGeneration"] + 1
+            or response.get("artifactId") != activation["artifactId"]
+            or response.get("planId") != activation["planId"]
+            or response.get("planDigest") != activation["planDigest"]
+            or response.get("currentGeneration") != status.get("currentGeneration")
+            or response.get("highestGeneration") != generation
+            or response.get("activationEpoch") != status.get("activationEpoch")
+        ):
+            raise UpdateError(
+                "AUTHORITY_ACTIVATION_UNCONFIRMED",
+                "Authority did not durably activate the verified data bundle.",
+                retryable=True,
+            )
+        activation["activationResponse"] = response
+        activation["resultingGeneration"] = generation
+        activation["resultingEpoch"] = status.get("activationEpoch")
+        transaction_path = self.state_root / "transactions" / f"{transaction['planId']}.json"
+        if transaction_path.is_file() and not transaction_path.is_symlink():
+            _atomic_json(transaction_path, transaction)
+
+    def _rollback_authority_activation(self, transaction: dict[str, Any]) -> None:
+        activation = transaction.get("authorityActivation")
+        if not isinstance(activation, dict):
+            return
+        status = self._authority_request({"action": "status"})
+        current = status.get("activeArtifactId")
+        if current == activation.get("previousArtifactId"):
+            return
+        if current != activation.get("artifactId"):
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_CONFLICT",
+                "Authority active artifact changed outside this update transaction.",
+            )
+        previous_artifact = activation.get("previousArtifactId")
+        if not _valid_digest(previous_artifact):
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE",
+                "Initial Authority activation has no previous artifact; its durable pointer cannot be rewound.",
+            )
+        origin_plan_id, origin_plan_digest = self._find_authority_artifact_plan_reference(
+            previous_artifact
+        )
+        generation = status.get("highestGeneration")
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 0:
+            raise UpdateError(
+                "AUTHORITY_STATUS_INVALID", "Authority generation is invalid during rollback."
+            )
+        rollback_material = {
+            "schemaVersion": 1,
+            "action": "rollback",
+            "originPlanId": origin_plan_id,
+            "originPlanDigest": origin_plan_digest,
+            "artifactId": previous_artifact,
+            "recoveryPlanId": transaction["planId"],
+            "recoveryPlanDigest": transaction["planDigest"],
+        }
+        rollback_digest = "sha256:" + hashlib.sha256(canonical_jcs(rollback_material)).hexdigest()
+        rollback_id = "plan-rollback-" + rollback_digest.split(":", 1)[1][:32]
+        self._persist_authority_rollback_plan_reference(
+            previous_artifact,
+            plan_id=rollback_id,
+            plan_digest=rollback_digest,
+            origin_plan_id=origin_plan_id,
+            origin_plan_digest=origin_plan_digest,
+        )
+        validation = self._authority_request(
+            {
+                "action": "validateArtifact",
+                "planId": rollback_id,
+                "planDigest": rollback_digest,
+                "artifactId": previous_artifact,
+            }
+        )
+        if (
+            validation.get("planId") != rollback_id
+            or validation.get("planDigest") != rollback_digest
+            or validation.get("artifactId") != previous_artifact
+            or validation.get("highestGeneration") != generation
+            or validation.get("nextGeneration") != generation + 1
+            or validation.get("currentGeneration") != status.get("currentGeneration")
+        ):
+            raise UpdateError(
+                "AUTHORITY_PLAN_MISMATCH",
+                "Authority rollback validation differs from the confirmed recovery plan.",
+            )
+        response = self._authority_request(
+            {
+                "action": "activateArtifact",
+                "planId": rollback_id,
+                "planDigest": rollback_digest,
+                "expectedGeneration": generation,
+                "artifactId": previous_artifact,
+            }
+        )
+        after = self._authority_request({"action": "status"})
+        if (
+            after.get("activeArtifactId") != previous_artifact
+            or not isinstance(after.get("highestGeneration"), int)
+            or after["highestGeneration"] != generation + 1
+            or response.get("planId") != rollback_id
+            or response.get("planDigest") != rollback_digest
+            or response.get("artifactId") != previous_artifact
+            or response.get("currentGeneration") != after.get("currentGeneration")
+            or response.get("highestGeneration") != after["highestGeneration"]
+            or response.get("activationEpoch") != after.get("activationEpoch")
+        ):
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNCONFIRMED",
+                "Authority did not durably restore the previous artifact at a higher generation.",
+            )
+        activation["rollbackResponse"] = response
+        activation["rollbackPlanId"] = rollback_id
+        activation["rollbackPlanDigest"] = rollback_digest
+        activation["rollbackGeneration"] = after["highestGeneration"]
+
+    def _find_authority_artifact_plan_reference(self, artifact_id: str) -> tuple[str, str]:
+        """Find a normal trusted plan reference that originally imported an artifact."""
+        if not _valid_digest(artifact_id):
+            raise UpdateError("INVALID_PLAN", "Authority artifact identity is invalid.")
+        raw_hex = artifact_id.removeprefix("sha256:")
+        metadata_directory = self.data_bundle_root / "metadata" / raw_hex
+        plans_directory = metadata_directory / "plans"
+        try:
+            plans_info = plans_directory.lstat()
+        except OSError as error:
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE",
+                "Previous Authority artifact has no imported plan references.",
+            ) from error
+        if (
+            plans_directory.is_symlink()
+            or not stat.S_ISDIR(plans_info.st_mode)
+            or plans_info.st_uid != 0
+            or stat.S_IMODE(plans_info.st_mode) & 0o022
+        ):
+            raise UpdateError("UNSAFE_DATA_BUNDLE_ROOT", "Authority plan metadata path is unsafe.")
+        try:
+            import grp
+
+            authority_group_id = grp.getgrnam("cyrene-authority").gr_gid
+        except (ImportError, KeyError) as error:
+            raise UpdateError(
+                "AUTHORITY_GROUP_MISSING", "The cyrene-authority group is required for rollback."
+            ) from error
+
+        manifest_path = metadata_directory / "component-manifest-v2.json"
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE", "Previous outer manifest metadata is unavailable."
+            )
+        self._validate_authority_metadata_file(manifest_path, authority_group_id)
+        try:
+            manifest = json.loads(manifest_path.read_bytes(), object_pairs_hook=_unique_json_object)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE", "Previous outer manifest metadata is invalid."
+            ) from error
+        if not isinstance(manifest, dict):
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE", "Previous outer manifest metadata is invalid."
+            )
+        manifest_digest = manifest.get("manifestDigest")
+        envelope = manifest.get("dataBundle")
+        if (
+            not _valid_digest(manifest_digest)
+            or manifest_digest != _digest_json(manifest, "manifestDigest")
+            or not isinstance(envelope, dict)
+            or set(envelope) != {"proofPath", "proofSha256"}
+            or not _valid_digest(envelope.get("proofSha256"))
+        ):
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE", "Previous outer manifest identity is invalid."
+            )
+
+        reference_fields = {
+            "schemaVersion",
+            "planId",
+            "planDigest",
+            "artifactId",
+            "manifestDigest",
+            "proofSha256",
+        }
+        for path in sorted(plans_directory.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                continue
+            self._validate_authority_metadata_file(path, authority_group_id)
+            reference = _read_object(path, "Authority artifact plan reference")
+            if (
+                set(reference) != reference_fields
+                or reference.get("schemaVersion") != 1
+                or reference.get("planId") != path.stem
+                or PLAN_ID_PATTERN.fullmatch(path.stem) is None
+                or not _valid_digest(reference.get("planDigest"))
+                or reference.get("artifactId") != artifact_id
+                or reference.get("manifestDigest") != manifest_digest
+                or reference.get("proofSha256") != envelope["proofSha256"]
+            ):
+                continue
+            return path.stem, reference["planDigest"]
+        raise UpdateError(
+            "AUTHORITY_ROLLBACK_UNAVAILABLE",
+            "Previous Authority artifact has no matching normal plan reference.",
+        )
+
+    def _persist_authority_rollback_plan_reference(
+        self,
+        artifact_id: str,
+        *,
+        plan_id: str,
+        plan_digest: str,
+        origin_plan_id: str,
+        origin_plan_digest: str,
+    ) -> None:
+        """Bind a monotonic rollback plan to an already verified immutable artifact."""
+        if (
+            not _valid_digest(artifact_id)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", plan_id) is None
+            or not _valid_digest(plan_digest)
+            or PLAN_ID_PATTERN.fullmatch(origin_plan_id) is None
+            or not _valid_digest(origin_plan_digest)
+        ):
+            raise UpdateError("INVALID_PLAN", "Authority rollback plan identity is invalid.")
+        raw_hex = artifact_id.removeprefix("sha256:")
+        metadata_directory = self.data_bundle_root / "metadata" / raw_hex
+        manifest_path = metadata_directory / "component-manifest-v2.json"
+        import_record_path = metadata_directory / "import-record-v1.json"
+        for directory in (
+            self.data_bundle_root,
+            self.data_bundle_root / "metadata",
+            metadata_directory,
+        ):
+            try:
+                info = directory.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "AUTHORITY_ROLLBACK_UNAVAILABLE",
+                    "Previous Authority artifact import metadata is unavailable.",
+                ) from error
+            if (
+                directory.is_symlink()
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise UpdateError(
+                    "UNSAFE_DATA_BUNDLE_ROOT", "Previous Authority artifact metadata is unsafe."
+                )
+        if (
+            manifest_path.is_symlink()
+            or not manifest_path.is_file()
+            or import_record_path.is_symlink()
+            or not import_record_path.is_file()
+        ):
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE",
+                "Previous Authority artifact has no imported outer manifest metadata.",
+            )
+        try:
+            import grp
+
+            authority_group_id = grp.getgrnam("cyrene-authority").gr_gid
+        except (ImportError, KeyError) as error:
+            raise UpdateError(
+                "AUTHORITY_GROUP_MISSING", "The cyrene-authority group is required for rollback."
+            ) from error
+        self._validate_authority_metadata_file(manifest_path, authority_group_id)
+        self._validate_authority_metadata_file(import_record_path, authority_group_id)
+        manifest_bytes = manifest_path.read_bytes()
+        try:
+            manifest = json.loads(manifest_bytes, object_pairs_hook=_unique_json_object)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE", "Previous outer manifest metadata is invalid."
+            ) from error
+        import_record = _read_object(import_record_path, "Authority artifact import record")
+        envelope = manifest.get("dataBundle") if isinstance(manifest, dict) else None
+        artifact = manifest.get("artifact") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("schemaVersion") != 2
+            or manifest.get("manifestDigest") != _digest_json(manifest, "manifestDigest")
+            or manifest.get("contentDigest") != artifact_id
+            or not isinstance(artifact, dict)
+            or artifact.get("kind") != "data-bundle"
+            or artifact.get("sha256") != artifact_id
+            or not isinstance(envelope, dict)
+            or set(envelope) != {"proofPath", "proofSha256"}
+            or envelope.get("proofPath") != "data-bundle-proof-v1.json"
+            or not _valid_digest(envelope.get("proofSha256"))
+            or import_record.get("artifactId") != artifact_id
+            or import_record.get("manifestDigest") != manifest.get("manifestDigest")
+        ):
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE",
+                "Previous Authority artifact manifest identity is not trustworthy.",
+            )
+        proof_path = self.data_bundle_root / "versions" / raw_hex / envelope["proofPath"]
+        for directory in (self.data_bundle_root / "versions", proof_path.parent):
+            try:
+                info = directory.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "AUTHORITY_ROLLBACK_UNAVAILABLE",
+                    "Previous Authority artifact version directory is unavailable.",
+                ) from error
+            if (
+                directory.is_symlink()
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise UpdateError(
+                    "UNSAFE_DATA_BUNDLE_ROOT", "Previous Authority artifact version path is unsafe."
+                )
+        if (
+            proof_path.is_symlink()
+            or not proof_path.is_file()
+            or _file_digest(proof_path) != envelope["proofSha256"]
+        ):
+            raise UpdateError(
+                "AUTHORITY_ROLLBACK_UNAVAILABLE",
+                "Previous Authority artifact proof does not match its outer manifest.",
+            )
+        plans_directory = metadata_directory / "plans"
+        plans_directory.mkdir(mode=0o750, exist_ok=True)
+        info = plans_directory.lstat()
+        if plans_directory.is_symlink() or not stat.S_ISDIR(info.st_mode) or info.st_uid != 0:
+            raise UpdateError("UNSAFE_DATA_BUNDLE_ROOT", "Authority plan metadata path is unsafe.")
+        os.chown(plans_directory, 0, authority_group_id)
+        plans_directory.chmod(0o750)
+        reference = {
+            "schemaVersion": 1,
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "artifactId": artifact_id,
+            "manifestDigest": manifest["manifestDigest"],
+            "proofSha256": envelope["proofSha256"],
+            "action": "rollback",
+            "originPlanId": origin_plan_id,
+            "originPlanDigest": origin_plan_digest,
+        }
+        reference_path = plans_directory / f"{plan_id}.json"
+        payload = (
+            json.dumps(reference, ensure_ascii=False, sort_keys=True, indent=2).encode() + b"\n"
+        )
+        if reference_path.exists() or reference_path.is_symlink():
+            self._validate_authority_metadata_file(reference_path, authority_group_id)
+            if (
+                reference_path.is_symlink()
+                or _read_object(reference_path, "rollback plan reference") != reference
+            ):
+                raise UpdateError("DATA_BUNDLE_COLLISION", "Rollback plan reference differs.")
+        else:
+            self._write_authority_metadata(reference_path, payload)
 
     def _begin_maintenance(self, transaction: dict[str, Any]) -> str:
         request_id = _maintenance_request_id(transaction)
@@ -3261,6 +4987,8 @@ class ComponentUpdater:
             previous = next(
                 old for old in transaction["previous"] if old["componentId"] == item["componentId"]
             )
+            if component.get("kind") == "data-bundle":
+                continue
             if component.get("pythonBundleService"):
                 bundle = self._load_service_bundle()
                 bundle_identity = item.get("bundleIdentity")
@@ -3450,6 +5178,13 @@ class ComponentUpdater:
                     "SERVICE_NOT_MANAGED",
                     "The staged component has no supported, catalog-matched local service.",
                 )
+            if component.get("kind") == "data-bundle":
+                if not self._authority_available():
+                    raise UpdateError(
+                        "AUTHORITY_NOT_MANAGED",
+                        "Authority's restricted local activation socket is unavailable; data bundle remains staged.",
+                    )
+                continue
             if not self._unit_exists(component):
                 raise UpdateError(
                     "SERVICE_NOT_MANAGED",
@@ -3479,6 +5214,8 @@ class ComponentUpdater:
         try:
             for previous in transaction["previous"]:
                 component = self.components[previous["componentId"]]
+                if component.get("kind") == "data-bundle":
+                    continue
                 candidate = next(
                     item
                     for item in transaction["components"]
@@ -3541,6 +5278,7 @@ class ComponentUpdater:
                     ],
                 }
             )
+            self._rollback_authority_activation(transaction)
             return (
                 True,
                 "Prior active versions were restored and health-checked; gate may be released.",
@@ -3669,7 +5407,21 @@ class ComponentUpdater:
                     retryable=True,
                 )
             component_ids.add(component_id)
-            if component.get("pythonBundleService"):
+            if component.get("kind") == "data-bundle":
+                artifact_id = item.get("artifactDigest")
+                if (
+                    not _valid_digest(artifact_id)
+                    or item.get("bundleIdentity") != artifact_id
+                    or item.get("pointerIdentity") != artifact_id.removeprefix("sha256:")
+                    or not isinstance(item.get("dataBundle"), dict)
+                    or item["dataBundle"].get("artifactId") != artifact_id
+                ):
+                    raise UpdateError(
+                        "TRANSACTION_IDENTITY_UNKNOWN",
+                        f"Update journal data-bundle identity is incomplete for {component_id}.",
+                        retryable=True,
+                    )
+            elif component.get("pythonBundleService"):
                 bundle_identity = item.get("bundleIdentity")
                 if (
                     not isinstance(bundle_identity, str)
@@ -3727,6 +5479,53 @@ class ComponentUpdater:
                     retryable=True,
                 )
             previous_ids.add(component_id)
+            if component.get("kind") == "data-bundle":
+                if item.get("version") is None:
+                    if any(
+                        item.get(key) is not None
+                        for key in (
+                            "releaseIdentity",
+                            "manifestDigest",
+                            "artifactDigest",
+                            "pointerIdentity",
+                            "bundleIdentity",
+                        )
+                    ):
+                        raise UpdateError(
+                            "TRANSACTION_IDENTITY_UNKNOWN",
+                            "Empty Authority snapshot identity has stray fields.",
+                            retryable=True,
+                        )
+                elif item.get("releaseIdentity") is None:
+                    artifact_id = item.get("artifactDigest")
+                    if (
+                        item.get("version") != "0.0.0"
+                        or item.get("manifestDigest") is not None
+                        or not _valid_digest(artifact_id)
+                        or item.get("pointerIdentity") != artifact_id.removeprefix("sha256:")
+                        or item.get("bundleIdentity") != artifact_id
+                        or item.get("identityAttested") is not True
+                    ):
+                        raise UpdateError(
+                            "TRANSACTION_IDENTITY_UNKNOWN",
+                            "Prior Authority snapshot identity is invalid.",
+                            retryable=True,
+                        )
+                elif (
+                    not isinstance(item.get("version"), str)
+                    or VERSION_PATTERN.fullmatch(item["version"]) is None
+                    or not _valid_digest(item.get("releaseIdentity"))
+                    or item.get("manifestDigest") != item.get("releaseIdentity")
+                    or not _valid_digest(item.get("artifactDigest"))
+                    or item.get("pointerIdentity") != item["artifactDigest"].removeprefix("sha256:")
+                    or item.get("bundleIdentity") != item.get("artifactDigest")
+                ):
+                    raise UpdateError(
+                        "TRANSACTION_IDENTITY_UNKNOWN",
+                        "Prior Authority artifact identity is invalid.",
+                        retryable=True,
+                    )
+                continue
             if item.get("version") is None:
                 if any(
                     item.get(key) is not None
@@ -4007,6 +5806,7 @@ class ComponentUpdater:
         workflow: str,
         source_ref: str,
         source_commit: str,
+        bundle_path: Path | None = None,
     ) -> None:
         if Path(repository).name == "" or not _valid_digest(digest):
             raise UpdateError("INVALID_ATTESTATION", "Attestation subject identity is invalid.")
@@ -4021,27 +5821,32 @@ class ComponentUpdater:
                     "ATTESTATION_VERIFIER_MISSING",
                     "GitHub CLI (`gh`) is required to verify artifact attestations.",
                 )
+            arguments = [
+                "gh",
+                "attestation",
+                "verify",
+                str(temporary_path),
+                "--repo",
+                repository,
+                "--signer-workflow",
+                workflow,
+                "--source-ref",
+                source_ref,
+                "--source-digest",
+                source_commit,
+                "--predicate-type",
+                "https://slsa.dev/provenance/v1",
+                "--cert-oidc-issuer",
+                "https://token.actions.githubusercontent.com",
+                "--format",
+                "json",
+            ]
+            if bundle_path is not None:
+                if bundle_path.is_symlink() or not bundle_path.is_file():
+                    raise UpdateError("INVALID_ATTESTATION", "Attestation bundle path is unsafe.")
+                arguments.extend(["--bundle", str(bundle_path)])
             completed = self.runner(
-                [
-                    "gh",
-                    "attestation",
-                    "verify",
-                    str(temporary_path),
-                    "--repo",
-                    repository,
-                    "--signer-workflow",
-                    workflow,
-                    "--source-ref",
-                    source_ref,
-                    "--source-digest",
-                    source_commit,
-                    "--predicate-type",
-                    "https://slsa.dev/provenance/v1",
-                    "--cert-oidc-issuer",
-                    "https://token.actions.githubusercontent.com",
-                    "--format",
-                    "json",
-                ],
+                arguments,
                 capture_output=True,
                 text=True,
                 timeout=60,

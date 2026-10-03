@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/data-bundle-proof-v1.schema.json",
+  "title": "Cyrene Paired Data Bundle Proof v1",
+  "description": "Closed source and attestation proof for a data-bundle archive. Each owner catalog and the Platform policy file have an independently verifiable GitHub SLSA bundle.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "protocolVersion",
+    "contractApiVersion",
+    "manifestPath",
+    "manifestSha256",
+    "policyPath",
+    "policySha256",
+    "policySchemaVersion",
+    "owners",
+    "policySource"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "protocolVersion": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+    },
+    "contractApiVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "manifestPath": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+    },
+    "manifestSha256": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+    },
+    "policyPath": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+    },
+    "policySha256": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+    },
+    "policySchemaVersion": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+    },
+    "owners": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/owner"
+      },
+      "uniqueItems": true
+    },
+    "policySource": {
+      "$ref": "#/$defs/policySource"
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "ref",
+        "commit"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "ref": {
+          "type": "string",
+          "pattern": "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
+        },
+        "commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        }
+      }
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "source",
+        "catalogPath",
+        "catalogSha256",
+        "provenance"
+      ],
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "catalogPath": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+        },
+        "catalogSha256": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+        },
+        "provenance": {
+          "$ref": "#/$defs/attestedFile"
+        }
+      }
+    },
+    "policySource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "path",
+        "sha256",
+        "provenance"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "path": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+        },
+        "provenance": {
+          "$ref": "#/$defs/attestedFile"
+        }
+      }
+    },
+    "attestedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attestation",
+        "bundlePath",
+        "bundleSha256",
+        "subjectPath",
+        "subjectDigest"
+      ],
+      "properties": {
+        "attestation": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/provenance"
+        },
+        "bundlePath": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+        },
+        "bundleSha256": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+        },
+        "subjectPath": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+        },
+        "subjectDigest": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/digest"
+        }
+      }
+    }
+  }
+}
