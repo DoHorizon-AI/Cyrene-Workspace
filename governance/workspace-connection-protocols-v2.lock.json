@@ -7,12 +7,12 @@
       "definition": {
         "repository": "DoHorizon-AI/Cyrene-Platform",
         "path": "contracts/proto/cyrene/workspace/authority/v2/workspace_authority.proto",
-        "sha256": "3f81dd6004a5c2747ff0a9140d6f1f5884cf3e36738fa9cea6f1233e46fb0349"
+        "sha256": "d8d1f7e9abff39877f55521a3a8f3fc56e950aca55472cc12a2b0fcbcd889d0b"
       },
       "mirror": {
         "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
         "path": "contracts/proto/cyrene/workspace/authority/v2/workspace_authority.proto",
-        "sha256": "3f81dd6004a5c2747ff0a9140d6f1f5884cf3e36738fa9cea6f1233e46fb0349"
+        "sha256": "d8d1f7e9abff39877f55521a3a8f3fc56e950aca55472cc12a2b0fcbcd889d0b"
       }
     },
     {
@@ -33,12 +33,12 @@
       "definition": {
         "repository": "DoHorizon-AI/Cyrene-Platform",
         "path": "contracts/proto/cyrene/workspace/local/v2/workspace_sidecar.proto",
-        "sha256": "459bff8d375dd2a095387121479209f384db9ca6392adf5dbac8f8320085182f"
+        "sha256": "c8da97793c6aee44816202102c269b338701c7171b2298fc875859776c8c2036"
       },
       "mirror": {
         "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
         "path": "contracts/proto/cyrene/workspace/local/v2/workspace_sidecar.proto",
-        "sha256": "459bff8d375dd2a095387121479209f384db9ca6392adf5dbac8f8320085182f"
+        "sha256": "c8da97793c6aee44816202102c269b338701c7171b2298fc875859776c8c2036"
       }
     },
     {
