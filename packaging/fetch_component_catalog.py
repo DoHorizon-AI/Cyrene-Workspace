@@ -25,10 +25,12 @@ def _attestation_verifier() -> Any:
     """Return the existing component updater's exact SLSA subject verifier."""
 
     try:
-        from component_updates import DEFAULT_CATALOG, ComponentUpdater
+        from component_updates import ComponentUpdater
 
         updater = ComponentUpdater(
-            catalog_path=DEFAULT_CATALOG,
+            catalog_path=(
+                Path(__file__).resolve().parents[1] / "governance" / "component-catalog-v1.json"
+            ),
             trusted_catalog_digest=None,
             load_active_catalog=False,
         )

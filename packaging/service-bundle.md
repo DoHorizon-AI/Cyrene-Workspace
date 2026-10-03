@@ -163,6 +163,10 @@ release, restarts only that service, and health-checks it. The former
 The post-install script starts units only on first installation.
 
 The embedded component catalog digest pins the bootstrap policy snapshot only.
+The Debian package takes that fixed snapshot from
+`packaging/component-catalog-bootstrap-v1.json`; the file is kept separate from
+the publisher's changing `governance/component-catalog-v1.json`, so catalog-only
+generation updates do not require an installer source change.
 To inspect or verify later catalog metadata, use `cyrene catalog status` and
 `cyrene catalog check --channel stable --latest` (or provide an exact
 `--release-id catalog-stable-<40-hex-source-SHA>`). Use `--channel preview`
@@ -238,7 +242,10 @@ model。broker journal 位于 `/var/lib/cyrene/runtime`，updater 计划和事�
 的 `/var/lib/cyrene-updates`。密钥和业务数据不随版本目录切换。移除软件包时会停止、禁用
 单位，并在 unit 文件移除后重载 systemd；不可变 release 和 `/var/lib/cyrene` 数据会保留。
 
-内嵌 component catalog 的摘要只固定 bootstrap 策略快照。查看当前目录可运行
+内嵌 component catalog 的摘要只固定 bootstrap 策略快照。Debian 包从固定文件
+`packaging/component-catalog-bootstrap-v1.json` 安装该快照；它与 publisher 持续更新的
+`governance/component-catalog-v1.json` 分开保存，因此仅目录 generation 更新无需改变 installer 源码。
+查看当前目录可运行
 `cyrene catalog status`；候选目录可运行 `cyrene catalog check --channel stable --latest`，
 或传入精确的 `--release-id catalog-stable-<40-hex-source-SHA>`。预览通道需显式使用
 `--channel preview` 和 `catalog-preview-<40-hex-source-SHA>`。check 会验证并报告

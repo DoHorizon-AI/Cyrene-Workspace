@@ -1,0 +1,1068 @@
+{
+  "schemaVersion": 1,
+  "generation": 6,
+  "defaultChannel": "stable",
+  "channels": {
+    "stable": {
+      "releasePrerelease": false,
+      "sourceRefs": [
+        "refs/heads/main",
+        "refs/heads/release"
+      ]
+    },
+    "preview": {
+      "releasePrerelease": true,
+      "sourceRefs": [
+        "refs/heads/develop"
+      ]
+    }
+  },
+  "targets": [
+    {
+      "id": "linux-ubuntu-24.04-x86_64-python-3.12",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "python:3.12"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "linux-ubuntu-24.04-x86_64-systemd",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "linux-ubuntu-24.04-aarch64-systemd",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "aarch64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "hostSupport": "contract-only"
+    },
+    {
+      "id": "windows-10.0-x86_64-docker-linux",
+      "target": {
+        "os": "windows",
+        "osVersion": "10.0",
+        "architecture": "x86_64",
+        "runtime": "docker-desktop:linux"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "linux-ubuntu-24.04-x86_64-docker-linux",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "docker:linux"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "linux-ubuntu-24.04-x86_64-python-3.12-library",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "python:3.12"
+      },
+      "hostSupport": "contract-only"
+    },
+    {
+      "id": "linux-ubuntu-22.04-x86_64-systemd",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "portable-contract-data-v1",
+      "target": {
+        "os": "linux",
+        "osVersion": "portable",
+        "architecture": "x86_64",
+        "runtime": "cyrene-authority-data"
+      },
+      "hostSupport": "supported"
+    }
+  ],
+  "publishers": [
+    {
+      "repository": "DoHorizon-AI/Cyrene-Platform",
+      "workflow": "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Platform/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Navigator",
+      "workflow": "DoHorizon-AI/Cyrene-Navigator/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Navigator/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Yield",
+      "workflow": "DoHorizon-AI/Cyrene-Yield/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Yield/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Reactor",
+      "workflow": "DoHorizon-AI/Cyrene-Reactor/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Reactor/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Exchange",
+      "workflow": "DoHorizon-AI/Cyrene-Exchange/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Exchange/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Catalyst",
+      "workflow": "DoHorizon-AI/Cyrene-Catalyst/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Catalyst/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Echo",
+      "workflow": "DoHorizon-AI/Cyrene-Echo/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Echo/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "workflow": "DoHorizon-AI/Cyrene-Plugins-Official/.github/workflows/component-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Plugins-Official/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "repository": "DoHorizon-AI/Cyrene-Workspace",
+      "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/data-bundle-release.yml",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Workspace/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    }
+  ],
+  "activitySourceCatalog": {
+    "managedBy": "cyrene-runtime-maintenance",
+    "path": "/var/lib/cyrene/runtime/activity-sources.json",
+    "generationSource": "install_catalog_generation",
+    "minimumSources": 1
+  },
+  "components": [
+    {
+      "componentId": "cyrene-linux-sys-adapter",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "core-runtime",
+        "order": 10,
+        "unit": "cyrene-linux-sys-adapter.service"
+      },
+      "dependencies": [],
+      "systemdUnit": "cyrene-linux-sys-adapter.service"
+    },
+    {
+      "componentId": "cyrene-nvidia-adapter",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "core-runtime",
+        "order": 11,
+        "unit": "cyrene-nvidia-adapter.service"
+      },
+      "dependencies": [],
+      "systemdUnit": "cyrene-nvidia-adapter.service"
+    },
+    {
+      "componentId": "cyrene-sandboxd",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "core-runtime",
+        "order": 20,
+        "unit": "cyrene-sandboxd.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-linux-sys-adapter"
+        }
+      ],
+      "systemdUnit": "cyrene-sandboxd.service"
+    },
+    {
+      "componentId": "cyrene-kernel",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "core-runtime",
+        "order": 30,
+        "unit": "cyrene-kernel.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-sandboxd"
+        }
+      ],
+      "systemdUnit": "cyrene-kernel.service"
+    },
+    {
+      "componentId": "cy-node-agent",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "core-runtime",
+        "order": 40,
+        "unit": "cy-node-agent.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-kernel"
+        }
+      ],
+      "systemdUnit": "cy-node-agent.service"
+    },
+    {
+      "componentId": "cy-runtime-agent",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "core-runtime",
+        "order": 41,
+        "unit": "cy-runtime-agent.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-kernel"
+        }
+      ],
+      "systemdUnit": "cy-runtime-agent.service"
+    },
+    {
+      "componentId": "cy-workspace-relay",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "artifactKinds": [
+        "native-binary",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-workspace-relay",
+            "containerName": "cyrene-workspace-relay",
+            "healthcheck": "docker-healthcheck"
+          }
+        },
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "contract-only"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cy-workspace-relay.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-kernel",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "systemdUnit": "cy-workspace-relay.service",
+      "compatibilityGroup": "workspace-product-v2",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-relay",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cy-workspace-relay-",
+          "stable": "stable-cy-workspace-relay-"
+        }
+      }
+    },
+    {
+      "componentId": "cy-workspace-connector",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "artifactKinds": [
+        "native-binary",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-workspace-connector",
+            "containerName": "cyrene-workspace-connector",
+            "healthcheck": "docker-healthcheck"
+          }
+        },
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "contract-only"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cy-workspace-connector.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-kernel",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "systemdUnit": "cy-workspace-connector.service",
+      "compatibilityGroup": "workspace-product-v2",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-connector",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cy-workspace-connector-",
+          "stable": "stable-cy-workspace-connector-"
+        }
+      }
+    },
+    {
+      "componentId": "cy-workspace-sidecar",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cy-workspace-sidecar.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-kernel",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "systemdUnit": "cy-workspace-sidecar.service",
+      "compatibilityGroup": "workspace-product-v2",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cy-workspace-sidecar-",
+          "stable": "stable-cy-workspace-sidecar-"
+        }
+      }
+    },
+    {
+      "componentId": "cy-workspace-web-bff",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-workspace-web-bff",
+            "containerName": "cyrene-workspace-web-bff",
+            "healthcheck": "docker-healthcheck"
+          }
+        },
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "contract-only"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cy-workspace-web-bff.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-kernel",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "systemdUnit": "cy-workspace-web-bff.service",
+      "compatibilityGroup": "workspace-product-v2",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-web-bff"
+    },
+    {
+      "componentId": "cyrene-runtime-maintenance",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-24.04-aarch64-systemd",
+          "artifactKind": "native-binary",
+          "support": "contract-only"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-runtime-maintenance",
+            "containerName": "cyrene-runtime-maintenance",
+            "healthcheck": "docker-healthcheck"
+          }
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-runtime-maintenance.service"
+      },
+      "dependencies": [],
+      "systemdUnit": "cyrene-runtime-maintenance.service",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-runtime-maintenance"
+    },
+    {
+      "componentId": "cyrene-navigator",
+      "kind": "python-bundle",
+      "publisher": "DoHorizon-AI/Cyrene-Navigator",
+      "artifactKinds": [
+        "python-bundle"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-navigator.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk"
+        }
+      ],
+      "systemdUnit": "cyrene-navigator.service",
+      "pythonBundleService": "navigator"
+    },
+    {
+      "componentId": "cyrene-yield",
+      "kind": "python-bundle",
+      "publisher": "DoHorizon-AI/Cyrene-Yield",
+      "artifactKinds": [
+        "python-bundle",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-yield",
+            "containerName": "cyrene-yield",
+            "healthcheck": "docker-healthcheck"
+          }
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-yield.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance"
+        }
+      ],
+      "systemdUnit": "cyrene-yield.service",
+      "pythonBundleService": "yield",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-yield"
+    },
+    {
+      "componentId": "cyrene-reactor",
+      "kind": "python-bundle",
+      "publisher": "DoHorizon-AI/Cyrene-Reactor",
+      "artifactKinds": [
+        "python-bundle",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-reactor",
+            "containerName": "cyrene-reactor",
+            "healthcheck": "docker-healthcheck"
+          }
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-reactor.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance"
+        }
+      ],
+      "systemdUnit": "cyrene-reactor.service",
+      "pythonBundleService": "reactor",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-reactor"
+    },
+    {
+      "componentId": "cyrene-exchange",
+      "kind": "python-bundle",
+      "publisher": "DoHorizon-AI/Cyrene-Exchange",
+      "artifactKinds": [
+        "python-bundle",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-exchange",
+            "containerName": "cyrene-exchange",
+            "healthcheck": "docker-healthcheck"
+          }
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-exchange.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance"
+        }
+      ],
+      "systemdUnit": "cyrene-exchange.service",
+      "pythonBundleService": "exchange",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-exchange"
+    },
+    {
+      "componentId": "cyrene-catalyst",
+      "kind": "python-bundle",
+      "publisher": "DoHorizon-AI/Cyrene-Catalyst",
+      "artifactKinds": [
+        "python-bundle",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-catalyst",
+            "containerName": "cyrene-catalyst",
+            "healthcheck": "docker-healthcheck"
+          }
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-catalyst.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance"
+        }
+      ],
+      "systemdUnit": "cyrene-catalyst.service",
+      "pythonBundleService": "catalyst",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-catalyst"
+    },
+    {
+      "componentId": "cyrene-echo",
+      "kind": "python-bundle",
+      "publisher": "DoHorizon-AI/Cyrene-Echo",
+      "artifactKinds": [
+        "python-bundle",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "unsupported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-echo",
+            "containerName": "cyrene-echo",
+            "healthcheck": "docker-healthcheck"
+          }
+        }
+      ],
+      "restart": {
+        "group": "single-service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance"
+        }
+      ],
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-echo"
+    },
+    {
+      "componentId": "cyrene-runtime-maintenance-sdk",
+      "kind": "python-bundle",
+      "role": "build-dependency",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "python-bundle"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12-library",
+          "artifactKind": "python-bundle",
+          "support": "contract-only"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": []
+    },
+    {
+      "componentId": "cy-workspace-frontend-bridge",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "artifactKinds": [
+        "native-binary",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-workspace-frontend-bridge",
+            "containerName": "cyrene-workspace-frontend-bridge",
+            "healthcheck": "docker-healthcheck"
+          }
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-workspace-frontend-bridge.service"
+      },
+      "dependencies": [],
+      "systemdUnit": "cyrene-workspace-frontend-bridge.service",
+      "compatibilityGroup": "workspace-product-v2",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-frontend-bridge",
+      "protocolVersion": "cyrene.workspace.product.v2",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cy-workspace-frontend-bridge-",
+          "stable": "stable-cy-workspace-frontend-bridge-"
+        }
+      }
+    },
+    {
+      "componentId": "cy-workspace-authority-host",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary",
+        "oci-image"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "windows-10.0-x86_64-docker-linux",
+          "artifactKind": "oci-image",
+          "support": "supported",
+          "windowsRuntime": {
+            "composeService": "cyrene-workspace-authority",
+            "containerName": "cyrene-workspace-authority",
+            "healthcheck": "docker-healthcheck"
+          }
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-workspace-authority.service"
+      },
+      "dependencies": [],
+      "systemdUnit": "cyrene-workspace-authority.service",
+      "compatibilityGroup": "workspace-product-v2",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-authority",
+      "protocolVersion": "cyrene.workspace.authority.v2"
+    },
+    {
+      "componentId": "cyrene-product-contract-bundle",
+      "kind": "data-bundle",
+      "publisher": "DoHorizon-AI/Cyrene-Workspace",
+      "artifactKinds": [
+        "data-bundle"
+      ],
+      "targets": [
+        {
+          "targetId": "portable-contract-data-v1",
+          "artifactKind": "data-bundle",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [],
+      "compatibilityGroup": "workspace-product-v2",
+      "protocolVersion": "cyrene.workspace.product.v2"
+    }
+  ],
+  "compatibilityGroups": [
+    {
+      "groupId": "workspace-product-v2",
+      "groupVersion": "2",
+      "contractApiVersion": "0.1.0",
+      "wireApiVersion": "cyrene.workspace.product.v2",
+      "contractLock": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "commit": "c7dea28958a97ccab3a9cc3199faf0ac5819a2a5",
+        "path": "governance/workspace-connection-protocols-v2.lock.json",
+        "sha256": "sha256:00fd59fb76d7144b6e1b554feadf035328b216231e0a323178836abf2b8bdd5a"
+      },
+      "members": [
+        {
+          "componentId": "cy-workspace-relay",
+          "requiredForAdoption": true,
+          "protocolVersion": "cyrene.workspace.product.v2"
+        },
+        {
+          "componentId": "cy-workspace-connector",
+          "requiredForAdoption": true,
+          "protocolVersion": "cyrene.workspace.product.v2"
+        },
+        {
+          "componentId": "cy-workspace-web-bff",
+          "requiredForAdoption": true,
+          "protocolVersion": "cyrene.workspace.product.v2"
+        },
+        {
+          "componentId": "cy-workspace-sidecar",
+          "requiredForAdoption": false,
+          "protocolVersion": "cyrene.workspace.product.v2"
+        },
+        {
+          "componentId": "cy-workspace-frontend-bridge",
+          "requiredForAdoption": true,
+          "protocolVersion": "cyrene.workspace.product.v2"
+        },
+        {
+          "componentId": "cy-workspace-authority-host",
+          "requiredForAdoption": true,
+          "protocolVersion": "cyrene.workspace.authority.v2"
+        },
+        {
+          "componentId": "cyrene-product-contract-bundle",
+          "requiredForAdoption": false,
+          "protocolVersion": "cyrene.workspace.product.v2"
+        }
+      ]
+    }
+  ],
+  "dataBundleTrust": {
+    "manifestPath": "product-contract-bundle.json",
+    "protocolVersion": "cyrene.workspace.product.v2",
+    "contractApiVersion": "0.1.0",
+    "policySource": {
+      "repository": "DoHorizon-AI/Cyrene-Platform",
+      "path": "contracts/policies/workspace-product-policy-v2.json",
+      "schemaVersion": "cyrene.workspace.product.authorization-policy.v2"
+    },
+    "owners": [
+      {
+        "ownerId": "catalyst",
+        "repository": "DoHorizon-AI/Cyrene-Catalyst",
+        "catalogPath": "contracts/product/v2/catalog.json"
+      },
+      {
+        "ownerId": "echo",
+        "repository": "DoHorizon-AI/Cyrene-Echo",
+        "catalogPath": "contracts/product/v2/catalog.json"
+      },
+      {
+        "ownerId": "exchange",
+        "repository": "DoHorizon-AI/Cyrene-Exchange",
+        "catalogPath": "contracts/product/v2/catalog.json"
+      },
+      {
+        "ownerId": "navigator",
+        "repository": "DoHorizon-AI/Cyrene-Navigator",
+        "catalogPath": "contracts/product/v2/catalog.json"
+      },
+      {
+        "ownerId": "reactor",
+        "repository": "DoHorizon-AI/Cyrene-Reactor",
+        "catalogPath": "contracts/product/v2/catalog.json"
+      },
+      {
+        "ownerId": "yield",
+        "repository": "DoHorizon-AI/Cyrene-Yield",
+        "catalogPath": "contracts/product/v2/catalog.json"
+      }
+    ]
+  }
+}
