@@ -26,8 +26,8 @@ With `VITE_WORKSPACE_BFF_ENABLED=true`, users discover an authorized Workspace, 
 
 | Input / 输入 | Source / 来源 |
 | --- | --- |
-| Generic protocol lock | Workspace `f1b1cb54c5a1715b5f99635ea75ccf395ecabc39`; SHA256 `0ad41eb1a9585f53d8ff2af3d28866902faace9f2d36837cb0d8a862683b643c` |
-| Catalog generation 4 | Workspace `86932722960083f1d84a5e70bb0d6b9e3f31a0f6`; SHA256 `28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc` |
+| Generic protocol lock | Workspace `c7dea28958a97ccab3a9cc3199faf0ac5819a2a5`; SHA256 `00fd59fb76d7144b6e1b554feadf035328b216231e0a323178836abf2b8bdd5a` |
+| Catalog generation 5 | Workspace `7e6d410017420de72d7688859ae81d675e4555ea`; SHA256 `f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816` |
 | Client implementation | `e01b90a0e9c62324566198540654bee0fd0b8293` |
 
 The protocol lock is `governance/workspace-connection-protocols-v2.lock.json`. Owner source pins are recorded in Platform's `tooling/workspace-product-contract-bundle/releases/workspace-product-v2.lock.json`. A source pin is not a successful signed release: the data publisher requires actual owner and policy release attestations for the supplied exact commits.
@@ -52,10 +52,10 @@ Six Product source commits and Client were pushed to `develop` without rewriting
 
 中文：六个 Product 与 Client 已正常推送 develop。上述三个 PR 承载集成，最新 CI 和合并结果从 GitHub 读回，本文不将等待中的检查或合并记为成功。
 
-- Immutable release settings await the previously requested explicit authorization; publishers also require a dedicated settings-read credential. No user token was copied into repository secrets.
+- Immutable release settings await the previously requested explicit authorization; publishers also require a dedicated settings-read credential. Six exact-head Product contract and component test jobs passed, but owner publication stopped at the missing `CYRENE_IMMUTABLE_RELEASES_READ_TOKEN` preflight, before querying the settings. Component publication separately stopped because no trusted immutable Platform preview index included the Runtime Maintenance SDK. These results are source-test evidence, not signed releases. No user token was copied into repository secrets.
 - Real Authority V2 acceptance requires a signed owner/policy archive, protected import metadata, migrated restricted database roles, Entra verification and mTLS identities.
 - Windows first startup requires a separately provisioned verified data bundle. This release updates supported OCI services but does not download or activate a new Windows data bundle.
 - The remote UI uses an operator-approved Workspace target binding. Dynamic machine selection, remote parameter editing, cancellation, checkpoint resume, artifact download and Reactor deployment remain subsequent workflow increments.
 - Network evidence remains limited to the agreed Tailscale/Cyrene Relay route. No new Azure resources or ACA production-deployment evidence are included.
 
-中文：不可变设置仍待先前提出的明确授权，并需专用只读凭据。真实验收还需签名数据包、受保护的导入记录、受限数据库迁移、Entra 和 mTLS 身份。Windows 仍需预置验证后的数据包。远程界面当前采用运维批准的目标绑定；动态选机及远程编辑、取消、检查点恢复、产物下载和 Reactor 部署属于后续增量。网络证据限定于既有 Tailscale/Cyrene Relay，不涉及新 Azure 资源或 ACA 生产部署。
+中文：不可变设置仍待先前提出的明确授权，并需专用只读凭据。六个 Product 当前提交的契约和组件测试均通过；owner 发布因缺少专用只读 token 在查询设置前退出，组件发布另缺包含 Runtime Maintenance SDK 的受信 Platform 预览索引。这些结果不等于签名发布完成。真实验收还需签名数据包、受保护的导入记录、受限数据库迁移、Entra 和 mTLS 身份。Windows 仍需预置验证后的数据包。远程界面当前采用运维批准的目标绑定；动态选机及远程编辑、取消、检查点恢复、产物下载和 Reactor 部署属于后续增量。网络证据限定于既有 Tailscale/Cyrene Relay，不涉及新 Azure 资源或 ACA 生产部署。
