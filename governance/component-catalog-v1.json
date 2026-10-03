@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 6,
+  "generation": 7,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -423,7 +423,7 @@
       ],
       "systemdUnit": "cy-workspace-relay.service",
       "compatibilityGroup": "workspace-product-v2",
-      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-relay",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-plugins-official/cyrene-workspace-relay",
       "releaseDiscovery": {
         "tagPrefixes": {
           "preview": "preview-cy-workspace-relay-",
@@ -478,7 +478,7 @@
       ],
       "systemdUnit": "cy-workspace-connector.service",
       "compatibilityGroup": "workspace-product-v2",
-      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-connector",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-plugins-official/cyrene-workspace-connector",
       "releaseDiscovery": {
         "tagPrefixes": {
           "preview": "preview-cy-workspace-connector-",
@@ -901,7 +901,7 @@
       "dependencies": [],
       "systemdUnit": "cyrene-workspace-frontend-bridge.service",
       "compatibilityGroup": "workspace-product-v2",
-      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-frontend-bridge",
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-plugins-official/cyrene-workspace-frontend-bridge",
       "protocolVersion": "cyrene.workspace.product.v2",
       "releaseDiscovery": {
         "tagPrefixes": {
