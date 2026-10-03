@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 5,
+  "generation": 6,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -423,7 +423,13 @@
       ],
       "systemdUnit": "cy-workspace-relay.service",
       "compatibilityGroup": "workspace-product-v2",
-      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-relay"
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-relay",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cy-workspace-relay-",
+          "stable": "stable-cy-workspace-relay-"
+        }
+      }
     },
     {
       "componentId": "cy-workspace-connector",
@@ -472,7 +478,13 @@
       ],
       "systemdUnit": "cy-workspace-connector.service",
       "compatibilityGroup": "workspace-product-v2",
-      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-connector"
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-connector",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cy-workspace-connector-",
+          "stable": "stable-cy-workspace-connector-"
+        }
+      }
     },
     {
       "componentId": "cy-workspace-sidecar",
@@ -504,7 +516,13 @@
         }
       ],
       "systemdUnit": "cy-workspace-sidecar.service",
-      "compatibilityGroup": "workspace-product-v2"
+      "compatibilityGroup": "workspace-product-v2",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cy-workspace-sidecar-",
+          "stable": "stable-cy-workspace-sidecar-"
+        }
+      }
     },
     {
       "componentId": "cy-workspace-web-bff",
@@ -884,7 +902,13 @@
       "systemdUnit": "cyrene-workspace-frontend-bridge.service",
       "compatibilityGroup": "workspace-product-v2",
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-frontend-bridge",
-      "protocolVersion": "cyrene.workspace.product.v2"
+      "protocolVersion": "cyrene.workspace.product.v2",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cy-workspace-frontend-bridge-",
+          "stable": "stable-cy-workspace-frontend-bridge-"
+        }
+      }
     },
     {
       "componentId": "cy-workspace-authority-host",

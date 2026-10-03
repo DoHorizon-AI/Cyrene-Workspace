@@ -286,6 +286,33 @@
             "service",
             "build-dependency"
           ]
+        },
+        "releaseDiscovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tagPrefixes"
+          ],
+          "properties": {
+            "tagPrefixes": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "preview",
+                "stable"
+              ],
+              "properties": {
+                "preview": {
+                  "type": "string",
+                  "pattern": "^preview-[a-z][a-z0-9-]{0,63}-$"
+                },
+                "stable": {
+                  "type": "string",
+                  "pattern": "^stable-[a-z][a-z0-9-]{0,63}-$"
+                }
+              }
+            }
+          }
         }
       }
     },

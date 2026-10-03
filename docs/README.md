@@ -15,6 +15,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 ## 2. Engineering & Developer Guides
 - [**QUICKSTART.md**](QUICKSTART.md): Prerequisites, bootstrap, and developer onboarding.
 - [**DEVELOPMENT.md**](DEVELOPMENT.md): Multi-repo topology, agent worktree isolation, JetBrains IDE integration, and quality gates.
+- [**Component update packaging**](../packaging/service-bundle.md): Linux component updater, verified catalog metadata, and immutable service packaging.
 
 ---
 

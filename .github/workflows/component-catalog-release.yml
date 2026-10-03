@@ -1,0 +1,659 @@
+name: Immutable component catalog release
+
+on:
+  push:
+    branches: [develop, main, release]
+    paths:
+      - governance/**
+      - .github/workflows/component-catalog-release.yml
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Optional channel assertion; the source ref remains authoritative
+        required: false
+        default: auto
+        type: choice
+        options: [auto, stable, preview]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: component-catalog-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Validate and publish the source catalog
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      attestations: write
+      artifact-metadata: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: DoHorizon-AI/Cyrene-Workspace
+      SOURCE_COMMIT: ${{ github.sha }}
+      SOURCE_REF: ${{ github.ref }}
+      REQUESTED_CHANNEL: ${{ inputs.channel || 'auto' }}
+      RAW_ASSET: component-catalog-v1.json
+      BUNDLE_ASSET: component-catalog-v1.json.attestation.jsonl
+      PUBLISH_DIR: ${{ runner.temp }}/component-catalog-release
+
+    steps:
+      - name: Check out the exact source commit
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Prove repository immutable releases are enabled
+        env:
+          CYRENE_IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.CYRENE_IMMUTABLE_RELEASES_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          secret_name = "CYRENE_IMMUTABLE_RELEASES_READ_TOKEN"
+          token = os.environ.get(secret_name)
+          if not token:
+              raise SystemExit(
+                  f"immutable-release settings preflight is blocked: configure {secret_name} "
+                  "with repository Administration: read access; no tag, attestation, or release was created"
+              )
+
+          request = urllib.request.Request(
+              "https://api.github.com/repos/DoHorizon-AI/Cyrene-Workspace/immutable-releases",
+              headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {token}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              },
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  status = response.status
+                  settings = json.loads(response.read().decode("utf-8"))
+          except urllib.error.HTTPError as error:
+              if error.code == 404:
+                  raise SystemExit(
+                      "immutable-release settings preflight is blocked: GitHub returned 404; "
+                      "confirm the repository setting and Administration: read credential; "
+                      "no tag, attestation, or release was created"
+                  ) from error
+              if error.code in {401, 403}:
+                  raise SystemExit(
+                      f"immutable-release settings preflight is blocked: GitHub denied settings access "
+                      f"(HTTP {error.code}); configure {secret_name} with repository Administration: read; "
+                      "no tag, attestation, or release was created"
+                  ) from error
+              raise SystemExit(
+                  f"immutable-release settings preflight could not verify the repository setting "
+                  f"(HTTP {error.code}); no tag, attestation, or release was created"
+              ) from error
+          except (OSError, urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError) as error:
+              raise SystemExit(
+                  "immutable-release settings preflight could not verify the repository setting over HTTPS; "
+                  "no tag, attestation, or release was created"
+              ) from error
+
+          if status != 200:
+              raise SystemExit(
+                  f"immutable-release settings preflight expected HTTP 200, got {status}; "
+                  "no tag, attestation, or release was created"
+              )
+          if not isinstance(settings, dict) or settings.get("enabled") is not True:
+              raise SystemExit(
+                  "repository immutable releases are disabled; refusing publication; "
+                  "no tag, attestation, or release was created"
+              )
+          print("Repository immutable releases are enabled")
+          PY
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned JSON Schema validation dependencies
+        run: python -m pip install --disable-pip-version-check "jsonschema==4.25.1" "referencing==0.36.2"
+
+      - name: Validate source identity, channel, catalog schema, and raw asset
+        id: catalog
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$REPOSITORY"
+          test "$GITHUB_WORKFLOW_REF" = "$REPOSITORY/.github/workflows/component-catalog-release.yml@$SOURCE_REF"
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "source commit must be a full lowercase Git SHA-1" >&2
+            exit 2
+          }
+          test "$(git rev-parse HEAD^{commit})" = "$SOURCE_COMMIT"
+
+          case "$SOURCE_REF" in
+            refs/heads/main|refs/heads/release) channel=stable ;;
+            refs/heads/develop) channel=preview ;;
+            *) echo "unsupported catalog source ref: $SOURCE_REF" >&2; exit 2 ;;
+          esac
+          case "$REQUESTED_CHANNEL" in
+            auto|"") ;;
+            stable|preview)
+              test "$REQUESTED_CHANNEL" = "$channel" || {
+                echo "requested channel $REQUESTED_CHANNEL does not match source ref $SOURCE_REF ($channel)" >&2
+                exit 2
+              }
+              ;;
+            *) echo "unsupported requested channel: $REQUESTED_CHANNEL" >&2; exit 2 ;;
+          esac
+
+          mkdir -p "$PUBLISH_DIR"
+          cp -- governance/component-catalog-v1.json "$PUBLISH_DIR/$RAW_ASSET"
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from jsonschema import Draft202012Validator
+          from referencing import Registry, Resource
+
+          governance = Path("governance")
+          raw_source = governance / "component-catalog-v1.json"
+          raw_asset = Path(os.environ["PUBLISH_DIR"]) / os.environ["RAW_ASSET"]
+
+          def no_duplicate_keys(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate JSON object key: {key}")
+                  result[key] = value
+              return result
+
+          source_bytes = raw_source.read_bytes()
+          asset_bytes = raw_asset.read_bytes()
+          if source_bytes != asset_bytes:
+              raise SystemExit("release asset differs from the catalog at the checked-out source commit")
+
+          def read_json(path):
+              return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicate_keys)
+
+          catalog = json.loads(asset_bytes.decode("utf-8"), object_pairs_hook=no_duplicate_keys)
+          schemas = [
+              read_json(governance / "component-catalog-v1.schema.json"),
+              read_json(governance / "component-release-manifest-v1.schema.json"),
+              read_json(governance / "component-release-manifest-v2.schema.json"),
+          ]
+          registry = Registry()
+          for schema in schemas:
+              Draft202012Validator.check_schema(schema)
+              registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
+
+          validator = Draft202012Validator(
+              schemas[0],
+              registry=registry,
+              format_checker=Draft202012Validator.FORMAT_CHECKER,
+          )
+          errors = sorted(validator.iter_errors(catalog), key=lambda error: tuple(map(str, error.absolute_path)))
+          if errors:
+              for error in errors[:50]:
+                  location = "/".join(map(str, error.absolute_path)) or "<root>"
+                  print(f"{location}: {error.message}", file=sys.stderr)
+              raise SystemExit(f"catalog failed Draft 2020-12 schema validation ({len(errors)} errors)")
+
+          generation = catalog.get("generation")
+          if type(generation) is not int or generation <= 0:
+              raise SystemExit("catalog generation must be a positive integer")
+
+          expected_channels = {
+              "stable": {
+                  "releasePrerelease": False,
+                  "sourceRefs": {"refs/heads/main", "refs/heads/release"},
+              },
+              "preview": {
+                  "releasePrerelease": True,
+                  "sourceRefs": {"refs/heads/develop"},
+              },
+          }
+          channels = catalog.get("channels", {})
+          for name, expected in expected_channels.items():
+              actual = channels.get(name, {})
+              if actual.get("releasePrerelease") is not expected["releasePrerelease"]:
+                  raise SystemExit(f"catalog {name} prerelease policy does not match the release protocol")
+              if set(actual.get("sourceRefs", [])) != expected["sourceRefs"]:
+                  raise SystemExit(f"catalog {name} source refs do not match the release protocol")
+
+          source_ref = os.environ["SOURCE_REF"]
+          channel = "preview" if source_ref == "refs/heads/develop" else "stable"
+          digest = hashlib.sha256(asset_bytes).hexdigest()
+          tag = f"catalog-{channel}-{os.environ['SOURCE_COMMIT']}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"channel={channel}\n")
+              output.write(f"prerelease={'true' if channel == 'preview' else 'false'}\n")
+              output.write(f"generation={generation}\n")
+              output.write(f"digest={digest}\n")
+              output.write(f"tag={tag}\n")
+          print(f"Validated generation {generation}, channel {channel}, catalog sha256 {digest}")
+          PY
+
+      - name: Check immutable catalog release history and idempotent tag state
+        id: history
+        env:
+          CHANNEL: ${{ steps.catalog.outputs.channel }}
+          GENERATION: ${{ steps.catalog.outputs.generation }}
+          CATALOG_DIGEST: ${{ steps.catalog.outputs.digest }}
+          RELEASE_TAG: ${{ steps.catalog.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/catalog-releases.json"
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          repository = os.environ["REPOSITORY"]
+          channel = os.environ["CHANNEL"]
+          source_commit = os.environ["SOURCE_COMMIT"]
+          current_tag = os.environ["RELEASE_TAG"]
+          current_generation = int(os.environ["GENERATION"])
+          current_digest = os.environ["CATALOG_DIGEST"]
+          raw_name = os.environ["RAW_ASSET"]
+          bundle_name = os.environ["BUNDLE_ASSET"]
+          workflow = f"{repository}/.github/workflows/component-catalog-release.yml"
+          predicate = "https://slsa.dev/provenance/v1"
+          tag_pattern = re.compile(r"^catalog-(stable|preview)-([0-9a-f]{40})$")
+          allowed_refs = {
+              "stable": ("refs/heads/main", "refs/heads/release"),
+              "preview": ("refs/heads/develop",),
+          }
+          token = os.environ["GH_TOKEN"]
+
+          def api(method, path, payload=None, *, missing_ok=False):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = Request(
+                  f"https://api.github.com/repos/{repository}/{path}",
+                  data=data,
+                  method=method,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              try:
+                  with urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except HTTPError as error:
+                  if missing_ok and error.code == 404:
+                      return None
+                  detail = error.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(f"GitHub API {method} {path} failed ({error.code}): {detail}") from error
+
+          def verify_bundle(raw_path, bundle_path, signer_digest, channel_name):
+              failures = []
+              for source_ref in allowed_refs[channel_name]:
+                  command = [
+                      "gh", "attestation", "verify", str(raw_path),
+                      "--bundle", str(bundle_path),
+                      "--repo", repository,
+                      "--signer-workflow", workflow,
+                      "--source-ref", source_ref,
+                      "--source-digest", signer_digest,
+                      "--predicate-type", predicate,
+                  ]
+                  result = subprocess.run(command, capture_output=True, text=True)
+                  if result.returncode == 0:
+                      return
+                  failures.append(f"{source_ref}: {result.stderr.strip()}")
+              raise RuntimeError("detached catalog attestation did not verify for an allowed source ref: " + " | ".join(failures))
+
+          def check_release_metadata(release, tag, channel_name):
+              expected_assets = {raw_name, bundle_name}
+              release_assets = release.get("assets", [])
+              asset_names = {asset.get("name") for asset in release_assets}
+              if release.get("tag_name") != tag:
+                  raise RuntimeError(f"release lookup returned the wrong tag for {tag}")
+              if release.get("draft") is not False or release.get("immutable") is not True:
+                  raise RuntimeError(f"catalog release {tag} is not published and immutable")
+              if release.get("prerelease") is not (channel_name == "preview"):
+                  raise RuntimeError(f"catalog release {tag} has a channel/prerelease mismatch")
+              if len(release_assets) != len(expected_assets) or asset_names != expected_assets:
+                  raise RuntimeError(f"catalog release {tag} assets must be exactly {sorted(expected_assets)}")
+              if any(asset.get("state") != "uploaded" for asset in release_assets):
+                  raise RuntimeError(f"catalog release {tag} has an asset that is not uploaded")
+
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "catalog-releases.json"), encoding="utf-8") as source:
+              pages = json.load(source)
+          releases = []
+          for page in pages if isinstance(pages, list) else []:
+              if isinstance(page, list):
+                  releases.extend(page)
+              elif isinstance(page, dict):
+                  releases.append(page)
+
+          generations = {}
+          processed = {}
+
+          def inspect_release(release, tag, channel_name, source_sha):
+              check_release_metadata(release, tag, channel_name)
+              with tempfile.TemporaryDirectory(prefix="component-catalog-history-") as temporary:
+                  subprocess.run(
+                      ["gh", "release", "download", tag, "--repo", repository,
+                       "--dir", temporary, "--pattern", raw_name, "--pattern", bundle_name],
+                      check=True,
+                  )
+                  raw_path = Path(temporary) / raw_name
+                  bundle_path = Path(temporary) / bundle_name
+                  if not raw_path.is_file() or not bundle_path.is_file():
+                      raise RuntimeError(f"immutable catalog release {tag} is missing a required asset")
+                  raw_bytes = raw_path.read_bytes()
+                  digest = hashlib.sha256(raw_bytes).hexdigest()
+                  try:
+                      catalog = json.loads(raw_bytes.decode("utf-8"))
+                  except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                      raise RuntimeError(f"immutable catalog release {tag} has invalid JSON") from error
+                  generation = catalog.get("generation") if isinstance(catalog, dict) else None
+                  if type(generation) is not int or generation <= 0:
+                      raise RuntimeError(f"immutable catalog release {tag} has an invalid generation")
+                  verify_bundle(raw_path, bundle_path, source_sha, channel_name)
+                  return generation, digest
+
+          for release in releases:
+              tag = release.get("tag_name", "")
+              if not tag.startswith("catalog-") or release.get("immutable") is not True:
+                  continue
+              match = tag_pattern.fullmatch(tag)
+              if match is None:
+                  raise RuntimeError(f"immutable catalog release has a malformed tag: {tag}")
+              release_channel, source_sha = match.groups()
+              generation, digest = inspect_release(release, tag, release_channel, source_sha)
+              if generation in generations and generations[generation] != digest:
+                  raise RuntimeError(f"immutable catalog history has different content at generation {generation}")
+              generations[generation] = digest
+              processed[tag] = (release, generation, digest)
+
+          if generations:
+              highest = max(generations)
+              if current_generation < highest:
+                  raise RuntimeError(f"catalog generation would decrease from {highest} to {current_generation}")
+              previous_digest = generations.get(current_generation)
+              if previous_digest is not None and previous_digest != current_digest:
+                  raise RuntimeError(f"catalog generation {current_generation} already has a different raw catalog digest")
+
+          exact_release = api(
+              "GET",
+              f"releases/tags/{quote(current_tag, safe='')}",
+              missing_ok=True,
+          )
+          already_published = False
+          if exact_release is not None:
+              match = tag_pattern.fullmatch(current_tag)
+              assert match is not None
+              exact_channel, source_sha = match.groups()
+              exact_generation, exact_digest = processed.get(current_tag, (None, None, None))[1:]
+              if exact_generation is None:
+                  exact_generation, exact_digest = inspect_release(
+                      exact_release, current_tag, exact_channel, source_sha
+                  )
+              if exact_channel != channel:
+                  raise RuntimeError("existing immutable tag channel does not match the selected source channel")
+              if (exact_generation, exact_digest) != (current_generation, current_digest):
+                  raise RuntimeError("existing immutable tag does not contain the catalog from this source commit")
+              already_published = True
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"already_published={'true' if already_published else 'false'}\n")
+          if already_published:
+              print(f"Immutable release {current_tag} already contains this exact catalog; treating the run as idempotent")
+          else:
+              print(f"Catalog generation {current_generation} is allowed by immutable release history")
+          PY
+
+      - name: Ensure the source tag points to the checked-out commit
+        if: steps.history.outputs.already_published != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.catalog.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          repository = os.environ["REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          source_commit = os.environ["SOURCE_COMMIT"]
+          token = os.environ["GH_TOKEN"]
+
+          def api(method, path, payload=None, *, missing_ok=False):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = Request(
+                  f"https://api.github.com/repos/{repository}/{path}",
+                  data=data,
+                  method=method,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              try:
+                  with urlopen(request, timeout=30) as response:
+                      return json.load(response)
+              except HTTPError as error:
+                  if missing_ok and error.code == 404:
+                      return None
+                  if method == "POST" and error.code in (409, 422):
+                      return None
+                  detail = error.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(f"GitHub API {method} {path} failed ({error.code}): {detail}") from error
+
+          def tag_commit():
+              reference = api("GET", f"git/ref/tags/{quote(tag, safe='')}", missing_ok=True)
+              if reference is None:
+                  return None
+              obj = reference.get("object", {})
+              for _ in range(8):
+                  kind = obj.get("type")
+                  sha = obj.get("sha")
+                  if kind == "commit":
+                      return sha
+                  if kind != "tag" or not isinstance(sha, str):
+                      raise RuntimeError(f"source tag {tag} does not resolve to a commit")
+                  annotated = api("GET", f"git/tags/{quote(sha, safe='')}")
+                  obj = annotated.get("object", {})
+              raise RuntimeError(f"source tag {tag} has excessive annotated-tag depth")
+
+          actual = tag_commit()
+          if actual is None:
+              api("POST", "git/refs", {"ref": f"refs/tags/{tag}", "sha": source_commit})
+              actual = tag_commit()
+          if actual != source_commit:
+              raise RuntimeError(f"source tag {tag} resolves to {actual}, expected {source_commit}")
+          print(f"Verified {tag} -> {source_commit}")
+          PY
+
+      - name: Prepare the exact subject filename and raw digest
+        if: steps.history.outputs.already_published != 'true'
+        run: |
+          set -euo pipefail
+          (cd "$PUBLISH_DIR" && sha256sum "$RAW_ASSET" > "$RUNNER_TEMP/component-catalog-subjects.sha256")
+
+      - name: Create the GitHub provenance attestation
+        if: steps.history.outputs.already_published != 'true'
+        uses: actions/attest@v4
+        with:
+          subject-checksums: ${{ runner.temp }}/component-catalog-subjects.sha256
+
+      - name: Save and verify the detached GitHub attestation bundle
+        if: steps.history.outputs.already_published != 'true'
+        env:
+          CHANNEL: ${{ steps.catalog.outputs.channel }}
+          CATALOG_DIGEST: ${{ steps.catalog.outputs.digest }}
+        run: |
+          set -euo pipefail
+          (
+            cd "$PUBLISH_DIR"
+            gh attestation download "$PUBLISH_DIR/$RAW_ASSET" \
+              --repo "$REPOSITORY" \
+              --predicate-type https://slsa.dev/provenance/v1
+            mv "sha256:$CATALOG_DIGEST.jsonl" "$PUBLISH_DIR/$BUNDLE_ASSET"
+          )
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          repository = os.environ["REPOSITORY"]
+          workflow = f"{repository}/.github/workflows/component-catalog-release.yml"
+          source_digest = os.environ["SOURCE_COMMIT"]
+          channel = os.environ["CHANNEL"]
+          refs = {
+              "stable": ("refs/heads/main", "refs/heads/release"),
+              "preview": ("refs/heads/develop",),
+          }[channel]
+          raw_path = Path(os.environ["PUBLISH_DIR"]) / os.environ["RAW_ASSET"]
+          bundle_path = Path(os.environ["PUBLISH_DIR"]) / os.environ["BUNDLE_ASSET"]
+          errors = []
+          for source_ref in refs:
+              result = subprocess.run(
+                  [
+                      "gh", "attestation", "verify", str(raw_path),
+                      "--bundle", str(bundle_path),
+                      "--repo", repository,
+                      "--signer-workflow", workflow,
+                      "--source-ref", source_ref,
+                      "--source-digest", source_digest,
+                      "--predicate-type", "https://slsa.dev/provenance/v1",
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+              if result.returncode == 0:
+                  print(f"Verified detached bundle for {source_ref} and source commit {source_digest}")
+                  break
+              errors.append(f"{source_ref}: {result.stderr.strip()}")
+          else:
+              print("; ".join(errors), file=sys.stderr)
+              raise SystemExit("detached GitHub attestation failed repository/workflow/source verification")
+          PY
+
+      - name: Publish the immutable catalog release
+        if: steps.history.outputs.already_published != 'true'
+        env:
+          CHANNEL: ${{ steps.catalog.outputs.channel }}
+          RELEASE_TAG: ${{ steps.catalog.outputs.tag }}
+          PRERELEASE: ${{ steps.catalog.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          args=("$RELEASE_TAG" "$PUBLISH_DIR/$RAW_ASSET" "$PUBLISH_DIR/$BUNDLE_ASSET" \
+            --repo "$REPOSITORY" --verify-tag --target "$SOURCE_COMMIT" --latest=false)
+          if [[ "$PRERELEASE" == true ]]; then
+            args+=(--prerelease)
+          fi
+          # gh release create publishes the release after uploading the two exact protocol assets.
+          gh release create "${args[@]}"
+
+      - name: Confirm the published release and its assets
+        env:
+          CHANNEL: ${{ steps.catalog.outputs.channel }}
+          CATALOG_DIGEST: ${{ steps.catalog.outputs.digest }}
+          RELEASE_TAG: ${{ steps.catalog.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/component-catalog-final"
+          gh api -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/component-catalog-final/release.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import Request, urlopen
+
+          release = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "component-catalog-final" / "release.json").read_text(encoding="utf-8")
+          )
+          expected_assets = {os.environ["RAW_ASSET"], os.environ["BUNDLE_ASSET"]}
+          if release.get("tag_name") != os.environ["RELEASE_TAG"]:
+              raise SystemExit("final release GET returned a different tag")
+          if release.get("draft") is not False or release.get("immutable") is not True:
+              raise SystemExit("final release GET did not confirm draft=false and immutable=true")
+          expected_prerelease = os.environ["CHANNEL"] == "preview"
+          if release.get("prerelease") is not expected_prerelease:
+              raise SystemExit("final release GET channel/prerelease state does not match source ref")
+          assets = release.get("assets", [])
+          if len(assets) != len(expected_assets) or {asset.get("name") for asset in assets} != expected_assets:
+              raise SystemExit(f"final release GET assets must be exactly {sorted(expected_assets)}")
+          if any(asset.get("state") != "uploaded" for asset in assets):
+              raise SystemExit("final release GET contains an asset that is not uploaded")
+
+          repository = os.environ["REPOSITORY"]
+          tag = os.environ["RELEASE_TAG"]
+          token = os.environ["GH_TOKEN"]
+          def request_json(path):
+              request = Request(
+                  f"https://api.github.com/repos/{repository}/{path}",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urlopen(request, timeout=30) as response:
+                  return json.load(response)
+
+          reference = request_json(f"git/ref/tags/{quote(tag, safe='')}")
+          obj = reference.get("object", {})
+          for _ in range(8):
+              if obj.get("type") == "commit":
+                  break
+              if obj.get("type") != "tag" or not isinstance(obj.get("sha"), str):
+                  raise SystemExit("final source tag does not resolve to a commit")
+              obj = request_json(f"git/tags/{quote(obj['sha'], safe='')}").get("object", {})
+          else:
+              raise SystemExit("final source tag has excessive annotated-tag depth")
+          if obj.get("sha") != os.environ["SOURCE_COMMIT"]:
+              raise SystemExit("final source tag does not point to the checked-out source commit")
+          print("Final release GET confirms immutable tag, channel, and exact protocol assets")
+          PY
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" \
+            --dir "$RUNNER_TEMP/component-catalog-final" \
+            --pattern "$RAW_ASSET" --pattern "$BUNDLE_ASSET"
+          test "$(sha256sum "$RUNNER_TEMP/component-catalog-final/$RAW_ASSET" | cut -d ' ' -f 1)" = "$CATALOG_DIGEST"
+          for source_ref in refs/heads/main refs/heads/release refs/heads/develop; do
+            if [[ "$CHANNEL:$source_ref" == "stable:refs/heads/main" || \
+                  "$CHANNEL:$source_ref" == "stable:refs/heads/release" || \
+                  "$CHANNEL:$source_ref" == "preview:refs/heads/develop" ]]; then
+              if gh attestation verify "$RUNNER_TEMP/component-catalog-final/$RAW_ASSET" \
+                --bundle "$RUNNER_TEMP/component-catalog-final/$BUNDLE_ASSET" \
+                --repo "$REPOSITORY" \
+                --signer-workflow "$REPOSITORY/.github/workflows/component-catalog-release.yml" \
+                --source-ref "$source_ref" \
+                --source-digest "$SOURCE_COMMIT" \
+                --predicate-type https://slsa.dev/provenance/v1; then
+                exit 0
+              fi
+            fi
+          done
+          echo "published detached attestation does not verify against Workspace workflow trust root and channel refs" >&2
+          exit 1

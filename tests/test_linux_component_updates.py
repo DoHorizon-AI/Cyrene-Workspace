@@ -86,6 +86,7 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
         json.dumps(
             {
                 "schemaVersion": 1,
+                "generation": 1,
                 "defaultChannel": "stable",
                 "channels": {"stable": {}, "preview": {}},
                 "components": [],

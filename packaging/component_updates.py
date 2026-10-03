@@ -42,6 +42,9 @@ SEMVER3_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*
 PLAN_ID_PATTERN = re.compile(r"^plan-[0-9a-f]{32}$")
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 INSTALLED_CATALOG = Path("/usr/share/cyrene/component-catalog-v1.json")
+ACTIVE_CATALOG_ROOT = Path("/usr/share/cyrene/component-catalogs")
+ACTIVE_CATALOG_POINTER = Path("/usr/share/cyrene/component-catalog-state.json")
+CATALOG_SCHEMA_ROOT = Path("/usr/share/cyrene/catalog-schemas")
 DEFAULT_CATALOG = (
     INSTALLED_CATALOG
     if INSTALLED_CATALOG.is_file()
@@ -55,7 +58,7 @@ DEFAULT_STATE_ROOT = Path("/var/lib/cyrene-updates")
 DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
 DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
 DEFAULT_CHANNEL = "stable"
-TRUSTED_CATALOG_DIGEST = "sha256:f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816"
+TRUSTED_CATALOG_DIGEST = "sha256:5b188affa20dbb261839a3dd7fb4f722aae76e64a3ed1ba35fcc52efd9ee1e97"
 USER_AGENT = "CyreneComponentUpdater/1"
 BEGIN_NO_TOKEN_STATUSES = frozenset(
     {
@@ -364,6 +367,130 @@ def _atomic_json(path: Path, value: dict[str, Any], *, mode: int = 0o600) -> Non
         temporary.unlink(missing_ok=True)
 
 
+def _verify_root_protected_directory(path: Path, *, create: bool = False) -> None:
+    """Require the complete public catalog path to be root-owned and non-writable."""
+
+    absolute = path.absolute()
+    if create:
+        absolute.mkdir(parents=True, exist_ok=True, mode=0o755)
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise UpdateError(
+                "UNSAFE_CATALOG", f"Cannot inspect protected catalog directory {current}: {error}"
+            ) from error
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or not stat.S_IMODE(info.st_mode) & 0o001
+        ):
+            raise UpdateError(
+                "UNSAFE_CATALOG",
+                f"Catalog directory and ancestors must be root-owned real directories without group/world write access: {current}",
+            )
+
+
+def _atomic_root_catalog_bytes(path: Path, payload: bytes) -> None:
+    """Atomically publish one immutable, root-readable catalog object."""
+
+    _verify_root_protected_directory(path.parent, create=True)
+    temporary = path.parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            0o644,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chown(temporary, 0, 0)
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_root_catalog_object(path: Path, description: str) -> bytes:
+    if path.is_symlink():
+        raise UpdateError("UNSAFE_CATALOG", f"Refusing a symbolic link for {description}: {path}")
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or not stat.S_IMODE(info.st_mode) & 0o004
+        ):
+            raise UpdateError(
+                "UNSAFE_CATALOG",
+                f"{description} must be root-owned, readable, and not group/world writable.",
+            )
+        return path.read_bytes()
+    except OSError as error:
+        raise UpdateError("UNSAFE_CATALOG", f"Cannot read {description}: {error}") from error
+
+
+def _stage_initial_catalog_directory(
+    metadata: dict[str, Any], catalog_bytes: bytes, attestation_bytes: bytes
+) -> Path:
+    """Build a complete first catalog snapshot outside the active path."""
+
+    parent = ACTIVE_CATALOG_ROOT.parent
+    _verify_root_protected_directory(parent)
+    if ACTIVE_CATALOG_ROOT.exists() or ACTIVE_CATALOG_ROOT.is_symlink():
+        raise UpdateError("UNSAFE_CATALOG", "The active catalog directory already exists.")
+    staging = parent / f".{ACTIVE_CATALOG_ROOT.name}.staging-{os.getpid()}-{uuid.uuid4().hex}"
+    created = False
+    try:
+        staging.mkdir(mode=0o700)
+        created = True
+        os.chown(staging, 0, 0)
+        os.chmod(staging, 0o755)
+        _verify_root_protected_directory(staging)
+        digest_hex = metadata["catalogSha256"].removeprefix("sha256:")
+        catalog_name = f"catalog-{digest_hex}.json"
+        attestation_name = f"catalog-{digest_hex}-{metadata['sourceCommit']}.attestation.jsonl"
+        _atomic_root_catalog_bytes(staging / catalog_name, catalog_bytes)
+        _atomic_root_catalog_bytes(staging / attestation_name, attestation_bytes)
+        directory_fd = os.open(staging, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return staging
+    except BaseException:
+        if created and staging.exists() and not staging.is_symlink():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _activate_initial_catalog_directory(staging: Path) -> None:
+    """Atomically expose a fully populated first active catalog directory."""
+
+    parent = ACTIVE_CATALOG_ROOT.parent
+    _verify_root_protected_directory(parent)
+    _verify_root_protected_directory(staging)
+    if ACTIVE_CATALOG_ROOT.exists() or ACTIVE_CATALOG_ROOT.is_symlink():
+        raise UpdateError("UNSAFE_CATALOG", "The active catalog directory appeared during import.")
+    os.rename(staging, ACTIVE_CATALOG_ROOT)
+    directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _verify_private_directory(path: Path) -> None:
     """Require a real, current-user-owned directory with no group/other access."""
 
@@ -407,6 +534,8 @@ class ComponentUpdater:
         systemd_unit_dirs: tuple[Path, ...] | None = None,
         data_bundle_root: Path = DEFAULT_DATA_BUNDLE_ROOT,
         authority_admin_socket: Path = DEFAULT_AUTHORITY_ADMIN_SOCKET,
+        load_active_catalog: bool = True,
+        allow_incomplete_catalog: bool = False,
     ) -> None:
         self.catalog_path = Path(catalog_path)
         self.activity_catalog_path = Path(activity_catalog_path)
@@ -418,6 +547,7 @@ class ComponentUpdater:
         self.authority_admin_socket = Path(authority_admin_socket)
         self.opener = opener
         self.runner = runner
+        self.allow_incomplete_catalog = allow_incomplete_catalog
         self.systemd_unit_dirs = (
             tuple(Path(path) for path in systemd_unit_dirs)
             if systemd_unit_dirs is not None
@@ -443,19 +573,40 @@ class ComponentUpdater:
                 "UNSAFE_CATALOG",
                 "The installed component catalog must be root-owned and not group/world writable.",
             )
-        catalog_bytes = self.catalog_path.read_bytes()
-        catalog_digest = "sha256:" + hashlib.sha256(catalog_bytes).hexdigest()
-        if trusted_catalog_digest is not None and catalog_digest != trusted_catalog_digest:
+        bootstrap_bytes = self.catalog_path.read_bytes()
+        bootstrap_digest = "sha256:" + hashlib.sha256(bootstrap_bytes).hexdigest()
+        if trusted_catalog_digest is not None and bootstrap_digest != trusted_catalog_digest:
             raise UpdateError(
                 "CATALOG_DIGEST_MISMATCH",
                 "The installed component catalog does not match its compiled authority pin.",
             )
+        self.bootstrap_catalog_digest = bootstrap_digest
+        self.bootstrap_catalog_bytes = bootstrap_bytes
+        self.load_active_catalog = load_active_catalog
+        self._index_cache: dict[tuple[str, ...], tuple[dict[str, Any], str]] = {}
+        self._readiness_cache: dict[tuple[str, bool], dict[str, Any]] = {}
+        self.catalog_source: dict[str, Any] | None = None
+        self.catalog_bytes = bootstrap_bytes
+        self.catalog_digest = bootstrap_digest
         try:
-            catalog_value = json.loads(catalog_bytes.decode("utf-8"))
+            catalog_value = json.loads(bootstrap_bytes.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise UpdateError(
                 "INVALID_LOCAL_STATE", f"Cannot read component catalog: {error}"
             ) from error
+        if load_active_catalog:
+            active = self._read_active_catalog()
+            if active is not None:
+                catalog_bytes, metadata = active
+                try:
+                    catalog_value = json.loads(catalog_bytes.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise UpdateError(
+                        "INVALID_CATALOG", f"The active component catalog is invalid: {error}"
+                    ) from error
+                self.catalog_bytes = catalog_bytes
+                self.catalog_digest = metadata["catalogSha256"]
+                self.catalog_source = metadata
         if not isinstance(catalog_value, dict):
             raise UpdateError("INVALID_CATALOG", "The component catalog must be a JSON object.")
         self.catalog = catalog_value
@@ -467,6 +618,12 @@ class ComponentUpdater:
             raise UpdateError(
                 "INVALID_CATALOG", "The installed component catalog has an unsupported schema."
             )
+        generation = self.catalog.get("generation")
+        if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+            raise UpdateError(
+                "INVALID_CATALOG", "The installed component catalog generation is invalid."
+            )
+        self.catalog_generation = generation
         self.components = {
             item.get("componentId"): item
             for item in self.catalog["components"]
@@ -482,8 +639,137 @@ class ComponentUpdater:
             for item in self.catalog.get("publishers", [])
             if isinstance(item, dict) and isinstance(item.get("repository"), str)
         }
-        self._index_cache: dict[tuple[str, str], tuple[dict[str, Any], str]] = {}
-        self._readiness_cache: dict[tuple[str, bool], dict[str, Any]] = {}
+
+    def _read_active_catalog(self) -> tuple[bytes, dict[str, Any]] | None:
+        """Load the public high-water pointer and its protected immutable snapshot."""
+
+        root_exists = ACTIVE_CATALOG_ROOT.exists() or ACTIVE_CATALOG_ROOT.is_symlink()
+        pointer_exists = ACTIVE_CATALOG_POINTER.exists() or ACTIVE_CATALOG_POINTER.is_symlink()
+        if not root_exists and not pointer_exists:
+            return None
+        if not pointer_exists:
+            if getattr(self, "allow_incomplete_catalog", False) and root_exists:
+                # Only the explicit import command enables this recovery path. The public
+                # updater and component runner fail closed when first activation stopped
+                # after publishing its snapshot directory but before the state pointer.
+                return None
+            raise UpdateError(
+                "UNSAFE_CATALOG",
+                "A catalog snapshot directory exists without its protected high-water pointer.",
+            )
+        if not root_exists:
+            raise UpdateError(
+                "UNSAFE_CATALOG",
+                "The protected catalog high-water pointer exists but its snapshot directory is missing.",
+            )
+        _verify_root_protected_directory(ACTIVE_CATALOG_ROOT)
+        _verify_root_protected_directory(ACTIVE_CATALOG_POINTER.parent)
+        if ACTIVE_CATALOG_POINTER.is_symlink() or not ACTIVE_CATALOG_POINTER.is_file():
+            raise UpdateError("UNSAFE_CATALOG", "The protected active-catalog pointer is unsafe.")
+        pointer_bytes = _read_root_catalog_object(
+            ACTIVE_CATALOG_POINTER, "active component-catalog pointer"
+        )
+        try:
+            pointer = json.loads(
+                pointer_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_CATALOG", f"Active catalog pointer is invalid: {error}"
+            ) from error
+        if (
+            not isinstance(pointer, dict)
+            or set(pointer) != {"schemaVersion", "catalogFile", "attestationFile", "metadata"}
+            or isinstance(pointer.get("schemaVersion"), bool)
+            or pointer.get("schemaVersion") != 1
+        ):
+            raise UpdateError("INVALID_CATALOG", "Active catalog pointer has an unsupported shape.")
+        metadata = pointer.get("metadata")
+        if not isinstance(metadata, dict):
+            raise UpdateError("INVALID_CATALOG", "Active catalog metadata is missing.")
+        required_metadata = {
+            "schemaVersion",
+            "repository",
+            "workflow",
+            "channel",
+            "releaseId",
+            "sourceCommit",
+            "sourceRef",
+            "catalogSha256",
+            "generation",
+            "subjectName",
+            "attestationAssetName",
+        }
+        if set(metadata) != required_metadata:
+            raise UpdateError(
+                "INVALID_CATALOG", "Active catalog metadata has an unsupported shape."
+            )
+        digest = metadata.get("catalogSha256")
+        match = re.fullmatch(r"sha256:([0-9a-f]{64})", str(digest))
+        if (
+            isinstance(metadata.get("schemaVersion"), bool)
+            or metadata.get("schemaVersion") != 1
+            or metadata.get("repository") != "DoHorizon-AI/Cyrene-Workspace"
+            or metadata.get("workflow")
+            != "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml"
+            or metadata.get("channel") not in {"stable", "preview"}
+            or not isinstance(metadata.get("releaseId"), str)
+            or not isinstance(metadata.get("sourceCommit"), str)
+            or re.fullmatch(r"[0-9a-f]{40}", metadata["sourceCommit"]) is None
+            or metadata.get("sourceRef")
+            not in (
+                {"refs/heads/main", "refs/heads/release"}
+                if metadata.get("channel") == "stable"
+                else {"refs/heads/develop"}
+            )
+            or match is None
+            or not isinstance(metadata.get("generation"), int)
+            or isinstance(metadata.get("generation"), bool)
+            or metadata["generation"] < 1
+            or metadata.get("subjectName") != "component-catalog-v1.json"
+            or metadata.get("attestationAssetName") != "component-catalog-v1.json.attestation.jsonl"
+        ):
+            raise UpdateError("INVALID_CATALOG", "Active catalog metadata identity is invalid.")
+        expected_tag = f"catalog-{metadata['channel']}-{metadata['sourceCommit']}"
+        if metadata.get("releaseId") != expected_tag:
+            raise UpdateError(
+                "INVALID_CATALOG", "Active catalog tag does not match its channel/source."
+            )
+        catalog_name = f"catalog-{match.group(1)}.json"
+        attestation_name = f"catalog-{match.group(1)}-{metadata['sourceCommit']}.attestation.jsonl"
+        if (
+            pointer.get("catalogFile") != catalog_name
+            or pointer.get("attestationFile") != attestation_name
+        ):
+            raise UpdateError(
+                "INVALID_CATALOG", "Active catalog pointer paths do not match its digest."
+            )
+        catalog_bytes = _read_root_catalog_object(
+            ACTIVE_CATALOG_ROOT / catalog_name, "active catalog"
+        )
+        if "sha256:" + hashlib.sha256(catalog_bytes).hexdigest() != digest:
+            raise UpdateError(
+                "CATALOG_DIGEST_MISMATCH", "Active catalog bytes differ from its receipt."
+            )
+        _read_root_catalog_object(
+            ACTIVE_CATALOG_ROOT / attestation_name, "active catalog detached attestation"
+        )
+        try:
+            catalog_value = json.loads(
+                catalog_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_CATALOG", f"Active catalog JSON is invalid: {error}"
+            ) from error
+        if (
+            not isinstance(catalog_value, dict)
+            or catalog_value.get("generation") != metadata["generation"]
+        ):
+            raise UpdateError(
+                "INVALID_CATALOG", "Active catalog generation differs from its receipt."
+            )
+        return catalog_bytes, metadata
 
     def _ensure_state_root(self) -> Path:
         """Create or validate the private root-owned updater journal directory."""
@@ -510,6 +796,410 @@ class ComponentUpdater:
             ) from error
         _verify_private_directory(directory)
         return directory
+
+    def _read_catalog_floor(self) -> dict[str, Any] | None:
+        """Read the private monotonic catalog receipt used by privileged operations."""
+
+        floor_path = self.state_root / "catalog-state.json"
+        if not self.state_root.exists() and not self.state_root.is_symlink():
+            return None
+        _verify_private_directory(self.state_root)
+        if not floor_path.exists() and not floor_path.is_symlink():
+            return None
+        if floor_path.is_symlink():
+            raise UpdateError("UNSAFE_CATALOG", "Catalog monotonic receipt must not be a symlink.")
+        try:
+            info = floor_path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise UpdateError(
+                    "UNSAFE_CATALOG", "Catalog monotonic receipt must be a root-owned 0600 file."
+                )
+        except OSError as error:
+            raise UpdateError(
+                "UNSAFE_CATALOG", f"Cannot inspect catalog receipt: {error}"
+            ) from error
+        floor = _read_object(floor_path, "catalog monotonic receipt")
+        if (
+            set(floor) != {"schemaVersion", "generation", "catalogSha256", "releaseId"}
+            or floor.get("schemaVersion") != 1
+            or not isinstance(floor.get("generation"), int)
+            or isinstance(floor.get("generation"), bool)
+            or floor["generation"] < 1
+            or not _valid_digest(floor.get("catalogSha256"))
+            or not isinstance(floor.get("releaseId"), str)
+        ):
+            raise UpdateError("INVALID_CATALOG", "Catalog monotonic receipt has an invalid shape.")
+        return floor
+
+    def _write_catalog_floor(self, metadata: dict[str, Any]) -> None:
+        self._private_state_directory("locks")
+        _atomic_json(
+            self.state_root / "catalog-state.json",
+            {
+                "schemaVersion": 1,
+                "generation": metadata["generation"],
+                "catalogSha256": metadata["catalogSha256"],
+                "releaseId": metadata["releaseId"],
+            },
+            mode=0o600,
+        )
+
+    def _check_catalog_floor(self, metadata: dict[str, Any]) -> None:
+        floor = self._read_catalog_floor()
+        if floor is None:
+            return
+        generation = metadata["generation"]
+        if generation < floor["generation"]:
+            raise UpdateError(
+                "CATALOG_ROLLBACK",
+                "The active catalog generation is below the protected monotonic receipt.",
+            )
+        if (
+            generation == floor["generation"]
+            and metadata["catalogSha256"] != floor["catalogSha256"]
+        ):
+            raise UpdateError(
+                "CATALOG_GENERATION_COLLISION",
+                "The same catalog generation is already pinned to different raw catalog bytes.",
+            )
+
+    def _assert_no_pending_catalog_intent(self) -> None:
+        """Do not switch trusted policy while maintenance or restore recovery is pending."""
+
+        transaction_root = self.state_root / "transactions"
+        if transaction_root.exists() or transaction_root.is_symlink():
+            if transaction_root.is_symlink() or not transaction_root.is_dir():
+                raise UpdateError("UNSAFE_STATE", "Update transaction directory is unsafe.")
+            _verify_private_directory(transaction_root)
+            for path in sorted(transaction_root.iterdir()):
+                if path.is_symlink() or not path.is_file():
+                    raise UpdateError(
+                        "PENDING_MAINTENANCE", "A transaction entry blocks catalog activation."
+                    )
+                transaction = _read_object(path, "pending component update transaction")
+                if transaction.get("phase") not in {"succeeded", "rolled_back"}:
+                    raise UpdateError(
+                        "PENDING_MAINTENANCE",
+                        "Resolve pending maintenance or rollback recovery before importing a catalog.",
+                    )
+
+        for service in ("navigator", "yield", "reactor", "exchange", "catalyst"):
+            intent = self.install_root / "services" / service / "update-journal.json"
+            if intent.exists() or intent.is_symlink():
+                raise UpdateError(
+                    "PENDING_RESTORE_INTENT",
+                    f"Resolve the pending {service} update/restore intent before importing a catalog.",
+                )
+
+    def _fetch_catalog_candidate(
+        self,
+        *,
+        channel: str,
+        release_id: str | None = None,
+        latest: bool = False,
+    ) -> tuple[dict[str, Any], bytes, bytes]:
+        if channel not in {"stable", "preview"}:
+            raise UpdateError("INVALID_CATALOG", "Catalog channel must be stable or preview.")
+        if (release_id is None) == (not latest):
+            raise UpdateError(
+                "INVALID_REQUEST",
+                "Specify exactly one catalog release ID or latest-candidate selector.",
+            )
+        try:
+            import importlib.util
+
+            metadata_path = Path(__file__).resolve().with_name("catalog_metadata.py")
+            metadata_spec = importlib.util.spec_from_file_location(
+                "_cyrene_catalog_metadata", metadata_path
+            )
+            if metadata_spec is None or metadata_spec.loader is None:
+                raise ImportError("catalog metadata module has no import loader")
+            catalog_metadata = importlib.util.module_from_spec(metadata_spec)
+            metadata_spec.loader.exec_module(catalog_metadata)
+        except (ImportError, OSError, AttributeError) as error:
+            raise UpdateError(
+                "CATALOG_HELPER_MISSING", "The trusted catalog metadata helper is missing."
+            ) from error
+        with tempfile.TemporaryDirectory(prefix="cyrene-catalog-") as temporary:
+            root = Path(temporary)
+            raw_path = root / "component-catalog-v1.json"
+            metadata_path = root / "component-catalog-v1.metadata.json"
+            attestation_path = root / "component-catalog-v1.json.attestation.jsonl"
+            try:
+                metadata = catalog_metadata.fetch_verified_catalog(
+                    channel=channel,
+                    release_id=release_id,
+                    latest_channel=channel if latest else None,
+                    output_path=raw_path,
+                    metadata_path=metadata_path,
+                    attestation_output_path=attestation_path,
+                    schema_root=(
+                        CATALOG_SCHEMA_ROOT
+                        if CATALOG_SCHEMA_ROOT.is_dir()
+                        else Path(__file__).resolve().parents[1] / "governance"
+                    ),
+                    verify_attestation=self._verify_attestation,
+                )
+            except Exception as error:
+                code = getattr(error, "code", "CATALOG_VERIFICATION_FAILED")
+                raise UpdateError(code, f"Trusted catalog verification failed: {error}") from error
+            try:
+                return metadata, raw_path.read_bytes(), attestation_path.read_bytes()
+            except OSError as error:
+                raise UpdateError(
+                    "CATALOG_HELPER_OUTPUT_INVALID",
+                    f"Verified catalog helper omitted an asset: {error}",
+                ) from error
+
+    def catalog_status(self) -> dict[str, Any]:
+        """Report the active trusted catalog identity without changing it."""
+
+        self._reload_catalog_for_operation()
+        active = self._read_active_catalog()
+        if active is None:
+            metadata: dict[str, Any] = {
+                "channel": "bootstrap",
+                "releaseId": None,
+                "sourceCommit": None,
+                "sourceRef": None,
+                "generation": self.catalog_generation,
+                "catalogSha256": self.bootstrap_catalog_digest,
+            }
+        else:
+            _, metadata = active
+            self._check_catalog_floor(metadata) if _running_as_root() else None
+        return {"status": "ready", "active": metadata}
+
+    def catalog_check(
+        self, *, channel: str, release_id: str | None = None, latest: bool = False
+    ) -> dict[str, Any]:
+        """Verify and describe a catalog candidate without activating it."""
+
+        metadata, _, _ = self._fetch_catalog_candidate(
+            channel=channel, release_id=release_id, latest=latest
+        )
+        return {"status": "candidate_verified", "activated": False, "candidate": metadata}
+
+    def catalog_import(self, *, channel: str, release_id: str) -> dict[str, Any]:
+        """Verify an exact immutable catalog release and explicitly activate its metadata."""
+
+        self._require_authorized_process()
+        self._ensure_state_root()
+        metadata, catalog_bytes, attestation_bytes = self._fetch_catalog_candidate(
+            channel=channel, release_id=release_id
+        )
+        with self._exclusive_update_lock():
+            active = self._read_active_catalog()
+            floor = self._read_catalog_floor()
+            current_generation = self.catalog_generation
+            current_digest = self.bootstrap_catalog_digest
+            if active is not None:
+                current_generation = active[1]["generation"]
+                current_digest = active[1]["catalogSha256"]
+            if floor is not None:
+                if floor["generation"] > current_generation:
+                    current_generation = floor["generation"]
+                    current_digest = floor["catalogSha256"]
+                elif (
+                    floor["generation"] == current_generation
+                    and floor["catalogSha256"] != current_digest
+                ):
+                    raise UpdateError(
+                        "CATALOG_GENERATION_COLLISION",
+                        "The protected catalog receipt conflicts with the active catalog bytes.",
+                    )
+            candidate_generation = metadata["generation"]
+            if candidate_generation < current_generation:
+                raise UpdateError(
+                    "CATALOG_ROLLBACK", "Catalog import would roll back the active generation."
+                )
+            if (
+                candidate_generation == current_generation
+                and metadata["catalogSha256"] != current_digest
+            ):
+                raise UpdateError(
+                    "CATALOG_GENERATION_COLLISION",
+                    "The same catalog generation is already pinned to different raw catalog bytes.",
+                )
+            if (
+                active is not None
+                and active[1]["generation"] == candidate_generation
+                and active[1]["catalogSha256"] == metadata["catalogSha256"]
+                and candidate_generation == current_generation
+            ):
+                self._refresh_active_catalog()
+                return {
+                    "status": "already_active",
+                    "active": active[1],
+                    "activated": False,
+                }
+
+            self._assert_no_pending_catalog_intent()
+            digest_hex = metadata["catalogSha256"].removeprefix("sha256:")
+            catalog_name = f"catalog-{digest_hex}.json"
+            attestation_name = f"catalog-{digest_hex}-{metadata['sourceCommit']}.attestation.jsonl"
+            catalog_path = ACTIVE_CATALOG_ROOT / catalog_name
+            attestation_path = ACTIVE_CATALOG_ROOT / attestation_name
+            pointer = {
+                "schemaVersion": 1,
+                "catalogFile": catalog_name,
+                "attestationFile": attestation_name,
+                "metadata": metadata,
+            }
+            if not ACTIVE_CATALOG_ROOT.exists() and not ACTIVE_CATALOG_ROOT.is_symlink():
+                staging = _stage_initial_catalog_directory(
+                    metadata, catalog_bytes, attestation_bytes
+                )
+                try:
+                    _activate_initial_catalog_directory(staging)
+                    _atomic_root_catalog_bytes(
+                        ACTIVE_CATALOG_POINTER,
+                        json.dumps(pointer, ensure_ascii=False, sort_keys=True, indent=2).encode(
+                            "utf-8"
+                        )
+                        + b"\n",
+                    )
+                    # The public state pointer carries the active generation/digest and remains
+                    # readable by non-root service launchers. A crash before this write leaves
+                    # an unmarked snapshot that only explicit import recovery may load.
+                    self._write_catalog_floor(metadata)
+                finally:
+                    if staging.exists() and not staging.is_symlink():
+                        shutil.rmtree(staging, ignore_errors=True)
+            else:
+                _verify_root_protected_directory(ACTIVE_CATALOG_ROOT)
+                if catalog_path.exists() or catalog_path.is_symlink():
+                    existing = _read_root_catalog_object(catalog_path, "catalog snapshot")
+                    if (
+                        "sha256:" + hashlib.sha256(existing).hexdigest()
+                        != metadata["catalogSha256"]
+                    ):
+                        raise UpdateError(
+                            "CATALOG_DIGEST_MISMATCH", "Catalog snapshot path collision detected."
+                        )
+                else:
+                    _atomic_root_catalog_bytes(catalog_path, catalog_bytes)
+                if attestation_path.exists() or attestation_path.is_symlink():
+                    previous_proof = _read_root_catalog_object(
+                        attestation_path, "catalog attestation snapshot"
+                    )
+                    if previous_proof != attestation_bytes:
+                        raise UpdateError(
+                            "CATALOG_PROOF_COLLISION",
+                            "Detached proof differs for identical catalog bytes.",
+                        )
+                else:
+                    _atomic_root_catalog_bytes(attestation_path, attestation_bytes)
+                _atomic_root_catalog_bytes(
+                    ACTIVE_CATALOG_POINTER,
+                    json.dumps(pointer, ensure_ascii=False, sort_keys=True, indent=2).encode(
+                        "utf-8"
+                    )
+                    + b"\n",
+                )
+                # The pointer carries the active generation and digest. If interrupted before
+                # this receipt update, the next root load advances the floor from that pointer.
+                self._write_catalog_floor(metadata)
+            self._refresh_active_catalog()
+            return {"status": "imported", "active": metadata, "activated": True}
+
+    def _refresh_active_catalog(self) -> None:
+        active = self._read_active_catalog()
+        if active is None:
+            raise UpdateError(
+                "UNSAFE_CATALOG", "Catalog activation did not publish an active pointer."
+            )
+        catalog_bytes, metadata = active
+        if _running_as_root():
+            floor = self._read_catalog_floor()
+            if floor is not None and (
+                floor["generation"] > metadata["generation"]
+                or (
+                    floor["generation"] == metadata["generation"]
+                    and floor["catalogSha256"] != metadata["catalogSha256"]
+                )
+            ):
+                raise UpdateError(
+                    "CATALOG_ROLLBACK",
+                    "Active catalog pointer conflicts with its monotonic receipt.",
+                )
+            if floor is None or floor["generation"] < metadata["generation"]:
+                self._write_catalog_floor(metadata)
+        try:
+            catalog_value = json.loads(
+                catalog_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_CATALOG", f"Active catalog JSON is invalid: {error}"
+            ) from error
+        if not isinstance(catalog_value, dict):
+            raise UpdateError("INVALID_CATALOG", "Active catalog must be a JSON object.")
+        self.catalog = catalog_value
+        self.catalog_bytes = catalog_bytes
+        self.catalog_digest = metadata["catalogSha256"]
+        self.catalog_generation = metadata["generation"]
+        self.catalog_source = metadata
+        self.components = {
+            item.get("componentId"): item
+            for item in self.catalog.get("components", [])
+            if isinstance(item, dict) and isinstance(item.get("componentId"), str)
+        }
+        self.targets = {
+            item["id"]: item
+            for item in self.catalog.get("targets", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        self.publishers = {
+            item["repository"]: item
+            for item in self.catalog.get("publishers", [])
+            if isinstance(item, dict) and isinstance(item.get("repository"), str)
+        }
+        self._index_cache.clear()
+
+    def _reload_catalog_for_operation(self) -> None:
+        """Re-read the protected active pointer at each check/stage/apply boundary."""
+
+        active = self._read_active_catalog()
+        if active is None:
+            if _running_as_root() and self._read_catalog_floor() is not None:
+                raise UpdateError(
+                    "UNSAFE_CATALOG", "A previously activated catalog pointer is missing."
+                )
+            if self.catalog_source is not None:
+                try:
+                    value = json.loads(self.bootstrap_catalog_bytes.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise UpdateError(
+                        "INVALID_CATALOG", f"Bootstrap catalog is invalid: {error}"
+                    ) from error
+                self.catalog = value
+                self.catalog_bytes = self.bootstrap_catalog_bytes
+                self.catalog_digest = self.bootstrap_catalog_digest
+                self.catalog_generation = value["generation"]
+                self.catalog_source = None
+                self.components = {
+                    item.get("componentId"): item
+                    for item in value.get("components", [])
+                    if isinstance(item, dict) and isinstance(item.get("componentId"), str)
+                }
+                self.targets = {
+                    item["id"]: item
+                    for item in value.get("targets", [])
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                }
+                self.publishers = {
+                    item["repository"]: item
+                    for item in value.get("publishers", [])
+                    if isinstance(item, dict) and isinstance(item.get("repository"), str)
+                }
+                self._index_cache.clear()
+            return
+        self._refresh_active_catalog()
 
     def _require_authorized_process(self) -> None:
         if self.state_root == DEFAULT_STATE_ROOT and not _running_as_root():
@@ -635,6 +1325,7 @@ class ComponentUpdater:
     def status(self) -> dict[str, Any]:
         """Read installed versions and live gate readiness without changing services."""
 
+        self._reload_catalog_for_operation()
         self._ensure_state_root()
         rows = []
         plans = self._staged_plans()
@@ -668,6 +1359,7 @@ class ComponentUpdater:
     ) -> dict[str, Any]:
         """Discover trusted channel releases and produce digest-bound plans."""
 
+        self._reload_catalog_for_operation()
         self._ensure_state_root()
         channel = self._resolve_channel(channel)
         if channel not in {"stable", "preview"}:
@@ -740,6 +1432,8 @@ class ComponentUpdater:
             digest_material = {
                 "schemaVersion": 1,
                 "channel": channel,
+                "catalogGeneration": self.catalog_generation,
+                "catalogDigest": self.catalog_digest,
                 "components": plan_components,
             }
             plan_digest = _digest_json(digest_material, "planDigest")
@@ -748,6 +1442,8 @@ class ComponentUpdater:
                 "planId": plan_id,
                 "planDigest": plan_digest,
                 "channel": channel,
+                "catalogGeneration": self.catalog_generation,
+                "catalogDigest": self.catalog_digest,
                 "phase": "checked",
                 "components": plan_components,
             }
@@ -825,6 +1521,7 @@ class ComponentUpdater:
     ) -> dict[str, Any]:
         """Download, verify, and install immutable payloads without gate or activation."""
 
+        self._reload_catalog_for_operation()
         self._ensure_state_root()
         self._validate_plan_identity(plan_id, plan_digest)
         stored_plan = _read_object(
@@ -834,6 +1531,15 @@ class ComponentUpdater:
             raise UpdateError(
                 "PLAN_CHANGED",
                 "The latest checked plan no longer matches this digest; run check again.",
+                retryable=True,
+            )
+        if (
+            stored_plan.get("catalogGeneration") != self.catalog_generation
+            or stored_plan.get("catalogDigest") != self.catalog_digest
+        ):
+            raise UpdateError(
+                "PLAN_CATALOG_CHANGED",
+                "The trusted catalog changed after this plan was checked; run check again.",
                 retryable=True,
             )
         channel = self._resolve_channel(
@@ -924,6 +1630,7 @@ class ComponentUpdater:
     ) -> dict[str, Any]:
         """Atomically gate the runtime, activate, restart, health-check, or rollback."""
 
+        self._reload_catalog_for_operation()
         self._validate_plan_identity(plan_id, plan_digest)
         if (
             not isinstance(confirmation, dict)
@@ -2165,9 +2872,14 @@ class ComponentUpdater:
         )
 
     def _channel_releases(
-        self, publisher: dict[str, Any], channel: str
+        self, publisher: dict[str, Any], channel: str, component: dict[str, Any]
     ) -> tuple[dict[str, Any], str]:
-        key = (publisher["repository"], channel)
+        component_prefix = self._component_release_tag_prefix(component, channel)
+        key = (
+            publisher["repository"],
+            channel,
+            component["componentId"] if component_prefix else "",
+        )
         if key in self._index_cache:
             return self._index_cache[key]
         releases_uri = publisher["releaseDiscovery"]["apiUri"]
@@ -2179,25 +2891,37 @@ class ComponentUpdater:
                 "INVALID_CATALOG",
                 f"Release discovery URL is not the fixed API for {publisher['repository']}.",
             )
-        releases = self._get_json(releases_uri)
-        if not isinstance(releases, list):
-            raise UpdateError(
-                "RELEASE_DISCOVERY_INVALID",
-                "GitHub Releases API did not return a release list.",
-                retryable=True,
-            )
         channel_cfg = self.catalog["channels"][channel]
         expected_prerelease = channel_cfg["releasePrerelease"]
-        selected_release = next(
-            (
-                item
-                for item in releases
-                if isinstance(item, dict)
-                and item.get("draft") is False
-                and item.get("prerelease") is expected_prerelease
-            ),
-            None,
-        )
+        selected_release = None
+        for page in range(1, 101):
+            page_uri = releases_uri if page == 1 else f"{releases_uri}&page={page}"
+            releases = self._get_json(page_uri)
+            if not isinstance(releases, list):
+                raise UpdateError(
+                    "RELEASE_DISCOVERY_INVALID",
+                    "GitHub Releases API did not return a release list.",
+                    retryable=True,
+                )
+            selected_release = next(
+                (
+                    item
+                    for item in releases
+                    if isinstance(item, dict)
+                    and item.get("draft") is False
+                    and item.get("prerelease") is expected_prerelease
+                    and (
+                        component_prefix is None
+                        or (
+                            isinstance(item.get("tag_name"), str)
+                            and item["tag_name"].startswith(component_prefix)
+                        )
+                    )
+                ),
+                None,
+            )
+            if selected_release is not None or len(releases) < 100:
+                break
         if selected_release is None:
             raise UpdateError(
                 "NO_RELEASE",
@@ -2233,7 +2957,7 @@ class ComponentUpdater:
             raise UpdateError(
                 "INVALID_RELEASE_INDEX", "The component release index is not valid UTF-8 JSON."
             ) from error
-        self._validate_index(index, publisher, channel, selected_release)
+        self._validate_index(index, publisher, channel, selected_release, component)
         self._verify_attestation(
             index_bytes,
             subject_name=index["provenance"]["attestation"]["subjectName"],
@@ -2247,7 +2971,12 @@ class ComponentUpdater:
         return index, index_uri
 
     def _validate_index(
-        self, index: Any, publisher: dict[str, Any], channel: str, release: dict[str, Any]
+        self,
+        index: Any,
+        publisher: dict[str, Any],
+        channel: str,
+        release: dict[str, Any],
+        component: dict[str, Any],
     ) -> None:
         if (
             not isinstance(index, dict)
@@ -2273,7 +3002,9 @@ class ComponentUpdater:
                 "UNTRUSTED_SOURCE",
                 "The release index source is outside the trusted repository/ref pins.",
             )
-        prefix = "preview-" if channel == "preview" else "stable-"
+        prefix = self._component_release_tag_prefix(component, channel) or (
+            "preview-" if channel == "preview" else "stable-"
+        )
         if release.get("tag_name") != prefix + source["commit"]:
             raise UpdateError(
                 "UNTRUSTED_RELEASE_TAG",
@@ -2307,6 +3038,34 @@ class ComponentUpdater:
                 "INVALID_RELEASE_INDEX", "The release index compatibilityGroups field is invalid."
             )
 
+    @staticmethod
+    def _component_release_tag_prefix(component: dict[str, Any], channel: str) -> str | None:
+        discovery = component.get("releaseDiscovery")
+        if discovery is None:
+            return None
+        if not isinstance(discovery, dict) or set(discovery) != {"tagPrefixes"}:
+            raise UpdateError(
+                "INVALID_CATALOG",
+                f"Component-specific release tag prefixes are invalid for {component.get('componentId')}.",
+            )
+        prefixes = discovery.get("tagPrefixes")
+        prefix = prefixes.get(channel) if isinstance(prefixes, dict) else None
+        expected = f"{channel}-{component.get('componentId')}-"
+        if (
+            not isinstance(prefixes, dict)
+            or set(prefixes) != {"preview", "stable"}
+            or prefix != expected
+            or any(
+                prefixes.get(item) != f"{item}-{component.get('componentId')}-"
+                for item in ("stable", "preview")
+            )
+        ):
+            raise UpdateError(
+                "INVALID_CATALOG",
+                f"Component-specific release tag prefixes are invalid for {component.get('componentId')}.",
+            )
+        return prefix
+
     def _candidate(
         self, component: dict[str, Any], target: dict[str, Any], channel: str
     ) -> Candidate:
@@ -2316,7 +3075,7 @@ class ComponentUpdater:
                 "INVALID_CATALOG",
                 f"No trusted publisher is configured for {component['componentId']}.",
             )
-        index, index_uri = self._channel_releases(publisher, channel)
+        index, index_uri = self._channel_releases(publisher, channel, component)
         entries = [
             item
             for item in index.get("releases", [])
@@ -2922,7 +3681,13 @@ class ComponentUpdater:
             }
             for key, item in sorted(selected.items())
         ]
-        material = {"schemaVersion": 1, "channel": channel, "components": rebuilt_components}
+        material = {
+            "schemaVersion": 1,
+            "channel": channel,
+            "catalogGeneration": plan.get("catalogGeneration"),
+            "catalogDigest": plan.get("catalogDigest"),
+            "components": rebuilt_components,
+        }
         if "sha256:" + hashlib.sha256(canonical_jcs(material)).hexdigest() != plan["planDigest"]:
             raise UpdateError(
                 "PLAN_CHANGED",
@@ -4100,9 +4865,19 @@ class ComponentUpdater:
         plan_components = plan.get("components")
         if not isinstance(plan_components, list) or not plan_components:
             raise UpdateError("INVALID_STAGE", "Staged plan has no checked component list.")
+        if (
+            plan.get("catalogGeneration") != self.catalog_generation
+            or plan.get("catalogDigest") != self.catalog_digest
+        ):
+            raise UpdateError(
+                "PLAN_CATALOG_CHANGED",
+                "The staged plan was checked against a different catalog generation; check and stage again.",
+            )
         plan_material = {
             "schemaVersion": 1,
             "channel": plan["channel"],
+            "catalogGeneration": plan["catalogGeneration"],
+            "catalogDigest": plan["catalogDigest"],
             "components": plan_components,
         }
         expected_digest = "sha256:" + hashlib.sha256(canonical_jcs(plan_material)).hexdigest()

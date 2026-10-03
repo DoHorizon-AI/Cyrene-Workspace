@@ -123,8 +123,18 @@ cp "${SCRIPT_DIR}/service_bundle.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/servic
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
 cp "${SCRIPT_DIR}/component_updates.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
+cp "${SCRIPT_DIR}/catalog_metadata.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
 cp "${WORKSPACE_ROOT}/governance/component-catalog-v1.json" "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
 chmod 644 "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
+mkdir -p "${STAGE_DIR}/usr/share/cyrene/catalog-schemas"
+cp "${WORKSPACE_ROOT}/governance/component-catalog-v1.schema.json" \
+    "${STAGE_DIR}/usr/share/cyrene/catalog-schemas/component-catalog-v1.schema.json"
+cp "${WORKSPACE_ROOT}/governance/component-release-manifest-v1.schema.json" \
+    "${STAGE_DIR}/usr/share/cyrene/catalog-schemas/component-release-manifest-v1.schema.json"
+cp "${WORKSPACE_ROOT}/governance/component-release-manifest-v2.schema.json" \
+    "${STAGE_DIR}/usr/share/cyrene/catalog-schemas/component-release-manifest-v2.schema.json"
+chmod 644 "${STAGE_DIR}/usr/share/cyrene/catalog-schemas/"*.schema.json
 if [[ -f "${WORKSPACE_ROOT}/pyproject.toml" ]]; then
     cp "${WORKSPACE_ROOT}/pyproject.toml" "${STAGE_DIR}/usr/lib/cyrene/"
 fi
@@ -321,7 +331,7 @@ Section: devel
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Cyrene Team <team@cyrene.dev>
-Depends: python3 (>= 3.12), python3 (<< 3.13), systemd, policykit-1, acl
+Depends: python3 (>= 3.12), python3 (<< 3.13), python3-jsonschema (>= 4.0), systemd, policykit-1, acl
 Description: Cyrene Unified Local LLM Stack
  Cyrene provides a complete local LLM development and inference platform,
  including model importation (Reactor), training drafts (Yield), dataset preparation
