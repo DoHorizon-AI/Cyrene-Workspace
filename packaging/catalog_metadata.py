@@ -62,7 +62,15 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         target = urllib.parse.urlsplit(new_url)
         if target.scheme != "https" or target.hostname not in self.allowed_hosts:
             raise CatalogMetadataError("GitHub returned an untrusted HTTPS redirect.")
-        return super().redirect_request(request, file_pointer, code, message, headers, new_url)
+        redirected = super().redirect_request(request, file_pointer, code, message, headers, new_url)
+        source = urllib.parse.urlsplit(request.full_url)
+        if redirected is not None and (
+            target.hostname != "api.github.com"
+            or target.netloc.lower() != source.netloc.lower()
+        ):
+            # urllib copies normal headers to redirected requests; never forward API credentials off-origin.
+            redirected.remove_header("Authorization")
+        return redirected
 
 
 def _read_url(url: str, *, accept: str, limit: int, asset: bool = False) -> bytes:
@@ -73,6 +81,17 @@ def _read_url(url: str, *, accept: str, limit: int, asset: bool = False) -> byte
         "User-Agent": "CyreneComponentCatalogFetcher/1",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    parsed_url = urllib.parse.urlsplit(url)
+    if (
+        parsed_url.scheme == "https"
+        and parsed_url.hostname == "api.github.com"
+        and parsed_url.username is None
+        and parsed_url.password is None
+        and parsed_url.port in (None, 443)
+    ):
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
     allowed_hosts = (
         frozenset(
