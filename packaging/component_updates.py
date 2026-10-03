@@ -55,7 +55,7 @@ DEFAULT_STATE_ROOT = Path("/var/lib/cyrene-updates")
 DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
 DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
 DEFAULT_CHANNEL = "stable"
-TRUSTED_CATALOG_DIGEST = "sha256:28fc1ef65a38658aeabb2bf23b7a35e91cb64774612f387936a971dfec2bd3dc"
+TRUSTED_CATALOG_DIGEST = "sha256:f12f5cd1243d16b6ec6a5194efacbdf7a8bf9dffcf8d9525c35183c45a7c7816"
 USER_AGENT = "CyreneComponentUpdater/1"
 BEGIN_NO_TOKEN_STATUSES = frozenset(
     {
