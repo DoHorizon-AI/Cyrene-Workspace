@@ -39,7 +39,6 @@ jobs:
       REQUESTED_CHANNEL: ${{ inputs.channel || 'auto' }}
       RAW_ASSET: component-catalog-v1.json
       BUNDLE_ASSET: component-catalog-v1.json.attestation.jsonl
-      PUBLISH_DIR: ${{ runner.temp }}/component-catalog-release
 
     steps:
       - name: Check out the exact source commit
@@ -125,6 +124,8 @@ jobs:
 
       - name: Validate source identity, channel, catalog schema, and raw asset
         id: catalog
+        env:
+          PUBLISH_DIR: ${{ runner.temp }}/component-catalog-release
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "$REPOSITORY"
@@ -492,6 +493,8 @@ jobs:
 
       - name: Prepare the exact subject filename and raw digest
         if: steps.history.outputs.already_published != 'true'
+        env:
+          PUBLISH_DIR: ${{ runner.temp }}/component-catalog-release
         run: |
           set -euo pipefail
           (cd "$PUBLISH_DIR" && sha256sum "$RAW_ASSET" > "$RUNNER_TEMP/component-catalog-subjects.sha256")
@@ -507,6 +510,7 @@ jobs:
         env:
           CHANNEL: ${{ steps.catalog.outputs.channel }}
           CATALOG_DIGEST: ${{ steps.catalog.outputs.digest }}
+          PUBLISH_DIR: ${{ runner.temp }}/component-catalog-release
         run: |
           set -euo pipefail
           (
@@ -562,6 +566,7 @@ jobs:
           CHANNEL: ${{ steps.catalog.outputs.channel }}
           RELEASE_TAG: ${{ steps.catalog.outputs.tag }}
           PRERELEASE: ${{ steps.catalog.outputs.prerelease }}
+          PUBLISH_DIR: ${{ runner.temp }}/component-catalog-release
         run: |
           set -euo pipefail
           args=("$RELEASE_TAG" "$PUBLISH_DIR/$RAW_ASSET" "$PUBLISH_DIR/$BUNDLE_ASSET" \
