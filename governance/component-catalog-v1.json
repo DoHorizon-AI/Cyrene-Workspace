@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 7,
+  "generation": 8,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -636,7 +636,8 @@
       },
       "dependencies": [
         {
-          "componentId": "cyrene-runtime-maintenance-sdk"
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
         }
       ],
       "systemdUnit": "cyrene-navigator.service",
@@ -673,10 +674,12 @@
       },
       "dependencies": [
         {
-          "componentId": "cyrene-runtime-maintenance-sdk"
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
         },
         {
-          "componentId": "cyrene-runtime-maintenance"
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
         }
       ],
       "systemdUnit": "cyrene-yield.service",
@@ -714,10 +717,12 @@
       },
       "dependencies": [
         {
-          "componentId": "cyrene-runtime-maintenance-sdk"
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
         },
         {
-          "componentId": "cyrene-runtime-maintenance"
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
         }
       ],
       "systemdUnit": "cyrene-reactor.service",
@@ -755,10 +760,12 @@
       },
       "dependencies": [
         {
-          "componentId": "cyrene-runtime-maintenance-sdk"
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
         },
         {
-          "componentId": "cyrene-runtime-maintenance"
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
         }
       ],
       "systemdUnit": "cyrene-exchange.service",
@@ -796,10 +803,12 @@
       },
       "dependencies": [
         {
-          "componentId": "cyrene-runtime-maintenance-sdk"
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
         },
         {
-          "componentId": "cyrene-runtime-maintenance"
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
         }
       ],
       "systemdUnit": "cyrene-catalyst.service",
@@ -836,10 +845,12 @@
       },
       "dependencies": [
         {
-          "componentId": "cyrene-runtime-maintenance-sdk"
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "versionRange": "=0.1.0"
         },
         {
-          "componentId": "cyrene-runtime-maintenance"
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
         }
       ],
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-echo"
