@@ -338,7 +338,7 @@ jobs:
           gh release create "$RELEASE_ID" "${assets[@]}" --draft --target "$SOURCE_COMMIT" \
             --title "Workspace Product data bundle $RELEASE_ID" \
             --notes "Immutable portable Product contract archive with independently verifiable owner and Platform policy proofs."
-          release_id="$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_ID" --jq .id)"
+          release_id="$(gh release view "$RELEASE_ID" --repo "$REPOSITORY" --json databaseId --jq .databaseId)"
           gh api --method PATCH "repos/$REPOSITORY/releases/$release_id" -F draft=false >/dev/null
           test "$(gh api "repos/$REPOSITORY/releases/tags/$RELEASE_ID" --jq .immutable)" = true
   validate:
