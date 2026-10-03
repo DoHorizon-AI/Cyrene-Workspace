@@ -48,7 +48,7 @@ CATALOG_SCHEMA_ROOT = Path("/usr/share/cyrene/catalog-schemas")
 DEFAULT_CATALOG = (
     INSTALLED_CATALOG
     if INSTALLED_CATALOG.is_file()
-    else Path(__file__).resolve().parents[1] / "governance" / "component-catalog-v1.json"
+    else Path(__file__).resolve().with_name("component-catalog-bootstrap-v1.json")
 )
 DEFAULT_ACTIVITY_CATALOG = Path("/var/lib/cyrene/runtime/activity-sources.json")
 DEFAULT_SOCKET = Path("/run/cyrene/runtime-maintenance.sock")
