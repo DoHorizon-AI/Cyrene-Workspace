@@ -616,6 +616,7 @@ def verify_and_stage(
     output_root.mkdir(parents=True, mode=0o755)
     raw_output = output_root / "verified-published-bytes" / target_profile
     bundles_output = output_root / "service-artifacts"
+    extraction_output = output_root / ".verified-extracted"
     raw_output.mkdir(parents=True)
     bundles_output.mkdir(parents=True)
     source_index_path = raw_output / DEFAULT_INDEX
@@ -886,7 +887,7 @@ def verify_and_stage(
 
             extracted_root = _extract_bundle_archive(
                 artifact_path,
-                bundles_output / service,
+                extraction_output / service,
                 expected_files,
             )
             try:
@@ -942,6 +943,11 @@ def verify_and_stage(
                     "sourceCommit": source_commit,
                 },
             }
+
+        # Keep verified extraction scratch separate from the immutable package tree.
+        # Each final service directory is created only after validation and must not
+        # collide with the safe extractor's destination.
+        shutil.rmtree(extraction_output)
 
     except BaseException:
         shutil.rmtree(output_root, ignore_errors=True)
