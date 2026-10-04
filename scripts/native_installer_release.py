@@ -2149,6 +2149,85 @@ def _release_version_from_lock(lock: dict[str, Any]) -> str:
     return version
 
 
+def _manifest_source_identity(source_receipt_source: dict[str, Any]) -> dict[str, Any]:
+    """Project the verified receipt identity into the release manifest shape.
+
+    The source receipt also carries the workflow identity. The release manifest
+    records that workflow at its top level, so its nested source object contains
+    only the repository, ref, and commit identity fields.
+    """
+
+    return {key: source_receipt_source[key] for key in ("repository", "ref", "commit")}
+
+
+def _validate_release_manifest_identity(
+    manifest: dict[str, Any],
+    receipt: dict[str, Any],
+    expected_repository: str,
+    expected_source_ref: str | None = None,
+    expected_source_commit: str | None = None,
+) -> dict[str, Any]:
+    """Validate the fixed repository, workflow, and source identity envelope."""
+
+    source = manifest.get("source")
+    if (
+        set(manifest)
+        != {
+            "schemaVersion",
+            "repository",
+            "releaseId",
+            "version",
+            "channel",
+            "source",
+            "workflow",
+            "run",
+            "targets",
+            "sourceReceipt",
+            "workspaceCatalog",
+            "pythonRuntimeLock",
+            "workspaceReleaseLock",
+            "checksumAsset",
+        }
+        or manifest.get("schemaVersion") != 1
+        or manifest.get("repository") != expected_repository
+        or manifest.get("workflow") != f"{expected_repository}/{WORKFLOW_PATH}"
+        or not isinstance(source, dict)
+        or set(source) != {"repository", "ref", "commit"}
+        or not SHA1_PATTERN.fullmatch(str(source.get("commit", "")))
+        or source.get("repository") != expected_repository
+        or source.get("ref") not in set().union(*CHANNEL_REFS.values())
+        or manifest.get("releaseId")
+        != (f"native-installer-{_source_channel(source['ref'])}-{source['commit']}")
+    ):
+        raise ReleaseError(
+            "release manifest does not identify the fixed repository/workflow/source"
+        )
+    if expected_source_ref is not None and source.get("ref") != expected_source_ref:
+        raise ReleaseError("release manifest source ref differs from the expected ref")
+    if expected_source_commit is not None and source.get("commit") != expected_source_commit:
+        raise ReleaseError("release manifest source commit differs from the expected commit")
+    receipt_source = receipt.get("workspaceSource")
+    if receipt_source != {
+        "repository": expected_repository,
+        "ref": source["ref"],
+        "commit": source["commit"],
+        "workflow": f"{expected_repository}/{WORKFLOW_PATH}",
+    }:
+        raise ReleaseError("source receipt source identity differs from the release manifest")
+    if manifest.get("channel") != _source_channel(source["ref"]):
+        raise ReleaseError("release manifest channel differs from its source ref")
+    return source
+
+
+def _validate_release_manifest_version(manifest: dict[str, Any], receipt: dict[str, Any]) -> None:
+    """Require the package version to equal the source-bound release lock."""
+
+    if manifest.get("version") != _release_version_from_lock(
+        receipt["workspaceReleaseLock"]["document"]
+    ):
+        raise ReleaseError("release package version differs from the source-bound Workspace lock")
+
+
 def _assemble(arguments: argparse.Namespace) -> int:
     """Create the two DEB assets, release manifest, receipt, and SHA256SUMS."""
 
@@ -2299,7 +2378,7 @@ def _assemble(arguments: argparse.Namespace) -> int:
         "releaseId": arguments.release_id,
         "version": arguments.version,
         "channel": channel,
-        "source": source,
+        "source": _manifest_source_identity(source),
         "workflow": f"{REPOSITORY}/{WORKFLOW_PATH}",
         "run": {"id": arguments.run_id, "attempt": arguments.run_attempt},
         "targets": deb_assets,
@@ -2375,54 +2454,14 @@ def verify_release_directory(
         _require_file(path, label)
     manifest = _read_json_object(manifest_path, "release manifest")
     receipt = _read_json_object(receipt_path, "source receipt")
-    source = manifest.get("source")
-    if (
-        set(manifest)
-        != {
-            "schemaVersion",
-            "repository",
-            "releaseId",
-            "version",
-            "channel",
-            "source",
-            "workflow",
-            "run",
-            "targets",
-            "sourceReceipt",
-            "workspaceCatalog",
-            "pythonRuntimeLock",
-            "workspaceReleaseLock",
-            "checksumAsset",
-        }
-        or manifest.get("schemaVersion") != 1
-        or manifest.get("repository") != expected_repository
-        or manifest.get("workflow") != f"{expected_repository}/{WORKFLOW_PATH}"
-        or not isinstance(source, dict)
-        or set(source) != {"repository", "ref", "commit"}
-        or not SHA1_PATTERN.fullmatch(str(source.get("commit", "")))
-        or source.get("repository") != expected_repository
-        or source.get("ref") not in set().union(*CHANNEL_REFS.values())
-        or manifest.get("releaseId")
-        != (f"native-installer-{_source_channel(source['ref'])}-{source['commit']}")
-    ):
-        raise ReleaseError(
-            "release manifest does not identify the fixed repository/workflow/source"
-        )
-    if expected_source_ref is not None and source.get("ref") != expected_source_ref:
-        raise ReleaseError("release manifest source ref differs from the expected ref")
-    if expected_source_commit is not None and source.get("commit") != expected_source_commit:
-        raise ReleaseError("release manifest source commit differs from the expected commit")
-    receipt_source = receipt.get("workspaceSource")
-    if receipt_source != {
-        "repository": expected_repository,
-        "ref": source["ref"],
-        "commit": source["commit"],
-        "workflow": f"{expected_repository}/{WORKFLOW_PATH}",
-    }:
-        raise ReleaseError("source receipt source identity differs from the release manifest")
-    if manifest.get("channel") != _source_channel(source["ref"]):
-        raise ReleaseError("release manifest channel differs from its source ref")
-    _validate_source_receipt(receipt, receipt_source)
+    source = _validate_release_manifest_identity(
+        manifest,
+        receipt,
+        expected_repository,
+        expected_source_ref,
+        expected_source_commit,
+    )
+    _validate_source_receipt(receipt, receipt["workspaceSource"])
     run = manifest.get("run")
     if (
         not isinstance(run, dict)
@@ -2436,10 +2475,7 @@ def verify_release_directory(
     ):
         raise ReleaseError("release manifest workflow run identity is malformed")
     names = _asset_names(str(manifest.get("version", "")))
-    if manifest.get("version") != _release_version_from_lock(
-        receipt["workspaceReleaseLock"]["document"]
-    ):
-        raise ReleaseError("release package version differs from the source-bound Workspace lock")
+    _validate_release_manifest_version(manifest, receipt)
     targets = manifest.get("targets")
     if not isinstance(targets, list) or len(targets) != 2:
         raise ReleaseError("release manifest must contain exactly two target DEBs")
