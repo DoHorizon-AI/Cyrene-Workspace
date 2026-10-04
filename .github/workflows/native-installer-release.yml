@@ -469,4 +469,4 @@ jobs:
           python scripts/native_installer_release.py verify \
             --directory "$destination" --expected-repository "$GITHUB_REPOSITORY" \
             --expected-source-ref "$SOURCE_REF" --expected-source-commit "$SOURCE_COMMIT"
-          test "$(gh release view "$release_id" --repo "$GITHUB_REPOSITORY" --json isDraft,immutable --jq '.isDraft == false and .immutable == true')" = true
+          test "$(gh release view "$release_id" --repo "$GITHUB_REPOSITORY" --json isDraft,isImmutable --jq '.isDraft == false and .isImmutable == true')" = true

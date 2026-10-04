@@ -544,6 +544,23 @@ def test_release_workflow_scopes_github_token_to_locked_python_prepare() -> None
     )
 
 
+def test_release_workflow_checks_immutable_release_with_supported_gh_field() -> None:
+    workflow_path = WORKSPACE_ROOT / ".github/workflows/native-installer-release.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["publish-release"]["steps"]
+    download_step = next(
+        step
+        for step in steps
+        if step.get("name")
+        == "Download the published immutable release and verify its offline envelope"
+    )
+
+    assert (
+        'gh release view "$release_id" --repo "$GITHUB_REPOSITORY" '
+        "--json isDraft,isImmutable --jq '.isDraft == false and .isImmutable == true'"
+    ) in download_step["run"]
+
+
 def test_installer_script_scan_allows_only_stage_bootstrap_and_unit_reload(tmp_path: Path) -> None:
     module = _module()
     control = tmp_path / "DEBIAN"
