@@ -265,6 +265,7 @@ jobs:
           path: ${{ runner.temp }}/native-installer-inputs
       - name: Prepare and validate the locked private Python on this Ubuntu profile
         env:
+          GH_TOKEN: ${{ github.token }}
           WORK_ROOT: ${{ runner.temp }}/native-python-prepare
         run: |
           set -euo pipefail

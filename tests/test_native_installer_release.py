@@ -524,6 +524,26 @@ def test_release_workflow_stages_platform_fetcher_schemas_with_catalog() -> None
     assert "native-installer-inputs/component-catalog-v1.json" in fetch_step["env"]["CATALOG_PATH"]
 
 
+def test_release_workflow_scopes_github_token_to_locked_python_prepare() -> None:
+    workflow_path = WORKSPACE_ROOT / ".github/workflows/native-installer-release.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    build_job = workflow["jobs"]["build-deb"]
+    prepare_step = next(
+        step
+        for step in build_job["steps"]
+        if step.get("name")
+        == "Prepare and validate the locked private Python on this Ubuntu profile"
+    )
+
+    assert build_job["permissions"] == {"contents": "read"}
+    assert prepare_step["env"]["GH_TOKEN"] == "${{ github.token }}"
+    assert all(
+        "GH_TOKEN" not in step.get("env", {})
+        for step in build_job["steps"]
+        if step is not prepare_step
+    )
+
+
 def test_installer_script_scan_allows_only_stage_bootstrap_and_unit_reload(tmp_path: Path) -> None:
     module = _module()
     control = tmp_path / "DEBIAN"
