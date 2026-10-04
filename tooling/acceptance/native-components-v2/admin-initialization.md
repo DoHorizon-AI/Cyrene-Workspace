@@ -125,8 +125,8 @@ empty, partial, or operator-authored tuple.
 At the **2026-10-04 13:30 UTC** checkpoint, the release was unpublished and
 its staging gate was blocked in Actions run `37205539712`; no verified
 administrator packet or command was available. That is historical status: a
-later verified packet receipt supersedes it. This artifact contains no `sudo`,
-`dpkg`, broker-start, unit-enable, check, stage, or apply command. The
+later verified packet receipt supersedes it. This artifact contains no
+`sudo`, `dpkg`, broker-start, unit-enable, check, stage, or apply command. The
 initializer already implements stage-only signed-DEB installation, exact-plan
 broker bootstrap, and activity source owner derivation from the five signed
 Product units; do not describe those paths as unwired. Even after host
