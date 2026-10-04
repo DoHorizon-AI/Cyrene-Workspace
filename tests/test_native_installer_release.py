@@ -199,6 +199,95 @@ def test_release_manifest_identity_rejects_receipt_sha_and_version_mismatches() 
         module._validate_release_manifest_version(manifest, receipt)
 
 
+def test_release_directory_membership_includes_checksum_subject_and_rejects_drift(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    checksums_name = "SHA256SUMS"
+    deb_names = {
+        "cyrene_0.1.0-rc.1_ubuntu-22.04_amd64.deb",
+        "cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb",
+    }
+    expected_asset_names = {
+        "native-installer-release-v1.json",
+        "native-installer-source-receipt-v1.json",
+        "python-runtime.lock.json",
+        "release-lock.json",
+        "component-catalog-v1.json",
+        *deb_names,
+    }
+    expected_subject_names = {*module.RELEASE_SUBJECT_NAMES, *deb_names}
+    catalog_bundle_name = "component-catalog-v1.json.attestation.jsonl"
+    expected_directory_names = (
+        expected_asset_names
+        | {checksums_name, catalog_bundle_name}
+        | {f"{name}.attestation.jsonl" for name in expected_subject_names}
+    )
+    for name in expected_directory_names:
+        (tmp_path / name).write_bytes(b"fixture")
+
+    module._validate_release_directory_membership(
+        tmp_path,
+        expected_asset_names,
+        expected_subject_names,
+        catalog_bundle_name,
+        checksums_name,
+    )
+
+    (tmp_path / checksums_name).unlink()
+    with pytest.raises(module.ReleaseError, match="missing or unexpected immutable"):
+        module._validate_release_directory_membership(
+            tmp_path,
+            expected_asset_names,
+            expected_subject_names,
+            catalog_bundle_name,
+            checksums_name,
+        )
+
+    (tmp_path / checksums_name).write_bytes(b"fixture")
+    (tmp_path / "unlisted-extra.json").write_bytes(b"fixture")
+    with pytest.raises(module.ReleaseError, match="missing or unexpected immutable"):
+        module._validate_release_directory_membership(
+            tmp_path,
+            expected_asset_names,
+            expected_subject_names,
+            catalog_bundle_name,
+            checksums_name,
+        )
+
+
+@pytest.mark.parametrize("entry_kind", ["symlink", "directory"])
+def test_release_directory_membership_rejects_non_asset_entries(
+    tmp_path: Path, entry_kind: str
+) -> None:
+    module = _module()
+    expected_asset_names = {"payload.deb", "SHA256SUMS"}
+    expected_subject_names = {"payload.deb", "SHA256SUMS"}
+    catalog_bundle_name = "catalog.json.attestation.jsonl"
+    for name in (
+        expected_asset_names
+        | {catalog_bundle_name}
+        | {f"{subject}.attestation.jsonl" for subject in expected_subject_names}
+    ):
+        (tmp_path / name).write_bytes(b"fixture")
+
+    checksum_path = tmp_path / "SHA256SUMS"
+    checksum_path.unlink()
+    if entry_kind == "symlink":
+        checksum_path.symlink_to("payload.deb")
+    else:
+        checksum_path.mkdir()
+
+    with pytest.raises(module.ReleaseError, match="non-asset entry"):
+        module._validate_release_directory_membership(
+            tmp_path,
+            expected_asset_names,
+            expected_subject_names,
+            catalog_bundle_name,
+            "SHA256SUMS",
+        )
+
+
 def test_fetch_plan_is_fixed_to_exact_ubuntu_tuples(tmp_path: Path) -> None:
     module = _module()
     inputs = tmp_path / "inputs.json"
