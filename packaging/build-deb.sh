@@ -252,6 +252,9 @@ cp "${SCRIPT_DIR}/component_updates.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/com
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
 cp "${SCRIPT_DIR}/catalog_metadata.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
+cp "${SCRIPT_DIR}/native_component_bootstrap.py" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/native_component_bootstrap.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_component_bootstrap.py"
 cp "${SCRIPT_DIR}/component-catalog-bootstrap-v1.json" "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
 chmod 644 "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
 mkdir -p "${STAGE_DIR}/usr/share/cyrene/catalog-schemas"
