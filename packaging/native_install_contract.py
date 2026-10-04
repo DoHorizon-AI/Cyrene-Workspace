@@ -129,7 +129,9 @@ def _verified_source_summary(index: dict[str, Any], target_profile: str) -> dict
         if set(manifest) != {"path", "sha256", "manifestDigest"}:
             raise ContractError(f"{component_id}.manifest has an invalid field set")
         manifest_sha = _sha(manifest.get("sha256"), f"{component_id}.manifest.sha256")
-        manifest_digest = _string(manifest.get("manifestDigest"), f"{component_id}.manifest.manifestDigest")
+        manifest_digest = _string(
+            manifest.get("manifestDigest"), f"{component_id}.manifest.manifestDigest"
+        )
         if re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_digest) is None:
             raise ContractError(f"{component_id}.manifest.manifestDigest is invalid")
 
@@ -152,7 +154,9 @@ def _verified_source_summary(index: dict[str, Any], target_profile: str) -> dict
             or attestation.get("sourceRef") != source_ref
             or attestation.get("sourceCommit") != source_commit
         ):
-            raise ContractError(f"{component_id}.attestation identity differs from its source tuple")
+            raise ContractError(
+                f"{component_id}.attestation identity differs from its source tuple"
+            )
 
         result[component_id] = {
             "componentId": component_id,
@@ -164,8 +168,12 @@ def _verified_source_summary(index: dict[str, Any], target_profile: str) -> dict
             "attestation": {
                 "sha256": attestation_sha,
                 "repository": attestation["repository"],
-                "workflow": _string(attestation.get("workflow"), f"{component_id}.attestation.workflow"),
-                "subjectName": _string(attestation.get("subjectName"), f"{component_id}.attestation.subjectName"),
+                "workflow": _string(
+                    attestation.get("workflow"), f"{component_id}.attestation.workflow"
+                ),
+                "subjectName": _string(
+                    attestation.get("subjectName"), f"{component_id}.attestation.subjectName"
+                ),
                 "sourceRef": source_ref,
                 "sourceCommit": source_commit,
             },
@@ -208,7 +216,9 @@ def create_contract(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create the Cyrene stage-only package marker")
     commands = parser.add_subparsers(dest="command", required=True)
-    create = commands.add_parser("create", help="bind source artifact evidence and maintainer scripts")
+    create = commands.add_parser(
+        "create", help="bind source artifact evidence and maintainer scripts"
+    )
     create.add_argument("--target-profile", required=True)
     create.add_argument("--service-artifacts-index", required=True, type=Path)
     create.add_argument("--scripts-dir", required=True, type=Path)
@@ -224,7 +234,9 @@ def _create_command(args: argparse.Namespace) -> int:
         scripts_dir=args.scripts_dir,
         output=args.output,
     )
-    print(json.dumps({"contractSha256": _sha_file(args.output, "generated contract")}, sort_keys=True))
+    print(
+        json.dumps({"contractSha256": _sha_file(args.output, "generated contract")}, sort_keys=True)
+    )
     return 0
 
 

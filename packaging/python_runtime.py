@@ -99,7 +99,9 @@ def _parse_requirements_lock(path: Path) -> dict[str, tuple[str, str]]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as error:
-        raise PythonRuntimeError(f"cannot read runtime requirements lock {path}: {error}") from error
+        raise PythonRuntimeError(
+            f"cannot read runtime requirements lock {path}: {error}"
+        ) from error
 
     pins: dict[str, tuple[str, str]] = {}
     index = 0
@@ -115,7 +117,9 @@ def _parse_requirements_lock(path: Path) -> dict[str, tuple[str, str]]:
             )
         hash_match = re.fullmatch(r"\s*--hash=sha256:([0-9a-f]{64})", lines[index])
         if hash_match is None:
-            raise PythonRuntimeError(f"runtime requirements lock has an invalid hash for {match.group(1)}")
+            raise PythonRuntimeError(
+                f"runtime requirements lock has an invalid hash for {match.group(1)}"
+            )
         index += 1
         name = _normalized_distribution(match.group(1))
         if name in pins:
@@ -133,7 +137,9 @@ def validate_lock(lock: dict[str, Any], lock_path: Path) -> tuple[dict[str, Any]
     if python.get("implementation") != "CPython" or python.get("version") != "3.12.14":
         raise PythonRuntimeError("the private Python pin must remain CPython 3.12.14")
     if python.get("distribution") != "astral-sh/python-build-standalone":
-        raise PythonRuntimeError("the private Python provider must remain Astral python-build-standalone")
+        raise PythonRuntimeError(
+            "the private Python provider must remain Astral python-build-standalone"
+        )
     if python.get("target") != "x86_64-unknown-linux-gnu":
         raise PythonRuntimeError("the private Python target must remain x86_64-unknown-linux-gnu")
 
@@ -163,31 +169,40 @@ def validate_lock(lock: dict[str, Any], lock_path: Path) -> tuple[dict[str, Any]
         or release.get("apiUrl")
         != "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260929"
     ):
-        raise PythonRuntimeError("Python archive provenance must match the immutable Astral release")
+        raise PythonRuntimeError(
+            "Python archive provenance must match the immutable Astral release"
+        )
     parsed_archive_url = urllib.parse.urlsplit(archive_url)
     if (
         parsed_archive_url.scheme != "https"
         or parsed_archive_url.hostname != "github.com"
         or parsed_archive_url.path.rsplit("/", 1)[-1] != urllib.parse.quote(archive_name, safe="")
     ):
-        raise PythonRuntimeError("python.archive.url must directly identify its locked GitHub release asset")
-    if release.get("assetApiUrl") != "https://api.github.com/repos/astral-sh/python-build-standalone/releases/assets/598637702":
-        raise PythonRuntimeError("Python archive asset API identity differs from the official immutable asset")
+        raise PythonRuntimeError(
+            "python.archive.url must directly identify its locked GitHub release asset"
+        )
+    if (
+        release.get("assetApiUrl")
+        != "https://api.github.com/repos/astral-sh/python-build-standalone/releases/assets/598637702"
+    ):
+        raise PythonRuntimeError(
+            "Python archive asset API identity differs from the official immutable asset"
+        )
     if release.get("assetId") != 598637702:
-        raise PythonRuntimeError("Python archive asset ID differs from the official immutable asset")
+        raise PythonRuntimeError(
+            "Python archive asset ID differs from the official immutable asset"
+        )
 
     resolver = _require_object(lock.get("buildResolver"), "buildResolver")
     if resolver.get("tool") != "uv" or resolver.get("version") != "0.12.21":
-        raise PythonRuntimeError("the pinned Python resolver and trainer tool must remain uv 0.12.21")
-    if (
-        resolver.get("installedPath") != "/opt/cyrene/uv/0.12.21/uv"
-        or resolver.get("usage")
-        != {
-            "build": "resolve-frozen-python-distribution-mapping",
-            "runtime": "explicit-trainer-environment-prepare",
-            "automaticRuntimeBootstrap": False,
-        }
-    ):
+        raise PythonRuntimeError(
+            "the pinned Python resolver and trainer tool must remain uv 0.12.21"
+        )
+    if resolver.get("installedPath") != "/opt/cyrene/uv/0.12.21/uv" or resolver.get("usage") != {
+        "build": "resolve-frozen-python-distribution-mapping",
+        "runtime": "explicit-trainer-environment-prepare",
+        "automaticRuntimeBootstrap": False,
+    }:
         raise PythonRuntimeError("the locked uv runtime path and explicit-use policy are invalid")
     uv_archive = _require_object(resolver.get("binaryArchive"), "buildResolver.binaryArchive")
     if uv_archive.get("name") != "uv-x86_64-unknown-linux-gnu.tar.gz":
@@ -196,7 +211,9 @@ def validate_lock(lock: dict[str, Any], lock_path: Path) -> tuple[dict[str, Any]
         uv_archive.get("executableSha256"), "buildResolver.binaryArchive.executableSha256"
     )
     if uv_executable_sha != "e8a4e7b4fd6283892fccfc4f335fb16cdf01064bb135172e4e2e73b478eb2076":
-        raise PythonRuntimeError("the uv executable digest differs from its verified official archive")
+        raise PythonRuntimeError(
+            "the uv executable digest differs from its verified official archive"
+        )
     uv_release = _require_object(uv_archive.get("release"), "buildResolver.binaryArchive.release")
     if (
         uv_release.get("repository") != "astral-sh/uv"
@@ -204,7 +221,9 @@ def validate_lock(lock: dict[str, Any], lock_path: Path) -> tuple[dict[str, Any]
         or uv_release.get("commit") != "7af826859382eb191e47467540850caa8f493e5b"
         or uv_release.get("immutable") is not True
     ):
-        raise PythonRuntimeError("uv resolver provenance must match the immutable uv 0.12.21 release")
+        raise PythonRuntimeError(
+            "uv resolver provenance must match the immutable uv 0.12.21 release"
+        )
     if uv_release.get("assetId") != 599238020:
         raise PythonRuntimeError("uv asset ID differs from the official immutable asset")
     if (
@@ -218,18 +237,28 @@ def validate_lock(lock: dict[str, Any], lock_path: Path) -> tuple[dict[str, Any]
         != "23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0"
         or uv_archive.get("size") != 19782662
     ):
-        raise PythonRuntimeError("uv binary archive metadata differs from its official immutable asset")
-    mapping = _require_object(resolver.get("distributionMetadata"), "buildResolver.distributionMetadata")
+        raise PythonRuntimeError(
+            "uv binary archive metadata differs from its official immutable asset"
+        )
+    mapping = _require_object(
+        resolver.get("distributionMetadata"), "buildResolver.distributionMetadata"
+    )
     mapping_url = _require_string(mapping.get("url"), "buildResolver.distributionMetadata.url")
-    mapping_sha = _require_sha256(mapping.get("sha256"), "buildResolver.distributionMetadata.sha256")
+    mapping_sha = _require_sha256(
+        mapping.get("sha256"), "buildResolver.distributionMetadata.sha256"
+    )
     if (
         mapping_url
         != "https://raw.githubusercontent.com/astral-sh/uv/7af826859382eb191e47467540850caa8f493e5b/crates/uv-python/download-metadata.json"
         or mapping_sha != "6167f194053b58a461b6b440bbfff121f0971bd6757fce95cfec90b19ee080df"
         or mapping.get("mappingKey") != "cpython-3.12.14-linux-x86_64-gnu"
     ):
-        raise PythonRuntimeError("uv Python download metadata must be pinned to the immutable 0.12.21 source")
-    selected_mapping = _require_object(mapping.get("mapping"), "buildResolver.distributionMetadata.mapping")
+        raise PythonRuntimeError(
+            "uv Python download metadata must be pinned to the immutable 0.12.21 source"
+        )
+    selected_mapping = _require_object(
+        mapping.get("mapping"), "buildResolver.distributionMetadata.mapping"
+    )
     if (
         selected_mapping.get("url") != archive_url
         or selected_mapping.get("sha256") != archive_sha
@@ -258,7 +287,9 @@ def validate_lock(lock: dict[str, Any], lock_path: Path) -> tuple[dict[str, Any]
     )
     actual_requirements_hash = _sha256_file(requirements_path)
     if actual_requirements_hash != requirements_hash:
-        raise PythonRuntimeError("runtime requirements lock SHA-256 does not match python-runtime.lock.json")
+        raise PythonRuntimeError(
+            "runtime requirements lock SHA-256 does not match python-runtime.lock.json"
+        )
     wheels = dependencies.get("wheels")
     if not isinstance(wheels, list) or not wheels:
         raise PythonRuntimeError("runtimeDependencies.wheels must be a non-empty list")
@@ -267,8 +298,12 @@ def validate_lock(lock: dict[str, Any], lock_path: Path) -> tuple[dict[str, Any]
     for index, raw_wheel in enumerate(wheels):
         wheel = _require_object(raw_wheel, f"runtimeDependencies.wheels[{index}]")
         name = _normalized_distribution(_require_string(wheel.get("name"), "wheel.name"))
-        version = _require_string(wheel.get("version"), f"runtimeDependencies.wheels[{index}].version")
-        filename = _require_string(wheel.get("filename"), f"runtimeDependencies.wheels[{index}].filename")
+        version = _require_string(
+            wheel.get("version"), f"runtimeDependencies.wheels[{index}].version"
+        )
+        filename = _require_string(
+            wheel.get("filename"), f"runtimeDependencies.wheels[{index}].filename"
+        )
         url = _require_string(wheel.get("url"), f"runtimeDependencies.wheels[{index}].url")
         digest = _require_sha256(wheel.get("sha256"), f"runtimeDependencies.wheels[{index}].sha256")
         if not isinstance(wheel.get("size"), int) or isinstance(wheel.get("size"), bool):
@@ -279,14 +314,20 @@ def validate_lock(lock: dict[str, Any], lock_path: Path) -> tuple[dict[str, Any]
             or parsed_url.hostname != "files.pythonhosted.org"
             or parsed_url.path.rsplit("/", 1)[-1] != filename
         ):
-            raise PythonRuntimeError(f"runtime wheel URL must identify the locked PyPI wheel: {filename}")
+            raise PythonRuntimeError(
+                f"runtime wheel URL must identify the locked PyPI wheel: {filename}"
+            )
         if name in expected_names:
             raise PythonRuntimeError(f"runtime dependency wheel is repeated: {name}")
         expected_names.add(name)
         if pins.get(name) != (version, digest):
-            raise PythonRuntimeError(f"runtime wheel pin differs from requirements lock: {name}=={version}")
+            raise PythonRuntimeError(
+                f"runtime wheel pin differs from requirements lock: {name}=={version}"
+            )
     if set(pins) != expected_names:
-        raise PythonRuntimeError("requirements lock and runtime wheel list contain different distributions")
+        raise PythonRuntimeError(
+            "requirements lock and runtime wheel list contain different distributions"
+        )
 
     payload = _require_object(lock.get("payload"), "payload")
     for field in (
@@ -329,7 +370,9 @@ def _read_limited_url(url: str, *, limit: int = MAX_METADATA_BYTES) -> bytes:
         with urllib.request.urlopen(request, timeout=60) as response:
             final_host = urllib.parse.urlsplit(response.geturl()).hostname
             if final_host not in ALLOWED_DOWNLOAD_HOSTS:
-                raise PythonRuntimeError(f"official download redirected to an untrusted host: {final_host}")
+                raise PythonRuntimeError(
+                    f"official download redirected to an untrusted host: {final_host}"
+                )
             content = response.read(limit + 1)
     except (urllib.error.URLError, TimeoutError) as error:
         raise PythonRuntimeError(f"download failed for {url}: {error}") from error
@@ -350,11 +393,15 @@ def _read_release_metadata(url: str, *, repository: str, tag: str, commit: str) 
         or release.get("target_commitish") != commit
         or release.get("immutable") is not True
     ):
-        raise PythonRuntimeError(f"GitHub release {repository}@{tag} is not the pinned immutable release")
+        raise PythonRuntimeError(
+            f"GitHub release {repository}@{tag} is not the pinned immutable release"
+        )
     return release
 
 
-def _find_asset(release: dict[str, Any], *, asset_id: int, name: str, url: str, sha256: str, size: int) -> None:
+def _find_asset(
+    release: dict[str, Any], *, asset_id: int, name: str, url: str, sha256: str, size: int
+) -> None:
     assets = release.get("assets")
     if not isinstance(assets, list):
         raise PythonRuntimeError("GitHub release metadata has no assets list")
@@ -367,7 +414,9 @@ def _find_asset(release: dict[str, Any], *, asset_id: int, name: str, url: str, 
             or raw_asset.get("digest") != f"sha256:{sha256}"
             or raw_asset.get("size") != size
         ):
-            raise PythonRuntimeError(f"GitHub asset {asset_id} metadata differs from the runtime lock")
+            raise PythonRuntimeError(
+                f"GitHub asset {asset_id} metadata differs from the runtime lock"
+            )
         return
     raise PythonRuntimeError(f"GitHub release does not contain the locked asset {name}")
 
@@ -376,7 +425,11 @@ def _verified_download(url: str, destination: Path, *, sha256: str, size: int) -
     """Download a fixed artifact through an atomic cache path, then verify bytes."""
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.is_file() and destination.stat().st_size == size and _sha256_file(destination) == sha256:
+    if (
+        destination.is_file()
+        and destination.stat().st_size == size
+        and _sha256_file(destination) == sha256
+    ):
         return destination
     temporary_fd, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".partial", dir=destination.parent
@@ -414,7 +467,9 @@ def _verified_download(url: str, destination: Path, *, sha256: str, size: int) -
             output.flush()
             os.fsync(output.fileno())
         if total != size:
-            raise PythonRuntimeError(f"download size mismatch for {url}: expected {size}, received {total}")
+            raise PythonRuntimeError(
+                f"download size mismatch for {url}: expected {size}, received {total}"
+            )
         if digest.hexdigest() != sha256:
             raise PythonRuntimeError(f"download SHA-256 mismatch for {url}")
         os.replace(temporary, destination)
@@ -430,7 +485,9 @@ def _verified_local_or_download(
     if source is None:
         return _verified_download(url, destination, sha256=sha256, size=size)
     if source.is_symlink() or not source.is_file():
-        raise PythonRuntimeError(f"locked artifact input is not a regular non-symlink file: {source}")
+        raise PythonRuntimeError(
+            f"locked artifact input is not a regular non-symlink file: {source}"
+        )
     if source.stat().st_size != size or _sha256_file(source) != sha256:
         raise PythonRuntimeError(f"locked artifact input has a size or SHA-256 mismatch: {source}")
     if source.resolve() == destination.resolve():
@@ -440,9 +497,7 @@ def _verified_local_or_download(
     return destination
 
 
-def _resolve_uv(
-    resolver: dict[str, Any], work_dir: Path, explicit_executable: Path | None
-) -> Path:
+def _resolve_uv(resolver: dict[str, Any], work_dir: Path, explicit_executable: Path | None) -> Path:
     """Use the pinned uv binary to resolve the local frozen distribution map."""
 
     asset = _require_object(resolver.get("binaryArchive"), "buildResolver.binaryArchive")
@@ -534,10 +589,19 @@ def _extract_uv_binary(archive_path: Path, asset: dict[str, Any], destination: P
                 raise PythonRuntimeError("uv resolver archive is empty")
             for member in members:
                 path = PurePosixPath(member.name)
-                if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != expected_root:
-                    raise PythonRuntimeError(f"uv resolver archive contains an unsafe path: {member.name}")
+                if (
+                    path.is_absolute()
+                    or ".." in path.parts
+                    or not path.parts
+                    or path.parts[0] != expected_root
+                ):
+                    raise PythonRuntimeError(
+                        f"uv resolver archive contains an unsafe path: {member.name}"
+                    )
                 if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
-                    raise PythonRuntimeError(f"uv resolver archive contains a non-regular entry: {member.name}")
+                    raise PythonRuntimeError(
+                        f"uv resolver archive contains a non-regular entry: {member.name}"
+                    )
             for member in members:
                 if member.isdir():
                     (temporary / Path(*PurePosixPath(member.name).parts)).mkdir(
@@ -548,7 +612,9 @@ def _extract_uv_binary(archive_path: Path, asset: dict[str, Any], destination: P
                     target.parent.mkdir(parents=True, exist_ok=True)
                     source = archive.extractfile(member)
                     if source is None:
-                        raise PythonRuntimeError(f"cannot read uv executable archive entry {member.name}")
+                        raise PythonRuntimeError(
+                            f"cannot read uv executable archive entry {member.name}"
+                        )
                     with source, target.open("xb") as output:
                         shutil.copyfileobj(source, output)
                     target.chmod(0o755)
@@ -557,7 +623,9 @@ def _extract_uv_binary(archive_path: Path, asset: dict[str, Any], destination: P
         if isinstance(error, PythonRuntimeError):
             raise
         if isinstance(error, (OSError, tarfile.TarError)):
-            raise PythonRuntimeError(f"cannot unpack pinned uv resolver archive: {error}") from error
+            raise PythonRuntimeError(
+                f"cannot unpack pinned uv resolver archive: {error}"
+            ) from error
         raise
     executable = temporary / expected
     if not executable.is_file():
@@ -568,7 +636,9 @@ def _extract_uv_binary(archive_path: Path, asset: dict[str, Any], destination: P
     )
     if _sha256_file(executable) != expected_sha256:
         shutil.rmtree(temporary, ignore_errors=True)
-        raise PythonRuntimeError("extracted uv executable differs from the verified official binary")
+        raise PythonRuntimeError(
+            "extracted uv executable differs from the verified official binary"
+        )
     temporary.rename(destination)
     return destination / expected
 
@@ -626,26 +696,38 @@ def _verify_release_assets(lock: dict[str, Any]) -> None:
 
 
 def _load_official_uv_mapping(resolver: dict[str, Any], destination: Path) -> dict[str, Any]:
-    source = _require_object(resolver.get("distributionMetadata"), "buildResolver.distributionMetadata")
+    source = _require_object(
+        resolver.get("distributionMetadata"), "buildResolver.distributionMetadata"
+    )
     content = _read_limited_url(source["url"], limit=source["size"])
     if len(content) != source["size"] or hashlib.sha256(content).hexdigest() != source["sha256"]:
         raise PythonRuntimeError("uv 0.12.21 Python distribution metadata SHA-256 mismatch")
     try:
         document = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise PythonRuntimeError(f"uv Python distribution metadata is invalid JSON: {error}") from error
+        raise PythonRuntimeError(
+            f"uv Python distribution metadata is invalid JSON: {error}"
+        ) from error
     document = _require_object(document, "uv Python distribution metadata")
     key = source["mappingKey"]
-    expected_mapping = _require_object(source.get("mapping"), "locked uv Python distribution mapping")
+    expected_mapping = _require_object(
+        source.get("mapping"), "locked uv Python distribution mapping"
+    )
     actual_mapping = document.get(key)
     if actual_mapping != expected_mapping:
-        raise PythonRuntimeError("uv 0.12.21 official mapping differs from python-runtime.lock.json")
+        raise PythonRuntimeError(
+            "uv 0.12.21 official mapping differs from python-runtime.lock.json"
+        )
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps({key: expected_mapping}, sort_keys=True) + "\n", encoding="utf-8")
+    destination.write_text(
+        json.dumps({key: expected_mapping}, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return {key: expected_mapping}
 
 
-def _resolve_frozen_mapping(uv_executable: Path, mapping_path: Path, resolver: dict[str, Any]) -> None:
+def _resolve_frozen_mapping(
+    uv_executable: Path, mapping_path: Path, resolver: dict[str, Any]
+) -> None:
     """Ask uv 0.12.21 to resolve the one-entry local mapping without network access."""
 
     source = resolver["distributionMetadata"]
@@ -684,14 +766,18 @@ def _resolve_frozen_mapping(uv_executable: Path, mapping_path: Path, resolver: d
             env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise PythonRuntimeError(f"uv could not resolve the frozen Python mapping: {error}") from error
+        raise PythonRuntimeError(
+            f"uv could not resolve the frozen Python mapping: {error}"
+        ) from error
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or str(result.returncode)
         raise PythonRuntimeError(f"uv could not resolve the frozen Python mapping: {detail}")
     try:
         entries = json.loads(result.stdout)
     except json.JSONDecodeError as error:
-        raise PythonRuntimeError("uv returned invalid JSON while resolving its frozen Python mapping") from error
+        raise PythonRuntimeError(
+            "uv returned invalid JSON while resolving its frozen Python mapping"
+        ) from error
     if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
         raise PythonRuntimeError("uv did not resolve exactly one pinned CPython distribution")
     resolved = entries[0]
@@ -703,13 +789,21 @@ def _resolve_frozen_mapping(uv_executable: Path, mapping_path: Path, resolver: d
         or resolved.get("arch") != "x86_64"
         or resolved.get("libc") != "gnu"
     ):
-        raise PythonRuntimeError("uv's resolved distribution differs from the official pinned mapping")
+        raise PythonRuntimeError(
+            "uv's resolved distribution differs from the official pinned mapping"
+        )
 
 
-def _validate_profile(release_lock_path: Path, lock_path: Path, target_profile: str, lock: dict[str, Any]) -> None:
+def _validate_profile(
+    release_lock_path: Path, lock_path: Path, target_profile: str, lock: dict[str, Any]
+) -> None:
     release_lock = _read_json_object(release_lock_path, "release-lock.json")
-    profiles = _require_object(release_lock.get("nativePythonProfiles"), "release-lock.nativePythonProfiles")
-    profile = _require_object(profiles.get(target_profile), f"release-lock.nativePythonProfiles.{target_profile}")
+    profiles = _require_object(
+        release_lock.get("nativePythonProfiles"), "release-lock.nativePythonProfiles"
+    )
+    profile = _require_object(
+        profiles.get(target_profile), f"release-lock.nativePythonProfiles.{target_profile}"
+    )
     relative_lock = _require_string(profile.get("pythonInput"), f"{target_profile}.pythonInput")
     resolved_lock = (release_lock_path.resolve().parent / relative_lock).resolve()
     if resolved_lock != lock_path.resolve():
@@ -717,7 +811,10 @@ def _validate_profile(release_lock_path: Path, lock_path: Path, target_profile: 
             f"{target_profile}.pythonInput does not reference the provided Python runtime lock"
         )
     runtime = lock["python"]
-    if profile.get("pythonVersion") != runtime["version"] or profile.get("pythonExecutable") != runtime["executable"]:
+    if (
+        profile.get("pythonVersion") != runtime["version"]
+        or profile.get("pythonExecutable") != runtime["executable"]
+    ):
         raise PythonRuntimeError(f"{target_profile} does not match the private Python runtime pin")
     os_version = profile.get("osVersion")
     expected_abi = {"22.04": "glibc-2.35", "24.04": "glibc-2.39"}.get(os_version)
@@ -730,7 +827,9 @@ def _validate_profile(release_lock_path: Path, lock_path: Path, target_profile: 
         or profile.get("abi") != expected_abi
         or profile.get("runtime") != "python:3.12"
     ):
-        raise PythonRuntimeError(f"{target_profile} does not describe a supported Ubuntu Python target")
+        raise PythonRuntimeError(
+            f"{target_profile} does not describe a supported Ubuntu Python target"
+        )
     try:
         host = platform.freedesktop_os_release()
     except (AttributeError, OSError) as error:
@@ -754,7 +853,9 @@ def _validate_profile(release_lock_path: Path, lock_path: Path, target_profile: 
         raise PythonRuntimeError(f"{target_profile} does not use the locked uv resolver")
 
 
-def _validate_archive_paths(archive_path: Path, *, root_name: str) -> tuple[list[tarfile.TarInfo], int]:
+def _validate_archive_paths(
+    archive_path: Path, *, root_name: str
+) -> tuple[list[tarfile.TarInfo], int]:
     """Reject absolute, traversing, special, duplicate, or escaping archive members."""
 
     try:
@@ -768,7 +869,9 @@ def _validate_archive_paths(archive_path: Path, *, root_name: str) -> tuple[list
             for member in members:
                 relative = PurePosixPath(member.name)
                 if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-                    raise PythonRuntimeError(f"CPython archive contains an unsafe path: {member.name}")
+                    raise PythonRuntimeError(
+                        f"CPython archive contains an unsafe path: {member.name}"
+                    )
                 if relative.parts[0] != root_name:
                     raise PythonRuntimeError(
                         f"CPython archive has an unexpected root path: {member.name}"
@@ -863,11 +966,19 @@ def _extract_python_archive(archive_path: Path, destination: Path, *, root_name:
             current_path = Path(current)
             for name in directory_names:
                 entry = current_path / name
-                if entry.is_symlink() and not entry.resolve(strict=False).is_relative_to(resolved_root):
-                    raise PythonRuntimeError(f"CPython archive contains an escaping symlink: {entry}")
+                if entry.is_symlink() and not entry.resolve(strict=False).is_relative_to(
+                    resolved_root
+                ):
+                    raise PythonRuntimeError(
+                        f"CPython archive contains an escaping symlink: {entry}"
+                    )
             for entry in current_path.iterdir():
-                if entry.is_symlink() and not entry.resolve(strict=False).is_relative_to(resolved_root):
-                    raise PythonRuntimeError(f"CPython archive contains an escaping symlink: {entry}")
+                if entry.is_symlink() and not entry.resolve(strict=False).is_relative_to(
+                    resolved_root
+                ):
+                    raise PythonRuntimeError(
+                        f"CPython archive contains an escaping symlink: {entry}"
+                    )
     except (OSError, tarfile.TarError, RuntimeError) as error:
         shutil.rmtree(destination, ignore_errors=True)
         if isinstance(error, PythonRuntimeError):
@@ -887,7 +998,7 @@ def _verify_staged_python(executable: Path, lock: dict[str, Any]) -> None:
         "versions = {name: m.version(name) for name in expected}; "
         "print(json.dumps({'version': '.'.join(map(str, sys.version_info[:3])), "
         "'executable': os.path.realpath(sys.executable), 'machine': platform.machine(), "
-            "'pip': m.version('pip'), 'jsonschema': jsonschema.__version__, 'dependencies': versions}))"
+        "'pip': m.version('pip'), 'jsonschema': jsonschema.__version__, 'dependencies': versions}))"
     )
     try:
         result = subprocess.run(
@@ -905,7 +1016,9 @@ def _verify_staged_python(executable: Path, lock: dict[str, Any]) -> None:
     try:
         state = json.loads(result.stdout)
     except json.JSONDecodeError as error:
-        raise PythonRuntimeError("private Python returned invalid runtime verification JSON") from error
+        raise PythonRuntimeError(
+            "private Python returned invalid runtime verification JSON"
+        ) from error
     expected_path = str(executable.resolve())
     if (
         state.get("version") != lock["python"]["version"]
@@ -914,11 +1027,15 @@ def _verify_staged_python(executable: Path, lock: dict[str, Any]) -> None:
         or state.get("pip") != lock["python"]["bundledPipVersion"]
         or state.get("jsonschema") != expected_versions.get("jsonschema")
     ):
-        raise PythonRuntimeError(f"staged private Python does not match the locked runtime: {state}")
+        raise PythonRuntimeError(
+            f"staged private Python does not match the locked runtime: {state}"
+        )
     for name, version in expected_versions.items():
         actual = state.get("dependencies", {}).get(name)
         if actual != version:
-            raise PythonRuntimeError(f"private Python dependency {name} has {actual}, expected {version}")
+            raise PythonRuntimeError(
+                f"private Python dependency {name} has {actual}, expected {version}"
+            )
 
 
 def prepare(args: argparse.Namespace) -> dict[str, str]:
@@ -942,7 +1059,9 @@ def prepare(args: argparse.Namespace) -> dict[str, str]:
     uv_root = stage_root.joinpath(*uv_install_path.parts[:-2])
     for path in (runtime_root, payload_root, uv_root):
         if path.exists() or path.is_symlink():
-            raise PythonRuntimeError(f"staging output already exists; refusing to replace it: {path}")
+            raise PythonRuntimeError(
+                f"staging output already exists; refusing to replace it: {path}"
+            )
     work_runtime = work_dir / "runtime-root"
     if work_runtime.exists() or work_runtime.is_symlink():
         raise PythonRuntimeError(f"private Python work path already exists: {work_runtime}")
@@ -1007,7 +1126,9 @@ def prepare(args: argparse.Namespace) -> dict[str, str]:
             env={**os.environ, "PIP_CONFIG_FILE": os.devnull, "PIP_DISABLE_PIP_VERSION_CHECK": "1"},
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise PythonRuntimeError(f"offline private runtime dependency install failed: {error}") from error
+        raise PythonRuntimeError(
+            f"offline private runtime dependency install failed: {error}"
+        ) from error
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or str(result.returncode)
         raise PythonRuntimeError(f"offline private runtime dependency install failed: {detail}")
@@ -1032,14 +1153,20 @@ def prepare(args: argparse.Namespace) -> dict[str, str]:
 
     payload_root.mkdir(parents=True, exist_ok=False)
     payload_assets = lock["payload"]
-    runtime_asset_path = stage_root.joinpath(*PurePosixPath(payload_assets["runtimeArchivePath"]).parts)
+    runtime_asset_path = stage_root.joinpath(
+        *PurePosixPath(payload_assets["runtimeArchivePath"]).parts
+    )
     runtime_asset_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(archive_path, runtime_asset_path)
-    requirements_asset = stage_root.joinpath(*PurePosixPath(payload_assets["requirementsPath"]).parts)
+    requirements_asset = stage_root.joinpath(
+        *PurePosixPath(payload_assets["requirementsPath"]).parts
+    )
     shutil.copyfile(requirements_path, requirements_asset)
     lock_asset = stage_root.joinpath(*PurePosixPath(payload_assets["lockPath"]).parts)
     shutil.copyfile(lock_path, lock_asset)
-    wheel_asset_directory = stage_root.joinpath(*PurePosixPath(payload_assets["wheelDirectory"]).parts)
+    wheel_asset_directory = stage_root.joinpath(
+        *PurePosixPath(payload_assets["wheelDirectory"]).parts
+    )
     wheel_asset_directory.mkdir(parents=True, exist_ok=False)
     for filename, source in wheel_paths.items():
         shutil.copyfile(source, wheel_asset_directory / filename)
@@ -1115,15 +1242,21 @@ def build_parser() -> argparse.ArgumentParser:
     check = subparsers.add_parser("check", help="Validate the runtime lock and dependency hashes.")
     check.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
 
-    stage = subparsers.add_parser("prepare", help="Verify assets and stage the offline private runtime.")
+    stage = subparsers.add_parser(
+        "prepare", help="Verify assets and stage the offline private runtime."
+    )
     stage.add_argument("--lock", type=Path, default=DEFAULT_LOCK)
     stage.add_argument("--release-lock", type=Path, default=DEFAULT_RELEASE_LOCK)
     stage.add_argument("--target-profile", required=True)
     stage.add_argument("--stage-root", required=True, type=Path)
     stage.add_argument("--work-dir", required=True, type=Path)
-    stage.add_argument("--archive", type=Path, help="Use a cached source archive after exact SHA-256 verification.")
+    stage.add_argument(
+        "--archive", type=Path, help="Use a cached source archive after exact SHA-256 verification."
+    )
     stage.add_argument("--uv-executable", type=Path, help="Use an exact uv 0.12.21 executable.")
-    stage.add_argument("--json", action="store_true", help="Write the staging report as one JSON object.")
+    stage.add_argument(
+        "--json", action="store_true", help="Write the staging report as one JSON object."
+    )
     return parser
 
 
@@ -1133,7 +1266,9 @@ def main(argv: list[str] | None = None) -> int:
         lock = _read_json_object(arguments.lock.resolve(), "python runtime lock")
         _, requirements_path = validate_lock(lock, arguments.lock.resolve())
         if arguments.command == "check":
-            print(f"Python runtime lock: PASS (CPython {lock['python']['version']}, uv {lock['buildResolver']['version']})")
+            print(
+                f"Python runtime lock: PASS (CPython {lock['python']['version']}, uv {lock['buildResolver']['version']})"
+            )
             print(f"Runtime dependency lock: PASS ({requirements_path})")
             return 0
         report = prepare(arguments)

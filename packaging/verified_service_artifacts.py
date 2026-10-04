@@ -141,10 +141,14 @@ def _canonical_jcs(value: Any) -> bytes:
                 raise VerifiedServiceArtifactError("manifest integer exceeds the safe JSON range")
             return str(item)
         if isinstance(item, float):
-            raise VerifiedServiceArtifactError("component manifest must not contain floating-point values")
+            raise VerifiedServiceArtifactError(
+                "component manifest must not contain floating-point values"
+            )
         if isinstance(item, str):
             if any(0xD800 <= ord(char) <= 0xDFFF for char in item):
-                raise VerifiedServiceArtifactError("manifest contains an unpaired Unicode surrogate")
+                raise VerifiedServiceArtifactError(
+                    "manifest contains an unpaired Unicode surrogate"
+                )
             return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
         if isinstance(item, list):
             return "[" + ",".join(encode(member) for member in item) + "]"
@@ -212,7 +216,9 @@ def _regular_input(root: Path, relative: Any, label: str) -> tuple[Path, str, in
     for part in path.relative_to(root).parts[:-1]:
         current = current / part
         if current.is_symlink() or not current.is_dir():
-            raise VerifiedServiceArtifactError(f"{label} passes through an unsafe directory: {current}")
+            raise VerifiedServiceArtifactError(
+                f"{label} passes through an unsafe directory: {current}"
+            )
     info = path.stat()
     if not stat.S_ISREG(info.st_mode):
         raise VerifiedServiceArtifactError(f"{label} is not a regular file: {path}")
@@ -225,16 +231,22 @@ def _read_github_release(repository: str, release_id: str) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             if urllib.parse.urlsplit(response.geturl()).hostname != "api.github.com":
-                raise VerifiedServiceArtifactError("GitHub release metadata redirected outside api.github.com")
+                raise VerifiedServiceArtifactError(
+                    "GitHub release metadata redirected outside api.github.com"
+                )
             content = response.read(MAX_RELEASE_METADATA_BYTES + 1)
     except (urllib.error.URLError, TimeoutError) as error:
-        raise VerifiedServiceArtifactError(f"cannot read immutable Product release metadata: {error}") from error
+        raise VerifiedServiceArtifactError(
+            f"cannot read immutable Product release metadata: {error}"
+        ) from error
     if len(content) > MAX_RELEASE_METADATA_BYTES:
         raise VerifiedServiceArtifactError("Product release metadata exceeds its size limit")
     try:
         result = json.loads(content.decode("utf-8"), object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-        raise VerifiedServiceArtifactError(f"GitHub returned invalid Product release metadata: {error}") from error
+        raise VerifiedServiceArtifactError(
+            f"GitHub returned invalid Product release metadata: {error}"
+        ) from error
     return _require_object(result, "GitHub Product release metadata")
 
 
@@ -247,7 +259,9 @@ def _verify_release_assets(
         or metadata.get("draft") is not False
         or metadata.get("prerelease") is not (channel == "preview")
     ):
-        raise VerifiedServiceArtifactError(f"Product release {release_id} is not the expected immutable release")
+        raise VerifiedServiceArtifactError(
+            f"Product release {release_id} is not the expected immutable release"
+        )
     raw_assets = metadata.get("assets")
     if not isinstance(raw_assets, list):
         raise VerifiedServiceArtifactError("immutable Product release metadata has no assets list")
@@ -278,7 +292,9 @@ def _verify_attestation(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> None:
     if shutil.which("gh") is None:
-        raise VerifiedServiceArtifactError("GitHub CLI (`gh`) is required to verify Product attestations")
+        raise VerifiedServiceArtifactError(
+            "GitHub CLI (`gh`) is required to verify Product attestations"
+        )
     command = [
         "gh",
         "attestation",
@@ -304,19 +320,27 @@ def _verify_attestation(
     try:
         result = runner(command, check=False, capture_output=True, text=True, timeout=90)
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise VerifiedServiceArtifactError(f"GitHub attestation verification could not complete: {error}") from error
+        raise VerifiedServiceArtifactError(
+            f"GitHub attestation verification could not complete: {error}"
+        ) from error
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or str(result.returncode)
         raise VerifiedServiceArtifactError(f"GitHub Product artifact attestation failed: {detail}")
     try:
         verification = json.loads(result.stdout)
     except json.JSONDecodeError as error:
-        raise VerifiedServiceArtifactError("GitHub CLI returned malformed attestation verification JSON") from error
+        raise VerifiedServiceArtifactError(
+            "GitHub CLI returned malformed attestation verification JSON"
+        ) from error
     if not isinstance(verification, list):
-        raise VerifiedServiceArtifactError("GitHub CLI returned an unexpected attestation verification shape")
+        raise VerifiedServiceArtifactError(
+            "GitHub CLI returned an unexpected attestation verification shape"
+        )
     for item in verification:
         verification_result = item.get("verificationResult") if isinstance(item, dict) else None
-        statement = verification_result.get("statement") if isinstance(verification_result, dict) else None
+        statement = (
+            verification_result.get("statement") if isinstance(verification_result, dict) else None
+        )
         subjects = statement.get("subject") if isinstance(statement, dict) else None
         if (
             not isinstance(statement, dict)
@@ -355,27 +379,41 @@ def _extract_bundle_archive(
             for count, member in enumerate(archive, start=1):
                 if count > MAX_ARCHIVE_ENTRIES:
                     raise VerifiedServiceArtifactError("Product archive has too many entries")
-                raw_name = member.name[:-1] if member.isdir() and member.name.endswith("/") else member.name
+                raw_name = (
+                    member.name[:-1]
+                    if member.isdir() and member.name.endswith("/")
+                    else member.name
+                )
                 path = _safe_relative(raw_name, "Product archive member")
                 normalized = path.as_posix()
                 if normalized in seen:
-                    raise VerifiedServiceArtifactError(f"Product archive contains duplicate entry {raw_name}")
+                    raise VerifiedServiceArtifactError(
+                        f"Product archive contains duplicate entry {raw_name}"
+                    )
                 seen.add(normalized)
                 target = destination.joinpath(*path.parts)
                 if member.isdir():
                     if member.size != 0:
-                        raise VerifiedServiceArtifactError(f"Product archive directory contains bytes: {raw_name}")
+                        raise VerifiedServiceArtifactError(
+                            f"Product archive directory contains bytes: {raw_name}"
+                        )
                     target.mkdir(parents=True, exist_ok=True, mode=0o755)
                     continue
                 if not member.isfile() or member.size < 0:
-                    raise VerifiedServiceArtifactError(f"Product archive has a link or special entry: {raw_name}")
+                    raise VerifiedServiceArtifactError(
+                        f"Product archive has a link or special entry: {raw_name}"
+                    )
                 expanded += member.size
                 if expanded > MAX_ARCHIVE_BYTES:
-                    raise VerifiedServiceArtifactError("Product archive exceeds the expanded-size limit")
+                    raise VerifiedServiceArtifactError(
+                        "Product archive exceeds the expanded-size limit"
+                    )
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
                 stream = archive.extractfile(member)
                 if stream is None:
-                    raise VerifiedServiceArtifactError(f"Product archive entry is unreadable: {raw_name}")
+                    raise VerifiedServiceArtifactError(
+                        f"Product archive entry is unreadable: {raw_name}"
+                    )
                 digest = hashlib.sha256()
                 mode = 0o755 if member.mode & 0o111 else 0o644
                 descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
@@ -387,43 +425,67 @@ def _extract_bundle_archive(
                 found[normalized] = digest.hexdigest()
     except (OSError, tarfile.TarError) as error:
         shutil.rmtree(destination, ignore_errors=True)
-        raise VerifiedServiceArtifactError(f"cannot safely extract Product archive: {error}") from error
+        raise VerifiedServiceArtifactError(
+            f"cannot safely extract Product archive: {error}"
+        ) from error
     expected: dict[str, str] = {}
     for name, digest in expected_files.items():
         path = _safe_relative(name, "artifact.files path").as_posix()
-        if not isinstance(digest, str) or not digest.startswith("sha256:") or not SHA256_PATTERN.fullmatch(digest[7:]):
-            raise VerifiedServiceArtifactError(f"outer manifest has an invalid file digest for {path}")
+        if (
+            not isinstance(digest, str)
+            or not digest.startswith("sha256:")
+            or not SHA256_PATTERN.fullmatch(digest[7:])
+        ):
+            raise VerifiedServiceArtifactError(
+                f"outer manifest has an invalid file digest for {path}"
+            )
         expected[path] = digest.removeprefix("sha256:")
     if found != expected:
         shutil.rmtree(destination, ignore_errors=True)
-        raise VerifiedServiceArtifactError("Product archive payload differs from its verified outer manifest")
+        raise VerifiedServiceArtifactError(
+            "Product archive payload differs from its verified outer manifest"
+        )
     candidates = [path for path in destination.rglob("manifest.json") if path.is_file()]
     if len(candidates) != 1:
         shutil.rmtree(destination, ignore_errors=True)
-        raise VerifiedServiceArtifactError("Product archive must contain exactly one inner service manifest")
+        raise VerifiedServiceArtifactError(
+            "Product archive must contain exactly one inner service manifest"
+        )
     bundle_root = candidates[0].parent
     return bundle_root
 
 
-def _catalog_inputs(catalog: dict[str, Any], target_profile: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def _catalog_inputs(
+    catalog: dict[str, Any], target_profile: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     components = catalog.get("components")
     publishers = catalog.get("publishers")
     targets = catalog.get("targets")
-    if not isinstance(components, list) or not isinstance(publishers, list) or not isinstance(targets, list):
-        raise VerifiedServiceArtifactError("bootstrap component catalog lacks components, publishers, or targets")
+    if (
+        not isinstance(components, list)
+        or not isinstance(publishers, list)
+        or not isinstance(targets, list)
+    ):
+        raise VerifiedServiceArtifactError(
+            "bootstrap component catalog lacks components, publishers, or targets"
+        )
     component_map = {item.get("componentId"): item for item in components if isinstance(item, dict)}
     publisher_map = {item.get("repository"): item for item in publishers if isinstance(item, dict)}
     target_map = {item.get("id"): item for item in targets if isinstance(item, dict)}
     target = target_map.get(target_profile)
     if not isinstance(target, dict) or target.get("hostSupport") != "supported":
-        raise VerifiedServiceArtifactError(f"bootstrap catalog does not support target {target_profile}")
+        raise VerifiedServiceArtifactError(
+            f"bootstrap catalog does not support target {target_profile}"
+        )
     return component_map, publisher_map, target
 
 
 def _load_profile(release_lock_path: Path, target_profile: str) -> dict[str, Any]:
     lock, _ = _read_json(release_lock_path, "Workspace release-lock.json")
     profiles = _require_object(lock.get("nativePythonProfiles"), "nativePythonProfiles")
-    profile = _require_object(profiles.get(target_profile), f"nativePythonProfiles.{target_profile}")
+    profile = _require_object(
+        profiles.get(target_profile), f"nativePythonProfiles.{target_profile}"
+    )
     expected_target = PRODUCT_TARGETS.get(target_profile)
     if (
         expected_target is None
@@ -433,7 +495,9 @@ def _load_profile(release_lock_path: Path, target_profile: str) -> dict[str, Any
         or profile.get("pythonInput") != "packaging/python-runtime.lock.json"
         or profile.get("abi") not in {"glibc-2.35", "glibc-2.39"}
     ):
-        raise VerifiedServiceArtifactError(f"release-lock profile does not match the pinned private runtime: {target_profile}")
+        raise VerifiedServiceArtifactError(
+            f"release-lock profile does not match the pinned private runtime: {target_profile}"
+        )
     return lock
 
 
@@ -461,16 +525,27 @@ def verify_and_stage(
     """Verify official release bytes and stage payload without rebuilding."""
 
     if input_root.is_symlink() or not input_root.is_dir():
-        raise VerifiedServiceArtifactError(f"verified Product artifact directory is missing: {input_root}")
+        raise VerifiedServiceArtifactError(
+            f"verified Product artifact directory is missing: {input_root}"
+        )
     input_root = input_root.resolve()
     index, index_bytes = _read_json(input_root / DEFAULT_INDEX, "verified-service-artifacts index")
-    if set(index) != {"schemaVersion", "targetProfile", "services"} or index.get("schemaVersion") != 1:
-        raise VerifiedServiceArtifactError("verified-service-artifacts index must use the exact v1 shape")
+    if (
+        set(index) != {"schemaVersion", "targetProfile", "services"}
+        or index.get("schemaVersion") != 1
+    ):
+        raise VerifiedServiceArtifactError(
+            "verified-service-artifacts index must use the exact v1 shape"
+        )
     if index.get("targetProfile") != target_profile:
-        raise VerifiedServiceArtifactError("verified-service-artifacts targetProfile differs from the selected DEB target")
+        raise VerifiedServiceArtifactError(
+            "verified-service-artifacts targetProfile differs from the selected DEB target"
+        )
     records = _require_object(index.get("services"), "verified-service-artifacts.services")
     if set(records) != set(SERVICE_COMPONENTS):
-        raise VerifiedServiceArtifactError("verified-service-artifacts must contain exactly the five managed services")
+        raise VerifiedServiceArtifactError(
+            "verified-service-artifacts must contain exactly the five managed services"
+        )
 
     release_lock = _load_profile(release_lock_path, target_profile)
     catalog, _ = _read_json(catalog_path, "bootstrap component catalog")
@@ -483,7 +558,9 @@ def verify_and_stage(
         raise VerifiedServiceArtifactError("release-lock.json has no repository source pins")
 
     if output_root.exists() or output_root.is_symlink():
-        raise VerifiedServiceArtifactError(f"verified Product staging output already exists: {output_root}")
+        raise VerifiedServiceArtifactError(
+            f"verified Product staging output already exists: {output_root}"
+        )
     output_root.mkdir(parents=True, mode=0o755)
     raw_output = output_root / "verified-published-bytes" / target_profile
     bundles_output = output_root / "service-artifacts"
@@ -499,12 +576,30 @@ def verify_and_stage(
     try:
         for component_id, service in sorted(SERVICE_COMPONENTS.items()):
             record = _require_object(records.get(component_id), f"services.{component_id}")
-            if set(record) != {"componentId", "repository", "releaseId", "source", "artifact", "manifest", "attestation"}:
-                raise VerifiedServiceArtifactError(f"services.{component_id} has an invalid field set")
-            component = _require_object(component_catalog.get(component_id), f"catalog component {component_id}")
-            component_repository = _require_string(component.get("publisher"), f"{component_id}.publisher")
-            publisher = _require_object(publisher_catalog.get(component_repository), f"publisher {component_repository}")
-            trusted_workflow = _require_string(publisher.get("workflow"), f"{component_repository}.workflow")
+            if set(record) != {
+                "componentId",
+                "repository",
+                "releaseId",
+                "source",
+                "artifact",
+                "manifest",
+                "attestation",
+            }:
+                raise VerifiedServiceArtifactError(
+                    f"services.{component_id} has an invalid field set"
+                )
+            component = _require_object(
+                component_catalog.get(component_id), f"catalog component {component_id}"
+            )
+            component_repository = _require_string(
+                component.get("publisher"), f"{component_id}.publisher"
+            )
+            publisher = _require_object(
+                publisher_catalog.get(component_repository), f"publisher {component_repository}"
+            )
+            trusted_workflow = _require_string(
+                publisher.get("workflow"), f"{component_repository}.workflow"
+            )
             expected_repository = SERVICE_REPOSITORIES[service]
             if (
                 record.get("componentId") != component_id
@@ -513,7 +608,9 @@ def verify_and_stage(
                 or component.get("kind") != "python-bundle"
                 or component.get("pythonBundleService") != service
             ):
-                raise VerifiedServiceArtifactError(f"Product publisher identity differs for {component_id}")
+                raise VerifiedServiceArtifactError(
+                    f"Product publisher identity differs for {component_id}"
+                )
             if not any(
                 isinstance(item, dict)
                 and item.get("targetId") == target_profile
@@ -521,7 +618,9 @@ def verify_and_stage(
                 and item.get("support") == "supported"
                 for item in component.get("targets", [])
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} is not supported for {target_profile}")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} is not supported for {target_profile}"
+                )
             expected_archive_name, expected_manifest_name = _canonical_product_asset_names(
                 component_id, target_profile, target_fields
             )
@@ -530,7 +629,9 @@ def verify_and_stage(
             release_match = RELEASE_PATTERN.fullmatch(release_id)
             source = _require_object(record.get("source"), f"{component_id}.source")
             if set(source) != {"ref", "commit"}:
-                raise VerifiedServiceArtifactError(f"{component_id}.source has an invalid field set")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id}.source has an invalid field set"
+                )
             source_ref = _require_string(source.get("ref"), f"{component_id}.source.ref")
             source_commit = _require_string(source.get("commit"), f"{component_id}.source.commit")
             if (
@@ -539,36 +640,54 @@ def verify_and_stage(
                 or COMMIT_PATTERN.fullmatch(source_commit) is None
                 or release_match.group(1) not in {"stable", "preview"}
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} release tag must bind its exact source commit")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} release tag must bind its exact source commit"
+                )
             channel = release_match.group(1)
             allowed_refs = _require_object(catalog.get("channels"), "catalog.channels").get(channel)
-            allowed_refs = _require_object(allowed_refs, f"catalog.channels.{channel}").get("sourceRefs")
+            allowed_refs = _require_object(allowed_refs, f"catalog.channels.{channel}").get(
+                "sourceRefs"
+            )
             if not isinstance(allowed_refs, list) or source_ref not in allowed_refs:
-                raise VerifiedServiceArtifactError(f"{component_id} source ref is not trusted for {channel}")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} source ref is not trusted for {channel}"
+                )
             pinned_commit = components.get(expected_repository)
             if pinned_commit != source_commit:
-                raise VerifiedServiceArtifactError(f"{component_id} source commit differs from release-lock.json")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} source commit differs from release-lock.json"
+                )
 
             artifact = _require_object(record.get("artifact"), f"{component_id}.artifact")
             if set(artifact) != {"path", "sha256", "sizeBytes", "kind", "format"}:
-                raise VerifiedServiceArtifactError(f"{component_id}.artifact has an invalid field set")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id}.artifact has an invalid field set"
+                )
             if artifact.get("kind") != "python-bundle" or artifact.get("format") != "tar.gz":
-                raise VerifiedServiceArtifactError(f"{component_id} artifact must be a published tar.gz Python bundle")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} artifact must be a published tar.gz Python bundle"
+                )
             artifact_path, artifact_sha, artifact_size = _regular_input(
                 input_root, artifact.get("path"), f"{component_id}.artifact.path"
             )
             artifact_name = artifact_path.name
             if artifact_name != expected_archive_name:
-                raise VerifiedServiceArtifactError(f"{component_id} archive asset name is not canonical for {target_profile}")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} archive asset name is not canonical for {target_profile}"
+                )
             if (
                 artifact.get("sha256") != artifact_sha
                 or artifact.get("sizeBytes") != artifact_size
                 or artifact_size < 1
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} archive SHA/size differs from index.json")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} archive SHA/size differs from index.json"
+                )
             manifest_record = _require_object(record.get("manifest"), f"{component_id}.manifest")
             if set(manifest_record) != {"path", "sha256", "manifestDigest"}:
-                raise VerifiedServiceArtifactError(f"{component_id}.manifest has an invalid field set")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id}.manifest has an invalid field set"
+                )
             manifest_path, manifest_sha, manifest_size = _regular_input(
                 input_root, manifest_record.get("path"), f"{component_id}.manifest.path"
             )
@@ -577,10 +696,14 @@ def verify_and_stage(
                     f"{component_id} manifest asset name is not canonical for {target_profile}"
                 )
             if manifest_record.get("sha256") != manifest_sha or manifest_size < 1:
-                raise VerifiedServiceArtifactError(f"{component_id} outer manifest SHA differs from index.json")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} outer manifest SHA differs from index.json"
+                )
             outer_manifest, _ = _read_json(manifest_path, f"{component_id} outer release manifest")
             if manifest_record.get("manifestDigest") != _manifest_digest(outer_manifest):
-                raise VerifiedServiceArtifactError(f"{component_id} outer manifest digest is invalid")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} outer manifest digest is invalid"
+                )
             if (
                 outer_manifest.get("schemaVersion") != 2
                 or outer_manifest.get("componentId") != component_id
@@ -588,16 +711,26 @@ def verify_and_stage(
                 or outer_manifest.get("channel") != channel
                 or outer_manifest.get("target") != target_fields
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} outer manifest identity or target differs")
-            outer_source = _require_object(outer_manifest.get("source"), f"{component_id} manifest.source")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} outer manifest identity or target differs"
+                )
+            outer_source = _require_object(
+                outer_manifest.get("source"), f"{component_id} manifest.source"
+            )
             if (
                 outer_source.get("repository") != f"https://github.com/{component_repository}"
                 or outer_source.get("ref") != source_ref
                 or outer_source.get("commit") != source_commit
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} outer manifest source differs from index.json")
-            artifact_metadata = _require_object(outer_manifest.get("artifact"), f"{component_id} manifest.artifact")
-            parsed_uri = urllib.parse.urlsplit(_require_string(artifact_metadata.get("uri"), f"{component_id}.artifact.uri"))
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} outer manifest source differs from index.json"
+                )
+            artifact_metadata = _require_object(
+                outer_manifest.get("artifact"), f"{component_id} manifest.artifact"
+            )
+            parsed_uri = urllib.parse.urlsplit(
+                _require_string(artifact_metadata.get("uri"), f"{component_id}.artifact.uri")
+            )
             if (
                 artifact_metadata.get("kind") != "python-bundle"
                 or artifact_metadata.get("format") != "tar.gz"
@@ -605,16 +738,34 @@ def verify_and_stage(
                 or artifact_metadata.get("sizeBytes") != artifact_size
                 or parsed_uri.scheme != "https"
                 or parsed_uri.hostname != "github.com"
-                or parsed_uri.path != f"/{component_repository}/releases/download/{release_id}/{artifact_name}"
+                or parsed_uri.path
+                != f"/{component_repository}/releases/download/{release_id}/{artifact_name}"
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} outer manifest does not bind its exact GitHub archive")
-            expected_files = _require_object(artifact_metadata.get("files"), f"{component_id}.artifact.files")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} outer manifest does not bind its exact GitHub archive"
+                )
+            expected_files = _require_object(
+                artifact_metadata.get("files"), f"{component_id}.artifact.files"
+            )
             if not expected_files:
-                raise VerifiedServiceArtifactError(f"{component_id} outer manifest has no archive payload map")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} outer manifest has no archive payload map"
+                )
 
             attestation = _require_object(record.get("attestation"), f"{component_id}.attestation")
-            if set(attestation) != {"path", "sha256", "repository", "workflow", "predicateType", "subjectName", "sourceRef", "sourceCommit"}:
-                raise VerifiedServiceArtifactError(f"{component_id}.attestation has an invalid field set")
+            if set(attestation) != {
+                "path",
+                "sha256",
+                "repository",
+                "workflow",
+                "predicateType",
+                "subjectName",
+                "sourceRef",
+                "sourceCommit",
+            }:
+                raise VerifiedServiceArtifactError(
+                    f"{component_id}.attestation has an invalid field set"
+                )
             attestation_path, attestation_sha, attestation_size = _regular_input(
                 input_root, attestation.get("path"), f"{component_id}.attestation.path"
             )
@@ -629,9 +780,15 @@ def verify_and_stage(
                 or attestation.get("sourceRef") != source_ref
                 or attestation.get("sourceCommit") != source_commit
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} detached attestation receipt identity differs")
-            provenance = _require_object(outer_manifest.get("provenance"), f"{component_id}.manifest.provenance")
-            manifest_attestation = _require_object(provenance.get("attestation"), f"{component_id}.manifest.attestation")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} detached attestation receipt identity differs"
+                )
+            provenance = _require_object(
+                outer_manifest.get("provenance"), f"{component_id}.manifest.provenance"
+            )
+            manifest_attestation = _require_object(
+                provenance.get("attestation"), f"{component_id}.manifest.attestation"
+            )
             if (
                 manifest_attestation.get("kind") != "github-artifact-attestation"
                 or manifest_attestation.get("repository") != component_repository
@@ -641,13 +798,18 @@ def verify_and_stage(
                     "subjectName" in manifest_attestation
                     and manifest_attestation.get("subjectName") != artifact_name
                 )
-                or ("sourceRef" in manifest_attestation and manifest_attestation.get("sourceRef") != source_ref)
+                or (
+                    "sourceRef" in manifest_attestation
+                    and manifest_attestation.get("sourceRef") != source_ref
+                )
                 or (
                     "sourceCommit" in manifest_attestation
                     and manifest_attestation.get("sourceCommit") != source_commit
                 )
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} outer provenance differs from trusted publisher identity")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} outer provenance differs from trusted publisher identity"
+                )
 
             release_metadata = release_reader(component_repository, release_id)
             _verify_release_assets(
@@ -676,7 +838,9 @@ def verify_and_stage(
                 asset_path = _safe_relative(raw_path.get("path"), f"{component_id} asset path")
                 asset_key = asset_path.as_posix()
                 if asset_key in seen_asset_paths:
-                    raise VerifiedServiceArtifactError(f"two Product services reuse one input asset path: {asset_key}")
+                    raise VerifiedServiceArtifactError(
+                        f"two Product services reuse one input asset path: {asset_key}"
+                    )
                 seen_asset_paths.add(asset_key)
                 destination = raw_output.joinpath(*asset_path.parts)
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -695,13 +859,17 @@ def verify_and_stage(
                     release_lock_path=release_lock_path,
                 )
             except (ImportError, OSError, RuntimeError, ValueError) as error:
-                raise VerifiedServiceArtifactError(f"{component_id} inner service bundle is invalid: {error}") from error
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} inner service bundle is invalid: {error}"
+                ) from error
             if (
                 inner_manifest.get("schema_version") != 2
                 or inner_manifest.get("service") != service
                 or inner_manifest.get("source_commit") != source_commit
             ):
-                raise VerifiedServiceArtifactError(f"{component_id} inner bundle source or schema differs")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} inner bundle source or schema differs"
+                )
             package_service_root = output_root / "service-artifacts" / service
             package_service_root.mkdir(parents=True, exist_ok=False)
             staged_bundle = package_service_root / inner_manifest["version"]
@@ -713,7 +881,9 @@ def verify_and_stage(
                     path.chmod(0o755 if path.stat().st_mode & 0o111 else 0o644)
             staged_manifest_path = staged_bundle / "manifest.json"
             if staged_manifest_path.is_symlink() or not staged_manifest_path.is_file():
-                raise VerifiedServiceArtifactError(f"{component_id} inner manifest disappeared during staging")
+                raise VerifiedServiceArtifactError(
+                    f"{component_id} inner manifest disappeared during staging"
+                )
 
             service_evidence[component_id] = {
                 "componentId": component_id,
@@ -721,7 +891,10 @@ def verify_and_stage(
                 "releaseId": release_id,
                 "source": {"ref": source_ref, "commit": source_commit},
                 "artifact": {"sha256": artifact_sha, "sizeBytes": artifact_size},
-                "manifest": {"sha256": manifest_sha, "manifestDigest": manifest_record["manifestDigest"]},
+                "manifest": {
+                    "sha256": manifest_sha,
+                    "manifestDigest": manifest_record["manifestDigest"],
+                },
                 "attestation": {
                     "sha256": attestation_sha,
                     "repository": component_repository,

@@ -34,7 +34,12 @@ def test_product_release_metadata_requires_immutable_assets_and_exact_bytes() ->
         "draft": False,
         "prerelease": False,
         "assets": [
-            {"name": "bundle.tar.gz", "digest": "sha256:" + "b" * 64, "size": 17, "state": "uploaded"}
+            {
+                "name": "bundle.tar.gz",
+                "digest": "sha256:" + "b" * 64,
+                "size": 17,
+                "state": "uploaded",
+            }
         ],
     }
 
@@ -43,12 +48,16 @@ def test_product_release_metadata_requires_immutable_assets_and_exact_bytes() ->
         changed = dict(metadata)
         changed[field] = value
         with pytest.raises(module.VerifiedServiceArtifactError):
-            module._verify_release_assets(changed, release_id, "stable", [("bundle.tar.gz", "b" * 64, 17)])
+            module._verify_release_assets(
+                changed, release_id, "stable", [("bundle.tar.gz", "b" * 64, 17)]
+            )
 
     changed = json.loads(json.dumps(metadata))
     changed["assets"][0]["digest"] = "sha256:" + "c" * 64
     with pytest.raises(module.VerifiedServiceArtifactError, match="does not match local bytes"):
-        module._verify_release_assets(changed, release_id, "stable", [("bundle.tar.gz", "b" * 64, 17)])
+        module._verify_release_assets(
+            changed, release_id, "stable", [("bundle.tar.gz", "b" * 64, 17)]
+        )
 
 
 @pytest.mark.parametrize(
@@ -92,13 +101,17 @@ def test_product_asset_names_follow_catalog_target_profile(
 ) -> None:
     module = _module()
 
-    assert module._canonical_product_asset_names("cyrene-catalyst", target_profile, target_fields) == (
+    assert module._canonical_product_asset_names(
+        "cyrene-catalyst", target_profile, target_fields
+    ) == (
         expected_archive,
         expected_manifest,
     )
 
     changed_target = dict(target_fields, abi="glibc-2.40")
-    with pytest.raises(module.VerifiedServiceArtifactError, match="canonical Product naming profile"):
+    with pytest.raises(
+        module.VerifiedServiceArtifactError, match="canonical Product naming profile"
+    ):
         module._canonical_product_asset_names("cyrene-catalyst", target_profile, changed_target)
 
 
@@ -150,7 +163,9 @@ def test_product_archive_extraction_accepts_exact_files_and_rejects_links(tmp_pa
         module._extract_bundle_archive(archive_path, tmp_path / "unsafe", {})
 
 
-def test_attestation_verifier_binds_exact_archive_subject(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_attestation_verifier_binds_exact_archive_subject(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     module = _module()
     artifact = tmp_path / "bundle.tar.gz"
     bundle = tmp_path / "bundle.tar.gz.attestation.jsonl"
@@ -166,7 +181,9 @@ def test_attestation_verifier_binds_exact_archive_subject(monkeypatch: pytest.Mo
             "predicateType": "https://slsa.dev/provenance/v1",
             "subject": [{"name": artifact.name, "digest": {"sha256": subject_sha}}],
         }
-        return subprocess.CompletedProcess(command, 0, json.dumps([{"verificationResult": {"statement": statement}}]), "")
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps([{"verificationResult": {"statement": statement}}]), ""
+        )
 
     module._verify_attestation(
         artifact,
@@ -185,14 +202,20 @@ def test_attestation_verifier_binds_exact_archive_subject(monkeypatch: pytest.Mo
     assert "--signer-workflow" in seen
     assert "accepted:true" not in seen
 
-    def wrong_subject_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def wrong_subject_runner(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         statement = {
             "predicateType": "https://slsa.dev/provenance/v1",
             "subject": [{"name": artifact.name, "digest": {"sha256": "0" * 64}}],
         }
-        return subprocess.CompletedProcess(command, 0, json.dumps([{"verificationResult": {"statement": statement}}]), "")
+        return subprocess.CompletedProcess(
+            command, 0, json.dumps([{"verificationResult": {"statement": statement}}]), ""
+        )
 
-    with pytest.raises(module.VerifiedServiceArtifactError, match="does not bind the exact Product archive"):
+    with pytest.raises(
+        module.VerifiedServiceArtifactError, match="does not bind the exact Product archive"
+    ):
         module._verify_attestation(
             artifact,
             bundle,

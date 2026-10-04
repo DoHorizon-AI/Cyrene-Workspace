@@ -61,9 +61,7 @@ def test_locked_runtime_uses_real_official_asset_and_separate_archive_digest() -
         "libcrypt1",
         "libgcc-s1",
     ]
-    assert lock["payload"]["verificationRecordPath"].endswith(
-        "python-runtime-verification.json"
-    )
+    assert lock["payload"]["verificationRecordPath"].endswith("python-runtime-verification.json")
 
     module.validate_lock(lock, LOCK_PATH)
 

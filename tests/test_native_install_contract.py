@@ -99,9 +99,10 @@ def test_contract_binds_the_exact_index_bytes_and_maintainer_scripts(tmp_path: P
     assert set(written["services"]) == set(SERVICES)
     assert set(written["maintainerScriptsSha256"]) == {"postinst", "prerm", "postrm"}
     for name in written["maintainerScriptsSha256"]:
-        assert written["maintainerScriptsSha256"][name] == hashlib.sha256(
-            (scripts / name).read_bytes()
-        ).hexdigest()
+        assert (
+            written["maintainerScriptsSha256"][name]
+            == hashlib.sha256((scripts / name).read_bytes()).hexdigest()
+        )
 
 
 @pytest.mark.parametrize("corruption", ["missing-service", "source-mismatch", "wrong-profile"])
@@ -133,13 +134,13 @@ def test_contract_rejects_incomplete_or_mismatched_source_index(
 def test_verified_release_builder_scripts_remain_stage_only() -> None:
     source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
     postinst = source.split("cat <<'EOF' > \"${STAGE_DIR}/DEBIAN/postinst\"\n", 1)[1].split(
-        "\nEOF\nchmod 755 \"${STAGE_DIR}/DEBIAN/postinst\"", 1
+        '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/postinst"', 1
     )[0]
     prerm = source.split("cat <<'EOF' > \"${STAGE_DIR}/DEBIAN/prerm\"\n", 1)[1].split(
-        "\nEOF\nchmod 755 \"${STAGE_DIR}/DEBIAN/prerm\"", 1
+        '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/prerm"', 1
     )[0]
     postrm = source.split("cat <<'EOF' > \"${STAGE_DIR}/DEBIAN/postrm\"\n", 1)[1].split(
-        "\nEOF\nchmod 755 \"${STAGE_DIR}/DEBIAN/postrm\"", 1
+        '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/postrm"', 1
     )[0]
     maintainer_scripts = "\n".join(
         "\n".join(line for line in script.splitlines() if not line.lstrip().startswith("#"))
@@ -157,18 +158,21 @@ def test_verified_release_builder_scripts_remain_stage_only() -> None:
         assert forbidden not in maintainer_scripts
     assert "/opt/cyrene/python/3.12.14/bin/python3.12" in postinst
 
-    control = source.split('cat <<EOF > "${STAGE_DIR}/DEBIAN/control"\n', 1)[1].split(
-        "\nEOF\n", 1
-    )[0]
+    control = source.split('cat <<EOF > "${STAGE_DIR}/DEBIAN/control"\n', 1)[1].split("\nEOF\n", 1)[
+        0
+    ]
     depends = next(line for line in control.splitlines() if line.startswith("Depends:"))
     assert "python3" not in depends
     assert "python3-jsonschema" not in depends
-    unit_stanzas = source.split("# 4. Systemd service units", 1)[1].split(
-        "# 5. DEBIAN/control", 1
-    )[0]
-    assert unit_stanzas.count(
-        "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run "
-    ) == 5
+    unit_stanzas = source.split("# 4. Systemd service units", 1)[1].split("# 5. DEBIAN/control", 1)[
+        0
+    ]
+    assert (
+        unit_stanzas.count(
+            "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run "
+        )
+        == 5
+    )
     contract_source = (WORKSPACE_ROOT / "packaging" / "native_install_contract.py").read_text(
         encoding="utf-8"
     )
