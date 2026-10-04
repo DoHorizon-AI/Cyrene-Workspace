@@ -173,6 +173,18 @@ if [[ "${DEVELOPMENT_SOURCE_BUILD}" -eq 1 && ! -d "${SERVICE_WHEELHOUSE}" ]]; th
     exit 2
 fi
 
+# Use the workflow-selected pinned helper interpreter instead of a host-specific path.
+BUILD_PYTHON="$(command -v python3 2>/dev/null || true)"
+if [[ -z "${BUILD_PYTHON}" || ! -x "${BUILD_PYTHON}" ]]; then
+    echo "ERROR: Python 3.12.14 build helper is unavailable on PATH." >&2
+    exit 2
+fi
+BUILD_PYTHON_VERSION="$("${BUILD_PYTHON}" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+if [[ "${BUILD_PYTHON_VERSION}" != "3.12.14" ]]; then
+    echo "ERROR: build helpers require the selected Python 3.12.14, got ${BUILD_PYTHON_VERSION}." >&2
+    exit 2
+fi
+
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_PACKAGE="${OUTPUT_DIR}/cyrene_${VERSION}_${ARCH}.deb"
 if [[ -L "${OUTPUT_PACKAGE}" || -d "${OUTPUT_PACKAGE}" ]]; then
@@ -215,7 +227,7 @@ PYTHON_RUNTIME_ARGS=(
 if [[ -n "${UV_EXECUTABLE}" ]]; then
     PYTHON_RUNTIME_ARGS+=(--uv-executable "${UV_EXECUTABLE}")
 fi
-/usr/bin/python3 "${SCRIPT_DIR}/python_runtime.py" "${PYTHON_RUNTIME_ARGS[@]}" \
+"${BUILD_PYTHON}" "${SCRIPT_DIR}/python_runtime.py" "${PYTHON_RUNTIME_ARGS[@]}" \
     > "${BUILD_WORK_DIR}/python-runtime-receipt.json"
 RUNTIME_PYTHON="${STAGE_DIR}/opt/cyrene/python/3.12.14/bin/python3.12"
 [[ -x "${RUNTIME_PYTHON}" ]] || {
@@ -288,7 +300,7 @@ chmod 755 "${STAGE_DIR}/usr/lib/cyrene/bootstrap.sh"
 
 if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
     VERIFIED_STAGE="${BUILD_WORK_DIR}/verified-service-artifacts"
-    /usr/bin/python3 "${SCRIPT_DIR}/verified_service_artifacts.py" \
+    "${BUILD_PYTHON}" "${SCRIPT_DIR}/verified_service_artifacts.py" \
         --input-root "${VERIFIED_SERVICE_ARTIFACTS}" \
         --target-profile "${TARGET_PROFILE}" \
         --output-root "${VERIFIED_STAGE}" \

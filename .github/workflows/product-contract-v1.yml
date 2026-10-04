@@ -204,6 +204,7 @@ jobs:
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
           tests/test_native_deb_staging.py
+          tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -235,6 +236,7 @@ jobs:
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
           tests/test_native_deb_staging.py
+          tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -254,6 +256,7 @@ jobs:
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
           tests/test_native_deb_staging.py
+          tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
