@@ -1392,9 +1392,22 @@ class ComponentUpdater:
                     "INVALID_REQUEST", "Unsupported component update protocol version."
                 )
             fields_by_operation = {
-                "status": {"protocolVersion", "operation"},
-                "check": {"protocolVersion", "operation", "componentIds", "channel"},
-                "stage": {"protocolVersion", "operation", "planId", "planDigest", "channel"},
+                "status": {"protocolVersion", "operation", "bootstrapMode"},
+                "check": {
+                    "protocolVersion",
+                    "operation",
+                    "componentIds",
+                    "channel",
+                    "bootstrapMode",
+                },
+                "stage": {
+                    "protocolVersion",
+                    "operation",
+                    "planId",
+                    "planDigest",
+                    "channel",
+                    "bootstrapMode",
+                },
                 "apply": {
                     "protocolVersion",
                     "operation",
@@ -1402,6 +1415,7 @@ class ComponentUpdater:
                     "planDigest",
                     "confirmation",
                     "channel",
+                    "bootstrapMode",
                 },
             }
             if (
@@ -1412,6 +1426,32 @@ class ComponentUpdater:
                     "INVALID_REQUEST", "The request contains an unsupported operation or field."
                 )
             self._require_authorized_process()
+            if "bootstrapMode" in request and request.get("bootstrapMode") != "first-core":
+                raise UpdateError("INVALID_REQUEST", "Unsupported first-install bootstrap mode.")
+            if request.get("bootstrapMode") == "first-core":
+                import importlib.util
+
+                helper_path = Path(__file__).with_name("native_core_bootstrap.py")
+                if not helper_path.is_file():
+                    helper_path = Path(__file__).resolve().parent / "native_core_bootstrap.py"
+                spec = importlib.util.spec_from_file_location(
+                    "_cyrene_native_core_bootstrap", helper_path
+                )
+                if spec is None or spec.loader is None:
+                    raise UpdateError(
+                        "HELPER_UNAVAILABLE", "First-Core bootstrap helper is missing."
+                    )
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = module
+                spec.loader.exec_module(module)
+                bootstrap_result = module.handle(self, request)
+                if bootstrap_result is not None:
+                    return {
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "ok": True,
+                        "operation": envelope_operation,
+                        "result": bootstrap_result,
+                    }
             if operation == "status":
                 result = self.status()
             elif operation == "check":
