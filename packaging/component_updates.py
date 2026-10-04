@@ -4103,6 +4103,14 @@ class ComponentUpdater:
         policy_source: dict[str, Any],
         trusted_owners: dict[str, dict[str, Any]],
     ) -> None:
+        """Bind Platform's short local bundle paths to trusted canonical sources.
+
+        The Platform bundle format uses each checkout directory name as its
+        inner repository/path prefix. Outer provenance remains fully qualified
+        and is validated before this projection is checked.
+        中文：仅将可信完整仓库名映射到包内短目录名，不改变外层来源证明。
+        """
+
         proof_owners = {owner["ownerId"]: owner for owner in proof["owners"]}
         manifest_owners = manifest.get("owners")
         files = manifest.get("files")
@@ -4126,12 +4134,28 @@ class ComponentUpdater:
                 )
             proof_owner = proof_owners.get(owner_id)
             trusted = trusted_owners.get(owner_id)
-            catalog_path = f"{trusted['repository']}/{trusted['catalogPath']}" if trusted else None
+            trusted_repository = trusted.get("repository") if trusted else None
+            trusted_catalog_path = trusted.get("catalogPath") if trusted else None
+            repository_parts = (
+                trusted_repository.split("/") if isinstance(trusted_repository, str) else []
+            )
+            if (
+                len(repository_parts) != 2
+                or repository_parts[0] != "DoHorizon-AI"
+                or not repository_parts[1].startswith("Cyrene-")
+                or trusted_catalog_path != "contracts/product/v2/catalog.json"
+            ):
+                raise UpdateError(
+                    "DATA_BUNDLE_OWNER_MISMATCH",
+                    f"Owner {owner_id!r} trusted source identity is invalid.",
+                )
+            local_repository = repository_parts[1]
+            catalog_path = f"{local_repository}/{trusted_catalog_path}"
             if (
                 owner_id in seen_owners
                 or proof_owner is None
                 or trusted is None
-                or owner.get("repository") != trusted["repository"]
+                or owner.get("repository") != local_repository
                 or owner.get("sourceSha") != proof_owner["source"]["commit"]
                 or owner.get("catalogPath") != catalog_path
                 or owner.get("catalogSha256")
