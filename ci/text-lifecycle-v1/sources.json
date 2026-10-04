@@ -2,12 +2,12 @@
   "schemaVersion": 1,
   "profile": "text-model-lifecycle-v1",
   "scope": "targeted-http-fixtures-not-gpu-acceptance",
-  "platformRevision": "bbbafeeb242c28555b47b0bfa2c8e74e618a2c3f",
+  "platformRevision": "cc31061d0c5f7282dac36ec6ce356b49c1044033",
   "products": {
-    "Catalyst": "074d0b38d616946793800f2e9db212e9c519d404",
-    "Yield": "19d25f37cb02c07dac574aef7ec98118e92ada89",
-    "Reactor": "8d3cec973bc51c21a07bb5bd8dec1f9c596f7069",
-    "Navigator": "73a0b56e11c24a67d740a262334a2ea78dee96f0",
+    "Catalyst": "6f999daacf8a2afd76033bfc5d0d7bcf68202de1",
+    "Yield": "65b5e77682d59b05e23f3d248765fb4986499a8e",
+    "Reactor": "49b560975c10e815ad5aac42a6c224dd4d39a8e8",
+    "Navigator": "04e84f7b7943bbe0d60604ff65194904b37ad821",
     "Echo": "7480d72c3d2520ccf7684ae43e2f2558c5c6e828"
   }
 }

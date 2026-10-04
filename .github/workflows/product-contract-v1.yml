@@ -172,6 +172,8 @@ jobs:
           tooling/acceptance/native-components-v2/admin_initialize.py
           tooling/acceptance/native-components-v2/admin_packet.py
           tooling/acceptance/native-components-v2/sidecar_invocation.py
+          tooling/acceptance/native-components-v2/control_initialize.py
+          tooling/acceptance/native-components-v2/training_evidence.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
@@ -179,6 +181,8 @@ jobs:
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
+          tests/test_native_control_initialize.py
+          tooling/acceptance/native-components-v2/tests/test_native_training_evidence.py
           tests/test_service_wheelhouse_export.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
@@ -195,6 +199,8 @@ jobs:
           tooling/acceptance/native-components-v2/admin_initialize.py
           tooling/acceptance/native-components-v2/admin_packet.py
           tooling/acceptance/native-components-v2/sidecar_invocation.py
+          tooling/acceptance/native-components-v2/control_initialize.py
+          tooling/acceptance/native-components-v2/training_evidence.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
@@ -202,6 +208,8 @@ jobs:
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
+          tests/test_native_control_initialize.py
+          tooling/acceptance/native-components-v2/tests/test_native_training_evidence.py
           tests/test_service_wheelhouse_export.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
@@ -215,6 +223,8 @@ jobs:
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
+          tests/test_native_control_initialize.py
+          tooling/acceptance/native-components-v2/tests/test_native_training_evidence.py
           tests/test_service_wheelhouse_export.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
@@ -228,7 +238,9 @@ jobs:
             tooling/acceptance/native-components-v2/native_acceptance.py \
             tooling/acceptance/native-components-v2/admin_initialize.py \
             tooling/acceptance/native-components-v2/admin_packet.py \
-            tooling/acceptance/native-components-v2/sidecar_invocation.py
+            tooling/acceptance/native-components-v2/sidecar_invocation.py \
+            tooling/acceptance/native-components-v2/control_initialize.py \
+            tooling/acceptance/native-components-v2/training_evidence.py
           bash -n packaging/build-deb.sh packaging/cyrene-component-update-helper
       - name: Parse the installer publisher and CI workflow YAML
         run: |

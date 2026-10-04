@@ -3,8 +3,8 @@
   "schemaVersion": 1,
   "name": "cyrene-0.1.0-rc.1",
   "description": "Single release lock for the first usable Cyrene RC: supported environment, native Python profiles, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine, plugin, and native Python runtime entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
-  "generatedAt": "2026-10-02T01:35:42Z",
-  "sourceState": "Repository revisions are pinned build inputs for connection components V2, maintenance-aware Products and controlled component updates. Source CI and scoped local acceptance do not establish immutable publication or native GPU/two-host RC acceptance. The Cyrene-Workspace entry records the validated source predecessor because the release-lock commit cannot self-reference.",
+  "generatedAt": "2026-10-04T11:08:13Z",
+  "sourceState": "Final source pins record the native closeout sources. The five native Product source commits are Catalyst 6f999daacf8a2afd76033bfc5d0d7bcf68202de1 (publisher run 37197062283), Exchange 7f1823f6eabe9956ff40cc2e4aa9035197b51e83 (37194428287), Navigator 04e84f7b7943bbe0d60604ff65194904b37ad821 (37196333182), Reactor 49b560975c10e815ad5aac42a6c224dd4d39a8e8 (37196339516), and Yield 65b5e77682d59b05e23f3d248765fb4986499a8e (37195208591); those publisher runs completed successfully. The acceptance scope here is immutable signed publication and matching-container validation only. Actual native-host installation, training-task submission, controlled update, and recovery remain NOT_RUN. Echo runtime/OCI remains 7480d72c3d2520ccf7684ae43e2f2558c5c6e828; its separately signed Product contract source is a6923bf1e326069143b0b56d32b5891d36655e3f. The existing wheelResolver.arguments field is target compatibility metadata for the pinned uv target, not argv passed to uv export: uv export uses the locked host interpreter without --python-platform, while pip download enforces CPython 3.12/cp312 and the profile’s accepted manylinux tags with source and hash verification. Cyrene-Workspace records validated predecessor 2b1210a19b5596cb90e3ac7c46a912a8a255da80 because release-lock cannot self-reference.",
   "supportedEnvironment": {
     "os": "Ubuntu 24.04 x86_64",
     "gpu": {
@@ -15,7 +15,8 @@
     "browser": "same-host or remote modern browser over HTTPS",
     "notes": [
       "WSL2 is a development validation profile, not native Linux production acceptance.",
-      "One GPU admits one exclusive training or inference Lease at a time."
+      "One GPU admits one exclusive training or inference Lease at a time.",
+      "The locked Ubuntu 22.04 and 24.04 Python profiles are packaging targets; they do not establish native GPU production acceptance."
     ]
   },
   "acceptanceModel": {
@@ -145,15 +146,15 @@
     }
   },
   "repositories": {
-    "Cyrene-Platform": "bbbafeeb242c28555b47b0bfa2c8e74e618a2c3f",
-    "Cyrene-Plugins-Official": "a41284c2ffe71a7412f556841f9ccc4a91864138",
-    "Cyrene-Workspace": "cec19d36ab7eaeb10daada52dc5c1e9166ea30d0",
-    "Cyrene-Reactor": "8d3cec973bc51c21a07bb5bd8dec1f9c596f7069",
-    "Cyrene-Yield": "19d25f37cb02c07dac574aef7ec98118e92ada89",
-    "Cyrene-Exchange": "0bec57a5fc593d7eb3ae1e71f38bf0b6dd8ab22b",
-    "Cyrene-Catalyst": "074d0b38d616946793800f2e9db212e9c519d404",
+    "Cyrene-Platform": "cc31061d0c5f7282dac36ec6ce356b49c1044033",
+    "Cyrene-Plugins-Official": "0387f487ccfb0f2dd77d31126c0f5669abdde822",
+    "Cyrene-Workspace": "2b1210a19b5596cb90e3ac7c46a912a8a255da80",
+    "Cyrene-Reactor": "49b560975c10e815ad5aac42a6c224dd4d39a8e8",
+    "Cyrene-Yield": "65b5e77682d59b05e23f3d248765fb4986499a8e",
+    "Cyrene-Exchange": "7f1823f6eabe9956ff40cc2e4aa9035197b51e83",
+    "Cyrene-Catalyst": "6f999daacf8a2afd76033bfc5d0d7bcf68202de1",
     "Cyrene-Echo": "7480d72c3d2520ccf7684ae43e2f2558c5c6e828",
-    "Cyrene-Navigator": "73a0b56e11c24a67d740a262334a2ea78dee96f0",
-    "Cyrene-Client": "d04c310fffdcfc82976dec8bbadedecfd07608d8"
+    "Cyrene-Navigator": "04e84f7b7943bbe0d60604ff65194904b37ad821",
+    "Cyrene-Client": "9c51a27540951589157926d1ee717d912ed22fc2"
   }
 }
