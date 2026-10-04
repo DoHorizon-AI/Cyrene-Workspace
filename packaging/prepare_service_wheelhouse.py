@@ -984,6 +984,102 @@ def _uv_version_matches_locked_profile(
     }
 
 
+def _uv_export_arguments(
+    uv_executable: str,
+    python_executable: str,
+    output_path: Path,
+    project_root: Path,
+) -> list[str]:
+    """Build a locked host export command for the prevalidated native target.
+
+    ``uv export`` resolves platform markers for the current host and does not
+    support ``--python-platform``. The caller first proves the host matches the
+    selected Ubuntu/ABI profile; wheel materialization then applies the profile's
+    CPython and manylinux constraints explicitly through pip.
+    """
+
+    return [
+        uv_executable,
+        "export",
+        "--locked",
+        "--no-dev",
+        "--no-default-groups",
+        "--no-emit-project",
+        "--no-emit-local",
+        "--no-annotate",
+        "--no-header",
+        "--format",
+        "requirements.txt",
+        "--python",
+        python_executable,
+        "--output-file",
+        str(output_path),
+        "--directory",
+        str(project_root),
+    ]
+
+
+def _pip_platform_tags(profile: dict[str, Any]) -> list[str]:
+    """Return pip platform filters for every accepted x86_64 glibc tag."""
+
+    try:
+        allowed = profile["wheelResolver"]["allowedWheelTags"]["pep600"]
+        architecture = allowed["architecture"]
+        major, minor = (int(part) for part in allowed["maxGlibc"].split("."))
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise ProducerError(
+            "native Python profile has invalid manylinux wheel constraints"
+        ) from error
+    if architecture != "x86_64" or major != 2 or minor < 17:
+        raise ProducerError("native Python profile has unsupported manylinux wheel constraints")
+
+    # A single pip --platform names one tag family. It does not add the lower
+    # PEP 600 tags implied by a newer glibc ceiling, so pass each accepted floor.
+    tags = [f"manylinux_2_{glibc_minor}_x86_64" for glibc_minor in range(minor, 16, -1)]
+    tags.extend(("manylinux2014_x86_64", "manylinux2010_x86_64", "manylinux1_x86_64"))
+    return tags
+
+
+def _pip_download_arguments(
+    python_executable: str,
+    profile: dict[str, Any],
+    source_wheels: Path,
+    service_stage: Path,
+    requirements_path: Path,
+) -> list[str]:
+    """Build the fixed, hash-checked pip download command for one native target."""
+
+    arguments = [
+        python_executable,
+        "-m",
+        "pip",
+        "download",
+        "--disable-pip-version-check",
+        "--no-deps",
+        "--require-hashes",
+        "--only-binary=:all:",
+        "--implementation",
+        "cp",
+        "--python-version",
+        "3.12",
+        "--abi",
+        "cp312",
+    ]
+    for platform_tag in _pip_platform_tags(profile):
+        arguments.extend(("--platform", platform_tag))
+    arguments.extend(
+        (
+            "--find-links",
+            str(source_wheels),
+            "--dest",
+            str(service_stage),
+            "--requirement",
+            str(requirements_path),
+        )
+    )
+    return arguments
+
+
 def _native_target(profile: dict[str, Any]) -> str:
     """Require the exact Ubuntu, x86_64, and glibc profile selected for this build."""
 
@@ -1282,26 +1378,12 @@ def _write_service(
     uv_export_path = staging_root / ".exports" / f"{spec.service}.requirements.txt"
     uv_export_path.parent.mkdir(parents=True, exist_ok=True)
     _run(
-        [
+        _uv_export_arguments(
             uv_executable,
-            "export",
-            "--locked",
-            "--no-dev",
-            "--no-default-groups",
-            "--no-emit-project",
-            "--no-emit-local",
-            "--no-annotate",
-            "--no-header",
-            "--format",
-            "requirements.txt",
-            "--python",
             python_executable,
-            *target_profile["wheelResolver"]["arguments"],
-            "--output-file",
-            str(uv_export_path),
-            "--directory",
-            str(project_root),
-        ],
+            uv_export_path,
+            project_root,
+        ),
         env=command_env,
     )
     export_text = uv_export_path.read_text(encoding="utf-8")
@@ -1440,36 +1522,13 @@ def _write_service(
     # The frozen export is already a complete transitive closure; do not follow wheel METADATA
     # direct Git references during preparation. 中文：锁文件已展开完整依赖闭包，避免回源解析。
     _run(
-        [
+        _pip_download_arguments(
             python_executable,
-            "-m",
-            "pip",
-            "download",
-            "--disable-pip-version-check",
-            "--no-deps",
-            "--require-hashes",
-            "--only-binary=:all:",
-            "--implementation",
-            "cp",
-            "--python-version",
-            "3.12",
-            "--abi",
-            "cp312",
-            "--platform",
-            (
-                "manylinux_2_"
-                + target_profile["wheelResolver"]["allowedWheelTags"]["pep600"]["maxGlibc"].split(
-                    "."
-                )[1]
-                + "_x86_64"
-            ),
-            "--find-links",
-            str(source_wheels),
-            "--dest",
-            str(service_stage),
-            "--requirement",
-            str(requirements_path),
-        ],
+            target_profile,
+            source_wheels,
+            service_stage,
+            requirements_path,
+        ),
         env=command_env,
     )
     source_record["wheel_tags"] = {

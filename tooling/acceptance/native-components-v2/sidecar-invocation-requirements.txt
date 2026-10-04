@@ -1,0 +1,4 @@
+# Operator client only; production authorization stays in Authority and Sidecar.
+grpcio==1.83.0
+grpcio-tools==1.83.0
+protobuf==7.36.0
