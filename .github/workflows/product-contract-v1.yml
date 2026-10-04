@@ -155,6 +155,7 @@ jobs:
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
+          tooling/acceptance/native-components-v2/admin_initialize.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
@@ -168,6 +169,7 @@ jobs:
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
+          tooling/acceptance/native-components-v2/admin_initialize.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
@@ -187,7 +189,8 @@ jobs:
             packaging/python_runtime.py packaging/verified_service_artifacts.py \
             packaging/native_install_contract.py \
             scripts/native_installer_release.py \
-            tooling/acceptance/native-components-v2/native_acceptance.py
+            tooling/acceptance/native-components-v2/native_acceptance.py \
+            tooling/acceptance/native-components-v2/admin_initialize.py
           bash -n packaging/build-deb.sh packaging/cyrene-component-update-helper
       - name: Parse the installer publisher and CI workflow YAML
         run: |
