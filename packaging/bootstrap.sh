@@ -14,6 +14,14 @@ PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 log() { echo "[cyrene-bootstrap] $*"; }
 fail() { echo "[cyrene-bootstrap] ERROR: $*" >&2; exit 1; }
 
+# The published native package carries immutable Product service bundles and
+# does not install mutable engine environments from the network. Preserve the
+# existing package runtime and its data; use the authorized component update
+# flow for later releases.
+if [[ -f /usr/share/cyrene/native-install-contract-v1.json ]]; then
+    fail "the published native package uses verified Product bundles; network engine bootstrap is disabled"
+fi
+
 # The lock stores either an exact version ("0.25.1") or an already-complete
 # specifier (">=5.5.3"). Prefixing "==" onto the latter produces an invalid
 # requirement, so pass ranges through untouched.

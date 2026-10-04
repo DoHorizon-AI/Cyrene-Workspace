@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# 打包 Cyrene 为可安装的 Ubuntu 24.04 .deb
-# 用法: ./build-deb.sh --version 0.1.0-rc.1 --output ./dist/
+# Assemble Cyrene's native Ubuntu package from a locked private Python runtime
+# and either attested Product releases or an explicitly non-release source build.
 
 set -euo pipefail
+umask 022
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -10,20 +11,34 @@ WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VERSION="0.1.0-rc.1"
 OUTPUT_DIR="${WORKSPACE_ROOT}/dist"
 ARCH="amd64"
+TARGET_PROFILE=""
 SERVICE_WHEELHOUSE="${CYRENE_SERVICE_WHEELHOUSE:-${SCRIPT_DIR}/service-wheelhouse}"
+VERIFIED_SERVICE_ARTIFACTS=""
+PYTHON_RUNTIME_ARCHIVE=""
+UV_EXECUTABLE=""
+DEVELOPMENT_SOURCE_BUILD=0
 
 print_help() {
     cat <<EOF
-Usage: $0 [OPTIONS]
+Usage: $0 --target-profile <targetId> --python-runtime-archive <archive> [OPTIONS]
 
-Build a Debian/Ubuntu .deb package for Cyrene.
+Assemble an Ubuntu .deb package for Cyrene.
 
 Options:
   --version <version>   Package version (default: 0.1.0-rc.1)
   --output <dir>        Output directory for .deb package (default: ./dist/)
   --arch <arch>         Architecture (amd64 only for this release)
+  --target-profile <id> Exact Linux Ubuntu Python profile from release-lock.json
+  --python-runtime-archive <file>
+                        Official pinned CPython 3.12.14 PBS archive; SHA-256 is checked
+  --uv-executable <file>
+                        Optional verified uv 0.12.21 build executable; it is also staged at its locked runtime path
+  --verified-service-artifacts <dir>
+                        Index plus original Product tar/manifest/attestation release assets
+  --development-source-build
+                        Build service bundles from a wheelhouse for local development only
   --service-wheelhouse <dir>
-                        Offline five-service wheelhouse (default: packaging/service-wheelhouse)
+                        Offline five-service wheelhouse (development mode only)
   -h, --help            Show this help message
 EOF
 }
@@ -42,6 +57,26 @@ while [[ $# -gt 0 ]]; do
             ARCH="$2"
             shift 2
             ;;
+        --target-profile)
+            TARGET_PROFILE="$2"
+            shift 2
+            ;;
+        --python-runtime-archive)
+            PYTHON_RUNTIME_ARCHIVE="$2"
+            shift 2
+            ;;
+        --uv-executable)
+            UV_EXECUTABLE="$2"
+            shift 2
+            ;;
+        --verified-service-artifacts)
+            VERIFIED_SERVICE_ARTIFACTS="$2"
+            shift 2
+            ;;
+        --development-source-build)
+            DEVELOPMENT_SOURCE_BUILD=1
+            shift
+            ;;
         --service-wheelhouse)
             SERVICE_WHEELHOUSE="$2"
             shift 2
@@ -59,7 +94,45 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${ARCH}" != "amd64" ]]; then
-    echo "ERROR: release-lock.json supports Ubuntu 24.04 x86_64 (amd64) only; refusing --arch ${ARCH}." >&2
+    echo "ERROR: release-lock.json supports Ubuntu 22.04/24.04 x86_64 (amd64) only; refusing --arch ${ARCH}." >&2
+    exit 2
+fi
+if [[ ! "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$ ]]; then
+    echo "ERROR: --version must be a single safe Debian version token." >&2
+    exit 2
+fi
+
+if [[ "${TARGET_PROFILE}" != "linux-ubuntu-22.04-x86_64-python-3.12" \
+    && "${TARGET_PROFILE}" != "linux-ubuntu-24.04-x86_64-python-3.12" ]]; then
+    echo "ERROR: --target-profile must be an exact supported Ubuntu Python 3.12 profile." >&2
+    exit 2
+fi
+
+if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" && "${DEVELOPMENT_SOURCE_BUILD}" -eq 1 ]]; then
+    echo "ERROR: --verified-service-artifacts cannot be combined with --development-source-build." >&2
+    exit 2
+fi
+if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" && -n "${CYRENE_SERVICE_WHEELHOUSE:-}" ]]; then
+    echo "ERROR: CYRENE_SERVICE_WHEELHOUSE is not accepted in verified published-artifact mode." >&2
+    exit 2
+fi
+if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
+    if [[ -L "${VERIFIED_SERVICE_ARTIFACTS}" || ! -d "${VERIFIED_SERVICE_ARTIFACTS}" \
+        || -L "${VERIFIED_SERVICE_ARTIFACTS}/index.json" || ! -f "${VERIFIED_SERVICE_ARTIFACTS}/index.json" ]]; then
+        echo "ERROR: --verified-service-artifacts must be a directory with a regular index.json." >&2
+        exit 2
+    fi
+fi
+if [[ -z "${VERIFIED_SERVICE_ARTIFACTS}" && "${DEVELOPMENT_SOURCE_BUILD}" -ne 1 ]]; then
+    echo "ERROR: choose --verified-service-artifacts for release assembly or explicitly opt into --development-source-build." >&2
+    exit 2
+fi
+if [[ -z "${PYTHON_RUNTIME_ARCHIVE}" ]]; then
+    echo "ERROR: --python-runtime-archive is required; provide the official archive verified by python_runtime.py." >&2
+    exit 2
+fi
+if [[ ! -f "${PYTHON_RUNTIME_ARCHIVE}" || -L "${PYTHON_RUNTIME_ARCHIVE}" ]]; then
+    echo "ERROR: Python runtime archive is missing or unsafe: ${PYTHON_RUNTIME_ARCHIVE}" >&2
     exit 2
 fi
 
@@ -72,8 +145,28 @@ if [[ "${HOST_ARCH}" != "amd64" ]]; then
     echo "ERROR: this RC supports native amd64 builds only; build host reports ${HOST_ARCH}." >&2
     exit 2
 fi
+case "${TARGET_PROFILE}" in
+    linux-ubuntu-22.04-x86_64-python-3.12)
+        EXPECTED_UBUNTU_VERSION="22.04"
+        MINIMUM_GLIBC="2.35"
+        ;;
+    linux-ubuntu-24.04-x86_64-python-3.12)
+        EXPECTED_UBUNTU_VERSION="24.04"
+        MINIMUM_GLIBC="2.39"
+        ;;
+esac
+if [[ ! -r /etc/os-release ]]; then
+    echo "ERROR: /etc/os-release is required to verify the exact native build profile." >&2
+    exit 2
+fi
+# shellcheck disable=SC1091
+. /etc/os-release
+if [[ "${ID:-}" != "ubuntu" || "${VERSION_ID:-}" != "${EXPECTED_UBUNTU_VERSION}" ]]; then
+    echo "ERROR: target profile ${TARGET_PROFILE} requires Ubuntu ${EXPECTED_UBUNTU_VERSION}; build host reports ${ID:-unknown} ${VERSION_ID:-unknown}." >&2
+    exit 2
+fi
 
-if [[ ! -d "${SERVICE_WHEELHOUSE}" ]]; then
+if [[ "${DEVELOPMENT_SOURCE_BUILD}" -eq 1 && ! -d "${SERVICE_WHEELHOUSE}" ]]; then
     echo "ERROR: service wheelhouse is missing: ${SERVICE_WHEELHOUSE}" >&2
     echo "Build a pinned offline wheelhouse first; see ${SCRIPT_DIR}/service-bundle.md." >&2
     echo "The Debian package will not contain non-runnable placeholder services." >&2
@@ -81,8 +174,15 @@ if [[ ! -d "${SERVICE_WHEELHOUSE}" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
+OUTPUT_PACKAGE="${OUTPUT_DIR}/cyrene_${VERSION}_${ARCH}.deb"
+if [[ -L "${OUTPUT_PACKAGE}" || -d "${OUTPUT_PACKAGE}" ]]; then
+    echo "ERROR: package output must not be a symlink or directory: ${OUTPUT_PACKAGE}" >&2
+    exit 2
+fi
 STAGE_DIR="$(mktemp -d -t cyrene-deb-XXXXXX)"
-trap 'rm -rf "${STAGE_DIR}"' EXIT
+BUILD_WORK_DIR="$(mktemp -d -t cyrene-deb-work-XXXXXX)"
+TEMP_OUTPUT_DIR="$(mktemp -d -p "${OUTPUT_DIR}" .cyrene-deb-build-XXXXXX)"
+trap 'rm -rf "${STAGE_DIR}" "${BUILD_WORK_DIR}" "${TEMP_OUTPUT_DIR}"' EXIT
 
 echo "==> Staging Cyrene .deb package (version: ${VERSION}, arch: ${ARCH})..."
 
@@ -93,20 +193,47 @@ mkdir -p "${STAGE_DIR}/usr/libexec"
 mkdir -p "${STAGE_DIR}/usr/lib/cyrene"
 mkdir -p "${STAGE_DIR}/etc/cyrene"
 mkdir -p "${STAGE_DIR}/lib/systemd/system"
-mkdir -p "${STAGE_DIR}/var/lib/cyrene"
 mkdir -p "${STAGE_DIR}/usr/share/cyrene/service-artifacts"
 mkdir -p "${STAGE_DIR}/usr/share/cyrene"
+mkdir -p "${STAGE_DIR}/usr/share/cyrene/python-runtime"
+mkdir -p "${STAGE_DIR}/usr/lib/cyrene/packaging"
 mkdir -p "${STAGE_DIR}/usr/share/polkit-1/actions"
 
 mkdir -p "${STAGE_DIR}/usr/lib/cyrene/scripts"
 
-# 1. CLI lives beside the other scripts under /usr/lib/cyrene, and /usr/bin/cyrene
-#    is a symlink. The CLI derives its workspace root from its own location, so
-#    installing the real file elsewhere made every data path resolve to the wrong
-#    directory.
-cp "${WORKSPACE_ROOT}/cyrene" "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene"
-chmod 755 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene"
-ln -s /usr/lib/cyrene/scripts/cyrene "${STAGE_DIR}/usr/bin/cyrene"
+# Stage the pinned private CPython and its offline runtime dependencies first.
+# The build resolver and PBS archive are independently pinned by this lock.
+PYTHON_RUNTIME_ARGS=(
+    prepare
+    --lock "${SCRIPT_DIR}/python-runtime.lock.json"
+    --release-lock "${WORKSPACE_ROOT}/release-lock.json"
+    --target-profile "${TARGET_PROFILE}"
+    --stage-root "${STAGE_DIR}"
+    --work-dir "${BUILD_WORK_DIR}/python-runtime"
+    --archive "${PYTHON_RUNTIME_ARCHIVE}"
+    --json
+)
+if [[ -n "${UV_EXECUTABLE}" ]]; then
+    PYTHON_RUNTIME_ARGS+=(--uv-executable "${UV_EXECUTABLE}")
+fi
+/usr/bin/python3 "${SCRIPT_DIR}/python_runtime.py" "${PYTHON_RUNTIME_ARGS[@]}" \
+    > "${BUILD_WORK_DIR}/python-runtime-receipt.json"
+RUNTIME_PYTHON="${STAGE_DIR}/opt/cyrene/python/3.12.14/bin/python3.12"
+[[ -x "${RUNTIME_PYTHON}" ]] || {
+    echo "ERROR: locked private Python staging did not produce ${RUNTIME_PYTHON}." >&2
+    exit 2
+}
+
+# Keep the Python entry point beneath the package install root; the public
+# command wrapper and every systemd product unit name its interpreter explicitly.
+cp "${WORKSPACE_ROOT}/cyrene" "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene.py"
+cat <<'EOF' > "${STAGE_DIR}/usr/bin/cyrene"
+#!/bin/sh
+set -eu
+exec /opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py "$@"
+EOF
+chmod 755 "${STAGE_DIR}/usr/bin/cyrene"
 
 # Polkit executes a root-owned fixed wrapper. The JSON request can select only
 # an updater operation; it cannot change the executable or its arguments.
@@ -146,18 +273,36 @@ fi
 if [[ -f "${WORKSPACE_ROOT}/release-lock.json" ]]; then
     cp "${WORKSPACE_ROOT}/release-lock.json" "${STAGE_DIR}/usr/lib/cyrene/"
 fi
-# Runtime bootstrap reads those pins and installs the engines into a venv.
+cp "${SCRIPT_DIR}/python-runtime.lock.json" "${STAGE_DIR}/usr/lib/cyrene/packaging/"
+cp "${SCRIPT_DIR}/python-runtime-requirements.lock" "${STAGE_DIR}/usr/lib/cyrene/packaging/"
 cp "${SCRIPT_DIR}/bootstrap.sh" "${STAGE_DIR}/usr/lib/cyrene/bootstrap.sh"
 chmod 755 "${STAGE_DIR}/usr/lib/cyrene/bootstrap.sh"
 
-# Every managed process ships as an immutable release bundle. The helper checks
-# the accepted source SHA from release-lock.json, the complete hash-pinned
-# offline wheel set, and the bundle file manifest before the .deb is assembled.
-python3 "${SCRIPT_DIR}/service_bundle.py" build \
-    --wheelhouse "${SERVICE_WHEELHOUSE}" \
-    --release-lock "${WORKSPACE_ROOT}/release-lock.json" \
-    --output "${STAGE_DIR}/usr/share/cyrene/service-artifacts" \
-    --arch "${ARCH}"
+if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
+    VERIFIED_STAGE="${BUILD_WORK_DIR}/verified-service-artifacts"
+    /usr/bin/python3 "${SCRIPT_DIR}/verified_service_artifacts.py" \
+        --input-root "${VERIFIED_SERVICE_ARTIFACTS}" \
+        --target-profile "${TARGET_PROFILE}" \
+        --output-root "${VERIFIED_STAGE}" \
+        --release-lock "${WORKSPACE_ROOT}/release-lock.json" \
+        --catalog "${SCRIPT_DIR}/component-catalog-bootstrap-v1.json" \
+        --json > "${BUILD_WORK_DIR}/verified-service-artifacts-receipt.json"
+    cp -a "${VERIFIED_STAGE}/service-artifacts/." \
+        "${STAGE_DIR}/usr/share/cyrene/service-artifacts/"
+    mkdir -p "${STAGE_DIR}/usr/share/cyrene/verified-service-artifacts/${TARGET_PROFILE}"
+    cp -a "${VERIFIED_STAGE}/verified-published-bytes/${TARGET_PROFILE}/." \
+        "${STAGE_DIR}/usr/share/cyrene/verified-service-artifacts/${TARGET_PROFILE}/"
+else
+    # Explicit development-only path. It is not accepted by signed release or
+    # native install contract validation.
+    "${RUNTIME_PYTHON}" "${SCRIPT_DIR}/service_bundle.py" build \
+        --wheelhouse "${SERVICE_WHEELHOUSE}" \
+        --release-lock "${WORKSPACE_ROOT}/release-lock.json" \
+        --output "${STAGE_DIR}/usr/share/cyrene/service-artifacts" \
+        --arch "${ARCH}" \
+        --target-profile "${TARGET_PROFILE}" \
+        --python-executable "${RUNTIME_PYTHON}"
+fi
 
 # 3. /etc/cyrene/ -> Default configuration template
 cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/cyrene.env"
@@ -174,9 +319,13 @@ CYRENE_PORT_REACTOR=8002
 CYRENE_PORT_EXCHANGE=8003
 CYRENE_PORT_CATALYST=8004
 EOF
+chmod 644 "${STAGE_DIR}/etc/cyrene/cyrene.env"
+printf '%s\n' '/etc/cyrene/cyrene.env' > "${STAGE_DIR}/DEBIAN/conffiles"
 
 if [[ -f "${SCRIPT_DIR}/Caddyfile.template" ]]; then
     cp "${SCRIPT_DIR}/Caddyfile.template" "${STAGE_DIR}/etc/cyrene/Caddyfile.template"
+    chmod 644 "${STAGE_DIR}/etc/cyrene/Caddyfile.template"
+    printf '%s\n' '/etc/cyrene/Caddyfile.template' >> "${STAGE_DIR}/DEBIAN/conffiles"
 fi
 
 # 4. Systemd service units
@@ -200,7 +349,7 @@ LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-
 PrivateMounts=yes
 Requires=cyrene-runtime-maintenance.service
 After=cyrene-runtime-maintenance.service
-ExecStart=/usr/bin/cyrene service-run navigator
+ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run navigator
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
@@ -229,7 +378,7 @@ LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-
 PrivateMounts=yes
 Requires=cyrene-runtime-maintenance.service
 After=cyrene-runtime-maintenance.service
-ExecStart=/usr/bin/cyrene service-run yield
+ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run yield
 Restart=on-failure
 RestartSec=5
 
@@ -257,7 +406,7 @@ LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-
 PrivateMounts=yes
 Requires=cyrene-runtime-maintenance.service
 After=cyrene-runtime-maintenance.service
-ExecStart=/usr/bin/cyrene service-run reactor
+ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run reactor
 Restart=on-failure
 RestartSec=5
 
@@ -285,7 +434,7 @@ LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-
 PrivateMounts=yes
 Requires=cyrene-runtime-maintenance.service
 After=cyrene-runtime-maintenance.service
-ExecStart=/usr/bin/cyrene service-run exchange
+ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run exchange
 Restart=on-failure
 RestartSec=5
 
@@ -313,7 +462,7 @@ LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-
 PrivateMounts=yes
 Requires=cyrene-runtime-maintenance.service
 After=cyrene-runtime-maintenance.service
-ExecStart=/usr/bin/cyrene service-run catalyst
+ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run catalyst
 Restart=on-failure
 RestartSec=5
 
@@ -331,310 +480,142 @@ Section: devel
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Cyrene Team <team@cyrene.dev>
-Depends: python3 (>= 3.12), python3 (<< 3.13), python3-jsonschema (>= 4.0), systemd, policykit-1, acl
+Depends: ca-certificates, libc6 (>= ${MINIMUM_GLIBC}), libcrypt1, libgcc-s1, systemd, policykit-1, acl
 Description: Cyrene Unified Local LLM Stack
  Cyrene provides a complete local LLM development and inference platform,
  including model importation (Reactor), training drafts (Yield), dataset preparation
  (Catalyst), unified API gateway (Exchange), and same-origin console (Navigator).
 EOF
 
-# 6. DEBIAN/postinst
+# 6. DEBIAN maintainer scripts
+# Package configuration is stage-only: it does not start, stop, enable, or
+# disable any service; initialize broker state; rotate credentials; switch an
+# active Product pointer; or fetch engines from the network.
 cat <<'EOF' > "${STAGE_DIR}/DEBIAN/postinst"
 #!/bin/sh
-set -e
+set -eu
 
-# 创建 cyrene 系统用户
-if ! id -u cyrene >/dev/null 2>&1; then
-    useradd --system --user-group --no-create-home --shell /bin/false cyrene
+PRIVATE_PYTHON=/opt/cyrene/python/3.12.14/bin/python3.12
+if [ ! -x "${PRIVATE_PYTHON}" ]; then
+    echo "ERROR: packaged private CPython is missing: ${PRIVATE_PYTHON}" >&2
+    exit 1
+fi
+"${PRIVATE_PYTHON}" -I -c 'import sys; assert sys.version_info[:3] == (3, 12, 14), sys.version'
+RUNTIME_META="$(stat -c '%u:%a' /opt/cyrene/python/3.12.14)"
+if [ "${RUNTIME_META}" != "0:755" ]; then
+    echo "ERROR: private Python install root must be root-owned mode 755; found ${RUNTIME_META}." >&2
+    exit 1
 fi
 
-# Product contract data has separate read domains: Authority can read source
-# metadata and plans, while the BFF can read only immutable activated versions.
-for bundle_group in cyrene-authority cyrene-product-bundle-reader; do
-    if ! getent group "$bundle_group" >/dev/null 2>&1; then
-        groupadd --system "$bundle_group"
-    fi
-done
-ensure_bundle_directory() {
+# Preserve an existing account exactly. Only create the service account on a
+# fresh system where it does not yet exist.
+if ! id -u cyrene >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --shell /usr/sbin/nologin cyrene
+fi
+
+ensure_fresh_service_directory() {
     path="$1"
-    owner_group="$2"
-    mode="$3"
     if [ -L "$path" ]; then
-        echo "ERROR: $path is a symlink; refusing to alter Product bundle trust data." >&2
+        echo "ERROR: $path is a symlink; refusing to follow existing runtime state." >&2
         exit 1
     elif [ ! -e "$path" ]; then
-        install -d -o root -g "$owner_group" -m "$mode" "$path"
-    fi
-    expected="0:$(getent group "$owner_group" | cut -d: -f3):$mode"
-    actual="$(stat -c '%u:%g:%a' -- "$path")"
-    if [ ! -d "$path" ] || [ "$actual" != "$expected" ]; then
-        echo "ERROR: $path must be $expected; found $actual. Refusing to repair trusted state in place." >&2
+        install -d -o cyrene -g cyrene -m 750 "$path"
+    elif [ ! -d "$path" ]; then
+        echo "ERROR: $path exists but is not a directory." >&2
         exit 1
     fi
 }
-bundle_root=/var/lib/cyrene-product-bundles
-if [ -L "$bundle_root" ]; then
-    echo "ERROR: $bundle_root is a symlink; refusing to alter Product bundle trust data." >&2
-    exit 1
-elif [ ! -e "$bundle_root" ]; then
-    install -d -o root -g root -m 0700 "$bundle_root"
-fi
-if [ ! -d "$bundle_root" ] || [ "$(stat -c '%u:%g' -- "$bundle_root")" != "0:0" ]; then
-    echo "ERROR: $bundle_root must be a root-owned directory." >&2
-    exit 1
-fi
-AUTHORITY_BUNDLE_GID="$(getent group cyrene-authority | cut -d: -f3)"
-BUNDLE_READER_GID="$(getent group cyrene-product-bundle-reader | cut -d: -f3)"
-setfacl -m "u::rwx,g::---,g:${AUTHORITY_BUNDLE_GID}:--x,g:${BUNDLE_READER_GID}:--x,m::--x,o::---" "$bundle_root"
-if [ "$(stat -c '%u:%g:%a' -- "$bundle_root")" != "0:0:710" ] \
-    || ! getfacl -cpn -- "$bundle_root" | grep -Fxq "group:${AUTHORITY_BUNDLE_GID}:--x" \
-    || ! getfacl -cpn -- "$bundle_root" | grep -Fxq "group:${BUNDLE_READER_GID}:--x"; then
-    echo "ERROR: $bundle_root traversal ACL does not match the two trusted service groups." >&2
-    exit 1
-fi
-ensure_bundle_directory /var/lib/cyrene-product-bundles/archives cyrene-authority 750
-ensure_bundle_directory /var/lib/cyrene-product-bundles/metadata cyrene-authority 750
-ensure_bundle_directory /var/lib/cyrene-product-bundles/versions cyrene-product-bundle-reader 750
+ensure_fresh_service_directory /var/lib/cyrene
+ensure_fresh_service_directory /var/log/cyrene
 
-# 设置数据目录与配置目录权限
-if [ -L /var/lib/cyrene ]; then
-    echo "ERROR: /var/lib/cyrene is a symlink; refusing to change runtime state through it." >&2
-    exit 1
-fi
-mkdir -p /var/lib/cyrene /var/log/cyrene /etc/cyrene
-chown cyrene:cyrene /var/lib/cyrene /var/log/cyrene
-find /var/lib/cyrene -mindepth 1 -maxdepth 1 ! -name runtime \
-    -exec chown -hR cyrene:cyrene -- {} +
-chmod 750 /var/lib/cyrene /var/log/cyrene
-
-# The Platform broker owns the durable runtime catalog and maintenance journal.
-# Require its authority group and binary before Product units are admitted.
-if ! getent group cyrene-runtime-maintenance >/dev/null 2>&1; then
-    echo "ERROR: cyrene-runtime-maintenance authority group is missing; install the verified Platform runtime-maintenance component first." >&2
-    exit 1
-fi
-if [ ! -x /usr/bin/cyrene-runtime-maintenance ]; then
-    echo "ERROR: /usr/bin/cyrene-runtime-maintenance is missing; install the verified Platform runtime-maintenance component first." >&2
-    exit 1
-fi
-if ! /usr/bin/cyrene component-install-missing-units; then
-    echo "ERROR: could not install or validate catalog-pinned Platform systemd units." >&2
-    exit 1
-fi
-if [ ! -f /lib/systemd/system/cyrene-runtime-maintenance.service ] && [ ! -f /usr/lib/systemd/system/cyrene-runtime-maintenance.service ] && [ ! -f /etc/systemd/system/cyrene-runtime-maintenance.service ]; then
-    echo "ERROR: cyrene-runtime-maintenance.service is missing; install the verified Platform runtime-maintenance component first." >&2
-    exit 1
-fi
-
-CYRENE_UID="$(id -u cyrene)"
-CYRENE_GID="$(id -g cyrene)"
-AUTHORITY_GID="$(getent group cyrene-runtime-maintenance | cut -d: -f3)"
-AUTHORITY_IDENTITY_TMP="$(mktemp /etc/cyrene/.workspace-authority-identity.env.XXXXXX)"
-printf 'CYRENE_AUTHORITY_BFF_PEER_UID=%s\n' "$CYRENE_UID" > "$AUTHORITY_IDENTITY_TMP"
-chown root:root "$AUTHORITY_IDENTITY_TMP"
-chmod 644 "$AUTHORITY_IDENTITY_TMP"
-mv -f "$AUTHORITY_IDENTITY_TMP" /etc/cyrene/workspace-authority-identity.env
+# Provision only the dedicated broker state directory. Existing state is
+# validated without repair so package upgrades cannot rewrite broker metadata.
 RUNTIME_STATE_DIR=/var/lib/cyrene/runtime
-if [ -L "$RUNTIME_STATE_DIR" ]; then
-    echo "ERROR: $RUNTIME_STATE_DIR is a symlink; refusing to follow it." >&2
-    exit 1
-elif [ -e "$RUNTIME_STATE_DIR" ]; then
-    if [ ! -d "$RUNTIME_STATE_DIR" ]; then
-        echo "ERROR: $RUNTIME_STATE_DIR exists but is not a directory." >&2
-        exit 1
-    fi
-    RUNTIME_STATE_OWNER_GROUP_MODE="$(stat -c '%u:%g:%a' -- "$RUNTIME_STATE_DIR")"
-    if [ "$RUNTIME_STATE_OWNER_GROUP_MODE" != "0:${AUTHORITY_GID}:2770" ]; then
-        echo "ERROR: $RUNTIME_STATE_DIR must be root:cyrene-runtime-maintenance mode 2770; found ${RUNTIME_STATE_OWNER_GROUP_MODE}." >&2
-        echo "       Refusing to repair existing runtime state in place. Stop Cyrene and repair the directory during offline maintenance." >&2
-        exit 1
-    fi
-else
-    install -d -o root -g cyrene-runtime-maintenance -m 2770 "$RUNTIME_STATE_DIR"
+if ! getent group cyrene-runtime-maintenance >/dev/null 2>&1; then
+    groupadd --system cyrene-runtime-maintenance
 fi
-RUNTIME_STATE_OWNER_GROUP_MODE="$(stat -c '%u:%g:%a' -- "$RUNTIME_STATE_DIR")"
-if [ -L "$RUNTIME_STATE_DIR" ] || [ "$RUNTIME_STATE_OWNER_GROUP_MODE" != "0:${AUTHORITY_GID}:2770" ]; then
-    echo "ERROR: $RUNTIME_STATE_DIR is not a root-owned 2770 authority directory." >&2
-    exit 1
-fi
-ACTIVITY_INIT_JSON="$(/usr/bin/cyrene-runtime-maintenance init-catalog \
-    --catalog "$RUNTIME_STATE_DIR/activity-sources.json" \
-    --token-dir /etc/cyrene/runtime-activity-source-tokens \
-    --catalog-gid "${AUTHORITY_GID}" \
-    --source "cyrene-navigator=${CYRENE_UID}:${CYRENE_GID}" \
-    --source "cyrene-yield=${CYRENE_UID}:${CYRENE_GID}" \
-    --source "cyrene-reactor=${CYRENE_UID}:${CYRENE_GID}" \
-    --source "cyrene-exchange=${CYRENE_UID}:${CYRENE_GID}" \
-    --source "cyrene-catalyst=${CYRENE_UID}:${CYRENE_GID}")"
-ACTIVITY_GENERATION="$(printf '%s' "$ACTIVITY_INIT_JSON" | /usr/bin/python3.12 -c 'import json,sys; value=json.load(sys.stdin); generation=value.get("generation"); print(generation) if isinstance(generation,int) and not isinstance(generation,bool) and generation > 0 else sys.exit("invalid activity catalog generation")')"
-case "$ACTIVITY_GENERATION" in
+AUTHORITY_GID="$(getent group cyrene-runtime-maintenance | cut -d: -f3)"
+case "${AUTHORITY_GID}" in
     ''|*[!0-9]*)
-        echo "ERROR: runtime-maintenance init-catalog returned an invalid generation." >&2
+        echo "ERROR: cyrene-runtime-maintenance group has no valid numeric gid." >&2
         exit 1
         ;;
 esac
-ACTIVITY_ENV_TMP="$(mktemp /etc/cyrene/.runtime-activity-sources.env.XXXXXX)"
-printf 'CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION=%s\n' "$ACTIVITY_GENERATION" > "$ACTIVITY_ENV_TMP"
-chown root:root "$ACTIVITY_ENV_TMP"
-chmod 644 "$ACTIVITY_ENV_TMP"
-mv -f "$ACTIVITY_ENV_TMP" /etc/cyrene/runtime-activity-sources.env
-
-# 安装 release-lock.json 锁定的 training/serving 引擎到隔离虚拟环境。
-# 这一步需要网络，失败不应让 dpkg 安装失败——允许用户之后手动重跑。
-if [ -x /usr/lib/cyrene/bootstrap.sh ]; then
-    if /usr/lib/cyrene/bootstrap.sh; then
-        echo "Cyrene runtime engines installed."
-    else
-        echo "WARNING: automatic engine installation failed." >&2
-        echo "         Re-run '/usr/lib/cyrene/bootstrap.sh' once network access is available." >&2
-    fi
-else
-    echo "WARNING: /usr/lib/cyrene/bootstrap.sh missing; engines were not installed." >&2
+if [ -L "${RUNTIME_STATE_DIR}" ]; then
+    echo "ERROR: ${RUNTIME_STATE_DIR} is a symlink; refusing to follow existing runtime state." >&2
+    exit 1
+elif [ ! -e "${RUNTIME_STATE_DIR}" ]; then
+    install -d -o root -g cyrene-runtime-maintenance -m 2770 "$RUNTIME_STATE_DIR"
+elif [ ! -d "${RUNTIME_STATE_DIR}" ]; then
+    echo "ERROR: ${RUNTIME_STATE_DIR} exists but is not a directory." >&2
+    exit 1
+fi
+RUNTIME_STATE_META="$(stat -c '%u:%g:%a' -- "$RUNTIME_STATE_DIR")"
+if [ "${RUNTIME_STATE_META}" != "0:${AUTHORITY_GID}:2770" ]; then
+    echo "ERROR: Refusing to repair existing runtime state in place (${RUNTIME_STATE_DIR}: ${RUNTIME_STATE_META})." >&2
+    exit 1
 fi
 
-# Validate and stage all five release bundles. Existing active symlinks are
-# retained on upgrade; the CLI activates only missing releases on first install.
-/usr/bin/cyrene service-bootstrap --activate-missing
-
-# 仅首次安装（而非升级）时生成 cyrene 用户拥有的配对凭据。
-if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
-    runuser -u cyrene -- env CYRENE_DEV_HOME=/var/lib/cyrene CYRENE_DATA_DIR=/var/lib/cyrene /usr/bin/cyrene init
+# This existing command validates and stages immutable releases only when
+# called without --activate-missing. It preserves existing active pointers.
+if ! /usr/bin/cyrene service-bootstrap; then
+    echo "ERROR: could not stage the verified Product release bytes." >&2
+    exit 1
 fi
 
-# Reload unit definitions on install and upgrade. Preserve the administrator's
-# enabled/running state on upgrades; a first install enables and starts units.
-SYSTEMD_RUNNING=0
+# Reload unit definitions so a later, explicitly approved operator action can
+# use the installed files. daemon-reload does not start or change unit state.
 if [ -d /run/systemd/system ]; then
-    SYSTEMD_RUNNING=1
-    if ! systemctl daemon-reload; then
-        echo "ERROR: systemd could not reload the installed Cyrene units." >&2
-        exit 1
-    fi
-    if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
-        if ! systemctl enable cyrene-runtime-maintenance.service; then
-            echo "ERROR: systemd could not enable cyrene-runtime-maintenance.service." >&2
-            exit 1
-        fi
-    fi
-    if ! systemctl start cyrene-runtime-maintenance.service; then
-        echo "ERROR: runtime maintenance broker failed to start; Product services will not be started." >&2
-        systemctl status --no-pager --full cyrene-runtime-maintenance.service >&2 || true
-        journalctl --no-pager -n 40 -u cyrene-runtime-maintenance.service >&2 || true
-        exit 1
-    fi
-    if ! systemctl is-active --quiet cyrene-runtime-maintenance.service; then
-        echo "ERROR: runtime maintenance broker is not active; Product services will not be started." >&2
-        exit 1
-    fi
-    if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
-        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
-            if ! systemctl enable "$unit"; then
-                echo "ERROR: systemd could not enable ${unit}.service." >&2
-                exit 1
-            fi
-        done
-        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
-            if ! systemctl start "$unit"; then
-                echo "ERROR: initial start failed for ${unit}.service; package configuration is incomplete." >&2
-                systemctl status --no-pager --full "$unit" >&2 || true
-                journalctl --no-pager -n 40 -u "$unit" >&2 || true
-                exit 1
-            fi
-        done
-        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
-            if ! systemctl is-active --quiet "$unit"; then
-                echo "ERROR: ${unit}.service exited during initial startup; package configuration is incomplete." >&2
-                systemctl status --no-pager --full "$unit" >&2 || true
-                journalctl --no-pager -n 40 -u "$unit" >&2 || true
-                exit 1
-            fi
-        done
-    fi
-else
-    if [ "$1" = "configure" ] && [ -z "${2:-}" ]; then
-        if ! systemctl --root=/ enable cyrene-runtime-maintenance.service; then
-            echo "ERROR: systemd could not enable cyrene-runtime-maintenance.service for the next boot." >&2
-            exit 1
-        fi
-        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
-            if ! systemctl --root=/ enable "${unit}.service"; then
-                echo "ERROR: systemd could not enable ${unit}.service for the next boot." >&2
-                exit 1
-            fi
-        done
-    fi
-    echo "WARNING: systemd is not running; Cyrene units were installed but not started." >&2
+    systemctl daemon-reload
 fi
 
-if [ "$SYSTEMD_RUNNING" -eq 1 ]; then
-    echo "Cyrene installed successfully."
-else
-    echo "Cyrene package files are installed; systemd is not running, so services were not started."
-fi
-echo "Run 'cyrene init' or 'cyrene doctor' to get started."
+echo "Cyrene package initialized in stage-only mode."
+echo "Product activation and runtime cutover remain deferred to the operator."
 exit 0
 EOF
 chmod 755 "${STAGE_DIR}/DEBIAN/postinst"
 
-# Stop and disable services only when the package is being removed. During
-# upgrades dpkg passes "upgrade", so currently running services stay untouched.
 cat <<'EOF' > "${STAGE_DIR}/DEBIAN/prerm"
 #!/bin/sh
-set -e
-
-if [ "${1:-}" = "remove" ]; then
-    if [ -d /run/systemd/system ]; then
-        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
-            if ! systemctl stop "${unit}.service"; then
-                echo "ERROR: could not stop ${unit}.service before removing Cyrene." >&2
-                exit 1
-            fi
-            if ! systemctl disable "${unit}.service"; then
-                echo "ERROR: could not disable ${unit}.service before removing Cyrene." >&2
-                exit 1
-            fi
-        done
-    else
-        echo "WARNING: systemd is not running; Cyrene services could not be stopped." >&2
-        for unit in cyrene-navigator cyrene-yield cyrene-reactor cyrene-exchange cyrene-catalyst; do
-            if ! systemctl --root=/ disable "${unit}.service"; then
-                echo "ERROR: systemd could not disable ${unit}.service from the offline root." >&2
-                exit 1
-            fi
-        done
-    fi
-fi
-
+set -eu
+# Deliberately leave existing runtime processes and administrator unit state
+# untouched during upgrade, removal, or purge.
 exit 0
 EOF
 chmod 755 "${STAGE_DIR}/DEBIAN/prerm"
 
-# Remove stale unit definitions after dpkg removes the unit files. Keep the
-# service release history and /var/lib/cyrene data for a possible reinstall.
 cat <<'EOF' > "${STAGE_DIR}/DEBIAN/postrm"
 #!/bin/sh
-set -e
-
+set -eu
+# Removing package files never stops services or mutates runtime state.
+# Refresh only systemd's file cache after a unit-file removal.
 case "${1:-}" in
     remove|purge)
         if [ -d /run/systemd/system ]; then
-            if ! systemctl daemon-reload; then
-                echo "ERROR: systemd could not reload after removing Cyrene units." >&2
-                exit 1
-            fi
+            systemctl daemon-reload
         fi
         ;;
 esac
-
 exit 0
 EOF
 chmod 755 "${STAGE_DIR}/DEBIAN/postrm"
 
+if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
+    "${RUNTIME_PYTHON}" "${SCRIPT_DIR}/native_install_contract.py" create \
+        --target-profile "${TARGET_PROFILE}" \
+        --service-artifacts-index "${STAGE_DIR}/usr/share/cyrene/service-artifacts/index.json" \
+        --scripts-dir "${STAGE_DIR}/DEBIAN" \
+        --output "${STAGE_DIR}/usr/share/cyrene/native-install-contract-v1.json"
+    chmod 644 "${STAGE_DIR}/usr/share/cyrene/native-install-contract-v1.json"
+fi
+
 # 7. Build .deb package
-OUTPUT_PACKAGE="${OUTPUT_DIR}/cyrene_${VERSION}_${ARCH}.deb"
 echo "==> Building package with dpkg-deb: ${OUTPUT_PACKAGE}..."
-dpkg-deb --build --root-owner-group "${STAGE_DIR}" "${OUTPUT_PACKAGE}"
+TEMP_PACKAGE="${TEMP_OUTPUT_DIR}/package.deb"
+dpkg-deb --build --root-owner-group "${STAGE_DIR}" "${TEMP_PACKAGE}"
+dpkg-deb -I "${TEMP_PACKAGE}"
+mv -f -- "${TEMP_PACKAGE}" "${OUTPUT_PACKAGE}"
+rmdir "${TEMP_OUTPUT_DIR}"
 
 echo "==> Package built successfully:"
 ls -lh "${OUTPUT_PACKAGE}"
-dpkg-deb -I "${OUTPUT_PACKAGE}"
