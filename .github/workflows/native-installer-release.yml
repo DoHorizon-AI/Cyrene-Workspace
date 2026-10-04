@@ -90,6 +90,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C platform-source rev-parse HEAD^{commit})" = "$EXPECTED_PLATFORM_COMMIT"
+      - name: Install exact Platform release helper dependencies
+        run: python -m pip install --disable-pip-version-check -r platform-source/tooling/release/requirements.txt
       - name: Fetch the explicitly selected Workspace catalog
         run: |
           set -euo pipefail
