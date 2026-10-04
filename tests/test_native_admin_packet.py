@@ -114,6 +114,7 @@ def _args(root: Path, bundle: Path, commit: str) -> object:
         "release_directory": release,
         "channel": "preview",
         "start_broker": False,
+        "operator_user": None,
         "output": root / "packet",
     }
     for name, _filename in admin_packet.BOOTSTRAP_INPUTS:
@@ -162,6 +163,7 @@ def test_assembler_creates_hash_bound_reviewable_stage_only_packet(tmp_path: Pat
     assert manifest["source"] == {"ref": "refs/heads/main", "commit": commit}
     assert manifest["releaseProof"]["verifier"]["attestationsVerified"] is True
     assert manifest["startBrokerRequested"] is False
+    assert manifest["operatorUser"] is None
     assert manifest["activationPolicy"] == {
         "products": "never-started",
         "coreServices": "never-started",
@@ -172,6 +174,54 @@ def test_assembler_creates_hash_bound_reviewable_stage_only_packet(tmp_path: Pat
         payload = (packet / relative).read_bytes()
         assert hashlib.sha256(payload).hexdigest() == record["sha256"]
         assert f"check_asset '{relative}' '{record['sha256']}'" in launcher
+    copied_assets = {
+        "assets/tools/gh": "$stage/tools/gh",
+        "assets/workspace.bundle": "$stage/workspace.bundle",
+        **{
+            relative: "$stage/release/" + relative.removeprefix("assets/release/")
+            for relative in manifest["assets"]
+            if relative.startswith("assets/release/")
+        },
+        **{
+            relative: "$stage/bootstrap/" + relative.removeprefix("assets/bootstrap/")
+            for relative in manifest["assets"]
+            if relative.startswith("assets/bootstrap/")
+        },
+    }
+    first_execution = min(
+        launcher.index("dpkg-deb --extract"),
+        launcher.index("python_version=$(env"),
+        launcher.index('git clone --template="$stage/git-template"'),
+    )
+    for relative, staged_path in copied_assets.items():
+        digest = manifest["assets"][relative]["sha256"]
+        copy_source = f'cp -- "$packet_dir/{relative}"'
+        assert copy_source in launcher
+        staged_guard = f'check_path "{staged_path}" "{digest}"'
+        assert staged_guard in launcher
+        assert launcher.index(copy_source) < launcher.index(staged_guard) < first_execution
+    assert launcher.splitlines()[2] == "PATH=/usr/bin:/bin; export PATH"
+    assert launcher.splitlines()[3].startswith("unset PYTHONHOME PYTHONPATH PYTHONUSERBASE")
+    assert "LD_PRELOAD" in launcher.splitlines()[3] and "GIT_DIR" in launcher.splitlines()[3]
+    guard_start = launcher.index("check_path() {")
+    guard_end = launcher.index("\n}\ncheck_asset()", guard_start) + 2
+    tampered_copy = _write(tmp_path / "tampered-gh-copy", b"changed after packet hash check\n")
+    guard_result = subprocess.run(
+        [
+            "sh",
+            "-c",
+            launcher[guard_start:guard_end] + '\ncheck_path "$1" "$2"',
+            "check-staged-copy",
+            str(tampered_copy),
+            manifest["assets"]["assets/tools/gh"]["sha256"],
+        ],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        check=False,
+    )
+    assert guard_result.returncode == 2
+    assert "digest mismatch" in guard_result.stderr
     assert launcher.index("check_asset 'assets/workspace.bundle'") < launcher.index(
         "stage=$(mktemp"
     )
@@ -212,6 +262,7 @@ def test_start_broker_is_an_explicit_packet_bound_choice(tmp_path: Path) -> None
     bundle, commit = _source_bundle(tmp_path)
     args = _args(tmp_path, bundle, commit)
     args.start_broker = True
+    args.operator_user = "ruanyun"
     args.output = tmp_path / "packet-with-broker-request"
 
     packet = admin_packet._assemble_packet(
@@ -232,9 +283,22 @@ def test_start_broker_is_an_explicit_packet_bound_choice(tmp_path: Path) -> None
     assert (
         manifest["activationPolicy"]["broker"] == "start-requested-after-explicit-plan-confirmation"
     )
-    assert initializer_command.endswith("--start-broker")
+    assert manifest["operatorUser"] == "ruanyun"
+    assert initializer_command.endswith("--start-broker --operator-user ruanyun")
     assert "--start-core" not in launcher and "--start-product" not in launcher
     subprocess.run(["sh", "-n", str(packet / "bootstrap.sh")], check=True)
+
+
+@pytest.mark.parametrize("operator_user", ["root", "0", "UPPER", "ruanyun;id", "user name"])
+def test_packet_rejects_unsafe_or_root_operator_user(tmp_path: Path, operator_user: str) -> None:
+    bundle, commit = _source_bundle(tmp_path)
+    args = _args(tmp_path, bundle, commit)
+    args.operator_user = operator_user
+
+    with pytest.raises(admin_packet.AdminPacketError, match="safe, non-root"):
+        admin_packet._assemble_packet(args)
+
+    assert not args.output.exists()
 
 
 def test_packet_requires_source_ref_to_resolve_to_exact_commit(tmp_path: Path) -> None:

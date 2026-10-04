@@ -972,6 +972,18 @@ def _validate_python_input(profile: dict[str, Any], workspace_root: Path) -> Non
         raise ProducerError("Python archive/resolver does not match the selected profile")
 
 
+def _uv_version_matches_locked_profile(
+    output: str, expected_version: str, expected_target: str
+) -> bool:
+    """Accept uv's locked version with or without its matching binary target annotation."""
+
+    version_line = output.strip()
+    return version_line in {
+        f"uv {expected_version}",
+        f"uv {expected_version} ({expected_target})",
+    }
+
+
 def _native_target(profile: dict[str, Any]) -> str:
     """Require the exact Ubuntu, x86_64, and glibc profile selected for this build."""
 
@@ -1646,12 +1658,15 @@ def main(argv: list[str] | None = None) -> int:
         if uv_path.is_symlink() or not uv_path.is_file() or not os.access(uv_path, os.X_OK):
             raise ProducerError(f"--uv must name a regular executable file: {uv_path}")
         uv_executable = str(uv_path.resolve())
-        uv_version = _run([uv_executable, "--version"]).strip().split()
+        uv_version = _run([uv_executable, "--version"])
         expected_uv_version = target_profile["wheelResolver"]["version"]
-        if len(uv_version) != 2 or uv_version != ["uv", expected_uv_version]:
+        expected_uv_target = target_profile["wheelResolver"]["arguments"][-1]
+        if not _uv_version_matches_locked_profile(
+            uv_version, expected_uv_version, expected_uv_target
+        ):
             raise ProducerError(
                 f"wheel resolver must be uv {expected_uv_version}, "
-                f"got {' '.join(uv_version) or 'no version'}"
+                f"got {uv_version.strip() or 'no version'}"
             )
         python_executable_text = str(python_executable.resolve())
         output_root.parent.mkdir(parents=True, exist_ok=True)

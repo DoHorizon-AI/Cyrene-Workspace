@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ SUPPORTED_UBUNTU = {"22.04", "24.04"}
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
+SAFE_OPERATOR_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 BOOTSTRAP_INPUTS = (
     ("index", "index.json"),
     ("index-attestation", "index.attestation.jsonl"),
@@ -310,20 +312,26 @@ def _launcher_script(
     deb_asset_name: str,
     deb_sha256: str,
     start_broker: bool,
+    operator_user: str | None,
 ) -> str:
     """Render a fixed launcher with literal asset hashes and no caller-supplied commands."""
 
     lines = [
         "#!/bin/sh",
         "set -eu",
+        "PATH=/usr/bin:/bin; export PATH",
+        "unset PYTHONHOME PYTHONPATH PYTHONUSERBASE PYTHONSTARTUP PYTHONINSPECT LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM GIT_CONFIG_GLOBAL GIT_EXEC_PATH GIT_TEMPLATE_DIR GIT_SSH GIT_SSH_COMMAND GIT_ASKPASS SSH_ASKPASS GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_HOST GITHUB_HOST GITHUB_API_URL GH_PAGER GH_PROMPT_DISABLED",
         'packet_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)',
         "[ ! -L \"$0\" ] || { echo 'REFUSED: launcher is a symlink' >&2; exit 2; }",
         'for directory in assets assets/tools assets/release assets/bootstrap; do [ ! -L "$packet_dir/$directory" ] || { echo "REFUSED: linked packet directory: $directory" >&2; exit 2; }; done',
-        "check_asset() {",
+        "check_path() {",
         "  file=$1; expected=$2",
-        '  [ -f "$packet_dir/$file" ] && [ ! -L "$packet_dir/$file" ] || { echo "REFUSED: missing or linked packet asset: $file" >&2; exit 2; }',
-        "  actual=$(sha256sum -- \"$packet_dir/$file\" | cut -d ' ' -f 1)",
+        '  [ -f "$file" ] && [ ! -L "$file" ] || { echo "REFUSED: missing or linked packet asset: $file" >&2; exit 2; }',
+        "  actual=$(sha256sum -- \"$file\" | cut -d ' ' -f 1)",
         '  [ "$actual" = "$expected" ] || { echo "REFUSED: packet asset digest mismatch: $file" >&2; exit 2; }',
+        "}",
+        "check_asset() {",
+        '  check_path "$packet_dir/$1" "$2"',
         "}",
     ]
     for relative, record in sorted(commitments.items()):
@@ -340,9 +348,8 @@ def _launcher_script(
             "trap 'exit 129' HUP",
             "trap 'exit 130' INT",
             "trap 'exit 143' TERM",
-            'mkdir -m 700 "$stage/tools" "$stage/release" "$stage/bootstrap"',
+            'mkdir -m 700 "$stage/tools" "$stage/release" "$stage/bootstrap" "$stage/gh-config" "$stage/git-template"',
             'cp -- "$packet_dir/assets/tools/gh" "$stage/tools/gh"',
-            'chmod 700 "$stage/tools/gh"',
             'cp -- "$packet_dir/assets/workspace.bundle" "$stage/workspace.bundle"',
         ]
     )
@@ -354,10 +361,26 @@ def _launcher_script(
         lines.append(
             f'cp -- "$packet_dir/assets/bootstrap/{filename}" "$stage/bootstrap/{filename}"'
         )
+    for relative, record in sorted(commitments.items()):
+        if relative == "assets/tools/gh":
+            staged_path = "$stage/tools/gh"
+        elif relative == "assets/workspace.bundle":
+            staged_path = "$stage/workspace.bundle"
+        elif relative.startswith("assets/release/"):
+            staged_path = "$stage/release/" + relative.removeprefix("assets/release/")
+        elif relative.startswith("assets/bootstrap/"):
+            staged_path = "$stage/bootstrap/" + relative.removeprefix("assets/bootstrap/")
+        else:
+            continue
+        lines.append(f'check_path "{staged_path}" "{record["sha256"]}"')
     lines.extend(
         [
+            'chmod 700 "$stage/tools/gh"',
             'PATH="$stage/tools:/usr/bin:/bin"; export PATH',
             'GH_EXECUTABLE="$stage/tools/gh"; export GH_EXECUTABLE',
+            'GH_CONFIG_DIR="$stage/gh-config"; export GH_CONFIG_DIR',
+            "GIT_CONFIG_GLOBAL=/dev/null; export GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM=1; export GIT_CONFIG_NOSYSTEM",
             'CYRENE_PACKET_WORKSPACE="$stage/workspace"; export CYRENE_PACKET_WORKSPACE',
             f"SOURCE_REF='{ref}'",
             f"SOURCE_COMMIT='{commit}'",
@@ -379,13 +402,13 @@ def _launcher_script(
             'python_version=$(env -u PYTHONPATH -u PYTHONHOME -u LD_LIBRARY_PATH PYTHONNOUSERSITE=1 "$private_python" --version 2>&1)',
             '[ "$python_version" = "Python 3.12.14" ] || { echo "REFUSED: unexpected private Python version: $python_version" >&2; exit 2; }',
             'env -u PYTHONPATH -u PYTHONHOME -u LD_LIBRARY_PATH PYTHONNOUSERSITE=1 "$private_python" -c \'import importlib.metadata as m, jsonschema, sys; assert sys.version_info[:3] == (3, 12, 14); assert m.version("jsonschema") == "4.26.0"; print("temporary verifier runtime: CPython 3.12.14, jsonschema 4.26.0")\'',
-            'git clone --no-checkout "$stage/workspace.bundle" "$stage/workspace"',
+            'git clone --template="$stage/git-template" --no-checkout "$stage/workspace.bundle" "$stage/workspace"',
             'git -C "$stage/workspace" cat-file -e "$SOURCE_COMMIT^{commit}"',
             '[ "$(git -C "$stage/workspace" rev-parse "$SOURCE_REF^{commit}")" = "$SOURCE_COMMIT" ] || { echo \'REFUSED: source ref and commit differ\' >&2; exit 2; }',
             'git -C "$stage/workspace" checkout --detach "$SOURCE_COMMIT"',
         ]
     )
-    # The launcher verifies the signed release before it stages the interpreter or installs the DEB.
+    # Controller proof authorizes extraction; the host verifier rechecks signatures before initializer installation.
     lines.extend(
         [
             'PYTHONNOUSERSITE=1 PYTHONPATH="$stage/workspace/tooling/acceptance/native-components-v2" "$private_python" - "$stage/release" "$SOURCE_REF" "$SOURCE_COMMIT" "$UBUNTU_VERSION" > "$stage/release-proof.json" <<\'PY\'',
@@ -403,6 +426,8 @@ def _launcher_script(
     )
     if start_broker:
         lines[-1] += " --start-broker"
+    if operator_user is not None:
+        lines[-1] += f" --operator-user {shlex.quote(operator_user)}"
     return "\n".join(lines) + "\n"
 
 
@@ -463,6 +488,7 @@ def _build_packet(
         "ubuntuVersion": args.ubuntu_version,
         "channel": args.channel,
         "startBrokerRequested": bool(args.start_broker),
+        "operatorUser": args.operator_user,
         "releaseProof": proof,
         "assets": commitments,
         "temporaryVerifierRuntime": {
@@ -497,6 +523,7 @@ def _build_packet(
             deb_asset_name=str(proof["target"]["assetName"]),
             deb_sha256=str(proof["target"]["debSha256"]),
             start_broker=bool(args.start_broker),
+            operator_user=args.operator_user,
         ),
         encoding="utf-8",
     )
@@ -527,6 +554,10 @@ def _assemble_packet(
         raise AdminPacketError("only Ubuntu 22.04 and 24.04 x86_64 packet targets are supported")
     if args.channel not in {"stable", "preview"}:
         raise AdminPacketError("channel must be stable or preview")
+    if args.operator_user is not None and (
+        not SAFE_OPERATOR_USER_RE.fullmatch(args.operator_user) or args.operator_user == "root"
+    ):
+        raise AdminPacketError("operator user must be a safe, non-root Linux username")
     bundle = _require_regular(args.source_bundle, "Workspace Git bundle")
     output = args.output.absolute()
     if output.exists() or output.is_symlink():
@@ -580,6 +611,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--start-broker",
         action="store_true",
         help="Bind a broker-only start request after the initializer's explicit plan confirmation",
+    )
+    parser.add_argument(
+        "--operator-user",
+        help="Bind one safe, existing non-root Linux username to the administrator packet",
     )
     parser.add_argument("--output", type=Path, required=True)
     return parser
