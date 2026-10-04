@@ -193,7 +193,11 @@ def test_portable_data_target_remains_independent_of_ubuntu_version(
 
 
 def _configure_unmanaged_runtime_agent(
-    updater: updates.ComponentUpdater, unit_dir: Path
+    updater: updates.ComponentUpdater,
+    unit_dir: Path,
+    *,
+    distribution_version: str = "24.04",
+    abi: str = "glibc-2.39",
 ) -> dict[str, object]:
     target_id = "linux-test-x86_64-systemd"
     component_id = "cy-runtime-agent"
@@ -201,8 +205,9 @@ def _configure_unmanaged_runtime_agent(
         "target": {
             "os": "linux",
             "distribution": "ubuntu",
-            "distributionVersion": "24.04",
+            "distributionVersion": distribution_version,
             "architecture": updates.platform.machine(),
+            "abi": abi,
             "runtime": "systemd",
         }
     }
@@ -224,9 +229,34 @@ def _configure_unmanaged_runtime_agent(
     return component
 
 
-def test_os_supported_unmanaged_native_has_no_apply_action(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("distribution_version", "abi"),
+    [("22.04", "glibc-2.35"), ("24.04", "glibc-2.39")],
+)
+def test_os_supported_unmanaged_native_has_no_apply_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    distribution_version: str,
+    abi: str,
+) -> None:
     updater = _empty_updater(tmp_path)
-    component = _configure_unmanaged_runtime_agent(updater, tmp_path / "missing-units")
+    monkeypatch.setattr(
+        updates.platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "ubuntu", "VERSION_ID": distribution_version},
+    )
+    monkeypatch.setattr(updates.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        updates.platform,
+        "libc_ver",
+        lambda: ("glibc", abi.removeprefix("glibc-")),
+    )
+    component = _configure_unmanaged_runtime_agent(
+        updater,
+        tmp_path / "missing-units",
+        distribution_version=distribution_version,
+        abi=abi,
+    )
 
     row = updater._result_component(
         component,
@@ -383,8 +413,15 @@ def test_apply_confirmation_is_bound_to_plan_id_and_digest(tmp_path: Path) -> No
     assert error.value.code == "CONFIRMATION_MISMATCH"
 
 
+@pytest.mark.parametrize(
+    ("distribution_version", "abi"),
+    [("22.04", "glibc-2.35"), ("24.04", "glibc-2.39")],
+)
 def test_begin_payload_preserves_sha256_artifact_digest_prefix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    distribution_version: str,
+    abi: str,
 ) -> None:
     updater = _empty_updater(tmp_path)
     component_id = "cyrene-test"
@@ -396,11 +433,23 @@ def test_begin_payload_preserves_sha256_artifact_digest_prefix(
         "target": {
             "os": "linux",
             "distribution": "ubuntu",
-            "distributionVersion": "24.04",
-            "architecture": updates.platform.machine(),
+            "distributionVersion": distribution_version,
+            "architecture": "x86_64",
+            "abi": abi,
             "runtime": "systemd",
         }
     }
+    monkeypatch.setattr(
+        updates.platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "ubuntu", "VERSION_ID": distribution_version},
+    )
+    monkeypatch.setattr(updates.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        updates.platform,
+        "libc_ver",
+        lambda: ("glibc", abi.removeprefix("glibc-")),
+    )
     unit_directory = tmp_path / "units"
     unit_directory.mkdir()
     (unit_directory / "cyrene-test.service").write_text(

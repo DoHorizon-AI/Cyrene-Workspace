@@ -783,7 +783,32 @@ def test_service_bundle_wheel_metadata_rejects_missing_or_duplicate_fields(
         bundle._wheel_metadata(wheel)
 
 
-def test_inner_service_manifest_binds_sdk_to_lock_and_file_hashes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("profile_id", "profile", "distribution_version", "abi"),
+    [
+        (UBUNTU_22_PROFILE_ID, UBUNTU_22_PROFILE, "22.04", "glibc-2.35"),
+        (UBUNTU_24_PROFILE_ID, UBUNTU_24_PROFILE, "24.04", "glibc-2.39"),
+    ],
+)
+def test_inner_service_manifest_binds_sdk_to_lock_and_file_hashes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile_id: str,
+    profile: dict[str, object],
+    distribution_version: str,
+    abi: str,
+) -> None:
+    monkeypatch.setattr(
+        bundle.platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "ubuntu", "VERSION_ID": distribution_version},
+    )
+    monkeypatch.setattr(bundle.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        bundle.platform,
+        "libc_ver",
+        lambda: ("glibc", abi.removeprefix("glibc-")),
+    )
     root = tmp_path / "bundle"
     dist_info = root / "python" / "cyrene_runtime_maintenance-0.1.0.dist-info"
     dist_info.mkdir(parents=True)
@@ -812,7 +837,7 @@ def test_inner_service_manifest_binds_sdk_to_lock_and_file_hashes(tmp_path: Path
         "source_commit": "b" * 40,
         "requirements_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
         "runtime_dependencies": runtime,
-        "target_profile": UBUNTU_24_PROFILE_ID,
+        "target_profile": profile_id,
         "wheel_tags": {"cyrene-runtime-maintenance-0.1.0-py3-none-any.whl": ["py3-none-any"]},
     }
     (root / "source.json").write_text(json.dumps(source, sort_keys=True), encoding="utf-8")
@@ -821,8 +846,8 @@ def test_inner_service_manifest_binds_sdk_to_lock_and_file_hashes(tmp_path: Path
         service="navigator",
         source_commit="b" * 40,
         source_repository="Cyrene-Navigator",
-        target_profile_id=UBUNTU_24_PROFILE_ID,
-        target_profile=UBUNTU_24_PROFILE,
+        target_profile_id=profile_id,
+        target_profile=profile,
         source_wheel_tags=source["wheel_tags"],
         installed_wheel_tags=["py3-none-any"],
         runtime_dependencies=runtime,
