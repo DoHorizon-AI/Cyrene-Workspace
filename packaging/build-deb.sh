@@ -354,6 +354,8 @@ cat <<'EOF' > "${STAGE_DIR}/lib/systemd/system/cyrene-navigator.service"
 [Unit]
 Description=Cyrene Navigator Web Host
 After=network.target
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 
 [Service]
 Type=simple
@@ -367,8 +369,6 @@ Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
 LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-navigator.token
 PrivateMounts=yes
-Requires=cyrene-runtime-maintenance.service
-After=cyrene-runtime-maintenance.service
 ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run navigator
 Restart=on-failure
 RestartSec=5
@@ -383,6 +383,8 @@ cat <<'EOF' > "${STAGE_DIR}/lib/systemd/system/cyrene-yield.service"
 [Unit]
 Description=Cyrene Yield Training Engine Service
 After=network.target
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 
 [Service]
 Type=simple
@@ -396,8 +398,6 @@ Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
 LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-yield.token
 PrivateMounts=yes
-Requires=cyrene-runtime-maintenance.service
-After=cyrene-runtime-maintenance.service
 ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run yield
 Restart=on-failure
 RestartSec=5
@@ -411,6 +411,8 @@ cat <<'EOF' > "${STAGE_DIR}/lib/systemd/system/cyrene-reactor.service"
 [Unit]
 Description=Cyrene Reactor Serving Engine Service
 After=network.target
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 
 [Service]
 Type=simple
@@ -424,8 +426,6 @@ Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
 LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-reactor.token
 PrivateMounts=yes
-Requires=cyrene-runtime-maintenance.service
-After=cyrene-runtime-maintenance.service
 ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run reactor
 Restart=on-failure
 RestartSec=5
@@ -439,6 +439,8 @@ cat <<'EOF' > "${STAGE_DIR}/lib/systemd/system/cyrene-exchange.service"
 [Unit]
 Description=Cyrene Exchange Routing & Gateway Service
 After=network.target
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 
 [Service]
 Type=simple
@@ -452,8 +454,6 @@ Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
 LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-exchange.token
 PrivateMounts=yes
-Requires=cyrene-runtime-maintenance.service
-After=cyrene-runtime-maintenance.service
 ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run exchange
 Restart=on-failure
 RestartSec=5
@@ -467,6 +467,8 @@ cat <<'EOF' > "${STAGE_DIR}/lib/systemd/system/cyrene-catalyst.service"
 [Unit]
 Description=Cyrene Catalyst Dataset Preparation Service
 After=network.target
+Requires=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service
 
 [Service]
 Type=simple
@@ -480,8 +482,6 @@ Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
 LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-catalyst.token
 PrivateMounts=yes
-Requires=cyrene-runtime-maintenance.service
-After=cyrene-runtime-maintenance.service
 ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run catalyst
 Restart=on-failure
 RestartSec=5
