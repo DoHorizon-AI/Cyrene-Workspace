@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -219,6 +220,11 @@ def _source_channel(source_ref: str) -> str:
     if source_ref in {"refs/heads/main", "refs/heads/release"}:
         return "stable"
     raise ReleaseError("source ref must be develop, main, or release")
+
+
+def _is_supported_component_manifest_schema(value: Any) -> bool:
+    """Accept only the published integer v1 or v2 component manifest versions."""
+    return type(value) is int and value in {1, 2}
 
 
 def _release_source(release_id: str, channel: str, label: str) -> str:
@@ -779,7 +785,7 @@ def _validate_index_against_receipt(
         if (
             manifest_document.get("componentId") != component_id
             or manifest_document.get("releaseId") != row["releaseId"]
-            or manifest_document.get("schemaVersion") != 2
+            or not _is_supported_component_manifest_schema(manifest_document.get("schemaVersion"))
             or manifest_document.get("channel") != _source_channel(source["ref"])
             or manifest_document.get("target") != proof["target"]
             or manifest_document.get("source")
@@ -816,6 +822,74 @@ def _validate_index_against_receipt(
                 label=f"embedded {component_id}",
             )
     return index_rows
+
+
+def _postinst_service_bootstrap_calls(content: str) -> list[tuple[int, list[str], bool]]:
+    """Find executable Cyrene calls at shell command positions.
+
+    Return each call's arguments and whether it is the unwrapped default command.
+    Shell words such as account names, echo text, and comments are not commands.
+    """
+    calls: list[tuple[int, list[str], bool]] = []
+    control_words = {"if", "then", "else", "elif", "while", "until", "do", "!"}
+    assignment = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", re.DOTALL)
+
+    for line_number, line in enumerate(content.splitlines()):
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        try:
+            tokens = list(lexer)
+        except ValueError as error:
+            raise ReleaseError("DEB postinst contains malformed shell quoting") from error
+
+        segments: list[list[str]] = []
+        current: list[str] = []
+        for token in tokens:
+            if token and all(character in ";&|" for character in token):
+                if current:
+                    segments.append(current)
+                    current = []
+            else:
+                current.append(token)
+        if current:
+            segments.append(current)
+
+        for segment in segments:
+            command = list(segment)
+            while command and command[0] in control_words:
+                command.pop(0)
+            had_prefix = False
+            while command and assignment.fullmatch(command[0]):
+                had_prefix = True
+                command.pop(0)
+
+            # Recognize common shell wrappers so they cannot hide an activation
+            # call from the stage-only check. Wrapping is not the default command.
+            while command and PurePosixPath(command[0]).name in {"env", "command", "exec"}:
+                wrapper = PurePosixPath(command.pop(0)).name
+                had_prefix = True
+                if wrapper == "command" and command and command[0] in {"-v", "-V"}:
+                    command = []
+                    break
+                if wrapper == "env":
+                    while command and command[0].startswith("-"):
+                        option = command.pop(0)
+                        if option == "--":
+                            break
+                    while command and assignment.fullmatch(command[0]):
+                        command.pop(0)
+            if not command or PurePosixPath(command[0]).name != "cyrene":
+                continue
+
+            executable = command[0]
+            is_default = (
+                not had_prefix
+                and executable in {"cyrene", "/usr/bin/cyrene"}
+                and command[1:] == ["service-bootstrap"]
+            )
+            calls.append((line_number, command[1:], is_default))
+    return calls
 
 
 def _static_installer_activation_check(control_directory: Path) -> dict[str, str]:
@@ -866,21 +940,8 @@ def _static_installer_activation_check(control_directory: Path) -> dict[str, str
             )
         if name == "postinst":
             _validate_runtime_state_staging(content)
-            invocations = [
-                line
-                for line in effective_lines
-                if re.search(r"(?<![\w-])(?:/usr/bin/)?cyrene\s+", line.lower())
-                and not re.search(r"\bcommand\s+-v\s+(?:/usr/bin/)?cyrene\b", line.lower())
-            ]
-            bootstrap_calls = [
-                line
-                for line in invocations
-                if re.search(
-                    r"(?:^|/)cyrene\s+service-bootstrap\s*(?:;\s*then\b|\|\|\s*true\b|$)",
-                    line.lower(),
-                )
-            ]
-            if len(invocations) != 1 or len(bootstrap_calls) != 1:
+            invocations = _postinst_service_bootstrap_calls(content)
+            if len(invocations) != 1 or not invocations[0][2]:
                 raise ReleaseError(
                     "DEB postinst must only stage via the default service-bootstrap command"
                 )
@@ -891,24 +952,30 @@ def _validate_runtime_state_staging(postinst: str) -> None:
     """Allow only missing-directory creation and read-only validation of broker state."""
 
     effective_lines = [
-        line.split("#", 1)[0].strip()
-        for line in postinst.splitlines()
+        (line_number, line.split("#", 1)[0].strip())
+        for line_number, line in enumerate(postinst.splitlines())
         if line.split("#", 1)[0].strip()
     ]
     start = [
         index
-        for index, line in enumerate(effective_lines)
+        for index, (_line_number, line) in enumerate(effective_lines)
         if line == "RUNTIME_STATE_DIR=/var/lib/cyrene/runtime"
     ]
+    bootstrap_line_numbers = {
+        line_number
+        for line_number, _arguments, _is_default in _postinst_service_bootstrap_calls(postinst)
+    }
     bootstrap = [
         index
-        for index, line in enumerate(effective_lines)
-        if re.search(r"(?:^|/)cyrene\s+service-bootstrap\b", line.lower())
+        for index, (line_number, _line) in enumerate(effective_lines)
+        if line_number in bootstrap_line_numbers
     ]
     if len(start) != 1 or len(bootstrap) != 1 or start[0] >= bootstrap[0]:
         raise ReleaseError("DEB postinst must identify one broker-state staging block")
 
-    block = [" ".join(line.split()) for line in effective_lines[start[0] : bootstrap[0]]]
+    block = [
+        " ".join(line.split()) for _line_number, line in effective_lines[start[0] : bootstrap[0]]
+    ]
     expected = [
         "RUNTIME_STATE_DIR=/var/lib/cyrene/runtime",
         "if ! getent group cyrene-runtime-maintenance >/dev/null 2>&1; then",
@@ -944,7 +1011,7 @@ def _validate_runtime_state_staging(postinst: str) -> None:
     remainder = effective_lines[: start[0]] + effective_lines[bootstrap[0] :]
     if any(
         re.search(r"RUNTIME_STATE_DIR|/var/lib/cyrene/runtime\b", line, re.IGNORECASE)
-        for line in remainder
+        for _line_number, line in remainder
     ):
         raise ReleaseError(
             "DEB postinst uses broker state outside its validated safe staging block"

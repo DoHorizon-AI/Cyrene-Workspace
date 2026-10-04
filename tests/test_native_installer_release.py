@@ -47,6 +47,22 @@ def _dispatch_inputs(module: ModuleType) -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_component_manifest_schema_accepts_only_supported_integer_versions(
+    schema_version: int,
+) -> None:
+    module = _module()
+    assert module._is_supported_component_manifest_schema(schema_version)
+
+
+@pytest.mark.parametrize("schema_version", [3, "1", True, None])
+def test_component_manifest_schema_rejects_unknown_and_non_integer_versions(
+    schema_version: object,
+) -> None:
+    module = _module()
+    assert not module._is_supported_component_manifest_schema(schema_version)
+
+
 def test_fetch_plan_is_fixed_to_exact_ubuntu_tuples(tmp_path: Path) -> None:
     module = _module()
     inputs = tmp_path / "inputs.json"
@@ -116,6 +132,7 @@ def test_stage_service_artifacts_matches_catalog_repository_identity(
     profile = module.PROFILE_IDS[0]
     target = {
         "os": "linux",
+        "osVersion": "22.04",
         "distribution": "ubuntu",
         "distributionVersion": "22.04",
         "architecture": "x86_64",
@@ -288,8 +305,15 @@ def test_installer_script_scan_allows_only_stage_bootstrap_and_unit_reload(tmp_p
     control.mkdir()
     (control / "postinst").write_text(
         "#!/bin/sh\nset -eu\n"
+        + "PRIVATE_PYTHON=/opt/cyrene/python/3.12.14/bin/python3.12\n"
+        + "\"${PRIVATE_PYTHON}\" -I -c 'import sys; assert sys.version_info[:3] == (3, 12, 14)'\n"
+        + "RUNTIME_META=\"$(stat -c '%u:%a' /opt/cyrene/python/3.12.14)\"\n"
+        + "if ! id -u cyrene >/dev/null 2>&1; then useradd --system cyrene; fi\n"
+        + 'install -d -o cyrene -g cyrene -m 750 "$path"\n'
+        + 'echo "Cyrene package initialized in stage-only mode."\n'
+        + "# This existing command validates and stages: /usr/bin/cyrene service-bootstrap\n"
         + _runtime_state_staging_block()
-        + "if ! /usr/bin/cyrene service-bootstrap; then exit 1; fi\n"
+        + 'if ! "/usr/bin/cyrene" service-bootstrap; then exit 1; fi\n'
         + "systemctl daemon-reload\n",
         encoding="utf-8",
     )
@@ -353,6 +377,33 @@ fi
 """
 
 
+@pytest.mark.parametrize(
+    "command_line",
+    [
+        "CYRENE_STAGE=1 /usr/bin/cyrene service-bootstrap",
+        "env CYRENE_STAGE=1 /usr/bin/cyrene service-bootstrap",
+        'if ! "/usr/bin/cyrene" service-bootstrap --activate-missing; then exit 1; fi',
+        'if ! "/usr/bin/cyrene" service-bootstrap; then exit 1; fi\n/usr/bin/cyrene status',
+        'if ! "/usr/bin/cyrene service-bootstrap; then exit 1; fi',
+    ],
+)
+def test_postinst_rejects_environment_wrappers_activation_and_extra_calls(
+    tmp_path: Path, command_line: str
+) -> None:
+    module = _module()
+    control = tmp_path / "DEBIAN"
+    control.mkdir()
+    (control / "postinst").write_text(
+        "#!/bin/sh\nset -eu\n" + _runtime_state_staging_block() + command_line + "\n",
+        encoding="utf-8",
+    )
+    for name in ("prerm", "postrm"):
+        (control / name).write_text("#!/bin/sh\nset -eu\nexit 0\n", encoding="utf-8")
+
+    with pytest.raises(module.ReleaseError):
+        module._static_installer_activation_check(control)
+
+
 def test_failed_draft_create_does_not_poll_by_tag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -383,6 +434,7 @@ def _write_package_fixture(
     profile = module.PROFILE_IDS[0]
     target = {
         "os": "linux",
+        "osVersion": "22.04",
         "distribution": "ubuntu",
         "distributionVersion": "22.04",
         "architecture": "x86_64",
@@ -423,9 +475,10 @@ def _write_package_fixture(
 
         service_source = {"ref": source_ref, "commit": commit}
         outer_manifest = {
-            "schemaVersion": 2,
+            "schemaVersion": 1,
             "componentId": component_id,
             "releaseId": release_id,
+            "version": "1.0.0",
             "channel": "stable",
             "target": target,
             "source": {
@@ -438,8 +491,28 @@ def _write_package_fixture(
                 "uri": (
                     f"https://github.com/{repository}/releases/download/{release_id}/{artifact_name}"
                 ),
-                "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+                "sha256": "sha256:" + hashlib.sha256(artifact_bytes).hexdigest(),
                 "sizeBytes": len(artifact_bytes),
+                "files": {
+                    "service-bundle/manifest.json": "sha256:"
+                    + hashlib.sha256(artifact_bytes).hexdigest()
+                },
+            },
+            "dependencies": [],
+            "restart": {"group": "none"},
+            "provenance": {
+                "attestation": {
+                    "kind": "github-artifact-attestation",
+                    "subjectName": artifact_name,
+                    "repository": repository,
+                    "workflow": f"{repository}/.github/workflows/component-release.yml",
+                    "predicateType": module.PREDICATE_TYPE,
+                    "run": {
+                        "id": "1",
+                        "attempt": 1,
+                        "url": f"https://github.com/{repository}/actions/runs/1",
+                    },
+                }
             },
             "manifestDigest": manifest_digest,
         }
@@ -519,8 +592,15 @@ def _write_package_fixture(
     scripts = {
         "postinst": (
             "#!/bin/sh\nset -eu\n"
+            + "PRIVATE_PYTHON=/opt/cyrene/python/3.12.14/bin/python3.12\n"
+            + "\"${PRIVATE_PYTHON}\" -I -c 'import sys; assert sys.version_info[:3] == (3, 12, 14)'\n"
+            + "RUNTIME_META=\"$(stat -c '%u:%a' /opt/cyrene/python/3.12.14)\"\n"
+            + "if ! id -u cyrene >/dev/null 2>&1; then useradd --system cyrene; fi\n"
+            + 'install -d -o cyrene -g cyrene -m 750 "$path"\n'
+            + 'echo "Cyrene package initialized in stage-only mode."\n'
+            + "# This existing command validates and stages: /usr/bin/cyrene service-bootstrap\n"
             + _runtime_state_staging_block()
-            + "if ! /usr/bin/cyrene service-bootstrap; then exit 1; fi\n"
+            + 'if ! "/usr/bin/cyrene" service-bootstrap; then exit 1; fi\n'
             + "systemctl daemon-reload\n"
         ),
         "prerm": "#!/bin/sh\nset -eu\nexit 0\n",

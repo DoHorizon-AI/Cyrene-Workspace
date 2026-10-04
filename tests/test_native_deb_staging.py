@@ -40,6 +40,26 @@ def test_deb_builder_leaves_locked_python_outputs_for_stage_helper(tmp_path: Pat
     assert (stage_root / "usr/share/cyrene").is_dir()
 
 
+def test_deb_product_units_require_the_platform_broker_in_unit_section() -> None:
+    """Systemd must parse broker ordering directives from each unit's [Unit] section."""
+
+    script = BUILD_SCRIPT.read_text(encoding="utf-8")
+    broker_requires = "Requires=cyrene-runtime-maintenance.service"
+    broker_after = "After=cyrene-runtime-maintenance.service"
+
+    for service in ("navigator", "yield", "reactor", "exchange", "catalyst"):
+        marker = f"cat <<'EOF' > \"${{STAGE_DIR}}/lib/systemd/system/cyrene-{service}.service\"\n"
+        start = script.index(marker) + len(marker)
+        end = script.index("\nEOF\n", start)
+        unit = script[start:end]
+        unit_section, service_section = unit.split("\n[Service]\n", maxsplit=1)
+
+        assert unit_section.splitlines().count(broker_requires) == 1
+        assert unit_section.splitlines().count(broker_after) == 1
+        assert broker_requires not in service_section
+        assert broker_after not in service_section
+
+
 def test_deb_package_version_survives_os_release_variable_import(tmp_path: Path) -> None:
     """Sourcing Ubuntu metadata must not replace the requested Debian package version."""
 
