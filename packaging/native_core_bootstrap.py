@@ -7,6 +7,7 @@ until the newly started Kernel reports known, empty runtime ownership counts.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ CORE_EXECUTABLE_NAMES = frozenset(
 PROC_ROOT = Path("/proc")
 CORE_RUNTIME_ROOT = Path("/var/lib/cyrene/runtime")
 CORE_RUN_ROOT = Path("/run/cyrene")
+_DELETED_EXE_SUFFIX = " (deleted)"
 
 
 def _digest(value: Any) -> str:
@@ -143,6 +145,28 @@ def _write_private_json(updater: Any, path: Path, value: dict[str, Any]) -> None
     updater._atomic_json_file(path, value, mode=0o600)
 
 
+def _read_process_executable(exe_link: Path) -> tuple[str, str]:
+    """Read a procfs executable link and validate its live inode.
+
+    `/proc/PID/exe` remains stat-able after unlink, unlike the displayed host
+    pathname. Keep the suffix in the returned path so deleted Core binaries
+    can never match a planned candidate executable.
+    中文：校验 procfs 中仍存活的 inode，并让已删除 Core 可执行文件继续触发旧进程门禁。
+    """
+
+    target = os.readlink(exe_link)
+    path_for_name = target.removesuffix(_DELETED_EXE_SUFFIX)
+    if not Path(path_for_name).is_absolute():
+        raise OSError(errno.EINVAL, "process executable path is not absolute", str(exe_link))
+    metadata = os.stat(exe_link)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError(errno.EINVAL, "process executable is not a regular file", str(exe_link))
+    name = Path(path_for_name).name
+    if not name:
+        raise OSError(errno.EINVAL, "process executable name is empty", str(exe_link))
+    return target, name
+
+
 def _core_process_snapshot(proc_root: Path = PROC_ROOT) -> list[tuple[str, str]]:
     """Inspect every process and retain exact executable paths for recovery checks."""
 
@@ -177,8 +201,8 @@ def _core_process_snapshot(proc_root: Path = PROC_ROOT) -> list[tuple[str, str]]
             ) from error
         names: set[str] = set()
         try:
-            executable_path = str((entry / "exe").resolve(strict=True))
-            names.add(Path(executable_path).name)
+            executable_path, executable_name = _read_process_executable(entry / "exe")
+            names.add(executable_name)
         except FileNotFoundError:
             if not entry.exists():
                 continue

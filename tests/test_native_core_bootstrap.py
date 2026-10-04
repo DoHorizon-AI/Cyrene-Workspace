@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -431,6 +432,102 @@ def test_empty_kernel_thread_cmdline_is_not_an_unknown_user_process(tmp_path: Pa
     unreadable_user_exe = _fake_proc(tmp_path / "proc-no-exe", missing_executable=True)
     with pytest.raises(RuntimeError, match="Process executable is unavailable"):
         bootstrap._core_process_snapshot(unreadable_user_exe)
+
+
+def test_deleted_non_core_executable_is_read_from_proc_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc_root = _fake_proc(tmp_path / "proc-deleted-user")
+    exe_link = proc_root / "100" / "exe"
+    executable = Path(os.readlink(exe_link))
+    descriptor = os.open(executable, os.O_RDONLY)
+    executable.unlink()
+    original_readlink = os.readlink
+    original_stat = os.stat
+
+    def deleted_proc_readlink(path: Any, *args: Any, **kwargs: Any) -> str:
+        if Path(path) == exe_link:
+            return f"{executable} (deleted)"
+        return original_readlink(path, *args, **kwargs)
+
+    def deleted_proc_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(path) == exe_link:
+            return os.fstat(descriptor)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", deleted_proc_readlink)
+    monkeypatch.setattr(os, "stat", deleted_proc_stat)
+    try:
+        assert bootstrap._core_process_snapshot(proc_root) == []
+    finally:
+        os.close(descriptor)
+
+
+def test_deleted_core_executable_still_blocks_first_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    proc_root = _fake_proc(tmp_path / "proc-deleted-core", core="cyrene-kernel")
+    process = proc_root / "100"
+    (process / "cmdline").write_bytes(b"python\0")
+    exe_link = process / "exe"
+    executable = Path(os.readlink(exe_link))
+    descriptor = os.open(executable, os.O_RDONLY)
+    executable.unlink()
+    original_readlink = os.readlink
+    original_stat = os.stat
+
+    def deleted_proc_readlink(path: Any, *args: Any, **kwargs: Any) -> str:
+        if Path(path) == exe_link:
+            return f"{executable} (deleted)"
+        return original_readlink(path, *args, **kwargs)
+
+    def deleted_proc_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(path) == exe_link:
+            return os.fstat(descriptor)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", deleted_proc_readlink)
+    monkeypatch.setattr(os, "stat", deleted_proc_stat)
+    try:
+        with pytest.raises(ValueError, match="Legacy or manually started"):
+            bootstrap.check(updater, proc_root=proc_root)
+    finally:
+        os.close(descriptor)
+
+
+def test_unreadable_process_executable_keeps_core_inventory_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc_root = _fake_proc(tmp_path / "proc-unreadable-executable")
+    exe_link = proc_root / "100" / "exe"
+    original_stat = os.stat
+
+    def deny_process_executable(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(path) == exe_link:
+            raise PermissionError("mock unreadable procfs executable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", deny_process_executable)
+    with pytest.raises(RuntimeError, match="Process executable is unreadable"):
+        bootstrap._core_process_snapshot(proc_root)
+
+
+def test_non_regular_process_executable_keeps_core_inventory_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc_root = _fake_proc(tmp_path / "proc-non-regular-executable")
+    exe_link = proc_root / "100" / "exe"
+    original_stat = os.stat
+
+    def report_directory_for_executable(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(path) == exe_link:
+            return original_stat(tmp_path)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", report_directory_for_executable)
+    with pytest.raises(RuntimeError, match="Process executable is unreadable"):
+        bootstrap._core_process_snapshot(proc_root)
 
 
 @pytest.mark.parametrize("resource", ["kernel-journal", "worker-transport"])
