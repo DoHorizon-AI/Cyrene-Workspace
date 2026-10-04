@@ -26,6 +26,7 @@ DEFAULT_BROKER_EXECUTABLE = Path("/usr/bin/cyrene-runtime-maintenance")
 DEFAULT_PROC_ROOT = Path("/proc")
 RUNTIME_SYSTEMD_UNIT_DIRECTORY = Path("/run/systemd/system")
 COMPILED_CATALOG_DIGEST = "sha256:9908229d8abee4cb3f1b5a55d8be5264310939e4b43700de0dfd37be7318c701"
+_DELETED_EXE_SUFFIX = " (deleted)"
 
 
 def _sha256(payload: bytes) -> str:
@@ -94,6 +95,26 @@ def _verify_detached(
     )
 
 
+def _read_process_executable(exe_link: Path) -> tuple[str, str]:
+    """Read a procfs executable link and validate its live inode.
+
+    `/proc/PID/exe` can still stat a running executable after unlink. Do not
+    resolve the displayed pathname back through the host filesystem.
+    中文：通过 procfs magic link 校验运行中的 inode，不要求已删除的原路径仍存在。
+    """
+
+    target = os.readlink(exe_link)
+    if not Path(target.removesuffix(_DELETED_EXE_SUFFIX)).is_absolute():
+        raise OSError(errno.EINVAL, "process executable path is not absolute", str(exe_link))
+    metadata = os.stat(exe_link)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise OSError(errno.EINVAL, "process executable is not a regular file", str(exe_link))
+    name = Path(target.removesuffix(_DELETED_EXE_SUFFIX)).name
+    if not name:
+        raise OSError(errno.EINVAL, "process executable name is empty", str(exe_link))
+    return target, name
+
+
 def _broker_process_exists(proc_root: Path) -> bool:
     """Fail closed if the process table is unavailable or contains the broker."""
 
@@ -111,8 +132,8 @@ def _broker_process_exists(proc_root: Path) -> bool:
             if state in {"Z", "X"}:
                 continue
             command = (process / "cmdline").read_bytes().replace(b"\0", b" ")
-            executable = (process / "exe").resolve(strict=True)
-            if executable.name == DEFAULT_BROKER_EXECUTABLE.name:
+            _executable_path, executable_name = _read_process_executable(process / "exe")
+            if executable_name == DEFAULT_BROKER_EXECUTABLE.name:
                 return True
         except FileNotFoundError:
             if not process.exists():

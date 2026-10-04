@@ -484,3 +484,91 @@ def test_process_table_unknown_fails_closed_and_kernel_threads_are_ignored(
     monkeypatch.setattr(Path, "read_text", deny_process_stat)
     with pytest.raises(RuntimeError, match="UNKNOWN"):
         bootstrap._broker_process_exists(proc_root)
+
+
+@pytest.mark.parametrize(
+    ("executable_name", "expected_broker"),
+    [("cyrene-runtime-maintenance", True), ("gvfsd", False)],
+)
+def test_deleted_running_executable_is_classified_by_inode_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    executable_name: str,
+    expected_broker: bool,
+) -> None:
+    proc_root = tmp_path / "proc-deleted-broker"
+    process = proc_root / "3"
+    process.mkdir(parents=True)
+    (process / "stat").write_text("3 (maintenance) S 1 0\n")
+    (process / "cmdline").write_bytes(b"renamed-process\0")
+    executable = tmp_path / executable_name
+    executable.write_text("still mapped executable inode")
+    exe_link = process / "exe"
+    exe_link.symlink_to(executable)
+    descriptor = os.open(executable, os.O_RDONLY)
+    executable.unlink()
+    original_readlink = os.readlink
+    original_stat = os.stat
+
+    def deleted_proc_readlink(path: Any, *args: Any, **kwargs: Any) -> str:
+        if Path(path) == exe_link:
+            return f"{executable} (deleted)"
+        return original_readlink(path, *args, **kwargs)
+
+    def deleted_proc_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(path) == exe_link:
+            return os.fstat(descriptor)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", deleted_proc_readlink)
+    monkeypatch.setattr(os, "stat", deleted_proc_stat)
+    monkeypatch.setattr(
+        bootstrap, "DEFAULT_BROKER_EXECUTABLE", Path("/usr/bin/cyrene-runtime-maintenance")
+    )
+    try:
+        assert bootstrap._broker_process_exists(proc_root) is expected_broker
+    finally:
+        os.close(descriptor)
+
+
+def test_unreadable_process_executable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc_root = tmp_path / "proc-exe-unreadable"
+    process = proc_root / "3"
+    process.mkdir(parents=True)
+    (process / "stat").write_text("3 (worker) S 1 0\n")
+    (process / "cmdline").write_bytes(b"python\0")
+    (process / "exe").symlink_to(tmp_path / "python")
+    original_readlink = os.readlink
+
+    def deny_process_executable(path: Any, *args: Any, **kwargs: Any) -> str:
+        if Path(path) == process / "exe":
+            raise PermissionError("mock unreadable procfs executable")
+        return original_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", deny_process_executable)
+    with pytest.raises(RuntimeError, match="unreadable|UNKNOWN"):
+        bootstrap._broker_process_exists(proc_root)
+
+
+def test_non_regular_process_executable_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc_root = tmp_path / "proc-non-regular-executable"
+    process = proc_root / "3"
+    process.mkdir(parents=True)
+    (process / "stat").write_text("3 (worker) S 1 0\n")
+    (process / "cmdline").write_bytes(b"python\0")
+    exe_link = process / "exe"
+    exe_link.symlink_to(tmp_path / "python")
+    original_stat = os.stat
+
+    def report_directory_for_executable(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if Path(path) == exe_link:
+            return original_stat(tmp_path)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", report_directory_for_executable)
+    with pytest.raises(RuntimeError, match="UNKNOWN"):
+        bootstrap._broker_process_exists(proc_root)
