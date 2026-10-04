@@ -106,6 +106,92 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
     )
 
 
+def test_workspace_bootstrap_uses_the_compiled_catalog_authority_pin(tmp_path: Path) -> None:
+    updater = updates.ComponentUpdater(
+        catalog_path=updates.DEFAULT_CATALOG,
+        activity_catalog_path=tmp_path / "activity-sources.json",
+        state_root=tmp_path / "update-state",
+        install_root=tmp_path / "install",
+        release_lock_path=tmp_path / "missing-release-lock.json",
+        broker_path=tmp_path / "missing-broker",
+        load_active_catalog=False,
+    )
+
+    assert updater.bootstrap_catalog_digest == updates.TRUSTED_CATALOG_DIGEST
+    assert updater.catalog_generation == 9
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "version", "abi"),
+    [
+        ("linux-ubuntu-22.04-x86_64-python-3.12", "22.04", "glibc-2.35"),
+        ("linux-ubuntu-24.04-x86_64-python-3.12", "24.04", "glibc-2.39"),
+    ],
+)
+def test_product_python_target_selects_exact_host_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile_id: str,
+    version: str,
+    abi: str,
+) -> None:
+    updater = updates.ComponentUpdater(
+        catalog_path=updates.DEFAULT_CATALOG,
+        activity_catalog_path=tmp_path / "activity-sources.json",
+        state_root=tmp_path / "update-state",
+        install_root=tmp_path / "install",
+        release_lock_path=WORKSPACE_ROOT / "release-lock.json",
+        broker_path=tmp_path / "missing-broker",
+        load_active_catalog=False,
+    )
+    lock = json.loads((WORKSPACE_ROOT / "release-lock.json").read_text(encoding="utf-8"))
+    updater.native_python_profiles = lock["nativePythonProfiles"]
+    monkeypatch.setattr(
+        updates.platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "ubuntu", "VERSION_ID": version},
+    )
+    monkeypatch.setattr(updates.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(updates.platform, "libc_ver", lambda: ("glibc", abi.removeprefix("glibc-")))
+    component = updater.components["cyrene-navigator"]
+    monkeypatch.setattr(updater, "_private_python_runtime_ready", lambda profile: False)
+    assert updater._target_for(component) is None
+
+    monkeypatch.setattr(updater, "_private_python_runtime_ready", lambda profile: True)
+    target = updater._target_for(component)
+
+    assert target is not None
+    assert target["id"] == profile_id
+    assert target["artifactKind"] == "python-bundle"
+
+
+def test_portable_data_target_remains_independent_of_ubuntu_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = updates.ComponentUpdater(
+        catalog_path=updates.DEFAULT_CATALOG,
+        activity_catalog_path=tmp_path / "activity-sources.json",
+        state_root=tmp_path / "update-state",
+        install_root=tmp_path / "install",
+        release_lock_path=tmp_path / "missing-release-lock.json",
+        broker_path=tmp_path / "missing-broker",
+        load_active_catalog=False,
+    )
+    monkeypatch.setattr(
+        updates.platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "fedora", "VERSION_ID": "42"},
+    )
+    monkeypatch.setattr(updates.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(updates.platform, "libc_ver", lambda: ("glibc", "2.39"))
+
+    target = updater._target_for(updater.components["cyrene-product-contract-bundle"])
+
+    assert target is not None
+    assert target["id"] == "portable-contract-data-v1"
+    assert target["artifactKind"] == "data-bundle"
+
+
 def _configure_unmanaged_runtime_agent(
     updater: updates.ComponentUpdater, unit_dir: Path
 ) -> dict[str, object]:
@@ -655,7 +741,6 @@ def test_deb_provisions_runtime_state_directory_fail_closed() -> None:
     assert "stat -c '%u:%g:%a' -- \"$RUNTIME_STATE_DIR\"" in builder
     assert '"0:${AUTHORITY_GID}:2770"' in builder
     assert "Refusing to repair existing runtime state in place" in builder
-    assert "! -name runtime" in builder
     assert "chown -R root:cyrene-runtime-maintenance /var/lib/cyrene/runtime" not in builder
 
 

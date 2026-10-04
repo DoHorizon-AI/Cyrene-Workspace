@@ -16,6 +16,7 @@ import pytest
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 UPDATES_PATH = WORKSPACE_ROOT / "packaging" / "component_updates.py"
 BUNDLE_PATH = WORKSPACE_ROOT / "packaging" / "service_bundle.py"
+UBUNTU_24_PROFILE_ID = "linux-ubuntu-24.04-x86_64-python-3.12"
 
 
 def _load_module(name: str, path: Path) -> Any:
@@ -29,6 +30,9 @@ def _load_module(name: str, path: Path) -> Any:
 
 updates = _load_module("cyrene_component_updates_identity_test", UPDATES_PATH)
 bundle = _load_module("cyrene_service_bundle_identity_test", BUNDLE_PATH)
+UBUNTU_24_PROFILE = bundle._native_python_profile(
+    WORKSPACE_ROOT / "release-lock.json", UBUNTU_24_PROFILE_ID
+)
 
 
 def _updater(tmp_path: Path) -> Any:
@@ -53,6 +57,7 @@ def _updater(tmp_path: Path) -> Any:
         state_root=tmp_path / "state",
         install_root=tmp_path / "install",
         broker_path=tmp_path / "missing-broker",
+        release_lock_path=WORKSPACE_ROOT / "release-lock.json",
         trusted_catalog_digest=None,
     )
 
@@ -293,7 +298,10 @@ def test_native_same_version_releases_have_distinct_identity_and_exact_rollback(
 def _legacy_v1_bundle(root: Path, marker: str = "legacy") -> dict[str, Any]:
     root.mkdir(parents=True)
     entrypoint = root / "run-service"
-    entrypoint.write_text(f"#!/bin/sh\nprintf '%s\\n' '{marker}'\n", encoding="utf-8")
+    entrypoint.write_text(
+        f"#!/bin/sh\n# {marker}\nexec {bundle.PRIVATE_PYTHON_EXECUTABLE} -I -c 'pass'\n",
+        encoding="utf-8",
+    )
     entrypoint.chmod(0o755)
     lock = root / "requirements.lock"
     lock.write_text("cyrene-navigator==1.2.3 --hash=sha256:" + "a" * 64 + "\n", encoding="utf-8")
@@ -335,8 +343,17 @@ def _legacy_v1_bundle(root: Path, marker: str = "legacy") -> dict[str, Any]:
 
 def _v2_bundle(root: Path, marker: str) -> dict[str, Any]:
     root.mkdir(parents=True)
+    dist_info = root / "python" / "cyrene-runtime-maintenance-0.1.0.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "WHEEL").write_text(
+        "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        encoding="utf-8",
+    )
     entrypoint = root / "run-service"
-    entrypoint.write_text(f"#!/bin/sh\nprintf '%s\\n' '{marker}'\n", encoding="utf-8")
+    entrypoint.write_text(
+        bundle._entrypoint_text("navigator", bundle.PRIVATE_PYTHON_EXECUTABLE),
+        encoding="utf-8",
+    )
     entrypoint.chmod(0o755)
     wheel_hash = "d" * 64
     lock = root / "requirements.lock"
@@ -359,18 +376,22 @@ def _v2_bundle(root: Path, marker: str) -> dict[str, Any]:
         "schema_version": 2,
         "service": "navigator",
         "source_repository": "Cyrene-Navigator",
-        "source_commit": "c" * 40,
+        "source_commit": hashlib.sha1(marker.encode("utf-8")).hexdigest(),
         "requirements_lock_sha256": lock_digest,
         "runtime_dependencies": runtime,
+        "target_profile": UBUNTU_24_PROFILE_ID,
+        "wheel_tags": {"cyrene-runtime-maintenance-0.1.0-py3-none-any.whl": ["py3-none-any"]},
     }
     (root / "source.json").write_text(json.dumps(source, sort_keys=True), encoding="utf-8")
     bundle._write_bundle_manifest(
         root,
         service="navigator",
-        source_commit="c" * 40,
+        source_commit=hashlib.sha1(marker.encode("utf-8")).hexdigest(),
         source_repository="Cyrene-Navigator",
-        debian_arch=bundle._debian_arch_for_host(),
-        python_version="3.12",
+        target_profile_id=UBUNTU_24_PROFILE_ID,
+        target_profile=UBUNTU_24_PROFILE,
+        source_wheel_tags=source["wheel_tags"],
+        installed_wheel_tags=["py3-none-any"],
         runtime_dependencies=runtime,
     )
     return bundle.validate_bundle(root, expected_service="navigator")
