@@ -11,6 +11,7 @@ import sys
 import tarfile
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -185,6 +186,45 @@ def _call(updater: Any, values: dict[str, bytes], target_id: str, **kwargs: Any)
     )
 
 
+def _completed_broker_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, dict[str, bytes], str, dict[str, Any], Path, Path, Path]:
+    """Create a completed broker and its exact installed unit for replay checks."""
+
+    updater, values, target_id = _fixture(tmp_path)
+    monkeypatch.setattr(bootstrap, "RUNTIME_SYSTEMD_UNIT_DIRECTORY", tmp_path / "runtime-systemd")
+    plan = _call(updater, values, target_id)
+    assert plan["status"] == "confirmation_required"
+    _call(updater, values, target_id, confirm_plan_digest=plan["planDigest"])
+
+    unit_name = updater.components[bootstrap.BOOTSTRAP_COMPONENT_ID]["systemdUnit"]
+    with tarfile.open(fileobj=io.BytesIO(values["artifact_bytes"]), mode="r:gz") as archive:
+        unit_bytes = archive.extractfile(f"systemd/{unit_name}")
+        assert unit_bytes is not None
+        unit_payload = unit_bytes.read()
+    unit_path = updater.systemd_unit_dirs[0] / unit_name
+    unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit_path.write_bytes(unit_payload)
+    unit_path.chmod(0o644)
+
+    active_path = updater.install_root / "components" / bootstrap.BOOTSTRAP_COMPONENT_ID / "active"
+    release = active_path.parent / "releases" / os.readlink(active_path).removeprefix("releases/")
+    updater.runner = lambda argv, **_kwargs: SimpleNamespace(
+        returncode=0,
+        stdout={"ActiveState": "inactive\n", "MainPID": "0\n"}[argv[2].removeprefix("--property=")],
+        stderr="",
+    )
+    return (
+        updater,
+        values,
+        target_id,
+        plan,
+        bootstrap._journal_path(updater),
+        active_path,
+        release,
+    )
+
+
 def test_digest_and_detached_attestation_mismatches_are_rejected(tmp_path: Path) -> None:
     updater, values, target_id = _fixture(tmp_path)
     values["artifact_bytes"] += b"tampered"
@@ -294,7 +334,6 @@ def test_first_bootstrap_activates_only_broker_and_recovers_interruption(tmp_pat
         updater.install_root / "components" / "cyrene-runtime-maintenance" / "active"
     ).is_symlink()
     assert os.readlink(kernel_root / "active") == kernel_pointer
-
     updater._write_active_receipt = original_write
     recovered = _call(updater, values, target_id, confirm_plan_digest=plan["planDigest"])
     assert lock_entries == ["entered", "entered"]
@@ -304,6 +343,164 @@ def test_first_bootstrap_activates_only_broker_and_recovers_interruption(tmp_pat
     assert recovered["artifactDigest"] == plan["artifactDigest"]
     assert recovered["activePointerTarget"].startswith("releases/1.2.3--")
     assert os.readlink(kernel_root / "active") == kernel_pointer
+
+
+def test_completed_same_plan_can_be_read_only_reconfirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (
+        updater,
+        values,
+        target_id,
+        original_plan,
+        journal_path,
+        active_path,
+        release,
+    ) = _completed_broker_plan(tmp_path, monkeypatch)
+    journal_bytes = journal_path.read_bytes()
+    pointer_target = os.readlink(active_path)
+    release_files = {
+        path.relative_to(release).as_posix(): path.read_bytes()
+        for path in release.rglob("*")
+        if path.is_file()
+    }
+    lock_entries: list[str] = []
+    updater._exclusive_update_lock = lambda: lock_entries.append("unexpected-lock")
+    monkeypatch.setattr(bootstrap, "_broker_process_exists", lambda _root: False)
+
+    plan = _call(updater, values, target_id)
+
+    assert plan == original_plan
+    assert journal_path.read_bytes() == journal_bytes
+    assert os.readlink(active_path) == pointer_target
+    assert {
+        path.relative_to(release).as_posix(): path.read_bytes()
+        for path in release.rglob("*")
+        if path.is_file()
+    } == release_files
+    assert lock_entries == []
+
+
+@pytest.mark.parametrize(
+    ("changed_state", "message"),
+    [("process", "process is running"), ("unit", "ActiveState")],
+)
+def test_completed_plan_confirmation_rechecks_live_state_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_state: str,
+    message: str,
+) -> None:
+    (
+        updater,
+        values,
+        target_id,
+        _original_plan,
+        journal_path,
+        active_path,
+        release,
+    ) = _completed_broker_plan(tmp_path / changed_state, monkeypatch)
+    plan = _call(updater, values, target_id)
+    before_journal = journal_path.read_bytes()
+    before_pointer = os.readlink(active_path)
+    before_release = {
+        path.relative_to(release).as_posix(): path.read_bytes()
+        for path in release.rglob("*")
+        if path.is_file()
+    }
+    if changed_state == "process":
+        monkeypatch.setattr(bootstrap, "_broker_process_exists", lambda _root: True)
+    else:
+        updater.runner = lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="active\n", stderr=""
+        )
+
+    with pytest.raises((RuntimeError, ValueError), match=message):
+        _call(updater, values, target_id, confirm_plan_digest=plan["planDigest"])
+
+    assert journal_path.read_bytes() == before_journal
+    assert os.readlink(active_path) == before_pointer
+    assert {
+        path.relative_to(release).as_posix(): path.read_bytes()
+        for path in release.rglob("*")
+        if path.is_file()
+    } == before_release
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("identity", "does not match this exact plan"),
+        ("pointer", "active pointer differs"),
+        ("receipt", "receipt|manifest does not match its receipt"),
+        ("payload", "payload digest differs"),
+        ("unit", "systemd unit differs"),
+        ("running", "process is running"),
+        ("process_unknown", "UNKNOWN"),
+        ("unit_active", "ActiveState"),
+        ("unit_unknown", "MainPID"),
+    ],
+)
+def test_completed_broker_replay_rejects_any_changed_live_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    message: str,
+) -> None:
+    (
+        updater,
+        values,
+        target_id,
+        _plan,
+        journal_path,
+        active_path,
+        release,
+    ) = _completed_broker_plan(tmp_path / failure, monkeypatch)
+    if failure == "identity":
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        journal["identity"]["targetId"] = "linux-ubuntu-22.04-x86_64-systemd"
+        journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    elif failure == "pointer":
+        active_path.unlink()
+        active_path.symlink_to("releases/other--" + "0" * 64)
+    elif failure == "receipt":
+        receipt_path = (
+            updater._installed_component_directory(bootstrap.BOOTSTRAP_COMPONENT_ID)
+            / "releases"
+            / (release.name.split("--", 1)[1] + ".json")
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["artifactDigest"] = _digest(b"different signed artifact")
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    elif failure == "payload":
+        (release / "bin" / "cyrene-runtime-maintenance").write_bytes(b"changed payload")
+    elif failure == "unit":
+        unit_path = (
+            updater.systemd_unit_dirs[0]
+            / updater.components[bootstrap.BOOTSTRAP_COMPONENT_ID]["systemdUnit"]
+        )
+        unit_path.write_text("[Service]\nExecStart=/bin/false\n", encoding="utf-8")
+    elif failure == "running":
+        monkeypatch.setattr(bootstrap, "_broker_process_exists", lambda _root: True)
+    elif failure == "process_unknown":
+        monkeypatch.setattr(
+            bootstrap,
+            "_broker_process_exists",
+            lambda _root: (_ for _ in ()).throw(RuntimeError("broker state UNKNOWN")),
+        )
+    elif failure == "unit_active":
+        updater.runner = lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout="active\n", stderr=""
+        )
+    elif failure == "unit_unknown":
+        updater.runner = lambda argv, **_kwargs: SimpleNamespace(
+            returncode=0 if "ActiveState" in argv[2] else 1,
+            stdout="inactive\n" if "ActiveState" in argv[2] else "unknown\n",
+            stderr="systemd query failed",
+        )
+
+    with pytest.raises((RuntimeError, ValueError, updates.UpdateError), match=message):
+        _call(updater, values, target_id)
 
 
 def test_manifest_jcs_and_source_mismatch_rejected_by_component_updater(tmp_path: Path) -> None:

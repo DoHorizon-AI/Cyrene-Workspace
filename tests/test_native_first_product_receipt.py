@@ -65,11 +65,20 @@ def _write_deb_fixture(root: Path) -> tuple[str, dict[str, Path]]:
     services: dict[str, dict[str, Any]] = {}
     for service in SERVICES:
         component_id = f"cyrene-{service}"
-        version = f"1.2.3-{service}"
-        artifact_digest = "sha256:" + (str(len(service)) * 64)
+        payload = f"signed staged payload:{service}".encode("ascii")
+        files = {"payload.bin": hashlib.sha256(payload).hexdigest()}
+        identity = {
+            "schema_version": 2,
+            "service": service,
+            "source_commit": SOURCE_COMMIT,
+            "files": files,
+        }
+        artifact_digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        ).hexdigest()
+        version = artifact_digest
         service_root = root / "usr/share/cyrene/service-artifacts" / service / version
         service_root.mkdir(parents=True)
-        payload = f"signed staged payload:{service}".encode("ascii")
         (service_root / "payload.bin").write_bytes(payload)
         manifest = {
             "schema_version": 2,
@@ -77,7 +86,7 @@ def _write_deb_fixture(root: Path) -> tuple[str, dict[str, Path]]:
             "version": version,
             "source_commit": SOURCE_COMMIT,
             "artifact_digest": artifact_digest,
-            "files": {"payload.bin": hashlib.sha256(payload).hexdigest()},
+            "files": files,
         }
         (service_root / "manifest.json").write_text(
             json.dumps(manifest, sort_keys=True), encoding="utf-8"
@@ -147,12 +156,31 @@ def test_cohort_binds_verified_deb_index_and_exact_staged_manifests(tmp_path: Pa
         manifest = json.loads(manifest_bytes)
         assert product["version"] == manifest["version"]
         assert product["manifestDigest"] == _sha256(manifest_bytes)
-        assert product["artifactDigest"] == manifest["artifact_digest"]
+        assert product["artifactDigest"] == "sha256:" + manifest["artifact_digest"]
         assert product["bundlePath"].endswith(f"/{product['service']}/{manifest['version']}")
     material = {key: value for key, value in receipt.items() if key != "receiptDigest"}
     assert receipt["receiptDigest"] == _sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     )
+
+
+@pytest.mark.parametrize("invalid_digest", ["sha256:" + "a" * 64, "g" * 64, "a" * 63])
+def test_cohort_rejects_noncanonical_inner_artifact_digest(
+    tmp_path: Path, invalid_digest: str
+) -> None:
+    """The signed bundle manifest uses exactly 64 raw lowercase hex characters."""
+
+    index_digest, bundles = _write_deb_fixture(tmp_path)
+    manifest_path = bundles["navigator"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifact_digest"] = invalid_digest
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(
+        admin_initialize.AdminInitializationError,
+        match="manifest identity differs: navigator",
+    ):
+        _derive(tmp_path, index_digest)
 
 
 def test_cohort_rejects_index_not_bound_to_verified_deb_proof(tmp_path: Path) -> None:

@@ -194,6 +194,110 @@ def _assert_fresh_broker(
     return current
 
 
+def _assert_completed_broker_plan_reusable(
+    updater: Any,
+    *,
+    journal: dict[str, Any],
+    plan_digest: str,
+    identity: dict[str, Any],
+    manifest: dict[str, Any],
+    artifact_digest: str,
+    payload_root: Path,
+) -> None:
+    """Allow read-only confirmation only for the exact completed inactive broker.
+
+    中文：仅对完全相同且当前未运行的已完成 broker 计划开放只读再确认。
+    """
+
+    component_id = BOOTSTRAP_COMPONENT_ID
+    component = updater.components.get(component_id)
+    unit = component.get("systemdUnit") if isinstance(component, dict) else None
+    expected_release = (
+        f"{manifest['version']}--{manifest['manifestDigest'].removeprefix('sha256:')}"
+    )
+    if (
+        journal.get("schemaVersion") != 1
+        or journal.get("phase") != "complete"
+        or journal.get("planDigest") != plan_digest
+        or journal.get("identity") != identity
+        or journal.get("releaseIdentity") != expected_release
+        or not isinstance(unit, str)
+        or component.get("restart", {}).get("unit") != unit
+    ):
+        raise ValueError("Completed maintenance broker journal does not match this exact plan")
+
+    active_path = updater.install_root / "components" / component_id / "active"
+    current = updater._active_native_pointer_identity(component_id)
+    expected_pointer = f"releases/{expected_release}"
+    if (
+        current != expected_release
+        or not active_path.is_symlink()
+        or os.readlink(active_path) != expected_pointer
+    ):
+        raise ValueError("Completed maintenance broker active pointer differs from this plan")
+
+    receipt = updater._read_active_receipt(component_id)
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("componentId") != component_id
+        or receipt.get("version") != manifest.get("version")
+        or receipt.get("manifestDigest") != manifest.get("manifestDigest")
+        or receipt.get("artifactDigest") != artifact_digest
+        or receipt.get("releaseIdentity") != manifest.get("manifestDigest")
+        or receipt.get("manifest") != manifest
+    ):
+        raise ValueError("Completed maintenance broker receipt differs from this plan")
+
+    release = updater.install_root / "components" / component_id / "releases" / expected_release
+    _verify_release_payload(updater, release, manifest)
+    installed_manifest = release / "component-manifest.json"
+    if (
+        installed_manifest.is_symlink()
+        or not installed_manifest.is_file()
+        or json.loads(installed_manifest.read_text(encoding="utf-8")) != manifest
+    ):
+        raise ValueError("Completed maintenance broker release manifest differs from this plan")
+
+    candidate_unit = payload_root / "systemd" / unit
+    if candidate_unit.is_symlink() or not candidate_unit.is_file():
+        raise ValueError("Verified broker payload omits its pinned systemd unit")
+    candidate_unit_bytes = candidate_unit.read_bytes()
+    if not updater._unit_uses_component_runner(candidate_unit, component_id):
+        raise ValueError("Verified broker systemd unit is not the pinned component runner")
+    installed_units = [
+        Path(directory) / unit
+        for directory in dict.fromkeys((*updater.systemd_unit_dirs, RUNTIME_SYSTEMD_UNIT_DIRECTORY))
+        if (Path(directory) / unit).exists() or (Path(directory) / unit).is_symlink()
+    ]
+    if len(installed_units) != 1:
+        raise ValueError("Completed maintenance broker systemd unit is missing or ambiguous")
+    installed_unit = installed_units[0]
+    unit_info = installed_unit.lstat()
+    if (
+        not stat.S_ISREG(unit_info.st_mode)
+        or unit_info.st_uid != os.geteuid()
+        or stat.S_IMODE(unit_info.st_mode) & 0o022
+        or installed_unit.read_bytes() != candidate_unit_bytes
+        or not updater._unit_uses_component_runner(installed_unit, component_id)
+    ):
+        raise ValueError("Installed maintenance broker systemd unit differs from this plan")
+
+    if _broker_process_exists(DEFAULT_PROC_ROOT):
+        raise ValueError("A maintenance broker process is running; exact-plan reuse is denied")
+    for property_name, expected_value in (("ActiveState", "inactive"), ("MainPID", "0")):
+        result = updater.runner(
+            ["systemctl", "show", f"--property={property_name}", "--value", unit],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0 or result.stdout.strip() != expected_value:
+            raise RuntimeError(
+                f"Maintenance broker {property_name} is not the exact inactive state"
+            )
+
+
 def _journal_path(updater: Any) -> Path:
     return Path(updater.state_root) / "native-first-bootstrap" / BOOTSTRAP_JOURNAL_NAME
 
@@ -586,9 +690,18 @@ def bootstrap_verified_runtime_maintenance(
         journal_path = _journal_path(updater)
         journal = _read_journal(journal_path)
         if confirm_plan_digest is None:
-            _assert_fresh_broker(
-                updater,
-            )
+            if journal is not None and journal.get("phase") == "complete":
+                _assert_completed_broker_plan_reusable(
+                    updater,
+                    journal=journal,
+                    plan_digest=plan_digest,
+                    identity=identity,
+                    manifest=manifest,
+                    artifact_digest=artifact["sha256"],
+                    payload_root=payload_root,
+                )
+            else:
+                _assert_fresh_broker(updater)
             if journal is not None and journal.get("planDigest") != plan_digest:
                 raise ValueError("A different interrupted bootstrap blocks this plan")
             return {"status": "confirmation_required", "planDigest": plan_digest, **identity}
@@ -607,6 +720,17 @@ def bootstrap_verified_runtime_maintenance(
             manifest_bytes=manifest_bytes,
         )
         with updater._exclusive_update_lock():
+            confirmed_journal = _read_journal(journal_path)
+            if confirmed_journal is not None and confirmed_journal.get("phase") == "complete":
+                _assert_completed_broker_plan_reusable(
+                    updater,
+                    journal=confirmed_journal,
+                    plan_digest=plan_digest,
+                    identity=identity,
+                    manifest=manifest,
+                    artifact_digest=artifact["sha256"],
+                    payload_root=payload_root,
+                )
             return _activate_confirmed(
                 updater,
                 candidate=candidate,

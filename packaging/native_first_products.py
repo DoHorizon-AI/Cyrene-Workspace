@@ -50,6 +50,7 @@ DEFAULT_PORTS = {
     "catalyst": 8004,
 }
 RECEIPT_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+RAW_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 PROC_ROOT = Path("/proc")
@@ -199,6 +200,17 @@ def _bundle_module(updater: Any) -> Any:
     return updater._load_service_bundle()
 
 
+def _typed_bundle_artifact_digest(value: Any) -> str | None:
+    """Convert a raw bundle digest to the receipt's typed SHA-256 form.
+
+    中文：仅将 bundle manifest 的裸 SHA-256 hex 转为 receipt 类型化格式。
+    """
+
+    if not isinstance(value, str) or RAW_SHA256.fullmatch(value) is None:
+        return None
+    return f"sha256:{value}"
+
+
 def _verified_products(
     updater: Any, core_plan: dict[str, Any], path: Path
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -286,7 +298,8 @@ def _verified_products(
         if (
             _digest(manifest_bytes) != row["manifestDigest"]
             or manifest.get("version") != row["version"]
-            or manifest.get("artifact_digest") != row["artifactDigest"]
+            or _typed_bundle_artifact_digest(manifest.get("artifact_digest"))
+            != row["artifactDigest"]
             or manifest.get("source_commit") != expected_source.get("source", {}).get("commit")
             or manifest.get("target", {}).get("profile_id") != product_profile_id
             or manifest.get("schema_version") != 2
@@ -572,7 +585,8 @@ def _live_product(updater: Any, product: dict[str, Any], *, proc_root: Path = PR
     )
     if (
         _digest((release / "manifest.json").read_bytes()) != product["manifestDigest"]
-        or installed_manifest.get("artifact_digest") != product["artifactDigest"]
+        or _typed_bundle_artifact_digest(installed_manifest.get("artifact_digest"))
+        != product["artifactDigest"]
     ):
         raise RuntimeError(
             f"Active Product bytes differ from the confirmed cohort: {product['service']}"
