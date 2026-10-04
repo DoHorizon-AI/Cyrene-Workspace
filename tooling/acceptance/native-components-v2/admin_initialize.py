@@ -40,6 +40,21 @@ COMPONENT_UPDATE_HELPER = Path("/usr/libexec/cyrene-component-update-helper")
 OPERATOR_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 ADMIN_ROOT_UID = 0
 ADMIN_ROOT_GID = 0
+FIRST_PRODUCT_COHORT_RECEIPT = Path(
+    "/var/lib/cyrene/native-initialization/first-product-cohort.json"
+)
+FIRST_PRODUCT_SERVICE_ORDER = ("navigator", "yield", "reactor", "exchange", "catalyst")
+FIRST_PRODUCT_PLATFORM_TARGETS = {
+    "linux-ubuntu-22.04-x86_64-python-3.12": "linux-ubuntu-22.04-x86_64-systemd",
+    "linux-ubuntu-24.04-x86_64-python-3.12": "linux-ubuntu-24.04-x86_64-systemd",
+}
+SERVICE_REPOSITORIES = {
+    "navigator": "Cyrene-Navigator",
+    "yield": "Cyrene-Yield",
+    "reactor": "Cyrene-Reactor",
+    "exchange": "Cyrene-Exchange",
+    "catalyst": "Cyrene-Catalyst",
+}
 PRODUCT_SOURCE_IDS = frozenset(
     {
         "cyrene-catalyst",
@@ -81,6 +96,7 @@ BACKUP_PATHS = (
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RAW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+PRODUCT_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 
 
 class AdminInitializationError(RuntimeError):
@@ -487,6 +503,378 @@ def _write_admin_journal(path: Path, value: dict[str, Any]) -> None:
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _canonical_receipt_bytes(value: dict[str, Any]) -> bytes:
+    """Encode this ASCII-only receipt subset using canonical JCS-compatible JSON."""
+
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
+
+
+def _first_product_receipt_material(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Validate the closed first-Product receipt shape and return digest material."""
+
+    if not isinstance(receipt, dict):
+        raise AdminInitializationError("First-Product cohort receipt must be an object")
+    if set(receipt) != {
+        "schemaVersion",
+        "kind",
+        "installer",
+        "products",
+        "receiptDigest",
+    }:
+        raise AdminInitializationError("First-Product cohort receipt has unexpected fields")
+    installer = receipt.get("installer")
+    products = receipt.get("products")
+    if (
+        receipt.get("schemaVersion") != 1
+        or receipt.get("kind") != "first-product-cohort"
+        or not isinstance(installer, dict)
+        or set(installer) != {"debSha256", "sourceCommit", "targetId"}
+        or not isinstance(installer.get("debSha256"), str)
+        or not SHA256_RE.fullmatch(installer["debSha256"])
+        or not isinstance(installer.get("sourceCommit"), str)
+        or COMMIT_RE.fullmatch(installer["sourceCommit"]) is None
+        or not isinstance(installer.get("targetId"), str)
+        or installer["targetId"] not in FIRST_PRODUCT_PLATFORM_TARGETS.values()
+        or not isinstance(products, list)
+        or len(products) != len(FIRST_PRODUCT_SERVICE_ORDER)
+    ):
+        raise AdminInitializationError("First-Product cohort receipt identity is invalid")
+    expected_services = list(FIRST_PRODUCT_SERVICE_ORDER)
+    actual_services: list[str] = []
+    for product in products:
+        if not isinstance(product, dict) or set(product) != {
+            "service",
+            "componentId",
+            "version",
+            "manifestDigest",
+            "artifactDigest",
+            "bundlePath",
+        }:
+            raise AdminInitializationError("First-Product cohort entry has unexpected fields")
+        service = product.get("service")
+        if (
+            not isinstance(service, str)
+            or product.get("componentId") != f"cyrene-{service}"
+            or not isinstance(product.get("version"), str)
+            or PRODUCT_VERSION_RE.fullmatch(product["version"]) is None
+            or not isinstance(product.get("manifestDigest"), str)
+            or not SHA256_RE.fullmatch(product["manifestDigest"])
+            or not isinstance(product.get("artifactDigest"), str)
+            or not SHA256_RE.fullmatch(product["artifactDigest"])
+            or product.get("bundlePath")
+            != f"/usr/share/cyrene/service-artifacts/{service}/{product['version']}"
+        ):
+            raise AdminInitializationError("First-Product cohort entry identity is invalid")
+        actual_services.append(service)
+    if actual_services != expected_services:
+        raise AdminInitializationError("First-Product cohort services are not canonical")
+    material = {key: value for key, value in receipt.items() if key != "receiptDigest"}
+    expected_digest = _sha256_bytes(_canonical_receipt_bytes(material))
+    if receipt.get("receiptDigest") != expected_digest:
+        raise AdminInitializationError("First-Product cohort receipt digest is invalid")
+    return material
+
+
+def _load_staged_service_bundle_validator(extracted_deb: Path) -> Callable[..., dict[str, Any]]:
+    """Load the validator shipped in the exact verified DEB extraction."""
+
+    module_path = extracted_deb / "usr/lib/cyrene/scripts/service_bundle.py"
+    release_lock = extracted_deb / "usr/lib/cyrene/release-lock.json"
+    if (
+        module_path.is_symlink()
+        or not module_path.is_file()
+        or release_lock.is_symlink()
+        or not release_lock.is_file()
+    ):
+        raise AdminInitializationError("Verified DEB omits its service bundle verifier or lock")
+    module_name = (
+        "_cyrene_admin_service_bundle_"
+        + hashlib.sha256(str(module_path).encode("utf-8")).hexdigest()[:12]
+    )
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise AdminInitializationError("Verified DEB service bundle validator cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    validate = getattr(module, "validate_bundle", None)
+    if not callable(validate):
+        raise AdminInitializationError("Verified DEB service bundle validator is incomplete")
+
+    def validate_staged_bundle(
+        bundle_path: Path, *, expected_service: str, expected_target_profile: str
+    ) -> dict[str, Any]:
+        try:
+            return validate(
+                bundle_path,
+                expected_service=expected_service,
+                expected_target_profile=expected_target_profile,
+                release_lock_path=release_lock,
+            )
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            raise AdminInitializationError(
+                f"Staged {expected_service} bundle failed signed DEB validation: {error}"
+            ) from error
+
+    return validate_staged_bundle
+
+
+def _derive_first_product_cohort(
+    extracted_deb: Path,
+    *,
+    deb_sha256: str,
+    source_commit: str,
+    target_id: str,
+    target_profile: str,
+    service_artifacts_index_sha256: str,
+    bundle_validator: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Derive the five staged Product identities from the verified DEB bytes."""
+
+    if not SHA256_RE.fullmatch(deb_sha256) or COMMIT_RE.fullmatch(source_commit) is None:
+        raise AdminInitializationError("Verified installer identity is malformed")
+    if not RAW_SHA256_RE.fullmatch(service_artifacts_index_sha256):
+        raise AdminInitializationError("Verified Product index digest is malformed")
+    index_path = extracted_deb / "usr/share/cyrene/service-artifacts/index.json"
+    if index_path.is_symlink() or not index_path.is_file():
+        raise AdminInitializationError("Verified DEB omits the staged Product index")
+    index_bytes = _private_regular_file(index_path, "staged Product index")
+    if hashlib.sha256(index_bytes).hexdigest() != service_artifacts_index_sha256:
+        raise AdminInitializationError("Staged Product index differs from signed DEB receipt")
+    try:
+        index = json.loads(index_bytes)
+    except json.JSONDecodeError as error:
+        raise AdminInitializationError("Staged Product index is invalid JSON") from error
+    if (
+        not isinstance(index, dict)
+        or set(index) != {"schemaVersion", "targetProfile", "services"}
+        or index.get("schemaVersion") != 1
+        or index.get("targetProfile") != target_profile
+        or not isinstance(index.get("services"), dict)
+    ):
+        raise AdminInitializationError(
+            "Staged Product index does not match the verified host profile"
+        )
+    services = index["services"]
+    if set(services) != PRODUCT_SOURCE_IDS:
+        raise AdminInitializationError(
+            "Staged Product index does not contain exactly five Products"
+        )
+    validate_bundle = bundle_validator or _load_staged_service_bundle_validator(extracted_deb)
+    products: list[dict[str, str]] = []
+    for service in FIRST_PRODUCT_SERVICE_ORDER:
+        component_id = f"cyrene-{service}"
+        record = services.get(component_id)
+        if (
+            not isinstance(record, dict)
+            or set(record)
+            != {
+                "componentId",
+                "repository",
+                "releaseId",
+                "source",
+                "artifact",
+                "manifest",
+                "attestation",
+            }
+            or record.get("componentId") != component_id
+            or record.get("repository") != f"DoHorizon-AI/{SERVICE_REPOSITORIES[service]}"
+        ):
+            raise AdminInitializationError(
+                f"Staged Product index identity is invalid: {component_id}"
+            )
+        product_source = record.get("source")
+        if (
+            not isinstance(product_source, dict)
+            or set(product_source) != {"ref", "commit"}
+            or not isinstance(product_source.get("ref"), str)
+            or not product_source["ref"]
+            or not isinstance(product_source.get("commit"), str)
+            or COMMIT_RE.fullmatch(product_source["commit"]) is None
+        ):
+            raise AdminInitializationError(
+                f"Staged Product source identity is invalid: {component_id}"
+            )
+        service_root = extracted_deb / "usr/share/cyrene/service-artifacts" / service
+        if service_root.is_symlink() or not service_root.is_dir():
+            raise AdminInitializationError(f"Staged Product bundle is missing: {service}")
+        versions = list(service_root.iterdir())
+        if len(versions) != 1 or versions[0].is_symlink() or not versions[0].is_dir():
+            raise AdminInitializationError(f"Staged Product bundle cohort is ambiguous: {service}")
+        bundle_path = versions[0]
+        manifest = validate_bundle(
+            bundle_path,
+            expected_service=service,
+            expected_target_profile=target_profile,
+        )
+        manifest_path = bundle_path / "manifest.json"
+        manifest_bytes = _private_regular_file(manifest_path, f"staged {service} bundle manifest")
+        manifest_digest = _sha256_bytes(manifest_bytes)
+        if not isinstance(manifest, dict):
+            raise AdminInitializationError(
+                f"Staged Product validator returned no manifest: {service}"
+            )
+        version = manifest.get("version")
+        artifact_digest = manifest.get("artifact_digest")
+        if (
+            manifest.get("schema_version") != 2
+            or manifest.get("service") != service
+            or manifest.get("source_commit") != product_source["commit"]
+            or not isinstance(version, str)
+            or bundle_path.name != version
+            or not isinstance(artifact_digest, str)
+            or not SHA256_RE.fullmatch(artifact_digest)
+        ):
+            raise AdminInitializationError(f"Staged Product manifest identity differs: {service}")
+        products.append(
+            {
+                "service": service,
+                "componentId": component_id,
+                "version": version,
+                "manifestDigest": manifest_digest,
+                "artifactDigest": artifact_digest,
+                "bundlePath": f"/usr/share/cyrene/service-artifacts/{service}/{version}",
+            }
+        )
+    receipt: dict[str, Any] = {
+        "schemaVersion": 1,
+        "kind": "first-product-cohort",
+        "installer": {
+            "debSha256": deb_sha256,
+            "sourceCommit": source_commit,
+            "targetId": target_id,
+        },
+        "products": products,
+    }
+    receipt["receiptDigest"] = _sha256_bytes(_canonical_receipt_bytes(receipt))
+    _first_product_receipt_material(receipt)
+    return receipt
+
+
+def _write_first_product_cohort_receipt(
+    receipt: dict[str, Any],
+    *,
+    path: Path = FIRST_PRODUCT_COHORT_RECEIPT,
+) -> dict[str, Any]:
+    """Atomically retain one root-private receipt and refuse nonmatching prior data."""
+
+    _first_product_receipt_material(receipt)
+    parent = path.parent
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_info = parent.lstat()
+    if (
+        parent.is_symlink()
+        or not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != ADMIN_ROOT_UID
+        or stat.S_IMODE(parent_info.st_mode) != 0o700
+    ):
+        raise AdminInitializationError("First-Product receipt directory is unsafe")
+    serialized = (
+        json.dumps(receipt, ensure_ascii=True, sort_keys=True, indent=2).encode("utf-8") + b"\n"
+    )
+    if os.path.lexists(path):
+        if path.is_symlink() or not path.is_file():
+            raise AdminInitializationError("Existing First-Product receipt path is unsafe")
+        info = path.lstat()
+        if (
+            info.st_uid != ADMIN_ROOT_UID
+            or info.st_gid != ADMIN_ROOT_GID
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise AdminInitializationError("Existing First-Product receipt is not root-private")
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise AdminInitializationError("Existing First-Product receipt is invalid") from error
+        _first_product_receipt_material(existing)
+        if existing != receipt:
+            raise AdminInitializationError("Existing First-Product receipt binds different inputs")
+        return {
+            "path": str(path),
+            "receiptDigest": receipt["receiptDigest"],
+            "status": "verified-existing",
+        }
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".first-product-cohort-", dir=parent)
+    temporary = Path(temporary_name)
+    installed_new = False
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, ADMIN_ROOT_UID, ADMIN_ROOT_GID)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(serialized)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+        installed_new = True
+        temporary.unlink()
+        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        readback_info = path.lstat()
+        readback = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(readback_info.st_mode)
+            or readback_info.st_uid != ADMIN_ROOT_UID
+            or readback_info.st_gid != ADMIN_ROOT_GID
+            or stat.S_IMODE(readback_info.st_mode) != 0o600
+            or readback != receipt
+        ):
+            raise AdminInitializationError("First-Product receipt failed atomic readback")
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        if installed_new and path.is_file() and not path.is_symlink():
+            try:
+                current = json.loads(path.read_text(encoding="utf-8"))
+                if current == receipt:
+                    path.unlink()
+            except (OSError, json.JSONDecodeError):
+                pass
+        raise
+    return {
+        "path": str(path),
+        "receiptDigest": receipt["receiptDigest"],
+        "status": "written",
+    }
+
+
+def _write_verified_first_product_cohort(
+    deb_path: Path,
+    *,
+    release_proof: dict[str, Any],
+    target: dict[str, Any],
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    receipt_path: Path = FIRST_PRODUCT_COHORT_RECEIPT,
+) -> dict[str, Any]:
+    """Extract the officially verified DEB and persist its validated staged Products."""
+
+    source = release_proof.get("source")
+    if not isinstance(source, dict):
+        raise AdminInitializationError("Verified native release has no source identity")
+    target_profile = target.get("targetId", "")
+    platform_target = FIRST_PRODUCT_PLATFORM_TARGETS.get(target_profile)
+    if platform_target is None:
+        raise AdminInitializationError("Verified DEB does not identify a supported Product profile")
+    extracted = Path(tempfile.mkdtemp(prefix="cyrene-first-product-deb-"))
+    try:
+        _run(["/usr/bin/dpkg-deb", "--extract", str(deb_path), str(extracted)], runner=runner)
+        receipt = _derive_first_product_cohort(
+            extracted,
+            deb_sha256=target.get("debSha256", ""),
+            source_commit=source.get("commit", ""),
+            target_id=platform_target,
+            target_profile=target_profile,
+            service_artifacts_index_sha256=target.get("serviceArtifactsIndexSha256", ""),
+        )
+        return _write_first_product_cohort_receipt(receipt, path=receipt_path)
+    finally:
+        shutil.rmtree(extracted, ignore_errors=True)
 
 
 def _operator_identity(
@@ -1036,6 +1424,13 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
     }:
         raise AdminInitializationError("Admin initialization journal has an unsupported phase")
 
+    evidence["firstProductCohort"] = _write_verified_first_product_cohort(
+        deb_path,
+        release_proof=release_proof,
+        target=target,
+    )
+    _write_admin_journal(journal_path, journal)
+
     if journal["phase"] == "identity-prepared":
         _fresh_activity_state(Path("/"))
         extract_root = Path(tempfile.mkdtemp(prefix="cyrene-init-deb-"))
@@ -1192,6 +1587,7 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
         "backup": evidence["backup"],
         "broker": evidence.get("brokerActivation"),
         "activitySources": evidence.get("activitySources"),
+        "firstProductCohort": evidence.get("firstProductCohort"),
         "operatorAuthorization": operator_authorization,
         "readiness": "UNKNOWN",
         "applyAdmission": "CLOSED",
