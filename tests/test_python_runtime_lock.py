@@ -30,6 +30,33 @@ def _lock() -> dict:
     return json.loads(LOCK_PATH.read_text(encoding="utf-8"))
 
 
+class _MetadataResponse(io.BytesIO):
+    def __init__(self, url: str) -> None:
+        super().__init__(b"{}")
+        self._url = url
+
+    def geturl(self) -> str:
+        return self._url
+
+
+def _mock_metadata_opener(
+    monkeypatch: pytest.MonkeyPatch,
+    module: ModuleType,
+    request_capture: dict[str, object],
+) -> None:
+    class _Opener:
+        def open(self, request: object, *, timeout: int) -> _MetadataResponse:
+            request_capture["request"] = request
+            request_capture["timeout"] = timeout
+            return _MetadataResponse(request.full_url)  # type: ignore[attr-defined]
+
+    def build_opener(*handlers: object) -> _Opener:
+        request_capture["handlers"] = handlers
+        return _Opener()
+
+    monkeypatch.setattr(module.urllib.request, "build_opener", build_opener)
+
+
 def test_locked_runtime_uses_real_official_asset_and_separate_archive_digest() -> None:
     module = _module()
     lock = _lock()
@@ -64,6 +91,71 @@ def test_locked_runtime_uses_real_official_asset_and_separate_archive_digest() -
     assert lock["payload"]["verificationRecordPath"].endswith("python-runtime-verification.json")
 
     module.validate_lock(lock, LOCK_PATH)
+
+
+def test_github_api_metadata_uses_preferred_token_and_strips_redirect_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    request_capture: dict[str, object] = {}
+    _mock_metadata_opener(monkeypatch, module, request_capture)
+    monkeypatch.setenv("GH_TOKEN", "preferred-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "fallback-token")
+
+    assert module._read_limited_url("https://api.github.com/repos/astral-sh/project") == b"{}"
+
+    request = request_capture["request"]
+    assert request.get_header("Authorization") == "Bearer preferred-token"
+    assert request_capture["timeout"] == 60
+    handler = request_capture["handlers"][0]
+    redirected = handler.redirect_request(
+        request, None, 302, "Found", {}, "https://objects.githubusercontent.com/asset"
+    )
+    assert redirected.get_header("Authorization") is None
+
+
+def test_github_api_metadata_without_token_is_anonymous(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    request_capture: dict[str, object] = {}
+    _mock_metadata_opener(monkeypatch, module, request_capture)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    module._read_limited_url("https://api.github.com/repos/astral-sh/project")
+
+    request = request_capture["request"]
+    assert request.get_header("Authorization") is None
+
+
+def test_github_api_metadata_uses_fallback_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    request_capture: dict[str, object] = {}
+    _mock_metadata_opener(monkeypatch, module, request_capture)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "fallback-token")
+
+    module._read_limited_url("https://api.github.com/repos/astral-sh/project")
+
+    request = request_capture["request"]
+    assert request.get_header("Authorization") == "Bearer fallback-token"
+
+
+def test_metadata_request_does_not_send_github_token_to_other_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module()
+    request_capture: dict[str, object] = {}
+    _mock_metadata_opener(monkeypatch, module, request_capture)
+    monkeypatch.setenv("GH_TOKEN", "secret-token")
+
+    module._read_limited_url("https://raw.githubusercontent.com/astral-sh/project/main/file")
+
+    request = request_capture["request"]
+    assert request.get_header("Authorization") is None
 
 
 def test_runtime_lock_rejects_archive_hash_or_uv_mapping_drift() -> None:

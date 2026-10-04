@@ -352,22 +352,46 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+class _StripAuthorizationRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow approved redirects without forwarding credentials."""
+
+    def redirect_request(
+        self,
+        request: urllib.request.Request,
+        response: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> urllib.request.Request | None:
+        redirected = super().redirect_request(request, response, code, message, headers, new_url)
+        if redirected is not None:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
 def _read_limited_url(url: str, *, limit: int = MAX_METADATA_BYTES) -> bytes:
     """Fetch one pinned HTTPS source and reject redirects outside official hosts."""
 
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname not in ALLOWED_DOWNLOAD_HOSTS:
         raise PythonRuntimeError(f"refusing non-official download URL: {url}")
+    headers = {
+        "Accept": "application/vnd.github+json, application/json, application/octet-stream",
+        "User-Agent": "CyrenePrivatePythonBootstrap/1",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if parsed.hostname == "api.github.com":
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         url,
-        headers={
-            "Accept": "application/vnd.github+json, application/json, application/octet-stream",
-            "User-Agent": "CyrenePrivatePythonBootstrap/1",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=headers,
     )
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:
+        opener = urllib.request.build_opener(_StripAuthorizationRedirectHandler())
+        with opener.open(request, timeout=60) as response:
             final_host = urllib.parse.urlsplit(response.geturl()).hostname
             if final_host not in ALLOWED_DOWNLOAD_HOSTS:
                 raise PythonRuntimeError(
