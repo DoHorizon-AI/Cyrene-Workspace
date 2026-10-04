@@ -11,4 +11,24 @@ if [ "$(/usr/bin/id -u)" -ne 0 ]; then
     exit 1
 fi
 
+gh=/usr/libexec/cyrene-tools/gh
+if [ ! -f "$gh" ] || [ -L "$gh" ] || [ ! -x "$gh" ] \
+    || [ "$(/usr/bin/stat -c '%u:%a' "$gh")" != "0:755" ] \
+    || [ "$(/usr/bin/sha256sum "$gh" | /usr/bin/cut -d ' ' -f 1)" != \
+        "141507c337e8b202ad398550c3b73d72f5af92e86f71665214538a81efd4c409" ]; then
+    printf '%s\n' 'cyrene-component-update-helper: pinned GitHub CLI is missing or unsafe.' >&2
+    exit 1
+fi
+
+PATH=/usr/libexec/cyrene-tools:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_HOST GITHUB_HOST GITHUB_API_URL
+GH_CONFIG_DIR=/var/lib/cyrene/operator-tools/gh-config
+export GH_CONFIG_DIR
+[ -d "$GH_CONFIG_DIR" ] && [ ! -L "$GH_CONFIG_DIR" ] \
+    && [ "$(/usr/bin/stat -c '%u:%a' "$GH_CONFIG_DIR")" = "0:700" ] || {
+    printf '%s\n' 'cyrene-component-update-helper: pinned GitHub CLI config directory is missing or unsafe.' >&2
+    exit 1
+}
+
 exec /usr/bin/cyrene update --json

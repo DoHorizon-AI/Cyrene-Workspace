@@ -37,6 +37,8 @@ BOOTSTRAP_UNIT = "cyrene-runtime-maintenance.service"
 PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
 BOOTSTRAP_HELPER_RELATIVE = PurePosixPath("share/cyrene-managed-runtime/cyrene_managed_runtime.py")
 COMPONENT_UPDATE_HELPER = Path("/usr/libexec/cyrene-component-update-helper")
+OPERATOR_TOOLS_LOCK = Path(__file__).with_name("operator-tools.lock.json")
+PERSISTENT_GH = Path("/usr/libexec/cyrene-tools/gh")
 OPERATOR_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 ADMIN_ROOT_UID = 0
 ADMIN_ROOT_GID = 0
@@ -88,6 +90,7 @@ BACKUP_PATHS = (
     "/usr/lib/systemd/system/cyrene-sandboxd.service",
     "/usr/lib/systemd/system/cyrene-linux-sys-adapter.service",
     "/usr/lib/systemd/system/cyrene-nvidia-adapter.service",
+    "/usr/libexec/cyrene-tools",
     "/usr/lib/cyrene/components",
     "/opt/cyrene/python/3.12.14",
     "/var/lib/cyrene",
@@ -235,6 +238,218 @@ def _ensure_private_directory(path: Path) -> None:
         or stat.S_IMODE(info.st_mode) != 0o700
     ):
         raise AdminInitializationError(f"Private directory is unsafe: {path}")
+
+
+def _ensure_operator_gh_config() -> None:
+    """Create the pinned CLI's root-only config beneath trusted Cyrene state."""
+
+    for parent in (Path("/var"), Path("/var/lib")):
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or parent.is_symlink() or info.st_uid != 0:
+            raise AdminInitializationError(f"GitHub CLI config parent is unsafe: {parent}")
+    cyrene_state = Path("/var/lib/cyrene")
+    if not cyrene_state.exists():
+        cyrene_state.mkdir(mode=0o755)
+        os.chown(cyrene_state, 0, 0)
+        os.chmod(cyrene_state, 0o755)
+    state_info = cyrene_state.lstat()
+    if not stat.S_ISDIR(state_info.st_mode) or cyrene_state.is_symlink() or state_info.st_uid != 0:
+        raise AdminInitializationError(f"GitHub CLI config parent is unsafe: {cyrene_state}")
+    _ensure_private_directory(Path("/var/lib/cyrene/operator-tools/gh-config"))
+
+
+def _locked_github_cli_digest(lock_path: Path = OPERATOR_TOOLS_LOCK) -> str:
+    """Read the fixed GitHub CLI binary digest from the exact bundled lock."""
+
+    try:
+        value = json.loads(lock_path.read_text(encoding="utf-8"))
+        gh = value["githubCli"]
+        digest = gh["binarySha256"]
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise AdminInitializationError(
+            "Pinned GitHub CLI lock is unavailable or invalid"
+        ) from error
+    if (
+        value.get("schemaVersion") != 1
+        or gh.get("version") != "2.97.0"
+        or gh.get("repository") != "cli/cli"
+        or gh.get("tag") != "v2.97.0"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(digest))
+    ):
+        raise AdminInitializationError("Pinned GitHub CLI lock is unsupported")
+    return str(digest)
+
+
+def _persist_locked_github_cli(
+    source: Path, *, destination: Path = PERSISTENT_GH
+) -> dict[str, str]:
+    """Atomically install the exact pinned CLI for later restricted updates."""
+
+    expected_digest = _locked_github_cli_digest()
+    if (
+        source.is_symlink()
+        or not source.is_file()
+        or _sha256_file(source) != f"sha256:{expected_digest}"
+    ):
+        raise AdminInitializationError("Packet GitHub CLI does not match the fixed binary SHA-256")
+    directory = destination.parent
+    for parent in (Path("/usr"), Path("/usr/libexec")):
+        parent_info = parent.lstat()
+        if not stat.S_ISDIR(parent_info.st_mode) or parent.is_symlink() or parent_info.st_uid != 0:
+            raise AdminInitializationError(f"Persistent GitHub CLI parent is unsafe: {parent}")
+    if directory.is_symlink():
+        raise AdminInitializationError("Persistent GitHub CLI directory must not be a symlink")
+    if not directory.exists():
+        directory.mkdir(mode=0o755, parents=False, exist_ok=False)
+        os.chown(directory, 0, 0)
+        os.chmod(directory, 0o755)
+    directory_info = directory.lstat()
+    if (
+        not stat.S_ISDIR(directory_info.st_mode)
+        or directory_info.st_uid != 0
+        or stat.S_IMODE(directory_info.st_mode) != 0o755
+    ):
+        raise AdminInitializationError("Persistent GitHub CLI directory is not root-owned mode 755")
+    if destination.is_symlink():
+        raise AdminInitializationError("Persistent GitHub CLI destination must not be a symlink")
+    if destination.exists():
+        info = destination.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o755
+            or _sha256_file(destination) != f"sha256:{expected_digest}"
+        ):
+            raise AdminInitializationError(
+                "Existing persistent GitHub CLI is not the verified root-owned pinned binary"
+            )
+        _ensure_operator_gh_config()
+        return {"path": str(destination), "sha256": f"sha256:{expected_digest}"}
+
+    _ensure_operator_gh_config()
+
+    temporary: Path | None = None
+    try:
+        fd, temporary_name = tempfile.mkstemp(prefix=".gh.", dir=directory)
+        temporary = Path(temporary_name)
+        with os.fdopen(fd, "wb") as output, source.open("rb") as input_stream:
+            shutil.copyfileobj(input_stream, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chown(temporary, 0, 0)
+        os.chmod(temporary, 0o755)
+        if _sha256_file(temporary) != f"sha256:{expected_digest}":
+            raise AdminInitializationError("Copied GitHub CLI changed before installation")
+        os.replace(temporary, destination)
+        temporary = None
+        directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise AdminInitializationError(
+            f"Persistent GitHub CLI could not be installed: {error}"
+        ) from error
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {"path": str(destination), "sha256": f"sha256:{expected_digest}"}
+
+
+DEPENDENCY_RE = re.compile(r"^([a-z0-9][a-z0-9+.-]*)(?:\s*\((<<|<=|=|>=|>>)\s*([^()]+)\))?$")
+
+
+def _preflight_deb_dependencies(
+    deb_path: Path,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> None:
+    """Require every generated DEB dependency to be installed before any host writes."""
+
+    def invoke(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        try:
+            return runner(
+                arguments,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise AdminInitializationError("Cannot preflight signed DEB dependencies") from error
+
+    metadata = invoke(["/usr/bin/dpkg-deb", "--field", str(deb_path), "Depends"])
+    if metadata.returncode != 0:
+        raise AdminInitializationError("Cannot read Depends from the signed DEB")
+    package_architecture = invoke(["/usr/bin/dpkg-deb", "--field", str(deb_path), "Architecture"])
+    if package_architecture.returncode != 0:
+        raise AdminInitializationError("Cannot read Architecture from the signed DEB")
+    package_architecture = package_architecture.stdout.strip()
+    native_architecture = invoke(["/usr/bin/dpkg", "--print-architecture"])
+    if native_architecture.returncode != 0 or not native_architecture.stdout.strip():
+        raise AdminInitializationError("Cannot determine the host's native Debian architecture")
+    native_architecture = native_architecture.stdout.strip()
+    if package_architecture not in {native_architecture, "all"}:
+        raise AdminInitializationError(
+            "Signed DEB architecture does not match the host's native architecture"
+        )
+    expression = metadata.stdout.strip()
+    if not expression:
+        return
+    for raw_group in expression.split(","):
+        alternatives: list[tuple[str, str | None, str | None]] = []
+        for raw_alternative in raw_group.split("|"):
+            match = DEPENDENCY_RE.fullmatch(raw_alternative.strip())
+            if match is None:
+                raise AdminInitializationError(
+                    f"Unsupported signed DEB dependency syntax: {raw_alternative.strip()}"
+                )
+            alternatives.append((match.group(1), match.group(2), match.group(3)))
+        satisfied = False
+        for package, operator, required_version in alternatives:
+            query = invoke(
+                [
+                    "/usr/bin/dpkg-query",
+                    "--show",
+                    "--showformat=${Package}\\t${Architecture}\\t${db:Status-Abbrev}\\t${Version}\\n",
+                    package,
+                ]
+            )
+            if query.returncode != 0:
+                continue
+            for row in query.stdout.splitlines():
+                fields = row.split("\t", maxsplit=3)
+                if len(fields) != 4:
+                    continue
+                installed_name, architecture, status, version = fields
+                if (
+                    installed_name.split(":", maxsplit=1)[0] != package
+                    or architecture not in {native_architecture, "all"}
+                    or status.strip() != "ii"
+                ):
+                    continue
+                if operator is not None:
+                    compare = invoke(
+                        [
+                            "/usr/bin/dpkg",
+                            "--compare-versions",
+                            version,
+                            operator,
+                            required_version or "",
+                        ]
+                    )
+                    if compare.returncode != 0:
+                        continue
+                satisfied = True
+                break
+            if satisfied:
+                break
+        if not satisfied:
+            choices = " | ".join(item[0] for item in alternatives)
+            raise AdminInitializationError(
+                f"Signed DEB dependency is not installed; install before initialization: {choices}"
+            )
 
 
 def _backup_archive(archive_path: Path, *, root: Path = Path("/")) -> dict[str, Any]:
@@ -1236,6 +1451,16 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
     if target.get("checks") != EXPECTED_INITIALIZATION_CHECKS:
         raise AdminInitializationError("Verified package does not satisfy the stage-only contract")
 
+    operator_cli_source = args.github_cli
+    locked_cli_digest = _locked_github_cli_digest()
+    if (
+        operator_cli_source.is_symlink()
+        or not operator_cli_source.is_file()
+        or _sha256_file(operator_cli_source) != f"sha256:{locked_cli_digest}"
+    ):
+        raise AdminInitializationError("Packet GitHub CLI does not match the fixed binary SHA-256")
+    _preflight_deb_dependencies(deb_path)
+
     bootstrap_inputs: dict[str, Path] = {
         "index": args.index,
         "index-attestation": args.index_attestation,
@@ -1278,6 +1503,10 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
         "workspaceReleaseId": release_proof["releaseId"],
         "workspaceSource": {"ref": ref, "commit": commit},
         "debSha256": target["debSha256"],
+        "persistentOperatorTool": {
+            "path": str(PERSISTENT_GH),
+            "sha256": f"sha256:{locked_cli_digest}",
+        },
         "broker": {
             "channel": args.channel,
             "targetId": target_id,
@@ -1312,6 +1541,8 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
             raise AdminInitializationError("Root-owned backup failed readback validation")
 
     if journal["phase"] == "backed-up":
+        evidence["persistentOperatorTool"] = _persist_locked_github_cli(operator_cli_source)
+        _write_admin_journal(journal_path, journal)
         _run(["/usr/bin/dpkg", "-i", str(deb_path)])
         installed_target_id = _load_compiled_target_id()
         if installed_target_id != target_id:
@@ -1583,6 +1814,7 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
         "source": release_proof["source"],
         "targetId": target["targetId"],
         "debSha256": target["debSha256"],
+        "persistentOperatorTool": evidence.get("persistentOperatorTool"),
         "planDigest": journal.get("confirmedPlanDigest"),
         "backup": evidence["backup"],
         "broker": evidence.get("brokerActivation"),
@@ -1634,6 +1866,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--artifact-attestation", type=Path, required=True)
+    parser.add_argument("--github-cli", type=Path, required=True)
     parser.add_argument("--channel", choices=("stable", "preview"), required=True)
     parser.add_argument("--backup-directory", type=Path, default=Path("/var/backups/cyrene"))
     parser.add_argument("--confirm-plan-digest")

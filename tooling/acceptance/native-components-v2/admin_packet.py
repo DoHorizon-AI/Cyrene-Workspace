@@ -421,7 +421,7 @@ def _launcher_script(
             "if proof.get('verifier', {}).get('attestationsVerified') is not True: raise SystemExit('official attestations were not verified')",
             "print(json.dumps(proof, sort_keys=True))",
             "PY",
-            'env -u PYTHONHOME -u LD_LIBRARY_PATH PYTHONNOUSERSITE=1 PYTHONPATH="$stage/workspace/tooling/acceptance/native-components-v2" "$private_python" "$stage/workspace/tooling/acceptance/native-components-v2/admin_initialize.py" --release-directory "$stage/release" --expected-source-ref "$SOURCE_REF" --expected-source-commit "$SOURCE_COMMIT" --index "$stage/bootstrap/index.json" --index-attestation "$stage/bootstrap/index.attestation.jsonl" --manifest "$stage/bootstrap/manifest.json" --artifact "$stage/bootstrap/artifact.tar.zst" --artifact-attestation "$stage/bootstrap/artifact.attestation.jsonl" --channel "$CHANNEL"',
+            'env -u PYTHONHOME -u LD_LIBRARY_PATH PYTHONNOUSERSITE=1 PYTHONPATH="$stage/workspace/tooling/acceptance/native-components-v2" "$private_python" "$stage/workspace/tooling/acceptance/native-components-v2/admin_initialize.py" --release-directory "$stage/release" --expected-source-ref "$SOURCE_REF" --expected-source-commit "$SOURCE_COMMIT" --index "$stage/bootstrap/index.json" --index-attestation "$stage/bootstrap/index.attestation.jsonl" --manifest "$stage/bootstrap/manifest.json" --artifact "$stage/bootstrap/artifact.tar.zst" --artifact-attestation "$stage/bootstrap/artifact.attestation.jsonl" --github-cli "$stage/tools/gh" --channel "$CHANNEL"',
         ]
     )
     if start_broker:
@@ -496,6 +496,13 @@ def _build_packet(
             "pythonPath": "/opt/cyrene/python/3.12.14/bin/python3.12 within private packet extraction",
             "version": "3.12.14",
             "installLocation": "root-owned packet staging only; no permanent /opt write before verification",
+        },
+        "persistentOperatorTool": {
+            "name": "gh",
+            "version": "2.97.0",
+            "path": "/usr/libexec/cyrene-tools/gh",
+            "sha256": _sha256(gh),
+            "source": "assets/tools/gh verified against assets/operator-tools.lock.json",
         },
         "activationPolicy": {
             "products": "never-started",

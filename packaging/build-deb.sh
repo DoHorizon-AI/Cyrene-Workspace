@@ -489,7 +489,7 @@ Section: devel
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Cyrene Team <team@cyrene.dev>
-Depends: ca-certificates, libc6 (>= ${MINIMUM_GLIBC}), libcrypt1, libgcc-s1, systemd, policykit-1, acl
+Depends: ca-certificates, libc6 (>= ${MINIMUM_GLIBC}), libcrypt1, libgcc-s1, systemd, policykit-1, acl, zstd
 Description: Cyrene Unified Local LLM Stack
  Cyrene provides a complete local LLM development and inference platform,
  including model importation (Reactor), training drafts (Yield), dataset preparation

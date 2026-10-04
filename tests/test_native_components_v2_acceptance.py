@@ -424,6 +424,8 @@ def test_admin_interface_needs_exact_source_pins_and_explicit_broker_start() -> 
             "/assets/broker.tar.gz",
             "--artifact-attestation",
             "/assets/broker.attestation.jsonl",
+            "--github-cli",
+            "/assets/tools/gh",
             "--channel",
             "preview",
         ]

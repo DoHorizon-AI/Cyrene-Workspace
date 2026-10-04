@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import io
@@ -103,6 +104,154 @@ def test_dispatch_inputs_reject_unpinned_or_incomplete_locators(
 
     with pytest.raises(module.ReleaseError, match=message):
         module._read_dispatch_inputs(path, "refs/heads/develop", "d" * 40)
+
+
+@pytest.mark.parametrize("use_release_index_repository_id", [True, False])
+def test_stage_service_artifacts_matches_catalog_repository_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_release_index_repository_id: bool,
+) -> None:
+    module = _module()
+    profile = module.PROFILE_IDS[0]
+    target = {
+        "os": "linux",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "python:3.12",
+    }
+    catalog = {
+        "components": [
+            {
+                "componentId": component_id,
+                "targets": [{"targetId": profile, "support": "supported"}],
+            }
+            for _, component_id in module.PRODUCTS.values()
+        ],
+        "targets": [{"id": profile, "target": target}],
+    }
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+    reports: list[str] = []
+    attestations: list[str] = []
+    tuples = []
+
+    for product, (repository, component_id) in module.PRODUCTS.items():
+        key = f"product/{product}/22.04"
+        release_id = "preview-" + hashlib.sha1(product.encode()).hexdigest()
+        source = {"ref": "refs/heads/develop", "commit": release_id.removeprefix("preview-")}
+        source_with_repository = {
+            "repository": f"https://github.com/{repository}",
+            **source,
+        }
+        artifact_name = f"{component_id}-{profile}.tar.gz"
+        manifest_name = f"{component_id}-{profile}.manifest.json"
+        row_dir = tmp_path / product
+        row_dir.mkdir()
+        artifact_path = row_dir / artifact_name
+        artifact_bytes = f"verified archive bytes for {product}".encode()
+        artifact_path.write_bytes(artifact_bytes)
+        manifest = {
+            "releaseId": release_id,
+            "componentId": component_id,
+            "source": source_with_repository,
+            "target": target,
+            "artifact": {
+                "kind": "python-bundle",
+                "format": "tar.gz",
+                "sizeBytes": len(artifact_bytes),
+            },
+            "manifestDigest": "sha256:" + hashlib.sha256(product.encode()).hexdigest(),
+        }
+        manifest_path = row_dir / manifest_name
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        index = {
+            "repository": (
+                repository
+                if use_release_index_repository_id
+                else f"https://github.com/{repository}"
+            ),
+            "channel": "preview",
+            "source": source_with_repository,
+        }
+        index_path = row_dir / "component-release-index-v1.json"
+        index_path.write_text(json.dumps(index), encoding="utf-8")
+        attestation_path = row_dir / f"{artifact_name}.attestation.jsonl"
+        attestation_path.write_text("verified bundle bytes", encoding="utf-8")
+        report = {
+            "artifactPath": str(artifact_path),
+            "manifestPath": str(manifest_path),
+            "manifest": manifest,
+            "index": index,
+        }
+        report_path = row_dir / "fetch-report.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        reports.append(f"{key}={report_path}")
+        attestations.append(f"{key}={attestation_path}")
+        tuples.append(
+            {
+                "key": key,
+                "repository": repository,
+                "releaseId": release_id,
+                "source": source,
+                "artifact": {
+                    "assetName": artifact_name,
+                    "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+                    "sizeBytes": len(artifact_bytes),
+                    "kind": "python-bundle",
+                    "format": "tar.gz",
+                    "attestation": {
+                        "assetName": attestation_path.name,
+                        "sha256": module._sha256(attestation_path),
+                        "repository": repository,
+                        "workflow": f"{repository}/.github/workflows/component-release.yml",
+                        "predicateType": module.PREDICATE_TYPE,
+                        "subjectName": artifact_name,
+                        "sourceRef": source["ref"],
+                        "sourceCommit": source["commit"],
+                    },
+                },
+                "manifest": {
+                    "assetName": manifest_name,
+                    "rawSha256": module._sha256(manifest_path),
+                    "declaredDigest": manifest["manifestDigest"],
+                },
+                "index": {"rawSha256": module._sha256(index_path)},
+            }
+        )
+
+    receipt_path = tmp_path / "source-receipt.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "workspaceSource": {"ref": "refs/heads/develop"},
+                "verifiedTuples": tuples,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "_validate_source_receipt", lambda *_args, **_kwargs: None)
+    output = tmp_path / "verified-output"
+    arguments = argparse.Namespace(
+        profile=profile,
+        source_receipt=receipt_path,
+        service_report=reports,
+        component_attestation=attestations,
+        output=output,
+        catalog=catalog_path,
+    )
+
+    if use_release_index_repository_id:
+        assert module._write_service_artifacts(arguments) == 0
+        assert (output / "index.json").is_file()
+    else:
+        with pytest.raises(
+            module.ReleaseError,
+            match="Product artifact bytes differ from verified receipt for catalyst",
+        ):
+            module._write_service_artifacts(arguments)
 
 
 def test_release_workflow_stages_platform_fetcher_schemas_with_catalog() -> None:

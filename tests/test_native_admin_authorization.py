@@ -257,6 +257,8 @@ def test_operator_argument_is_explicitly_optional() -> None:
             "/artifact",
             "--artifact-attestation",
             "/artifact.sig",
+            "--github-cli",
+            "/packet/tools/gh",
             "--channel",
             "stable",
         ]

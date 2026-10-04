@@ -341,6 +341,37 @@ def _validate_indexed_manifest(
     return entry
 
 
+def _validate_manifest_index_digest(
+    updater_module: Any, manifest: dict[str, Any], entry: dict[str, Any]
+) -> None:
+    """Check the canonical manifest digest pinned by the signed release index."""
+    digest = updater_module._digest_json(manifest, "manifestDigest")
+    if manifest.get("manifestDigest") != digest or entry.get("manifestDigest") != digest:
+        raise ControlInitializationError(
+            "outer bundle manifest canonical digest does not match the signed index"
+        )
+
+
+def _bundle_target(updater: Any, component: dict[str, Any]) -> dict[str, Any]:
+    """Combine the catalog target with its unique component artifact declaration."""
+    target = updater.targets.get(DATA_BUNDLE_TARGET)
+    declarations = [
+        item
+        for item in component.get("targets", [])
+        if isinstance(item, dict) and item.get("targetId") == DATA_BUNDLE_TARGET
+    ]
+    if (
+        not isinstance(target, dict)
+        or len(declarations) != 1
+        or declarations[0].get("artifactKind") != "data-bundle"
+        or declarations[0].get("support") != "supported"
+    ):
+        raise ControlInitializationError(
+            "trusted catalog does not uniquely authorize the data-bundle target"
+        )
+    return {**target, "artifactKind": declarations[0]["artifactKind"]}
+
+
 def _bundle_validation(
     args: argparse.Namespace, *, updater_module: Any, runner: Callable[..., Any]
 ) -> dict[str, Any]:
@@ -363,11 +394,11 @@ def _bundle_validation(
     )
     component = updater.components.get(COMPONENT_ID)
     publisher = updater.publishers.get(component.get("publisher")) if component else None
-    target = updater.targets.get(DATA_BUNDLE_TARGET)
-    if component is None or publisher is None or target is None:
+    if component is None or publisher is None:
         raise ControlInitializationError(
             "trusted catalog omits the required data-bundle component or target"
         )
+    target = _bundle_target(updater, component)
 
     index, index_bytes = _json_file(Path(args.index), "release index")
     index_digest = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
@@ -378,12 +409,9 @@ def _bundle_validation(
     updater._validate_index(index, publisher, args.channel, release, component)
     entry = _select_bundle_release_entry(index, component, target)
     manifest, manifest_bytes = _json_file(Path(args.manifest), "outer bundle manifest")
-    if hashlib.sha256(manifest_bytes).hexdigest() != str(
-        entry.get("manifestDigest", "")
-    ).removeprefix("sha256:"):
-        raise ControlInitializationError(
-            "outer bundle manifest digest does not match the signed index"
-        )
+    # The release index pins a JCS digest; raw asset bytes have a separate
+    # release-API digest and are verified at download time.
+    _validate_manifest_index_digest(updater_module, manifest, entry)
     _validate_indexed_manifest(updater, manifest, index, component, target, publisher, args.channel)
     artifact = manifest.get("artifact", {})
     artifact_path = Path(args.artifact)
