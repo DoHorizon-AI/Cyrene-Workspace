@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cyrene.dev/schemas/component-catalog-v1.schema.json",
   "title": "Cyrene Component Catalog v1",
-  "description": "Static component identity, platform matrix, restart topology, and provenance trust pins. This is independent of Product v2 contracts.",
+  "description": "Static component identity, platform matrix, restart topology, and provenance trust pins. This is independent of Product v2 contracts. Generation 9 and later retain the supported Ubuntu 22.04 Python 3.12 target for the five native Python Products.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -465,10 +465,14 @@
       "allOf": [
         {
           "if": {
-            "required": ["groupVersion"]
+            "required": [
+              "groupVersion"
+            ]
           },
           "then": {
-            "required": ["contractLock"]
+            "required": [
+              "contractLock"
+            ]
           }
         }
       ]
@@ -568,6 +572,253 @@
           "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
         }
       }
+    },
+    "ubuntu2204Python312PlatformTarget": {
+      "const": {
+        "id": "linux-ubuntu-22.04-x86_64-python-3.12",
+        "target": {
+          "os": "linux",
+          "osVersion": "22.04",
+          "distribution": "ubuntu",
+          "distributionVersion": "22.04",
+          "architecture": "x86_64",
+          "abi": "glibc-2.35",
+          "runtime": "python:3.12"
+        },
+        "hostSupport": "supported"
+      }
+    },
+    "ubuntu2204Python312ComponentTarget": {
+      "const": {
+        "targetId": "linux-ubuntu-22.04-x86_64-python-3.12",
+        "artifactKind": "python-bundle",
+        "support": "supported"
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "generation": {
+            "minimum": 9
+          }
+        },
+        "required": [
+          "generation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "targets": {
+            "contains": {
+              "$ref": "#/$defs/ubuntu2204Python312PlatformTarget"
+            },
+            "items": {
+              "if": {
+                "properties": {
+                  "id": {
+                    "const": "linux-ubuntu-22.04-x86_64-python-3.12"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              },
+              "then": {
+                "$ref": "#/$defs/ubuntu2204Python312PlatformTarget"
+              }
+            }
+          },
+          "components": {
+            "allOf": [
+              {
+                "items": {
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "componentId": {
+                            "enum": [
+                              "cyrene-catalyst",
+                              "cyrene-exchange",
+                              "cyrene-navigator",
+                              "cyrene-reactor",
+                              "cyrene-yield"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "componentId"
+                        ]
+                      },
+                      "then": {
+                        "properties": {
+                          "targets": {
+                            "items": {
+                              "if": {
+                                "properties": {
+                                  "targetId": {
+                                    "const": "linux-ubuntu-22.04-x86_64-python-3.12"
+                                  }
+                                },
+                                "required": [
+                                  "targetId"
+                                ]
+                              },
+                              "then": {
+                                "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "not": {
+                          "properties": {
+                            "componentId": {
+                              "enum": [
+                                "cyrene-catalyst",
+                                "cyrene-exchange",
+                                "cyrene-navigator",
+                                "cyrene-reactor",
+                                "cyrene-yield"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "componentId"
+                          ]
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "targets": {
+                            "items": {
+                              "not": {
+                                "properties": {
+                                  "targetId": {
+                                    "const": "linux-ubuntu-22.04-x86_64-python-3.12"
+                                  }
+                                },
+                                "required": [
+                                  "targetId"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-catalyst"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-exchange"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-navigator"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-reactor"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-yield"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
 }
