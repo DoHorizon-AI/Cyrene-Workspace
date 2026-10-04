@@ -168,6 +168,58 @@ def _manifest_digest(manifest: dict[str, Any]) -> str:
     return "sha256:" + _sha256_bytes(_canonical_jcs(unsigned))
 
 
+def _verify_outer_manifest_digest(
+    manifest_record: dict[str, Any], outer_manifest: dict[str, Any]
+) -> None:
+    """Require the index and signed manifest to bind the same canonical digest."""
+    expected_digest = _manifest_digest(outer_manifest)
+    if (
+        manifest_record.get("manifestDigest") != expected_digest
+        or outer_manifest.get("manifestDigest") != expected_digest
+    ):
+        raise VerifiedServiceArtifactError("outer manifest digest is invalid")
+
+
+def _verify_outer_manifest_identity(
+    outer_manifest: dict[str, Any],
+    *,
+    component_id: str,
+    release_id: str,
+    channel: str,
+    target_fields: dict[str, Any],
+    source_repository: str,
+    source_ref: str,
+    source_commit: str,
+) -> None:
+    """Check the exact component, target, and source tuple in a signed manifest.
+
+    Component release manifest v1 is the documented single-target envelope used by
+    native Product publishers; v2 remains accepted for existing consumers.
+    """
+    schema_version = outer_manifest.get("schemaVersion")
+    if (
+        type(schema_version) is not int
+        or schema_version not in {1, 2}
+        or outer_manifest.get("componentId") != component_id
+        or outer_manifest.get("releaseId") != release_id
+        or outer_manifest.get("channel") != channel
+        or outer_manifest.get("target") != target_fields
+    ):
+        raise VerifiedServiceArtifactError(
+            f"{component_id} outer manifest identity or target differs"
+        )
+
+    outer_source = _require_object(outer_manifest.get("source"), f"{component_id} manifest.source")
+    if (
+        outer_source.get("repository") != source_repository
+        or outer_source.get("ref") != source_ref
+        or outer_source.get("commit") != source_commit
+    ):
+        raise VerifiedServiceArtifactError(
+            f"{component_id} outer manifest source differs from index.json"
+        )
+
+
 def _canonical_product_asset_names(
     component_id: str, target_profile: str, target_fields: dict[str, Any]
 ) -> tuple[str, str]:
@@ -700,31 +752,17 @@ def verify_and_stage(
                     f"{component_id} outer manifest SHA differs from index.json"
                 )
             outer_manifest, _ = _read_json(manifest_path, f"{component_id} outer release manifest")
-            if manifest_record.get("manifestDigest") != _manifest_digest(outer_manifest):
-                raise VerifiedServiceArtifactError(
-                    f"{component_id} outer manifest digest is invalid"
-                )
-            if (
-                outer_manifest.get("schemaVersion") != 2
-                or outer_manifest.get("componentId") != component_id
-                or outer_manifest.get("releaseId") != release_id
-                or outer_manifest.get("channel") != channel
-                or outer_manifest.get("target") != target_fields
-            ):
-                raise VerifiedServiceArtifactError(
-                    f"{component_id} outer manifest identity or target differs"
-                )
-            outer_source = _require_object(
-                outer_manifest.get("source"), f"{component_id} manifest.source"
+            _verify_outer_manifest_digest(manifest_record, outer_manifest)
+            _verify_outer_manifest_identity(
+                outer_manifest,
+                component_id=component_id,
+                release_id=release_id,
+                channel=channel,
+                target_fields=target_fields,
+                source_repository=f"https://github.com/{component_repository}",
+                source_ref=source_ref,
+                source_commit=source_commit,
             )
-            if (
-                outer_source.get("repository") != f"https://github.com/{component_repository}"
-                or outer_source.get("ref") != source_ref
-                or outer_source.get("commit") != source_commit
-            ):
-                raise VerifiedServiceArtifactError(
-                    f"{component_id} outer manifest source differs from index.json"
-                )
             artifact_metadata = _require_object(
                 outer_manifest.get("artifact"), f"{component_id} manifest.artifact"
             )
