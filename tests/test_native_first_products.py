@@ -96,6 +96,21 @@ def test_native_core_target_maps_to_exact_product_python_profile() -> None:
         first._python_profile_for_core_target("linux-ubuntu-24.04-x86_64-python-3.12")
 
 
+@pytest.mark.parametrize("raw_digest", ["a" * 64, "0" * 64, "f" * 64])
+def test_bundle_raw_artifact_digest_maps_to_typed_receipt_digest(raw_digest: str) -> None:
+    assert first._typed_bundle_artifact_digest(raw_digest) == f"sha256:{raw_digest}"
+
+
+@pytest.mark.parametrize(
+    "invalid_digest",
+    [None, "sha256:" + "a" * 64, "A" * 64, "g" * 64, "a" * 63],
+)
+def test_bundle_artifact_digest_rejects_noncanonical_representation(
+    invalid_digest: Any,
+) -> None:
+    assert first._typed_bundle_artifact_digest(invalid_digest) is None
+
+
 class _Updater:
     def __init__(self, tmp_path: Path) -> None:
         self.state_root = tmp_path

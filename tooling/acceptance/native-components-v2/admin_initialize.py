@@ -992,7 +992,7 @@ def _derive_first_product_cohort(
             or not isinstance(version, str)
             or bundle_path.name != version
             or not isinstance(artifact_digest, str)
-            or not SHA256_RE.fullmatch(artifact_digest)
+            or not RAW_SHA256_RE.fullmatch(artifact_digest)
         ):
             raise AdminInitializationError(f"Staged Product manifest identity differs: {service}")
         products.append(
@@ -1001,7 +1001,9 @@ def _derive_first_product_cohort(
                 "componentId": component_id,
                 "version": version,
                 "manifestDigest": manifest_digest,
-                "artifactDigest": artifact_digest,
+                # Bundle manifests use raw hex; receipts use the typed SHA-256 form.
+                # 中文：bundle manifest 保存裸 hex，receipt 保留带类型前缀的摘要。
+                "artifactDigest": f"sha256:{artifact_digest}",
                 "bundlePath": f"/usr/share/cyrene/service-artifacts/{service}/{version}",
             }
         )
