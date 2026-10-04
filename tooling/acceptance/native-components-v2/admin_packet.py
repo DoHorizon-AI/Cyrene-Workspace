@@ -400,7 +400,7 @@ def _launcher_script(
     lines.extend(
         [
             'chmod 700 "$stage/tools/gh"',
-            'PATH="$stage/tools:/usr/bin:/bin"; export PATH',
+            'PATH="$stage/tools:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin"; export PATH',
             'GH_EXECUTABLE="$stage/tools/gh"; export GH_EXECUTABLE',
             'GH_CONFIG_DIR="$stage/gh-config"; export GH_CONFIG_DIR',
             "GIT_CONFIG_GLOBAL=/dev/null; export GIT_CONFIG_GLOBAL",
