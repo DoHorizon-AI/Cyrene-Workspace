@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "repository": "",
+  "releaseId": "",
+  "version": "",
+  "channel": "",
+  "workflow": "",
+  "run": {
+    "id": "",
+    "attempt": ""
+  },
+  "source": {
+    "ref": "",
+    "commit": ""
+  },
+  "target": {
+    "targetId": "",
+    "assetName": "",
+    "debSha256": "",
+    "debSizeBytes": "",
+    "serviceArtifactsIndexSha256": "",
+    "services": {},
+    "maintainerScriptsSha256": {
+      "postinst": "",
+      "prerm": "",
+      "postrm": ""
+    },
+    "checks": {}
+  },
+  "manifest": {
+    "sha256": ""
+  },
+  "sourceReceipt": {
+    "sha256": ""
+  },
+  "verifier": {
+    "path": "",
+    "sha256": "",
+    "attestationsVerified": false
+  }
+}

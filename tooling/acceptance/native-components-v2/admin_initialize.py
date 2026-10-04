@@ -1,0 +1,1061 @@
+#!/usr/bin/env python3
+"""
+┌─────────────────────────────────────────────────────────────────────┐
+│ Module: tooling.acceptance.native_components_v2.admin_initialize   │
+│ Role: Run the pinned, stage-only native host initialization.          │
+│                                                                      │
+│ 模块职责：按已验证摘要执行一次性、仅暂存的主机初始化。                  │
+└─────────────────────────────────────────────────────────────────────┘
+"""
+
+from __future__ import annotations
+
+import argparse
+import grp
+import hashlib
+import importlib.util
+import json
+import os
+import platform
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+from collections.abc import Callable
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from native_acceptance import AcceptanceError, verify_native_release_for_host
+
+WORKSPACE_REPOSITORY = "DoHorizon-AI/Cyrene-Workspace"
+BOOTSTRAP_COMPONENT = "cyrene-runtime-maintenance"
+BOOTSTRAP_UNIT = "cyrene-runtime-maintenance.service"
+PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
+BOOTSTRAP_HELPER_RELATIVE = PurePosixPath("share/cyrene-managed-runtime/cyrene_managed_runtime.py")
+PRODUCT_SOURCE_IDS = frozenset(
+    {
+        "cyrene-catalyst",
+        "cyrene-exchange",
+        "cyrene-navigator",
+        "cyrene-reactor",
+        "cyrene-yield",
+    }
+)
+EXPECTED_INITIALIZATION_CHECKS = {
+    "serviceActivation": "deferred",
+    "brokerAction": "preserve-existing",
+    "oldRuntimeAction": "preserve",
+    "maintainerScriptsStaticScan": "passed",
+    "verifiedServiceBytesPreserved": "passed",
+    "freshBrokerUnavailable": "fail-closed",
+    "upgradeState": "preserve-existing",
+    "activeRuntimePointers": "preserve-existing",
+    "pinnedPrivateRuntime": "passed",
+}
+BACKUP_PATHS = (
+    "/etc/cyrene",
+    "/etc/systemd/system/cyrene-runtime-maintenance.service",
+    "/etc/systemd/system/cyrene-runtime-maintenance.service.d",
+    "/etc/systemd/system/cyrene-kernel.service.d",
+    "/etc/systemd/system/cyrene-sandboxd.service.d",
+    "/etc/systemd/system/cyrene-linux-sys-adapter.service.d",
+    "/etc/systemd/system/cyrene-nvidia-adapter.service.d",
+    "/usr/lib/systemd/system/cyrene-runtime-maintenance.service",
+    "/usr/lib/systemd/system/cyrene-kernel.service",
+    "/usr/lib/systemd/system/cyrene-sandboxd.service",
+    "/usr/lib/systemd/system/cyrene-linux-sys-adapter.service",
+    "/usr/lib/systemd/system/cyrene-nvidia-adapter.service",
+    "/usr/lib/cyrene/components",
+    "/opt/cyrene/python/3.12.14",
+    "/var/lib/cyrene",
+    "/var/lib/cyrene-updates",
+)
+SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+RAW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+class AdminInitializationError(RuntimeError):
+    """A pinned initialization precondition or trusted operation failed."""
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    """Return a prefixed SHA-256 digest for immutable input bytes.
+
+    中文：计算不可变输入字节的 SHA-256 摘要。
+    """
+
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash a regular file without exposing its contents.
+
+    中文：只计算普通文件摘要，不输出文件内容。
+    """
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _private_regular_file(path: Path, label: str) -> bytes:
+    """Read one non-symlink regular input and return its exact bytes."""
+
+    if path.is_symlink() or not path.is_file():
+        raise AdminInitializationError(f"{label} must be a regular file, not a symlink")
+    return path.read_bytes()
+
+
+def _run(
+    arguments: list[str],
+    *,
+    input_text: str | None = None,
+    timeout: int = 300,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> subprocess.CompletedProcess[str]:
+    """Run one fixed argv without a shell and keep command output in memory."""
+
+    try:
+        result = runner(
+            arguments,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AdminInitializationError(
+            f"Trusted command could not complete: {Path(arguments[0]).name}"
+        ) from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().replace("\n", " ")[:500]
+        raise AdminInitializationError(
+            f"{Path(arguments[0]).name} failed ({result.returncode}): {detail}"
+        )
+    return result
+
+
+def _json_result(result: subprocess.CompletedProcess[str], label: str) -> dict[str, Any]:
+    """Parse one bounded JSON result and reject malformed command output."""
+
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise AdminInitializationError(f"{label} did not return valid JSON") from error
+    if not isinstance(value, dict):
+        raise AdminInitializationError(f"{label} returned an invalid result object")
+    return value
+
+
+def _verify_bootstrap_plan(plan: dict[str, Any], target_id: str) -> str:
+    """Accept only the exact read-only plan shape returned by the helper."""
+
+    plan_digest = plan.get("planDigest")
+    if (
+        plan.get("status") != "confirmation_required"
+        or not isinstance(plan_digest, str)
+        or not SHA256_RE.fullmatch(plan_digest)
+        or plan.get("componentId") != BOOTSTRAP_COMPONENT
+        or plan.get("targetId") != target_id
+        or not isinstance(plan.get("version"), str)
+        or not isinstance(plan.get("manifestDigest"), str)
+        or not SHA256_RE.fullmatch(plan["manifestDigest"])
+        or not isinstance(plan.get("artifactDigest"), str)
+        or not SHA256_RE.fullmatch(plan["artifactDigest"])
+        or not isinstance(plan.get("indexDigest"), str)
+        or not SHA256_RE.fullmatch(plan["indexDigest"])
+    ):
+        raise AdminInitializationError("Broker bootstrap did not return a canonical exact plan")
+    return plan_digest
+
+
+def _require_root() -> None:
+    """Require the explicit administrator invocation before reading target state."""
+
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        raise AdminInitializationError("Administrator initialization must run as root")
+
+
+def _host_ubuntu_version(root: Path) -> str:
+    """Derive the release target from the host's current OS facts."""
+
+    release_path = root / "etc/os-release"
+    if release_path.is_symlink() or not release_path.is_file():
+        raise AdminInitializationError("Host OS release identity is unavailable")
+    fields: dict[str, str] = {}
+    for line in release_path.read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            fields[key] = value.strip().strip('"')
+    if fields.get("ID") != "ubuntu" or platform.machine().lower() not in {"x86_64", "amd64"}:
+        raise AdminInitializationError("Initialization supports only Ubuntu x86_64 hosts")
+    version = fields.get("VERSION_ID", "")
+    if version not in {"22.04", "24.04"}:
+        raise AdminInitializationError("Host Ubuntu release is outside the signed DEB targets")
+    return version
+
+
+def _ensure_private_directory(path: Path) -> None:
+    """Create or validate a root-owned private directory without following links."""
+
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or path.is_symlink()
+        or info.st_uid != 0
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise AdminInitializationError(f"Private directory is unsafe: {path}")
+
+
+def _backup_archive(archive_path: Path, *, root: Path = Path("/")) -> dict[str, Any]:
+    """Create and reopen a root-only backup of installation-critical state.
+
+    The archive preserves symlinks as links and never follows them. It excludes
+    model payloads and task data outside the listed installation paths.
+    中文：备份配置、原生指针、私有运行时与维护状态；不读取或打印凭据内容。
+    """
+
+    _require_root()
+    if archive_path.is_symlink() or archive_path.exists():
+        raise AdminInitializationError("Backup archive path must be new and not a symlink")
+    _ensure_private_directory(archive_path.parent)
+    selected: list[tuple[Path, str]] = []
+    for absolute in BACKUP_PATHS:
+        source = root / absolute.lstrip("/")
+        if not os.path.lexists(source):
+            continue
+        if source.is_symlink():
+            raise AdminInitializationError(f"Backup root path is a symlink: {absolute}")
+        selected.append((source, absolute.lstrip("/")))
+
+    try:
+        with tarfile.open(archive_path, mode="x:gz", format=tarfile.PAX_FORMAT) as archive:
+            for source, archive_name in selected:
+                archive.add(source, arcname=archive_name, recursive=True)
+        os.chmod(archive_path, 0o600)
+        os.chown(archive_path, 0, 0)
+        with tarfile.open(archive_path, mode="r:gz") as archive:
+            members = archive.getmembers()
+            for member in members:
+                if member.isfile():
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise AdminInitializationError("Backup archive has unreadable file data")
+                    while stream.read(1024 * 1024):
+                        pass
+    except (OSError, tarfile.TarError) as error:
+        archive_path.unlink(missing_ok=True)
+        raise AdminInitializationError(f"Backup archive could not be verified: {error}") from error
+
+    info = archive_path.lstat()
+    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+        raise AdminInitializationError("Backup archive ownership or mode is unsafe")
+    return {
+        "path": str(archive_path),
+        "sha256": _sha256_file(archive_path),
+        "sizeBytes": info.st_size,
+        "memberCount": len(members),
+        "paths": [name for _, name in selected],
+        "readback": "passed",
+    }
+
+
+def _fresh_activity_state(root: Path) -> None:
+    """Require an empty fresh catalog/token/runtime state before initialization."""
+
+    catalog = root / "var/lib/cyrene/runtime/activity-sources.json"
+    token_dir = root / "etc/cyrene/runtime-activity-source-tokens"
+    environment = root / "etc/cyrene/runtime-activity-sources.env"
+    private_state = root / "var/lib/cyrene/runtime-maintenance-private"
+    runtime_state = root / "var/lib/cyrene/runtime"
+    for path in (catalog, environment):
+        if os.path.lexists(path):
+            raise AdminInitializationError(f"Existing trusted state must be preserved: {path}")
+    for path in (token_dir, private_state, runtime_state):
+        if not os.path.lexists(path):
+            continue
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or path.is_symlink():
+            raise AdminInitializationError(f"Existing runtime state path is unsafe: {path}")
+        try:
+            next(path.iterdir())
+        except StopIteration:
+            continue
+        raise AdminInitializationError(f"Existing runtime data must be preserved: {path}")
+
+
+def _unit_service_fields(unit_bytes: bytes, unit_path: Path) -> dict[str, str]:
+    """Extract required source identity and credential-file fields from a unit."""
+
+    try:
+        text = unit_bytes.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AdminInitializationError(
+            f"Signed service unit is not UTF-8: {unit_path.name}"
+        ) from error
+    section = ""
+    service: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+            continue
+        if section != "Service" or not stripped or stripped.startswith("#"):
+            continue
+        key, separator, value = stripped.partition("=")
+        if separator and key in {"User", "Group", "LoadCredential", "EnvironmentFile"}:
+            service[key] = value
+    credential = service.get("LoadCredential", "")
+    credential_name, separator, credential_source = credential.partition(":")
+    match = re.fullmatch(
+        r"/etc/cyrene/runtime-activity-source-tokens/([a-z0-9._-]+)\.token",
+        credential_source,
+    )
+    if (
+        service.get("User") != "cyrene"
+        or service.get("Group") != "cyrene"
+        or credential_name != "activity-token"
+        or not separator
+        or match is None
+        or service.get("EnvironmentFile") != "/etc/cyrene/runtime-activity-sources.env"
+    ):
+        raise AdminInitializationError(
+            f"Product unit owner or credential path differs from the signed initialization contract: {unit_path.name}"
+        )
+    return {"sourceId": match.group(1), "user": service["User"], "group": service["Group"]}
+
+
+def _activity_source_arguments(
+    extracted_units: Path, installed_units: Path, *, root: Path = Path("/")
+) -> tuple[list[str], dict[str, Any]]:
+    """Derive activity-source principals from the exact signed Product units."""
+
+    extracted: dict[str, bytes] = {}
+    for path in extracted_units.glob("cyrene-*.service"):
+        extracted[path.name] = _private_regular_file(path, f"signed unit {path.name}")
+    if len(extracted) != len(PRODUCT_SOURCE_IDS):
+        raise AdminInitializationError("Signed DEB must contain exactly five activity-source units")
+
+    sources: dict[str, tuple[int, int]] = {}
+    expected_names: set[str] = set()
+    for name, unit_bytes in extracted.items():
+        fields = _unit_service_fields(unit_bytes, Path(name))
+        source_id = fields["sourceId"]
+        if source_id not in PRODUCT_SOURCE_IDS or source_id in sources:
+            raise AdminInitializationError(
+                "Signed Product unit source IDs are incomplete or duplicated"
+            )
+        installed_path = installed_units / name
+        installed = _private_regular_file(installed_path, f"installed unit {name}")
+        if installed != unit_bytes:
+            raise AdminInitializationError(
+                f"Installed Product unit differs from verified DEB bytes: {name}"
+            )
+        uid = pwd.getpwnam(fields["user"]).pw_uid
+        gid = grp.getgrnam(fields["group"]).gr_gid
+        sources[source_id] = (uid, gid)
+        expected_names.add(name)
+    if set(sources) != PRODUCT_SOURCE_IDS:
+        raise AdminInitializationError(
+            "Installed units do not provide the complete trusted source set"
+        )
+    maintenance_gid = grp.getgrnam("cyrene-runtime-maintenance").gr_gid
+    arguments = [
+        item
+        for source_id, (uid, gid) in sorted(sources.items())
+        for item in ("--source", f"{source_id}={uid}:{gid}")
+    ]
+    return arguments, {
+        "unitFiles": sorted(expected_names),
+        "catalogGid": maintenance_gid,
+        "sources": {source_id: list(identity) for source_id, identity in sorted(sources.items())},
+    }
+
+
+def _load_compiled_target_id(
+    helper: Path = Path("/usr/lib/cyrene/scripts/component_updates.py"),
+    catalog: Path = Path("/usr/share/cyrene/component-catalog-v1.json"),
+) -> str:
+    """Read the broker target from the installed compiled trusted catalog."""
+
+    if helper.is_symlink() or not helper.is_file():
+        raise AdminInitializationError("Installed component updater helper is unavailable")
+    if catalog.is_symlink() or not catalog.is_file():
+        raise AdminInitializationError("Compiled trusted component catalog is unavailable")
+    if os.geteuid() == 0:
+        helper_info = helper.lstat()
+        catalog_info = catalog.lstat()
+        if (
+            helper_info.st_uid != 0
+            or catalog_info.st_uid != 0
+            or stat.S_IMODE(helper_info.st_mode) & 0o022
+            or stat.S_IMODE(catalog_info.st_mode) & 0o022
+        ):
+            raise AdminInitializationError(
+                "Installed trusted updater inputs are not root-controlled"
+            )
+    spec = importlib.util.spec_from_file_location("cyrene_admin_component_updates", helper)
+    if spec is None or spec.loader is None:
+        raise AdminInitializationError("Installed component updater helper cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    helper_directory = str(helper.parent)
+    module_name = spec.name
+    sys.modules[module_name] = module
+    sys.path.insert(0, helper_directory)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if sys.path[0] == helper_directory:
+            sys.path.pop(0)
+        sys.modules.pop(module_name, None)
+    updater = module.ComponentUpdater(
+        catalog_path=catalog,
+        activity_catalog_path=Path("/var/lib/cyrene/runtime/activity-sources.json"),
+        socket_path=Path("/run/cyrene/runtime-maintenance.sock"),
+        broker_path=Path("/usr/bin/cyrene-runtime-maintenance"),
+        install_root=Path("/usr/lib/cyrene"),
+        state_root=Path("/var/lib/cyrene-updates"),
+        release_lock_path=Path("/usr/lib/cyrene/release-lock.json"),
+        trusted_catalog_digest=module.TRUSTED_CATALOG_DIGEST,
+        load_active_catalog=False,
+    )
+    component = updater.components.get(BOOTSTRAP_COMPONENT)
+    if not isinstance(component, dict):
+        raise AdminInitializationError("Compiled trusted catalog omits the maintenance broker")
+    target = updater._target_for(component)
+    target_id = target.get("id") if isinstance(target, dict) else None
+    if not isinstance(target_id, str) or not target_id:
+        raise AdminInitializationError(
+            "Compiled trusted catalog has no broker target for this host"
+        )
+    return target_id
+
+
+def _load_admin_journal(path: Path, identity: dict[str, Any]) -> dict[str, Any]:
+    """Load a matching root-owned recovery journal or create a new one."""
+
+    _ensure_private_directory(path.parent)
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or not path.is_file():
+            raise AdminInitializationError("Admin initialization journal path is unsafe")
+        info = path.lstat()
+        if info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600:
+            raise AdminInitializationError("Admin initialization journal is not private")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise AdminInitializationError("Admin initialization journal is invalid") from error
+        if not isinstance(value, dict) or value.get("identity") != identity:
+            raise AdminInitializationError("Admin initialization journal belongs to other inputs")
+        return value
+    return {"schemaVersion": 1, "identity": identity, "phase": "verified", "evidence": {}}
+
+
+def _write_admin_journal(path: Path, value: dict[str, Any]) -> None:
+    """Atomically persist a root-only progress record without secret values."""
+
+    descriptor, name = tempfile.mkstemp(prefix=".admin-init-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.fchown(descriptor, 0, 0)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _verified_broker_helper(
+    activation: dict[str, Any], *, install_root: Path = Path("/usr/lib/cyrene")
+) -> tuple[Path, dict[str, Any]]:
+    """Resolve the helper only inside the just-activated signed broker release."""
+
+    release_value = activation.get("releasePath")
+    if not isinstance(release_value, str):
+        raise AdminInitializationError("Broker activation omitted its releasePath")
+    release = Path(release_value)
+    expected_root = install_root / "components" / BOOTSTRAP_COMPONENT / "releases"
+    try:
+        if release.parent != expected_root or release.is_symlink() or not release.is_dir():
+            raise AdminInitializationError(
+                "Activated broker releasePath is outside its component root"
+            )
+    except OSError as error:
+        raise AdminInitializationError("Activated broker releasePath is unavailable") from error
+    manifest_path = release / "component-manifest.json"
+    manifest_bytes = _private_regular_file(manifest_path, "activated broker manifest")
+    try:
+        manifest = json.loads(manifest_bytes)
+    except json.JSONDecodeError as error:
+        raise AdminInitializationError("Activated broker manifest is invalid") from error
+    artifact = manifest.get("artifact") if isinstance(manifest, dict) else None
+    files = artifact.get("files") if isinstance(artifact, dict) else None
+    relative_name = BOOTSTRAP_HELPER_RELATIVE.as_posix()
+    expected_digest = files.get(relative_name) if isinstance(files, dict) else None
+    helper = release.joinpath(*BOOTSTRAP_HELPER_RELATIVE.parts)
+    if (
+        not isinstance(expected_digest, str)
+        or not SHA256_RE.fullmatch(expected_digest)
+        or manifest.get("manifestDigest") != activation.get("manifestDigest")
+        or artifact.get("sha256") != activation.get("artifactDigest")
+        or helper.is_symlink()
+        or not helper.is_file()
+        or _sha256_file(helper) != expected_digest
+    ):
+        raise AdminInitializationError(
+            "Managed-runtime helper does not match the activated signed release"
+        )
+    return helper, manifest
+
+
+def _broker_unit_and_entrypoint(
+    activation: dict[str, Any], *, install_root: Path = Path("/usr/lib/cyrene")
+) -> tuple[Path, Path]:
+    """Resolve the unit and executable from the activated signed manifest."""
+
+    release_path = activation.get("releasePath")
+    if not isinstance(release_path, str):
+        raise AdminInitializationError("Broker activation omitted its releasePath")
+    release = Path(release_path)
+    _helper, manifest = _verified_broker_helper(activation, install_root=install_root)
+    artifact = manifest["artifact"]
+    files = artifact["files"]
+    unit_relative = f"systemd/{BOOTSTRAP_UNIT}"
+    entrypoint_relative = artifact.get("entrypoint")
+    unit_digest = files.get(unit_relative)
+    binary_digest = files.get(entrypoint_relative) if isinstance(entrypoint_relative, str) else None
+    unit_path = release / unit_relative
+    binary_path = release / entrypoint_relative if isinstance(entrypoint_relative, str) else None
+    if (
+        not isinstance(unit_digest, str)
+        or not SHA256_RE.fullmatch(unit_digest)
+        or not isinstance(binary_digest, str)
+        or not SHA256_RE.fullmatch(binary_digest)
+        or binary_path is None
+        or unit_path.is_symlink()
+        or binary_path.is_symlink()
+        or not unit_path.is_file()
+        or not binary_path.is_file()
+        or _sha256_file(unit_path) != unit_digest
+        or _sha256_file(binary_path) != binary_digest
+    ):
+        raise AdminInitializationError("Broker unit or executable differs from its signed file map")
+    return unit_path, binary_path
+
+
+def _systemd_properties(unit: str) -> dict[str, str]:
+    """Read order-independent systemd key/value properties for one unit."""
+
+    output = _run(
+        [
+            "/usr/bin/systemctl",
+            "show",
+            "--no-pager",
+            "--property=LoadState,ActiveState,FragmentPath,DropInPaths,MainPID",
+            unit,
+        ]
+    ).stdout
+    return {
+        key: value
+        for line in output.splitlines()
+        if "=" in line
+        for key, value in (line.split("=", 1),)
+    }
+
+
+def _start_fresh_broker(
+    activation: dict[str, Any], runner: Callable[..., subprocess.CompletedProcess[str]]
+) -> dict[str, str]:
+    """Start only the new broker and prove systemd launched its signed binary."""
+
+    unit_path, binary_path = _broker_unit_and_entrypoint(activation)
+    installed_unit = Path("/usr/lib/systemd/system") / BOOTSTRAP_UNIT
+    if (
+        installed_unit.is_symlink()
+        or not installed_unit.is_file()
+        or _sha256_file(installed_unit) != _sha256_file(unit_path)
+    ):
+        raise AdminInitializationError(
+            "Installed broker unit differs from the signed active release"
+        )
+    properties = _systemd_properties(BOOTSTRAP_UNIT)
+    if (
+        properties.get("LoadState") != "loaded"
+        or Path(properties.get("FragmentPath", "")).resolve() != installed_unit.resolve()
+        or properties.get("DropInPaths", "")
+    ):
+        raise AdminInitializationError("Loaded broker unit identity or drop-ins are not exact")
+    if properties.get("ActiveState") != "active":
+        _run(["/usr/bin/systemctl", "start", BOOTSTRAP_UNIT], runner=runner)
+        properties = _systemd_properties(BOOTSTRAP_UNIT)
+    if properties.get("ActiveState") != "active":
+        raise AdminInitializationError("New maintenance broker did not become active")
+    pid = properties.get("MainPID", "")
+    if not pid.isdecimal() or int(pid) <= 1:
+        raise AdminInitializationError("New broker unit has no valid active MainPID")
+    try:
+        process_exe = Path(os.readlink(f"/proc/{pid}/exe"))
+    except OSError as error:
+        raise AdminInitializationError("New broker executable identity is unreadable") from error
+    if process_exe != binary_path:
+        raise AdminInitializationError(
+            "Broker MainPID is not executing the signed active entrypoint"
+        )
+    return {
+        "unit": BOOTSTRAP_UNIT,
+        "activeState": properties["ActiveState"],
+        "mainPid": pid,
+        "binaryPath": str(binary_path),
+        "binarySha256": _sha256_file(binary_path),
+        "unitSha256": _sha256_file(unit_path),
+    }
+
+
+def _read_os_release_version() -> str:
+    """Read the real root OS release for the signed DEB target selection."""
+
+    return _host_ubuntu_version(Path("/"))
+
+
+def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
+    """Verify, back up, stage the DEB, and prepare only the fresh broker.
+
+    The maintenance broker can be started only when explicitly requested after
+    a matching plan confirmation. Core/Product services are never started,
+    enabled, stopped, or switched here. UNKNOWN authority stays CLOSED.
+    中文：仅暂存签名包、初始化全新维护代理；不启动或切换 Kernel/Product。
+    """
+
+    _require_root()
+    ref = args.expected_source_ref
+    commit = args.expected_source_commit
+    if (
+        ref
+        not in {
+            "refs/heads/develop",
+            "refs/heads/main",
+            "refs/heads/release",
+        }
+        or COMMIT_RE.fullmatch(commit) is None
+    ):
+        raise AdminInitializationError(
+            "Exact allowed Workspace source ref and full SHA are required"
+        )
+    version = _read_os_release_version()
+    release_proof = verify_native_release_for_host(
+        args.release_directory,
+        expected_source_ref=ref,
+        expected_source_commit=commit,
+        ubuntu_version=version,
+    )
+    if release_proof["repository"] != WORKSPACE_REPOSITORY:
+        raise AdminInitializationError(
+            "Verified package repository does not match the fixed Workspace"
+        )
+    target = release_proof["target"]
+    deb_path = Path(target["debPath"])
+    deb_bytes = _private_regular_file(deb_path, "verified stage-only DEB")
+    if _sha256_bytes(deb_bytes) != target["debSha256"]:
+        raise AdminInitializationError("Verified DEB changed before initialization")
+    if target.get("checks") != EXPECTED_INITIALIZATION_CHECKS:
+        raise AdminInitializationError("Verified package does not satisfy the stage-only contract")
+
+    bootstrap_inputs: dict[str, Path] = {
+        "index": args.index,
+        "index-attestation": args.index_attestation,
+        "manifest": args.manifest,
+        "artifact": args.artifact,
+        "artifact-attestation": args.artifact_attestation,
+    }
+    bootstrap_hashes = {
+        name: _sha256_bytes(_private_regular_file(path, name))
+        for name, path in bootstrap_inputs.items()
+    }
+    extract_root = Path(tempfile.mkdtemp(prefix="cyrene-init-catalog-"))
+    try:
+        _run(["/usr/bin/dpkg-deb", "--extract", str(deb_path), str(extract_root)])
+        target_id = _load_compiled_target_id(
+            extract_root / "usr/lib/cyrene/scripts/component_updates.py",
+            extract_root / "usr/share/cyrene/component-catalog-v1.json",
+        )
+    finally:
+        shutil.rmtree(extract_root, ignore_errors=True)
+    bootstrap_command = [
+        "/usr/bin/cyrene",
+        "component-bootstrap-runtime-maintenance",
+        "--index",
+        str(args.index),
+        "--index-attestation",
+        str(args.index_attestation),
+        "--manifest",
+        str(args.manifest),
+        "--artifact",
+        str(args.artifact),
+        "--artifact-attestation",
+        str(args.artifact_attestation),
+        "--channel",
+        args.channel,
+        "--target-id",
+        target_id,
+    ]
+    identity = {
+        "workspaceReleaseId": release_proof["releaseId"],
+        "workspaceSource": {"ref": ref, "commit": commit},
+        "debSha256": target["debSha256"],
+        "broker": {
+            "channel": args.channel,
+            "targetId": target_id,
+            "inputSha256": bootstrap_hashes,
+        },
+    }
+    journal_path = Path("/var/lib/cyrene/native-initialization") / (
+        "operator-init-" + target["debSha256"].removeprefix("sha256:") + ".json"
+    )
+    journal = _load_admin_journal(journal_path, identity)
+    evidence = journal.setdefault("evidence", {})
+
+    backup_path = Path(args.backup_directory) / (
+        "native-init-" + target["debSha256"].removeprefix("sha256:") + ".tar.gz"
+    )
+    if journal["phase"] == "verified":
+        backup = _backup_archive(backup_path)
+        evidence["backup"] = backup
+        journal["phase"] = "backed-up"
+        _write_admin_journal(journal_path, journal)
+    else:
+        backup = evidence.get("backup")
+        if not isinstance(backup, dict) or backup.get("path") != str(backup_path):
+            raise AdminInitializationError("Recovery journal has no matching verified backup")
+        if _sha256_file(backup_path) != backup.get("sha256"):
+            raise AdminInitializationError("Root-owned backup changed after verification")
+        with tarfile.open(backup_path, mode="r:gz") as archive:
+            member_count = len(archive.getmembers())
+        if member_count != backup.get("memberCount"):
+            raise AdminInitializationError("Root-owned backup failed readback validation")
+
+    if journal["phase"] == "backed-up":
+        _run(["/usr/bin/dpkg", "-i", str(deb_path)])
+        installed_target_id = _load_compiled_target_id()
+        if installed_target_id != target_id:
+            raise AdminInitializationError(
+                "Installed compiled broker target differs from the signed DEB catalog target"
+            )
+        journal["phase"] = "deb-staged"
+        _write_admin_journal(journal_path, journal)
+
+    if journal["phase"] == "deb-staged":
+        _fresh_activity_state(Path("/"))
+        plan_result = _json_result(_run(bootstrap_command), "Broker bootstrap plan")
+        plan_digest = _verify_bootstrap_plan(plan_result, target_id)
+        journal["phase"] = "broker-plan-created"
+        journal["planDigest"] = plan_digest
+        journal["planIdentity"] = {
+            key: plan_result.get(key)
+            for key in (
+                "componentId",
+                "targetId",
+                "version",
+                "manifestDigest",
+                "artifactDigest",
+                "indexDigest",
+            )
+        }
+        _write_admin_journal(journal_path, journal)
+
+    if journal["phase"] == "broker-plan-created":
+        expected_digest = journal.get("planDigest")
+        confirmation = args.confirm_plan_digest
+        if confirmation is None:
+            print(
+                "Verified broker plan "
+                + json.dumps(journal["planIdentity"], sort_keys=True, separators=(",", ":")),
+                flush=True,
+            )
+            confirmation = input(
+                "Type the exact planDigest to confirm new broker activation: "
+            ).strip()
+        if confirmation != expected_digest:
+            raise AdminInitializationError(
+                "Human confirmation did not match the exact broker plan digest"
+            )
+        journal["confirmedPlanDigest"] = confirmation
+        journal["phase"] = "broker-confirmed"
+        _write_admin_journal(journal_path, journal)
+
+    if journal["phase"] == "broker-confirmed":
+        activation = _json_result(
+            _run([*bootstrap_command, "--confirm-plan-digest", journal["confirmedPlanDigest"]]),
+            "Broker bootstrap confirmation",
+        )
+        if (
+            activation.get("status") != "activated"
+            or activation.get("planDigest") != journal["confirmedPlanDigest"]
+            or activation.get("componentId") != BOOTSTRAP_COMPONENT
+            or activation.get("targetId") != target_id
+            or any(activation.get(key) != value for key, value in journal["planIdentity"].items())
+        ):
+            raise AdminInitializationError("Broker activation did not match the confirmed plan")
+        helper, helper_manifest = _verified_broker_helper(activation)
+        journal["phase"] = "broker-activated"
+        evidence["brokerActivation"] = {
+            key: activation.get(key)
+            for key in (
+                "componentId",
+                "targetId",
+                "version",
+                "manifestDigest",
+                "artifactDigest",
+                "indexDigest",
+                "releasePath",
+                "activePointer",
+                "activePointerTarget",
+            )
+        }
+        evidence["managedHelperSha256"] = _sha256_file(helper)
+        evidence["brokerManifestDigest"] = helper_manifest["manifestDigest"]
+        _write_admin_journal(journal_path, journal)
+    else:
+        activation = evidence.get("brokerActivation")
+        if not isinstance(activation, dict):
+            raise AdminInitializationError("Recovery journal has no verified broker activation")
+        helper, _helper_manifest = _verified_broker_helper(activation)
+        if _sha256_file(helper) != evidence.get("managedHelperSha256"):
+            raise AdminInitializationError("Managed-runtime helper changed after activation")
+
+    if journal["phase"] == "broker-activated":
+        unit_result = _json_result(
+            _run(["/usr/bin/cyrene", "component-install-missing-units"]),
+            "Trusted unit installation",
+        )
+        if not isinstance(unit_result.get("installed"), list) or not isinstance(
+            unit_result.get("alreadyPresent"), list
+        ):
+            raise AdminInitializationError("Trusted unit installer returned an invalid result")
+        evidence["unitInstallation"] = unit_result
+        _run([str(PRIVATE_PYTHON), str(helper), "prepare", "--root", "/"])
+        _run(["/usr/bin/systemctl", "daemon-reload"])
+        journal["phase"] = "identity-prepared"
+        evidence["managedRuntimePrepare"] = "passed"
+        evidence["daemonReload"] = "passed"
+        _write_admin_journal(journal_path, journal)
+    elif journal["phase"] not in {
+        "identity-prepared",
+        "catalog-initialized",
+        "broker-started",
+        "complete",
+    }:
+        raise AdminInitializationError("Admin initialization journal has an unsupported phase")
+
+    if journal["phase"] == "identity-prepared":
+        _fresh_activity_state(Path("/"))
+        extract_root = Path(tempfile.mkdtemp(prefix="cyrene-init-deb-"))
+        try:
+            _run(["/usr/bin/dpkg-deb", "--extract", str(deb_path), str(extract_root)])
+            source_args, source_evidence = _activity_source_arguments(
+                extract_root / "usr/lib/systemd/system",
+                Path("/usr/lib/systemd/system"),
+            )
+        finally:
+            shutil.rmtree(extract_root, ignore_errors=True)
+        runtime_group_gid = grp.getgrnam("cyrene-runtime-maintenance").gr_gid
+        catalog_command = [
+            "/usr/bin/cyrene",
+            "component-run",
+            BOOTSTRAP_COMPONENT,
+            "--",
+            "init-catalog",
+            "--catalog",
+            "/var/lib/cyrene/runtime/activity-sources.json",
+            "--token-dir",
+            "/etc/cyrene/runtime-activity-source-tokens",
+            "--catalog-gid",
+            str(runtime_group_gid),
+            *source_args,
+        ]
+        init_result = _json_result(_run(catalog_command), "Fresh activity catalog initialization")
+        generation = init_result.get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+            raise AdminInitializationError(
+                "Activity-source initializer returned no valid generation"
+            )
+        returned_sources = init_result.get("sources")
+        if (
+            not isinstance(returned_sources, list)
+            or {row.get("source_id") for row in returned_sources if isinstance(row, dict)}
+            != PRODUCT_SOURCE_IDS
+            or any(
+                row.get("token_file")
+                != f"/etc/cyrene/runtime-activity-source-tokens/{row.get('source_id')}.token"
+                for row in returned_sources
+                if isinstance(row, dict)
+            )
+        ):
+            raise AdminInitializationError(
+                "Activity-source initializer returned an unexpected owner set"
+            )
+        environment_path = Path("/etc/cyrene/runtime-activity-sources.env")
+        descriptor = os.open(
+            environment_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o644,
+        )
+        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+            stream.write(f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={generation}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chown(environment_path, 0, 0)
+        os.chmod(environment_path, 0o644)
+        catalog_path = Path("/var/lib/cyrene/runtime/activity-sources.json")
+        catalog = json.loads(_private_regular_file(catalog_path, "fresh activity catalog"))
+        expected_sources = [
+            {
+                "source_id": source_id,
+                "uid": source_identity[0],
+                "gid": source_identity[1],
+            }
+            for source_id, source_identity in sorted(source_evidence["sources"].items())
+        ]
+        actual_sources = [
+            {key: row.get(key) for key in ("source_id", "uid", "gid")}
+            for row in catalog.get("sources", [])
+            if isinstance(row, dict)
+        ]
+        if catalog.get("generation") != generation or actual_sources != expected_sources:
+            raise AdminInitializationError(
+                "Activity catalog generation changed after initialization"
+            )
+        token_dir = Path("/etc/cyrene/runtime-activity-source-tokens")
+        token_files: list[str] = []
+        for source_id in sorted(PRODUCT_SOURCE_IDS):
+            token_path = token_dir / f"{source_id}.token"
+            info = token_path.lstat()
+            if (
+                token_path.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) != 0o400
+            ):
+                raise AdminInitializationError(
+                    f"Generated source token metadata is unsafe: {source_id}"
+                )
+            token_files.append(str(token_path))
+        evidence["activitySources"] = {
+            "catalog": str(catalog_path),
+            "generation": generation,
+            "catalogSha256": _sha256_file(catalog_path),
+            "environment": str(environment_path),
+            "environmentSha256": _sha256_file(environment_path),
+            "tokenFiles": token_files,
+            "sourceUnits": source_evidence,
+        }
+        journal["phase"] = "catalog-initialized"
+        _write_admin_journal(journal_path, journal)
+    elif journal["phase"] in {"catalog-initialized", "broker-started", "complete"}:
+        activity = evidence.get("activitySources")
+        if not isinstance(activity, dict):
+            raise AdminInitializationError("Recovery journal has no fresh activity-source receipt")
+        for key, path_value in (
+            ("catalogSha256", "/var/lib/cyrene/runtime/activity-sources.json"),
+            ("environmentSha256", "/etc/cyrene/runtime-activity-sources.env"),
+        ):
+            if _sha256_file(Path(path_value)) != activity.get(key):
+                raise AdminInitializationError(
+                    "Fresh activity configuration changed after initialization"
+                )
+
+    if args.start_broker and journal["phase"] in {
+        "catalog-initialized",
+        "broker-started",
+        "complete",
+    }:
+        broker_state = _start_fresh_broker(evidence["brokerActivation"], subprocess.run)
+        journal["phase"] = "broker-started"
+        evidence["brokerService"] = broker_state
+        _write_admin_journal(journal_path, journal)
+
+    result = {
+        "status": (
+            "BROKER_STARTED_AUTHORITY_UNKNOWN"
+            if journal["phase"] in {"broker-started", "complete"}
+            else "PREPARED"
+        ),
+        "releaseId": release_proof["releaseId"],
+        "source": release_proof["source"],
+        "targetId": target["targetId"],
+        "debSha256": target["debSha256"],
+        "planDigest": journal.get("confirmedPlanDigest"),
+        "backup": evidence["backup"],
+        "broker": evidence.get("brokerActivation"),
+        "activitySources": evidence.get("activitySources"),
+        "readiness": "UNKNOWN",
+        "applyAdmission": "CLOSED",
+        "productAndCoreActivation": "NOT_RUN",
+        "platformReadyManifest": "NOT_WRITTEN",
+        "manualRuntimeProcesses": "PRESERVED",
+    }
+    journal["result"] = result
+    journal["phase"] = "complete" if args.start_broker else journal["phase"]
+    _write_admin_journal(journal_path, journal)
+    return result
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the exact, pin-required administrator command interface."""
+
+    parser = argparse.ArgumentParser(
+        description="Run a signed, stage-only native host initialization"
+    )
+    parser.add_argument("--release-directory", type=Path, required=True)
+    parser.add_argument("--expected-source-ref", required=True)
+    parser.add_argument("--expected-source-commit", required=True)
+    parser.add_argument("--index", type=Path, required=True)
+    parser.add_argument("--index-attestation", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--artifact", type=Path, required=True)
+    parser.add_argument("--artifact-attestation", type=Path, required=True)
+    parser.add_argument("--channel", choices=("stable", "preview"), required=True)
+    parser.add_argument("--backup-directory", type=Path, default=Path("/var/backups/cyrene"))
+    parser.add_argument("--confirm-plan-digest")
+    parser.add_argument(
+        "--start-broker",
+        action="store_true",
+        help="Start only the newly verified runtime-maintenance broker after fresh-only initialization",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run one root-only initialization and print a redacted receipt."""
+
+    try:
+        args = build_parser().parse_args(argv)
+        result = execute_initialization(args)
+    except (AdminInitializationError, AcceptanceError, OSError, ValueError) as error:
+        print(f"BLOCKED: {error}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
