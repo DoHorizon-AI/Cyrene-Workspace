@@ -36,6 +36,10 @@ BOOTSTRAP_COMPONENT = "cyrene-runtime-maintenance"
 BOOTSTRAP_UNIT = "cyrene-runtime-maintenance.service"
 PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
 BOOTSTRAP_HELPER_RELATIVE = PurePosixPath("share/cyrene-managed-runtime/cyrene_managed_runtime.py")
+COMPONENT_UPDATE_HELPER = Path("/usr/libexec/cyrene-component-update-helper")
+OPERATOR_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+ADMIN_ROOT_UID = 0
+ADMIN_ROOT_GID = 0
 PRODUCT_SOURCE_IDS = frozenset(
     {
         "cyrene-catalyst",
@@ -485,6 +489,170 @@ def _write_admin_journal(path: Path, value: dict[str, Any]) -> None:
         raise
 
 
+def _operator_identity(
+    username: str, lookup: Callable[[str], Any] = pwd.getpwnam
+) -> tuple[str, int]:
+    """Resolve one explicitly selected local account and reject root identities."""
+
+    if not isinstance(username, str) or OPERATOR_NAME_RE.fullmatch(username) is None:
+        raise AdminInitializationError("Operator username is not a safe local account name")
+    try:
+        account = lookup(username)
+    except (KeyError, OSError) as error:
+        raise AdminInitializationError("Selected operator account does not exist") from error
+    if getattr(account, "pw_name", None) != username:
+        raise AdminInitializationError("Selected operator account lookup was not exact")
+    uid = getattr(account, "pw_uid", None)
+    if isinstance(uid, bool) or not isinstance(uid, int) or uid <= 0:
+        raise AdminInitializationError("Selected operator account must be a non-root user")
+    return username, uid
+
+
+def _verify_installed_update_helper(
+    signed_helper: bytes, *, helper_path: Path = COMPONENT_UPDATE_HELPER
+) -> str:
+    """Require the installed fixed helper to be a root-owned byte-exact package file."""
+
+    try:
+        info = helper_path.lstat()
+    except OSError as error:
+        raise AdminInitializationError(
+            "Installed fixed component-update helper is unavailable"
+        ) from error
+    if (
+        helper_path.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != ADMIN_ROOT_UID
+        or info.st_gid != ADMIN_ROOT_GID
+        or stat.S_IMODE(info.st_mode) != 0o755
+    ):
+        raise AdminInitializationError("Installed fixed component-update helper metadata is unsafe")
+    installed = _private_regular_file(helper_path, "installed fixed component-update helper")
+    if installed != signed_helper:
+        raise AdminInitializationError("Installed fixed helper differs from verified DEB bytes")
+    return _sha256_bytes(installed)
+
+
+def _operator_sudoers_bytes(username: str) -> bytes:
+    """Render the sole argument-free sudo command granted to the selected account."""
+
+    return (
+        f'{username} ALL=(root) NOPASSWD: /usr/libexec/cyrene-component-update-helper ""\n'
+    ).encode("ascii")
+
+
+def _authorize_component_update_operator(
+    username: str,
+    signed_helper: bytes,
+    *,
+    sudoers_directory: Path = Path("/etc/sudoers.d"),
+    helper_path: Path = COMPONENT_UPDATE_HELPER,
+    staging_parent: Path | None = None,
+    lookup: Callable[[str], Any] = pwd.getpwnam,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict[str, Any]:
+    """Install or verify one narrow sudoers rule after validating account and helper."""
+
+    operator, uid = _operator_identity(username, lookup)
+    helper_digest = _verify_installed_update_helper(signed_helper, helper_path=helper_path)
+    rule = _operator_sudoers_bytes(operator)
+    destination = sudoers_directory / f"cyrene-component-update-{operator}"
+    if os.path.lexists(destination):
+        if destination.is_symlink() or not destination.is_file():
+            raise AdminInitializationError("Existing operator sudoers path is unsafe")
+        info = destination.lstat()
+        existing = destination.read_bytes()
+        if (
+            info.st_uid != ADMIN_ROOT_UID
+            or info.st_gid != ADMIN_ROOT_GID
+            or stat.S_IMODE(info.st_mode) != 0o440
+            or existing != rule
+        ):
+            raise AdminInitializationError(
+                "Existing operator sudoers rule differs; refusing overwrite"
+            )
+        _run(["/usr/sbin/visudo", "-c", "-f", str(destination)], runner=runner)
+        return {
+            "username": operator,
+            "uid": uid,
+            "helper": str(helper_path),
+            "helperSha256": helper_digest,
+            "sudoers": str(destination),
+            "sudoersSha256": _sha256_bytes(rule),
+            "priorRuleState": "matching",
+            "ruleReadback": "passed",
+            "status": "verified-existing",
+        }
+
+    parent = staging_parent or sudoers_directory / ".cyrene-init-private"
+    if (
+        sudoers_directory.is_symlink()
+        or not sudoers_directory.is_dir()
+        or sudoers_directory.lstat().st_uid != ADMIN_ROOT_UID
+    ):
+        raise AdminInitializationError("Sudoers include directory is unsafe")
+    parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_info = parent.lstat()
+    if (
+        parent.is_symlink()
+        or not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != ADMIN_ROOT_UID
+        or stat.S_IMODE(parent_info.st_mode) != 0o700
+    ):
+        raise AdminInitializationError("Operator sudoers staging directory is unsafe")
+    descriptor, staged_name = tempfile.mkstemp(prefix=".cyrene-operator-", dir=parent)
+    staged = Path(staged_name)
+    installed_new = False
+    try:
+        os.fchmod(descriptor, 0o440)
+        os.fchown(descriptor, ADMIN_ROOT_UID, ADMIN_ROOT_GID)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(rule)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _run(["/usr/sbin/visudo", "-c", "-f", str(staged)], runner=runner)
+        if os.path.lexists(destination):
+            raise AdminInitializationError("Operator sudoers path appeared during initialization")
+        os.link(staged, destination)
+        staged.unlink()
+        installed_new = True
+        directory_fd = os.open(sudoers_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        readback = destination.lstat()
+        if (
+            destination.is_symlink()
+            or not stat.S_ISREG(readback.st_mode)
+            or readback.st_uid != ADMIN_ROOT_UID
+            or readback.st_gid != ADMIN_ROOT_GID
+            or stat.S_IMODE(readback.st_mode) != 0o440
+            or destination.read_bytes() != rule
+        ):
+            raise AdminInitializationError("Installed operator sudoers rule failed readback")
+    except Exception:
+        staged.unlink(missing_ok=True)
+        if installed_new and not destination.is_symlink() and destination.is_file():
+            try:
+                if _sha256_file(destination) == _sha256_bytes(rule):
+                    destination.unlink()
+            except OSError:
+                pass
+        raise
+    return {
+        "username": operator,
+        "uid": uid,
+        "helper": str(helper_path),
+        "helperSha256": helper_digest,
+        "sudoers": str(destination),
+        "sudoersSha256": _sha256_bytes(rule),
+        "priorRuleState": "absent",
+        "ruleReadback": "passed",
+        "status": "installed",
+    }
+
+
 def _verified_broker_helper(
     activation: dict[str, Any], *, install_root: Path = Path("/usr/lib/cyrene")
 ) -> tuple[Path, dict[str, Any]]:
@@ -728,6 +896,8 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
             "inputSha256": bootstrap_hashes,
         },
     }
+    if args.operator_user is not None:
+        identity["operatorUser"] = args.operator_user
     journal_path = Path("/var/lib/cyrene/native-initialization") / (
         "operator-init-" + target["debSha256"].removeprefix("sha256:") + ".json"
     )
@@ -993,6 +1163,21 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
         evidence["brokerService"] = broker_state
         _write_admin_journal(journal_path, journal)
 
+    operator_authorization: dict[str, Any] | None = None
+    if args.operator_user is not None:
+        extract_root = Path(tempfile.mkdtemp(prefix="cyrene-init-operator-deb-"))
+        try:
+            _run(["/usr/bin/dpkg-deb", "--extract", str(deb_path), str(extract_root)])
+            signed_helper_path = extract_root / "usr/libexec/cyrene-component-update-helper"
+            signed_helper = _private_regular_file(
+                signed_helper_path, "verified DEB component-update helper"
+            )
+            operator_authorization = _authorize_component_update_operator(
+                args.operator_user, signed_helper
+            )
+        finally:
+            shutil.rmtree(extract_root, ignore_errors=True)
+
     result = {
         "status": (
             "BROKER_STARTED_AUTHORITY_UNKNOWN"
@@ -1007,6 +1192,7 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
         "backup": evidence["backup"],
         "broker": evidence.get("brokerActivation"),
         "activitySources": evidence.get("activitySources"),
+        "operatorAuthorization": operator_authorization,
         "readiness": "UNKNOWN",
         "applyAdmission": "CLOSED",
         "productAndCoreActivation": "NOT_RUN",
@@ -1015,7 +1201,26 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
     }
     journal["result"] = result
     journal["phase"] = "complete" if args.start_broker else journal["phase"]
-    _write_admin_journal(journal_path, journal)
+    if operator_authorization is not None:
+        evidence["operatorAuthorization"] = operator_authorization
+    try:
+        _write_admin_journal(journal_path, journal)
+    except Exception:
+        if (
+            operator_authorization is not None
+            and operator_authorization.get("status") == "installed"
+        ):
+            rule_path = Path(operator_authorization["sudoers"])
+            try:
+                if (
+                    not rule_path.is_symlink()
+                    and rule_path.is_file()
+                    and _sha256_file(rule_path) == operator_authorization["sudoersSha256"]
+                ):
+                    rule_path.unlink()
+            except OSError:
+                pass
+        raise
     return result
 
 
@@ -1036,6 +1241,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--channel", choices=("stable", "preview"), required=True)
     parser.add_argument("--backup-directory", type=Path, default=Path("/var/backups/cyrene"))
     parser.add_argument("--confirm-plan-digest")
+    parser.add_argument(
+        "--operator-user",
+        help="Optionally grant one existing non-root account the fixed component-update helper",
+    )
     parser.add_argument(
         "--start-broker",
         action="store_true",

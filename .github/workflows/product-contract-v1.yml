@@ -156,9 +156,12 @@ jobs:
           packaging/component_updates.py scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
           tooling/acceptance/native-components-v2/admin_initialize.py
+          tooling/acceptance/native-components-v2/admin_packet.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
+          tests/test_native_admin_packet.py
+          tests/test_native_admin_authorization.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
       - name: Check native-profile formatting
@@ -170,9 +173,12 @@ jobs:
           packaging/component_updates.py scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
           tooling/acceptance/native-components-v2/admin_initialize.py
+          tooling/acceptance/native-components-v2/admin_packet.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
+          tests/test_native_admin_packet.py
+          tests/test_native_admin_authorization.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
       - name: Test runtime lock, signed service bytes, installer receipts, and native updates
@@ -181,6 +187,8 @@ jobs:
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
+          tests/test_native_admin_packet.py
+          tests/test_native_admin_authorization.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
       - name: Compile Python helpers and check package shell syntax
@@ -190,7 +198,8 @@ jobs:
             packaging/native_install_contract.py \
             scripts/native_installer_release.py \
             tooling/acceptance/native-components-v2/native_acceptance.py \
-            tooling/acceptance/native-components-v2/admin_initialize.py
+            tooling/acceptance/native-components-v2/admin_initialize.py \
+            tooling/acceptance/native-components-v2/admin_packet.py
           bash -n packaging/build-deb.sh packaging/cyrene-component-update-helper
       - name: Parse the installer publisher and CI workflow YAML
         run: |

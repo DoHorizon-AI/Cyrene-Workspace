@@ -243,6 +243,33 @@ def test_builders_reject_a_different_ubuntu_profile_host(
         bundle._require_profile_host(profile)
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        "uv 0.12.21",
+        "uv 0.12.21 (x86_64-unknown-linux-gnu)",
+    ],
+)
+def test_locked_uv_version_accepts_official_version_output(output: str) -> None:
+    assert prepare._uv_version_matches_locked_profile(output, "0.12.21", "x86_64-unknown-linux-gnu")
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "uv 0.12.20",
+        "uv 0.12.21 (aarch64-unknown-linux-gnu)",
+        "uv 0.12.21 (x86_64-unknown-linux-musl)",
+        "uv 0.12.21 unexpected",
+        "uv 0.12.21\nwarning",
+    ],
+)
+def test_locked_uv_version_rejects_wrong_version_target_or_output(output: str) -> None:
+    assert not prepare._uv_version_matches_locked_profile(
+        output, "0.12.21", "x86_64-unknown-linux-gnu"
+    )
+
+
 def test_runtime_sdk_input_requires_exact_distribution_version_and_digest(tmp_path: Path) -> None:
     wheel, digest = _wheel(tmp_path, "cyrene-runtime-maintenance", "0.1.0")
     args = Namespace(
