@@ -2228,6 +2228,32 @@ def _validate_release_manifest_version(manifest: dict[str, Any], receipt: dict[s
         raise ReleaseError("release package version differs from the source-bound Workspace lock")
 
 
+def _validate_release_directory_membership(
+    root: Path,
+    expected_asset_names: set[str],
+    expected_subject_names: set[str],
+    catalog_bundle_name: str,
+    checksums_name: str,
+) -> None:
+    """Require the release directory to contain only its exact immutable assets."""
+
+    expected_directory_names = (
+        set(expected_asset_names)
+        | {checksums_name}
+        | {f"{name}.attestation.jsonl" for name in expected_subject_names}
+        | {catalog_bundle_name}
+    )
+    actual_directory_names = set()
+    for path in root.iterdir():
+        if path.is_symlink() or not path.is_file():
+            raise ReleaseError(f"release directory contains a non-asset entry: {path.name}")
+        actual_directory_names.add(path.name)
+    if actual_directory_names != expected_directory_names:
+        raise ReleaseError(
+            "release directory contains missing or unexpected immutable release assets"
+        )
+
+
 def _assemble(arguments: argparse.Namespace) -> int:
     """Create the two DEB assets, release manifest, receipt, and SHA256SUMS."""
 
@@ -2649,20 +2675,13 @@ def verify_release_directory(
                     f"offline attestation verification failed for {path.name}: "
                     f"{result.stderr.strip() or 'gh attestation verify returned nonzero'}"
                 )
-    expected_directory_names = (
-        set(expected_asset_hashes)
-        | {f"{name}.attestation.jsonl" for name in expected_subjects}
-        | {catalog_bundle_path.name}
+    _validate_release_directory_membership(
+        root,
+        set(expected_asset_hashes),
+        expected_subjects,
+        catalog_bundle_path.name,
+        checksums_path.name,
     )
-    actual_directory_names = set()
-    for path in root.iterdir():
-        if path.is_symlink() or not path.is_file():
-            raise ReleaseError(f"release directory contains a non-asset entry: {path.name}")
-        actual_directory_names.add(path.name)
-    if actual_directory_names != expected_directory_names:
-        raise ReleaseError(
-            "release directory contains missing or unexpected immutable release assets"
-        )
     return manifest
 
 
