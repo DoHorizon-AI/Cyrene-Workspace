@@ -9,7 +9,7 @@ import json
 import subprocess
 import tarfile
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -273,11 +273,251 @@ def test_outer_manifest_digest_must_match_index_and_manifest() -> None:
     manifest_record["manifestDigest"] = "sha256:" + "0" * 64
     with pytest.raises(module.VerifiedServiceArtifactError, match="manifest digest is invalid"):
         module._verify_outer_manifest_digest(manifest_record, manifest)
-
     manifest_record["manifestDigest"] = manifest["manifestDigest"]
     manifest["manifestDigest"] = "sha256:" + "0" * 64
     with pytest.raises(module.VerifiedServiceArtifactError, match="manifest digest is invalid"):
         module._verify_outer_manifest_digest(manifest_record, manifest)
+
+
+def _write_staging_inputs(
+    module: ModuleType, root: Path, target_profile: str
+) -> tuple[Path, Path, dict[str, dict[str, object]], dict[str, str]]:
+    """Build small immutable-shaped inputs for a complete five-service stage."""
+    input_root = root / "inputs"
+    input_root.mkdir()
+    target_fields = module.PRODUCT_TARGETS[target_profile]
+    commit_by_service = {
+        service: str(index) * 40 for index, service in enumerate(module.SERVICES, start=1)
+    }
+    catalog_components = []
+    publishers = []
+    records: dict[str, dict[str, object]] = {}
+    release_assets: dict[str, dict[str, object]] = {}
+
+    for component_id, service in sorted(module.SERVICE_COMPONENTS.items()):
+        repository_name = module.SERVICE_REPOSITORIES[service]
+        repository = f"DoHorizon-AI/{repository_name}"
+        workflow = f"{repository}/.github/workflows/component-release.yml"
+        release_assets[repository] = {}
+        catalog_components.append(
+            {
+                "componentId": component_id,
+                "publisher": repository,
+                "kind": "python-bundle",
+                "pythonBundleService": service,
+                "targets": [
+                    {
+                        "targetId": target_profile,
+                        "artifactKind": "python-bundle",
+                        "support": "supported",
+                    }
+                ],
+            }
+        )
+        publishers.append({"repository": repository, "workflow": workflow})
+
+        source_commit = commit_by_service[service]
+        release_id = f"preview-{source_commit}"
+        archive_name, manifest_name = module._canonical_product_asset_names(
+            component_id, target_profile, target_fields
+        )
+        archive_path = input_root / archive_name
+        inner_manifest_bytes = b"{}"
+        with tarfile.open(archive_path, "w:gz") as archive:
+            member = tarfile.TarInfo("manifest.json")
+            member.mode = 0o644
+            member.size = len(inner_manifest_bytes)
+            archive.addfile(member, io.BytesIO(inner_manifest_bytes))
+        artifact_sha = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+        artifact_size = archive_path.stat().st_size
+        inner_manifest_sha = hashlib.sha256(inner_manifest_bytes).hexdigest()
+        attestation_name = archive_name + ".attestation.jsonl"
+        attestation_path = input_root / attestation_name
+        attestation_path.write_bytes(b"attestation fixture")
+        attestation_sha = hashlib.sha256(attestation_path.read_bytes()).hexdigest()
+        artifact_uri = (
+            f"https://github.com/{repository}/releases/download/{release_id}/{archive_name}"
+        )
+        outer_manifest: dict[str, object] = {
+            "schemaVersion": 1,
+            "releaseId": release_id,
+            "componentId": component_id,
+            "version": "1.0.0",
+            "channel": "preview",
+            "target": target_fields,
+            "artifact": {
+                "kind": "python-bundle",
+                "format": "tar.gz",
+                "sha256": f"sha256:{artifact_sha}",
+                "sizeBytes": artifact_size,
+                "uri": artifact_uri,
+                "files": {"manifest.json": f"sha256:{inner_manifest_sha}"},
+            },
+            "dependencies": [],
+            "restart": {},
+            "source": {
+                "repository": f"https://github.com/{repository}",
+                "ref": "refs/heads/develop",
+                "commit": source_commit,
+            },
+            "provenance": {
+                "attestation": {
+                    "kind": "github-artifact-attestation",
+                    "repository": repository,
+                    "workflow": workflow,
+                    "predicateType": "https://slsa.dev/provenance/v1",
+                }
+            },
+        }
+        outer_manifest["manifestDigest"] = module._manifest_digest(outer_manifest)
+        manifest_bytes = json.dumps(outer_manifest, separators=(",", ":")).encode()
+        (input_root / manifest_name).write_bytes(manifest_bytes)
+        manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
+        records[component_id] = {
+            "componentId": component_id,
+            "repository": repository,
+            "releaseId": release_id,
+            "source": {"ref": "refs/heads/develop", "commit": source_commit},
+            "artifact": {
+                "path": archive_name,
+                "sha256": artifact_sha,
+                "sizeBytes": artifact_size,
+                "kind": "python-bundle",
+                "format": "tar.gz",
+            },
+            "manifest": {
+                "path": manifest_name,
+                "sha256": manifest_sha,
+                "manifestDigest": outer_manifest["manifestDigest"],
+            },
+            "attestation": {
+                "path": attestation_name,
+                "sha256": attestation_sha,
+                "repository": repository,
+                "workflow": workflow,
+                "predicateType": "https://slsa.dev/provenance/v1",
+                "subjectName": archive_name,
+                "sourceRef": "refs/heads/develop",
+                "sourceCommit": source_commit,
+            },
+        }
+        release_assets[repository][release_id] = [
+            (archive_name, artifact_sha, artifact_size),
+            (manifest_name, manifest_sha, len(manifest_bytes)),
+            (attestation_name, attestation_sha, attestation_path.stat().st_size),
+        ]
+
+    catalog_path = root / "catalog.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "components": catalog_components,
+                "publishers": publishers,
+                "targets": [
+                    {
+                        "id": target_profile,
+                        "hostSupport": "supported",
+                        "target": target_fields,
+                    }
+                ],
+                "channels": {"preview": {"sourceRefs": ["refs/heads/develop"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    index = {"schemaVersion": 1, "targetProfile": target_profile, "services": records}
+    (input_root / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    return input_root, catalog_path, release_assets, commit_by_service
+
+
+@pytest.mark.parametrize(
+    "target_profile",
+    [
+        "linux-ubuntu-22.04-x86_64-python-3.12",
+        "linux-ubuntu-24.04-x86_64-python-3.12",
+    ],
+)
+def test_verify_and_stage_separates_extraction_scratch_from_final_service_trees(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, target_profile: str
+) -> None:
+    module = _module()
+    input_root, catalog_path, release_assets, commit_by_service = _write_staging_inputs(
+        module, tmp_path, target_profile
+    )
+    lock_path = tmp_path / "release-lock.json"
+    lock_path.write_text("{}", encoding="utf-8")
+    output_root = tmp_path / "stage"
+    events: list[str] = []
+
+    def read_release(repository: str, release_id: str) -> dict[str, object]:
+        events.append(f"release:{repository}")
+        assets = [
+            {"name": name, "digest": f"sha256:{digest}", "size": size, "state": "uploaded"}
+            for name, digest, size in release_assets[repository][release_id]
+        ]
+        return {
+            "tag_name": release_id,
+            "immutable": True,
+            "draft": False,
+            "prerelease": True,
+            "assets": assets,
+        }
+
+    def validate_bundle(
+        bundle_root: Path,
+        *,
+        expected_service: str,
+        expected_target_profile: str,
+        release_lock_path: Path,
+    ) -> dict[str, object]:
+        events.append(f"bundle:{expected_service}")
+        assert expected_target_profile == target_profile
+        assert release_lock_path == lock_path
+        assert (bundle_root / "manifest.json").read_bytes() == b"{}"
+        return {
+            "schema_version": 2,
+            "service": expected_service,
+            "source_commit": commit_by_service[expected_service],
+            "version": "fixture-1.0.0",
+        }
+
+    def verify_attestation(*args: object, **kwargs: object) -> None:
+        events.append(f"attestation:{kwargs['repository']}")
+
+    monkeypatch.setattr(
+        module,
+        "_load_profile",
+        lambda _path, _profile: {
+            "repositories": {
+                module.SERVICE_REPOSITORIES[service]: commit
+                for service, commit in commit_by_service.items()
+            }
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_load_service_bundle_module",
+        lambda: SimpleNamespace(validate_bundle=validate_bundle),
+    )
+
+    result = module.verify_and_stage(
+        input_root=input_root,
+        target_profile=target_profile,
+        output_root=output_root,
+        release_lock_path=lock_path,
+        catalog_path=catalog_path,
+        release_reader=read_release,
+        attestation_verifier=verify_attestation,
+    )
+
+    assert set(result["services"]) == set(module.SERVICE_COMPONENTS)
+    assert len([event for event in events if event.startswith("release:")]) == 5
+    assert len([event for event in events if event.startswith("attestation:")]) == 5
+    assert len([event for event in events if event.startswith("bundle:")]) == 5
+    assert not (output_root / ".verified-extracted").exists()
+    for service in module.SERVICES:
+        staged_bundle = output_root / "service-artifacts" / service / "fixture-1.0.0"
+        assert (staged_bundle / "manifest.json").read_bytes() == b"{}"
 
 
 def test_verified_asset_input_rejects_symlinks_and_path_traversal(tmp_path: Path) -> None:

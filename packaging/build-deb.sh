@@ -8,7 +8,7 @@ umask 022
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-VERSION="0.1.0-rc.1"
+PACKAGE_VERSION="0.1.0-rc.1"
 OUTPUT_DIR="${WORKSPACE_ROOT}/dist"
 ARCH="amd64"
 TARGET_PROFILE=""
@@ -46,7 +46,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version)
-            VERSION="$2"
+            PACKAGE_VERSION="$2"
             shift 2
             ;;
         --output)
@@ -97,7 +97,7 @@ if [[ "${ARCH}" != "amd64" ]]; then
     echo "ERROR: release-lock.json supports Ubuntu 22.04/24.04 x86_64 (amd64) only; refusing --arch ${ARCH}." >&2
     exit 2
 fi
-if [[ ! "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$ ]]; then
+if [[ ! "${PACKAGE_VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z.+:~_-]{0,127}$ ]]; then
     echo "ERROR: --version must be a single safe Debian version token." >&2
     exit 2
 fi
@@ -186,7 +186,7 @@ if [[ "${BUILD_PYTHON_VERSION}" != "3.12.14" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-OUTPUT_PACKAGE="${OUTPUT_DIR}/cyrene_${VERSION}_${ARCH}.deb"
+OUTPUT_PACKAGE="${OUTPUT_DIR}/cyrene_${PACKAGE_VERSION}_${ARCH}.deb"
 if [[ -L "${OUTPUT_PACKAGE}" || -d "${OUTPUT_PACKAGE}" ]]; then
     echo "ERROR: package output must not be a symlink or directory: ${OUTPUT_PACKAGE}" >&2
     exit 2
@@ -196,7 +196,7 @@ BUILD_WORK_DIR="$(mktemp -d -t cyrene-deb-work-XXXXXX)"
 TEMP_OUTPUT_DIR="$(mktemp -d -p "${OUTPUT_DIR}" .cyrene-deb-build-XXXXXX)"
 trap 'rm -rf "${STAGE_DIR}" "${BUILD_WORK_DIR}" "${TEMP_OUTPUT_DIR}"' EXIT
 
-echo "==> Staging Cyrene .deb package (version: ${VERSION}, arch: ${ARCH})..."
+echo "==> Staging Cyrene .deb package (version: ${PACKAGE_VERSION}, arch: ${ARCH})..."
 
 # Directory structure
 mkdir -p "${STAGE_DIR}/DEBIAN"
@@ -495,7 +495,7 @@ chmod 644 "${STAGE_DIR}/lib/systemd/system/"*.service
 # 5. DEBIAN/control
 cat <<EOF > "${STAGE_DIR}/DEBIAN/control"
 Package: cyrene
-Version: ${VERSION}
+Version: ${PACKAGE_VERSION}
 Section: devel
 Priority: optional
 Architecture: ${ARCH}
