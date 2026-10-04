@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -209,6 +210,56 @@ def _emitter_index(
     }
     index["indexDigest"] = updater_module._digest_json(index, "indexDigest")
     return index
+
+
+def test_bundle_target_merges_the_component_artifact_declaration() -> None:
+    updater_module = control._load_updater()
+    updater = updater_module.ComponentUpdater(
+        catalog_path=WORKSPACE_ROOT / "packaging/component-catalog-bootstrap-v1.json",
+        trusted_catalog_digest=control.TRUSTED_CATALOG_DIGEST,
+        load_active_catalog=False,
+    )
+    component = updater.components[control.COMPONENT_ID]
+    catalog_target = updater.targets[control.DATA_BUNDLE_TARGET]
+
+    assert "artifactKind" not in catalog_target
+    assert control._bundle_target(updater, component) == {
+        **catalog_target,
+        "artifactKind": "data-bundle",
+    }
+
+    component["targets"] = [
+        {
+            "targetId": control.DATA_BUNDLE_TARGET,
+            "artifactKind": "data-bundle",
+            "support": "contract-only",
+        }
+    ]
+    with pytest.raises(control.ControlInitializationError, match="uniquely authorize"):
+        control._bundle_target(updater, component)
+
+
+def test_pretty_manifest_bytes_use_the_signed_canonical_digest() -> None:
+    updater_module = control._load_updater()
+    manifest: dict[str, object] = {
+        "componentId": control.COMPONENT_ID,
+        "target": {"architecture": "x86_64", "os": "linux", "runtime": "cyrene-authority-data"},
+        "version": "1.2.3",
+    }
+    manifest["manifestDigest"] = updater_module._digest_json(manifest, "manifestDigest")
+    entry = {"manifestDigest": manifest["manifestDigest"]}
+    raw_bytes = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
+
+    assert "sha256:" + hashlib.sha256(raw_bytes).hexdigest() != manifest["manifestDigest"]
+    control._validate_manifest_index_digest(updater_module, manifest, entry)
+
+    changed = {**manifest, "version": "1.2.4"}
+    with pytest.raises(control.ControlInitializationError, match="canonical digest"):
+        control._validate_manifest_index_digest(updater_module, changed, entry)
+
+    changed["manifestDigest"] = updater_module._digest_json(changed, "manifestDigest")
+    with pytest.raises(control.ControlInitializationError, match="canonical digest"):
+        control._validate_manifest_index_digest(updater_module, changed, entry)
 
 
 def test_emitter_target_selects_unique_full_target_and_reaches_manifest_validation(

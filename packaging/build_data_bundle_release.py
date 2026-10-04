@@ -27,7 +27,6 @@ import zstandard
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
-
 REPOSITORY = "DoHorizon-AI/Cyrene-Workspace"
 COMPONENT_ID = "cyrene-product-contract-bundle"
 TARGET_ID = "portable-contract-data-v1"
@@ -159,21 +158,24 @@ def _write_tar_zst(root: Path, destination: Path) -> None:
     """Write a deterministic tar.zst with normalized ownership and timestamps."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     compressor = zstandard.ZstdCompressor(level=19, threads=0, write_checksum=True, write_content_size=True)
-    with destination.open("wb") as output, compressor.stream_writer(output, closefd=False) as compressed:
-        with tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive:
-            for relative in _file_map(root):
-                source = root / relative
-                source_info = source.stat()
-                entry = tarfile.TarInfo(relative)
-                entry.size = source_info.st_size
-                entry.mtime = 0
-                entry.uid = 0
-                entry.gid = 0
-                entry.uname = ""
-                entry.gname = ""
-                entry.mode = 0o755 if source_info.st_mode & 0o111 else 0o644
-                with source.open("rb") as stream:
-                    archive.addfile(entry, stream)
+    with (
+        destination.open("wb") as output,
+        compressor.stream_writer(output, closefd=False) as compressed,
+        tarfile.open(fileobj=compressed, mode="w|", format=tarfile.PAX_FORMAT) as archive,
+    ):
+        for relative in _file_map(root):
+            source = root / relative
+            source_info = source.stat()
+            entry = tarfile.TarInfo(relative)
+            entry.size = source_info.st_size
+            entry.mtime = 0
+            entry.uid = 0
+            entry.gid = 0
+            entry.uname = ""
+            entry.gname = ""
+            entry.mode = 0o755 if source_info.st_mode & 0o111 else 0o644
+            with source.open("rb") as stream:
+                archive.addfile(entry, stream)
 
 
 def _parse_pairs(values: list[str], label: str) -> dict[str, Path]:
@@ -367,7 +369,7 @@ def _policy_entry(
     )
     proof = {
         "source": {"repository": POLICY_REPOSITORY, "ref": ref, "commit": commit},
-        "path": POLICY_BUNDLE_PATH,
+        "path": POLICY_SOURCE_PATH,
         "sha256": _digest(policy_raw),
         "provenance": {
             "attestation": attestation,
@@ -407,7 +409,7 @@ def package(args: argparse.Namespace) -> None:
     policy_proof, policy_files = _policy_entry(
         args.policy_publication, args.policy_assets, args.channel, args.policy_commit
     )
-    policy_path = policy_proof["path"]
+    policy_path = POLICY_BUNDLE_PATH
     policy_bytes = next(data for path, data in policy_files if str(path) == policy_path)
     bundled_policy_path = args.bundle_root / policy_path
     if _regular_file(bundled_policy_path) != policy_bytes:

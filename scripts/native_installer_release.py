@@ -2967,7 +2967,7 @@ def _write_service_artifacts(arguments: argparse.Namespace) -> int:
         if (
             not isinstance(manifest, dict)
             or not isinstance(index, dict)
-            or index.get("repository") != f"https://github.com/{repository}"
+            or index.get("repository") != repository
             or index.get("channel") != _source_channel(receipt["workspaceSource"]["ref"])
             or source.get("repository") != f"https://github.com/{repository}"
             or source != record["source"] | {"repository": f"https://github.com/{repository}"}

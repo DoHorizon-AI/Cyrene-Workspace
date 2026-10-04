@@ -33,6 +33,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 PROTOCOL_VERSION = "cyrene.component-updates.helper.v1"
+PRODUCT_CONTRACT_ATTESTATION_WORKFLOW = "/.github/workflows/product-contract.yml"
+PRODUCT_POLICY_ATTESTATION_WORKFLOW = "/.github/workflows/product-policy-release.yml"
 COMPONENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 DIGEST_PATTERN = re.compile(r"^sha256:([0-9a-f]{64})$")
 BUNDLE_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -4072,12 +4074,24 @@ class ComponentUpdater:
                 owner,
                 label=f"owner {owner['ownerId']} catalog",
                 channel=channel,
+                expected_subject_path=(
+                    expected_owner["repository"] + "/" + expected_owner["catalogPath"]
+                ),
+                expected_workflow=(
+                    expected_owner["repository"] + PRODUCT_CONTRACT_ATTESTATION_WORKFLOW
+                ),
             )
         self._validate_inner_bundle_files(
             manifest_value, proof, payload_root, policy_source, trusted_owners
         )
         self._verify_data_bundle_subject(
-            payload_root, policy_payload, policy_source, label="policy source", channel=channel
+            payload_root,
+            policy_payload,
+            policy_source,
+            label="policy source",
+            channel=channel,
+            expected_subject_path=(policy_trust["repository"] + "/" + policy_trust["path"]),
+            expected_workflow=(policy_trust["repository"] + PRODUCT_POLICY_ATTESTATION_WORKFLOW),
         )
         return proof
 
@@ -4177,6 +4191,8 @@ class ComponentUpdater:
         *,
         label: str,
         channel: str,
+        expected_subject_path: str,
+        expected_workflow: str,
     ) -> None:
         source = record.get("source")
         provenance = record.get("provenance")
@@ -4184,7 +4200,13 @@ class ComponentUpdater:
         publisher = (
             self.publishers.get(source.get("repository")) if isinstance(source, dict) else None
         )
-        subject_path = record.get("catalogPath", record.get("path"))
+        record_subject_path = record.get("catalogPath", record.get("path"))
+        if record.get("catalogPath") is not None:
+            subject_path = record_subject_path
+        elif isinstance(source, dict):
+            subject_path = f"{source.get('repository')}/{record_subject_path}"
+        else:
+            subject_path = None
         if (
             not isinstance(source, dict)
             or not isinstance(provenance, dict)
@@ -4196,6 +4218,7 @@ class ComponentUpdater:
             or re.fullmatch(r"[0-9a-f]{40}", str(source.get("commit", ""))) is None
             or not isinstance(attested, dict)
             or not isinstance(subject_path, str)
+            or subject_path != expected_subject_path
         ):
             raise UpdateError(
                 "UNTRUSTED_DATA_BUNDLE_SOURCE", f"{label} source proof is incomplete or untrusted."
@@ -4209,7 +4232,7 @@ class ComponentUpdater:
             - {"kind", "uri", "subjectName", "repository", "workflow", "predicateType", "run"}
             or attestation.get("kind") != "github-artifact-attestation"
             or attestation.get("repository") != source["repository"]
-            or attestation.get("workflow") != publisher.get("workflow")
+            or attestation.get("workflow") != expected_workflow
             or attestation.get("predicateType") != "https://slsa.dev/provenance/v1"
             or not {
                 "kind",
@@ -4265,7 +4288,7 @@ class ComponentUpdater:
             subject_name=PurePosixPath(subject_path).name,
             digest=provenance["subjectDigest"],
             repository=source["repository"],
-            workflow=publisher["workflow"],
+            workflow=expected_workflow,
             source_ref=source["ref"],
             source_commit=source["commit"],
             bundle_path=bundle_path,
