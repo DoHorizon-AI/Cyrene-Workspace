@@ -211,10 +211,61 @@ def _host_ubuntu_version(root: Path) -> str:
     """Derive the release target from the host's current OS facts."""
 
     release_path = root / "etc/os-release"
-    if release_path.is_symlink() or not release_path.is_file():
+    try:
+        release_info = os.lstat(release_path)
+    except OSError as error:
+        raise AdminInitializationError("Host OS release identity is unavailable") from error
+
+    try:
+        root_path = root.resolve(strict=True)
+    except OSError as error:
+        raise AdminInitializationError("Host OS release identity is unavailable") from error
+    if stat.S_ISLNK(release_info.st_mode):
+        # Ubuntu's canonical relative link is allowed; symlink mode bits are fixed at 0777.
+        # Ubuntu 的标准链接模式位固定为 0777，因此校验所有者与精确目标。
+        try:
+            if release_info.st_uid != 0 or os.readlink(release_path) != "../usr/lib/os-release":
+                raise AdminInitializationError("Host OS release identity is unavailable")
+            if release_path.resolve(strict=True) != root_path / "usr/lib/os-release":
+                raise AdminInitializationError("Host OS release identity is unavailable")
+        except OSError as error:
+            raise AdminInitializationError("Host OS release identity is unavailable") from error
+        release_path = root / "usr/lib/os-release"
+    elif not stat.S_ISREG(release_info.st_mode):
         raise AdminInitializationError("Host OS release identity is unavailable")
+    else:
+        try:
+            if release_path.resolve(strict=True) != root_path / "etc/os-release":
+                raise AdminInitializationError("Host OS release identity is unavailable")
+        except OSError as error:
+            raise AdminInitializationError("Host OS release identity is unavailable") from error
+
+    try:
+        target_info = os.lstat(release_path)
+    except OSError as error:
+        raise AdminInitializationError("Host OS release identity is unavailable") from error
+    if not stat.S_ISREG(target_info.st_mode):
+        raise AdminInitializationError("Host OS release identity is unavailable")
+
+    try:
+        descriptor = os.open(
+            release_path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as release_file:
+            file_info = os.fstat(release_file.fileno())
+            if (
+                not stat.S_ISREG(file_info.st_mode)
+                or file_info.st_uid != 0
+                or file_info.st_mode & 0o022
+            ):
+                raise AdminInitializationError("Host OS release identity is unavailable")
+            release_text = release_file.read()
+    except (OSError, UnicodeError) as error:
+        raise AdminInitializationError("Host OS release identity is unavailable") from error
+
     fields: dict[str, str] = {}
-    for line in release_path.read_text(encoding="utf-8").splitlines():
+    for line in release_text.splitlines():
         key, separator, value = line.partition("=")
         if separator:
             fields[key] = value.strip().strip('"')
