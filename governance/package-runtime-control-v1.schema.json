@@ -1,0 +1,1816 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/package-runtime-control-v1.schema.json",
+  "title": "Cyrene Package Runtime and Binding Admission Protocols v1",
+  "description": "Production Unix-socket JSONL contracts for the Platform package runtime control surface and its runtime-maintenance binding-operation admission. The stdio development control stream is outside this authenticated UDS contract.",
+  "$comment": "未知字段、旧版本和混合方法变体必须拒绝；目录锁仅在 broker Health 精确报告协议及 capability 后才允许绑定变更。",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/controlRequest"
+    },
+    {
+      "$ref": "#/$defs/controlResponse"
+    },
+    {
+      "$ref": "#/$defs/brokerRequest"
+    },
+    {
+      "$ref": "#/$defs/brokerResponse"
+    }
+  ],
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "responseRequestId": {
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
+    },
+    "sourceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "brokerIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "packageIdentity": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "packageVersion": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]*$"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 65536
+      },
+      "maxProperties": 256,
+      "description": "Environment forwarding is limited by the daemon to 256 entries and 256 KiB total encoded values."
+    },
+    "sourceAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_token"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/sourceId"
+        },
+        "source_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "controlAuth": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "source_token"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/sourceId"
+            },
+            "source_token": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        }
+      ],
+      "description": "Empty auth is accepted only for a real SO_PEERCRED UID 0 peer. Product callers supply both source_id and source_token."
+    },
+    "controlRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "authority"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "descriptor_path",
+            "archive_path",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "inspect"
+            },
+            "descriptor_path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "archive_path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "descriptor_path",
+            "archive_path",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "verify"
+            },
+            "descriptor_path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "archive_path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "descriptor_path",
+            "archive_path",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "install"
+            },
+            "descriptor_path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "archive_path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "package_id",
+            "package_version",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "install_offline"
+            },
+            "package_id": {
+              "$ref": "#/$defs/packageIdentity"
+            },
+            "package_version": {
+              "$ref": "#/$defs/packageVersion"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "installation_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "get_installation"
+            },
+            "installation_id": {
+              "$ref": "#/$defs/packageIdentity"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "list_installations"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "binding_id",
+            "installation_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "activate"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/packageIdentity"
+            },
+            "installation_id": {
+              "$ref": "#/$defs/packageIdentity"
+            },
+            "environment": {
+              "$ref": "#/$defs/environment"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "binding_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "recover_binding"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/packageIdentity"
+            },
+            "environment": {
+              "$ref": "#/$defs/environment"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "binding_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "deactivate"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/packageIdentity"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "binding_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "runtime_status"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/packageIdentity"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "binding_id",
+            "installation_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "upgrade"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/packageIdentity"
+            },
+            "installation_id": {
+              "$ref": "#/$defs/packageIdentity"
+            },
+            "environment": {
+              "$ref": "#/$defs/environment"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "binding_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "rollback"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/packageIdentity"
+            },
+            "environment": {
+              "$ref": "#/$defs/environment"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "binding_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "remove_binding_reference"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/packageIdentity"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "installation_id",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "uninstall"
+            },
+            "installation_id": {
+              "$ref": "#/$defs/packageIdentity"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "cleanup"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "orphan_runtime_count"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "operation",
+            "auth",
+            "catalog_generation"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "auth": {
+              "$ref": "#/$defs/controlAuth"
+            },
+            "catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "operation": {
+              "const": "shutdown"
+            }
+          }
+        }
+      ]
+    },
+    "controlResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "ok",
+            "result"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/responseRequestId"
+            },
+            "ok": {
+              "const": true
+            },
+            "result": {}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "ok",
+            "error"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/responseRequestId"
+            },
+            "ok": {
+              "const": false
+            },
+            "error": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "remediation"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Z][A-Z0-9_]*$"
+                },
+                "message": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "remediation": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "binding_operation": {
+                  "$ref": "#/$defs/bindingOperationReceipt"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "bindingScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "package_id",
+        "installation_id",
+        "operation"
+      ],
+      "properties": {
+        "binding_id": {
+          "$ref": "#/$defs/brokerIdentifier"
+        },
+        "package_id": {
+          "$ref": "#/$defs/brokerIdentifier"
+        },
+        "installation_id": {
+          "$ref": "#/$defs/brokerIdentifier"
+        },
+        "operation": {
+          "enum": [
+            "activate",
+            "recover",
+            "deactivate"
+          ]
+        }
+      }
+    },
+    "sourceBrokerAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_token"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/sourceId"
+        },
+        "source_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    },
+    "brokerHealthRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "method": {
+          "const": "Health"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        }
+      }
+    },
+    "admitBindingOperationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "method",
+        "protocol_version",
+        "auth",
+        "params"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "method": {
+          "const": "AdmitBindingOperation"
+        },
+        "protocol_version": {
+          "const": "cyrene.runtime-maintenance.binding-operations.v1"
+        },
+        "auth": {
+          "$ref": "#/$defs/sourceBrokerAuth"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "expected_catalog_generation",
+            "binding_id",
+            "package_id",
+            "installation_id",
+            "operation"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/sourceId"
+            },
+            "expected_catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/brokerIdentifier"
+            },
+            "package_id": {
+              "$ref": "#/$defs/brokerIdentifier"
+            },
+            "installation_id": {
+              "$ref": "#/$defs/brokerIdentifier"
+            },
+            "operation": {
+              "enum": [
+                "activate",
+                "recover",
+                "deactivate"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "completeBindingOperationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "method",
+        "protocol_version",
+        "auth",
+        "params"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "method": {
+          "const": "CompleteBindingOperation"
+        },
+        "protocol_version": {
+          "const": "cyrene.runtime-maintenance.binding-operations.v1"
+        },
+        "auth": {
+          "$ref": "#/$defs/sourceBrokerAuth"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "expected_catalog_generation",
+            "binding_id",
+            "package_id",
+            "installation_id",
+            "operation",
+            "operation_token"
+          ],
+          "properties": {
+            "source_id": {
+              "$ref": "#/$defs/sourceId"
+            },
+            "expected_catalog_generation": {
+              "$ref": "#/$defs/positiveInteger"
+            },
+            "binding_id": {
+              "$ref": "#/$defs/brokerIdentifier"
+            },
+            "package_id": {
+              "$ref": "#/$defs/brokerIdentifier"
+            },
+            "installation_id": {
+              "$ref": "#/$defs/brokerIdentifier"
+            },
+            "operation": {
+              "enum": [
+                "activate",
+                "recover",
+                "deactivate"
+              ]
+            },
+            "operation_token": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        }
+      }
+    },
+    "bindingOperationRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/admitBindingOperationRequest"
+        },
+        {
+          "$ref": "#/$defs/completeBindingOperationRequest"
+        }
+      ],
+      "description": "Both methods require the exact advertised binding-operations protocol_version. No legacy or mixed method variant is accepted."
+    },
+    "brokerRequest": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/brokerHealthRequest"
+        },
+        {
+          "$ref": "#/$defs/bindingOperationRequest"
+        }
+      ],
+      "description": "This lock scopes Health and binding-operation calls; unrelated maintenance methods use their own contracts."
+    },
+    "brokerHealthResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "result"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/responseRequestId"
+        },
+        "result": {
+          "$ref": "#/$defs/brokerHealthResult"
+        }
+      }
+    },
+    "admitBindingOperationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "result"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/responseRequestId"
+        },
+        "result": {
+          "$ref": "#/$defs/admissionResult"
+        }
+      }
+    },
+    "completeBindingOperationResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "result"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/responseRequestId"
+        },
+        "result": {
+          "$ref": "#/$defs/completionResult"
+        }
+      }
+    },
+    "bindingOperationResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/admitBindingOperationResponse"
+        },
+        {
+          "$ref": "#/$defs/completeBindingOperationResponse"
+        },
+        {
+          "$ref": "#/$defs/brokerErrorResponse"
+        }
+      ]
+    },
+    "brokerResponse": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/brokerHealthResponse"
+        },
+        {
+          "$ref": "#/$defs/bindingOperationResponse"
+        },
+        {
+          "$ref": "#/$defs/brokerErrorResponse"
+        }
+      ]
+    },
+    "brokerHealthResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "protocol_version",
+        "capabilities",
+        "core_bootstrap_eligible",
+        "catalog_generation",
+        "gate_generation"
+      ],
+      "properties": {
+        "status": {
+          "const": "SERVING"
+        },
+        "protocol_version": {
+          "const": "cyrene.runtime-maintenance.broker.v1"
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[a-z][a-z0-9._-]*$"
+          },
+          "contains": {
+            "const": "cyrene.runtime-maintenance.binding-operations.v1"
+          }
+        },
+        "core_bootstrap_eligible": {
+          "type": "boolean"
+        },
+        "catalog_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "gate_generation": {
+          "$ref": "#/$defs/unsignedInteger"
+        }
+      }
+    },
+    "admissionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "source_id",
+        "scope",
+        "operation_token",
+        "catalog_generation",
+        "gate_generation",
+        "already_in_flight",
+        "already_completed"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "source_id": {
+          "$ref": "#/$defs/sourceId"
+        },
+        "scope": {
+          "$ref": "#/$defs/bindingScope"
+        },
+        "operation_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "gate_generation": {
+          "$ref": "#/$defs/unsignedInteger"
+        },
+        "already_in_flight": {
+          "type": "boolean",
+          "description": "If true, do not execute the mutation again."
+        },
+        "already_completed": {
+          "type": "boolean",
+          "description": "If true, do not execute the mutation again."
+        },
+        "catalog_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "properties": {
+              "already_in_flight": {
+                "const": true
+              },
+              "already_completed": {
+                "const": true
+              }
+            },
+            "required": [
+              "already_in_flight",
+              "already_completed"
+            ]
+          }
+        }
+      ]
+    },
+    "completionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "completed",
+        "gate_generation"
+      ],
+      "properties": {
+        "completed": {
+          "const": true
+        },
+        "gate_generation": {
+          "$ref": "#/$defs/unsignedInteger"
+        }
+      }
+    },
+    "brokerErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "error"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/responseRequestId"
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Z][A-Z0-9_]*$"
+            },
+            "message": {
+              "type": "string",
+              "maxLength": 8192
+            }
+          }
+        }
+      }
+    },
+    "protocolBindingControl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion",
+        "definition",
+        "requestSchema",
+        "responseSchema",
+        "authorityResultSchema",
+        "bindingMutationResponseSchema"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": "cy-package-runtime.control.v1"
+        },
+        "definition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "repository": {
+              "const": "DoHorizon-AI/Cyrene-Workspace"
+            },
+            "path": {
+              "const": "governance/package-runtime-control-v1.schema.json"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "requestSchema": {
+          "const": "#/$defs/controlRequest"
+        },
+        "responseSchema": {
+          "const": "#/$defs/controlResponse"
+        },
+        "authorityResultSchema": {
+          "const": "#/$defs/authorityResult"
+        },
+        "bindingMutationResponseSchema": {
+          "const": "#/$defs/bindingMutationControlResponse"
+        }
+      }
+    },
+    "protocolBindingBroker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion",
+        "definition",
+        "requestSchema",
+        "responseSchema"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": "cyrene.runtime-maintenance.broker.v1"
+        },
+        "definition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "repository": {
+              "const": "DoHorizon-AI/Cyrene-Workspace"
+            },
+            "path": {
+              "const": "governance/package-runtime-control-v1.schema.json"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "requestSchema": {
+          "const": "#/$defs/brokerHealthRequest"
+        },
+        "responseSchema": {
+          "const": "#/$defs/brokerHealthResponse"
+        }
+      }
+    },
+    "protocolBindingOperations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocolVersion",
+        "definition",
+        "requestSchema",
+        "responseSchema"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "const": "cyrene.runtime-maintenance.binding-operations.v1"
+        },
+        "definition": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "path",
+            "sha256"
+          ],
+          "properties": {
+            "repository": {
+              "const": "DoHorizon-AI/Cyrene-Workspace"
+            },
+            "path": {
+              "const": "governance/package-runtime-control-v1.schema.json"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "requestSchema": {
+          "const": "#/$defs/bindingOperationRequest"
+        },
+        "responseSchema": {
+          "const": "#/$defs/bindingOperationResponse"
+        }
+      }
+    },
+    "protocolLock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lockVersion",
+        "lockId",
+        "compatibilityGroup",
+        "transport",
+        "protocols",
+        "bindingAdmission"
+      ],
+      "properties": {
+        "lockVersion": {
+          "const": 1
+        },
+        "lockId": {
+          "const": "package-runtime-protocols-v1"
+        },
+        "compatibilityGroup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "groupId",
+            "groupVersion",
+            "contractApiVersion",
+            "wireApiVersion",
+            "members"
+          ],
+          "properties": {
+            "groupId": {
+              "const": "package-runtime-native-v1"
+            },
+            "groupVersion": {
+              "const": "1"
+            },
+            "contractApiVersion": {
+              "const": "0.1.0"
+            },
+            "wireApiVersion": {
+              "const": "cyrene.runtime-maintenance.binding-operations.v1"
+            },
+            "members": {
+              "const": [
+                {
+                  "componentId": "cyrene-runtime-maintenance",
+                  "requiredForAdoption": true,
+                  "protocolVersion": "cyrene.runtime-maintenance.broker.v1"
+                },
+                {
+                  "componentId": "cy-package-runtime",
+                  "requiredForAdoption": true,
+                  "protocolVersion": "cy-package-runtime.control.v1"
+                }
+              ]
+            }
+          }
+        },
+        "transport": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "framing",
+            "controlSocket",
+            "maintenanceBrokerSocket",
+            "controlRequestLimitBytes",
+            "scopePolicy"
+          ],
+          "properties": {
+            "framing": {
+              "const": "one-jsonl-request-and-response-per-unix-connection"
+            },
+            "controlSocket": {
+              "const": "/run/cyrene-package-runtime/control.sock"
+            },
+            "maintenanceBrokerSocket": {
+              "const": "/run/cyrene/runtime-maintenance.sock"
+            },
+            "controlRequestLimitBytes": {
+              "const": 1048576
+            },
+            "scopePolicy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "peerCredentials",
+                "productAuthentication",
+                "generationField",
+                "defaultScope",
+                "rootOperator",
+                "bindingScopeTuple",
+                "sourceIdMustMatchAuth",
+                "catalogGenerationMustBeCurrent",
+                "brokerBindingCaller"
+              ],
+              "properties": {
+                "peerCredentials": {
+                  "const": "SO_PEERCRED"
+                },
+                "productAuthentication": {
+                  "const": "source_id+source_token+matching_peer_uid_gid"
+                },
+                "generationField": {
+                  "const": "catalog_generation"
+                },
+                "defaultScope": {
+                  "const": "empty-deny"
+                },
+                "rootOperator": {
+                  "const": "SO_PEERCRED.uid=0"
+                },
+                "bindingScopeTuple": {
+                  "const": "binding_id+package_id+installation_id+operation"
+                },
+                "sourceIdMustMatchAuth": {
+                  "const": true
+                },
+                "catalogGenerationMustBeCurrent": {
+                  "const": true
+                },
+                "brokerBindingCaller": {
+                  "const": "source-authenticated-peer-only"
+                }
+              }
+            }
+          }
+        },
+        "protocols": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "packageRuntimeControl",
+            "maintenanceBroker",
+            "bindingOperations"
+          ],
+          "properties": {
+            "packageRuntimeControl": {
+              "$ref": "#/$defs/protocolBindingControl"
+            },
+            "maintenanceBroker": {
+              "$ref": "#/$defs/protocolBindingBroker"
+            },
+            "bindingOperations": {
+              "$ref": "#/$defs/protocolBindingOperations"
+            }
+          }
+        },
+        "bindingAdmission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "healthMethod",
+            "requiredBrokerProtocolVersion",
+            "requiredCapability",
+            "methods",
+            "operations",
+            "controlOperationMap",
+            "replayRules",
+            "requiredDaemonCapability",
+            "authorityAdvertisesOnlyAfter",
+            "completionOwner",
+            "daemonCompletesOperation",
+            "pendingAdmissionBlocksUpdates",
+            "admissionExpiry",
+            "sameCatalogGeneration",
+            "legacyBrokerBehavior",
+            "wrongProtocolError",
+            "requestIdCorrelation",
+            "completionMatchesAdmissionTuple",
+            "completionUsesCurrentCatalogGeneration",
+            "mixedAuthError",
+            "admissionFlagsMutuallyExclusive",
+            "failureReceiptRule",
+            "inFlightReplayBehavior",
+            "completedReplayBehavior",
+            "postAdmissionMutationErrorBehavior"
+          ],
+          "properties": {
+            "healthMethod": {
+              "const": "Health"
+            },
+            "requiredBrokerProtocolVersion": {
+              "const": "cyrene.runtime-maintenance.broker.v1"
+            },
+            "requiredCapability": {
+              "const": "cyrene.runtime-maintenance.binding-operations.v1"
+            },
+            "methods": {
+              "const": [
+                "AdmitBindingOperation",
+                "CompleteBindingOperation"
+              ]
+            },
+            "operations": {
+              "const": [
+                "activate",
+                "recover",
+                "deactivate"
+              ]
+            },
+            "controlOperationMap": {
+              "const": [
+                {
+                  "controlOperation": "activate",
+                  "brokerOperation": "activate"
+                },
+                {
+                  "controlOperation": "recover_binding",
+                  "brokerOperation": "recover"
+                },
+                {
+                  "controlOperation": "deactivate",
+                  "brokerOperation": "deactivate"
+                }
+              ]
+            },
+            "replayRules": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "executeWhenAlreadyInFlight",
+                "executeWhenAlreadyCompleted"
+              ],
+              "properties": {
+                "executeWhenAlreadyInFlight": {
+                  "const": false
+                },
+                "executeWhenAlreadyCompleted": {
+                  "const": false
+                }
+              }
+            },
+            "requiredDaemonCapability": {
+              "const": "cy-package-runtime.binding-operation-admission.v1"
+            },
+            "authorityAdvertisesOnlyAfter": {
+              "const": "SERVING+exact broker protocol_version+required broker capability+same catalog_generation"
+            },
+            "completionOwner": {
+              "const": "product-sdk-after-durable-owner-state-commit"
+            },
+            "daemonCompletesOperation": {
+              "const": false
+            },
+            "pendingAdmissionBlocksUpdates": {
+              "const": true
+            },
+            "admissionExpiry": {
+              "const": "none"
+            },
+            "sameCatalogGeneration": {
+              "const": "Authority.catalog_generation=BrokerHealth.catalog_generation=current source-policy generation"
+            },
+            "legacyBrokerBehavior": {
+              "const": "missing exact Health capability means no daemon capability and no mutation; no fallback"
+            },
+            "wrongProtocolError": {
+              "const": "PROTOCOL_VERSION_UNSUPPORTED"
+            },
+            "requestIdCorrelation": {
+              "const": "same control request_id, admission request_id, receipt request_id, completion request_id"
+            },
+            "completionMatchesAdmissionTuple": {
+              "const": true
+            },
+            "completionUsesCurrentCatalogGeneration": {
+              "const": true
+            },
+            "mixedAuthError": {
+              "const": "OPERATOR_AUTH_NOT_ALLOWED"
+            },
+            "admissionFlagsMutuallyExclusive": {
+              "const": true
+            },
+            "failureReceiptRule": {
+              "const": "post-admission runtime error may carry binding_operation receipt; it is not success and Product SDK must not Complete without durable successful owner-state commit"
+            },
+            "inFlightReplayBehavior": {
+              "const": "BINDING_OPERATION_PENDING error with typed receipt; no rerun"
+            },
+            "completedReplayBehavior": {
+              "const": "read-only RuntimeStatus success with typed receipt; no rerun"
+            },
+            "postAdmissionMutationErrorBehavior": {
+              "const": "error may carry typed receipt; Product SDK does not auto-complete"
+            }
+          }
+        }
+      }
+    },
+    "unsignedInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "authorityResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "protocol_version",
+        "catalog_generation",
+        "capabilities"
+      ],
+      "properties": {
+        "authority": {
+          "const": "platform_package_runtime"
+        },
+        "protocol_version": {
+          "const": "cy-package-runtime.control.v1"
+        },
+        "catalog_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "capabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 1,
+          "items": {
+            "const": "cy-package-runtime.binding-operation-admission.v1"
+          },
+          "description": "Empty unless the exact broker Health protocol, binding-operations capability, and catalog generation all match."
+        }
+      }
+    },
+    "bindingOperationReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "source_id",
+        "protocol_version",
+        "scope",
+        "catalog_generation",
+        "gate_generation",
+        "operation_token",
+        "already_in_flight",
+        "already_completed"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "protocol_version": {
+          "const": "cyrene.runtime-maintenance.binding-operations.v1"
+        },
+        "scope": {
+          "$ref": "#/$defs/bindingScope"
+        },
+        "catalog_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "operation_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Secret completion capability; do not log."
+        },
+        "source_id": {
+          "$ref": "#/$defs/sourceId"
+        },
+        "gate_generation": {
+          "$ref": "#/$defs/unsignedInteger"
+        },
+        "already_in_flight": {
+          "type": "boolean",
+          "description": "If true, the mutation was not executed again."
+        },
+        "already_completed": {
+          "type": "boolean",
+          "description": "If true, the completed mutation was not executed again."
+        }
+      },
+      "allOf": [
+        {
+          "not": {
+            "properties": {
+              "already_in_flight": {
+                "const": true
+              },
+              "already_completed": {
+                "const": true
+              }
+            },
+            "required": [
+              "already_in_flight",
+              "already_completed"
+            ]
+          }
+        }
+      ]
+    },
+    "bindingMutationRuntimeStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "installation_id",
+        "generation",
+        "state",
+        "failure_code",
+        "failure_message",
+        "connection_ref",
+        "binding_operation"
+      ],
+      "properties": {
+        "binding_id": {
+          "$ref": "#/$defs/packageIdentity"
+        },
+        "installation_id": {
+          "$ref": "#/$defs/packageIdentity"
+        },
+        "generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "state": {
+          "enum": [
+            "RUNNING",
+            "STOPPED",
+            "FAILED"
+          ]
+        },
+        "failure_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "failure_message": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 8192
+        },
+        "connection_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "binding_operation": {
+          "$ref": "#/$defs/bindingOperationReceipt"
+        }
+      }
+    },
+    "bindingMutationControlResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "ok",
+            "result"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "ok": {
+              "const": true
+            },
+            "result": {
+              "$ref": "#/$defs/bindingMutationRuntimeStatus"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "ok",
+            "error"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/requestId"
+            },
+            "ok": {
+              "const": false
+            },
+            "error": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "remediation",
+                "binding_operation"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128,
+                  "pattern": "^[A-Z][A-Z0-9_]*$"
+                },
+                "message": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "remediation": {
+                  "type": "string",
+                  "maxLength": 8192
+                },
+                "binding_operation": {
+                  "$ref": "#/$defs/bindingOperationReceipt"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
