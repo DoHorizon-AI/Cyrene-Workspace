@@ -45,6 +45,76 @@ def _journal_path(updater: Any) -> Path:
     return Path(updater.state_root) / "native-first-bootstrap" / JOURNAL_NAME
 
 
+def _resume_first_products_post_end(
+    updater: Any,
+    plan: dict[str, Any],
+    transaction: dict[str, Any],
+    journal_path: Path,
+    *,
+    recovery: bool = True,
+) -> dict[str, Any]:
+    """Resume only Product post-End work; never roll back the released Core cohort."""
+
+    if transaction.get("gateReleaseConfirmed") is not True:
+        raise ValueError("Post-End Product phase has no durable Core gate-release proof")
+    addon = transaction.get("firstProducts")
+    identity = plan.get("firstProducts")
+    if (
+        not isinstance(addon, dict)
+        or not isinstance(identity, dict)
+        or addon.get("receiptDigest") != identity.get("receiptDigest")
+        or addon.get("products") != identity.get("products")
+    ):
+        raise ValueError("Post-End Product journal no longer matches the immutable plan")
+    try:
+        module = _first_products_module()
+        callback = module.recover_post_end if recovery else module.complete_post_end
+        result = callback(updater, plan, transaction)
+        if not isinstance(result, dict) or result.get("status") not in {"complete", "pending"}:
+            raise TypeError("Product post-End recovery returned an invalid status")
+    except Exception as error:
+        transaction["phase"] = "post_end_pending"
+        transaction["postEndError"] = str(error)[:500]
+        _write_private_json(updater, journal_path, transaction)
+        raise RuntimeError(
+            "Core gate release is confirmed; Product post-End work remains pending and was not rolled back"
+        ) from error
+    transaction["postEndResult"] = result
+    transaction["phase"] = "succeeded" if result["status"] == "complete" else "post_end_pending"
+    transaction.pop("postEndError", None)
+    _write_private_json(updater, journal_path, transaction)
+    return {
+        "status": "installed" if result["status"] == "complete" else "post-end-pending",
+        "planId": plan["planId"],
+        "planDigest": plan["planDigest"],
+        "postEndReadiness": transaction.get("postEndReadiness", "UNKNOWN"),
+        "firstProducts": result,
+    }
+
+
+def _rollback_pre_end(
+    updater: Any,
+    plan: dict[str, Any],
+    transaction: dict[str, Any],
+    components: list[dict[str, Any]],
+) -> None:
+    """Remove Product-owned candidates first, then this transaction's Core cohort."""
+
+    if plan.get("includeProducts") is True:
+        record = transaction.get("firstProducts")
+        if not isinstance(record, dict):
+            raise ValueError("First-Product ownership journal is missing before cleanup")
+        has_owned_products = (
+            any(record.get(key) for key in ("ownedPointers", "ownedUnits", "ownedPids"))
+            or record.get("pendingPointer") is not None
+            or record.get("pendingUnit") is not None
+        )
+        if has_owned_products or record.get("phase") not in {"planned", "staged"}:
+            _first_products_module().rollback_pre_end(updater, plan, transaction)
+    _stop_candidate_services(updater, components)
+    _remove_candidate_pointers_and_units(updater, components)
+
+
 def _read_private_json(path: Path) -> dict[str, Any] | None:
     if not path.exists() and not path.is_symlink():
         return None
@@ -281,6 +351,37 @@ def _plan_path(updater: Any, plan_id: str) -> Path:
     return Path(updater.state_root) / "plans" / (plan_id + ".first-core.json")
 
 
+def _base_plan(updater: Any, plan_id: str, plan_digest: str) -> dict[str, Any]:
+    """Load the ordinary updater plan bound as the Core portion of this plan."""
+
+    path = Path(updater.state_root) / "plans" / (plan_id + ".json")
+    value = _read_private_json(path)
+    if value is None or value.get("planId") != plan_id or value.get("planDigest") != plan_digest:
+        raise ValueError("The fixed Core update plan changed; check again")
+    return value
+
+
+def _first_products_module() -> Any:
+    """Load the fixed Product first-start helper shipped beside this module."""
+
+    name = "_cyrene_native_first_products"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    import importlib.util
+
+    helper_path = Path(__file__).with_name("native_first_products.py")
+    if not helper_path.is_file() or helper_path.is_symlink():
+        raise RuntimeError("The fixed first-Product helper is unavailable")
+    spec = importlib.util.spec_from_file_location(name, helper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("The fixed first-Product helper cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_plan(updater: Any, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
     updater._validate_plan_identity(plan_id, plan_digest)
     value = _read_private_json(_plan_path(updater, plan_id))
@@ -301,6 +402,9 @@ def _load_plan(updater: Any, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
         )
     if not callable(canonical):
         raise TypeError("Trusted plan canonicalization is unavailable")
+    include_products = value.get("includeProducts", False)
+    if not isinstance(include_products, bool):
+        raise TypeError("First-Core includeProducts plan field is not a boolean")
     material = {
         key: value[key]
         for key in (
@@ -318,6 +422,16 @@ def _load_plan(updater: Any, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
             "components",
         )
     }
+    # Accept Core-only plans written before the explicit Product opt-in field.
+    if "includeProducts" in value:
+        material["includeProducts"] = include_products
+    if include_products:
+        first_products = value.get("firstProducts")
+        if not isinstance(first_products, dict) or first_products.get("schemaVersion") != 1:
+            raise ValueError("First-Product identity block is missing from the immutable plan")
+        material["firstProducts"] = first_products
+    elif "firstProducts" in value:
+        raise ValueError("Core-only plan unexpectedly contains Product cohort data")
     expected_digest = _digest(canonical(material))
     if expected_digest != plan_digest or plan_id != "plan-" + expected_digest.split(":", 1)[1][:32]:
         raise ValueError("First-Core plan digest does not match its immutable cohort data")
@@ -329,11 +443,19 @@ def _load_plan(updater: Any, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
     return value
 
 
-def check(updater: Any, *, channel: Any = None, proc_root: Path = PROC_ROOT) -> dict[str, Any]:
+def check(
+    updater: Any,
+    *,
+    channel: Any = None,
+    include_products: bool = False,
+    proc_root: Path = PROC_ROOT,
+) -> dict[str, Any]:
     """Create a digest-bound four-component bootstrap plan from trusted candidates."""
 
     updater._reload_catalog_for_operation()
     updater._ensure_state_root()
+    if not isinstance(include_products, bool):
+        raise TypeError("includeProducts must be a boolean")
     _assert_fresh(updater, proc_root=proc_root)
     snapshot = _health_snapshot(updater)
     checked = updater.check(list(CORE_COMPONENT_IDS), channel=channel, include_readiness=False)
@@ -351,6 +473,7 @@ def check(updater: Any, *, channel: Any = None, proc_root: Path = PROC_ROOT) -> 
     }
     if len(targets) != 1 or None in targets:
         raise ValueError("Core artifacts do not share one supported native target")
+    first_products = _first_products_module().check(updater, normal) if include_products else None
     material = {
         "schemaVersion": 1,
         "mode": CORE_BOOTSTRAP_MODE,
@@ -362,7 +485,12 @@ def check(updater: Any, *, channel: Any = None, proc_root: Path = PROC_ROOT) -> 
         **snapshot,
         "targetId": next(iter(targets)),
         "components": sorted(items, key=lambda item: item["componentId"]),
+        "includeProducts": include_products,
     }
+    if include_products:
+        if not isinstance(first_products, dict) or first_products.get("schemaVersion") != 1:
+            raise TypeError("First-Product helper returned an invalid immutable identity block")
+        material["firstProducts"] = first_products
     updater_module = sys.modules.get(updater.__class__.__module__)
     canonical = getattr(updater_module, "canonical_jcs", None)
     if not callable(canonical):
@@ -420,6 +548,18 @@ def stage(updater: Any, plan_id: Any, plan_digest: Any, *, channel: Any = None) 
     }
     if digests != plan["componentArtifactDigests"]:
         raise ValueError("Staged Core artifact digests differ from the confirmed plan")
+    first_products_stage = None
+    if plan.get("includeProducts") is True:
+        base_plan = _base_plan(updater, plan["basePlanId"], plan["basePlanDigest"])
+        first_products_stage = _first_products_module().stage(
+            updater, base_plan, plan["firstProducts"]
+        )
+        if (
+            not isinstance(first_products_stage, dict)
+            or first_products_stage.get("receiptDigest") != plan["firstProducts"]["receiptDigest"]
+            or first_products_stage.get("products") != plan["firstProducts"]["products"]
+        ):
+            raise ValueError("Staged Product cohort differs from the immutable check plan")
     staged_plan = {**plan, "phase": "staged"}
     staged_record = {
         "schemaVersion": 1,
@@ -429,6 +569,8 @@ def stage(updater: Any, plan_id: Any, plan_digest: Any, *, channel: Any = None) 
         "basePlanDigest": plan["basePlanDigest"],
         "phase": "staged",
     }
+    if first_products_stage is not None:
+        staged_record["firstProductsStage"] = first_products_stage
     _write_private_json(
         updater, Path(updater.state_root) / "staged" / plan_id / "stage.json", staged_record
     )
@@ -438,6 +580,7 @@ def stage(updater: Any, plan_id: Any, plan_digest: Any, *, channel: Any = None) 
         "plan": staged_plan,
         "plans": [staged_plan],
         "components": staged.get("components", []),
+        **({"firstProducts": first_products_stage} if first_products_stage is not None else {}),
     }
 
 
@@ -734,6 +877,9 @@ def apply(
         "gateGeneration": plan["gateGeneration"],
         "confirmed": True,
     }
+    if plan.get("includeProducts") is True:
+        expected_confirmation["includeProducts"] = True
+        expected_confirmation["firstProducts"] = plan["firstProducts"]
     if confirmation != expected_confirmation:
         raise ValueError(
             "Apply confirmation must bind the exact first-Core plan and full artifact cohort"
@@ -752,6 +898,14 @@ def apply(
             or staged.get("plan") != {**plan, "phase": "staged"}
         ):
             raise ValueError("The exact confirmed Core bootstrap plan is not staged")
+        if plan.get("includeProducts") is True:
+            product_stage = staged.get("firstProductsStage")
+            if (
+                not isinstance(product_stage, dict)
+                or product_stage.get("receiptDigest") != plan["firstProducts"]["receiptDigest"]
+                or product_stage.get("products") != plan["firstProducts"]["products"]
+            ):
+                raise ValueError("The exact confirmed Product cohort is not staged")
         base_path = Path(updater.state_root) / "staged" / plan["basePlanId"] / "stage.json"
         base_record = _read_private_json(base_path)
         if base_record is None:
@@ -772,6 +926,19 @@ def apply(
             "expectedCatalogGeneration": plan["catalogGeneration"],
             "expectedActivitySources": plan["activitySources"],
             "componentArtifactDigests": plan["componentArtifactDigests"],
+            "includeProducts": plan.get("includeProducts", False),
+            **(
+                {
+                    "firstProducts": {
+                        "schemaVersion": 1,
+                        "receiptDigest": plan["firstProducts"]["receiptDigest"],
+                        "products": plan["firstProducts"]["products"],
+                        "phase": "staged",
+                    }
+                }
+                if plan.get("includeProducts") is True
+                else {}
+            ),
             "components": components,
             "previous": updater._capture_active_versions(components),
             "beginRequest": {
@@ -798,32 +965,6 @@ def apply(
                 raise ValueError(
                     "A different interrupted first-Core bootstrap keeps the gate closed"
                 )
-            if existing.get("phase") == "succeeded":
-                return {
-                    "status": "installed",
-                    "planId": plan_id,
-                    "planDigest": plan_digest,
-                    "postEndReadiness": existing.get("postEndReadiness", "UNKNOWN"),
-                }
-            if existing.get("phase") == "end_confirmed":
-                if existing.get("gateReleaseConfirmed") is not True:
-                    raise ValueError("End-confirmed journal has no durable unlock proof")
-                try:
-                    post_end = updater._readiness_for(
-                        "CORE_RUNTIME", requires_restart=True, force=True
-                    )
-                    existing["postEndReadiness"] = post_end.get("status", "UNKNOWN")
-                except Exception as error:  # noqa: BLE001 - gate release is already confirmed.
-                    existing["postEndReadiness"] = "UNKNOWN"
-                    existing["postEndReadinessError"] = str(error)[:300]
-                existing["phase"] = "succeeded"
-                _write_private_json(updater, journal_path, existing)
-                return {
-                    "status": "installed",
-                    "planId": plan_id,
-                    "planDigest": plan_digest,
-                    "postEndReadiness": existing["postEndReadiness"],
-                }
             for key in (
                 "requestId",
                 "planId",
@@ -840,6 +981,64 @@ def apply(
                     raise ValueError(
                         f"Interrupted first-Core journal changed immutable field {key}"
                     )
+            if (
+                "includeProducts" in plan
+                and existing.get("includeProducts", False) != plan["includeProducts"]
+            ):
+                raise ValueError("Interrupted first-Core journal changed Product selection")
+            if plan.get("includeProducts") is True:
+                previous_products = existing.get("firstProducts")
+                expected_products = transaction["firstProducts"]
+                if (
+                    not isinstance(previous_products, dict)
+                    or previous_products.get("receiptDigest") != expected_products["receiptDigest"]
+                    or previous_products.get("products") != expected_products["products"]
+                ):
+                    raise ValueError("Interrupted Product journal changed its immutable identity")
+            elif "firstProducts" in existing:
+                raise ValueError("Core-only journal unexpectedly contains Product ownership")
+            if existing.get("phase") == "succeeded":
+                if plan.get("includeProducts") is True and (
+                    not isinstance(existing.get("postEndResult"), dict)
+                    or existing["postEndResult"].get("status") != "complete"
+                ):
+                    raise ValueError("Completed Product bootstrap journal lacks completion proof")
+                return {
+                    "status": "installed",
+                    "planId": plan_id,
+                    "planDigest": plan_digest,
+                    "postEndReadiness": existing.get("postEndReadiness", "UNKNOWN"),
+                    **(
+                        {"firstProducts": existing["postEndResult"]}
+                        if plan.get("includeProducts") is True
+                        else {}
+                    ),
+                }
+            if existing.get("phase") == "post_end_pending" and plan.get("includeProducts") is True:
+                return _resume_first_products_post_end(updater, plan, existing, journal_path)
+            if existing.get("phase") == "end_confirmed":
+                if existing.get("gateReleaseConfirmed") is not True:
+                    raise ValueError("End-confirmed journal has no durable unlock proof")
+                if plan.get("includeProducts") is True:
+                    existing["phase"] = "post_end_pending"
+                    _write_private_json(updater, journal_path, existing)
+                    return _resume_first_products_post_end(updater, plan, existing, journal_path)
+                try:
+                    post_end = updater._readiness_for(
+                        "CORE_RUNTIME", requires_restart=True, force=True
+                    )
+                    existing["postEndReadiness"] = post_end.get("status", "UNKNOWN")
+                except Exception as error:  # noqa: BLE001 - gate release is already confirmed.
+                    existing["postEndReadiness"] = "UNKNOWN"
+                    existing["postEndReadinessError"] = str(error)[:300]
+                existing["phase"] = "succeeded"
+                _write_private_json(updater, journal_path, existing)
+                return {
+                    "status": "installed",
+                    "planId": plan_id,
+                    "planDigest": plan_digest,
+                    "postEndReadiness": existing["postEndReadiness"],
+                }
             if any(
                 item.get("pointerIdentity") is not None for item in existing.get("previous", [])
             ):
@@ -952,6 +1151,14 @@ def apply(
         try:
             _verify_live_core_cohort(updater, transaction, plan)
             _require_core_ready(updater, plan)
+            if plan.get("includeProducts") is True:
+                product_helper = _first_products_module()
+                if transaction.get("phase") == "end_call_pending":
+                    product_helper.verify_held(updater, plan, transaction)
+                else:
+                    product_helper.activate_held(updater, plan, transaction)
+                _write_private_json(updater, journal_path, transaction)
+                _require_core_ready(updater, plan)
         except Exception as error:
             if transaction["phase"] == "end_call_pending":
                 # The previous End RPC may have opened the gate before its
@@ -963,8 +1170,7 @@ def apply(
                     "preserve the journal and candidate services for operator recovery"
                 ) from error
             try:
-                _stop_candidate_services(updater, components)
-                _remove_candidate_pointers_and_units(updater, components)
+                _rollback_pre_end(updater, plan, transaction, components)
             except Exception as cleanup_error:  # noqa: BLE001 - preserve candidate state when ownership is unknown.
                 transaction["cleanupError"] = str(cleanup_error)[:300]
             transaction["failure"] = str(error)[:500]
@@ -1004,10 +1210,18 @@ def apply(
                 "Platform did not confirm gate release; preserve the first-Core journal and retry this exact plan"
             )
 
-        transaction["phase"] = "end_confirmed"
+        transaction["phase"] = (
+            "post_end_pending" if plan.get("includeProducts") is True else "end_confirmed"
+        )
         transaction["gateReleaseConfirmed"] = True
         transaction.pop("maintenanceToken", None)
+        if plan.get("includeProducts") is True:
+            transaction["firstProducts"]["phase"] = "post_end_pending"
         _write_private_json(updater, journal_path, transaction)
+        if plan.get("includeProducts") is True:
+            return _resume_first_products_post_end(
+                updater, plan, transaction, journal_path, recovery=False
+            )
         try:
             post_end = updater._readiness_for("CORE_RUNTIME", requires_restart=True, force=True)
             transaction["postEndReadiness"] = post_end.get("status", "UNKNOWN")
@@ -1034,8 +1248,16 @@ def handle(updater: Any, request: dict[str, Any]) -> dict[str, Any] | None:
         return None
     operation = request.get("operation")
     if operation == "status":
-        if set(request) != {"protocolVersion", "operation", "bootstrapMode"}:
+        if set(request) - {
+            "protocolVersion",
+            "operation",
+            "bootstrapMode",
+            "includeProducts",
+        }:
             raise ValueError("Unsupported first-Core status field")
+        include_products = request.get("includeProducts", False)
+        if not isinstance(include_products, bool):
+            raise TypeError("includeProducts must be a boolean")
         result = updater.status()
         try:
             _assert_fresh(updater)
@@ -1056,12 +1278,41 @@ def handle(updater: Any, request: dict[str, Any]) -> dict[str, Any] | None:
                 "message": str(error)[:300],
             }
         result["mode"] = CORE_BOOTSTRAP_MODE
+        result["includeProducts"] = include_products
         result["firstCoreEligibility"] = eligibility
+        transaction = _read_private_json(_journal_path(updater))
+        if transaction is not None and transaction.get("includeProducts") is True:
+            phase = transaction.get("phase")
+            product_status = (
+                "complete"
+                if phase == "succeeded"
+                else "UNKNOWN"
+                if phase == "end_call_pending"
+                else "pending"
+            )
+            result["firstProductsBootstrap"] = {
+                "status": product_status,
+                "phase": phase,
+                "gateReleaseConfirmed": transaction.get("gateReleaseConfirmed") is True,
+            }
         return result
     if operation == "check":
-        if set(request) - {"protocolVersion", "operation", "bootstrapMode", "channel"}:
+        if set(request) - {
+            "protocolVersion",
+            "operation",
+            "bootstrapMode",
+            "channel",
+            "includeProducts",
+        }:
             raise ValueError("Unsupported first-Core check field")
-        return check(updater, channel=request.get("channel"))
+        include_products = request.get("includeProducts", False)
+        if not isinstance(include_products, bool):
+            raise TypeError("includeProducts must be a boolean")
+        return check(
+            updater,
+            channel=request.get("channel"),
+            include_products=include_products,
+        )
     if operation == "stage":
         if set(request) - {
             "protocolVersion",

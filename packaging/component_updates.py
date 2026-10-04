@@ -1392,13 +1392,19 @@ class ComponentUpdater:
                     "INVALID_REQUEST", "Unsupported component update protocol version."
                 )
             fields_by_operation = {
-                "status": {"protocolVersion", "operation", "bootstrapMode"},
+                "status": {
+                    "protocolVersion",
+                    "operation",
+                    "bootstrapMode",
+                    "includeProducts",
+                },
                 "check": {
                     "protocolVersion",
                     "operation",
                     "componentIds",
                     "channel",
                     "bootstrapMode",
+                    "includeProducts",
                 },
                 "stage": {
                     "protocolVersion",
@@ -1428,6 +1434,14 @@ class ComponentUpdater:
             self._require_authorized_process()
             if "bootstrapMode" in request and request.get("bootstrapMode") != "first-core":
                 raise UpdateError("INVALID_REQUEST", "Unsupported first-install bootstrap mode.")
+            if "includeProducts" in request and request.get("bootstrapMode") != "first-core":
+                raise UpdateError(
+                    "INVALID_REQUEST", "Product first-start selection requires first-core mode."
+                )
+            if "includeProducts" in request and not isinstance(
+                request.get("includeProducts"), bool
+            ):
+                raise UpdateError("INVALID_REQUEST", "includeProducts must be a boolean.")
             if request.get("bootstrapMode") == "first-core":
                 import importlib.util
 

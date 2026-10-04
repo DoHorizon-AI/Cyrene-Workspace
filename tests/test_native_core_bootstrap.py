@@ -85,6 +85,9 @@ class FakeUpdater:
     def _require_authorized_process(self) -> None:
         pass
 
+    def status(self) -> dict[str, Any]:
+        return {"components": []}
+
     @contextmanager
     def _exclusive_update_lock(self):
         yield
@@ -277,6 +280,92 @@ class FakeUpdater:
         pass
 
 
+class FakeFirstProducts:
+    """Model receipt-bound Product hooks without starting real Product services."""
+
+    def __init__(self, updater: FakeUpdater) -> None:
+        self.updater = updater
+        self.products = [
+            {
+                "service": service,
+                "componentId": "cyrene-" + service,
+                "version": "1.0.0",
+                "manifestDigest": _digest((service + "-manifest").encode()),
+                "artifactDigest": _digest((service + "-artifact").encode()),
+                "sourceCommit": "a" * 40,
+                "targetProfileId": "ubuntu-24.04-x86_64",
+            }
+            for service in ("catalyst", "exchange", "navigator", "reactor", "yield")
+        ]
+        self.identity = {
+            "schemaVersion": 1,
+            "receiptDigest": _digest(b"verified-first-product-receipt"),
+            "installer": {
+                "debSha256": _digest(b"installer"),
+                "sourceCommit": "b" * 40,
+                "targetId": "ubuntu-24.04-x86_64",
+            },
+            "products": self.products,
+        }
+        self.post_end_results = ["pending", "complete"]
+        self.make_runtime_unknown_after_activate = False
+
+    def check(self, _updater: Any, _core_plan: dict[str, Any]) -> dict[str, Any]:
+        self.updater.events.append(("products-check",))
+        return self.identity
+
+    def stage(
+        self, _updater: Any, _core_plan: dict[str, Any], identity: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.updater.events.append(("products-stage",))
+        assert identity == self.identity
+        return {
+            "status": "staged",
+            "receiptDigest": identity["receiptDigest"],
+            "products": self.products,
+        }
+
+    def activate_held(
+        self, _updater: Any, _plan: dict[str, Any], transaction: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.updater.events.append(("products-activate-held",))
+        transaction["firstProducts"]["phase"] = "active"
+        if self.make_runtime_unknown_after_activate:
+            self.updater.gate_counts["active_worker_count"] = None
+        return {"status": "active"}
+
+    def verify_held(
+        self, _updater: Any, _plan: dict[str, Any], _transaction: dict[str, Any]
+    ) -> None:
+        self.updater.events.append(("products-verify-held",))
+
+    def rollback_pre_end(
+        self, _updater: Any, _plan: dict[str, Any], transaction: dict[str, Any]
+    ) -> None:
+        self.updater.events.append(("products-rollback-pre-end",))
+        transaction["firstProducts"]["phase"] = "staged"
+
+    def complete_post_end(
+        self, _updater: Any, _plan: dict[str, Any], transaction: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.updater.events.append(("products-complete-post-end",))
+        status = self.post_end_results.pop(0)
+        transaction["firstProducts"]["phase"] = (
+            "complete" if status == "complete" else "post_end_pending"
+        )
+        return {"status": status, "phase": transaction["firstProducts"]["phase"]}
+
+    def recover_post_end(
+        self, _updater: Any, _plan: dict[str, Any], transaction: dict[str, Any]
+    ) -> dict[str, Any]:
+        self.updater.events.append(("products-recover-post-end",))
+        status = self.post_end_results.pop(0)
+        transaction["firstProducts"]["phase"] = (
+            "complete" if status == "complete" else "post_end_pending"
+        )
+        return {"status": status, "phase": transaction["firstProducts"]["phase"]}
+
+
 def _fake_proc(
     root: Path,
     *,
@@ -307,6 +396,20 @@ def _fake_proc(
 def _check_plan(updater: FakeUpdater, tmp_path: Path) -> dict[str, Any]:
     proc = _fake_proc(tmp_path / "proc")
     return bootstrap.check(updater, proc_root=proc)["plan"]
+
+
+def _product_confirmation(plan: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "mode": bootstrap.CORE_BOOTSTRAP_MODE,
+        "planId": plan["planId"],
+        "planDigest": plan["planDigest"],
+        "componentArtifactDigests": plan["componentArtifactDigests"],
+        "catalogGeneration": plan["catalogGeneration"],
+        "gateGeneration": plan["gateGeneration"],
+        "confirmed": True,
+        "includeProducts": True,
+        "firstProducts": plan["firstProducts"],
+    }
 
 
 def test_unknown_legacy_or_incomplete_process_inventory_refuses_check(tmp_path: Path) -> None:
@@ -356,6 +459,279 @@ def test_stage_is_allowed_without_process_idle_proof(tmp_path: Path) -> None:
     result = bootstrap.stage(updater, plan["planId"], plan["planDigest"])
     assert result["status"] == "staged"
     assert len(result["components"]) == 4
+
+
+def test_products_opt_in_is_boolean_and_status_does_not_claim_product_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    monkeypatch.setattr(bootstrap, "_assert_fresh", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_health_snapshot",
+        lambda *_args, **_kwargs: {
+            "coreBootstrapEligible": True,
+            "gateGeneration": 9,
+            "catalogGeneration": 1,
+            "activitySources": ["source-a", "source-b"],
+        },
+    )
+    result = bootstrap.handle(
+        updater,
+        {
+            "protocolVersion": updates.PROTOCOL_VERSION,
+            "operation": "status",
+            "bootstrapMode": bootstrap.CORE_BOOTSTRAP_MODE,
+            "includeProducts": True,
+        },
+    )
+    assert result["includeProducts"] is True
+    assert "firstProducts" not in result
+    assert not any(event[0] == "products-check" for event in updater.events)
+    with pytest.raises(TypeError, match="boolean"):
+        bootstrap.handle(
+            updater,
+            {
+                "protocolVersion": updates.PROTOCOL_VERSION,
+                "operation": "check",
+                "bootstrapMode": bootstrap.CORE_BOOTSTRAP_MODE,
+                "includeProducts": "true",
+            },
+        )
+
+
+def test_products_identity_is_bound_by_plan_stage_and_explicit_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    products = FakeFirstProducts(updater)
+    monkeypatch.setattr(bootstrap, "_first_products_module", lambda: products)
+    proc = _fake_proc(tmp_path / "proc-products-plan")
+    plan = bootstrap.check(updater, include_products=True, proc_root=proc)["plan"]
+    assert plan["includeProducts"] is True
+    assert plan["firstProducts"] == products.identity
+    assert bootstrap._load_plan(updater, plan["planId"], plan["planDigest"]) == plan
+
+    staged = bootstrap.stage(updater, plan["planId"], plan["planDigest"])
+    assert staged["firstProducts"]["receiptDigest"] == plan["firstProducts"]["receiptDigest"]
+    assert any(event[0] == "products-stage" for event in updater.events)
+    monkeypatch.setattr(bootstrap, "_is_root", lambda: True)
+    confirmation = _product_confirmation(plan)
+    changed = json.loads(json.dumps(confirmation))
+    changed["firstProducts"]["products"][0]["artifactDigest"] = _digest(b"tampered")
+    with pytest.raises(ValueError, match="confirmation"):
+        bootstrap.apply(
+            updater,
+            plan["planId"],
+            plan["planDigest"],
+            changed,
+            proc_root=_fake_proc(tmp_path / "proc-products-tamper"),
+        )
+
+
+def test_product_api_activation_occurs_under_core_hold_and_post_end_retry_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    products = FakeFirstProducts(updater)
+    monkeypatch.setattr(bootstrap, "_first_products_module", lambda: products)
+    plan = bootstrap.check(
+        updater,
+        include_products=True,
+        proc_root=_fake_proc(tmp_path / "proc-products-apply"),
+    )["plan"]
+    bootstrap.stage(updater, plan["planId"], plan["planDigest"])
+    monkeypatch.setattr(bootstrap, "_is_root", lambda: True)
+    monkeypatch.setattr(bootstrap, "_verify_started_processes", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_verify_live_core_cohort", lambda *_: None)
+    confirmation = _product_confirmation(plan)
+
+    first = bootstrap.apply(
+        updater,
+        plan["planId"],
+        plan["planDigest"],
+        confirmation,
+        proc_root=_fake_proc(tmp_path / "proc-products-apply-again"),
+    )
+    hold = next(
+        i for i, event in enumerate(updater.events) if event[:2] == ("broker", "BeginCoreBootstrap")
+    )
+    activate = next(
+        i for i, event in enumerate(updater.events) if event[0] == "products-activate-held"
+    )
+    end = next(i for i, event in enumerate(updater.events) if event[0] == "end")
+    assert hold < activate < end
+    assert first["status"] == "post-end-pending"
+    assert json.loads(bootstrap._journal_path(updater).read_text())["phase"] == "post_end_pending"
+    monkeypatch.setattr(bootstrap, "_assert_fresh", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_health_snapshot",
+        lambda *_args, **_kwargs: {
+            "coreBootstrapEligible": False,
+            "gateGeneration": 10,
+            "catalogGeneration": 1,
+            "activitySources": ["source-a", "source-b"],
+        },
+    )
+    status = bootstrap.handle(
+        updater,
+        {
+            "protocolVersion": updates.PROTOCOL_VERSION,
+            "operation": "status",
+            "bootstrapMode": bootstrap.CORE_BOOTSTRAP_MODE,
+            "includeProducts": True,
+        },
+    )
+    assert status["firstProductsBootstrap"] == {
+        "status": "pending",
+        "phase": "post_end_pending",
+        "gateReleaseConfirmed": True,
+    }
+
+    resumed = bootstrap.apply(
+        updater,
+        plan["planId"],
+        plan["planDigest"],
+        confirmation,
+        proc_root=_fake_proc(tmp_path / "proc-products-recover"),
+    )
+    assert resumed["status"] == "installed"
+    assert resumed["firstProducts"]["status"] == "complete"
+    assert sum(event[0] == "end" for event in updater.events) == 1
+    assert sum(event[0] == "products-recover-post-end" for event in updater.events) == 1
+    assert not any(event[0] == "stop" for event in updater.events)
+
+
+def test_unknown_kernel_counts_refuse_product_activation_without_claiming_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    products = FakeFirstProducts(updater)
+    monkeypatch.setattr(bootstrap, "_first_products_module", lambda: products)
+    plan = bootstrap.check(
+        updater,
+        include_products=True,
+        proc_root=_fake_proc(tmp_path / "proc-products-unknown"),
+    )["plan"]
+    bootstrap.stage(updater, plan["planId"], plan["planDigest"])
+    updater.gate_counts.update(
+        {
+            "blocker_codes": ["RUNTIME_ACTIVITY_UNKNOWN"],
+            "active_task_count": None,
+            "inflight_runtime_admission_count": None,
+            "active_worker_count": None,
+            "active_allocation_count": None,
+        }
+    )
+    monkeypatch.setattr(bootstrap, "_is_root", lambda: True)
+    monkeypatch.setattr(bootstrap, "_verify_started_processes", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_verify_live_core_cohort", lambda *_: None)
+    with pytest.raises(RuntimeError, match="hold remains closed"):
+        bootstrap.apply(
+            updater,
+            plan["planId"],
+            plan["planDigest"],
+            _product_confirmation(plan),
+            proc_root=_fake_proc(tmp_path / "proc-products-unknown-apply"),
+        )
+    assert not any(event[0] == "products-activate-held" for event in updater.events)
+    assert not any(event[0] == "products-rollback-pre-end" for event in updater.events)
+    assert not any(event[0] == "end" for event in updater.events)
+
+
+def test_owned_product_cleanup_precedes_core_cleanup_before_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    products = FakeFirstProducts(updater)
+    products.make_runtime_unknown_after_activate = True
+    for component_id in bootstrap.CORE_COMPONENT_IDS:
+        updater.unit_pids[updater.components[component_id]["systemdUnit"]] = "55"
+    monkeypatch.setattr(bootstrap, "_first_products_module", lambda: products)
+    plan = bootstrap.check(
+        updater,
+        include_products=True,
+        proc_root=_fake_proc(tmp_path / "proc-product-cleanup"),
+    )["plan"]
+    bootstrap.stage(updater, plan["planId"], plan["planDigest"])
+    monkeypatch.setattr(bootstrap, "_is_root", lambda: True)
+    monkeypatch.setattr(bootstrap, "_verify_started_processes", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_verify_live_core_cohort", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_verify_candidate_pid", lambda *_: None)
+
+    with pytest.raises(RuntimeError, match="hold remains closed"):
+        bootstrap.apply(
+            updater,
+            plan["planId"],
+            plan["planDigest"],
+            _product_confirmation(plan),
+            proc_root=_fake_proc(tmp_path / "proc-product-cleanup-apply"),
+        )
+    product_cleanup = next(
+        i for i, event in enumerate(updater.events) if event[0] == "products-rollback-pre-end"
+    )
+    core_stop = next(i for i, event in enumerate(updater.events) if event[0] == "stop")
+    assert product_cleanup < core_stop
+    assert all(pointer is None for pointer in updater.pointers.values())
+    assert not any(event[0] == "end" for event in updater.events)
+
+
+def test_uncertain_product_end_with_unhealthy_recovery_preserves_both_cohorts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    products = FakeFirstProducts(updater)
+    monkeypatch.setattr(bootstrap, "_first_products_module", lambda: products)
+    plan = bootstrap.check(
+        updater,
+        include_products=True,
+        proc_root=_fake_proc(tmp_path / "proc-products-uncertain"),
+    )["plan"]
+    bootstrap.stage(updater, plan["planId"], plan["planDigest"])
+    monkeypatch.setattr(bootstrap, "_is_root", lambda: True)
+    monkeypatch.setattr(bootstrap, "_verify_started_processes", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_verify_live_core_cohort", lambda *_: None)
+    confirmation = _product_confirmation(plan)
+    original_request = updater._broker_request
+    end_attempts = 0
+
+    def lose_end_response(
+        method: str, params: dict[str, Any], *, request_id: str | None = None
+    ) -> dict[str, Any]:
+        nonlocal end_attempts
+        if method == "EndMaintenance":
+            end_attempts += 1
+            raise RuntimeError("response lost after dispatch")
+        return original_request(method, params, request_id=request_id)
+
+    updater._broker_request = lose_end_response
+    with pytest.raises(RuntimeError, match="result is uncertain"):
+        bootstrap.apply(
+            updater,
+            plan["planId"],
+            plan["planDigest"],
+            confirmation,
+            proc_root=_fake_proc(tmp_path / "proc-products-end-first"),
+        )
+    assert json.loads(bootstrap._journal_path(updater).read_text())["phase"] == "end_call_pending"
+
+    updater.gate_counts["active_worker_count"] = None
+    with pytest.raises(RuntimeError, match="outcome is uncertain"):
+        bootstrap.apply(
+            updater,
+            plan["planId"],
+            plan["planDigest"],
+            confirmation,
+            proc_root=_fake_proc(tmp_path / "proc-products-end-retry"),
+        )
+    journal = json.loads(bootstrap._journal_path(updater).read_text())
+    assert journal["phase"] == "end_call_pending"
+    assert journal["firstProducts"]["phase"] == "active"
+    assert end_attempts == 1
+    assert all(pointer is not None for pointer in updater.pointers.values())
+    assert not any(event[0] == "products-rollback-pre-end" for event in updater.events)
+    assert not any(event[0] == "stop" for event in updater.events)
 
 
 def test_check_rejects_nonfresh_catalog_target_and_gpu_resources(tmp_path: Path) -> None:
@@ -731,3 +1107,36 @@ def test_fixed_four_operation_helper_routes_only_the_named_bootstrap_mode(tmp_pa
     )
     assert invalid["ok"] is False
     assert invalid["error"]["code"] == "INVALID_REQUEST"
+
+    status = updates.ComponentUpdater.handle(
+        updater,
+        {
+            "protocolVersion": updates.PROTOCOL_VERSION,
+            "operation": "status",
+            "bootstrapMode": bootstrap.CORE_BOOTSTRAP_MODE,
+            "includeProducts": True,
+        },
+    )
+    assert status["ok"] is True
+    assert status["result"]["includeProducts"] is True
+    wrong_type = updates.ComponentUpdater.handle(
+        updater,
+        {
+            "protocolVersion": updates.PROTOCOL_VERSION,
+            "operation": "check",
+            "bootstrapMode": bootstrap.CORE_BOOTSTRAP_MODE,
+            "includeProducts": "true",
+        },
+    )
+    assert wrong_type["ok"] is False
+    assert wrong_type["error"]["code"] == "INVALID_REQUEST"
+    unscoped = updates.ComponentUpdater.handle(
+        updater,
+        {
+            "protocolVersion": updates.PROTOCOL_VERSION,
+            "operation": "status",
+            "includeProducts": True,
+        },
+    )
+    assert unscoped["ok"] is False
+    assert unscoped["error"]["code"] == "INVALID_REQUEST"
