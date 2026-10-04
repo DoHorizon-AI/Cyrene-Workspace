@@ -302,7 +302,7 @@ def _validate_proof(
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(target.get("debSha256", "")))
         or not isinstance(verifier, Mapping)
         or verifier.get("attestationsVerified") is not True
-        or not SHA256_RE.fullmatch(str(verifier.get("sha256", "")))
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(verifier.get("sha256", "")))
     ):
         raise AdminPacketError(
             "official verifier did not return the exact fully attested release proof"
