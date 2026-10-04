@@ -221,9 +221,33 @@ def _checkout_exact_bundle(bundle: Path, destination: Path, ref: str, commit: st
     """Clone a supplied bundle without mutating its source and require its exact ref."""
 
     _require_regular(bundle, "Workspace Git bundle")
+    if ref not in ALLOWED_REFS or not COMMIT_RE.fullmatch(commit):
+        raise AdminPacketError(
+            "an allowed exact Workspace ref and full lowercase commit are required"
+        )
+    advertised_commits = []
+    for line in _run_git(["git", "bundle", "list-heads", str(bundle)]).splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == ref:
+            advertised_commits.append(fields[0])
+    if advertised_commits != [commit]:
+        raise AdminPacketError("source bundle ref does not resolve to the supplied full commit")
     _run_git(["git", "clone", "--no-checkout", str(bundle), str(destination)])
     _run_git(["git", "-C", str(destination), "cat-file", "-e", f"{commit}^{{commit}}"])
-    actual = _run_git(["git", "-C", str(destination), "rev-parse", f"{ref}^{{commit}}"])
+    _run_git(
+        [
+            "git",
+            "-C",
+            str(destination),
+            "fetch",
+            "--no-tags",
+            str(bundle),
+            f"{ref}:refs/cyrene-packet/selected-source",
+        ]
+    )
+    actual = _run_git(
+        ["git", "-C", str(destination), "rev-parse", "refs/cyrene-packet/selected-source^{commit}"]
+    )
     if actual != commit:
         raise AdminPacketError("source bundle ref does not resolve to the supplied full commit")
     _run_git(["git", "-C", str(destination), "checkout", "--detach", commit])
@@ -404,7 +428,8 @@ def _launcher_script(
             'env -u PYTHONPATH -u PYTHONHOME -u LD_LIBRARY_PATH PYTHONNOUSERSITE=1 "$private_python" -c \'import importlib.metadata as m, jsonschema, sys; assert sys.version_info[:3] == (3, 12, 14); assert m.version("jsonschema") == "4.26.0"; print("temporary verifier runtime: CPython 3.12.14, jsonschema 4.26.0")\'',
             'git clone --template="$stage/git-template" --no-checkout "$stage/workspace.bundle" "$stage/workspace"',
             'git -C "$stage/workspace" cat-file -e "$SOURCE_COMMIT^{commit}"',
-            '[ "$(git -C "$stage/workspace" rev-parse "$SOURCE_REF^{commit}")" = "$SOURCE_COMMIT" ] || { echo \'REFUSED: source ref and commit differ\' >&2; exit 2; }',
+            'git -C "$stage/workspace" fetch --no-tags "$stage/workspace.bundle" "$SOURCE_REF:refs/cyrene-packet/selected-source"',
+            '[ "$(git -C "$stage/workspace" rev-parse refs/cyrene-packet/selected-source^{commit})" = "$SOURCE_COMMIT" ] || { echo \'REFUSED: source ref and commit differ\' >&2; exit 2; }',
             'git -C "$stage/workspace" checkout --detach "$SOURCE_COMMIT"',
         ]
     )

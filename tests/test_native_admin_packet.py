@@ -46,7 +46,9 @@ def _write(path: Path, content: bytes = b"fixture\n") -> Path:
     return path
 
 
-def _source_bundle(root: Path) -> tuple[Path, str]:
+def _source_bundle(
+    root: Path, *, advertised_branch: str = "main", advertise_selected_branch_only: bool = False
+) -> tuple[Path, str]:
     """Create a tiny exact-ref bundle with the required source tree paths."""
 
     repo = root / "repo"
@@ -68,6 +70,12 @@ def _source_bundle(root: Path) -> tuple[Path, str]:
         _write(repo / required)
     subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-m", "fixture source"], check=True)
+    if advertised_branch != "main":
+        subprocess.run(
+            ["git", "-C", str(repo), "branch", advertised_branch],
+            check=True,
+            capture_output=True,
+        )
     commit = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
         check=True,
@@ -75,11 +83,12 @@ def _source_bundle(root: Path) -> tuple[Path, str]:
         text=True,
     ).stdout.strip()
     bundle = root / "workspace.bundle"
-    subprocess.run(
-        ["git", "-C", str(repo), "bundle", "create", str(bundle), "--all"],
-        check=True,
-        capture_output=True,
+    bundle_args = (
+        ["git", "-C", str(repo), "bundle", "create", str(bundle), f"refs/heads/{advertised_branch}"]
+        if advertise_selected_branch_only
+        else ["git", "-C", str(repo), "bundle", "create", str(bundle), "--all"]
     )
+    subprocess.run(bundle_args, check=True, capture_output=True)
     return bundle, commit
 
 
@@ -306,13 +315,127 @@ def test_packet_requires_source_ref_to_resolve_to_exact_commit(tmp_path: Path) -
     args = _args(tmp_path, bundle, commit)
     args.source_commit = "d" * 40
 
-    with pytest.raises(admin_packet.AdminPacketError, match="Git failed"):
+    with pytest.raises(admin_packet.AdminPacketError, match="source bundle ref"):
         admin_packet._assemble_packet(
             args,
             verifier=lambda *_args, **_kwargs: {},
             lock=LOCK,
             github_cli_provider=_fake_gh_provider(tmp_path),
         )
+
+
+def test_checkout_materializes_advertised_develop_branch_when_bundle_head_is_absent(
+    tmp_path: Path,
+) -> None:
+    bundle, commit = _source_bundle(
+        tmp_path, advertised_branch="develop", advertise_selected_branch_only=True
+    )
+
+    checkout = admin_packet._checkout_exact_bundle(
+        bundle, tmp_path / "controller-checkout", "refs/heads/develop", commit
+    )
+
+    assert admin_packet._run_git(["git", "-C", str(checkout), "rev-parse", "HEAD"]) == commit
+    assert (
+        admin_packet._run_git(
+            [
+                "git",
+                "-C",
+                str(checkout),
+                "rev-parse",
+                "refs/cyrene-packet/selected-source^{commit}",
+            ]
+        )
+        == commit
+    )
+
+
+@pytest.mark.parametrize(
+    ("ref", "commit", "message"),
+    [
+        ("refs/heads/main", "a" * 40, "source bundle ref"),
+        ("refs/heads/unknown", "a" * 40, "allowed exact Workspace ref"),
+        ("refs/heads/develop", "b" * 40, "source bundle ref"),
+    ],
+)
+def test_checkout_rejects_unadvertised_ref_or_wrong_full_commit(
+    tmp_path: Path, ref: str, commit: str, message: str
+) -> None:
+    bundle, actual_commit = _source_bundle(
+        tmp_path, advertised_branch="develop", advertise_selected_branch_only=True
+    )
+    if commit == "a" * 40:
+        commit = actual_commit
+
+    with pytest.raises(admin_packet.AdminPacketError, match=message):
+        admin_packet._checkout_exact_bundle(bundle, tmp_path / "bad-checkout", ref, commit)
+    assert not (tmp_path / "bad-checkout").exists()
+
+
+def _launcher_checkout_commands(script: str) -> str:
+    """Extract only the generated launcher's non-privileged source checkout commands."""
+
+    start = script.index("git clone --template=")
+    end_line = 'git -C "$stage/workspace" checkout --detach "$SOURCE_COMMIT"'
+    end = script.index(end_line, start) + len(end_line)
+    return script[start:end]
+
+
+@pytest.mark.parametrize(
+    ("ref", "commit", "expected_status"),
+    [
+        ("refs/heads/develop", None, 0),
+        ("refs/heads/main", None, 2),
+        ("refs/heads/unknown", None, 2),
+        ("refs/heads/develop", "b" * 40, 2),
+    ],
+)
+def test_generated_launcher_materializes_and_checks_advertised_branch_before_checkout(
+    tmp_path: Path, ref: str, commit: str | None, expected_status: int
+) -> None:
+    bundle, actual_commit = _source_bundle(
+        tmp_path, advertised_branch="develop", advertise_selected_branch_only=True
+    )
+    stage = tmp_path / "launcher-stage"
+    (stage / "git-template").mkdir(parents=True)
+    (stage / "workspace.bundle").write_bytes(bundle.read_bytes())
+    script = admin_packet._launcher_script(
+        commitments={},
+        ref="refs/heads/develop",
+        commit=actual_commit,
+        ubuntu_version="22.04",
+        channel="preview",
+        deb_asset_name="fixture.deb",
+        deb_sha256="b" * 64,
+        start_broker=False,
+        operator_user=None,
+    )
+    selected_commit = commit or actual_commit
+
+    result = subprocess.run(
+        ["sh", "-c", _launcher_checkout_commands(script)],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "stage": str(stage),
+            "SOURCE_REF": ref,
+            "SOURCE_COMMIT": selected_commit,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == expected_status, result.stderr
+    workspace = stage / "workspace"
+    if expected_status == 0:
+        assert (
+            admin_packet._run_git(["git", "-C", str(workspace), "rev-parse", "HEAD"])
+            == actual_commit
+        )
+    else:
+        assert not (
+            workspace / "tooling/acceptance/native-components-v2/native_acceptance.py"
+        ).exists()
 
 
 def test_release_asset_symlink_is_rejected(tmp_path: Path) -> None:
