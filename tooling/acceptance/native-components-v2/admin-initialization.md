@@ -1,7 +1,7 @@
 # One-time native host administrator initialization
 
 Status at **2026-10-04 13:30 UTC**: **BLOCKED; NO VERIFIED ADMINISTRATOR
-PACKET OR INSTALL COMMAND**. At this checkpoint the native installer release
+PACKET; NO INSTALL COMMAND GENERATED**. At this checkpoint the native installer release
 was unpublished; staging was blocked in Actions run `37205539712`. This runbook
 describes the privileged bootstrap boundary; it is not an installer and must
 not be used with guessed signatures, source commits, builder identities,
