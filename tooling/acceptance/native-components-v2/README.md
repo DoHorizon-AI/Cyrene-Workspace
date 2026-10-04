@@ -15,6 +15,8 @@ Product/GPU 工作负载。
 | --- | --- |
 | [`native_acceptance.py`](native_acceptance.py) | Create runs, prepare an isolated user-space directory, collect read-only host facts, append evidence, and render a Markdown receipt. |
 | [`admin_initialize.py`](admin_initialize.py) | Execute a root-only, pin-required, stage-only DEB and fresh broker initialization after official release verification. |
+| [`admin_packet.py`](admin_packet.py) | Assemble a reviewable administrator packet from an exact source Git bundle and officially verified signed release inputs. |
+| [`operator-tools.lock.json`](operator-tools.lock.json) | Pin the official GitHub CLI archive, checksum file, and executable used by the administrator packet. |
 | [`kernel_readonly_probe.rs`](kernel_readonly_probe.rs) | Query only Kernel capabilities and update readiness over an already-running Unix socket. |
 | [`admin-initialization.md`](admin-initialization.md) | One-time administrator initialization gates; the executable installation command is intentionally pending the final verified signature tuple. |
 | [`admin-init-tuple.template.json`](admin-init-tuple.template.json) | Empty receipt shape populated only by successful official release and attestation verification. |
@@ -23,6 +25,8 @@ Product/GPU 工作负载。
 | --- | --- |
 | [`native_acceptance.py`](native_acceptance.py) | 创建 run、准备隔离用户目录、采集主机只读事实、追加证据并生成 Markdown 回执。 |
 | [`admin_initialize.py`](admin_initialize.py) | 仅在正式发行验证和精确 pin 齐备后，以 root 暂存 DEB 并初始化全新的维护代理。 |
+| [`admin_packet.py`](admin_packet.py) | 使用精确源码 Git bundle 和已通过正式验证的签名发行输入，组装可审阅的管理员初始化包。 |
+| [`operator-tools.lock.json`](operator-tools.lock.json) | 固定初始化包所用官方 GitHub CLI 的归档、校验文件与可执行文件摘要。 |
 | [`kernel_readonly_probe.rs`](kernel_readonly_probe.rs) | 通过已运行 Unix socket 只读查询 Kernel 能力与更新就绪状态。 |
 | [`admin-initialization.md`](admin-initialization.md) | 一次性管理员初始化门禁；最终真实签名 tuple 核定前不生成可执行安装命令。 |
 | [`admin-init-tuple.template.json`](admin-init-tuple.template.json) | 仅由正式发行及 attestation 验证成功后填充的空白回执结构。 |

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "githubCli": {
+    "version": "2.97.0",
+    "repository": "cli/cli",
+    "tag": "v2.97.0",
+    "assetName": "gh_2.97.0_linux_amd64.tar.gz",
+    "sourceUrl": "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_linux_amd64.tar.gz",
+    "archiveSha256": "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112",
+    "archiveSizeBytes": 14770812,
+    "checksumsAssetName": "gh_2.97.0_checksums.txt",
+    "checksumsSourceUrl": "https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_checksums.txt",
+    "checksumsSha256": "61905c69ec8660f310814ec98395cdd0c2d07aabf024c597ec45813984a02334",
+    "checksumsSizeBytes": 1950,
+    "binaryPath": "gh_2.97.0_linux_amd64/bin/gh",
+    "binarySha256": "141507c337e8b202ad398550c3b73d72f5af92e86f71665214538a81efd4c409"
+  }
+}
