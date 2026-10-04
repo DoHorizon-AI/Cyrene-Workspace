@@ -1,0 +1,123 @@
+{
+  "lockVersion": 1,
+  "lockId": "package-runtime-protocols-v1",
+  "compatibilityGroup": {
+    "groupId": "package-runtime-native-v1",
+    "groupVersion": "1",
+    "contractApiVersion": "0.1.0",
+    "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+    "members": [
+      {
+        "componentId": "cyrene-runtime-maintenance",
+        "requiredForAdoption": true,
+        "protocolVersion": "cyrene.runtime-maintenance.broker.v1"
+      },
+      {
+        "componentId": "cy-package-runtime",
+        "requiredForAdoption": true,
+        "protocolVersion": "cy-package-runtime.control.v1"
+      }
+    ]
+  },
+  "transport": {
+    "framing": "one-jsonl-request-and-response-per-unix-connection",
+    "controlSocket": "/run/cyrene-package-runtime/control.sock",
+    "maintenanceBrokerSocket": "/run/cyrene/runtime-maintenance.sock",
+    "controlRequestLimitBytes": 1048576,
+    "scopePolicy": {
+      "peerCredentials": "SO_PEERCRED",
+      "productAuthentication": "source_id+source_token+matching_peer_uid_gid",
+      "generationField": "catalog_generation",
+      "defaultScope": "empty-deny",
+      "rootOperator": "SO_PEERCRED.uid=0",
+      "bindingScopeTuple": "binding_id+package_id+installation_id+operation",
+      "sourceIdMustMatchAuth": true,
+      "catalogGenerationMustBeCurrent": true,
+      "brokerBindingCaller": "source-authenticated-peer-only"
+    }
+  },
+  "protocols": {
+    "packageRuntimeControl": {
+      "protocolVersion": "cy-package-runtime.control.v1",
+      "definition": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "path": "governance/package-runtime-control-v1.schema.json",
+        "sha256": "6e4a4bf0e5c62a1af0852510749555832a82c3f131929da55b35a748a0b350e1"
+      },
+      "requestSchema": "#/$defs/controlRequest",
+      "responseSchema": "#/$defs/controlResponse",
+      "authorityResultSchema": "#/$defs/authorityResult",
+      "bindingMutationResponseSchema": "#/$defs/bindingMutationControlResponse"
+    },
+    "maintenanceBroker": {
+      "protocolVersion": "cyrene.runtime-maintenance.broker.v1",
+      "definition": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "path": "governance/package-runtime-control-v1.schema.json",
+        "sha256": "6e4a4bf0e5c62a1af0852510749555832a82c3f131929da55b35a748a0b350e1"
+      },
+      "requestSchema": "#/$defs/brokerHealthRequest",
+      "responseSchema": "#/$defs/brokerHealthResponse"
+    },
+    "bindingOperations": {
+      "protocolVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+      "definition": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "path": "governance/package-runtime-control-v1.schema.json",
+        "sha256": "6e4a4bf0e5c62a1af0852510749555832a82c3f131929da55b35a748a0b350e1"
+      },
+      "requestSchema": "#/$defs/bindingOperationRequest",
+      "responseSchema": "#/$defs/bindingOperationResponse"
+    }
+  },
+  "bindingAdmission": {
+    "healthMethod": "Health",
+    "requiredBrokerProtocolVersion": "cyrene.runtime-maintenance.broker.v1",
+    "requiredCapability": "cyrene.runtime-maintenance.binding-operations.v1",
+    "methods": [
+      "AdmitBindingOperation",
+      "CompleteBindingOperation"
+    ],
+    "operations": [
+      "activate",
+      "recover",
+      "deactivate"
+    ],
+    "controlOperationMap": [
+      {
+        "controlOperation": "activate",
+        "brokerOperation": "activate"
+      },
+      {
+        "controlOperation": "recover_binding",
+        "brokerOperation": "recover"
+      },
+      {
+        "controlOperation": "deactivate",
+        "brokerOperation": "deactivate"
+      }
+    ],
+    "replayRules": {
+      "executeWhenAlreadyInFlight": false,
+      "executeWhenAlreadyCompleted": false
+    },
+    "requiredDaemonCapability": "cy-package-runtime.binding-operation-admission.v1",
+    "authorityAdvertisesOnlyAfter": "SERVING+exact broker protocol_version+required broker capability+same catalog_generation",
+    "completionOwner": "product-sdk-after-durable-owner-state-commit",
+    "daemonCompletesOperation": false,
+    "pendingAdmissionBlocksUpdates": true,
+    "admissionExpiry": "none",
+    "sameCatalogGeneration": "Authority.catalog_generation=BrokerHealth.catalog_generation=current source-policy generation",
+    "legacyBrokerBehavior": "missing exact Health capability means no daemon capability and no mutation; no fallback",
+    "wrongProtocolError": "PROTOCOL_VERSION_UNSUPPORTED",
+    "requestIdCorrelation": "same control request_id, admission request_id, receipt request_id, completion request_id",
+    "completionMatchesAdmissionTuple": true,
+    "completionUsesCurrentCatalogGeneration": true,
+    "mixedAuthError": "OPERATOR_AUTH_NOT_ALLOWED",
+    "admissionFlagsMutuallyExclusive": true,
+    "failureReceiptRule": "post-admission runtime error may carry binding_operation receipt; it is not success and Product SDK must not Complete without durable successful owner-state commit",
+    "inFlightReplayBehavior": "BINDING_OPERATION_PENDING error with typed receipt; no rerun",
+    "completedReplayBehavior": "read-only RuntimeStatus success with typed receipt; no rerun",
+    "postAdmissionMutationErrorBehavior": "error may carry typed receipt; Product SDK does not auto-complete"
+  }
+}
