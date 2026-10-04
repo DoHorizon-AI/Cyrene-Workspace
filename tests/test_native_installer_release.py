@@ -63,6 +63,142 @@ def test_component_manifest_schema_rejects_unknown_and_non_integer_versions(
     assert not module._is_supported_component_manifest_schema(schema_version)
 
 
+def _release_manifest_identity_fixture(
+    module: ModuleType,
+) -> tuple[dict[str, object], dict[str, object]]:
+    source = {
+        "repository": module.REPOSITORY,
+        "ref": "refs/heads/develop",
+        "commit": "a" * 40,
+        "workflow": f"{module.REPOSITORY}/{module.WORKFLOW_PATH}",
+    }
+    release_source = module._manifest_source_identity(source)
+    manifest = {
+        "schemaVersion": 1,
+        "repository": module.REPOSITORY,
+        "releaseId": f"native-installer-preview-{'a' * 40}",
+        "version": "0.1.0-rc.1",
+        "channel": "preview",
+        "source": release_source,
+        "workflow": f"{module.REPOSITORY}/{module.WORKFLOW_PATH}",
+        "run": {"id": 37209702474, "attempt": 1},
+        "targets": [],
+        "sourceReceipt": {},
+        "workspaceCatalog": {},
+        "pythonRuntimeLock": {},
+        "workspaceReleaseLock": {},
+        "checksumAsset": "SHA256SUMS",
+    }
+    receipt = {
+        "workspaceSource": source,
+        "workspaceReleaseLock": {"document": {"name": "cyrene-0.1.0-rc.1"}},
+    }
+    return manifest, receipt
+
+
+def test_release_manifest_projects_fixed_source_identity_from_receipt_shape() -> None:
+    module = _module()
+    manifest, receipt = _release_manifest_identity_fixture(module)
+
+    assert manifest["source"] == {
+        "repository": module.REPOSITORY,
+        "ref": "refs/heads/develop",
+        "commit": "a" * 40,
+    }
+    assert "workflow" not in manifest["source"]
+    assert receipt["workspaceSource"]["workflow"] == (f"{module.REPOSITORY}/{module.WORKFLOW_PATH}")
+    assert (
+        module._validate_release_manifest_identity(
+            manifest,
+            receipt,
+            module.REPOSITORY,
+            "refs/heads/develop",
+            "a" * 40,
+        )
+        == manifest["source"]
+    )
+    module._validate_release_manifest_version(manifest, receipt)
+
+
+def _replace_manifest_ref_with_main(manifest: dict[str, object]) -> None:
+    manifest["source"]["ref"] = "refs/heads/main"
+    manifest["releaseId"] = f"native-installer-stable-{'a' * 40}"
+
+
+def _replace_manifest_source_commit(manifest: dict[str, object]) -> None:
+    manifest["source"]["commit"] = "b" * 40
+    manifest["releaseId"] = f"native-installer-preview-{'b' * 40}"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_ref", "expected_commit", "message"),
+    [
+        (
+            lambda manifest: manifest.update(repository="attacker/other-repo"),
+            "refs/heads/develop",
+            "a" * 40,
+            "fixed repository/workflow/source",
+        ),
+        (
+            lambda manifest: manifest.update(workflow="attacker/other-workflow.yml"),
+            "refs/heads/develop",
+            "a" * 40,
+            "fixed repository/workflow/source",
+        ),
+        (
+            _replace_manifest_ref_with_main,
+            "refs/heads/develop",
+            "a" * 40,
+            "expected ref",
+        ),
+        (
+            _replace_manifest_source_commit,
+            "refs/heads/develop",
+            "a" * 40,
+            "expected commit",
+        ),
+        (
+            lambda manifest: manifest.update(channel="stable"),
+            "refs/heads/develop",
+            "a" * 40,
+            "channel differs",
+        ),
+    ],
+)
+def test_release_manifest_identity_rejects_wrong_repository_workflow_source_or_channel(
+    mutate: object,
+    expected_ref: str,
+    expected_commit: str,
+    message: str,
+) -> None:
+    module = _module()
+    manifest, receipt = _release_manifest_identity_fixture(module)
+    mutate(manifest)
+
+    with pytest.raises(module.ReleaseError, match=message):
+        module._validate_release_manifest_identity(
+            manifest,
+            receipt,
+            module.REPOSITORY,
+            expected_ref,
+            expected_commit,
+        )
+
+
+def test_release_manifest_identity_rejects_receipt_sha_and_version_mismatches() -> None:
+    module = _module()
+    manifest, receipt = _release_manifest_identity_fixture(module)
+    manifest["source"]["commit"] = "b" * 40
+    manifest["releaseId"] = f"native-installer-preview-{'b' * 40}"
+    with pytest.raises(module.ReleaseError, match="source receipt source identity"):
+        module._validate_release_manifest_identity(manifest, receipt, module.REPOSITORY)
+
+    manifest, receipt = _release_manifest_identity_fixture(module)
+    manifest["version"] = "0.1.0-rc.2"
+    with pytest.raises(module.ReleaseError, match="source-bound Workspace lock"):
+        module._validate_release_manifest_version(manifest, receipt)
+
+
 def test_fetch_plan_is_fixed_to_exact_ubuntu_tuples(tmp_path: Path) -> None:
     module = _module()
     inputs = tmp_path / "inputs.json"
