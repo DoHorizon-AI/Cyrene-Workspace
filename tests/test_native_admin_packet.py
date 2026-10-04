@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -333,6 +334,78 @@ def test_assembler_creates_hash_bound_reviewable_stage_only_packet(tmp_path: Pat
     assert "/usr/bin/python3" not in launcher
     assert launcher.index("verify_native_release_for_host") < launcher.index("admin_initialize.py")
     subprocess.run(["sh", "-n", str(packet / "bootstrap.sh")], check=True)
+
+
+@pytest.mark.parametrize("ubuntu_version", ["22.04", "24.04"])
+def test_generated_launcher_path_resolves_dpkg_maintainer_tools_without_user_path(
+    tmp_path: Path, ubuntu_version: str
+) -> None:
+    """Resolve pinned and dpkg system tools without inheriting caller PATH entries."""
+
+    stage = tmp_path / "stage"
+    tools = {
+        "gh": stage / "tools/gh",
+        "local_helper": stage / "mock/usr/local/sbin/cyrene-local-admin-tool",
+        "ldconfig": stage / "mock/usr/sbin/ldconfig",
+        "start_stop_daemon": stage / "mock/sbin/start-stop-daemon",
+    }
+    user_bin = tmp_path / "user-bin"
+    for name, path in tools.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!/bin/sh\necho {name}\n", encoding="utf-8")
+        path.chmod(0o755)
+        inherited = user_bin / path.name
+        inherited.parent.mkdir(parents=True, exist_ok=True)
+        inherited.write_text("#!/bin/sh\necho inherited-user-tool\n", encoding="utf-8")
+        inherited.chmod(0o755)
+
+    launcher = admin_packet._launcher_script(
+        commitments={},
+        ref="refs/heads/develop",
+        commit=TEST_COMMIT,
+        ubuntu_version=ubuntu_version,
+        channel="preview",
+        deb_asset_name=f"cyrene_0.1.0-rc.1_ubuntu-{ubuntu_version}_amd64.deb",
+        deb_sha256="b" * 64,
+        start_broker=False,
+        operator_user=None,
+    )
+    path_line = next(
+        line for line in launcher.splitlines() if line.startswith('PATH="$stage/tools:')
+    )
+    assert (
+        path_line
+        == 'PATH="$stage/tools:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin"; export PATH'
+    )
+    simulated_path_line = (
+        path_line.replace("/usr/local/sbin", "@LOCAL_SBIN@")
+        .replace("/usr/sbin", "@USR_SBIN@")
+        .replace("/sbin", "@SBIN@")
+        .replace("@LOCAL_SBIN@", "$stage/mock/usr/local/sbin")
+        .replace("@USR_SBIN@", "$stage/mock/usr/sbin")
+        .replace("@SBIN@", "$stage/mock/sbin")
+    )
+    script = "\n".join(
+        [
+            f"stage={shlex.quote(str(stage))}",
+            simulated_path_line,
+            "command -v gh",
+            "command -v cyrene-local-admin-tool",
+            "command -v ldconfig",
+            "command -v start-stop-daemon",
+        ]
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        env={"PATH": str(user_bin)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [str(path) for path in tools.values()]
+    assert "inherited-user-tool" not in result.stdout
 
 
 def test_packet_refuses_unattested_or_mismatched_verifier_receipt(tmp_path: Path) -> None:
