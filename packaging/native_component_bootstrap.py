@@ -264,23 +264,30 @@ def _assert_completed_broker_plan_reusable(
     candidate_unit_bytes = candidate_unit.read_bytes()
     if not updater._unit_uses_component_runner(candidate_unit, component_id):
         raise ValueError("Verified broker systemd unit is not the pinned component runner")
-    installed_units = [
-        Path(directory) / unit
-        for directory in dict.fromkeys((*updater.systemd_unit_dirs, RUNTIME_SYSTEMD_UNIT_DIRECTORY))
-        if (Path(directory) / unit).exists() or (Path(directory) / unit).is_symlink()
-    ]
+    installed_units: dict[tuple[int, int, str], Path] = {}
+    for directory in dict.fromkeys((*updater.systemd_unit_dirs, RUNTIME_SYSTEMD_UNIT_DIRECTORY)):
+        installed_unit = Path(directory) / unit
+        if not installed_unit.exists() and not installed_unit.is_symlink():
+            continue
+        unit_info = installed_unit.lstat()
+        if (
+            not stat.S_ISREG(unit_info.st_mode)
+            or unit_info.st_uid != os.geteuid()
+            or stat.S_IMODE(unit_info.st_mode) & 0o022
+            or installed_unit.read_bytes() != candidate_unit_bytes
+            or not updater._unit_uses_component_runner(installed_unit, component_id)
+        ):
+            raise ValueError("Installed maintenance broker systemd unit differs from this plan")
+        # Ubuntu's /lib and /usr/lib can name one unit through usrmerge; count
+        # that file once only when inode and strict physical path both agree.
+        physical_identity = (
+            unit_info.st_dev,
+            unit_info.st_ino,
+            str(installed_unit.resolve(strict=True)),
+        )
+        installed_units.setdefault(physical_identity, installed_unit)
     if len(installed_units) != 1:
         raise ValueError("Completed maintenance broker systemd unit is missing or ambiguous")
-    installed_unit = installed_units[0]
-    unit_info = installed_unit.lstat()
-    if (
-        not stat.S_ISREG(unit_info.st_mode)
-        or unit_info.st_uid != os.geteuid()
-        or stat.S_IMODE(unit_info.st_mode) & 0o022
-        or installed_unit.read_bytes() != candidate_unit_bytes
-        or not updater._unit_uses_component_runner(installed_unit, component_id)
-    ):
-        raise ValueError("Installed maintenance broker systemd unit differs from this plan")
 
     if _broker_process_exists(DEFAULT_PROC_ROOT):
         raise ValueError("A maintenance broker process is running; exact-plan reuse is denied")

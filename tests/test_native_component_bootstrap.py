@@ -381,6 +381,63 @@ def test_completed_same_plan_can_be_read_only_reconfirmed(
     assert lock_entries == []
 
 
+def test_completed_broker_plan_accepts_one_unit_reached_through_usrmerge_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, values, target_id, original_plan, *_ = _completed_broker_plan(tmp_path, monkeypatch)
+    unit_directory = updater.systemd_unit_dirs[0]
+    alias_directory = tmp_path / "lib-systemd-system"
+    alias_directory.symlink_to(unit_directory, target_is_directory=True)
+    updater.systemd_unit_dirs = (unit_directory, alias_directory)
+    monkeypatch.setattr(bootstrap, "_broker_process_exists", lambda _root: False)
+
+    replayed = _call(updater, values, target_id)
+
+    assert replayed == original_plan
+
+
+@pytest.mark.parametrize("alias_kind", ["distinct_file", "leaf_symlink", "unsafe_owner"])
+def test_completed_broker_plan_rejects_nonphysical_or_unsafe_unit_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias_kind: str
+) -> None:
+    updater, values, target_id, _plan, *_ = _completed_broker_plan(
+        tmp_path / alias_kind, monkeypatch
+    )
+    unit_name = updater.components[bootstrap.BOOTSTRAP_COMPONENT_ID]["systemdUnit"]
+    unit_directory = updater.systemd_unit_dirs[0]
+    unit_path = unit_directory / unit_name
+    if alias_kind == "distinct_file":
+        second_directory = tmp_path / alias_kind / "second-systemd"
+        second_directory.mkdir()
+        (second_directory / unit_name).write_bytes(unit_path.read_bytes())
+        (second_directory / unit_name).chmod(0o644)
+        updater.systemd_unit_dirs = (unit_directory, second_directory)
+        expected_message = "missing or ambiguous"
+    elif alias_kind == "leaf_symlink":
+        second_directory = tmp_path / alias_kind / "second-systemd"
+        second_directory.mkdir()
+        (second_directory / unit_name).symlink_to(unit_path)
+        updater.systemd_unit_dirs = (unit_directory, second_directory)
+        expected_message = "differs from this plan"
+    else:
+        original_lstat = Path.lstat
+
+        def foreign_owner(path: Path) -> os.stat_result:
+            metadata = original_lstat(path)
+            if path == unit_path:
+                fields = list(metadata)
+                fields[4] = os.geteuid() + 1
+                return os.stat_result(fields)
+            return metadata
+
+        monkeypatch.setattr(Path, "lstat", foreign_owner)
+        expected_message = "differs from this plan"
+    monkeypatch.setattr(bootstrap, "_broker_process_exists", lambda _root: False)
+
+    with pytest.raises(ValueError, match=expected_message):
+        _call(updater, values, target_id)
+
+
 @pytest.mark.parametrize(
     ("changed_state", "message"),
     [("process", "process is running"), ("unit", "ActiveState")],
