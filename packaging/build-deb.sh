@@ -195,7 +195,6 @@ mkdir -p "${STAGE_DIR}/etc/cyrene"
 mkdir -p "${STAGE_DIR}/lib/systemd/system"
 mkdir -p "${STAGE_DIR}/usr/share/cyrene/service-artifacts"
 mkdir -p "${STAGE_DIR}/usr/share/cyrene"
-mkdir -p "${STAGE_DIR}/usr/share/cyrene/python-runtime"
 mkdir -p "${STAGE_DIR}/usr/lib/cyrene/packaging"
 mkdir -p "${STAGE_DIR}/usr/share/polkit-1/actions"
 

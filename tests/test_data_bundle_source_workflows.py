@@ -122,18 +122,23 @@ def _fixture(
         record["ownerId"] = owner_id
         records.append(record)
         expected_workflows.append(repository + OWNER_WORKFLOW_SUFFIX)
+        local_repository = repository.rsplit("/", 1)[-1]
+        inner_catalog_path = f"{local_repository}/{trusted['catalogPath']}"
+        inner_catalog = root / inner_catalog_path
+        inner_catalog.parent.mkdir(parents=True, exist_ok=True)
+        inner_catalog.write_bytes(subject_bytes)
         inner_owners.append(
             {
                 "ownerId": owner_id,
-                "repository": repository,
+                "repository": local_repository,
                 "sourceSha": commit,
-                "catalogPath": source_path,
+                "catalogPath": inner_catalog_path,
                 "catalogSha256": record["catalogSha256"].removeprefix("sha256:"),
             }
         )
         inner_files.append(
             {
-                "path": source_path,
+                "path": inner_catalog_path,
                 "sha256": record["catalogSha256"].removeprefix("sha256:"),
             }
         )

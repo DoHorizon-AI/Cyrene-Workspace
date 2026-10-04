@@ -72,6 +72,7 @@ jobs:
           tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
           tests/test_data_bundle_source_workflows.py
+          tests/test_data_bundle_inner_manifest.py
           tests/test_linux_component_updates.py
       - name: Check component updater and bundle producer formatting
         run: >-
@@ -82,6 +83,7 @@ jobs:
           tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
           tests/test_data_bundle_source_workflows.py
+          tests/test_data_bundle_inner_manifest.py
           tests/test_linux_component_updates.py
       - name: Test updater, identity, and bundle metadata paths
         run: >-
@@ -89,6 +91,7 @@ jobs:
           tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
           tests/test_data_bundle_source_workflows.py
+          tests/test_data_bundle_inner_manifest.py
           tests/test_linux_component_updates.py tests/test_cyrene_cli.py
           tests/test_service_wheelhouse_export.py
       - name: Check package and privileged helper shell syntax
@@ -200,6 +203,7 @@ jobs:
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
+          tests/test_native_deb_staging.py
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -209,6 +213,7 @@ jobs:
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
           tests/test_data_bundle_source_workflows.py
+          tests/test_data_bundle_inner_manifest.py
       - name: Check native-profile formatting
         run: >-
           ruff format --check
@@ -229,6 +234,7 @@ jobs:
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
+          tests/test_native_deb_staging.py
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -238,6 +244,7 @@ jobs:
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
           tests/test_data_bundle_source_workflows.py
+          tests/test_data_bundle_inner_manifest.py
       - name: Test runtime lock, signed service bytes, installer receipts, and native updates
         run: >-
           pytest -q
@@ -246,6 +253,7 @@ jobs:
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
+          tests/test_native_deb_staging.py
           tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -255,6 +263,7 @@ jobs:
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
           tests/test_data_bundle_source_workflows.py
+          tests/test_data_bundle_inner_manifest.py
       - name: Compile Python helpers and check package shell syntax
         run: |
           python -m py_compile \
