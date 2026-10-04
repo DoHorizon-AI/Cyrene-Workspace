@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schemaVersion": 1,
+  "python": {
+    "implementation": "CPython",
+    "distribution": "astral-sh/python-build-standalone",
+    "version": "3.12.14",
+    "target": "x86_64-unknown-linux-gnu",
+    "installRoot": "/opt/cyrene/python/3.12.14",
+    "executable": "/opt/cyrene/python/3.12.14/bin/python3.12",
+    "archiveRoot": "python",
+    "archiveStripComponents": 1,
+    "bundledPipVersion": "26.2.1",
+    "archive": {
+      "name": "cpython-3.12.14+20260929-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260929/cpython-3.12.14%2B20260929-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "sha256": "ef605200f8174e87ecfc308e52a88127543f85dd5c940dc5e92cab244b98a003",
+      "size": 34277962,
+      "release": {
+        "repository": "astral-sh/python-build-standalone",
+        "tag": "20260929",
+        "commit": "b498734a5791d0e6786695a226fd398a41c6f7f6",
+        "immutable": true,
+        "apiUrl": "https://api.github.com/repos/astral-sh/python-build-standalone/releases/tags/20260929",
+        "assetApiUrl": "https://api.github.com/repos/astral-sh/python-build-standalone/releases/assets/598637702",
+        "assetId": 598637702
+      }
+    }
+  },
+  "buildResolver": {
+    "tool": "uv",
+    "version": "0.12.21",
+    "installedPath": "/opt/cyrene/uv/0.12.21/uv",
+    "usage": {
+      "build": "resolve-frozen-python-distribution-mapping",
+      "runtime": "explicit-trainer-environment-prepare",
+      "automaticRuntimeBootstrap": false
+    },
+    "binaryArchive": {
+      "name": "uv-x86_64-unknown-linux-gnu.tar.gz",
+      "url": "https://github.com/astral-sh/uv/releases/download/0.12.21/uv-x86_64-unknown-linux-gnu.tar.gz",
+      "sha256": "23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0",
+      "size": 19782662,
+      "archiveRoot": "uv-x86_64-unknown-linux-gnu",
+      "executable": "uv-x86_64-unknown-linux-gnu/uv",
+      "executableSha256": "e8a4e7b4fd6283892fccfc4f335fb16cdf01064bb135172e4e2e73b478eb2076",
+      "release": {
+        "repository": "astral-sh/uv",
+        "tag": "0.12.21",
+        "commit": "7af826859382eb191e47467540850caa8f493e5b",
+        "immutable": true,
+        "apiUrl": "https://api.github.com/repos/astral-sh/uv/releases/tags/0.12.21",
+        "assetApiUrl": "https://api.github.com/repos/astral-sh/uv/releases/assets/599238020",
+        "assetId": 599238020
+      }
+    },
+    "distributionMetadata": {
+      "url": "https://raw.githubusercontent.com/astral-sh/uv/7af826859382eb191e47467540850caa8f493e5b/crates/uv-python/download-metadata.json",
+      "sha256": "6167f194053b58a461b6b440bbfff121f0971bd6757fce95cfec90b19ee080df",
+      "size": 3176495,
+      "mappingKey": "cpython-3.12.14-linux-x86_64-gnu",
+      "mapping": {
+        "name": "cpython",
+        "arch": {
+          "family": "x86_64",
+          "variant": null
+        },
+        "os": "linux",
+        "libc": "gnu",
+        "major": 3,
+        "minor": 12,
+        "patch": 14,
+        "prerelease": "",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260929/cpython-3.12.14%2B20260929-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "sha256": "ef605200f8174e87ecfc308e52a88127543f85dd5c940dc5e92cab244b98a003",
+        "variant": null,
+        "build": "20260929"
+      }
+    }
+  },
+  "runtimeDependencies": {
+    "requirementsPath": "python-runtime-requirements.lock",
+    "requirementsSha256": "684f0a0718c8b0488a73d7b2770966eec21429d0150751609b68faf3bbb5fc37",
+    "sitePackagesRelativePath": "lib/python3.12/site-packages",
+    "systemPackages": [
+      "ca-certificates",
+      "libcrypt1",
+      "libgcc-s1"
+    ],
+    "wheels": [
+      {
+        "name": "attrs",
+        "version": "26.1.0",
+        "filename": "attrs-26.1.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl",
+        "sha256": "c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309",
+        "size": 67548
+      },
+      {
+        "name": "jsonschema",
+        "version": "4.26.0",
+        "filename": "jsonschema-4.26.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl",
+        "sha256": "d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce",
+        "size": 90630
+      },
+      {
+        "name": "jsonschema-specifications",
+        "version": "2025.9.1",
+        "filename": "jsonschema_specifications-2025.9.1-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl",
+        "sha256": "98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe",
+        "size": 18437
+      },
+      {
+        "name": "referencing",
+        "version": "0.37.0",
+        "filename": "referencing-0.37.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl",
+        "sha256": "381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231",
+        "size": 26766
+      },
+      {
+        "name": "rpds-py",
+        "version": "2026.6.3",
+        "filename": "rpds_py-2026.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "url": "https://files.pythonhosted.org/packages/04/8f/d2f3f532616be4d06c316ef119683e832bd3d41e112bf3a88f4151c95b17/rpds_py-2026.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "sha256": "ecabd69db66de867690f9797f2f8fa27ba501bbc24540cbdbdc649cd15888ba6",
+        "size": 366189
+      },
+      {
+        "name": "typing-extensions",
+        "version": "4.16.0",
+        "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+        "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+        "size": 45571
+      }
+    ]
+  },
+  "payload": {
+    "runtimeArchivePath": "usr/share/cyrene/python-runtime/cpython-3.12.14+20260929-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+    "requirementsPath": "usr/share/cyrene/python-runtime/python-runtime-requirements.lock",
+    "lockPath": "usr/share/cyrene/python-runtime/python-runtime.lock.json",
+    "wheelDirectory": "usr/share/cyrene/python-runtime/wheels",
+    "verificationRecordPath": "usr/share/cyrene/python-runtime/python-runtime-verification.json"
+  }
+}

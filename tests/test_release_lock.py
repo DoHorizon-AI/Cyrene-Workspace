@@ -33,6 +33,39 @@ def test_repository_lock_is_structurally_valid() -> None:
     assert errors == []
 
 
+def test_native_python_profiles_lock_supported_targets_and_private_runtime() -> None:
+    document = _document()
+    profiles = document["nativePythonProfiles"]
+
+    assert set(profiles) == {
+        "linux-ubuntu-22.04-x86_64-python-3.12",
+        "linux-ubuntu-24.04-x86_64-python-3.12",
+    }
+    for target_id, profile in profiles.items():
+        assert profile["pythonVersion"] == "3.12.14"
+        assert profile["pythonExecutable"] == "/opt/cyrene/python/3.12.14/bin/python3.12"
+        assert profile["pythonInput"] == "packaging/python-runtime.lock.json"
+        assert profile["wheelResolver"]["tool"] == "uv"
+        assert profile["wheelResolver"]["arguments"] == [
+            "--python-platform",
+            "x86_64-unknown-linux-gnu",
+        ]
+        assert profile["wheelResolver"]["allowedWheelTags"]["pep600"]["maxGlibc"] == (
+            "2.35" if "22.04" in target_id else "2.39"
+        )
+
+
+def test_native_python_profile_rejects_a_higher_glibc_floor_on_ubuntu22() -> None:
+    document = _document()
+    document["nativePythonProfiles"]["linux-ubuntu-22.04-x86_64-python-3.12"]["wheelResolver"][
+        "allowedWheelTags"
+    ]["pep600"]["maxGlibc"] = "2.36"
+
+    errors, _ = _module().validate(document)
+
+    assert any("PEP 600 policy must not exceed 2.35" in error for error in errors)
+
+
 def test_repository_lock_names_current_blockers() -> None:
     _, blockers = _module().validate(_document())
     assert any("training.llama-factory.v1" in blocker for blocker in blockers)

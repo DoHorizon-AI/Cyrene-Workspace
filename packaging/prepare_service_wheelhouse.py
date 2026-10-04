@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import email.parser
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -72,6 +73,16 @@ class WheelArtifact:
 
 RUNTIME_SDK_COMPONENT_ID = "cyrene-runtime-maintenance-sdk"
 RUNTIME_SDK_DISTRIBUTION = "cyrene-runtime-maintenance"
+PRIVATE_PYTHON_EXECUTABLE = "/opt/cyrene/python/3.12.14/bin/python3.12"
+NATIVE_PYTHON_TARGET_FIELDS = (
+    "os",
+    "osVersion",
+    "distribution",
+    "distributionVersion",
+    "architecture",
+    "abi",
+    "runtime",
+)
 
 
 SERVICE_SPECS = (
@@ -95,6 +106,134 @@ SERVICE_SPECS = (
 
 class ProducerError(RuntimeError):
     """Raised when an input cannot be proven to match its pinned source."""
+
+
+def _shared_bundle_module() -> Any:
+    """Load the consumer's canonical Product execution-runtime validator."""
+
+    module_name = "_cyrene_service_bundle_shared_validator"
+    cached = sys.modules.get(module_name)
+    if cached is not None:
+        return cached
+    module_path = Path(__file__).resolve().with_name("service_bundle.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ProducerError(f"cannot load canonical service bundle validator: {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def _safe_source_relative_path(value: Any, label: str) -> PurePosixPath:
+    """Require a normalized repo-relative Product source path."""
+
+    if not isinstance(value, str):
+        raise ProducerError(f"{label} must be a repo-relative path string")
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise ProducerError(f"{label} must be a normalized repo-relative path")
+    return path
+
+
+def _copy_execution_runtime_source(
+    repo_root: Path,
+    service_stage: Path,
+    target_profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Copy one Product-root declaration and only its explicitly declared sources."""
+
+    declaration_path = repo_root / "execution-runtime.json"
+    if not declaration_path.exists() and not declaration_path.is_symlink():
+        return None
+    if declaration_path.is_symlink() or not declaration_path.is_file():
+        raise ProducerError(
+            f"Product execution-runtime.json is missing or unsafe: {declaration_path}"
+        )
+    descriptor = _read_json_object(declaration_path, "Product execution-runtime.json")
+    runtime_root = service_stage / "execution-runtime"
+    runtime_root.mkdir(mode=0o755)
+    declaration_destination = runtime_root / "execution-runtime.json"
+    shutil.copyfile(declaration_path, declaration_destination)
+
+    source_names = [
+        descriptor.get("project_file"),
+        descriptor.get("lock_file"),
+        descriptor.get("bootstrap_script"),
+        descriptor.get("probe_script"),
+    ]
+    protocol_files = descriptor.get("protocol_files")
+    if not isinstance(protocol_files, list):
+        raise ProducerError("Product execution-runtime.json protocol_files must be a path list")
+    source_names.extend(protocol_files)
+    relative_paths = [
+        _safe_source_relative_path(source_name, "Product execution-runtime.json source path")
+        for source_name in source_names
+    ]
+    for relative in sorted(set(relative_paths), key=lambda path: path.as_posix()):
+        source = repo_root.joinpath(*relative.parts)
+        current = repo_root
+        for part in relative.parts:
+            current = current / part
+            try:
+                current.lstat()
+            except OSError as error:
+                raise ProducerError(
+                    f"declared Product runtime source is missing: {current}"
+                ) from error
+            if current != source and (current.is_symlink() or not current.is_dir()):
+                raise ProducerError(f"declared Product runtime source path is unsafe: {current}")
+        if source.is_symlink() or not source.is_file():
+            raise ProducerError(f"declared Product runtime source is not a regular file: {source}")
+        destination = runtime_root.joinpath(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    shared_bundle = _shared_bundle_module()
+    try:
+        shared_bundle._validate_execution_runtime(
+            descriptor,
+            root=service_stage,
+            files=shared_bundle._expected_file_map(service_stage),
+            profile=target_profile,
+        )
+    except shared_bundle.ServiceBundleError as error:
+        raise ProducerError(f"Product execution-runtime.json is invalid: {error}") from error
+    return descriptor
+
+
+def _execution_runtime_source_hashes(service_stage: Path) -> dict[str, str]:
+    """Bind Product source files copied to the wheelhouse into source provenance."""
+
+    runtime_root = service_stage / "execution-runtime"
+    if runtime_root.is_symlink() or not runtime_root.is_dir():
+        raise ProducerError("Product execution-runtime source tree is missing or unsafe")
+    result: dict[str, str] = {}
+    for current, directory_names, file_names in os.walk(runtime_root, followlinks=False):
+        current_path = Path(current)
+        for name in directory_names:
+            path = current_path / name
+            if path.is_symlink() or not path.is_dir():
+                raise ProducerError(f"Product execution-runtime has an unsafe directory: {path}")
+        for name in file_names:
+            path = current_path / name
+            if path.is_symlink() or not path.is_file():
+                raise ProducerError(f"Product execution-runtime has an unsafe file: {path}")
+            relative = path.relative_to(service_stage).as_posix()
+            result[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if not result:
+        raise ProducerError("Product execution-runtime source tree must contain files")
+    return dict(sorted(result.items()))
 
 
 def _normalize_distribution(value: str) -> str:
@@ -581,23 +720,20 @@ def _requirement_hashes(path: Path) -> dict[tuple[str, str], set[str]]:
     return requirements
 
 
-def _verify_wheelhouse(service_dir: Path, spec: ServiceSpec, source_commit: str) -> None:
+def _verify_wheelhouse(
+    service_dir: Path,
+    spec: ServiceSpec,
+    source_commit: str,
+    *,
+    target_profile_id: str,
+    target_profile: dict[str, Any],
+) -> None:
     """Verify all flat wheels match the generated exact pins and artifact hashes."""
 
     lock = service_dir / "requirements.lock"
     allowed = _requirement_hashes(lock)
     source = _read_json_object(service_dir / "source.json", f"{spec.service} source.json")
     runtime_dependencies = source.get("runtime_dependencies")
-    expected_source = {
-        "schema_version": 2,
-        "service": spec.service,
-        "source_repository": spec.repository,
-        "source_commit": source_commit,
-        "requirements_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
-        "runtime_dependencies": runtime_dependencies,
-    }
-    if set(source) != set(expected_source) or source != expected_source:
-        raise ProducerError(f"{spec.service}/source.json differs from its pinned source or lock")
     if not isinstance(runtime_dependencies, list) or len(runtime_dependencies) != 1:
         raise ProducerError(
             f"{spec.service}/source.json must pin exactly one runtime SDK dependency"
@@ -629,13 +765,73 @@ def _verify_wheelhouse(service_dir: Path, spec: ServiceSpec, source_commit: str)
     if spec.service == "navigator":
         expected_entries.add("serve-web.py")
     wheel_paths: list[Path] = []
+    execution_runtime_root = service_dir / "execution-runtime"
     for child in service_dir.iterdir():
+        if child.name == "execution-runtime" and child.is_dir() and not child.is_symlink():
+            for current, directory_names, file_names in os.walk(child, followlinks=False):
+                current_path = Path(current)
+                for name in directory_names:
+                    path = current_path / name
+                    if path.is_symlink() or not path.is_dir():
+                        raise ProducerError(
+                            f"Product execution-runtime has an unsafe directory: {path}"
+                        )
+                for name in file_names:
+                    path = current_path / name
+                    if path.is_symlink() or not path.is_file():
+                        raise ProducerError(f"Product execution-runtime has an unsafe file: {path}")
+            continue
         if child.is_symlink() or not child.is_file():
-            raise ProducerError(f"wheelhouse entries must be flat regular files: {child}")
+            raise ProducerError(
+                f"wheelhouse entries must be regular files or the declared runtime tree: {child}"
+            )
         if child.name.endswith(".whl"):
             wheel_paths.append(child)
         elif child.name not in expected_entries:
             raise ProducerError(f"unexpected {spec.service} wheelhouse entry: {child.name}")
+
+    has_execution_runtime = "execution_runtime" in source
+    execution_runtime = source.get("execution_runtime")
+    if has_execution_runtime != execution_runtime_root.is_dir():
+        raise ProducerError(
+            "Product execution-runtime declaration and source tree must appear together"
+        )
+    if execution_runtime_root.is_symlink():
+        raise ProducerError("Product execution-runtime source tree must not be a symlink")
+
+    actual_wheel_tags = {
+        wheel.name: _verify_wheel_tags(wheel, target_profile) for wheel in sorted(wheel_paths)
+    }
+    expected_source = {
+        "schema_version": 2,
+        "service": spec.service,
+        "source_repository": spec.repository,
+        "source_commit": source_commit,
+        "requirements_lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
+        "runtime_dependencies": runtime_dependencies,
+        "target_profile": target_profile_id,
+        "wheel_tags": actual_wheel_tags,
+    }
+    if has_execution_runtime:
+        expected_source["execution_runtime"] = execution_runtime
+        expected_source["execution_runtime_source_sha256"] = _execution_runtime_source_hashes(
+            service_dir
+        )
+    if set(source) != set(expected_source) or source != expected_source:
+        raise ProducerError(
+            f"{spec.service}/source.json differs from its pinned source, lock, or wheel tags"
+        )
+    if has_execution_runtime:
+        shared_bundle = _shared_bundle_module()
+        try:
+            shared_bundle._validate_execution_runtime(
+                execution_runtime,
+                root=service_dir,
+                files=shared_bundle._expected_file_map(service_dir),
+                profile=target_profile,
+            )
+        except shared_bundle.ServiceBundleError as error:
+            raise ProducerError(f"{spec.service} execution runtime is invalid: {error}") from error
 
     required_names = {
         _normalize_distribution(name)
@@ -681,21 +877,251 @@ def _verify_wheelhouse(service_dir: Path, spec: ServiceSpec, source_commit: str)
         raise ProducerError(f"{spec.service} wheelhouse contains no wheels")
 
 
-def _native_target() -> str:
-    """Require the native Linux Python 3.12 target used by service_bundle.py."""
+def _native_python_profile(release_lock: dict[str, Any], profile_id: str) -> dict[str, Any]:
+    """Load one complete target profile from the Workspace's pinned release lock."""
 
-    if not sys.platform.startswith("linux"):
-        raise ProducerError("wheelhouse preparation must run on Linux")
-    if sys.version_info[:2] != (3, 12):
-        raise ProducerError(
-            f"wheelhouse preparation requires Python 3.12, got {sys.version_info.major}.{sys.version_info.minor}"
-        )
+    profiles = release_lock.get("nativePythonProfiles")
+    profile = profiles.get(profile_id) if isinstance(profiles, dict) else None
+    expected_keys = set(NATIVE_PYTHON_TARGET_FIELDS) | {
+        "pythonVersion",
+        "pythonExecutable",
+        "pythonInput",
+        "wheelResolver",
+    }
+    if not isinstance(profile, dict) or set(profile) != expected_keys:
+        raise ProducerError(f"release-lock.json has no complete Python profile {profile_id!r}")
+    resolver = profile["wheelResolver"]
+    if not isinstance(resolver, dict):
+        raise ProducerError(f"release-lock.json Python profile is invalid: {profile_id}")
+    allowed = resolver.get("allowedWheelTags")
+    if not isinstance(allowed, dict):
+        raise ProducerError(f"release-lock.json Python profile is invalid: {profile_id}")
+    pep600 = allowed.get("pep600")
+    if not isinstance(pep600, dict):
+        raise ProducerError(f"release-lock.json Python profile is invalid: {profile_id}")
+    if (
+        set(resolver) != {"tool", "version", "arguments", "allowedWheelTags"}
+        or set(allowed) != {"purePython", "pep600"}
+        or set(pep600) != {"architecture", "maxGlibc"}
+        or profile.get("pythonVersion") != "3.12.14"
+        or profile.get("pythonExecutable") != PRIVATE_PYTHON_EXECUTABLE
+        or profile.get("pythonInput") != "packaging/python-runtime.lock.json"
+        or profile.get("runtime") != "python:3.12"
+        or profile.get("os") != "linux"
+        or profile.get("distribution") != "ubuntu"
+        or profile.get("osVersion") not in {"22.04", "24.04"}
+        or profile.get("distributionVersion") != profile.get("osVersion")
+        or profile.get("architecture") != "x86_64"
+        or (profile.get("osVersion"), profile.get("abi"))
+        not in {("22.04", "glibc-2.35"), ("24.04", "glibc-2.39")}
+        or profile_id != f"linux-ubuntu-{profile.get('osVersion')}-x86_64-python-3.12"
+        or resolver.get("tool") != "uv"
+        or resolver.get("version") != "0.12.21"
+        or resolver.get("arguments") != ["--python-platform", "x86_64-unknown-linux-gnu"]
+        or allowed.get("purePython") != ["*-none-any"]
+        or pep600.get("architecture") != profile.get("architecture")
+        or pep600.get("maxGlibc") != profile["abi"].removeprefix("glibc-")
+    ):
+        raise ProducerError(f"release-lock.json Python profile is invalid: {profile_id}")
+    return dict(profile)
+
+
+def _validate_python_input(profile: dict[str, Any], workspace_root: Path) -> None:
+    """Verify the separate Python archive and uv lock referenced by the target profile."""
+
+    relative = PurePosixPath(profile["pythonInput"])
+    if (
+        relative.is_absolute()
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.as_posix() != profile["pythonInput"]
+    ):
+        raise ProducerError("Python profile input must be a normalized relative lock path")
+    path = Path(workspace_root).resolve().joinpath(*relative.parts)
+    current = Path(workspace_root).resolve()
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ProducerError(f"Python profile input lock path contains a symlink: {current}")
+    if not path.is_file():
+        raise ProducerError(f"Python profile input lock is missing: {path}")
+    lock = _read_json_object(path, "Python runtime input lock")
+    python = lock.get("python")
+    resolver = lock.get("buildResolver")
+    archive = python.get("archive") if isinstance(python, dict) else None
+    uv_archive = resolver.get("binaryArchive") if isinstance(resolver, dict) else None
+    if (
+        not isinstance(python, dict)
+        or python.get("implementation") != "CPython"
+        or python.get("version") != profile["pythonVersion"]
+        or python.get("target") != "x86_64-unknown-linux-gnu"
+        or python.get("executable") != profile["pythonExecutable"]
+        or not isinstance(archive, dict)
+        or not isinstance(archive.get("sha256"), str)
+        or SHA256_PATTERN.fullmatch(archive["sha256"]) is None
+        or type(archive.get("size")) is not int
+        or archive["size"] < 1
+        or not isinstance(resolver, dict)
+        or resolver.get("tool") != profile["wheelResolver"]["tool"]
+        or resolver.get("version") != profile["wheelResolver"]["version"]
+        or not isinstance(uv_archive, dict)
+        or not isinstance(uv_archive.get("sha256"), str)
+        or SHA256_PATTERN.fullmatch(uv_archive["sha256"]) is None
+        or type(uv_archive.get("size")) is not int
+        or uv_archive["size"] < 1
+    ):
+        raise ProducerError("Python archive/resolver does not match the selected profile")
+
+
+def _native_target(profile: dict[str, Any]) -> str:
+    """Require the exact Ubuntu, x86_64, and glibc profile selected for this build."""
+
+    try:
+        os_release = platform.freedesktop_os_release()
+    except OSError as error:
+        raise ProducerError(f"cannot determine wheelhouse build OS: {error}") from error
     machine = platform.machine().lower()
-    if machine != "x86_64":
+    libc_name, libc_version = platform.libc_ver()
+    abi = f"{libc_name}-{libc_version}" if libc_name and libc_version else None
+    if (
+        not sys.platform.startswith("linux")
+        or os_release.get("ID") != profile["distribution"]
+        or os_release.get("VERSION_ID") != profile["distributionVersion"]
+        or machine not in {"x86_64", "amd64"}
+        or abi != profile["abi"]
+    ):
         raise ProducerError(
-            f"release-lock.json supports Ubuntu 24.04 x86_64 only, got Linux/{machine}"
+            "wheelhouse target profile does not match the build host: "
+            f"expected {profile['distribution']} {profile['distributionVersion']} "
+            f"x86_64/{profile['abi']}, got {os_release.get('ID')} "
+            f"{os_release.get('VERSION_ID')} {machine}/{abi}"
         )
     return "amd64"
+
+
+def _python_runtime_version(executable: Path) -> str:
+    """Read the explicit pinned Python interpreter's full version and implementation."""
+
+    path = Path(executable)
+    if path.is_symlink() or not path.is_file() or not os.access(path, os.X_OK):
+        raise ProducerError(f"build Python interpreter is missing or unsafe: {path}")
+    try:
+        completed = subprocess.run(
+            [
+                str(path),
+                "-I",
+                "-c",
+                (
+                    "import platform,sys; "
+                    "print('CPython' if platform.python_implementation() == 'CPython' else 'other'); "
+                    "print('.'.join(map(str, sys.version_info[:3]))); "
+                    "print(platform.machine())"
+                ),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ProducerError(f"cannot execute pinned build Python {path}: {error}") from error
+    lines = completed.stdout.strip().splitlines()
+    if len(lines) != 3:
+        raise ProducerError(f"pinned build Python returned incomplete runtime identity: {path}")
+    implementation, version, machine = lines
+    if implementation != "CPython":
+        raise ProducerError(f"build interpreter must be CPython, got {implementation}")
+    if machine not in {"x86_64", "amd64"}:
+        raise ProducerError(f"build interpreter must target x86_64, got {machine}")
+    return version
+
+
+def _wheel_tags(path: Path) -> list[str]:
+    """Read the expanded wheel tags from its WHEEL metadata."""
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            wheel_paths = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/WHEEL") and name.count("/") == 1
+            ]
+            if len(wheel_paths) != 1:
+                raise ProducerError(f"wheel must contain one dist-info/WHEEL: {path}")
+            metadata = archive.read(wheel_paths[0]).decode("utf-8")
+    except (OSError, zipfile.BadZipFile, UnicodeDecodeError) as error:
+        raise ProducerError(f"cannot inspect wheel tags in {path}: {error}") from error
+    tags = [
+        line.removeprefix("Tag:").strip()
+        for line in metadata.splitlines()
+        if line.startswith("Tag:")
+    ]
+    if not tags:
+        raise ProducerError(f"wheel has no Tag metadata: {path}")
+    return tags
+
+
+def _wheel_filename_tags(path: Path) -> list[str]:
+    """Expand the Python, ABI, and platform tags encoded in a wheel filename."""
+
+    fields = path.name.removesuffix(".whl").split("-")
+    if len(fields) not in {5, 6}:
+        raise ProducerError(f"wheel filename does not follow the binary wheel format: {path.name}")
+    python_tags, abi_tags, platform_tags = (set(value.split(".")) for value in fields[-3:])
+    return sorted(
+        f"{python_tag}-{abi_tag}-{platform_tag}"
+        for python_tag in python_tags
+        for abi_tag in abi_tags
+        for platform_tag in platform_tags
+    )
+
+
+def _wheel_tag_is_compatible(tag: str, profile: dict[str, Any]) -> bool:
+    parts = tag.split("-")
+    if len(parts) != 3:
+        return False
+    python_tags, abi_tags, platform_tags = parts
+    python_set = set(python_tags.split("."))
+    abi_set = set(abi_tags.split("."))
+    platform_set = set(platform_tags.split("."))
+    if python_set & {"py3", "py312", "cp312"} and abi_set == {"none"} and platform_set == {"any"}:
+        return True
+    compatible_abi3 = "abi3" in abi_set and any(
+        (match := re.fullmatch(r"cp3([0-9]+)", item)) is not None and int(match.group(1)) <= 12
+        for item in python_set
+    )
+    if not compatible_abi3 and not ("cp312" in python_set and "cp312" in abi_set):
+        return False
+    allowed = profile["wheelResolver"]["allowedWheelTags"]["pep600"]
+    target_major, target_minor = map(int, allowed["maxGlibc"].split("."))
+    legacy_floors = {
+        "manylinux1_x86_64": 5,
+        "manylinux2010_x86_64": 12,
+        "manylinux2014_x86_64": 17,
+    }
+    if target_major != 2 or allowed["architecture"] != "x86_64":
+        return False
+    return any(
+        legacy_floors.get(item, target_minor + 1) <= target_minor
+        or (
+            (match := re.fullmatch(r"manylinux_2_([0-9]+)_x86_64", item)) is not None
+            and int(match.group(1)) <= target_minor
+        )
+        for item in platform_set
+    )
+
+
+def _verify_wheel_tags(path: Path, profile: dict[str, Any]) -> list[str]:
+    tags = _wheel_tags(path)
+    if len(tags) != len(set(tags)):
+        raise ProducerError(f"wheel repeats a WHEEL Tag entry: {path.name}")
+    if _wheel_filename_tags(path) != sorted(tags):
+        raise ProducerError(f"wheel filename tags differ from WHEEL metadata: {path.name}")
+    for tag in tags:
+        if not _wheel_tag_is_compatible(tag, profile):
+            raise ProducerError(
+                f"wheel tag {tag!r} is incompatible with target "
+                f"{profile['distributionVersion']}/{profile['abi']}: {path.name}"
+            )
+    return sorted(tags)
 
 
 def _load_runtime_sdk_wheel(args: argparse.Namespace) -> tuple[WheelArtifact, str, str]:
@@ -758,6 +1184,8 @@ def _load_runtime_sdk_wheel(args: argparse.Namespace) -> tuple[WheelArtifact, st
 def _write_service(
     *,
     spec: ServiceSpec,
+    target_profile_id: str,
+    target_profile: dict[str, Any],
     repository_metadata: dict[str, tuple[str, str]],
     release_lock: dict[str, Any],
     checkout_root: Path,
@@ -856,6 +1284,7 @@ def _write_service(
             "requirements.txt",
             "--python",
             python_executable,
+            *target_profile["wheelResolver"]["arguments"],
             "--output-file",
             str(uv_export_path),
             "--directory",
@@ -966,10 +1395,18 @@ def _write_service(
                 "wheel_sha256": runtime_sdk.sha256,
             }
         ],
+        "target_profile": target_profile_id,
     }
-    (service_stage / "source.json").write_text(
-        json.dumps(source_record, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+    execution_runtime = _copy_execution_runtime_source(
+        repo_root,
+        service_stage,
+        target_profile,
     )
+    if execution_runtime is not None:
+        source_record["execution_runtime"] = execution_runtime
+        source_record["execution_runtime_source_sha256"] = _execution_runtime_source_hashes(
+            service_stage
+        )
 
     if spec.service == "navigator":
         launcher = repo_root / "scripts" / "serve-web.py"
@@ -1000,6 +1437,20 @@ def _write_service(
             "--no-deps",
             "--require-hashes",
             "--only-binary=:all:",
+            "--implementation",
+            "cp",
+            "--python-version",
+            "3.12",
+            "--abi",
+            "cp312",
+            "--platform",
+            (
+                "manylinux_2_"
+                + target_profile["wheelResolver"]["allowedWheelTags"]["pep600"]["maxGlibc"].split(
+                    "."
+                )[1]
+                + "_x86_64"
+            ),
             "--find-links",
             str(source_wheels),
             "--dest",
@@ -1009,10 +1460,24 @@ def _write_service(
         ],
         env=command_env,
     )
-    _verify_wheelhouse(service_stage, spec, service_commit)
+    source_record["wheel_tags"] = {
+        wheel.name: _verify_wheel_tags(wheel, target_profile)
+        for wheel in sorted(service_stage.glob("*.whl"))
+    }
+    (service_stage / "source.json").write_text(
+        json.dumps(source_record, indent=2, sort_keys=False) + "\n", encoding="utf-8"
+    )
+    _verify_wheelhouse(
+        service_stage,
+        spec,
+        service_commit,
+        target_profile_id=target_profile_id,
+        target_profile=target_profile,
+    )
     print(
         f"Prepared {spec.service}: source={service_commit}, "
-        f"wheels={len(list(service_stage.glob('*.whl')))}, target=linux/{_native_target()}/python3.12"
+        f"wheels={len(list(service_stage.glob('*.whl')))}, "
+        f"target={target_profile_id}/CPython{target_profile['pythonVersion']}"
     )
     return service_stage
 
@@ -1088,6 +1553,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="override release-lock.json for the selected service with this exact 40-character source SHA",
     )
     parser.add_argument(
+        "--target-profile",
+        required=True,
+        help="exact nativePythonProfiles targetId from release-lock.json",
+    )
+    parser.add_argument(
+        "--python-executable",
+        type=Path,
+        required=True,
+        help="verified CPython 3.12.14 build interpreter extracted from pythonInput",
+    )
+    parser.add_argument(
         "--runtime-sdk-wheel",
         type=Path,
         help="wheel extracted from the verified cyrene-runtime-maintenance-sdk bundle",
@@ -1104,8 +1580,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--uv",
-        default=shutil.which("uv") or "uv",
-        help="uv executable used for frozen export and wheel builds",
+        required=True,
+        help="SHA-verified uv 0.12.21 executable extracted from python-runtime.lock.json",
     )
     return parser.parse_args(argv)
 
@@ -1120,7 +1596,6 @@ def main(argv: list[str] | None = None) -> int:
                 raise ProducerError("--service-commit requires --service")
             if not COMMIT_PATTERN.fullmatch(args.service_commit):
                 raise ProducerError("--service-commit must be a lowercase 40-character Git SHA")
-        architecture = _native_target()
         workspace_root = args.workspace_root.resolve()
         output_root = args.output.expanduser().absolute()
         if not (workspace_root / "repositories.yaml").is_file():
@@ -1133,20 +1608,32 @@ def main(argv: list[str] | None = None) -> int:
             raise ProducerError(
                 "release-lock.json has an unsupported schema or missing repositories map"
             )
+        target_profile = _native_python_profile(release_lock, args.target_profile)
+        _native_target(target_profile)
+        _validate_python_input(target_profile, workspace_root)
+        python_executable = Path(args.python_executable)
+        if python_executable.is_symlink() or not python_executable.is_file():
+            raise ProducerError(
+                f"--python-executable must name a regular verified interpreter: {python_executable}"
+            )
+        if Path(sys.executable).resolve() != python_executable.resolve():
+            raise ProducerError(
+                "invoke prepare_service_wheelhouse.py with the same pinned interpreter supplied "
+                "to --python-executable; ambient/home interpreters are not release inputs"
+            )
+        python_runtime = _python_runtime_version(python_executable)
+        if python_runtime != target_profile["pythonVersion"]:
+            raise ProducerError(
+                f"wheelhouse Python must be CPython {target_profile['pythonVersion']}, "
+                f"got {python_runtime}"
+            )
         supported_environment = release_lock.get("supportedEnvironment")
-        python_lock = release_lock.get("python")
         supported_os = (
             supported_environment.get("os") if isinstance(supported_environment, dict) else None
         )
-        if supported_os != "Ubuntu 24.04 x86_64":
+        if not isinstance(supported_os, str) or not supported_os.endswith("x86_64"):
             raise ProducerError(
-                "wheelhouse target must match release-lock.json supportedEnvironment.os "
-                f"(expected 'Ubuntu 24.04 x86_64', got {supported_os!r})"
-            )
-        python_runtime = python_lock.get("runtime") if isinstance(python_lock, dict) else None
-        if python_runtime != "3.12":
-            raise ProducerError(
-                "wheelhouse target must match release-lock.json Python runtime 3.12"
+                "release-lock.json supportedEnvironment.os must still declare x86_64 support"
             )
         repository_metadata = _load_repository_remotes(workspace_root / "repositories.yaml")
         selected_specs = tuple(
@@ -1155,10 +1642,18 @@ def main(argv: list[str] | None = None) -> int:
         runtime_sdk, runtime_sdk_manifest_digest, runtime_sdk_artifact_digest = (
             _load_runtime_sdk_wheel(args)
         )
-        uv_executable = shutil.which(args.uv)
-        if uv_executable is None:
-            raise ProducerError(f"uv executable was not found: {args.uv}")
-        python_executable = str(Path(sys.executable).resolve())
+        uv_path = Path(args.uv).expanduser().absolute()
+        if uv_path.is_symlink() or not uv_path.is_file() or not os.access(uv_path, os.X_OK):
+            raise ProducerError(f"--uv must name a regular executable file: {uv_path}")
+        uv_executable = str(uv_path.resolve())
+        uv_version = _run([uv_executable, "--version"]).strip().split()
+        expected_uv_version = target_profile["wheelResolver"]["version"]
+        if len(uv_version) != 2 or uv_version != ["uv", expected_uv_version]:
+            raise ProducerError(
+                f"wheel resolver must be uv {expected_uv_version}, "
+                f"got {' '.join(uv_version) or 'no version'}"
+            )
+        python_executable_text = str(python_executable.resolve())
         output_root.parent.mkdir(parents=True, exist_ok=True)
         if output_root.is_symlink() or (output_root.exists() and not output_root.is_dir()):
             raise ProducerError(f"output root must be a real directory: {output_root}")
@@ -1191,13 +1686,15 @@ def main(argv: list[str] | None = None) -> int:
             for spec in selected_specs:
                 staged = _write_service(
                     spec=spec,
+                    target_profile_id=args.target_profile,
+                    target_profile=target_profile,
                     repository_metadata=repository_metadata,
                     release_lock=release_lock,
                     checkout_root=checkout_root,
                     checkout_cache=checkout_cache,
                     staging_root=staging_root,
                     uv_executable=uv_executable,
-                    python_executable=python_executable,
+                    python_executable=python_executable_text,
                     command_env=command_env,
                     service_commit_override=(
                         args.service_commit if spec.service == args.service else None
@@ -1212,7 +1709,7 @@ def main(argv: list[str] | None = None) -> int:
         noun = "wheelhouse" if len(selected_specs) == 1 else "wheelhouses"
         print(
             f"Published {noun} for {service_names} to {output_root} "
-            f"(linux/{architecture}, Python 3.12)"
+            f"({args.target_profile}, CPython {target_profile['pythonVersion']})"
         )
         return 0
     except (OSError, ProducerError, KeyError, TypeError) as error:

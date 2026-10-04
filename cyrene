@@ -203,6 +203,32 @@ def _load_service_bundle_module() -> Any:
     return module
 
 
+def _load_native_component_bootstrap_module() -> Any:
+    """Load only the fixed offline native-bootstrap helper shipped with Cyrene."""
+
+    candidates = [
+        WORKSPACE_ROOT / "scripts" / "native_component_bootstrap.py",
+        WORKSPACE_ROOT / "packaging" / "native_component_bootstrap.py",
+    ]
+    module_path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if module_path is None:
+        raise FileNotFoundError(
+            "native component bootstrap helper is missing; reinstall the Cyrene package"
+        )
+    module_name = "_cyrene_native_component_bootstrap"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load native component bootstrap helper from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
 def _load_component_updates_module() -> Any:
     """Load the fixed Linux helper from an installed package or this checkout."""
 
@@ -700,6 +726,24 @@ def cmd_service_bootstrap(args: argparse.Namespace) -> int:
         print(f"ERROR: could not stage packaged service releases: {error}", file=sys.stderr)
         return 1
     print(f"Staged {staged} immutable service release(s).")
+    return 0
+
+
+def cmd_service_prepare(args: argparse.Namespace) -> int:
+    """Prepare a signed Product-declared runtime without activating its release."""
+
+    try:
+        bundle_module = _load_service_bundle_module()
+        result = bundle_module.prepare_execution_runtime(
+            args.service,
+            version=args.version,
+            install_root=service_install_root(),
+            data_root=Path(os.environ.get("CYRENE_DATA_DIR", "/var/lib/cyrene")),
+        )
+    except Exception as error:  # noqa: BLE001 - keep validation and helper errors actionable.
+        print(f"ERROR: cannot prepare {args.service} execution runtime: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
@@ -2475,6 +2519,37 @@ def cmd_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_component_bootstrap_runtime_maintenance(args: argparse.Namespace) -> int:
+    """Plan or confirm the first offline maintenance-broker activation."""
+
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        print(
+            "ERROR: runtime-maintenance bootstrap must run as root.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        bootstrap = _load_native_component_bootstrap_module()
+        updates = _load_component_updates_module()
+        updater = updates.ComponentUpdater()
+        result = bootstrap.bootstrap_verified_runtime_maintenance(
+            updater,
+            index_bytes=Path(args.index).read_bytes(),
+            index_attestation_bytes=Path(args.index_attestation).read_bytes(),
+            manifest_bytes=Path(args.manifest).read_bytes(),
+            artifact_bytes=Path(args.artifact).read_bytes(),
+            artifact_attestation_bytes=Path(args.artifact_attestation).read_bytes(),
+            channel=args.channel,
+            target_id=args.target_id,
+            confirm_plan_digest=args.confirm_plan_digest,
+        )
+    except Exception as error:  # noqa: BLE001 - report verification and helper errors uniformly.
+        print(f"ERROR: runtime-maintenance bootstrap failed: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_component_run(args: argparse.Namespace) -> int:
     """Execute one catalog-pinned native release for a systemd unit.
 
@@ -2920,6 +2995,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     service_bootstrap_parser.set_defaults(func=cmd_service_bootstrap)
 
+    service_prepare_parser = subparsers.add_parser(
+        "service-prepare", help="Prepare a Product-declared execution runtime"
+    )
+    service_prepare_parser.add_argument("service", help="Product service with a runtime descriptor")
+    service_prepare_parser.add_argument(
+        "--version", help="Exact staged immutable bundle version (defaults to the active release)"
+    )
+    service_prepare_parser.set_defaults(func=cmd_service_prepare)
+
     component_run_parser = subparsers.add_parser("component-run", help=argparse.SUPPRESS)
     component_run_parser.add_argument("component_id", help="Trusted native component ID")
     component_run_parser.add_argument(
@@ -2933,6 +3017,24 @@ def build_parser() -> argparse.ArgumentParser:
         "component-install-missing-units", help=argparse.SUPPRESS
     )
     component_units_parser.set_defaults(func=cmd_component_install_missing_units)
+
+    component_bootstrap_parser = subparsers.add_parser(
+        "component-bootstrap-runtime-maintenance", help=argparse.SUPPRESS
+    )
+    component_bootstrap_parser.add_argument("--index", required=True, type=Path)
+    component_bootstrap_parser.add_argument("--index-attestation", required=True, type=Path)
+    component_bootstrap_parser.add_argument("--manifest", required=True, type=Path)
+    component_bootstrap_parser.add_argument("--artifact", required=True, type=Path)
+    component_bootstrap_parser.add_argument("--artifact-attestation", required=True, type=Path)
+    component_bootstrap_parser.add_argument(
+        "--channel", required=True, choices=("stable", "preview")
+    )
+    component_bootstrap_parser.add_argument("--target-id", required=True)
+    component_bootstrap_parser.add_argument(
+        "--confirm-plan-digest",
+        help="Confirm only the exact digest returned by a prior read-only plan",
+    )
+    component_bootstrap_parser.set_defaults(func=cmd_component_bootstrap_runtime_maintenance)
 
     # update
     update_parser = subparsers.add_parser(

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 8,
+  "generation": 9,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -113,6 +113,19 @@
         "osVersion": "portable",
         "architecture": "x86_64",
         "runtime": "cyrene-authority-data"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "linux-ubuntu-22.04-x86_64-python-3.12",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "python:3.12"
       },
       "hostSupport": "supported"
     }
@@ -628,6 +641,11 @@
           "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
           "artifactKind": "python-bundle",
           "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
         }
       ],
       "restart": {
@@ -666,6 +684,11 @@
             "containerName": "cyrene-yield",
             "healthcheck": "docker-healthcheck"
           }
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
         }
       ],
       "restart": {
@@ -709,6 +732,11 @@
             "containerName": "cyrene-reactor",
             "healthcheck": "docker-healthcheck"
           }
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
         }
       ],
       "restart": {
@@ -752,6 +780,11 @@
             "containerName": "cyrene-exchange",
             "healthcheck": "docker-healthcheck"
           }
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
         }
       ],
       "restart": {
@@ -795,6 +828,11 @@
             "containerName": "cyrene-catalyst",
             "healthcheck": "docker-healthcheck"
           }
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-python-3.12",
+          "artifactKind": "python-bundle",
+          "support": "supported"
         }
       ],
       "restart": {

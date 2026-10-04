@@ -56,9 +56,11 @@ DEFAULT_BROKER = Path("/usr/bin/cyrene-runtime-maintenance")
 DEFAULT_INSTALL_ROOT = Path("/usr/lib/cyrene")
 DEFAULT_STATE_ROOT = Path("/var/lib/cyrene-updates")
 DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
+DEFAULT_RELEASE_LOCK = Path("/usr/lib/cyrene/release-lock.json")
+DEFAULT_PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
 DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
 DEFAULT_CHANNEL = "stable"
-TRUSTED_CATALOG_DIGEST = "sha256:5b188affa20dbb261839a3dd7fb4f722aae76e64a3ed1ba35fcc52efd9ee1e97"
+TRUSTED_CATALOG_DIGEST = "sha256:9908229d8abee4cb3f1b5a55d8be5264310939e4b43700de0dfd37be7318c701"
 USER_AGENT = "CyreneComponentUpdater/1"
 BEGIN_NO_TOKEN_STATUSES = frozenset(
     {
@@ -74,6 +76,15 @@ PRODUCT_CONTRACT_ROOT_ENV = {
     "cy-workspace-web-bff": "CYRENE_WORKSPACE_WEB_BFF_PRODUCT_CONTRACT_ROOT_V2",
     "cy-workspace-connector": "CYRENE_WORKSPACE_CONNECTOR_PRODUCT_CONTRACT_ROOT_V2",
 }
+NATIVE_PYTHON_TARGET_FIELDS = (
+    "os",
+    "osVersion",
+    "distribution",
+    "distributionVersion",
+    "architecture",
+    "abi",
+    "runtime",
+)
 
 
 class UpdateError(RuntimeError):
@@ -528,6 +539,7 @@ class ComponentUpdater:
         broker_path: Path = DEFAULT_BROKER,
         install_root: Path = DEFAULT_INSTALL_ROOT,
         state_root: Path = DEFAULT_STATE_ROOT,
+        release_lock_path: Path = DEFAULT_RELEASE_LOCK,
         trusted_catalog_digest: str | None = TRUSTED_CATALOG_DIGEST,
         opener: Callable[..., Any] = urllib.request.urlopen,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -544,6 +556,7 @@ class ComponentUpdater:
         self.install_root = Path(install_root)
         self.state_root = Path(state_root)
         self.data_bundle_root = Path(data_bundle_root)
+        self.release_lock_path = Path(release_lock_path)
         self.authority_admin_socket = Path(authority_admin_socket)
         self.opener = opener
         self.runner = runner
@@ -634,11 +647,129 @@ class ComponentUpdater:
             for item in self.catalog.get("targets", [])
             if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
+        self.native_python_profiles = self._read_native_python_profiles()
         self.publishers = {
             item["repository"]: item
             for item in self.catalog.get("publishers", [])
             if isinstance(item, dict) and isinstance(item.get("repository"), str)
         }
+
+    def _read_native_python_profiles(self) -> dict[str, dict[str, Any]]:
+        """Read package-pinned Python target profiles; a missing lock disables Python updates."""
+
+        path = self.release_lock_path
+        if not path.exists() and not path.is_symlink():
+            return {}
+        try:
+            info = path.lstat()
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                return {}
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        profiles = value.get("nativePythonProfiles") if isinstance(value, dict) else None
+        if not isinstance(profiles, dict):
+            return {}
+
+        validated: dict[str, dict[str, Any]] = {}
+        for profile_id, profile in profiles.items():
+            if not isinstance(profile_id, str) or not isinstance(profile, dict):
+                continue
+            if (
+                set(profile)
+                != set(NATIVE_PYTHON_TARGET_FIELDS)
+                | {"pythonVersion", "pythonExecutable", "pythonInput", "wheelResolver"}
+                or profile.get("pythonVersion") != "3.12.14"
+                or profile.get("pythonExecutable") != str(DEFAULT_PRIVATE_PYTHON)
+                or profile.get("pythonInput") != "packaging/python-runtime.lock.json"
+                or profile.get("runtime") != "python:3.12"
+                or profile.get("architecture") != "x86_64"
+                or profile.get("distribution") != "ubuntu"
+                or (profile.get("osVersion"), profile.get("abi"))
+                not in {("22.04", "glibc-2.35"), ("24.04", "glibc-2.39")}
+            ):
+                continue
+            resolver = profile.get("wheelResolver")
+            if not isinstance(resolver, dict) or not isinstance(
+                resolver.get("allowedWheelTags"), dict
+            ):
+                continue
+            allowed = resolver["allowedWheelTags"]
+            pep600 = allowed.get("pep600")
+            if (
+                set(resolver) != {"tool", "version", "arguments", "allowedWheelTags"}
+                or set(allowed) != {"purePython", "pep600"}
+                or not isinstance(pep600, dict)
+                or set(pep600) != {"architecture", "maxGlibc"}
+                or resolver.get("tool") != "uv"
+                or resolver.get("version") != "0.12.21"
+                or resolver.get("arguments") != ["--python-platform", "x86_64-unknown-linux-gnu"]
+                or allowed.get("purePython") != ["*-none-any"]
+                or pep600.get("architecture") != "x86_64"
+                or pep600.get("maxGlibc") != profile["abi"].removeprefix("glibc-")
+            ):
+                continue
+            if (
+                profile.get("os") != "linux"
+                or profile.get("osVersion") not in {"22.04", "24.04"}
+                or profile.get("distributionVersion") != profile.get("osVersion")
+                or profile_id != f"linux-ubuntu-{profile['osVersion']}-x86_64-python-3.12"
+            ):
+                continue
+            validated[profile_id] = profile
+        return validated
+
+    def _private_python_runtime_ready(self, profile: dict[str, Any]) -> bool:
+        """Require the exact root-owned CPython runtime installed by the DEB."""
+
+        executable = Path(str(profile.get("pythonExecutable", "")))
+        if executable != DEFAULT_PRIVATE_PYTHON:
+            return False
+        current = Path(executable.anchor)
+        try:
+            for part in executable.parts[1:]:
+                current = current / part
+                info = current.lstat()
+                if current == executable:
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_uid != 0
+                        or info.st_mode & 0o022
+                        or not os.access(current, os.X_OK)
+                    ):
+                        return False
+                elif not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    return False
+            result = self.runner(
+                [
+                    str(executable),
+                    "-I",
+                    "-c",
+                    (
+                        "import platform,sys; "
+                        "print(platform.python_implementation()); "
+                        "print('.'.join(map(str, sys.version_info[:3]))); "
+                        "print(platform.machine())"
+                    ),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return False
+        if result.returncode != 0:
+            return False
+        return result.stdout.strip().splitlines() == [
+            "CPython",
+            profile["pythonVersion"],
+            "x86_64",
+        ]
 
     def _read_active_catalog(self) -> tuple[bytes, dict[str, Any]] | None:
         """Load the public high-water pointer and its protected immutable snapshot."""
@@ -1821,7 +1952,7 @@ class ComponentUpdater:
             host = platform.freedesktop_os_release()
         except OSError:
             return None
-        if host.get("ID") != "ubuntu" or host.get("VERSION_ID") not in {"22.04", "24.04"}:
+        if not sys.platform.startswith("linux"):
             return None
         host_arch = platform.machine().lower()
         architecture = (
@@ -1845,19 +1976,28 @@ class ComponentUpdater:
                 entry.get("artifactKind") == "data-bundle"
                 and entry.get("targetId") == "portable-contract-data-v1"
             )
-            if not portable_data_target and (
-                spec.get("distribution") != "ubuntu"
+            if portable_data_target:
+                if architecture != spec.get("architecture"):
+                    continue
+            elif (
+                host.get("ID") != "ubuntu"
+                or host_version not in {"22.04", "24.04"}
+                or spec.get("distribution") != "ubuntu"
                 or spec.get("distributionVersion") != host_version
             ):
                 continue
             if spec.get("abi") is not None and spec.get("abi") != host_abi:
                 continue
-            if entry.get("artifactKind") == "python-bundle" and (
-                spec.get("runtime") != "python:3.12" or host_version != "24.04"
-            ):
-                continue
-            if entry.get("artifactKind") == "python-bundle" and sys.version_info[:2] != (3, 12):
-                continue
+            if entry.get("artifactKind") == "python-bundle":
+                profile_id = entry.get("targetId")
+                profile = self.native_python_profiles.get(profile_id)
+                if (
+                    profile is None
+                    or any(profile.get(key) != spec.get(key) for key in NATIVE_PYTHON_TARGET_FIELDS)
+                    or profile.get("osVersion") != host_version
+                    or not self._private_python_runtime_ready(profile)
+                ):
+                    continue
             if entry.get("artifactKind") == "native-binary" and spec.get("runtime") != "systemd":
                 continue
             if (
@@ -4133,7 +4273,29 @@ class ComponentUpdater:
                 ]
                 if len(candidates) == 1:
                     bundle_root = candidates[0].parent
-            inner = module.validate_bundle(bundle_root, expected_service=service)
+            target_profile_id = next(
+                (
+                    item.get("targetId")
+                    for item in candidate.component.get("targets", [])
+                    if isinstance(item, dict)
+                    and item.get("artifactKind") == "python-bundle"
+                    and item.get("support") == "supported"
+                    and self.targets.get(item.get("targetId"), {}).get("target")
+                    == candidate.manifest.get("target")
+                ),
+                None,
+            )
+            if not isinstance(target_profile_id, str):
+                raise UpdateError(
+                    "UNSUPPORTED_TARGET",
+                    f"No trusted Python target profile matches the release for {candidate.component['componentId']}.",
+                )
+            inner = module.validate_bundle(
+                bundle_root,
+                expected_service=service,
+                expected_target_profile=target_profile_id,
+                release_lock_path=self.release_lock_path,
+            )
             if inner.get("schema_version") != 2:
                 raise UpdateError(
                     "LEGACY_BUNDLE_NOT_STAGEABLE",
@@ -4161,7 +4323,11 @@ class ComponentUpdater:
                         "BUILD_DEPENDENCY_UNSATISFIED",
                         f"Bundle for {candidate.component['componentId']} does not embed required build dependency {dependency['componentId']} {dependency['versionRange']}.",
                     )
-            installed_path = module.stage_release(bundle_root, install_root=self.install_root)
+            installed_path = module.stage_release(
+                bundle_root,
+                install_root=self.install_root,
+                release_lock_path=self.release_lock_path,
+            )
             bundle_identity = inner.get("artifact_digest")
             if (
                 not isinstance(bundle_identity, str)

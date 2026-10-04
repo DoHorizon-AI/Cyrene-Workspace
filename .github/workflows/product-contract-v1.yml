@@ -115,6 +115,115 @@ jobs:
           print("component release schemas and catalog are valid")
           PY
 
+  native-profile-contracts:
+    name: ci / native-installer-${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ubuntu: "22.04"
+            runner: ubuntu-22.04
+            target: linux-ubuntu-22.04-x86_64-python-3.12
+          - ubuntu: "24.04"
+            runner: ubuntu-24.04
+            target: linux-ubuntu-24.04-x86_64-python-3.12
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET_PROFILE: ${{ matrix.target }}
+      UBUNTU_VERSION: ${{ matrix.ubuntu }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.14"
+      - name: Assert this job runs on its declared Ubuntu profile
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = "$UBUNTU_VERSION"
+          test "$(dpkg --print-architecture)" = amd64
+      - name: Install pinned native-profile test tools
+        run: >-
+          python -m pip install --disable-pip-version-check
+          ruff==0.16.5 pytest==9.1.1 jsonschema==4.26.0 referencing==0.37.0 PyYAML==6.0.3
+      - name: Lint native runtime, installer verifier, and operator acceptance
+        run: >-
+          ruff check
+          packaging/python_runtime.py packaging/verified_service_artifacts.py
+          packaging/native_install_contract.py
+          packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
+          packaging/component_updates.py scripts/native_installer_release.py
+          tooling/acceptance/native-components-v2/native_acceptance.py
+          tooling/acceptance/native-components-v2/admin_initialize.py
+          tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
+          tests/test_native_install_contract.py tests/test_native_installer_release.py
+          tests/test_native_components_v2_acceptance.py
+          tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
+          tests/test_linux_component_update_identity.py
+      - name: Check native-profile formatting
+        run: >-
+          ruff format --check
+          packaging/python_runtime.py packaging/verified_service_artifacts.py
+          packaging/native_install_contract.py
+          packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
+          packaging/component_updates.py scripts/native_installer_release.py
+          tooling/acceptance/native-components-v2/native_acceptance.py
+          tooling/acceptance/native-components-v2/admin_initialize.py
+          tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
+          tests/test_native_install_contract.py tests/test_native_installer_release.py
+          tests/test_native_components_v2_acceptance.py
+          tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
+          tests/test_linux_component_update_identity.py
+      - name: Test runtime lock, signed service bytes, installer receipts, and native updates
+        run: >-
+          pytest -q
+          tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
+          tests/test_native_install_contract.py tests/test_native_installer_release.py
+          tests/test_native_components_v2_acceptance.py
+          tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
+          tests/test_linux_component_update_identity.py
+      - name: Compile Python helpers and check package shell syntax
+        run: |
+          python -m py_compile \
+            packaging/python_runtime.py packaging/verified_service_artifacts.py \
+            packaging/native_install_contract.py \
+            scripts/native_installer_release.py \
+            tooling/acceptance/native-components-v2/native_acceptance.py \
+            tooling/acceptance/native-components-v2/admin_initialize.py
+          bash -n packaging/build-deb.sh packaging/cyrene-component-update-helper
+      - name: Parse the installer publisher and CI workflow YAML
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          import subprocess
+
+          for filename in (
+              ".github/workflows/native-installer-release.yml",
+              ".github/workflows/product-contract-v1.yml",
+          ):
+              workflow = Path(filename)
+              value = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+              event_key = "on" if "on" in value else True
+              if event_key not in value or "jobs" not in value:
+                  raise SystemExit(f"invalid workflow structure: {filename}")
+              for job_name, job in value["jobs"].items():
+                  for step_index, step in enumerate(job.get("steps", [])):
+                      script = step.get("run")
+                      if not isinstance(script, str):
+                          continue
+                      result = subprocess.run(
+                          ["bash", "-n"], input=script, text=True, capture_output=True, check=False
+                      )
+                      if result.returncode:
+                          raise SystemExit(
+                              f"shell syntax failed in {filename}:{job_name}:step-{step_index}:\n"
+                              + result.stderr
+                          )
+          print("native release and source CI workflow YAML and shell parse")
+          PY
+
   lifecycle-integration:
     name: ci / lifecycle-integration
     runs-on: ubuntu-latest

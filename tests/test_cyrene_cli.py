@@ -341,6 +341,219 @@ def test_component_run_rejects_ids_not_in_the_trusted_native_catalog(
     assert "not a supported native systemd component" in capsys.readouterr().err
 
 
+def test_service_prepare_uses_signed_runtime_helper_and_prints_descriptor_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    calls: dict[str, object] = {}
+    install_root = tmp_path / "install"
+    data_root = tmp_path / "state"
+    monkeypatch.setenv("CYRENE_INSTALL_ROOT", str(install_root))
+    monkeypatch.setenv("CYRENE_DATA_DIR", str(data_root))
+
+    class FakeBundle:
+        @staticmethod
+        def prepare_execution_runtime(service: str, **kwargs: object) -> dict[str, str]:
+            calls.update(service=service, **kwargs)
+            return {
+                "status": "prepared",
+                "service": service,
+                "runtimeHome": str(data_root / "trainer-runtime" / "1.2.3"),
+                "runtimeManifest": str(data_root / "trainer-runtime" / "1.2.3" / "runtime.json"),
+            }
+
+    monkeypatch.setattr(module, "_load_service_bundle_module", lambda: FakeBundle)
+    args = module.build_parser().parse_args(["service-prepare", "yield", "--version", "1.2.3"])
+
+    assert args.func(args) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["runtimeHome"].endswith("/trainer-runtime/1.2.3")
+    assert calls == {
+        "service": "yield",
+        "version": "1.2.3",
+        "install_root": install_root,
+        "data_root": data_root,
+    }
+
+
+def test_service_prepare_reports_invalid_runtime_descriptor(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+
+    class FakeBundle:
+        @staticmethod
+        def prepare_execution_runtime(service: str, **kwargs: object) -> dict[str, str]:
+            raise ValueError("release has no execution_runtime descriptor")
+
+    monkeypatch.setattr(module, "_load_service_bundle_module", lambda: FakeBundle)
+    args = module.build_parser().parse_args(["service-prepare", "reactor"])
+
+    assert args.func(args) == 1
+    assert "no execution_runtime descriptor" in capsys.readouterr().err
+
+
+def test_runtime_maintenance_bootstrap_requires_root_before_loading_or_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    monkeypatch.setattr(module.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        module,
+        "_load_native_component_bootstrap_module",
+        lambda: pytest.fail("unprivileged calls must fail before loading the helper"),
+    )
+    args = module.build_parser().parse_args(
+        [
+            "component-bootstrap-runtime-maintenance",
+            "--index",
+            "/missing/index.json",
+            "--index-attestation",
+            "/missing/index.sigstore",
+            "--manifest",
+            "/missing/manifest.json",
+            "--artifact",
+            "/missing/artifact.tar",
+            "--artifact-attestation",
+            "/missing/artifact.sigstore",
+            "--channel",
+            "stable",
+            "--target-id",
+            "linux-x86_64",
+        ]
+    )
+
+    assert args.func(args) == 1
+    assert "must run as root" in capsys.readouterr().err
+
+
+def test_runtime_maintenance_bootstrap_reports_missing_fixed_helper(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        module,
+        "_load_native_component_bootstrap_module",
+        lambda: (_ for _ in ()).throw(FileNotFoundError("fixed helper missing")),
+    )
+    args = module.build_parser().parse_args(
+        [
+            "component-bootstrap-runtime-maintenance",
+            "--index",
+            "/missing/index.json",
+            "--index-attestation",
+            "/missing/index.sigstore",
+            "--manifest",
+            "/missing/manifest.json",
+            "--artifact",
+            "/missing/artifact.tar",
+            "--artifact-attestation",
+            "/missing/artifact.sigstore",
+            "--channel",
+            "stable",
+            "--target-id",
+            "linux-x86_64",
+        ]
+    )
+
+    assert args.func(args) == 1
+    assert "fixed helper missing" in capsys.readouterr().err
+
+
+def test_runtime_maintenance_bootstrap_forwards_exact_bytes_and_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    payloads = {
+        "index": b'{"schemaVersion":1}',
+        "index-attestation": b"index-attestation",
+        "manifest": b'{"manifestDigest":"sha256:abc"}',
+        "artifact": b"artifact-bytes",
+        "artifact-attestation": b"artifact-attestation",
+    }
+    paths: dict[str, Path] = {}
+    for name, payload in payloads.items():
+        path = tmp_path / name
+        path.write_bytes(payload)
+        paths[name] = path
+    calls: list[dict[str, object]] = []
+    updater = object()
+
+    class FakeUpdates:
+        @staticmethod
+        def ComponentUpdater() -> object:
+            return updater
+
+    class FakeBootstrap:
+        @staticmethod
+        def bootstrap_verified_runtime_maintenance(received_updater: object, **kwargs: object):
+            assert received_updater is updater
+            calls.append(kwargs)
+            if kwargs["confirm_plan_digest"] is None:
+                return {"status": "confirmation-required", "planDigest": "sha256:plan"}
+            return {
+                "status": "activated",
+                "planDigest": kwargs["confirm_plan_digest"],
+                "activePointer": "/usr/lib/cyrene/active",
+            }
+
+    monkeypatch.setattr(module, "_load_native_component_bootstrap_module", lambda: FakeBootstrap)
+    monkeypatch.setattr(module, "_load_component_updates_module", lambda: FakeUpdates)
+    common = [
+        "component-bootstrap-runtime-maintenance",
+        "--index",
+        str(paths["index"]),
+        "--index-attestation",
+        str(paths["index-attestation"]),
+        "--manifest",
+        str(paths["manifest"]),
+        "--artifact",
+        str(paths["artifact"]),
+        "--artifact-attestation",
+        str(paths["artifact-attestation"]),
+        "--channel",
+        "preview",
+        "--target-id",
+        "linux-x86_64",
+    ]
+    args = module.build_parser().parse_args(common)
+    assert args.func(args) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "confirmation-required",
+        "planDigest": "sha256:plan",
+    }
+
+    confirmed_args = module.build_parser().parse_args(
+        [*common, "--confirm-plan-digest", "sha256:plan"]
+    )
+    assert confirmed_args.func(confirmed_args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "activated"
+    assert calls == [
+        {
+            "index_bytes": payloads["index"],
+            "index_attestation_bytes": payloads["index-attestation"],
+            "manifest_bytes": payloads["manifest"],
+            "artifact_bytes": payloads["artifact"],
+            "artifact_attestation_bytes": payloads["artifact-attestation"],
+            "channel": "preview",
+            "target_id": "linux-x86_64",
+            "confirm_plan_digest": None,
+        },
+        {
+            "index_bytes": payloads["index"],
+            "index_attestation_bytes": payloads["index-attestation"],
+            "manifest_bytes": payloads["manifest"],
+            "artifact_bytes": payloads["artifact"],
+            "artifact_attestation_bytes": payloads["artifact-attestation"],
+            "channel": "preview",
+            "target_id": "linux-x86_64",
+            "confirm_plan_digest": "sha256:plan",
+        },
+    ]
+
+
 def test_install_missing_component_units_verifies_payload_and_never_overwrites(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

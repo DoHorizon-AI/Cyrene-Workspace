@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "schemaVersion": 1,
   "name": "cyrene-0.1.0-rc.1",
-  "description": "Single release lock for the first usable Cyrene RC: supported environment, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine and plugin entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
+  "description": "Single release lock for the first usable Cyrene RC: supported environment, native Python profiles, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine, plugin, and native Python runtime entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
   "generatedAt": "2026-10-02T01:35:42Z",
   "sourceState": "Repository revisions are pinned build inputs for connection components V2, maintenance-aware Products and controlled component updates. Source CI and scoped local acceptance do not establish immutable publication or native GPU/two-host RC acceptance. The Cyrene-Workspace entry records the validated source predecessor because the release-lock commit cannot self-reference.",
   "supportedEnvironment": {
@@ -35,6 +35,66 @@
     "declaredRange": ">=3.11,<3.15",
     "devObserved": "3.12.3",
     "status": "PINNED"
+  },
+  "nativePythonProfiles": {
+    "linux-ubuntu-22.04-x86_64-python-3.12": {
+      "os": "linux",
+      "osVersion": "22.04",
+      "distribution": "ubuntu",
+      "distributionVersion": "22.04",
+      "architecture": "x86_64",
+      "abi": "glibc-2.35",
+      "runtime": "python:3.12",
+      "pythonVersion": "3.12.14",
+      "pythonExecutable": "/opt/cyrene/python/3.12.14/bin/python3.12",
+      "pythonInput": "packaging/python-runtime.lock.json",
+      "wheelResolver": {
+        "tool": "uv",
+        "version": "0.12.21",
+        "arguments": [
+          "--python-platform",
+          "x86_64-unknown-linux-gnu"
+        ],
+        "allowedWheelTags": {
+          "purePython": [
+            "*-none-any"
+          ],
+          "pep600": {
+            "architecture": "x86_64",
+            "maxGlibc": "2.35"
+          }
+        }
+      }
+    },
+    "linux-ubuntu-24.04-x86_64-python-3.12": {
+      "os": "linux",
+      "osVersion": "24.04",
+      "distribution": "ubuntu",
+      "distributionVersion": "24.04",
+      "architecture": "x86_64",
+      "abi": "glibc-2.39",
+      "runtime": "python:3.12",
+      "pythonVersion": "3.12.14",
+      "pythonExecutable": "/opt/cyrene/python/3.12.14/bin/python3.12",
+      "pythonInput": "packaging/python-runtime.lock.json",
+      "wheelResolver": {
+        "tool": "uv",
+        "version": "0.12.21",
+        "arguments": [
+          "--python-platform",
+          "x86_64-unknown-linux-gnu"
+        ],
+        "allowedWheelTags": {
+          "purePython": [
+            "*-none-any"
+          ],
+          "pep600": {
+            "architecture": "x86_64",
+            "maxGlibc": "2.39"
+          }
+        }
+      }
+    }
   },
   "cuda": {
     "requirement": "NVIDIA driver compatible with the pinned vLLM/PyTorch CUDA wheel",

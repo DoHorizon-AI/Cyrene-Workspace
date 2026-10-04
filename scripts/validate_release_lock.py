@@ -38,6 +38,30 @@ TERMINAL_STATUSES = {"PINNED", "RECORDED_AT_INSTALL"}
 BLOCKING_STATUSES = {"PENDING_REAL_ACCEPTANCE", "EVIDENCE_SCOPED", "UNRESOLVED"}
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+")
+NATIVE_PYTHON_EXECUTABLE = "/opt/cyrene/python/3.12.14/bin/python3.12"
+NATIVE_PYTHON_INPUT = "packaging/python-runtime.lock.json"
+NATIVE_PYTHON_PROFILES = {
+    "linux-ubuntu-22.04-x86_64-python-3.12": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "python:3.12",
+        "maxGlibc": "2.35",
+    },
+    "linux-ubuntu-24.04-x86_64-python-3.12": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "python:3.12",
+        "maxGlibc": "2.39",
+    },
+}
 
 
 def validate(document: dict[str, object]) -> tuple[list[str], list[str]]:
@@ -65,6 +89,7 @@ def validate(document: dict[str, object]) -> tuple[list[str], list[str]]:
     python = document.get("python")
     if not isinstance(python, dict) or not python.get("runtime"):
         errors.append("python.runtime is required")
+    errors.extend(validate_native_python_profiles(document.get("nativePythonProfiles")))
     if not isinstance(document.get("cuda"), dict):
         errors.append("cuda is required")
 
@@ -101,6 +126,73 @@ def validate(document: dict[str, object]) -> tuple[list[str], list[str]]:
             if not COMMIT_PATTERN.fullmatch(value):
                 errors.append(f"repositories.{name} must be a pinned 40-hex commit")
     return errors, blockers
+
+
+def validate_native_python_profiles(value: object) -> list[str]:
+    """Require immutable CPython profiles for each supported native Product target."""
+
+    errors: list[str] = []
+    if not isinstance(value, dict):
+        return ["nativePythonProfiles must declare Ubuntu 22.04 and 24.04 Python targets"]
+    if set(value) != set(NATIVE_PYTHON_PROFILES):
+        errors.append("nativePythonProfiles keys must match the supported Ubuntu Python targets")
+
+    for target_id, expected in NATIVE_PYTHON_PROFILES.items():
+        profile = value.get(target_id)
+        if not isinstance(profile, dict):
+            errors.append(f"nativePythonProfiles.{target_id} is required")
+            continue
+        for field, expected_value in expected.items():
+            if field == "maxGlibc":
+                continue
+            if profile.get(field) != expected_value:
+                errors.append(f"nativePythonProfiles.{target_id}.{field} must be {expected_value}")
+        if profile.get("pythonVersion") != "3.12.14":
+            errors.append(f"nativePythonProfiles.{target_id}.pythonVersion must be 3.12.14")
+        if profile.get("pythonExecutable") != NATIVE_PYTHON_EXECUTABLE:
+            errors.append(
+                f"nativePythonProfiles.{target_id}.pythonExecutable must be the protected "
+                "CPython path"
+            )
+        if profile.get("pythonInput") != NATIVE_PYTHON_INPUT:
+            errors.append(
+                f"nativePythonProfiles.{target_id}.pythonInput must reference {NATIVE_PYTHON_INPUT}"
+            )
+
+        resolver = profile.get("wheelResolver")
+        if not isinstance(resolver, dict):
+            errors.append(f"nativePythonProfiles.{target_id}.wheelResolver is required")
+            continue
+        if resolver.get("tool") != "uv" or resolver.get("version") != "0.12.21":
+            errors.append(f"nativePythonProfiles.{target_id}.wheelResolver must pin uv 0.12.21")
+        if resolver.get("arguments") != ["--python-platform", "x86_64-unknown-linux-gnu"]:
+            errors.append(
+                f"nativePythonProfiles.{target_id}.wheelResolver.arguments must select "
+                "the GNU x86_64 target"
+            )
+        allowed_tags = resolver.get("allowedWheelTags")
+        if not isinstance(allowed_tags, dict):
+            errors.append(
+                f"nativePythonProfiles.{target_id}.wheelResolver.allowedWheelTags is required"
+            )
+            continue
+        if allowed_tags.get("purePython") != ["*-none-any"]:
+            errors.append(
+                f"nativePythonProfiles.{target_id}.wheelResolver must allow pure-Python wheel tags"
+            )
+        pep600 = allowed_tags.get("pep600")
+        if not isinstance(pep600, dict):
+            errors.append(
+                f"nativePythonProfiles.{target_id}.wheelResolver.allowedWheelTags.pep600 "
+                "is required"
+            )
+            continue
+        if pep600.get("architecture") != "x86_64" or pep600.get("maxGlibc") != expected["maxGlibc"]:
+            errors.append(
+                f"nativePythonProfiles.{target_id}.wheelResolver PEP 600 policy must not "
+                f"exceed {expected['maxGlibc']}"
+            )
+    return errors
 
 
 def validate_lifecycle_sources(
