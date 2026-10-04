@@ -93,22 +93,67 @@ def _source_bundle(
 
 
 def _proof(ref: str, commit: str, ubuntu_version: str) -> dict[str, object]:
+    channel = "preview" if ref == "refs/heads/develop" else "stable"
     return {
         "repository": "DoHorizon-AI/Cyrene-Workspace",
-        "channel": "preview",
-        "source": {"ref": ref, "commit": commit},
+        "releaseId": f"native-installer-{channel}-{commit}",
+        "version": "0.1.0-rc.1",
+        "channel": channel,
+        "workflow": (
+            "DoHorizon-AI/Cyrene-Workspace/.github/workflows/native-installer-release.yml"
+        ),
+        "run": {"id": 37213549672, "attempt": 1},
+        "source": {
+            "repository": "DoHorizon-AI/Cyrene-Workspace",
+            "ref": ref,
+            "commit": commit,
+        },
         "target": {
             "targetId": f"linux-ubuntu-{ubuntu_version}-x86_64-python-3.12",
-            "assetName": "cyrene-native-host_1.0_amd64.deb",
+            "assetName": f"cyrene_0.1.0-rc.1_ubuntu-{ubuntu_version}_amd64.deb",
             "debSha256": "sha256:" + "b" * 64,
+            "debSizeBytes": 123,
+            "serviceArtifactsIndexPath": "/usr/share/cyrene/service-artifacts/index.json",
+            "serviceArtifactsIndexSha256": "c" * 64,
+            "maintainerScriptsSha256": {
+                "postinst": "d" * 64,
+                "prerm": "e" * 64,
+                "postrm": "f" * 64,
+            },
+            "services": {},
+            "checks": {
+                "serviceActivation": "deferred",
+                "brokerAction": "preserve-existing",
+                "oldRuntimeAction": "preserve",
+                "maintainerScriptsStaticScan": "passed",
+                "verifiedServiceBytesPreserved": "passed",
+                "freshBrokerUnavailable": "fail-closed",
+                "upgradeState": "preserve-existing",
+                "activeRuntimePointers": "preserve-existing",
+                "pinnedPrivateRuntime": "passed",
+            },
         },
-        "verifier": {"sha256": "c" * 64, "attestationsVerified": True},
+        "manifest": {
+            "path": "/release/native-installer-release-v1.json",
+            "sha256": "sha256:" + "1" * 64,
+        },
+        "sourceReceipt": {
+            "path": "/release/native-installer-source-receipt-v1.json",
+            "sha256": "sha256:" + "2" * 64,
+        },
+        "verifier": {
+            "path": "/workspace/scripts/native_installer_release.py",
+            "sha256": "sha256:" + "c" * 64,
+            "attestationsVerified": True,
+        },
+        "verifiedAtUtc": "2026-10-04T16:08:41+00:00",
     }
 
 
 def _args(root: Path, bundle: Path, commit: str) -> object:
     release = root / "release"
-    _write(release / "cyrene-native-host_1.0_amd64.deb")
+    source_ref = "refs/heads/main"
+    _write(release / "cyrene_0.1.0-rc.1_ubuntu-22.04_amd64.deb")
     for filename in (
         "native-installer-release-v1.json",
         "native-installer-source-receipt-v1.json",
@@ -117,11 +162,11 @@ def _args(root: Path, bundle: Path, commit: str) -> object:
         _write(release / filename)
     values: dict[str, object] = {
         "source_bundle": bundle,
-        "source_ref": "refs/heads/main",
+        "source_ref": source_ref,
         "source_commit": commit,
         "ubuntu_version": "22.04",
         "release_directory": release,
-        "channel": "preview",
+        "channel": "preview" if source_ref == "refs/heads/develop" else "stable",
         "start_broker": False,
         "operator_user": None,
         "output": root / "packet",
@@ -129,6 +174,45 @@ def _args(root: Path, bundle: Path, commit: str) -> object:
     for name, _filename in admin_packet.BOOTSTRAP_INPUTS:
         values[name.replace("-", "_")] = _write(root / "inputs" / _filename)
     return type("PacketArgs", (), values)()
+
+
+def test_packet_proof_validator_accepts_official_prefixed_digest_shape() -> None:
+    proof = _proof("refs/heads/develop", TEST_COMMIT, "24.04")
+
+    admin_packet._validate_proof(
+        proof,
+        ref="refs/heads/develop",
+        commit=TEST_COMMIT,
+        ubuntu_version="24.04",
+        channel="preview",
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda proof: proof.update(repository="DoHorizon-AI/Other"),
+        lambda proof: proof.update(channel="stable"),
+        lambda proof: proof["source"].update(ref="refs/heads/main"),
+        lambda proof: proof["source"].update(commit="b" * 40),
+        lambda proof: proof["target"].update(targetId="linux-ubuntu-22.04-x86_64-python-3.12"),
+        lambda proof: proof["target"].update(debSha256="b" * 64),
+        lambda proof: proof["verifier"].update(sha256="c" * 64),
+        lambda proof: proof["verifier"].update(attestationsVerified=False),
+    ],
+)
+def test_packet_proof_validator_rejects_mismatched_or_unattested_fields(mutate: object) -> None:
+    proof = _proof("refs/heads/develop", TEST_COMMIT, "24.04")
+    mutate(proof)
+
+    with pytest.raises(admin_packet.AdminPacketError, match="exact fully attested"):
+        admin_packet._validate_proof(
+            proof,
+            ref="refs/heads/develop",
+            commit=TEST_COMMIT,
+            ubuntu_version="24.04",
+            channel="preview",
+        )
 
 
 def _fake_gh_provider(root: Path):
