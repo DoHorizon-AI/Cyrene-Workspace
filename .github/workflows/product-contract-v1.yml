@@ -153,7 +153,8 @@ jobs:
           packaging/python_runtime.py packaging/verified_service_artifacts.py
           packaging/native_install_contract.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
-          packaging/component_updates.py scripts/native_installer_release.py
+          packaging/component_updates.py packaging/native_core_bootstrap.py
+          scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
           tooling/acceptance/native-components-v2/admin_initialize.py
           tooling/acceptance/native-components-v2/admin_packet.py
@@ -161,7 +162,7 @@ jobs:
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
-          tests/test_native_admin_authorization.py
+          tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
       - name: Check native-profile formatting
@@ -170,7 +171,8 @@ jobs:
           packaging/python_runtime.py packaging/verified_service_artifacts.py
           packaging/native_install_contract.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
-          packaging/component_updates.py scripts/native_installer_release.py
+          packaging/component_updates.py packaging/native_core_bootstrap.py
+          scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
           tooling/acceptance/native-components-v2/admin_initialize.py
           tooling/acceptance/native-components-v2/admin_packet.py
@@ -178,7 +180,7 @@ jobs:
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
-          tests/test_native_admin_authorization.py
+          tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
       - name: Test runtime lock, signed service bytes, installer receipts, and native updates
@@ -188,14 +190,14 @@ jobs:
           tests/test_native_install_contract.py tests/test_native_installer_release.py
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
-          tests/test_native_admin_authorization.py
+          tests/test_native_admin_authorization.py tests/test_native_core_bootstrap.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
       - name: Compile Python helpers and check package shell syntax
         run: |
           python -m py_compile \
             packaging/python_runtime.py packaging/verified_service_artifacts.py \
-            packaging/native_install_contract.py \
+            packaging/native_install_contract.py packaging/native_core_bootstrap.py \
             scripts/native_installer_release.py \
             tooling/acceptance/native-components-v2/native_acceptance.py \
             tooling/acceptance/native-components-v2/admin_initialize.py \
