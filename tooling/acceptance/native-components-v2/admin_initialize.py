@@ -66,6 +66,9 @@ PRODUCT_SOURCE_IDS = frozenset(
         "cyrene-yield",
     }
 )
+PRODUCT_SOURCE_UNIT_NAMES = frozenset(
+    f"cyrene-{source_id.removeprefix('cyrene-')}.service" for source_id in PRODUCT_SOURCE_IDS
+)
 EXPECTED_INITIALIZATION_CHECKS = {
     "serviceActivation": "deferred",
     "brokerAction": "preserve-existing",
@@ -629,8 +632,10 @@ def _activity_source_arguments(
     extracted: dict[str, bytes] = {}
     for path in extracted_units.glob("cyrene-*.service"):
         extracted[path.name] = _private_regular_file(path, f"signed unit {path.name}")
-    if len(extracted) != len(PRODUCT_SOURCE_IDS):
-        raise AdminInitializationError("Signed DEB must contain exactly five activity-source units")
+    if set(extracted) != PRODUCT_SOURCE_UNIT_NAMES:
+        raise AdminInitializationError(
+            "Signed DEB must contain the exact five Product activity-source unit names"
+        )
 
     sources: dict[str, tuple[int, int]] = {}
     expected_names: set[str] = set()
@@ -640,6 +645,11 @@ def _activity_source_arguments(
         if source_id not in PRODUCT_SOURCE_IDS or source_id in sources:
             raise AdminInitializationError(
                 "Signed Product unit source IDs are incomplete or duplicated"
+            )
+        expected_name = f"cyrene-{source_id.removeprefix('cyrene-')}.service"
+        if name != expected_name:
+            raise AdminInitializationError(
+                f"Signed Product unit name does not match its source ID: {name}"
             )
         installed_path = installed_units / name
         installed = _private_regular_file(installed_path, f"installed unit {name}")
@@ -666,6 +676,75 @@ def _activity_source_arguments(
         "catalogGid": maintenance_gid,
         "sources": {source_id: list(identity) for source_id, identity in sorted(sources.items())},
     }
+
+
+def _resolve_extracted_systemd_units(extract_root: Path) -> Path:
+    """Resolve Product units from Debian's merged-usr or legacy filesystem layout.
+
+    Debian packages may store units under either ``lib/systemd/system`` or
+    ``usr/lib/systemd/system``. The extracted tree is not necessarily usrmerged,
+    even when the target host is. Both layouts are accepted only when they
+    expose the exact five signed Product unit files with identical bytes.
+
+    Args:
+        extract_root: Private root created by extracting the signed DEB.
+    Returns:
+        One resolved directory containing the exact Product unit set.
+    Raises:
+        AdminInitializationError: If neither supported path is safe or the roots
+            expose missing, extra, or conflicting Product unit files.
+
+    中文：兼容 DEB 的 lib/usr/lib 两种布局，同时严格锁定五个 Product unit。
+    """
+
+    try:
+        resolved_root = extract_root.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise AdminInitializationError("Signed DEB extraction root is unavailable") from error
+
+    relative_roots = (Path("lib/systemd/system"), Path("usr/lib/systemd/system"))
+    directories: list[tuple[Path, dict[str, bytes]]] = []
+    seen_directory_ids: set[tuple[int, int]] = set()
+    for relative_root in relative_roots:
+        candidate = extract_root / relative_root
+        if not os.path.lexists(candidate):
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+            info = resolved.stat()
+        except (OSError, RuntimeError) as error:
+            raise AdminInitializationError(
+                f"Signed DEB systemd unit path is unavailable: {relative_root.as_posix()}"
+            ) from error
+        if not resolved.is_relative_to(resolved_root) or not stat.S_ISDIR(info.st_mode):
+            raise AdminInitializationError(
+                f"Signed DEB systemd unit path is unsafe: {relative_root.as_posix()}"
+            )
+        directory_id = (info.st_dev, info.st_ino)
+        if directory_id in seen_directory_ids:
+            continue
+        seen_directory_ids.add(directory_id)
+
+        units = {
+            path.name: _private_regular_file(path, f"signed unit {path.name}")
+            for path in resolved.glob("cyrene-*.service")
+        }
+        if units:
+            directories.append((resolved, units))
+
+    if not directories:
+        raise AdminInitializationError("Signed DEB has no supported Product systemd unit directory")
+    expected = PRODUCT_SOURCE_UNIT_NAMES
+    for _directory, units in directories:
+        if set(units) != expected:
+            raise AdminInitializationError(
+                "Signed DEB must contain the exact five Product activity-source unit names"
+            )
+    if any(units != directories[0][1] for _directory, units in directories[1:]):
+        raise AdminInitializationError(
+            "Signed DEB lib/ and usr/lib systemd unit directories contain divergent Product units"
+        )
+    return directories[0][0]
 
 
 def _load_compiled_target_id(
@@ -1721,7 +1800,7 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
         try:
             _run(["/usr/bin/dpkg-deb", "--extract", str(deb_path), str(extract_root)])
             source_args, source_evidence = _activity_source_arguments(
-                extract_root / "usr/lib/systemd/system",
+                _resolve_extracted_systemd_units(extract_root),
                 Path("/usr/lib/systemd/system"),
             )
         finally:

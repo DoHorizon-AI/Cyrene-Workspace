@@ -316,15 +316,17 @@ def test_fresh_activity_catalog_gate_preserves_any_existing_state(tmp_path: Path
         admin_initialize._fresh_activity_state(tmp_path)
 
 
+@pytest.mark.parametrize("unit_layout", ("lib/systemd/system", "usr/lib/systemd/system"))
 def test_activity_sources_come_from_exact_signed_and_installed_units(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unit_layout: str
 ) -> None:
     """Owner IDs and credential files are parsed from matching Product units.
 
     中文：owner ID 与 credential 路径必须来自相同的签名和已安装 unit 字节。
     """
 
-    extracted = tmp_path / "deb/usr/lib/systemd/system"
+    extract_root = tmp_path / "deb"
+    extracted = extract_root / unit_layout
     installed = tmp_path / "installed"
     extracted.mkdir(parents=True)
     installed.mkdir()
@@ -351,7 +353,8 @@ def test_activity_sources_come_from_exact_signed_and_installed_units(
         "getgrnam",
         lambda name: SimpleNamespace(gr_gid=2001 if name == "cyrene" else 3001),
     )
-    arguments, evidence = admin_initialize._activity_source_arguments(extracted, installed)
+    resolved_units = admin_initialize._resolve_extracted_systemd_units(extract_root)
+    arguments, evidence = admin_initialize._activity_source_arguments(resolved_units, installed)
     assert arguments == [
         item
         for source_id in sorted(admin_initialize.PRODUCT_SOURCE_IDS)
@@ -362,6 +365,114 @@ def test_activity_sources_come_from_exact_signed_and_installed_units(
     (installed / "cyrene-yield.service").write_bytes(b"different unit bytes")
     with pytest.raises(
         admin_initialize.AdminInitializationError, match="differs from verified DEB"
+    ):
+        admin_initialize._activity_source_arguments(resolved_units, installed)
+
+
+def test_extracted_merged_usr_alias_is_not_counted_twice(tmp_path: Path) -> None:
+    """A lib symlink to usr/lib resolves to one signed unit directory.
+
+    中文：usrmerge 的目录别名只解析一次，不会重复计算五个 Product unit。
+    """
+
+    extract_root = tmp_path / "deb"
+    units = extract_root / "usr/lib/systemd/system"
+    units.mkdir(parents=True)
+    for source_id in sorted(admin_initialize.PRODUCT_SOURCE_IDS):
+        unit = f"cyrene-{source_id.removeprefix('cyrene-')}.service"
+        (units / unit).write_text(f"[Unit]\nDescription={source_id}\n", encoding="utf-8")
+    (extract_root / "lib").symlink_to("usr/lib", target_is_directory=True)
+
+    assert admin_initialize._resolve_extracted_systemd_units(extract_root) == units.resolve()
+
+
+def test_extracted_deb_rejects_divergent_lib_and_usr_lib_units(tmp_path: Path) -> None:
+    """Two physical systemd roots cannot disagree about signed Product unit bytes.
+
+    中文：两个独立目录的签名 unit 内容冲突时必须关闭初始化。
+    """
+
+    extract_root = tmp_path / "deb"
+    legacy = extract_root / "lib/systemd/system"
+    merged = extract_root / "usr/lib/systemd/system"
+    legacy.mkdir(parents=True)
+    merged.mkdir(parents=True)
+    for source_id in sorted(admin_initialize.PRODUCT_SOURCE_IDS):
+        unit = f"cyrene-{source_id.removeprefix('cyrene-')}.service"
+        payload = f"[Unit]\nDescription={source_id}\n".encode()
+        (legacy / unit).write_bytes(payload)
+        (merged / unit).write_bytes(payload)
+    (merged / "cyrene-yield.service").write_bytes(b"different signed bytes")
+
+    with pytest.raises(admin_initialize.AdminInitializationError, match="divergent Product units"):
+        admin_initialize._resolve_extracted_systemd_units(extract_root)
+
+
+@pytest.mark.parametrize("inventory_change", ("missing", "extra"))
+def test_extracted_deb_requires_exact_five_product_unit_names(
+    tmp_path: Path, inventory_change: str
+) -> None:
+    """The layout fix must not relax the exact Product unit inventory.
+
+    中文：兼容路径布局不能放宽五个固定 Product unit 的完整性要求。
+    """
+
+    extract_root = tmp_path / "deb"
+    units = extract_root / "lib/systemd/system"
+    units.mkdir(parents=True)
+    for source_id in sorted(admin_initialize.PRODUCT_SOURCE_IDS):
+        unit = f"cyrene-{source_id.removeprefix('cyrene-')}.service"
+        (units / unit).write_text(f"[Unit]\nDescription={source_id}\n", encoding="utf-8")
+    if inventory_change == "missing":
+        (units / "cyrene-yield.service").unlink()
+    else:
+        (units / "cyrene-runtime-observer.service").write_text(
+            "[Unit]\nDescription=observer\n", encoding="utf-8"
+        )
+
+    with pytest.raises(admin_initialize.AdminInitializationError, match="exact five Product"):
+        admin_initialize._resolve_extracted_systemd_units(extract_root)
+
+
+def test_activity_source_filename_must_match_signed_source_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact five filenames cannot be rebound to another Product source ID.
+
+    中文：unit 文件名和签名内的 source ID 必须一一对应。
+    """
+
+    extracted = tmp_path / "deb/lib/systemd/system"
+    installed = tmp_path / "installed"
+    extracted.mkdir(parents=True)
+    installed.mkdir()
+    for source_id in sorted(admin_initialize.PRODUCT_SOURCE_IDS):
+        unit = f"cyrene-{source_id.removeprefix('cyrene-')}.service"
+        payload = (
+            "[Service]\n"
+            "User=cyrene\n"
+            "Group=cyrene\n"
+            "EnvironmentFile=/etc/cyrene/runtime-activity-sources.env\n"
+            "LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/"
+            f"{source_id}.token\n"
+        )
+        if source_id == "cyrene-yield":
+            payload = payload.replace("cyrene-yield.token", "cyrene-navigator.token")
+        (extracted / unit).write_text(payload, encoding="utf-8")
+        (installed / unit).write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(
+        admin_initialize.pwd,
+        "getpwnam",
+        lambda name: SimpleNamespace(pw_uid=1001),
+    )
+    monkeypatch.setattr(
+        admin_initialize.grp,
+        "getgrnam",
+        lambda name: SimpleNamespace(gr_gid=2001),
+    )
+
+    with pytest.raises(
+        admin_initialize.AdminInitializationError, match="source IDs are incomplete"
     ):
         admin_initialize._activity_source_arguments(extracted, installed)
 
