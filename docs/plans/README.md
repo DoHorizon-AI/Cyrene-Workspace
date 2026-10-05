@@ -14,6 +14,7 @@
 
 | Plan | Scope / 范围 | Current status / 当前状态 |
 | --- | --- | --- |
+| [Navigator Work Assistant Round 1](navigator-work-assistant-round1.md) | Durable dsh work assistant, WeCom, QQ, native subagents, cloud patrols and paired Client | Implementing; real host acceptance and VM cutover separate |
 | [Connection Components V2](connection-components-v2.md) | Product catalogs, connection boundaries, confirmed component updates and native two-host acceptance | Implementing; actual deployment gates pending |
 | [Cyrene Text Model Lifecycle V1](cyrene-text-model-lifecycle-v1.md) | Text LLM、NVIDIA CUDA、LLaMA Factory SFT/LoRA、vLLM、Exchange、Navigator Harness、Echo 反馈和开放式资源交接 | Implementing; 30/32 scoped Phase 0 checks have Actual PASS evidence; P0-GATE and later gates pending |
 | [Cyrene First Usable RC V1](cyrene-first-rc-v1.md) | 安装、浏览器控制台、模型导入、数据集、单卡 SFT + LoRA、vLLM 部署、Exchange 网关与 API Key、外部客户端 | Implementing; Wave 0 baseline and Wave 2 import/gateway API foundations have LOCAL_TEST_PASS; installer, WebUI, real GPU and HTTPS gates pending |
@@ -43,6 +44,7 @@ Frozen client handoff / 固定客户端交接：[Navigator V8](handoff/cyrene-na
 
 | 计划 | 范围 | 当前状态 |
 |---|---|---|
+| [Navigator 工作助手第一轮](navigator-work-assistant-round1.md) | 持久 dsh 工作助手、企微、QQ、原生子代理、云巡检与配对 Client | 实施中；真实宿主验收和 VM 切换单独记录 |
 | [连接组件 V2](connection-components-v2.md) | Product 操作目录、连接边界、确认后组件更新与原生双机验收 | 正在实施；真实部署门禁尚待验收 |
 | [Cyrene Text Model Lifecycle V1](cyrene-text-model-lifecycle-v1.md) | 文本 LLM、NVIDIA CUDA、LLaMA Factory SFT/LoRA、vLLM、Exchange、Navigator Harness、Echo 反馈和开放式资源交接 | 正在实施；指定范围内 Phase 0 的 32 项检查中，30 项已有 Actual PASS 证据；P0-GATE 和后续门禁仍待完成 |
 | [Cyrene First Usable RC V1](cyrene-first-rc-v1.md) | 安装、浏览器控制台、模型导入、数据集、单卡 SFT + LoRA、vLLM 部署、Exchange 网关与 API Key、外部客户端 | 正在实施；Wave 0 基线和 Wave 2 导入 / 网关 API 基础已取得 LOCAL_TEST_PASS；安装器、WebUI、真实 GPU 和 HTTPS 门禁仍待完成 |
