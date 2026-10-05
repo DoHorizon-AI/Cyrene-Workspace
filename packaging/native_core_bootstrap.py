@@ -10,9 +10,11 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -62,6 +64,8 @@ PROC_ROOT = Path("/proc")
 CORE_RUNTIME_ROOT = Path("/var/lib/cyrene/runtime")
 CORE_RUN_ROOT = Path("/run/cyrene")
 _DELETED_EXE_SUFFIX = " (deleted)"
+CORE_EXEC_STARTUP_WAIT_SECONDS = 10.0
+CORE_EXEC_STARTUP_POLL_SECONDS = 0.1
 
 
 def _digest(value: Any) -> str:
@@ -1144,17 +1148,22 @@ def _verify_started_processes(updater: Any, components: list[dict[str, Any]]) ->
     for item in components:
         component = updater.components[item["componentId"]]
         unit = component["systemdUnit"]
+        clock, _sleeper = _candidate_startup_clock(updater)
+        started_at = _startup_time(clock)
+        deadline = started_at + CORE_EXEC_STARTUP_WAIT_SECONDS
+        timeout = _startup_remaining(clock, deadline, unit)
         completed = updater.runner(
             ["systemctl", "show", "--property=MainPID", "--value", unit],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=min(10, timeout),
             check=False,
         )
+        _startup_remaining(clock, deadline, unit)
         if completed.returncode != 0 or not completed.stdout.strip().isdecimal():
             raise RuntimeError(f"{unit} has no confirmed systemd MainPID")
         pid = completed.stdout.strip()
-        _verify_candidate_pid(updater, item, pid)
+        _verify_candidate_pid(updater, item, pid, deadline=deadline)
 
 
 def _candidate_executable(updater: Any, item: dict[str, Any]) -> Path:
@@ -1183,13 +1192,129 @@ def _candidate_executable(updater: Any, item: dict[str, Any]) -> Path:
     return executable.resolve(strict=True)
 
 
-def _verify_candidate_pid(updater: Any, item: dict[str, Any], pid: str) -> None:
+def _candidate_startup_clock(updater: Any) -> tuple[Any, Any]:
+    """Return the private clock seam used to bound candidate identity polling."""
+
+    clock = getattr(updater, "monotonic", time.monotonic)
+    sleeper = getattr(updater, "sleeper", time.sleep)
+    if not callable(clock) or not callable(sleeper):
+        raise TypeError("Core candidate startup clock seam is invalid")
+    return clock, sleeper
+
+
+def _startup_time(clock: Any) -> float:
+    """Read a valid monotonic timestamp from the private bootstrap seam."""
+
+    value = clock()
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        raise RuntimeError("Core candidate startup clock returned an invalid timestamp")
+    return float(value)
+
+
+def _startup_timeout(unit: str) -> RuntimeError:
+    return RuntimeError(
+        f"{unit} MainPID did not reach the exact staged release entrypoint within "
+        f"{CORE_EXEC_STARTUP_WAIT_SECONDS:g} seconds"
+    )
+
+
+def _startup_remaining(clock: Any, deadline: float, unit: str) -> float:
+    """Return remaining identity budget and reject observations beyond its deadline."""
+
+    remaining = deadline - _startup_time(clock)
+    if remaining <= 0:
+        raise _startup_timeout(unit)
+    return remaining
+
+
+def _systemd_candidate_identity(
+    updater: Any, unit: str, expected_pid: str, *, deadline: float, clock: Any
+) -> None:
+    """Require the same systemd unit to stay active with its original MainPID."""
+
+    for property_name in ("ActiveState", "MainPID"):
+        remaining = _startup_remaining(clock, deadline, unit)
+        try:
+            completed = updater.runner(
+                ["systemctl", "show", f"--property={property_name}", "--value", unit],
+                capture_output=True,
+                text=True,
+                timeout=min(5, remaining),
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(f"Cannot confirm {unit} {property_name} during startup") from error
+        _startup_remaining(clock, deadline, unit)
+        value = completed.stdout.strip()
+        if completed.returncode != 0:
+            raise RuntimeError(f"Cannot confirm {unit} {property_name} during startup")
+        if property_name == "ActiveState" and value != "active":
+            raise RuntimeError(f"{unit} left active state during candidate startup")
+        if property_name == "MainPID" and (
+            not value.isascii() or not value.isdecimal() or value == "0" or value != expected_pid
+        ):
+            raise RuntimeError(f"{unit} MainPID changed during candidate startup")
+
+
+def _proc_executable_matches(pid: str, expected: Path) -> bool:
+    """Compare proc's live executable path and inode with the signed entrypoint."""
+
+    proc_executable = PROC_ROOT / pid / "exe"
+    try:
+        executable = proc_executable.resolve(strict=True)
+        live_info = proc_executable.stat()
+        expected_info = expected.stat()
+    except OSError:
+        return False
+    return (
+        executable == expected
+        and stat.S_ISREG(live_info.st_mode)
+        and (live_info.st_dev, live_info.st_ino) == (expected_info.st_dev, expected_info.st_ino)
+    )
+
+
+def _verify_candidate_pid(
+    updater: Any, item: dict[str, Any], pid: str, *, deadline: float | None = None
+) -> None:
+    """Wait briefly for exec, then require the exact signed candidate process identity.
+
+    systemd Type=simple can report active while the trusted component runner is still
+    validating and execing the staged ELF. Poll only that same active MainPID; never
+    treat the runner or another executable as ready.
+    中文：只等待原 MainPID 完成 exec，最终仍按签名入口路径、inode 与字节摘要核验。
+    """
+
+    if not pid.isascii() or not pid.isdecimal() or pid == "0":
+        raise RuntimeError("Core candidate MainPID is invalid")
+    component_id = item["componentId"]
+    unit = updater.components[component_id]["systemdUnit"]
     expected = _candidate_executable(updater, item)
-    executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
-    if executable != expected:
-        raise RuntimeError(
-            f"{updater.components[item['componentId']]['systemdUnit']} MainPID is not the exact staged release entrypoint"
-        )
+    clock, sleeper = _candidate_startup_clock(updater)
+    if deadline is None:
+        deadline = _startup_time(clock) + CORE_EXEC_STARTUP_WAIT_SECONDS
+    if not math.isfinite(deadline):
+        raise RuntimeError("Core candidate startup deadline is invalid")
+
+    # ── Phase 1: Observe only the original, active systemd MainPID.
+    # 第一阶段：仅轮询原始且仍处于 active 的 MainPID。
+    while True:
+        _systemd_candidate_identity(updater, unit, pid, deadline=deadline, clock=clock)
+        if _proc_executable_matches(pid, expected):
+            # Revalidate immutable release bytes and the same process identity at success.
+            confirmed = _candidate_executable(updater, item)
+            if confirmed != expected:
+                raise RuntimeError("Core staged entrypoint path changed during candidate startup")
+            _startup_remaining(clock, deadline, unit)
+            _systemd_candidate_identity(updater, unit, pid, deadline=deadline, clock=clock)
+            if not _proc_executable_matches(pid, confirmed):
+                raise RuntimeError(
+                    f"{unit} MainPID changed executable during candidate startup verification"
+                )
+            _startup_remaining(clock, deadline, unit)
+            return
+
+        remaining = _startup_remaining(clock, deadline, unit)
+        sleeper(min(CORE_EXEC_STARTUP_POLL_SECONDS, remaining))
 
 
 def _stop_candidate_services(updater: Any, components: list[dict[str, Any]]) -> None:
