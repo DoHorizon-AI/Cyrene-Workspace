@@ -1,16 +1,35 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 0 ]; then
-    printf '%s\n' 'cyrene-component-update-helper: arguments are not accepted.' >&2
-    exit 2
-fi
-
 if [ "$(/usr/bin/id -u)" -ne 0 ]; then
     printf '%s\n' 'cyrene-component-update-helper: invoke through pkexec or sudo.' >&2
     exit 1
 fi
 
+mode=update
+if [ "$#" -eq 0 ]; then
+    mode=update
+elif [ "$#" -eq 11 ] && [ "$1" = "placement-peer-plan" ] \
+    && [ "$2" = "--deployment-id" ] && [ "$4" = "--requester-host-id" ] \
+    && [ "$6" = "--requester-role-id" ] && [ "$8" = "--group-id" ] \
+    && [ "$10" = "--nonce" ]; then
+    mode=peer
+elif [ "$#" -eq 13 ] && [ "$1" = "placement-peer-receipt" ] \
+    && [ "$2" = "--deployment-id" ] && [ "$4" = "--requester-host-id" ] \
+    && [ "$6" = "--requester-role-id" ] && [ "$8" = "--group-id" ] \
+    && [ "$10" = "--nonce" ] && [ "$12" = "--phase" ] \
+    && { [ "$13" = "any" ] || [ "$13" = "ABSENT" ] || [ "$13" = "STAGED" ] \
+        || [ "$13" = "PREPARED_HELD" ] || [ "$13" = "ACTIVE_HELD" ] \
+        || [ "$13" = "ACTIVE" ]; }; then
+    mode=peer
+else
+    printf '%s\n' 'cyrene-component-update-helper: unsupported fixed operation arguments.' >&2
+    exit 2
+fi
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_HOST GITHUB_HOST GITHUB_API_URL
 gh=/usr/libexec/cyrene-tools/gh
 if [ ! -f "$gh" ] || [ -L "$gh" ] || [ ! -x "$gh" ] \
     || [ "$(/usr/bin/stat -c '%u:%a' "$gh")" != "0:755" ] \
@@ -22,9 +41,17 @@ fi
 
 PATH=/usr/libexec/cyrene-tools:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GH_CONFIG_DIR GH_HOST GITHUB_HOST GITHUB_API_URL
 GH_CONFIG_DIR=/var/lib/cyrene/operator-tools/gh-config
 export GH_CONFIG_DIR
+if [ "$mode" = "peer" ]; then
+    [ -d "$GH_CONFIG_DIR" ] && [ ! -L "$GH_CONFIG_DIR" ] \
+        && [ "$(/usr/bin/stat -c '%u:%a' "$GH_CONFIG_DIR")" = "0:700" ] || {
+        printf '%s\n' 'cyrene-component-update-helper: pinned GitHub CLI config directory is missing or unsafe.' >&2
+        exit 1
+    }
+    exec /usr/bin/cyrene placement-peer-evidence "$@"
+fi
+
 [ -d "$GH_CONFIG_DIR" ] && [ ! -L "$GH_CONFIG_DIR" ] \
     && [ "$(/usr/bin/stat -c '%u:%a' "$GH_CONFIG_DIR")" = "0:700" ] || {
     printf '%s\n' 'cyrene-component-update-helper: pinned GitHub CLI config directory is missing or unsafe.' >&2

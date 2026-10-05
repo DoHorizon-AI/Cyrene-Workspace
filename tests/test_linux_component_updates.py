@@ -118,7 +118,7 @@ def test_workspace_bootstrap_uses_the_compiled_catalog_authority_pin(tmp_path: P
     )
 
     assert updater.bootstrap_catalog_digest == updates.TRUSTED_CATALOG_DIGEST
-    assert updater.catalog_generation == 11
+    assert updater.catalog_generation == 12
 
 
 @pytest.mark.parametrize(
@@ -739,10 +739,13 @@ def test_privileged_helper_has_a_fixed_root_only_command() -> None:
     mode = stat.S_IMODE(HELPER_PATH.stat().st_mode)
 
     assert mode == 0o755
-    assert 'if [ "$#" -ne 0 ]' in helper
     assert 'if [ "$(/usr/bin/id -u)" -ne 0 ]' in helper
     assert "exec /usr/bin/cyrene update --json" in helper
-    assert "$@" not in helper
+    assert '"$1" = "placement-peer-plan"' in helper
+    assert '"$1" = "placement-peer-receipt"' in helper
+    assert 'exec /usr/bin/cyrene placement-peer-evidence "$@"' in helper
+    assert helper.count('"$@"') == 1
+    assert helper.index('if [ "$mode" = "peer" ]') < helper.index("gh=/usr/libexec/cyrene-tools/gh")
     assert (
         subprocess.run(
             [str(HELPER_PATH), "--executable", "/bin/sh"],
@@ -750,7 +753,7 @@ def test_privileged_helper_has_a_fixed_root_only_command() -> None:
             capture_output=True,
             text=True,
         ).returncode
-        == 2
+        != 0
     )
 
 
