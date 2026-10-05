@@ -71,6 +71,7 @@ DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
 DEFAULT_RELEASE_LOCK = Path("/usr/lib/cyrene/release-lock.json")
 DEFAULT_PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
 DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
+DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT = Path("/etc/cyrene/runtime-activity-sources.env")
 DEFAULT_CHANNEL = "stable"
 TRUSTED_CATALOG_DIGEST = "sha256:6ddce58276388c4c9f58c811ba4fa703e4c3c3970ee7a7d990fdab9389fba7d6"
 USER_AGENT = "CyreneComponentUpdater/1"
@@ -2900,6 +2901,285 @@ class ComponentUpdater:
         spec.loader.exec_module(module)
         return module
 
+    def _load_native_first_products_bootstrap(self) -> Any:
+        """Load the signed first-Product receipt and bundle verifier."""
+
+        module_path = Path(__file__).with_name("native_first_products.py")
+        if not module_path.is_file() or module_path.is_symlink():
+            raise UpdateError(
+                "PRODUCT_COHORT_UNAVAILABLE",
+                "The signed Product cohort verifier is missing or unsafe.",
+            )
+        import importlib.util
+
+        module_name = "_cyrene_native_first_products_for_package_bootstrap"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError(
+                "PRODUCT_COHORT_UNAVAILABLE", "The signed Product cohort verifier cannot load."
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            raise UpdateError(
+                "PRODUCT_COHORT_UNAVAILABLE", "The signed Product cohort verifier failed."
+            ) from error
+        return module
+
+    def _package_bootstrap_product_units(
+        self, activity_catalog: dict[str, Any], package_helper: Any
+    ) -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
+        """Derive the exact five Product sources from installed signed evidence.
+
+        中文：从已安装签名回执、bundle 和可信 catalog 派生唯一客户端集合。
+        """
+
+        first_products = self._load_native_first_products_bootstrap()
+        receipt = first_products._read_receipt()
+        target_id = receipt.get("installer", {}).get("targetId")
+        receipt, products = first_products._verified_products(
+            self, {"targetId": target_id}, first_products.RECEIPT_PATH
+        )
+        expected = tuple(
+            service for _source, _unit, service in package_helper.PACKAGE_BOOTSTRAP_PRODUCT_SOURCES
+        )
+        if tuple(row.get("service") for row in products) != expected:
+            raise UpdateError(
+                "PRODUCT_COHORT_UNKNOWN", "Installed signed Product cohort membership is unknown."
+            )
+        source_records = {
+            source["source_id"]: source for source in activity_catalog.get("sources", [])
+        }
+        expected_source_ids = {
+            source_id
+            for source_id, _unit, _service in package_helper.PACKAGE_BOOTSTRAP_PRODUCT_SOURCES
+        }
+        if set(source_records) != expected_source_ids:
+            raise UpdateError(
+                "PRODUCT_COHORT_UNKNOWN",
+                "Runtime activity sources do not exactly match the five signed Product clients.",
+                retryable=True,
+            )
+        rows: list[dict[str, Any]] = []
+        for product, (source_id, expected_unit, service) in zip(
+            products, package_helper.PACKAGE_BOOTSTRAP_PRODUCT_SOURCES, strict=True
+        ):
+            component_id = product.get("componentId")
+            component = self.components.get(component_id)
+            source = source_records.get(source_id)
+            if (
+                not isinstance(component, dict)
+                or component_id != source_id
+                or product.get("service") != service
+                or component.get("systemdUnit") != expected_unit
+                or not isinstance(source, dict)
+            ):
+                raise UpdateError(
+                    "PRODUCT_COHORT_UNKNOWN",
+                    f"Signed Product source or unit identity differs for {service}.",
+                    retryable=True,
+                )
+            try:
+                first_products._unit_path(self, component, service)
+            except Exception as error:
+                raise UpdateError(
+                    "PRODUCT_COHORT_UNKNOWN",
+                    f"Signed Product unit identity is unsafe for {service}.",
+                    retryable=True,
+                ) from error
+            rows.append(
+                {
+                    "source_id": source_id,
+                    "component_id": component_id,
+                    "unit": expected_unit,
+                    "service": service,
+                    "uid": source["uid"],
+                    "gid": source["gid"],
+                    "source_token_sha256": source["source_token_sha256"],
+                }
+            )
+        return first_products, rows, products
+
+    def _package_product_unit_state(self, unit: str) -> str:
+        """Read only an explicit active/inactive systemd state for a fixed unit."""
+
+        try:
+            result = self.runner(
+                ["systemctl", "show", "--property=ActiveState", "--value", unit],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UpdateError(
+                "PRODUCT_STATE_UNKNOWN",
+                f"Cannot read Product unit state for {unit}.",
+                retryable=True,
+            ) from error
+        state = result.stdout.strip()
+        if result.returncode != 0 or state not in {"active", "inactive"}:
+            raise UpdateError(
+                "PRODUCT_STATE_UNKNOWN",
+                f"Product unit {unit} has an unknown systemd state.",
+                retryable=True,
+            )
+        return state
+
+    def _capture_package_product_activity(
+        self,
+        first_products: Any,
+        product_units: list[dict[str, Any]],
+        verified_products: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
+        """Record active products only after signed pointer/process/API checks.
+
+        中文：只有指针、进程身份和签名健康端点都通过才记录为活动客户端。
+        """
+
+        active: list[dict[str, str]] = []
+        for row in product_units:
+            state = self._package_product_unit_state(row["unit"])
+            if state == "active":
+                try:
+                    product = next(
+                        product
+                        for product in verified_products
+                        if product["service"] == row["service"]
+                    )
+                    first_products._live_product(self, product)
+                except Exception as error:
+                    raise UpdateError(
+                        "PRODUCT_STATE_UNKNOWN",
+                        f"Active Product identity or health is unverified for {row['service']}.",
+                        retryable=True,
+                    ) from error
+                active.append({"source_id": row["source_id"], "unit": row["unit"]})
+            else:
+                try:
+                    pid = first_products._main_pid(self, row["unit"])
+                except Exception as error:
+                    raise UpdateError(
+                        "PRODUCT_STATE_UNKNOWN",
+                        f"Inactive Product process state is unknown for {row['service']}.",
+                        retryable=True,
+                    ) from error
+                if pid != 0:
+                    raise UpdateError(
+                        "PRODUCT_STATE_UNKNOWN",
+                        f"Inactive Product unit still has a MainPID: {row['service']}.",
+                        retryable=True,
+                    )
+        return active
+
+    def _wait_package_products_quiesced(
+        self, first_products: Any, product_units: list[dict[str, Any]]
+    ) -> None:
+        """Wait until every fixed Product unit is inactive with MainPID zero."""
+
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            stopped = True
+            for row in product_units:
+                if self._package_product_unit_state(row["unit"]) != "inactive":
+                    stopped = False
+                    break
+                if first_products._main_pid(self, row["unit"]) != 0:
+                    stopped = False
+                    break
+            if stopped:
+                return
+            time.sleep(1)
+        raise UpdateError(
+            "PRODUCT_QUIESCE_TIMEOUT",
+            "A Product unit did not stop within 90 seconds.",
+            retryable=True,
+        )
+
+    @staticmethod
+    def _verify_package_activity_generation(generation: int) -> None:
+        """Read back the exact shared generation consumed by all Product units."""
+
+        path = DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT
+        descriptor: int | None = None
+        try:
+            before = path.lstat()
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            info = os.fstat(descriptor)
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or info.st_gid != 0
+                or stat.S_IMODE(info.st_mode) != 0o644
+                or info.st_nlink != 1
+                or info.st_dev != before.st_dev
+                or info.st_ino != before.st_ino
+                or info.st_size > 4096
+            ):
+                raise UpdateError(
+                    "PRODUCT_ENVIRONMENT_UNKNOWN",
+                    "Shared Product activity generation metadata is unsafe.",
+                    retryable=True,
+                )
+            content = os.read(descriptor, 4097)
+        except OSError as error:
+            raise UpdateError(
+                "PRODUCT_ENVIRONMENT_UNKNOWN", "Shared Product activity generation is unavailable."
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        expected = f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={generation}\n".encode("ascii")
+        if content != expected:
+            raise UpdateError(
+                "PRODUCT_ENVIRONMENT_UNKNOWN",
+                "Shared Product activity generation does not match the committed catalog.",
+                retryable=True,
+            )
+
+    def _restore_package_product_activity(
+        self,
+        first_products: Any,
+        product_units: list[dict[str, Any]],
+        verified_products: list[dict[str, Any]],
+        prior_active_products: list[dict[str, str]],
+    ) -> None:
+        """Restore exactly the previously active clients and verify signed health.
+
+        中文：只恢复原先活动的客户端，保持原先停用的服务停用。
+        """
+
+        active_units = {item.get("unit") for item in prior_active_products}
+        if not active_units <= {row["unit"] for row in product_units}:
+            raise UpdateError("PRODUCT_STATE_UNKNOWN", "Journal names a foreign Product unit.")
+        products_by_service = {item["service"]: item for item in verified_products}
+        for row in product_units:
+            was_active = row["unit"] in active_units
+            state = self._package_product_unit_state(row["unit"])
+            if was_active:
+                if state == "inactive":
+                    self._run_systemctl("start", row["unit"])
+                    self._wait_unit_active(row["unit"])
+                product = products_by_service.get(row["service"])
+                if product is None:
+                    raise UpdateError(
+                        "PRODUCT_COHORT_UNKNOWN", "Signed Product health identity is missing."
+                    )
+                first_products._live_product(self, product)
+            else:
+                if state != "inactive" or first_products._main_pid(self, row["unit"]) != 0:
+                    raise UpdateError(
+                        "PRODUCT_STATE_CHANGED",
+                        f"Previously inactive Product became active: {row['service']}.",
+                        retryable=True,
+                    )
+
     def _load_native_runtime_schema_migration(self) -> Any:
         """Load the signed helper that derives legacy state profile and proof bytes."""
         import importlib.util
@@ -2936,6 +3216,9 @@ class ComponentUpdater:
         with self._exclusive_update_lock():
             verified = helper.verify_cached_package_candidate()
             activity_catalog, _sources = self._activity_catalog()
+            _first_products, product_units, _verified_products = (
+                self._package_bootstrap_product_units(activity_catalog, helper)
+            )
             readiness = self._readiness_for("PACKAGE_ONLY", requires_restart=False, force=True)
             self._require_ready(readiness, "PACKAGE_ONLY")
             gate_generation = readiness.get("gate_generation")
@@ -2947,6 +3230,7 @@ class ComponentUpdater:
                 verified,
                 catalog_generation=activity_catalog["generation"],
                 gate_generation=gate_generation,
+                affected_product_units=product_units,
             )
         return {
             "planId": plan.plan_id,
@@ -2974,8 +3258,21 @@ class ComponentUpdater:
         helper = self._load_native_package_runtime_bootstrap()
         with self._exclusive_update_lock():
             self._assert_no_pending_catalog_intent()
+            if isinstance(plan_id, str) and PLAN_ID_PATTERN.fullmatch(plan_id):
+                pending_path = self._private_state_directory("transactions") / f"{plan_id}.json"
+                if pending_path.exists() or pending_path.is_symlink():
+                    return self._resume_package_bootstrap_clients(
+                        helper,
+                        pending_path,
+                        plan_id=plan_id,
+                        plan_digest=plan_digest,
+                        confirmation=confirmation,
+                    )
             verified = helper.verify_cached_package_candidate()
             activity_catalog, activity_sources = self._activity_catalog()
+            first_products, product_units, verified_products = (
+                self._package_bootstrap_product_units(activity_catalog, helper)
+            )
             readiness = self._readiness_for("PACKAGE_ONLY", requires_restart=False, force=True)
             self._require_ready(readiness, "PACKAGE_ONLY")
             gate_generation = readiness.get("gate_generation")
@@ -2987,6 +3284,7 @@ class ComponentUpdater:
                 verified,
                 catalog_generation=activity_catalog["generation"],
                 gate_generation=gate_generation,
+                affected_product_units=product_units,
             )
             if plan_id != plan.plan_id or plan_digest != plan.plan_digest:
                 raise UpdateError(
@@ -3011,6 +3309,19 @@ class ComponentUpdater:
                     retryable=True,
                 )
 
+            try:
+                prior_active_products = self._capture_package_product_activity(
+                    first_products, product_units, verified_products
+                )
+            except UpdateError:
+                raise
+            except Exception as error:
+                raise UpdateError(
+                    "PRODUCT_STATE_UNKNOWN",
+                    "The five signed Product units could not be safely inventoried.",
+                    retryable=True,
+                ) from error
+
             transaction_id = f"cyrene-update-{plan.plan_id}"
             transaction_path = (
                 self._private_state_directory("transactions") / f"{plan.plan_id}.json"
@@ -3026,12 +3337,16 @@ class ComponentUpdater:
                 "transactionKind": "package-runtime-bootstrap.v1",
                 "planId": plan.plan_id,
                 "planDigest": plan.plan_digest,
+                "plannedGateGeneration": plan.gate_generation,
+                "plannedCatalogGeneration": plan.catalog_generation,
                 "requestId": transaction_id,
                 "componentArtifactDigests": plan.component_artifact_digests,
                 "targetKind": "PACKAGE_ONLY",
                 "expectedGateGeneration": readiness.get("gate_generation"),
                 "expectedCatalogGeneration": activity_catalog["generation"],
                 "expectedActivitySources": activity_sources,
+                "productCohort": product_units,
+                "priorActiveProducts": prior_active_products,
                 "phase": "begin_pending",
                 "candidate": {
                     **plan.material,
@@ -3081,6 +3396,24 @@ class ComponentUpdater:
             transaction["maintenanceToken"] = maintenance_token
             transaction["expectedGateGeneration"] = begin_gate_generation
             transaction["phase"] = "maintenance_active"
+            _atomic_json(transaction_path, transaction)
+
+            # Stop only the exact clients that were already healthy and active.
+            transaction["phase"] = "product_quiesce_pending"
+            _atomic_json(transaction_path, transaction)
+            for active_product in prior_active_products:
+                self._run_systemctl("stop", active_product["unit"])
+            try:
+                self._wait_package_products_quiesced(first_products, product_units)
+            except Exception as error:
+                transaction["phase"] = "product_quiesce_unknown"
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "PRODUCT_QUIESCE_UNKNOWN",
+                    "Package Runtime clients did not all prove a stopped state; maintenance remains held.",
+                    retryable=True,
+                ) from error
+            transaction["phase"] = "products_quiesced"
             _atomic_json(transaction_path, transaction)
 
             maintenance = {
@@ -3154,6 +3487,29 @@ class ComponentUpdater:
             transaction["phase"] = "policy_written"
             _atomic_json(transaction_path, transaction)
 
+            previous_generation = activity_catalog["generation"]
+            try:
+                environment_result = helper.ensure_yield_product_package_environment(
+                    verified,
+                    installation,
+                    updated_catalog,
+                    helper.read_runtime_source_policy(),
+                    previous_catalog_generation=previous_generation,
+                )
+                self._verify_package_activity_generation(updated_catalog["generation"])
+            except Exception as error:
+                transaction["phase"] = "product_environment_unknown"
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "PRODUCT_ENVIRONMENT_UNKNOWN",
+                    "The signed Product source generation could not be projected and read back; maintenance remains held.",
+                    retryable=True,
+                ) from error
+            transaction["productEnvironmentChanged"] = bool(environment_result.changed)
+            transaction["productEnvironmentGeneration"] = updated_catalog["generation"]
+            transaction["phase"] = "product_environment_projected"
+            _atomic_json(transaction_path, transaction)
+
             transaction["phase"] = "runtime_start_pending"
             _atomic_json(transaction_path, transaction)
             try:
@@ -3173,6 +3529,25 @@ class ComponentUpdater:
                 ) from error
             transaction["runtimeAuthority"] = runtime_authority
             transaction["phase"] = "runtime_health_verified"
+            _atomic_json(transaction_path, transaction)
+
+            try:
+                self._restore_package_product_activity(
+                    first_products,
+                    product_units,
+                    verified_products,
+                    prior_active_products,
+                )
+            except Exception as error:
+                transaction["phase"] = "product_health_pending"
+                transaction["recoveryError"] = "Previously active Product health is pending."
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "PRODUCT_RESTORE_PENDING",
+                    "Previously active Product clients did not pass signed health checks; maintenance remains held.",
+                    retryable=True,
+                ) from error
+            transaction["phase"] = "products_restored"
             _atomic_json(transaction_path, transaction)
 
             validate_id = f"cyrene-package-validate-{uuid.uuid4().hex}"
@@ -3214,7 +3589,52 @@ class ComponentUpdater:
                 )
             transaction["phase"] = "end_pending"
             _atomic_json(transaction_path, transaction)
-            self._end_maintenance(transaction, outcome="SUCCESS", healthy=True)
+            try:
+                self._end_maintenance(transaction, outcome="SUCCESS", healthy=True)
+            except UpdateError:
+                # An End reply may be lost after the broker released admission.
+                # Recover only from a fresh, exact READY response for this catalog.
+                try:
+                    ended_readiness = self._readiness_for(
+                        "PACKAGE_ONLY", requires_restart=False, force=True
+                    )
+                    if (
+                        ended_readiness.get("status") != "READY"
+                        or ended_readiness.get("install_catalog_generation")
+                        != updated_catalog["generation"]
+                        or ended_readiness.get("unknown_activity_sources") != []
+                    ):
+                        raise UpdateError(
+                            "GATE_UNKNOWN", "Package Runtime End outcome is not established."
+                        )
+                except Exception as error:
+                    transaction["phase"] = "end_unknown"
+                    _atomic_json(transaction_path, transaction)
+                    raise UpdateError(
+                        "GATE_UNKNOWN",
+                        "Package Runtime End outcome is unknown; Product restore remains pending.",
+                        retryable=True,
+                    ) from error
+            transaction["phase"] = "clients_restore_pending"
+            _atomic_json(transaction_path, transaction)
+            try:
+                # Recheck the exact prior-active set after End; recovery here is
+                # restore-only and never reacquires the gate or reinstalls bytes.
+                self._restore_package_product_activity(
+                    first_products,
+                    product_units,
+                    verified_products,
+                    prior_active_products,
+                )
+            except Exception as error:
+                transaction["phase"] = "clients_restore_pending"
+                transaction["recoveryError"] = "Previously active Product restore is pending."
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "PRODUCT_RESTORE_PENDING",
+                    "Previously active Product clients remain pending restoration; package state is committed.",
+                    retryable=True,
+                ) from error
             transaction["phase"] = "succeeded"
             transaction.pop("maintenanceToken", None)
             transaction.pop("recoveryError", None)
@@ -3228,6 +3648,268 @@ class ComponentUpdater:
                 "policyDigest": transaction["policyDigest"],
                 "runtimeActivated": False,
             }
+
+    def _resume_package_bootstrap_clients(
+        self,
+        helper: Any,
+        transaction_path: Path,
+        *,
+        plan_id: str,
+        plan_digest: Any,
+        confirmation: Any,
+    ) -> dict[str, Any]:
+        """Resume only the confirmed client-health/End tail of a package plan.
+
+        中文：恢复阶段仅修复客户端健康或结束维护，不重装包、不重新 Begin。
+        """
+
+        try:
+            info = transaction_path.lstat()
+        except OSError as error:
+            raise UpdateError(
+                "INVALID_LOCAL_STATE", "Package Runtime journal is unavailable."
+            ) from error
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_nlink != 1
+        ):
+            raise UpdateError("UNSAFE_STATE", "Package Runtime journal metadata is unsafe.")
+        transaction = _read_object(transaction_path, "Package Runtime transaction journal")
+        phase = transaction.get("phase")
+        if (
+            transaction.get("schemaVersion") != 1
+            or transaction.get("transactionKind") != "package-runtime-bootstrap.v1"
+            or transaction.get("planId") != plan_id
+            or transaction.get("planDigest") != plan_digest
+            or transaction.get("requestId") != f"cyrene-update-{plan_id}"
+            or transaction.get("targetKind") != "PACKAGE_ONLY"
+            or phase
+            not in {
+                "product_health_pending",
+                "products_restored",
+                "end_pending",
+                "end_unknown",
+                "clients_restore_pending",
+                "succeeded",
+            }
+        ):
+            raise UpdateError(
+                "PENDING_MAINTENANCE",
+                "Package Runtime journal is unknown or belongs to another operation.",
+                retryable=True,
+            )
+        verified = helper.verify_cached_package_candidate()
+        activity_catalog, activity_sources = self._activity_catalog()
+        first_products, product_units, verified_products = self._package_bootstrap_product_units(
+            activity_catalog, helper
+        )
+        if transaction.get("productCohort") != product_units:
+            raise UpdateError(
+                "PRODUCT_COHORT_UNKNOWN",
+                "The signed Product source or unit set differs from the pending plan.",
+                retryable=True,
+            )
+        prior_active = transaction.get("priorActiveProducts")
+        cohort_by_source = {row["source_id"]: row["unit"] for row in product_units}
+        if (
+            not isinstance(prior_active, list)
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"source_id", "unit"}
+                or not isinstance(item.get("source_id"), str)
+                or cohort_by_source.get(item.get("source_id")) != item.get("unit")
+                for item in prior_active
+            )
+            or len({item["source_id"] for item in prior_active}) != len(prior_active)
+        ):
+            raise UpdateError(
+                "PRODUCT_STATE_UNKNOWN", "Pending journal has an invalid prior-active Product set."
+            )
+        try:
+            plan = helper.build_package_bootstrap_plan(
+                verified,
+                catalog_generation=transaction["plannedCatalogGeneration"],
+                gate_generation=transaction["plannedGateGeneration"],
+                affected_product_units=product_units,
+            )
+            helper.validate_package_bootstrap_confirmation(
+                plan,
+                {
+                    "plan_id": plan_id,
+                    "plan_digest": plan_digest,
+                    "confirmed": confirmation is True,
+                },
+            )
+        except Exception as error:
+            raise UpdateError(
+                "CONFIRMATION_MISMATCH", "Pending Package Runtime plan identity is not valid."
+            ) from error
+        if (
+            plan.plan_id != plan_id
+            or plan.plan_digest != plan_digest
+            or transaction.get("componentArtifactDigests") != plan.component_artifact_digests
+            or transaction.get("candidate", {}).get("attestationBundleDigests")
+            != verified.attestation_bundle_digests
+            or {
+                key: value
+                for key, value in transaction.get("candidate", {}).items()
+                if key != "attestationBundleDigests"
+            }
+            != plan.material
+        ):
+            raise UpdateError(
+                "PLAN_CHANGED", "Pending Package Runtime candidate differs from its journal."
+            )
+        if phase == "succeeded":
+            try:
+                installation = helper.validate_installation_record(
+                    verified, transaction.get("installation")
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "TRANSACTION_IDENTITY_UNKNOWN",
+                    "Completed Package Runtime installation evidence is invalid.",
+                ) from error
+            return {
+                "status": "installed",
+                "planId": plan.plan_id,
+                "planDigest": plan.plan_digest,
+                "installation": installation,
+                "catalogGeneration": transaction.get("catalogGeneration"),
+                "policyDigest": transaction.get("policyDigest"),
+                "runtimeActivated": False,
+            }
+        if activity_catalog.get("generation") != transaction.get(
+            "expectedCatalogGeneration"
+        ) or activity_sources != transaction.get("expectedActivitySources"):
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Activity catalog differs from the pending Package Runtime transaction.",
+                retryable=True,
+            )
+        try:
+            self._verify_package_activity_generation(activity_catalog["generation"])
+            installation = helper.validate_installation_record(
+                verified, transaction.get("installation")
+            )
+            policy = helper.read_runtime_source_policy()
+            helper.validate_runtime_source_policy(policy, verified, installation, activity_catalog)
+            runtime_authority = helper.probe_runtime_authority(
+                activity_catalog, expected_catalog_generation=activity_catalog["generation"]
+            )
+        except Exception as error:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_HEALTH_UNKNOWN",
+                "Package Runtime source authority is not verified for the pending transaction.",
+                retryable=True,
+            ) from error
+
+        if phase in {"product_health_pending", "products_restored"}:
+            try:
+                self._restore_package_product_activity(
+                    first_products,
+                    product_units,
+                    verified_products,
+                    transaction["priorActiveProducts"],
+                )
+            except Exception as error:
+                transaction["phase"] = "product_health_pending"
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "PRODUCT_RESTORE_PENDING",
+                    "Previously active Product clients remain pending restoration.",
+                    retryable=True,
+                ) from error
+            transaction["phase"] = "products_restored"
+            transaction["runtimeAuthority"] = runtime_authority
+            _atomic_json(transaction_path, transaction)
+
+        readiness = self._readiness_for("PACKAGE_ONLY", requires_restart=False, force=True)
+        if (
+            readiness.get("install_catalog_generation") != activity_catalog["generation"]
+            or readiness.get("unknown_activity_sources") != []
+        ):
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Package Runtime gate state is not known for recovery.",
+                retryable=True,
+            )
+        if readiness.get("status") == "MAINTENANCE_ACTIVE":
+            validate_id = f"cyrene-package-resume-validate-{uuid.uuid4().hex}"
+            validation = self._broker_request(
+                "ValidateMaintenanceHold",
+                {
+                    "request_id": validate_id,
+                    "maintenance_token": transaction.get("maintenanceToken"),
+                    "target_kind": "PACKAGE_ONLY",
+                    "plan_id": plan.plan_id,
+                    "plan_digest": plan.plan_digest,
+                    "component_artifact_digests": plan.component_artifact_digests,
+                    "component_id": verified.package_id,
+                    "artifact_digest": verified.artifact_digest,
+                    "expected_gate_generation": transaction.get("expectedGateGeneration"),
+                    "expected_catalog_generation": activity_catalog["generation"],
+                },
+                request_id=validate_id,
+            )
+            expected = {
+                "valid": True,
+                "request_id": validate_id,
+                "target_kind": "PACKAGE_ONLY",
+                "plan_id": plan.plan_id,
+                "plan_digest": plan.plan_digest,
+                "component_artifact_digests": plan.component_artifact_digests,
+                "component_id": verified.package_id,
+                "artifact_digest": verified.artifact_digest,
+                "gate_generation": transaction.get("expectedGateGeneration"),
+                "catalog_generation": activity_catalog["generation"],
+            }
+            if validation != expected:
+                raise UpdateError(
+                    "GATE_UNKNOWN",
+                    "Pending Package Runtime hold identity is unknown.",
+                    retryable=True,
+                )
+            transaction["phase"] = "end_pending"
+            _atomic_json(transaction_path, transaction)
+            self._end_maintenance(transaction, outcome="SUCCESS", healthy=True)
+        elif readiness.get("status") != "READY":
+            raise UpdateError(
+                "GATE_UNKNOWN", "Package Runtime End outcome is unknown.", retryable=True
+            )
+
+        transaction["phase"] = "clients_restore_pending"
+        _atomic_json(transaction_path, transaction)
+        try:
+            self._restore_package_product_activity(
+                first_products,
+                product_units,
+                verified_products,
+                transaction["priorActiveProducts"],
+            )
+        except Exception as error:
+            transaction["recoveryError"] = "Previously active Product restore is pending."
+            _atomic_json(transaction_path, transaction)
+            raise UpdateError(
+                "PRODUCT_RESTORE_PENDING",
+                "Package Runtime is committed; only prior-active Product restoration remains.",
+                retryable=True,
+            ) from error
+        transaction["phase"] = "succeeded"
+        transaction.pop("maintenanceToken", None)
+        transaction.pop("recoveryError", None)
+        _atomic_json(transaction_path, transaction)
+        return {
+            "status": "installed",
+            "planId": plan.plan_id,
+            "planDigest": plan.plan_digest,
+            "installation": installation,
+            "catalogGeneration": activity_catalog["generation"],
+            "policyDigest": transaction.get("policyDigest"),
+            "runtimeActivated": False,
+        }
 
     def _activity_catalog(self) -> tuple[dict[str, Any], list[str]]:
         catalog = _read_object(self.activity_catalog_path, "runtime activity source catalog")

@@ -376,8 +376,25 @@ def test_package_plan_binds_immutable_inputs_and_exact_confirmation(
     verified_inputs: tuple[bootstrap.VerifiedPackageCandidate, dict[str, Any], dict[str, Any]],
 ) -> None:
     candidate, _record_value, catalog = verified_inputs
+    products = [
+        {
+            "source_id": source_id,
+            "component_id": source_id,
+            "unit": unit,
+            "service": service,
+            "uid": 1000,
+            "gid": 1000,
+            "source_token_sha256": f"{index:x}" * 64,
+        }
+        for index, (source_id, unit, service) in enumerate(
+            bootstrap.PACKAGE_BOOTSTRAP_PRODUCT_SOURCES, start=1
+        )
+    ]
     plan = bootstrap.build_package_bootstrap_plan(
-        candidate, catalog_generation=catalog["generation"], gate_generation=11
+        candidate,
+        catalog_generation=catalog["generation"],
+        gate_generation=11,
+        affected_product_units=products,
     )
     assert plan.component_artifact_digests == {candidate.package_id: candidate.artifact_digest}
     assert plan.material["source_commit"] == bootstrap.PACKAGE_SOURCE_COMMIT
@@ -385,10 +402,22 @@ def test_package_plan_binds_immutable_inputs_and_exact_confirmation(
     assert plan.material["gate_generation"] == 11
     assert (
         bootstrap.build_package_bootstrap_plan(
-            candidate, catalog_generation=catalog["generation"], gate_generation=12
+            candidate,
+            catalog_generation=catalog["generation"],
+            gate_generation=12,
+            affected_product_units=products,
         ).plan_digest
         != plan.plan_digest
     )
+    changed_products = [dict(item) for item in products]
+    changed_products[-1]["source_token_sha256"] = "f" * 64
+    changed_cohort_plan = bootstrap.build_package_bootstrap_plan(
+        candidate,
+        catalog_generation=catalog["generation"],
+        gate_generation=11,
+        affected_product_units=changed_products,
+    )
+    assert changed_cohort_plan.plan_digest != plan.plan_digest
     bootstrap.validate_package_bootstrap_confirmation(
         plan,
         {"plan_id": plan.plan_id, "plan_digest": plan.plan_digest, "confirmed": True},
@@ -397,6 +426,20 @@ def test_package_plan_binds_immutable_inputs_and_exact_confirmation(
         bootstrap.validate_package_bootstrap_confirmation(
             plan,
             {"plan_id": plan.plan_id, "plan_digest": _digest(b"other"), "confirmed": True},
+        )
+    with pytest.raises(bootstrap.PackageRuntimeBootstrapError, match="cohort"):
+        bootstrap.build_package_bootstrap_plan(
+            candidate,
+            catalog_generation=catalog["generation"],
+            gate_generation=11,
+            affected_product_units=[{**products[0], "unit": "foreign.service"}, *products[1:]],
+        )
+    with pytest.raises(bootstrap.PackageRuntimeBootstrapError, match="incomplete"):
+        bootstrap.build_package_bootstrap_plan(
+            candidate,
+            catalog_generation=catalog["generation"],
+            gate_generation=11,
+            affected_product_units=products[:-1],
         )
 
 

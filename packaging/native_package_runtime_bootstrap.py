@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import grp
 import hashlib
+import importlib.util
 import json
 import os
 import pwd
@@ -30,6 +31,13 @@ PACKAGE_CAPABILITY = "training.llama-factory.v1"
 PACKAGE_INTERFACE_VERSION = "1"
 PACKAGE_SOURCE_ID = "cyrene-yield"
 PACKAGE_BINDING_ID = "yield.llama-factory.primary"
+PACKAGE_BOOTSTRAP_PRODUCT_SOURCES = (
+    ("cyrene-navigator", "cyrene-navigator.service", "navigator"),
+    ("cyrene-yield", "cyrene-yield.service", "yield"),
+    ("cyrene-reactor", "cyrene-reactor.service", "reactor"),
+    ("cyrene-exchange", "cyrene-exchange.service", "exchange"),
+    ("cyrene-catalyst", "cyrene-catalyst.service", "catalyst"),
+)
 PACKAGE_CHANNEL = "preview"
 PACKAGE_SOURCE_REPOSITORY = "DoHorizon-AI/Cyrene-Plugins-Official"
 PACKAGE_SOURCE_URL = f"https://github.com/{PACKAGE_SOURCE_REPOSITORY}"
@@ -200,14 +208,49 @@ def _canonical_json(value: Any) -> bytes:
 
 
 def build_package_bootstrap_plan(
-    candidate: VerifiedPackageCandidate, *, catalog_generation: int, gate_generation: int
+    candidate: VerifiedPackageCandidate,
+    *,
+    catalog_generation: int,
+    gate_generation: int,
+    affected_product_units: list[dict[str, Any]],
 ) -> PackageBootstrapPlan:
-    """Bind the exact signed package inputs and current catalog into a plan ID."""
+    """Bind package proof, source identities, and the fixed Product cohort into a plan.
+
+    The Product rows are derived from the installed signed cohort and current
+    activity catalog by the updater. Their exact membership is part of user
+    confirmation, so a changed client set cannot reuse an earlier approval.
+    中文：将固定五个 Product 来源与单位纳入确认摘要，避免确认后改变受影响客户端。
+    """
 
     if type(catalog_generation) is not int or catalog_generation < 1:
         raise PackageRuntimeBootstrapError("Package Runtime plan catalog generation is invalid")
     if type(gate_generation) is not int or gate_generation < 1:
         raise PackageRuntimeBootstrapError("Package Runtime plan gate generation is invalid")
+    if not isinstance(affected_product_units, list) or len(affected_product_units) != len(
+        PACKAGE_BOOTSTRAP_PRODUCT_SOURCES
+    ):
+        raise PackageRuntimeBootstrapError("Package Runtime Product cohort is incomplete")
+    normalized_products: list[dict[str, Any]] = []
+    for row, (source_id, unit, service) in zip(
+        affected_product_units, PACKAGE_BOOTSTRAP_PRODUCT_SOURCES, strict=True
+    ):
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {"source_id", "component_id", "unit", "service", "uid", "gid", "source_token_sha256"}
+            or row.get("source_id") != source_id
+            or row.get("component_id") != source_id
+            or row.get("unit") != unit
+            or row.get("service") != service
+            or type(row.get("uid")) is not int
+            or row["uid"] < 0
+            or type(row.get("gid")) is not int
+            or row["gid"] < 0
+            or not isinstance(row.get("source_token_sha256"), str)
+            or RAW_SHA256.fullmatch(row["source_token_sha256"]) is None
+        ):
+            raise PackageRuntimeBootstrapError("Package Runtime Product cohort identity is invalid")
+        normalized_products.append(dict(row))
     material = {
         "schema_version": 1,
         "target_kind": "PACKAGE_ONLY",
@@ -228,6 +271,7 @@ def build_package_bootstrap_plan(
         "preparer_wheel_digest": candidate.preparer_wheel_digest,
         "attestation_bundle_digests": dict(candidate.attestation_bundle_digests),
         "binding_id": PACKAGE_BINDING_ID,
+        "affected_product_units": normalized_products,
         "catalog_generation": catalog_generation,
         "gate_generation": gate_generation,
     }
@@ -2024,6 +2068,45 @@ def probe_runtime_authority(
         "catalog_generation": result["catalog_generation"],
         "capabilities": list(result["capabilities"]),
     }
+
+
+def ensure_yield_product_package_environment(
+    candidate: VerifiedPackageCandidate,
+    installation_record: Any,
+    activity_catalog: Any,
+    runtime_source_policy: Any,
+    *,
+    previous_catalog_generation: int,
+) -> Any:
+    """Load the independent Product environment writer beside this helper.
+
+    The updater calls this only after catalog and policy readback while its
+    existing maintenance hold remains active. The writer synchronizes shared
+    source generation and Yield's separate admitted-binding configuration.
+    """
+
+    module_path = Path(__file__).with_name("native_product_package_environment.py")
+    spec = importlib.util.spec_from_file_location(
+        "_cyrene_native_product_package_environment", module_path
+    )
+    if spec is None or spec.loader is None:
+        raise PackageRuntimeBootstrapError("Product Package Runtime environment writer is missing")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        return module.ensure_yield_package_environment(
+            sys.modules[__name__],
+            candidate,
+            installation_record,
+            activity_catalog,
+            runtime_source_policy,
+            previous_catalog_generation=previous_catalog_generation,
+        )
+    except Exception as error:
+        raise PackageRuntimeBootstrapError(
+            "Yield Package Runtime environment could not be projected safely"
+        ) from error
 
 
 def _read_source_token(path: Path, expected_digest: str) -> str:

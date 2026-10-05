@@ -193,6 +193,7 @@ jobs:
           packaging/native_first_products.py
           packaging/native_component_bootstrap.py
           packaging/native_package_runtime_bootstrap.py
+          packaging/native_product_package_environment.py
           packaging/native_runtime_schema_migration.py
           scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
@@ -216,6 +217,7 @@ jobs:
           tests/test_native_broker_client_resolution.py
           tests/test_native_component_bootstrap_directory_modes.py
           tests/test_native_package_runtime_bootstrap.py
+          tests/test_native_product_package_environment.py
           tests/test_native_release_directory_modes.py
           tests/test_native_runtime_schema_migration.py
           tests/test_package_runtime_activity_catalog.py
@@ -242,6 +244,7 @@ jobs:
           packaging/native_first_products.py
           packaging/native_component_bootstrap.py
           packaging/native_package_runtime_bootstrap.py
+          packaging/native_product_package_environment.py
           packaging/native_runtime_schema_migration.py
           scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
@@ -265,6 +268,7 @@ jobs:
           tests/test_native_broker_client_resolution.py
           tests/test_native_component_bootstrap_directory_modes.py
           tests/test_native_package_runtime_bootstrap.py
+          tests/test_native_product_package_environment.py
           tests/test_native_release_directory_modes.py
           tests/test_native_runtime_schema_migration.py
           tests/test_package_runtime_activity_catalog.py
@@ -299,6 +303,7 @@ jobs:
           tests/test_native_broker_client_resolution.py
           tests/test_native_component_bootstrap_directory_modes.py
           tests/test_native_package_runtime_bootstrap.py
+          tests/test_native_product_package_environment.py
           tests/test_native_release_directory_modes.py
           tests/test_native_runtime_schema_migration.py
           tests/test_package_runtime_activity_catalog.py
@@ -323,6 +328,7 @@ jobs:
             packaging/native_first_products.py \
             packaging/native_component_bootstrap.py packaging/native_package_runtime_bootstrap.py \
             packaging/native_runtime_schema_migration.py \
+            packaging/native_product_package_environment.py \
             scripts/native_installer_release.py \
             tooling/acceptance/native-components-v2/native_acceptance.py \
             tooling/acceptance/native-components-v2/admin_initialize.py \
