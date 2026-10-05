@@ -228,6 +228,7 @@ jobs:
           tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_component_bootstrap.py
           tests/test_native_core_bootstrap.py
+          tests/test_native_first_core_startup_wait.py
           tests/test_component_catalog_linux22.py
           tests/test_component_executable_files.py
           tests/test_native_admin_broker_readiness.py
@@ -291,6 +292,7 @@ jobs:
           tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_component_bootstrap.py
           tests/test_native_core_bootstrap.py
+          tests/test_native_first_core_startup_wait.py
           tests/test_component_catalog_linux22.py
           tests/test_component_executable_files.py
           tests/test_native_admin_broker_readiness.py
@@ -335,6 +337,7 @@ jobs:
           tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_component_bootstrap.py
           tests/test_native_core_bootstrap.py
+          tests/test_native_first_core_startup_wait.py
           tests/test_component_catalog_linux22.py
           tests/test_component_executable_files.py
           tests/test_native_admin_broker_readiness.py
