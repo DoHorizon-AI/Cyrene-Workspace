@@ -191,6 +191,10 @@ jobs:
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
           packaging/native_first_products.py
+          packaging/native_component_bootstrap.py
+          packaging/native_package_runtime_bootstrap.py
+          packaging/native_product_package_environment.py
+          packaging/native_runtime_schema_migration.py
           scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
           tooling/acceptance/native-components-v2/admin_initialize.py
@@ -207,6 +211,19 @@ jobs:
           tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_component_bootstrap.py
           tests/test_native_core_bootstrap.py
+          tests/test_component_catalog_linux22.py
+          tests/test_component_executable_files.py
+          tests/test_native_admin_broker_readiness.py
+          tests/test_native_broker_client_resolution.py
+          tests/test_native_component_bootstrap_directory_modes.py
+          tests/test_native_package_runtime_bootstrap.py
+          tests/test_native_product_package_environment.py
+          tests/test_native_release_directory_modes.py
+          tests/test_native_runtime_schema_migration.py
+          tests/test_package_runtime_activity_catalog.py
+          tests/test_package_runtime_authority_probe.py
+          tests/test_package_runtime_bootstrap_transaction.py
+          tests/test_package_runtime_catalog.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -225,6 +242,10 @@ jobs:
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
           packaging/native_first_products.py
+          packaging/native_component_bootstrap.py
+          packaging/native_package_runtime_bootstrap.py
+          packaging/native_product_package_environment.py
+          packaging/native_runtime_schema_migration.py
           scripts/native_installer_release.py
           tooling/acceptance/native-components-v2/native_acceptance.py
           tooling/acceptance/native-components-v2/admin_initialize.py
@@ -241,6 +262,19 @@ jobs:
           tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_component_bootstrap.py
           tests/test_native_core_bootstrap.py
+          tests/test_component_catalog_linux22.py
+          tests/test_component_executable_files.py
+          tests/test_native_admin_broker_readiness.py
+          tests/test_native_broker_client_resolution.py
+          tests/test_native_component_bootstrap_directory_modes.py
+          tests/test_native_package_runtime_bootstrap.py
+          tests/test_native_product_package_environment.py
+          tests/test_native_release_directory_modes.py
+          tests/test_native_runtime_schema_migration.py
+          tests/test_package_runtime_activity_catalog.py
+          tests/test_package_runtime_authority_probe.py
+          tests/test_package_runtime_bootstrap_transaction.py
+          tests/test_package_runtime_catalog.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -263,6 +297,19 @@ jobs:
           tests/test_native_deb_helper_python.py
           tests/test_native_admin_authorization.py tests/test_native_component_bootstrap.py
           tests/test_native_core_bootstrap.py
+          tests/test_component_catalog_linux22.py
+          tests/test_component_executable_files.py
+          tests/test_native_admin_broker_readiness.py
+          tests/test_native_broker_client_resolution.py
+          tests/test_native_component_bootstrap_directory_modes.py
+          tests/test_native_package_runtime_bootstrap.py
+          tests/test_native_product_package_environment.py
+          tests/test_native_release_directory_modes.py
+          tests/test_native_runtime_schema_migration.py
+          tests/test_package_runtime_activity_catalog.py
+          tests/test_package_runtime_authority_probe.py
+          tests/test_package_runtime_bootstrap_transaction.py
+          tests/test_package_runtime_catalog.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -279,6 +326,9 @@ jobs:
             packaging/python_runtime.py packaging/verified_service_artifacts.py \
             packaging/native_install_contract.py packaging/native_core_bootstrap.py \
             packaging/native_first_products.py \
+            packaging/native_component_bootstrap.py packaging/native_package_runtime_bootstrap.py \
+            packaging/native_runtime_schema_migration.py \
+            packaging/native_product_package_environment.py \
             scripts/native_installer_release.py \
             tooling/acceptance/native-components-v2/native_acceptance.py \
             tooling/acceptance/native-components-v2/admin_initialize.py \

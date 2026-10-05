@@ -24,10 +24,39 @@ CORE_COMPONENT_IDS = (
     "cyrene-sandboxd",
     "cyrene-kernel",
 )
+PACKAGE_RUNTIME_GROUP_ID = "package-runtime-native-v1"
+PACKAGE_RUNTIME_GROUP_COMPONENT_IDS = (
+    "cyrene-runtime-maintenance",
+    "cyrene-kernel",
+    "cy-package-runtime",
+)
+C10_FIRST_CORE_COMPONENT_IDS = (
+    "cyrene-linux-sys-adapter",
+    "cyrene-nvidia-adapter",
+    "cyrene-sandboxd",
+    "cyrene-runtime-maintenance",
+    "cyrene-kernel",
+    "cy-package-runtime",
+)
+_PACKAGE_RUNTIME_PROTOCOLS = {
+    "cyrene-runtime-maintenance": "cyrene.runtime-maintenance.broker.v1",
+    "cyrene-kernel": "cyrene.runtime-maintenance.state.v2",
+    "cy-package-runtime": "cy-package-runtime.control.v1",
+}
 CORE_BOOTSTRAP_MODE = "first-core"
 JOURNAL_NAME = "first-core-bootstrap.json"
-CORE_EXECUTABLE_NAMES = frozenset(
+LEGACY_CORE_EXECUTABLE_NAMES = frozenset(
     {"cyrene-linux-sys-adapter", "cyrene-nvidia-adapter", "cyrene-sandboxd", "cyrene-kernel"}
+)
+CORE_EXECUTABLE_NAMES = frozenset(
+    {
+        "cyrene-linux-sys-adapter",
+        "cyrene-nvidia-adapter",
+        "cyrene-sandboxd",
+        "cyrene-kernel",
+        "cyrene-runtime-maintenance",
+        "cy-package-runtime",
+    }
 )
 PROC_ROOT = Path("/proc")
 CORE_RUNTIME_ROOT = Path("/var/lib/cyrene/runtime")
@@ -115,6 +144,7 @@ def _rollback_pre_end(
             _first_products_module().rollback_pre_end(updater, plan, transaction)
     _stop_candidate_services(updater, components)
     _remove_candidate_pointers_and_units(updater, components)
+    _restore_initial_c10_broker(updater, transaction)
 
 
 def _read_private_json(path: Path) -> dict[str, Any] | None:
@@ -167,7 +197,11 @@ def _read_process_executable(exe_link: Path) -> tuple[str, str]:
     return target, name
 
 
-def _core_process_snapshot(proc_root: Path = PROC_ROOT) -> list[tuple[str, str]]:
+def _core_process_snapshot(
+    proc_root: Path = PROC_ROOT,
+    *,
+    executable_names: frozenset[str] = CORE_EXECUTABLE_NAMES,
+) -> list[tuple[str, str, str]]:
     """Inspect every process and retain exact executable paths for recovery checks."""
 
     if not proc_root.is_dir() or proc_root.is_symlink():
@@ -218,14 +252,254 @@ def _core_process_snapshot(proc_root: Path = PROC_ROOT) -> list[tuple[str, str]]
         for argument in command:
             if argument:
                 names.add(Path(os.fsdecode(argument)).name)
-        found.extend((name, executable_path) for name in sorted(names & CORE_EXECUTABLE_NAMES))
+        found.extend(
+            (name, executable_path, entry.name) for name in sorted(names & executable_names)
+        )
     return found
 
 
 def _core_processes(proc_root: Path = PROC_ROOT) -> list[str]:
     """Return legacy Core process names after validating the whole process table."""
 
-    return sorted({name for name, _ in _core_process_snapshot(proc_root)})
+    return sorted({name for name, _path, _pid in _core_process_snapshot(proc_root)})
+
+
+def _validate_package_runtime_group(updater: Any) -> dict[str, Any] | None:
+    """Validate the exact C10 group contract, or identify a legacy C9 catalog."""
+
+    groups = updater.catalog.get("compatibilityGroups", [])
+    if not isinstance(groups, list):
+        raise TypeError("Trusted compatibility group catalog is malformed")
+    matches = [
+        group
+        for group in groups
+        if isinstance(group, dict) and group.get("groupId") == PACKAGE_RUNTIME_GROUP_ID
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ValueError("Trusted Package Runtime compatibility group is ambiguous")
+    group = matches[0]
+    expected_members = [
+        {"componentId": component_id, "requiredForAdoption": True, "protocolVersion": protocol}
+        for component_id, protocol in _PACKAGE_RUNTIME_PROTOCOLS.items()
+    ]
+    if (
+        group.get("groupVersion") != "2"
+        or group.get("wireApiVersion") != "cyrene.runtime-maintenance.binding-operations.v1"
+        or group.get("contractApiVersion") != "0.1.0"
+        or group.get("members") != expected_members
+    ):
+        raise ValueError(
+            "Trusted Package Runtime compatibility group is not the fixed C10 contract"
+        )
+    for component_id, protocol in _PACKAGE_RUNTIME_PROTOCOLS.items():
+        component = updater.components.get(component_id)
+        if (
+            not isinstance(component, dict)
+            or component.get("compatibilityGroup") != PACKAGE_RUNTIME_GROUP_ID
+            or component.get("protocolVersion") != protocol
+        ):
+            raise ValueError(f"Trusted catalog has an incomplete C10 member: {component_id}")
+    return group
+
+
+def _catalog_core_component_ids(updater: Any) -> tuple[str, ...]:
+    """Select C9's fixed four or C10's complete six-component first-Core cohort."""
+
+    return (
+        C10_FIRST_CORE_COMPONENT_IDS
+        if _validate_package_runtime_group(updater) is not None
+        else CORE_COMPONENT_IDS
+    )
+
+
+def _component_cohort(
+    updater: Any, component_ids: set[str] | list[str] | tuple[str, ...]
+) -> tuple[str, ...]:
+    """Reject partial or mixed first-Core sets and return their fixed start order."""
+
+    actual = set(component_ids)
+    legacy = set(CORE_COMPONENT_IDS)
+    c10 = set(C10_FIRST_CORE_COMPONENT_IDS)
+    if actual == legacy:
+        if _validate_package_runtime_group(updater) is not None:
+            raise ValueError("C10 first-Core candidates must include every required group member")
+        return CORE_COMPONENT_IDS
+    if actual == c10:
+        _validate_package_runtime_group(updater)
+        return C10_FIRST_CORE_COMPONENT_IDS
+    raise ValueError("First-Core candidates are not an exact supported C9 or C10 cohort")
+
+
+def _validate_staged_cohort(updater: Any, components: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Bind staged C10 manifests to the trusted group pins before activation."""
+
+    cohort = _component_cohort(
+        updater, {item.get("componentId") for item in components if isinstance(item, dict)}
+    )
+    if cohort == CORE_COMPONENT_IDS:
+        return cohort
+    group = _validate_package_runtime_group(updater)
+    assert group is not None
+    for item in components:
+        component_id = item["componentId"]
+        if component_id not in _PACKAGE_RUNTIME_PROTOCOLS:
+            continue
+        manifest = item.get("manifest")
+        compatibility = manifest.get("compatibility") if isinstance(manifest, dict) else None
+        if (
+            manifest.get("schemaVersion") != 2
+            or manifest.get("protocolVersion") != _PACKAGE_RUNTIME_PROTOCOLS[component_id]
+            or not isinstance(compatibility, dict)
+            or compatibility.get("groupId") != PACKAGE_RUNTIME_GROUP_ID
+            or compatibility.get("groupVersion") != group["groupVersion"]
+            or compatibility.get("contractApiVersion") != group["contractApiVersion"]
+            or compatibility.get("wireApiVersion") != group["wireApiVersion"]
+            or compatibility.get("contractLock") != group.get("contractLock")
+        ):
+            raise ValueError(f"Staged C10 compatibility pins differ for {component_id}")
+    return cohort
+
+
+def _validate_c10_broker_manifest(updater: Any, installed: dict[str, Any]) -> dict[str, Any]:
+    """Require the current Broker's installed receipt to prove the exact C10 protocol."""
+
+    group = _validate_package_runtime_group(updater)
+    manifest = installed.get("manifest")
+    component_id = "cyrene-runtime-maintenance"
+    compatibility = manifest.get("compatibility") if isinstance(manifest, dict) else None
+    if (
+        group is None
+        or installed.get("active") is not True
+        or installed.get("identityAttested") is not True
+        or manifest.get("schemaVersion") != 2
+        or manifest.get("protocolVersion") != _PACKAGE_RUNTIME_PROTOCOLS[component_id]
+        or not isinstance(compatibility, dict)
+        or compatibility.get("groupId") != PACKAGE_RUNTIME_GROUP_ID
+        or compatibility.get("groupVersion") != group["groupVersion"]
+        or compatibility.get("contractApiVersion") != group["contractApiVersion"]
+        or compatibility.get("wireApiVersion") != group["wireApiVersion"]
+        or compatibility.get("contractLock") != group.get("contractLock")
+    ):
+        raise ValueError("Current maintenance Broker is not verified for the exact C10 contract")
+    pointer = installed.get("pointerIdentity")
+    expected_pointer = f"{manifest.get('version')}--{str(manifest.get('manifestDigest', '')).removeprefix('sha256:')}"
+    if (
+        not isinstance(pointer, str)
+        or pointer != expected_pointer
+        or installed.get("manifestDigest") != manifest.get("manifestDigest")
+        or not isinstance(installed.get("artifactDigest"), str)
+    ):
+        raise ValueError("Current maintenance Broker receipt does not match its active pointer")
+    return manifest
+
+
+def _verify_process_executable(
+    proc_root: Path, pid: str, expected: Path, *, description: str
+) -> None:
+    """Match one systemd PID to its exact live executable inode path."""
+
+    try:
+        process_path, _name = _read_process_executable(Path(proc_root) / pid / "exe")
+    except OSError as error:
+        raise RuntimeError(f"{description} process identity is unreadable") from error
+    if process_path.endswith(_DELETED_EXE_SUFFIX) or Path(process_path) != expected:
+        raise ValueError(f"{description} MainPID is not its signed executable")
+
+
+def _verified_running_c10_broker(updater: Any, proc_root: Path) -> dict[str, Any]:
+    """Prove the active signed C10 Broker is the sole permitted pre-Core process."""
+
+    component_id = "cyrene-runtime-maintenance"
+    component = updater.components[component_id]
+    installed = updater._installed(component)
+    manifest = _validate_c10_broker_manifest(updater, installed)
+    pointer = installed["pointerIdentity"]
+    receipt = updater._read_active_receipt(component_id)
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("manifest") != manifest
+        or receipt.get("manifestDigest") != installed["manifestDigest"]
+        or receipt.get("artifactDigest") != installed["artifactDigest"]
+        or updater._active_native_pointer_identity(component_id) != pointer
+    ):
+        raise ValueError("Current maintenance Broker active receipt is missing or inconsistent")
+
+    release = updater.install_root / "components" / component_id / "releases" / pointer
+    unit = component.get("systemdUnit")
+    unit_source = release / "systemd" / unit
+    if (
+        not isinstance(unit, str)
+        or component.get("restart", {}).get("unit") != unit
+        or unit_source.is_symlink()
+        or not unit_source.is_file()
+        or not updater._unit_uses_component_runner(unit_source, component_id)
+    ):
+        raise ValueError("Current maintenance Broker has no verified catalog unit")
+    unit_bytes = unit_source.read_bytes()
+    installed_units: dict[tuple[int, int, str], Path] = {}
+    for directory in updater.systemd_unit_dirs:
+        path = Path(directory) / unit
+        if not path.exists() and not path.is_symlink():
+            continue
+        info = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or path.read_bytes() != unit_bytes
+            or not updater._unit_uses_component_runner(path, component_id)
+        ):
+            raise ValueError("Current maintenance Broker unit differs from its signed release")
+        installed_units[(info.st_dev, info.st_ino, str(path.resolve(strict=True)))] = path
+    if len(installed_units) != 1:
+        raise ValueError("Current maintenance Broker unit is missing or ambiguous")
+
+    executable = _candidate_executable(
+        updater,
+        {
+            "componentId": component_id,
+            "version": manifest["version"],
+            "manifestDigest": manifest["manifestDigest"],
+            "manifest": manifest,
+        },
+    )
+    active = updater.runner(
+        ["systemctl", "show", "--property=ActiveState", "--value", unit],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    main_pid = updater.runner(
+        ["systemctl", "show", "--property=MainPID", "--value", unit],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    pid = main_pid.stdout.strip()
+    if (
+        active.returncode != 0
+        or active.stdout.strip() != "active"
+        or not pid.isdecimal()
+        or pid == "0"
+    ):
+        raise RuntimeError("Current maintenance Broker is not confirmed active")
+    _verify_process_executable(proc_root, pid, executable, description="Current maintenance Broker")
+    return {
+        "componentId": component_id,
+        "pointerIdentity": pointer,
+        "version": manifest["version"],
+        "manifestDigest": installed["manifestDigest"],
+        "artifactDigest": installed["artifactDigest"],
+        "systemdUnit": unit,
+        "mainPid": pid,
+        "executable": str(executable),
+    }
 
 
 def _assert_fresh(
@@ -234,12 +508,37 @@ def _assert_fresh(
     proc_root: Path = PROC_ROOT,
     planned_components: list[dict[str, Any]] | None = None,
     require_empty_kernel_state: bool = True,
-) -> None:
+    expected_bootstrap_broker: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Require a genuine empty first install; never take over old Core state."""
 
     planned = {item["componentId"]: item for item in planned_components or []}
-    expected_executables: set[str] = set()
-    for component_id in CORE_COMPONENT_IDS:
+    planned_executables: dict[str, dict[str, Any]] = {}
+    cohort = _catalog_core_component_ids(updater)
+    current_broker = (
+        _verified_running_c10_broker(updater, proc_root)
+        if cohort == C10_FIRST_CORE_COMPONENT_IDS
+        else None
+    )
+    if (
+        current_broker is not None
+        and expected_bootstrap_broker is not None
+        and current_broker != expected_bootstrap_broker
+    ):
+        candidate = next(
+            (
+                item
+                for item in planned_components or []
+                if item.get("componentId") == "cyrene-runtime-maintenance"
+            ),
+            None,
+        )
+        if candidate is None or (
+            current_broker.get("pointerIdentity")
+            != f"{candidate['version']}--{candidate['manifestDigest'].removeprefix('sha256:')}"
+        ):
+            raise ValueError("Current C10 Broker differs from the checked first-Core identity")
+    for component_id in cohort:
         component = updater.components.get(component_id)
         if not isinstance(component, dict):
             raise TypeError(f"Trusted catalog omits Core component {component_id}")
@@ -252,20 +551,27 @@ def _assert_fresh(
             entrypoint = item.get("manifest", {}).get("artifact", {}).get("entrypoint")
             if not isinstance(entrypoint, str):
                 raise ValueError("Staged Core entrypoint identity is incomplete")
-            expected_executables.add(
-                str(
-                    (
-                        updater.install_root
-                        / "components"
-                        / component_id
-                        / "releases"
-                        / expected_pointer
-                        / entrypoint
-                    ).resolve()
-                )
+            executable_path = str(
+                (
+                    updater.install_root
+                    / "components"
+                    / component_id
+                    / "releases"
+                    / expected_pointer
+                    / entrypoint
+                ).resolve()
             )
+            planned_executables[executable_path] = item
         current = updater._active_native_pointer_identity(component_id)
-        if current is not None and current != expected_pointer:
+        if (
+            current is not None
+            and current != expected_pointer
+            and not (
+                component_id == "cyrene-runtime-maintenance"
+                and current_broker is not None
+                and current == current_broker["pointerIdentity"]
+            )
+        ):
             raise ValueError(
                 f"Core component {component_id} already has an unrelated active pointer"
             )
@@ -275,6 +581,8 @@ def _assert_fresh(
         for directory in updater.systemd_unit_dirs:
             path = Path(directory) / unit
             if path.exists() or path.is_symlink():
+                if component_id == "cyrene-runtime-maintenance" and current_broker is not None:
+                    continue
                 if item is None:
                     raise ValueError(f"Existing Core unit blocks first install: {unit}")
                 release = (
@@ -324,9 +632,43 @@ def _assert_fresh(
                 raise ValueError(
                     f"Existing Core runtime ownership path blocks first install: {relative}"
                 )
-    processes = _core_process_snapshot(proc_root)
-    if any(executable not in expected_executables for _, executable in processes):
-        raise ValueError("Legacy or manually started Core process blocks first install")
+    process_names = (
+        CORE_EXECUTABLE_NAMES
+        if cohort == C10_FIRST_CORE_COMPONENT_IDS
+        else LEGACY_CORE_EXECUTABLE_NAMES
+    )
+    processes = _core_process_snapshot(proc_root, executable_names=process_names)
+    for _name, executable, pid in processes:
+        if current_broker is not None and (
+            pid == current_broker["mainPid"] and executable == current_broker["executable"]
+        ):
+            continue
+        item = planned_executables.get(executable)
+        if item is None:
+            raise ValueError("Legacy or manually started Core process blocks first install")
+        component = updater.components[item["componentId"]]
+        unit = component["systemdUnit"]
+        main_pid = updater.runner(
+            ["systemctl", "show", "--property=MainPID", "--value", unit],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        state = updater.runner(
+            ["systemctl", "show", "--property=ActiveState", "--value", unit],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if (
+            main_pid.returncode != 0
+            or state.returncode != 0
+            or main_pid.stdout.strip() != pid
+            or state.stdout.strip() != "active"
+        ):
+            raise ValueError("A planned Core executable is not owned by its exact active unit")
     try:
         gpu = updater.runner(
             ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
@@ -343,6 +685,7 @@ def _assert_fresh(
         raise RuntimeError("GPU resource inventory failed; first-Core eligibility is UNKNOWN")
     if gpu.stdout.strip():
         raise ValueError("Existing GPU compute resources block first-Core installation")
+    return current_broker
 
 
 def _health_snapshot(updater: Any, *, require_eligible: bool = True) -> dict[str, Any]:
@@ -360,6 +703,16 @@ def _health_snapshot(updater: Any, *, require_eligible: bool = True) -> dict[str
         raise TypeError("Platform did not expose a known first-Core eligibility state")
     if require_eligible and not eligible:
         raise RuntimeError("Platform does not confirm a fresh first-Core bootstrap state")
+    if _validate_package_runtime_group(updater) is not None:
+        capabilities = result.get("capabilities")
+        if (
+            result.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
+            or not isinstance(capabilities, list)
+            or any(not isinstance(value, str) or not value for value in capabilities)
+            or len(capabilities) != len(set(capabilities))
+            or "cyrene.runtime-maintenance.state.v2" not in capabilities
+        ):
+            raise RuntimeError("Current Broker Health does not prove the C10 state-v2 contract")
     activity_catalog, sources = updater._activity_catalog()
     if activity_catalog["generation"] != result["catalog_generation"]:
         raise RuntimeError("Broker and installed activity catalog generations differ")
@@ -426,6 +779,30 @@ def _load_plan(updater: Any, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
         )
     if not callable(canonical):
         raise TypeError("Trusted plan canonicalization is unavailable")
+    bootstrap_broker = None
+    if "bootstrapBroker" in value:
+        broker = value["bootstrapBroker"]
+        if (
+            not isinstance(broker, dict)
+            or set(broker)
+            != {
+                "componentId",
+                "pointerIdentity",
+                "version",
+                "manifestDigest",
+                "artifactDigest",
+                "systemdUnit",
+                "mainPid",
+                "executable",
+            }
+            or broker.get("componentId") != "cyrene-runtime-maintenance"
+            or not isinstance(broker.get("mainPid"), str)
+            or not broker["mainPid"].isdecimal()
+            or broker["mainPid"] == "0"
+            or not isinstance(broker.get("executable"), str)
+        ):
+            raise ValueError("First-Core Broker identity block is malformed")
+        bootstrap_broker = broker
     include_products = value.get("includeProducts", False)
     if not isinstance(include_products, bool):
         raise TypeError("First-Core includeProducts plan field is not a boolean")
@@ -446,6 +823,8 @@ def _load_plan(updater: Any, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
             "components",
         )
     }
+    if bootstrap_broker is not None:
+        material["bootstrapBroker"] = bootstrap_broker
     # Accept Core-only plans written before the explicit Product opt-in field.
     if "includeProducts" in value:
         material["includeProducts"] = include_products
@@ -480,20 +859,22 @@ def check(
     updater._ensure_state_root()
     if not isinstance(include_products, bool):
         raise TypeError("includeProducts must be a boolean")
-    _assert_fresh(updater, proc_root=proc_root)
+    bootstrap_broker = _assert_fresh(updater, proc_root=proc_root)
     snapshot = _health_snapshot(updater)
     checked = updater.check(list(CORE_COMPONENT_IDS), channel=channel, include_readiness=False)
     normal = checked.get("plan")
     if not isinstance(normal, dict):
         raise TypeError("Trusted release index did not produce a complete Core cohort")
     items = normal.get("components")
-    if not isinstance(items, list) or {item.get("componentId") for item in items} != set(
-        CORE_COMPONENT_IDS
-    ):
-        raise ValueError("Trusted release index did not produce exactly the four Core components")
+    if not isinstance(items, list):
+        raise TypeError("Trusted release index did not produce a component cohort")
+    cohort = _component_cohort(
+        updater, {item.get("componentId") for item in items if isinstance(item, dict)}
+    )
+    if cohort != _catalog_core_component_ids(updater):
+        raise ValueError("Release candidates do not match the trusted first-Core cohort")
     targets = {
-        updater._target_for(updater.components[component_id]).get("id")
-        for component_id in CORE_COMPONENT_IDS
+        updater._target_for(updater.components[component_id]).get("id") for component_id in cohort
     }
     if len(targets) != 1 or None in targets:
         raise ValueError("Core artifacts do not share one supported native target")
@@ -511,6 +892,8 @@ def check(
         "components": sorted(items, key=lambda item: item["componentId"]),
         "includeProducts": include_products,
     }
+    if bootstrap_broker is not None:
+        material["bootstrapBroker"] = bootstrap_broker
     if include_products:
         if not isinstance(first_products, dict) or first_products.get("schemaVersion") != 1:
             raise TypeError("First-Product helper returned an invalid immutable identity block")
@@ -551,6 +934,10 @@ def stage(updater: Any, plan_id: Any, plan_digest: Any, *, channel: Any = None) 
     """Stage every exact signed candidate while allowing runtime readiness UNKNOWN."""
 
     plan = _load_plan(updater, plan_id, plan_digest)
+    if "bootstrapBroker" in plan:
+        current_broker = _verified_running_c10_broker(updater, PROC_ROOT)
+        if current_broker != plan["bootstrapBroker"]:
+            raise ValueError("The verified C10 Broker changed after the first-Core check")
     snapshot = _health_snapshot(updater, require_eligible=False)
     if any(
         plan.get(key) != value
@@ -572,6 +959,7 @@ def stage(updater: Any, plan_id: Any, plan_digest: Any, *, channel: Any = None) 
     }
     if digests != plan["componentArtifactDigests"]:
         raise ValueError("Staged Core artifact digests differ from the confirmed plan")
+    _validate_staged_cohort(updater, record.get("components", []))
     first_products_stage = None
     if plan.get("includeProducts") is True:
         base_plan = _base_plan(updater, plan["basePlanId"], plan["basePlanDigest"])
@@ -671,15 +1059,44 @@ def _require_core_ready(updater: Any, plan: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _require_c10_package_runtime_ready(updater: Any, plan: dict[str, Any]) -> dict[str, Any]:
+    """Require source-authenticated Package Runtime authority before C10 gate release."""
+
+    if _component_cohort(updater, {item["componentId"] for item in plan["components"]}) != (
+        C10_FIRST_CORE_COMPONENT_IDS
+    ):
+        return {}
+    catalog, sources = updater._activity_catalog()
+    if catalog.get("generation") != plan["catalogGeneration"] or sources != plan["activitySources"]:
+        raise RuntimeError("Activity source identity changed before C10 readiness proof")
+    helper = updater._load_native_package_runtime_bootstrap()
+    try:
+        result = helper.probe_runtime_authority(
+            catalog, expected_catalog_generation=plan["catalogGeneration"]
+        )
+    except Exception as error:
+        raise RuntimeError(
+            "Package Runtime source-authenticated authority readiness is unavailable"
+        ) from error
+    expected = {
+        "authority": "platform_package_runtime",
+        "protocol_version": "cy-package-runtime.control.v1",
+        "catalog_generation": plan["catalogGeneration"],
+        "capabilities": ["cy-package-runtime.binding-operation-admission.v1"],
+    }
+    if result != expected:
+        raise RuntimeError("Package Runtime authority identity differs from the C10 contract")
+    return result
+
+
 def _verify_live_core_cohort(
     updater: Any, transaction: dict[str, Any], plan: dict[str, Any]
 ) -> None:
     """Prove all four exact staged releases are active and their units are healthy."""
 
-    if {item.get("componentId") for item in transaction.get("components", [])} != set(
-        CORE_COMPONENT_IDS
-    ):
-        raise RuntimeError("Bootstrap journal no longer contains the exact four-component cohort")
+    cohort = _validate_staged_cohort(updater, transaction.get("components", []))
+    if {item.get("componentId") for item in plan.get("components", [])} != set(cohort):
+        raise RuntimeError("Bootstrap plan and journal no longer contain the same exact cohort")
     for item in transaction["components"]:
         component_id = item["componentId"]
         pointer = f"{item['version']}--{item['manifestDigest'].removeprefix('sha256:')}"
@@ -718,6 +1135,7 @@ def _verify_live_core_cohort(
         or snapshot["activitySources"] != sources
     ):
         raise RuntimeError("Platform activity catalog changed while the Core hold is active")
+    _require_c10_package_runtime_ready(updater, plan)
 
 
 def _verify_started_processes(updater: Any, components: list[dict[str, Any]]) -> None:
@@ -777,11 +1195,9 @@ def _verify_candidate_pid(updater: Any, item: dict[str, Any], pid: str) -> None:
 def _stop_candidate_services(updater: Any, components: list[dict[str, Any]]) -> None:
     """Stop only exact plan-owned unit PIDs, in reverse dependency order."""
 
-    ordered = sorted(
-        components,
-        key=lambda item: updater.components[item["componentId"]]["restart"]["order"],
-        reverse=True,
-    )
+    cohort = _validate_staged_cohort(updater, components)
+    order = {component_id: index for index, component_id in enumerate(cohort)}
+    ordered = sorted(components, key=lambda item: order[item["componentId"]], reverse=True)
     for item in ordered:
         unit = updater.components[item["componentId"]]["systemdUnit"]
         completed = updater.runner(
@@ -816,21 +1232,245 @@ def _stop_candidate_services(updater: Any, components: list[dict[str, Any]]) -> 
             raise RuntimeError(f"Owned candidate unit {unit} did not stop; keep the hold and files")
 
 
-def _activate_core_cohort(updater: Any, transaction: dict[str, Any]) -> None:
-    """Activate only the four plan-bound pointers, resuming exact partial work."""
+def _remove_verified_broker_units(
+    updater: Any, manifest: dict[str, Any], *, allow_missing: bool = False
+) -> None:
+    """Remove only installed unit files matching the active signed Broker release."""
 
+    component_id = "cyrene-runtime-maintenance"
+    component = updater.components[component_id]
+    unit = component["systemdUnit"]
+    pointer = f"{manifest['version']}--{manifest['manifestDigest'].removeprefix('sha256:')}"
+    source = updater.install_root / "components" / component_id / "releases" / pointer
+    expected = source / "systemd" / unit
+    if expected.is_symlink() or not expected.is_file():
+        raise ValueError("Signed maintenance Broker release unit is unavailable")
+    expected_bytes = expected.read_bytes()
+    removed: set[tuple[int, int, str]] = set()
+    for directory in updater.systemd_unit_dirs:
+        path = Path(directory) / unit
+        if not path.exists() and not path.is_symlink():
+            continue
+        info = path.lstat()
+        if path.is_symlink():
+            raise ValueError("Refusing to remove a symlinked maintenance Broker unit")
+        identity = (info.st_dev, info.st_ino, str(path.resolve(strict=True)))
+        if identity in removed:
+            continue
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or path.read_bytes() != expected_bytes
+            or not updater._unit_uses_component_runner(path, component_id)
+        ):
+            raise ValueError("Refusing to remove a Broker unit outside its signed release")
+        path.unlink()
+        updater._fsync_directory(path.parent)
+        removed.add(identity)
+    if not removed and not allow_missing:
+        raise ValueError("Signed maintenance Broker unit disappeared before replacement")
+
+
+def _stop_initial_c10_broker(updater: Any, transaction: dict[str, Any], journal_path: Path) -> None:
+    """Stop the verified authority Broker only after its hold token is journaled."""
+
+    original = transaction.get("bootstrapBroker")
+    if not isinstance(original, dict):
+        return
+    component_id = "cyrene-runtime-maintenance"
+    component = updater.components[component_id]
+    candidate = next(
+        item for item in transaction["components"] if item["componentId"] == component_id
+    )
+    candidate_pointer = (
+        f"{candidate['version']}--{candidate['manifestDigest'].removeprefix('sha256:')}"
+    )
+    current_pointer = updater._active_native_pointer_identity(component_id)
+    if current_pointer == candidate_pointer:
+        return
+    if current_pointer != original.get("pointerIdentity"):
+        raise ValueError("Maintenance Broker pointer changed outside this first-Core plan")
+    installed = updater._installed(component)
+    manifest = _validate_c10_broker_manifest(updater, installed)
+    if (
+        installed.get("pointerIdentity") != original.get("pointerIdentity")
+        or manifest.get("manifestDigest") != original.get("manifestDigest")
+        or installed.get("artifactDigest") != original.get("artifactDigest")
+    ):
+        raise ValueError("Initial C10 Broker no longer matches the checked signed identity")
+
+    phase = transaction.get("brokerRestartPhase")
+    if phase != "stopped":
+        if phase is None:
+            transaction["brokerRestartPhase"] = "stop_pending"
+            _write_private_json(updater, journal_path, transaction)
+        if phase != "stop_pending" and phase is not None:
+            raise ValueError("C10 Broker restart journal phase is unknown; keep the hold closed")
+        state = updater.runner(
+            ["systemctl", "show", "--property=MainPID", "--value", component["systemdUnit"]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if state.returncode != 0 or not state.stdout.strip().isdecimal():
+            raise RuntimeError("Cannot prove the current maintenance Broker PID")
+        pid = state.stdout.strip()
+        if pid != "0":
+            current = _verified_running_c10_broker(updater, PROC_ROOT)
+            if current != original:
+                raise ValueError(
+                    "Running maintenance Broker differs from its checked process identity"
+                )
+            updater._run_systemctl("stop", component["systemdUnit"])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            state = updater.runner(
+                ["systemctl", "show", "--property=MainPID", "--value", component["systemdUnit"]],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            active = updater.runner(
+                [
+                    "systemctl",
+                    "show",
+                    "--property=ActiveState",
+                    "--value",
+                    component["systemdUnit"],
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if (
+                state.returncode == 0
+                and state.stdout.strip() == "0"
+                and active.returncode == 0
+                and active.stdout.strip() == "inactive"
+            ):
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("Initial maintenance Broker did not stop under the held plan")
+        remaining = _core_process_snapshot(PROC_ROOT, executable_names=frozenset({component_id}))
+        if remaining:
+            raise RuntimeError("Maintenance Broker process remains after its unit stopped")
+        _remove_verified_broker_units(updater, manifest, allow_missing=phase == "stop_pending")
+        transaction["brokerRestartPhase"] = "stopped"
+        _write_private_json(updater, journal_path, transaction)
+    else:
+        state = updater.runner(
+            ["systemctl", "show", "--property=MainPID", "--value", component["systemdUnit"]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        active = updater.runner(
+            ["systemctl", "show", "--property=ActiveState", "--value", component["systemdUnit"]],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        candidate_release = (
+            updater.install_root / "components" / component_id / "releases" / candidate_pointer
+        )
+        candidate_unit = candidate_release / "systemd" / component["systemdUnit"]
+        if candidate_unit.is_symlink() or not candidate_unit.is_file():
+            raise ValueError("Staged C10 Broker unit is unavailable during restart recovery")
+        unit_paths = [
+            Path(directory) / component["systemdUnit"] for directory in updater.systemd_unit_dirs
+        ]
+        if (
+            state.returncode != 0
+            or state.stdout.strip() != "0"
+            or active.returncode != 0
+            or active.stdout.strip() != "inactive"
+            or any(
+                path.is_symlink()
+                or (path.exists() and path.read_bytes() != candidate_unit.read_bytes())
+                for path in unit_paths
+            )
+        ):
+            raise RuntimeError("Journaled C10 Broker stop state no longer matches the host")
+
+
+def _restore_initial_c10_broker(updater: Any, transaction: dict[str, Any]) -> None:
+    """Restore the exact signed authority Broker while preserving the closed hold."""
+
+    original = transaction.get("bootstrapBroker")
+    if not isinstance(original, dict):
+        return
+    component_id = "cyrene-runtime-maintenance"
+    component = updater.components[component_id]
+    prior = next(item for item in transaction["previous"] if item["componentId"] == component_id)
+    pointer = original["pointerIdentity"]
+    current = updater._active_native_pointer_identity(component_id)
+    if current != pointer:
+        candidate_pointer = next(
+            item["version"] + "--" + item["manifestDigest"].removeprefix("sha256:")
+            for item in transaction["components"]
+            if item["componentId"] == component_id
+        )
+        if current not in {None, candidate_pointer}:
+            raise ValueError(
+                "Cannot restore the original C10 Broker over an unknown active pointer"
+            )
+        updater._activate_native(component_id, pointer, expected_current=current)
+    updater._restore_active_receipt(component_id, prior)
+    receipt = updater._read_release_receipt(component_id, prior["releaseIdentity"])
+    if not isinstance(receipt, dict) or receipt.get("manifestDigest") != original["manifestDigest"]:
+        raise ValueError("Original C10 Broker receipt is unavailable for restoration")
+    manifest = receipt["manifest"]
+    release = updater.install_root / "components" / component_id / "releases" / pointer
+    _remove_verified_broker_units(updater, manifest, allow_missing=True)
+    _write_unit(updater, component, release)
+    updater.runner(
+        ["systemctl", "daemon-reload"], capture_output=True, text=True, timeout=30, check=False
+    )
+    updater._run_systemctl("start", component["systemdUnit"])
+    updater._wait_unit_active(component["systemdUnit"])
+    _verify_started_processes(
+        updater,
+        [
+            {
+                "componentId": component_id,
+                "version": manifest["version"],
+                "manifestDigest": manifest["manifestDigest"],
+                "manifest": manifest,
+            }
+        ],
+    )
+
+
+def _activate_core_cohort(updater: Any, transaction: dict[str, Any]) -> None:
+    """Activate only plan-bound pointers, including the exact initial Broker update."""
+
+    previous_by_id = {entry["componentId"]: entry for entry in transaction["previous"]}
+    initial_broker = transaction.get("bootstrapBroker")
     for item in transaction["components"]:
         component_id = item["componentId"]
         pointer = f"{item['version']}--{item['manifestDigest'].removeprefix('sha256:')}"
         current = updater._active_native_pointer_identity(component_id)
-        if current not in {None, pointer}:
+        previous = previous_by_id[component_id]
+        allowed_previous_broker = (
+            component_id == "cyrene-runtime-maintenance"
+            and isinstance(initial_broker, dict)
+            and current == initial_broker.get("pointerIdentity")
+            and previous.get("pointerIdentity") == current
+            and previous.get("identityAttested") is True
+        )
+        if current not in {None, pointer} and not allowed_previous_broker:
             raise ValueError(
                 f"Core pointer changed outside this bootstrap transaction: {component_id}"
             )
-        if current is None:
-            previous = next(
-                entry for entry in transaction["previous"] if entry["componentId"] == component_id
-            )
+        if current is None or allowed_previous_broker:
             updater._activate_transaction(
                 {**transaction, "components": [item], "previous": [previous]}
             )
@@ -839,13 +1479,11 @@ def _activate_core_cohort(updater: Any, transaction: dict[str, Any]) -> None:
 
 
 def _start_core_components(updater: Any, components: list[dict[str, Any]]) -> None:
-    """Start only the exact four new Core units in catalog order."""
+    """Start the exact legacy or C10 first-Core cohort in its fixed dependency order."""
 
-    ordered = sorted(
-        components, key=lambda item: updater.components[item["componentId"]]["restart"]["order"]
-    )
-    if [item["componentId"] for item in ordered] != list(CORE_COMPONENT_IDS):
-        raise ValueError("Core catalog start order differs from the fixed first-Core cohort")
+    cohort = _validate_staged_cohort(updater, components)
+    by_id = {item["componentId"]: item for item in components}
+    ordered = [by_id[component_id] for component_id in cohort]
     for item in ordered:
         unit = updater.components[item["componentId"]]["systemdUnit"]
         updater._run_systemctl("start", unit)
@@ -904,6 +1542,8 @@ def apply(
     if plan.get("includeProducts") is True:
         expected_confirmation["includeProducts"] = True
         expected_confirmation["firstProducts"] = plan["firstProducts"]
+    if "bootstrapBroker" in plan:
+        expected_confirmation["bootstrapBroker"] = plan["bootstrapBroker"]
     if confirmation != expected_confirmation:
         raise ValueError(
             "Apply confirmation must bind the exact first-Core plan and full artifact cohort"
@@ -940,6 +1580,9 @@ def apply(
             expected_plan_digest=plan["basePlanDigest"],
         )
         components = base_record["components"]
+        cohort = _validate_staged_cohort(updater, components)
+        if {item.get("componentId") for item in plan["components"]} != set(cohort):
+            raise ValueError("Staged component cohort differs from the confirmed first-Core plan")
         transaction = {
             "schemaVersion": 1,
             "requestId": plan["requestId"],
@@ -950,6 +1593,7 @@ def apply(
             "expectedCatalogGeneration": plan["catalogGeneration"],
             "expectedActivitySources": plan["activitySources"],
             "componentArtifactDigests": plan["componentArtifactDigests"],
+            **({"bootstrapBroker": plan["bootstrapBroker"]} if "bootstrapBroker" in plan else {}),
             "includeProducts": plan.get("includeProducts", False),
             **(
                 {
@@ -998,6 +1642,7 @@ def apply(
                 "expectedCatalogGeneration",
                 "expectedActivitySources",
                 "componentArtifactDigests",
+                "bootstrapBroker",
                 "beginRequest",
                 "components",
             ):
@@ -1063,10 +1708,20 @@ def apply(
                     "planDigest": plan_digest,
                     "postEndReadiness": existing["postEndReadiness"],
                 }
-            if any(
-                item.get("pointerIdentity") is not None for item in existing.get("previous", [])
-            ):
-                raise ValueError("First-Core journal records an old Core pointer")
+            initial_broker = existing.get("bootstrapBroker")
+            unexpected_previous = [
+                item
+                for item in existing.get("previous", [])
+                if item.get("pointerIdentity") is not None
+                and not (
+                    item.get("componentId") == "cyrene-runtime-maintenance"
+                    and isinstance(initial_broker, dict)
+                    and item.get("pointerIdentity") == initial_broker.get("pointerIdentity")
+                    and item.get("identityAttested") is True
+                )
+            ]
+            if unexpected_previous:
+                raise ValueError("First-Core journal records an unrelated old Core pointer")
             if not isinstance(existing.get("maintenanceToken"), str) and existing.get(
                 "phase"
             ) not in {"begin_pending", "end_confirmed"}:
@@ -1085,9 +1740,17 @@ def apply(
                 else None,
                 require_empty_kernel_state=existing is None
                 or existing.get("phase") == "begin_pending",
+                expected_bootstrap_broker=plan.get("bootstrapBroker"),
             )
         if existing is None:
             _write_private_json(updater, journal_path, transaction)
+            fresh_snapshot = _health_snapshot(updater)
+            if (
+                fresh_snapshot["gateGeneration"] != plan["gateGeneration"]
+                or fresh_snapshot["catalogGeneration"] != plan["catalogGeneration"]
+                or fresh_snapshot["activitySources"] != plan["activitySources"]
+            ):
+                raise RuntimeError("Fresh C10 Broker Health changed after first-Core confirmation")
         if transaction.get("phase") == "succeeded":
             return {"status": "installed", "planId": plan_id, "planDigest": plan_digest}
         if transaction.get("phase") == "begin_pending":
@@ -1107,6 +1770,7 @@ def apply(
             ):
                 raise RuntimeError("Platform did not confirm a durable closed first-Core hold")
             transaction["maintenanceToken"] = response["maintenance_token"]
+            transaction["maintenanceGateGeneration"] = response["gate_generation"]
             transaction["phase"] = "held"
             _write_private_json(updater, journal_path, transaction)
         if transaction.get("phase") not in {
@@ -1129,6 +1793,13 @@ def apply(
                 transaction["phase"] = "installing"
                 _write_private_json(updater, journal_path, transaction)
             if transaction["phase"] == "installing":
+                _assert_fresh(
+                    updater,
+                    proc_root=proc_root,
+                    planned_components=components,
+                    expected_bootstrap_broker=plan.get("bootstrapBroker"),
+                )
+                _stop_initial_c10_broker(updater, transaction, journal_path)
                 for item in components:
                     component = updater.components[item["componentId"]]
                     pointer = f"{item['version']}--{item['manifestDigest'].removeprefix('sha256:')}"
@@ -1258,7 +1929,7 @@ def apply(
             "status": "installed",
             "planId": plan_id,
             "planDigest": plan_digest,
-            "components": list(CORE_COMPONENT_IDS),
+            "components": list(cohort),
             "postEndReadiness": transaction["postEndReadiness"],
         }
 

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 9,
+  "generation": 10,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -325,7 +325,9 @@
           "componentId": "cyrene-sandboxd"
         }
       ],
-      "systemdUnit": "cyrene-kernel.service"
+      "systemdUnit": "cyrene-kernel.service",
+      "compatibilityGroup": "package-runtime-native-v1",
+      "protocolVersion": "cyrene.runtime-maintenance.state.v2"
     },
     {
       "componentId": "cy-node-agent",
@@ -428,12 +430,7 @@
         "group": "single-service",
         "unit": "cy-workspace-relay.service"
       },
-      "dependencies": [
-        {
-          "componentId": "cyrene-kernel",
-          "versionRange": ">=0.1.0, <0.2.0"
-        }
-      ],
+      "dependencies": [],
       "systemdUnit": "cy-workspace-relay.service",
       "compatibilityGroup": "workspace-product-v2",
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-plugins-official/cyrene-workspace-relay",
@@ -483,12 +480,7 @@
         "group": "single-service",
         "unit": "cy-workspace-connector.service"
       },
-      "dependencies": [
-        {
-          "componentId": "cyrene-kernel",
-          "versionRange": ">=0.1.0, <0.2.0"
-        }
-      ],
+      "dependencies": [],
       "systemdUnit": "cy-workspace-connector.service",
       "compatibilityGroup": "workspace-product-v2",
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-plugins-official/cyrene-workspace-connector",
@@ -576,12 +568,7 @@
         "group": "single-service",
         "unit": "cy-workspace-web-bff.service"
       },
-      "dependencies": [
-        {
-          "componentId": "cyrene-kernel",
-          "versionRange": ">=0.1.0, <0.2.0"
-        }
-      ],
+      "dependencies": [],
       "systemdUnit": "cy-workspace-web-bff.service",
       "compatibilityGroup": "workspace-product-v2",
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-workspace-web-bff"
@@ -627,7 +614,42 @@
       },
       "dependencies": [],
       "systemdUnit": "cyrene-runtime-maintenance.service",
-      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-runtime-maintenance"
+      "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-runtime-maintenance",
+      "compatibilityGroup": "package-runtime-native-v1",
+      "protocolVersion": "cyrene.runtime-maintenance.broker.v1"
+    },
+    {
+      "componentId": "cy-package-runtime",
+      "kind": "native-binary",
+      "publisher": "DoHorizon-AI/Cyrene-Platform",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        },
+        {
+          "targetId": "linux-ubuntu-22.04-x86_64-systemd",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-package-runtime.service"
+      },
+      "dependencies": [
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "systemdUnit": "cyrene-package-runtime.service",
+      "compatibilityGroup": "package-runtime-native-v1",
+      "protocolVersion": "cy-package-runtime.control.v1"
     },
     {
       "componentId": "cyrene-navigator",
@@ -1068,6 +1090,35 @@
           "componentId": "cyrene-product-contract-bundle",
           "requiredForAdoption": false,
           "protocolVersion": "cyrene.workspace.product.v2"
+        }
+      ]
+    },
+    {
+      "groupId": "package-runtime-native-v1",
+      "groupVersion": "2",
+      "contractApiVersion": "0.1.0",
+      "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+      "contractLock": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "commit": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
+        "path": "governance/package-runtime-protocols-v1.lock.json",
+        "sha256": "sha256:fcfb13fe19fa2db8055c318c903f00e4f65a1d2e4c33700e44b08e694612a267"
+      },
+      "members": [
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "requiredForAdoption": true,
+          "protocolVersion": "cyrene.runtime-maintenance.broker.v1"
+        },
+        {
+          "componentId": "cyrene-kernel",
+          "requiredForAdoption": true,
+          "protocolVersion": "cyrene.runtime-maintenance.state.v2"
+        },
+        {
+          "componentId": "cy-package-runtime",
+          "requiredForAdoption": true,
+          "protocolVersion": "cy-package-runtime.control.v1"
         }
       ]
     }

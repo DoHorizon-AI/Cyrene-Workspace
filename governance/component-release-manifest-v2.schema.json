@@ -228,6 +228,14 @@
         "entrypoint": {
           "$ref": "#/$defs/relativePath"
         },
+        "executableFiles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/relativePath"
+          }
+        },
         "arguments": {
           "type": "array",
           "items": {

@@ -118,7 +118,7 @@ def test_workspace_bootstrap_uses_the_compiled_catalog_authority_pin(tmp_path: P
     )
 
     assert updater.bootstrap_catalog_digest == updates.TRUSTED_CATALOG_DIGEST
-    assert updater.catalog_generation == 9
+    assert updater.catalog_generation == 10
 
 
 @pytest.mark.parametrize(

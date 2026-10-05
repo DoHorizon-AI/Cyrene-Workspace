@@ -48,7 +48,7 @@ def test_catalog_validates_against_catalog_and_manifest_schemas() -> None:
         CATALOG_PATH.read_bytes(), WORKSPACE_ROOT / "governance"
     )
 
-    assert validated["generation"] == 9
+    assert validated["generation"] == 10
 
 
 def test_generation9_schema_requires_the_ubuntu22_target_for_each_product() -> None:
@@ -109,7 +109,7 @@ def test_ubuntu22_python_target_is_supported_only_by_the_five_products() -> None
     components = _component_map(catalog)
     targets = {target["id"]: target for target in catalog["targets"]}
 
-    assert catalog["generation"] == 9
+    assert catalog["generation"] == 10
     assert targets[TARGET_ID] == {
         "id": TARGET_ID,
         "target": {

@@ -150,6 +150,14 @@ def test_missing_signed_input_is_rejected_without_network_or_state_change(tmp_pa
         )
 
 
+def test_control_preflight_pin_matches_the_canonical_c10_catalog() -> None:
+    catalog = WORKSPACE_ROOT / "packaging/component-catalog-bootstrap-v1.json"
+    expected = "sha256:" + hashlib.sha256(catalog.read_bytes()).hexdigest()
+
+    assert control.TRUSTED_CATALOG_DIGEST == expected
+    assert control.TRUSTED_CATALOG_DIGEST == control._load_updater().TRUSTED_CATALOG_DIGEST
+
+
 def test_wrong_catalog_digest_and_wrong_control_platform_are_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
