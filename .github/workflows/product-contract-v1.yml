@@ -224,6 +224,7 @@ jobs:
           tests/test_package_runtime_authority_probe.py
           tests/test_package_runtime_bootstrap_transaction.py
           tests/test_package_runtime_catalog.py
+          tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -275,6 +276,7 @@ jobs:
           tests/test_package_runtime_authority_probe.py
           tests/test_package_runtime_bootstrap_transaction.py
           tests/test_package_runtime_catalog.py
+          tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py
@@ -310,6 +312,7 @@ jobs:
           tests/test_package_runtime_authority_probe.py
           tests/test_package_runtime_bootstrap_transaction.py
           tests/test_package_runtime_catalog.py
+          tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
           tests/test_native_sidecar_invocation.py

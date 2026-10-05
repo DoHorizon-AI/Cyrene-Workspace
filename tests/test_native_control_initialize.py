@@ -150,7 +150,7 @@ def test_missing_signed_input_is_rejected_without_network_or_state_change(tmp_pa
         )
 
 
-def test_control_preflight_pin_matches_the_canonical_c10_catalog() -> None:
+def test_control_preflight_pin_matches_the_canonical_c11_catalog() -> None:
     catalog = WORKSPACE_ROOT / "packaging/component-catalog-bootstrap-v1.json"
     expected = "sha256:" + hashlib.sha256(catalog.read_bytes()).hexdigest()
 
