@@ -433,6 +433,53 @@ def _install_or_repair_release(updater: Any, candidate: Any, payload_root: Path)
     return release
 
 
+def _ensure_public_component_directories(updater: Any, component_id: str, release: Path) -> None:
+    """Make the verified broker path traversable by its service account.
+
+    Every directory is first checked as a real root-owned, non-group/world-writable
+    directory. Only then are modes set to 0755 and read back. Explicit chmod is
+    required because the reviewed launcher runs the initializer with umask 077.
+    中文：先验证公开组件目录链，再显式设为 0755，避免继承私有暂存目录的 umask。
+    """
+
+    if component_id != BOOTSTRAP_COMPONENT_ID:
+        raise ValueError("Public component-directory repair is limited to the broker")
+    install_root = Path(updater.install_root)
+    component_root = install_root / "components" / component_id
+    releases = component_root / "releases"
+    if release.parent != releases or release.is_symlink():
+        raise ValueError("Activated broker release is outside its fixed component directory")
+
+    directories = (install_root, install_root / "components", component_root, releases, release)
+    for directory in directories:
+        try:
+            info = directory.lstat()
+        except OSError as error:
+            raise ValueError(f"Broker component directory is unavailable: {directory}") from error
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or directory.is_symlink()
+            or info.st_uid != 0
+            or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) & 0o022
+        ):
+            raise ValueError(f"Broker component directory is unsafe: {directory}")
+
+    # Preflight the complete chain before changing any metadata.
+    for directory in directories:
+        os.chmod(directory, 0o755, follow_symlinks=False)
+    for directory in directories:
+        info = directory.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or directory.is_symlink()
+            or info.st_uid != 0
+            or info.st_gid != 0
+            or stat.S_IMODE(info.st_mode) != 0o755
+        ):
+            raise ValueError(f"Broker component directory failed permission readback: {directory}")
+
+
 def _activate_confirmed(
     updater: Any,
     *,
@@ -471,6 +518,7 @@ def _activate_confirmed(
         _assert_fresh_broker(updater)
 
     release = _install_or_repair_release(updater, candidate, payload_root)
+    _ensure_public_component_directories(updater, component_id, release)
     journal["phase"] = "installed"
     journal["releaseIdentity"] = release.name
     _persist_journal(updater, journal_path, journal)

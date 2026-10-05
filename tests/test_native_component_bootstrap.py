@@ -34,6 +34,47 @@ bootstrap = _load(
 )
 
 
+@pytest.fixture(autouse=True)
+def _simulate_root_owned_test_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Model the root-owned filesystem inside this test's isolated temporary tree."""
+
+    previous_umask = os.umask(0o077)
+    original_lstat = Path.lstat
+    test_root = tmp_path.resolve()
+
+    def root_owned_install_lstat(path: Path) -> os.stat_result:
+        metadata = original_lstat(path)
+        if not path.absolute().is_relative_to(test_root):
+            return metadata
+        fields = list(metadata)
+        fields[4] = 0
+        fields[5] = 0
+        return os.stat_result(fields)
+
+    original_fstat = os.fstat
+
+    def root_owned_test_fstat(descriptor: int) -> os.stat_result:
+        metadata = original_fstat(descriptor)
+        try:
+            descriptor_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        except OSError:
+            return metadata
+        if not descriptor_path.absolute().is_relative_to(test_root):
+            return metadata
+        fields = list(metadata)
+        fields[4] = 0
+        fields[5] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", root_owned_install_lstat)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "fstat", root_owned_test_fstat)
+    try:
+        yield
+    finally:
+        os.umask(previous_umask)
+
+
 def _digest(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
