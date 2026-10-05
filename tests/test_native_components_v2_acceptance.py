@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -312,8 +313,198 @@ def test_fresh_activity_catalog_gate_preserves_any_existing_state(tmp_path: Path
     (runtime / "existing-journal.json").unlink()
     catalog = runtime / "activity-sources.json"
     catalog.write_text("{}", encoding="utf-8")
-    with pytest.raises(admin_initialize.AdminInitializationError, match="trusted state"):
+    with pytest.raises(admin_initialize.AdminInitializationError, match="trusted activity state"):
         admin_initialize._fresh_activity_state(tmp_path)
+
+
+def _write_prepared_activity_state(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], dict[str, bytes]]:
+    """Write a private test fixture matching the installed-source catalog contract."""
+
+    owner = os.geteuid()
+    root_group = os.getegid()
+    source_uid = 999
+    source_gid = 999
+    monkeypatch.setattr(admin_initialize, "ADMIN_ROOT_UID", owner)
+    monkeypatch.setattr(admin_initialize, "ADMIN_ROOT_GID", root_group)
+    monkeypatch.setattr(
+        admin_initialize.grp,
+        "getgrnam",
+        lambda name: SimpleNamespace(
+            gr_gid=root_group if name == "cyrene-runtime-maintenance" else source_gid
+        ),
+    )
+
+    runtime = root / "var/lib/cyrene/runtime"
+    runtime.mkdir(parents=True)
+    for directory in (root / "var", root / "var/lib", root / "var/lib/cyrene"):
+        directory.chmod(0o755)
+    os.chown(runtime, owner, root_group)
+    runtime.chmod(0o2770)
+    token_dir = root / "etc/cyrene/runtime-activity-source-tokens"
+    token_dir.mkdir(parents=True)
+    (root / "etc").chmod(0o755)
+    (root / "etc/cyrene").chmod(0o755)
+    os.chown(token_dir, owner, root_group)
+    token_dir.chmod(0o711)
+    environment_dir = root / "etc/cyrene"
+
+    sources = []
+    tokens: dict[str, bytes] = {}
+    expected_sources = {}
+    for index, source_id in enumerate(sorted(admin_initialize.PRODUCT_SOURCE_IDS)):
+        token = f"fixture-token-{index}"
+        token_bytes = f"{token}\n".encode()
+        tokens[source_id] = token_bytes
+        token_path = token_dir / f"{source_id}.token"
+        token_path.write_bytes(token_bytes)
+        token_path.chmod(0o400)
+        os.chown(token_path, owner, root_group)
+        sources.append(
+            {
+                "source_id": source_id,
+                "uid": source_uid,
+                "gid": source_gid,
+                "source_token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+            }
+        )
+        expected_sources[source_id] = [source_uid, source_gid]
+
+    catalog = {"schema_version": 1, "generation": 1, "sources": sources}
+    catalog_path = runtime / "activity-sources.json"
+    catalog_path.write_text(json.dumps(catalog, separators=(",", ":")), encoding="utf-8")
+    catalog_path.chmod(0o640)
+    os.chown(catalog_path, owner, root_group)
+    environment = environment_dir / "runtime-activity-sources.env"
+    environment.write_text("CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION=1\n", encoding="ascii")
+    environment.chmod(0o644)
+    os.chown(environment, owner, root_group)
+    evidence: dict[str, object] = {
+        "catalogGid": root_group,
+        "sources": expected_sources,
+        "unitFiles": [
+            f"cyrene-{source_id.removeprefix('cyrene-')}.service"
+            for source_id in sorted(expected_sources)
+        ],
+    }
+    return evidence, tokens
+
+
+def test_prepared_activity_state_is_read_only_reused_and_bound_to_signed_units(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact existing catalog and tokens are reused without rewriting secrets."""
+
+    source_evidence, tokens = _write_prepared_activity_state(tmp_path, monkeypatch)
+    catalog_path = tmp_path / "var/lib/cyrene/runtime/activity-sources.json"
+    environment_path = tmp_path / "etc/cyrene/runtime-activity-sources.env"
+    paths = [catalog_path, environment_path]
+    paths.extend(
+        tmp_path / "etc/cyrene/runtime-activity-source-tokens" / f"{source_id}.token"
+        for source_id in sorted(tokens)
+    )
+    before = {path: path.read_bytes() for path in paths}
+
+    evidence = admin_initialize._fresh_activity_state(
+        tmp_path,
+        source_evidence=source_evidence,
+    )
+
+    assert evidence is not None
+    assert evidence["generation"] == 1
+    assert evidence["sourceUnits"] == source_evidence
+    assert {path: path.read_bytes() for path in paths} == before
+    assert evidence["catalogSha256"] == admin_initialize._sha256_file(catalog_path)
+    assert evidence["environmentSha256"] == admin_initialize._sha256_file(environment_path)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "extra-source",
+        "extra-field",
+        "uid-mismatch",
+        "generation-mismatch",
+        "catalog-mode",
+        "catalog-hardlink",
+        "runtime-mode",
+        "environment-generation",
+        "token-bytes",
+        "extra-token",
+        "token-link",
+    ),
+)
+def test_prepared_activity_state_rejects_tampering_and_incomplete_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    source_evidence, _tokens = _write_prepared_activity_state(tmp_path, monkeypatch)
+    runtime = tmp_path / "var/lib/cyrene/runtime"
+    catalog_path = runtime / "activity-sources.json"
+    token_dir = tmp_path / "etc/cyrene/runtime-activity-source-tokens"
+    if tamper in {
+        "extra-source",
+        "extra-field",
+        "uid-mismatch",
+        "generation-mismatch",
+    }:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        if tamper == "extra-source":
+            catalog["sources"].append(dict(catalog["sources"][0], source_id="cyrene-unknown"))
+        elif tamper == "extra-field":
+            catalog["bindings"] = []
+        elif tamper == "uid-mismatch":
+            catalog["sources"][0]["uid"] += 1
+        else:
+            catalog["generation"] = 2
+        catalog_path.write_text(json.dumps(catalog, separators=(",", ":")), encoding="utf-8")
+        catalog_path.chmod(0o640)
+    elif tamper == "catalog-mode":
+        catalog_path.chmod(0o600)
+    elif tamper == "catalog-hardlink":
+        os.link(catalog_path, runtime / "catalog-hardlink")
+    elif tamper == "runtime-mode":
+        runtime.chmod(0o2775)
+    elif tamper == "environment-generation":
+        environment = tmp_path / "etc/cyrene/runtime-activity-sources.env"
+        environment.write_text("CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION=2\n", encoding="ascii")
+        environment.chmod(0o644)
+    elif tamper == "token-bytes":
+        source_id = min(admin_initialize.PRODUCT_SOURCE_IDS)
+        path = token_dir / f"{source_id}.token"
+        path.chmod(0o600)
+        path.write_text("rotated-token\n", encoding="utf-8")
+        path.chmod(0o400)
+    elif tamper == "extra-token":
+        (token_dir / "unlisted.token").write_text("unexpected\n", encoding="utf-8")
+    else:
+        source_id = min(admin_initialize.PRODUCT_SOURCE_IDS)
+        path = token_dir / f"{source_id}.token"
+        path.unlink()
+        path.symlink_to(token_dir / f"{sorted(admin_initialize.PRODUCT_SOURCE_IDS)[1]}.token")
+
+    with pytest.raises(admin_initialize.AdminInitializationError):
+        admin_initialize._fresh_activity_state(
+            tmp_path,
+            source_evidence=source_evidence,
+        )
+
+
+def test_prepared_activity_state_rejects_non_root_owner_expectation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_evidence, _tokens = _write_prepared_activity_state(tmp_path, monkeypatch)
+    monkeypatch.setattr(admin_initialize, "ADMIN_ROOT_UID", os.geteuid() + 1)
+    with pytest.raises(admin_initialize.AdminInitializationError):
+        admin_initialize._fresh_activity_state(
+            tmp_path,
+            source_evidence=source_evidence,
+        )
 
 
 @pytest.mark.parametrize("unit_layout", ("lib/systemd/system", "usr/lib/systemd/system"))

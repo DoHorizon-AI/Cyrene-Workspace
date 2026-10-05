@@ -563,17 +563,264 @@ def _backup_archive(archive_path: Path, *, root: Path = Path("/")) -> dict[str, 
     }
 
 
-def _fresh_activity_state(root: Path) -> None:
-    """Require an empty fresh catalog/token/runtime state before initialization."""
+def _activity_directory(
+    root: Path,
+    relative: Path,
+    *,
+    runtime_group: int,
+) -> Path | None:
+    """Validate an existing fixed activity-state directory chain without writes."""
 
+    current = root
+    checked: list[str] = []
+    for part in relative.parts:
+        current = current / part
+        checked.append(part)
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(info.st_mode) or current.is_symlink():
+            raise AdminInitializationError(f"Runtime activity directory is unsafe: {current}")
+        if tuple(checked) == ("var", "lib", "cyrene", "runtime"):
+            if (
+                info.st_uid != ADMIN_ROOT_UID
+                or info.st_gid != runtime_group
+                or stat.S_IMODE(info.st_mode) != 0o2770
+            ):
+                raise AdminInitializationError("Shared runtime directory identity is unsafe")
+        elif info.st_uid != ADMIN_ROOT_UID or stat.S_IMODE(info.st_mode) & 0o022:
+            raise AdminInitializationError(
+                f"Runtime activity ancestor is not root-controlled: {current}"
+            )
+    return current
+
+
+def _read_activity_file(
+    path: Path,
+    *,
+    label: str,
+    owner: int,
+    group: int,
+    mode: int,
+) -> bytes:
+    """Read one fixed activity file after no-follow inode metadata checks."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        raise AdminInitializationError(f"Trusted {label} cannot be opened safely") from error
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != owner
+            or info.st_gid != group
+            or stat.S_IMODE(info.st_mode) != mode
+            or info.st_nlink != 1
+        ):
+            raise AdminInitializationError(f"Trusted {label} metadata is unsafe")
+        chunks: list[bytes] = []
+        while block := os.read(descriptor, 1024 * 1024):
+            chunks.append(block)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _unique_activity_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise AdminInitializationError("Trusted activity catalog has duplicate fields")
+        result[key] = value
+    return result
+
+
+def _existing_activity_sources(
+    root: Path,
+    source_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Read-only verify the already prepared catalog, env, and source tokens."""
+
+    try:
+        runtime_group = grp.getgrnam("cyrene-runtime-maintenance").gr_gid
+    except KeyError as error:
+        raise AdminInitializationError("Runtime maintenance group is unavailable") from error
+    if source_evidence.get("catalogGid") != runtime_group:
+        raise AdminInitializationError(
+            "Signed activity-source evidence has a different catalog GID"
+        )
+    runtime_dir = _activity_directory(
+        root,
+        Path("var/lib/cyrene/runtime"),
+        runtime_group=runtime_group,
+    )
+    token_dir = _activity_directory(
+        root,
+        Path("etc/cyrene/runtime-activity-source-tokens"),
+        runtime_group=runtime_group,
+    )
+    environment_dir = _activity_directory(
+        root,
+        Path("etc/cyrene"),
+        runtime_group=runtime_group,
+    )
+    if runtime_dir is None or token_dir is None or environment_dir is None:
+        raise AdminInitializationError("Prepared trusted activity-source state is incomplete")
+    private_state = root / "var/lib/cyrene/runtime-maintenance-private"
+    if os.path.lexists(private_state):
+        private_info = private_state.lstat()
+        if (
+            not stat.S_ISDIR(private_info.st_mode)
+            or private_state.is_symlink()
+            or private_info.st_uid != ADMIN_ROOT_UID
+            or stat.S_IMODE(private_info.st_mode) != 0o700
+        ):
+            raise AdminInitializationError("Existing private broker state directory is unsafe")
+
+    catalog_path = runtime_dir / "activity-sources.json"
+    environment_path = environment_dir / "runtime-activity-sources.env"
+    catalog_bytes = _read_activity_file(
+        catalog_path,
+        label="activity catalog",
+        owner=ADMIN_ROOT_UID,
+        group=runtime_group,
+        mode=0o640,
+    )
+    try:
+        catalog = json.loads(
+            catalog_bytes.decode("utf-8"),
+            object_pairs_hook=_unique_activity_json_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AdminInitializationError(
+            "Trusted activity catalog is not valid UTF-8 JSON"
+        ) from error
+    if (
+        not isinstance(catalog, dict)
+        or set(catalog) != {"schema_version", "generation", "sources"}
+        or type(catalog.get("schema_version")) is not int
+        or catalog.get("schema_version") != 1
+        or type(catalog.get("generation")) is not int
+        or catalog.get("generation", 0) < 1
+    ):
+        raise AdminInitializationError("Trusted activity catalog shape or generation is invalid")
+
+    expected_sources = source_evidence.get("sources")
+    if not isinstance(expected_sources, dict) or set(expected_sources) != PRODUCT_SOURCE_IDS:
+        raise AdminInitializationError("Signed Product unit source evidence is incomplete")
+    catalog_sources = catalog.get("sources")
+    if not isinstance(catalog_sources, list) or len(catalog_sources) != len(PRODUCT_SOURCE_IDS):
+        raise AdminInitializationError("Trusted activity catalog source set is incomplete")
+    source_hashes: dict[str, str] = {}
+    for row, source_id in zip(catalog_sources, sorted(PRODUCT_SOURCE_IDS), strict=True):
+        expected_identity = expected_sources[source_id]
+        if not isinstance(expected_identity, list) or len(expected_identity) != 2:
+            raise AdminInitializationError("Signed Product unit owner evidence is malformed")
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"source_id", "uid", "gid", "source_token_sha256"}
+            or row.get("source_id") != source_id
+            or type(row.get("uid")) is not int
+            or row.get("uid") != expected_identity[0]
+            or type(row.get("gid")) is not int
+            or row.get("gid") != expected_identity[1]
+            or not isinstance(row.get("source_token_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", row["source_token_sha256"]) is None
+        ):
+            raise AdminInitializationError(
+                "Trusted activity catalog differs from signed Product units"
+            )
+        source_hashes[source_id] = row["source_token_sha256"]
+
+    token_directory_info = token_dir.lstat()
+    if (
+        token_directory_info.st_uid != ADMIN_ROOT_UID
+        or stat.S_IMODE(token_directory_info.st_mode) != 0o711
+    ):
+        raise AdminInitializationError("Trusted activity token directory metadata is unsafe")
+    expected_token_names = {f"{source_id}.token" for source_id in PRODUCT_SOURCE_IDS}
+    try:
+        actual_token_names = {entry.name for entry in token_dir.iterdir()}
+    except OSError as error:
+        raise AdminInitializationError("Trusted activity token directory cannot be read") from error
+    if actual_token_names != expected_token_names:
+        raise AdminInitializationError(
+            "Trusted activity token directory has missing or extra entries"
+        )
+    token_files: list[str] = []
+    for source_id in sorted(PRODUCT_SOURCE_IDS):
+        token_path = token_dir / f"{source_id}.token"
+        token_bytes = _read_activity_file(
+            token_path,
+            label=f"{source_id} source token",
+            owner=ADMIN_ROOT_UID,
+            group=ADMIN_ROOT_GID,
+            mode=0o400,
+        )
+        try:
+            token = token_bytes.decode("utf-8").strip()
+        except UnicodeDecodeError as error:
+            raise AdminInitializationError("Trusted activity source token is not UTF-8") from error
+        if (
+            not token
+            or hashlib.sha256(token.encode("utf-8")).hexdigest() != source_hashes[source_id]
+        ):
+            raise AdminInitializationError(
+                "Trusted activity source token does not match its catalog"
+            )
+        token_files.append(str(token_path))
+
+    environment_bytes = _read_activity_file(
+        environment_path,
+        label="activity environment",
+        owner=ADMIN_ROOT_UID,
+        group=ADMIN_ROOT_GID,
+        mode=0o644,
+    )
+    expected_environment = (
+        f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={catalog['generation']}\n".encode("ascii")
+    )
+    if environment_bytes != expected_environment:
+        raise AdminInitializationError("Activity environment generation differs from its catalog")
+
+    # The shared runtime directory may also contain broker-owned state. It is
+    # intentionally left opaque here and is never interpreted as idle proof.
+    return {
+        "catalog": str(catalog_path),
+        "generation": catalog["generation"],
+        "catalogSha256": _sha256_bytes(catalog_bytes),
+        "environment": str(environment_path),
+        "environmentSha256": _sha256_bytes(environment_bytes),
+        "tokenFiles": token_files,
+        "sourceUnits": source_evidence,
+    }
+
+
+def _fresh_activity_state(
+    root: Path,
+    *,
+    source_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Keep fresh setup fresh, or read-only reuse exact trusted state."""
+
+    root = Path(root)
     catalog = root / "var/lib/cyrene/runtime/activity-sources.json"
     token_dir = root / "etc/cyrene/runtime-activity-source-tokens"
     environment = root / "etc/cyrene/runtime-activity-sources.env"
     private_state = root / "var/lib/cyrene/runtime-maintenance-private"
     runtime_state = root / "var/lib/cyrene/runtime"
-    for path in (catalog, environment):
-        if os.path.lexists(path):
-            raise AdminInitializationError(f"Existing trusted state must be preserved: {path}")
+    if os.path.lexists(catalog):
+        if source_evidence is None:
+            raise AdminInitializationError(
+                "Existing trusted activity state requires signed unit evidence"
+            )
+        if catalog.is_symlink():
+            raise AdminInitializationError("Existing trusted activity catalog is a symlink")
+        return _existing_activity_sources(root, source_evidence)
+    if os.path.lexists(environment):
+        raise AdminInitializationError(f"Existing trusted state must be preserved: {environment}")
     for path in (token_dir, private_state, runtime_state):
         if not os.path.lexists(path):
             continue
@@ -585,6 +832,7 @@ def _fresh_activity_state(root: Path) -> None:
         except StopIteration:
             continue
         raise AdminInitializationError(f"Existing runtime data must be preserved: {path}")
+    return None
 
 
 def _unit_service_fields(unit_bytes: bytes, unit_path: Path) -> dict[str, str]:
@@ -679,6 +927,117 @@ def _activity_source_arguments(
         "unitFiles": sorted(expected_names),
         "catalogGid": maintenance_gid,
         "sources": {source_id: list(identity) for source_id, identity in sorted(sources.items())},
+    }
+
+
+def _activity_source_evidence_from_deb(deb_path: Path) -> tuple[list[str], dict[str, Any]]:
+    """Derive source identities from signed package units and installed unit bytes."""
+
+    extract_root = Path(tempfile.mkdtemp(prefix="cyrene-init-activity-units-"))
+    try:
+        _run(["/usr/bin/dpkg-deb", "--extract", str(deb_path), str(extract_root)])
+        return _activity_source_arguments(
+            _resolve_extracted_systemd_units(extract_root),
+            Path("/usr/lib/systemd/system"),
+        )
+    finally:
+        shutil.rmtree(extract_root, ignore_errors=True)
+
+
+def _initialize_fresh_activity_sources(
+    source_arguments: list[str],
+    source_evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Create activity credentials only for a verified empty fresh-install state."""
+
+    runtime_group_gid = grp.getgrnam("cyrene-runtime-maintenance").gr_gid
+    catalog_command = [
+        "/usr/bin/cyrene",
+        "component-run",
+        BOOTSTRAP_COMPONENT,
+        "--",
+        "init-catalog",
+        "--catalog",
+        "/var/lib/cyrene/runtime/activity-sources.json",
+        "--token-dir",
+        "/etc/cyrene/runtime-activity-source-tokens",
+        "--catalog-gid",
+        str(runtime_group_gid),
+        *source_arguments,
+    ]
+    init_result = _json_result(_run(catalog_command), "Fresh activity catalog initialization")
+    generation = init_result.get("generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise AdminInitializationError("Activity-source initializer returned no valid generation")
+    returned_sources = init_result.get("sources")
+    if (
+        not isinstance(returned_sources, list)
+        or {row.get("source_id") for row in returned_sources if isinstance(row, dict)}
+        != PRODUCT_SOURCE_IDS
+        or any(
+            row.get("token_file")
+            != f"/etc/cyrene/runtime-activity-source-tokens/{row.get('source_id')}.token"
+            for row in returned_sources
+            if isinstance(row, dict)
+        )
+    ):
+        raise AdminInitializationError(
+            "Activity-source initializer returned an unexpected owner set"
+        )
+
+    environment_path = Path("/etc/cyrene/runtime-activity-sources.env")
+    descriptor = os.open(
+        environment_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o644,
+    )
+    with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+        stream.write(f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={generation}\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chown(environment_path, 0, 0)
+    os.chmod(environment_path, 0o644)
+
+    catalog_path = Path("/var/lib/cyrene/runtime/activity-sources.json")
+    catalog = json.loads(_private_regular_file(catalog_path, "fresh activity catalog"))
+    expected_sources = [
+        {
+            "source_id": source_id,
+            "uid": source_identity[0],
+            "gid": source_identity[1],
+        }
+        for source_id, source_identity in sorted(source_evidence["sources"].items())
+    ]
+    actual_sources = [
+        {key: row.get(key) for key in ("source_id", "uid", "gid")}
+        for row in catalog.get("sources", [])
+        if isinstance(row, dict)
+    ]
+    if catalog.get("generation") != generation or actual_sources != expected_sources:
+        raise AdminInitializationError("Activity catalog generation changed after initialization")
+    token_dir = Path("/etc/cyrene/runtime-activity-source-tokens")
+    token_files: list[str] = []
+    for source_id in sorted(PRODUCT_SOURCE_IDS):
+        token_path = token_dir / f"{source_id}.token"
+        info = token_path.lstat()
+        if (
+            token_path.is_symlink()
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o400
+        ):
+            raise AdminInitializationError(
+                f"Generated source token metadata is unsafe: {source_id}"
+            )
+        token_files.append(str(token_path))
+    return {
+        "catalog": str(catalog_path),
+        "generation": generation,
+        "catalogSha256": _sha256_file(catalog_path),
+        "environment": str(environment_path),
+        "environmentSha256": _sha256_file(environment_path),
+        "tokenFiles": token_files,
+        "sourceUnits": source_evidence,
     }
 
 
@@ -1681,6 +2040,8 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
     )
     journal = _load_admin_journal(journal_path, identity)
     evidence = journal.setdefault("evidence", {})
+    activity_source_arguments: list[str] | None = None
+    activity_source_evidence: dict[str, Any] | None = None
 
     backup_path = Path(args.backup_directory) / (
         "native-init-" + target["debSha256"].removeprefix("sha256:") + ".tar.gz"
@@ -1714,7 +2075,13 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
         _write_admin_journal(journal_path, journal)
 
     if journal["phase"] == "deb-staged":
-        _fresh_activity_state(Path("/"))
+        activity_source_arguments, activity_source_evidence = _activity_source_evidence_from_deb(
+            deb_path
+        )
+        _fresh_activity_state(
+            Path("/"),
+            source_evidence=activity_source_evidence,
+        )
         plan_result = _json_result(_run(bootstrap_command), "Broker bootstrap plan")
         plan_digest = _verify_bootstrap_plan(plan_result, target_id)
         journal["phase"] = "broker-plan-created"
@@ -1824,107 +2191,20 @@ def execute_initialization(args: argparse.Namespace) -> dict[str, Any]:
     _write_admin_journal(journal_path, journal)
 
     if journal["phase"] == "identity-prepared":
-        _fresh_activity_state(Path("/"))
-        extract_root = Path(tempfile.mkdtemp(prefix="cyrene-init-deb-"))
-        try:
-            _run(["/usr/bin/dpkg-deb", "--extract", str(deb_path), str(extract_root)])
-            source_args, source_evidence = _activity_source_arguments(
-                _resolve_extracted_systemd_units(extract_root),
-                Path("/usr/lib/systemd/system"),
+        if activity_source_evidence is None or activity_source_arguments is None:
+            activity_source_arguments, activity_source_evidence = (
+                _activity_source_evidence_from_deb(deb_path)
             )
-        finally:
-            shutil.rmtree(extract_root, ignore_errors=True)
-        runtime_group_gid = grp.getgrnam("cyrene-runtime-maintenance").gr_gid
-        catalog_command = [
-            "/usr/bin/cyrene",
-            "component-run",
-            BOOTSTRAP_COMPONENT,
-            "--",
-            "init-catalog",
-            "--catalog",
-            "/var/lib/cyrene/runtime/activity-sources.json",
-            "--token-dir",
-            "/etc/cyrene/runtime-activity-source-tokens",
-            "--catalog-gid",
-            str(runtime_group_gid),
-            *source_args,
-        ]
-        init_result = _json_result(_run(catalog_command), "Fresh activity catalog initialization")
-        generation = init_result.get("generation")
-        if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
-            raise AdminInitializationError(
-                "Activity-source initializer returned no valid generation"
-            )
-        returned_sources = init_result.get("sources")
-        if (
-            not isinstance(returned_sources, list)
-            or {row.get("source_id") for row in returned_sources if isinstance(row, dict)}
-            != PRODUCT_SOURCE_IDS
-            or any(
-                row.get("token_file")
-                != f"/etc/cyrene/runtime-activity-source-tokens/{row.get('source_id')}.token"
-                for row in returned_sources
-                if isinstance(row, dict)
-            )
-        ):
-            raise AdminInitializationError(
-                "Activity-source initializer returned an unexpected owner set"
-            )
-        environment_path = Path("/etc/cyrene/runtime-activity-sources.env")
-        descriptor = os.open(
-            environment_path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o644,
+        existing_activity = _fresh_activity_state(
+            Path("/"),
+            source_evidence=activity_source_evidence,
         )
-        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
-            stream.write(f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={generation}\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.chown(environment_path, 0, 0)
-        os.chmod(environment_path, 0o644)
-        catalog_path = Path("/var/lib/cyrene/runtime/activity-sources.json")
-        catalog = json.loads(_private_regular_file(catalog_path, "fresh activity catalog"))
-        expected_sources = [
-            {
-                "source_id": source_id,
-                "uid": source_identity[0],
-                "gid": source_identity[1],
-            }
-            for source_id, source_identity in sorted(source_evidence["sources"].items())
-        ]
-        actual_sources = [
-            {key: row.get(key) for key in ("source_id", "uid", "gid")}
-            for row in catalog.get("sources", [])
-            if isinstance(row, dict)
-        ]
-        if catalog.get("generation") != generation or actual_sources != expected_sources:
-            raise AdminInitializationError(
-                "Activity catalog generation changed after initialization"
+        if existing_activity is None:
+            existing_activity = _initialize_fresh_activity_sources(
+                activity_source_arguments,
+                activity_source_evidence,
             )
-        token_dir = Path("/etc/cyrene/runtime-activity-source-tokens")
-        token_files: list[str] = []
-        for source_id in sorted(PRODUCT_SOURCE_IDS):
-            token_path = token_dir / f"{source_id}.token"
-            info = token_path.lstat()
-            if (
-                token_path.is_symlink()
-                or not stat.S_ISREG(info.st_mode)
-                or info.st_uid != 0
-                or stat.S_IMODE(info.st_mode) != 0o400
-            ):
-                raise AdminInitializationError(
-                    f"Generated source token metadata is unsafe: {source_id}"
-                )
-            token_files.append(str(token_path))
-        evidence["activitySources"] = {
-            "catalog": str(catalog_path),
-            "generation": generation,
-            "catalogSha256": _sha256_file(catalog_path),
-            "environment": str(environment_path),
-            "environmentSha256": _sha256_file(environment_path),
-            "tokenFiles": token_files,
-            "sourceUnits": source_evidence,
-        }
+        evidence["activitySources"] = existing_activity
         journal["phase"] = "catalog-initialized"
         _write_admin_journal(journal_path, journal)
     elif journal["phase"] in {"catalog-initialized", "broker-started", "complete"}:
