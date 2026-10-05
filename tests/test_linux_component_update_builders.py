@@ -48,6 +48,13 @@ def _wheel(path: Path, name: str, version: str, tag: str = "py3-none-any") -> tu
     normalized = name.replace("-", "_").replace(".", "_")
     wheel_path = path / f"{normalized}-{version}-{tag}.whl"
     dist_info = f"{normalized}-{version}.dist-info"
+    python_tags, abi_tags, platform_tags = (part.split(".") for part in tag.split("-"))
+    wheel_tags = sorted(
+        f"{python_tag}-{abi_tag}-{platform_tag}"
+        for python_tag in python_tags
+        for abi_tag in abi_tags
+        for platform_tag in platform_tags
+    )
     with zipfile.ZipFile(wheel_path, "w") as archive:
         archive.writestr(
             f"{dist_info}/METADATA",
@@ -55,7 +62,8 @@ def _wheel(path: Path, name: str, version: str, tag: str = "py3-none-any") -> tu
         )
         archive.writestr(
             f"{dist_info}/WHEEL",
-            f"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: {tag}\n",
+            "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\n"
+            + "".join(f"Tag: {wheel_tag}\n" for wheel_tag in wheel_tags),
         )
     return wheel_path, hashlib.sha256(wheel_path.read_bytes()).hexdigest()
 
@@ -186,6 +194,79 @@ def test_wheelhouse_checks_filename_and_wheel_metadata_tags(tmp_path: Path) -> N
         prepare._verify_wheel_tags(too_new_22, UBUNTU_22_PROFILE)
     with pytest.raises(prepare.ProducerError, match="filename tags differ from WHEEL metadata"):
         prepare._verify_wheel_tags(mismatched, UBUNTU_24_PROFILE)
+
+
+def test_dual_python_tag_wheel_is_accepted_by_producer_and_bundle_consumer(tmp_path: Path) -> None:
+    wheel, _ = _wheel(tmp_path, "tzdata", "2026.5", "py2.py3-none-any")
+    tags = ["py2-none-any", "py3-none-any"]
+
+    assert prepare._verify_wheel_tags(wheel, UBUNTU_24_PROFILE) == tags
+    assert bundle._wheelhouse_wheel_tags([wheel], UBUNTU_24_PROFILE) == {wheel.name: tags}
+
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(wheel) as archive:
+        archive.extractall(installed)
+    assert bundle._verify_site_package_wheel_tags(installed, UBUNTU_24_PROFILE) == tags
+    assert bundle._validate_source_wheel_tags({wheel.name: tags}, UBUNTU_24_PROFILE, tags) == {
+        wheel.name: tags
+    }
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "py2-none-any",
+        "cp312-cp312-manylinux_2_40_x86_64",
+        "cp312-pp312-manylinux_2_39_x86_64",
+    ],
+)
+def test_wheel_artifact_without_a_compatible_tag_is_rejected(tmp_path: Path, tag: str) -> None:
+    wheel, _ = _wheel(tmp_path, "tzdata", "2026.5", tag)
+    with pytest.raises(prepare.ProducerError):
+        prepare._verify_wheel_tags(wheel, UBUNTU_24_PROFILE)
+    with pytest.raises(bundle.ServiceBundleError):
+        bundle._wheelhouse_wheel_tags([wheel], UBUNTU_24_PROFILE)
+
+    installed = tmp_path / "installed"
+    with zipfile.ZipFile(wheel) as archive:
+        archive.extractall(installed)
+    with pytest.raises(bundle.ServiceBundleError):
+        bundle._verify_site_package_wheel_tags(installed, UBUNTU_24_PROFILE)
+    with pytest.raises(bundle.ServiceBundleError):
+        bundle._validate_source_wheel_tags({wheel.name: [tag]}, UBUNTU_24_PROFILE, [tag])
+
+
+def test_incompatible_wheel_is_not_masked_by_a_compatible_wheel(tmp_path: Path) -> None:
+    compatible, _ = _wheel(tmp_path, "tzdata", "2026.5", "py2.py3-none-any")
+    incompatible, _ = _wheel(tmp_path, "py2-only-package", "1.0.0", "py2-none-any")
+    combined_tags = ["py2-none-any", "py3-none-any"]
+
+    assert prepare._verify_wheel_tags(compatible, UBUNTU_24_PROFILE) == combined_tags
+    with pytest.raises(prepare.ProducerError):
+        [
+            prepare._verify_wheel_tags(wheel, UBUNTU_24_PROFILE)
+            for wheel in (compatible, incompatible)
+        ]
+    with pytest.raises(bundle.ServiceBundleError):
+        bundle._wheelhouse_wheel_tags([compatible, incompatible], UBUNTU_24_PROFILE)
+
+    installed = tmp_path / "installed"
+    for wheel in (compatible, incompatible):
+        with zipfile.ZipFile(wheel) as archive:
+            archive.extractall(installed)
+    with pytest.raises(bundle.ServiceBundleError):
+        bundle._verify_site_package_wheel_tags(installed, UBUNTU_24_PROFILE)
+
+    source_tags = {
+        compatible.name: combined_tags,
+        incompatible.name: ["py2-none-any"],
+    }
+    with pytest.raises(bundle.ServiceBundleError):
+        bundle._validate_source_wheel_tags(
+            source_tags,
+            UBUNTU_24_PROFILE,
+            sorted({tag for tags in source_tags.values() for tag in tags}),
+        )
 
 
 @pytest.mark.parametrize(

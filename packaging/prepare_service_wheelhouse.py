@@ -35,6 +35,7 @@ PIN_PATTERN = re.compile(r"(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]*)==(?P<version>[^\
 DIRECT_GIT_PATTERN = re.compile(
     r"(?P<name>[A-Za-z0-9][A-Za-z0-9_.-]*)\s*@\s*(?P<url>git\+https?://\S+)\Z"
 )
+WHEEL_TAG_PATTERN = re.compile(r"[A-Za-z0-9_]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+\Z")
 
 
 @dataclass(frozen=True)
@@ -1217,18 +1218,33 @@ def _wheel_tag_is_compatible(tag: str, profile: dict[str, Any]) -> bool:
     )
 
 
+def _wheel_tags_are_compatible(tags: list[str], profile: dict[str, Any]) -> bool:
+    """Require valid tag syntax and at least one tag supported by the target."""
+
+    return (
+        bool(tags)
+        and all(WHEEL_TAG_PATTERN.fullmatch(tag) is not None for tag in tags)
+        and any(_wheel_tag_is_compatible(tag, profile) for tag in tags)
+    )
+
+
 def _verify_wheel_tags(path: Path, profile: dict[str, Any]) -> list[str]:
     tags = _wheel_tags(path)
     if len(tags) != len(set(tags)):
         raise ProducerError(f"wheel repeats a WHEEL Tag entry: {path.name}")
     if _wheel_filename_tags(path) != sorted(tags):
         raise ProducerError(f"wheel filename tags differ from WHEEL metadata: {path.name}")
-    for tag in tags:
-        if not _wheel_tag_is_compatible(tag, profile):
+    if not _wheel_tags_are_compatible(tags, profile):
+        invalid_tag = next((tag for tag in tags if WHEEL_TAG_PATTERN.fullmatch(tag) is None), None)
+        if invalid_tag is not None:
             raise ProducerError(
-                f"wheel tag {tag!r} is incompatible with target "
-                f"{profile['distributionVersion']}/{profile['abi']}: {path.name}"
+                f"wheel has an invalid WHEEL Tag entry {invalid_tag!r}: {path.name}"
             )
+        incompatible_tag = next(tag for tag in tags if not _wheel_tag_is_compatible(tag, profile))
+        raise ProducerError(
+            f"wheel tag {incompatible_tag!r} is incompatible with target "
+            f"{profile['distributionVersion']}/{profile['abi']}: {path.name}"
+        )
     return sorted(tags)
 
 
