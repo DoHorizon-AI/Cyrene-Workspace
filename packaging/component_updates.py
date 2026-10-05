@@ -54,7 +54,8 @@ DEFAULT_CATALOG = (
 )
 DEFAULT_ACTIVITY_CATALOG = Path("/var/lib/cyrene/runtime/activity-sources.json")
 DEFAULT_SOCKET = Path("/run/cyrene/runtime-maintenance.sock")
-DEFAULT_BROKER = Path("/usr/bin/cyrene-runtime-maintenance")
+BROKER_COMPONENT_ID = "cyrene-runtime-maintenance"
+BROKER_BOOTSTRAP_JOURNAL = "native-first-bootstrap/runtime-maintenance-first-install.json"
 DEFAULT_INSTALL_ROOT = Path("/usr/lib/cyrene")
 DEFAULT_STATE_ROOT = Path("/var/lib/cyrene-updates")
 DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
@@ -538,7 +539,7 @@ class ComponentUpdater:
         catalog_path: Path = DEFAULT_CATALOG,
         activity_catalog_path: Path = DEFAULT_ACTIVITY_CATALOG,
         socket_path: Path = DEFAULT_SOCKET,
-        broker_path: Path = DEFAULT_BROKER,
+        broker_path: Path | None = None,
         install_root: Path = DEFAULT_INSTALL_ROOT,
         state_root: Path = DEFAULT_STATE_ROOT,
         release_lock_path: Path = DEFAULT_RELEASE_LOCK,
@@ -554,7 +555,9 @@ class ComponentUpdater:
         self.catalog_path = Path(catalog_path)
         self.activity_catalog_path = Path(activity_catalog_path)
         self.socket_path = Path(socket_path)
-        self.broker_path = Path(broker_path)
+        # None means resolve only the catalog-pinned, installed broker. An explicit
+        # path preserves the legacy/test override without changing its semantics.
+        self.broker_path = Path(broker_path) if broker_path is not None else None
         self.install_root = Path(install_root)
         self.state_root = Path(state_root)
         self.data_bundle_root = Path(data_bundle_root)
@@ -2780,7 +2783,8 @@ class ComponentUpdater:
         sources: list[str] = []
         if method in {"GetUpdateReadiness", "BeginMaintenance"}:
             catalog, sources = self._activity_catalog()
-        if not self.broker_path.is_file() or not os.access(self.broker_path, os.X_OK):
+        broker_path = self.broker_path or self._resolve_installed_broker()
+        if not broker_path.is_file() or not os.access(broker_path, os.X_OK):
             raise UpdateError(
                 "GATE_UNKNOWN",
                 "The native runtime maintenance broker is unavailable; apply is fail-closed.",
@@ -2800,8 +2804,11 @@ class ComponentUpdater:
             },
         }
         try:
+            command = [str(broker_path), "request", "--socket", str(self.socket_path)]
+            if method != "Health":
+                command.append("--operator")
             completed = self.runner(
-                [str(self.broker_path), "request", "--socket", str(self.socket_path), "--operator"],
+                command,
                 input=json.dumps(payload, separators=(",", ":")) + "\n",
                 capture_output=True,
                 text=True,
@@ -2883,6 +2890,172 @@ class ComponentUpdater:
                 retryable=True,
             )
         return result
+
+    def _resolve_installed_broker(self) -> Path:
+        """Resolve the fixed active broker only when its install identities agree."""
+
+        component = self.components.get(BROKER_COMPONENT_ID)
+        if (
+            not isinstance(component, dict)
+            or component.get("componentId") != BROKER_COMPONENT_ID
+            or component.get("kind") != "native-binary"
+            or self.bootstrap_catalog_digest != TRUSTED_CATALOG_DIGEST
+        ):
+            raise UpdateError(
+                "GATE_UNKNOWN", "The trusted maintenance broker catalog is unavailable."
+            )
+
+        # Reuse the updater's release, active-pointer, manifest, and install receipt checks.
+        installed = self._installed(component)
+        manifest = installed.get("manifest")
+        if (
+            installed.get("active") is not True
+            or not isinstance(manifest, dict)
+            or manifest.get("componentId") != BROKER_COMPONENT_ID
+            or manifest.get("manifestDigest") != installed.get("manifestDigest")
+            or manifest.get("version") != installed.get("activeVersion")
+            or _artifact_kind_from_manifest(manifest) != "native-binary"
+        ):
+            raise UpdateError(
+                "GATE_UNKNOWN", "The active maintenance broker identity is unverified."
+            )
+
+        artifact = manifest.get("artifact")
+        files = artifact.get("files") if isinstance(artifact, dict) else None
+        entrypoint = artifact.get("entrypoint") if isinstance(artifact, dict) else None
+        if not isinstance(files, dict) or not isinstance(entrypoint, str):
+            raise UpdateError(
+                "GATE_UNKNOWN", "The active broker manifest has no trusted entrypoint."
+            )
+        relative = _safe_relative(entrypoint, field="broker.artifact.entrypoint")
+        expected_digest = files.get(relative.as_posix())
+        if not _valid_digest(expected_digest):
+            raise UpdateError(
+                "GATE_UNKNOWN", "The active broker entrypoint has no pinned file digest."
+            )
+
+        component_root = self.install_root / "components" / BROKER_COMPONENT_ID
+        active = component_root / "active"
+        try:
+            active_info = active.lstat()
+            if not stat.S_ISLNK(active_info.st_mode) or active_info.st_uid != 0:
+                raise ValueError("active pointer is not a root-owned symlink")
+            pointer = os.readlink(active)
+            match = re.fullmatch(r"releases/([^/]+)", pointer)
+            if match is None or match.group(1) != installed.get("pointerIdentity"):
+                raise ValueError("active pointer differs from the verified receipt")
+            release = component_root / pointer
+            manifest_path = release / "component-manifest.json"
+            self._verify_broker_directory_chain(release, entrypoint=relative)
+            manifest_info = manifest_path.lstat()
+            if (
+                manifest_path.is_symlink()
+                or not stat.S_ISREG(manifest_info.st_mode)
+                or manifest_info.st_uid != 0
+                or stat.S_IMODE(manifest_info.st_mode) & 0o022
+            ):
+                raise ValueError("installed manifest is not root-controlled")
+            if json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
+                raise ValueError("installed manifest differs from the install receipt")
+            binary = release.joinpath(*relative.parts)
+            binary_info = binary.lstat()
+            if (
+                not stat.S_ISREG(binary_info.st_mode)
+                or binary_info.st_uid != 0
+                or binary_info.st_nlink != 1
+                or stat.S_IMODE(binary_info.st_mode) & 0o022
+                or not stat.S_IMODE(binary_info.st_mode) & 0o111
+                or _file_digest(binary) != expected_digest
+            ):
+                raise ValueError("installed broker entrypoint differs from its manifest digest")
+            if installed.get("identityAttested") is not True:
+                # A completed first-install journal is only a recovery identity source
+                # when the normal active/release receipt is unavailable. Newer releases
+                # remain valid through their own verified install receipts.
+                self._verify_broker_bootstrap_journal(manifest, installed, pointer)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                f"The active maintenance broker failed install verification: {error}",
+            ) from error
+        return binary
+
+    def _verify_broker_directory_chain(self, release: Path, *, entrypoint: PurePosixPath) -> None:
+        """Require real root-owned, non-writable install directories and payload parents."""
+
+        directories = [self.install_root, self.install_root / "components"]
+        component_root = self.install_root / "components" / BROKER_COMPONENT_ID
+        directories.extend((component_root, component_root / "releases", release))
+        current = release
+        for part in entrypoint.parts[:-1]:
+            current /= part
+            directories.append(current)
+        if self.install_root == DEFAULT_INSTALL_ROOT:
+            directories = [Path("/"), Path("/usr"), Path("/usr/lib"), *directories]
+        for directory in directories:
+            info = directory.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or directory.is_symlink()
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+                or not stat.S_IMODE(info.st_mode) & 0o001
+            ):
+                raise ValueError(f"install directory is not root-controlled: {directory}")
+
+    def _verify_broker_bootstrap_journal(
+        self, manifest: dict[str, Any], installed: dict[str, Any], pointer: str
+    ) -> None:
+        """Bind the active broker receipt to the completed first-install journal."""
+
+        journal_path = self.state_root / BROKER_BOOTSTRAP_JOURNAL
+        journal_dir = journal_path.parent
+        # The install-state ancestors are public system directories (0755 is valid);
+        # only the updater state root and bootstrap journal directory are private.
+        for directory in list(self.state_root.parents)[:3]:
+            info = directory.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or directory.is_symlink()
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise ValueError("first-install journal ancestor is not root-controlled")
+        for directory in (self.state_root, journal_dir):
+            info = directory.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or directory.is_symlink()
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o077
+            ):
+                raise ValueError("first-install journal directory is not private and root-owned")
+        info = journal_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ValueError("first-install journal is not a private root-owned file")
+        journal = _read_object(journal_path, "maintenance broker first-install journal")
+        identity = journal.get("identity")
+        artifact = manifest["artifact"]
+        if (
+            journal.get("schemaVersion") != 1
+            or journal.get("phase") != "complete"
+            or re.fullmatch(r"[0-9a-f]{64}", str(journal.get("planDigest"))) is None
+            or journal.get("releaseIdentity") != pointer.removeprefix("releases/")
+            or not isinstance(identity, dict)
+            or identity.get("componentId") != BROKER_COMPONENT_ID
+            or identity.get("version") != manifest.get("version")
+            or identity.get("manifestDigest") != manifest.get("manifestDigest")
+            or identity.get("artifactDigest") != artifact.get("sha256")
+            or installed.get("artifactDigest") != identity.get("artifactDigest")
+            or not any(
+                target.get("id") == identity.get("targetId")
+                and target.get("target") == manifest.get("target")
+                for target in self.targets.values()
+            )
+            or not isinstance(identity.get("indexDigest"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", identity["indexDigest"]) is None
+        ):
+            raise ValueError("first-install journal does not bind the active broker receipt")
 
     def _readiness(self, component: dict[str, Any]) -> dict[str, Any]:
         target_kind = (
@@ -7216,7 +7389,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--activity-catalog", type=Path, default=DEFAULT_ACTIVITY_CATALOG)
     parser.add_argument("--socket", type=Path, default=DEFAULT_SOCKET)
-    parser.add_argument("--broker", type=Path, default=DEFAULT_BROKER)
+    parser.add_argument("--broker", type=Path)
     parser.add_argument("--install-root", type=Path, default=DEFAULT_INSTALL_ROOT)
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     args = parser.parse_args(argv)
