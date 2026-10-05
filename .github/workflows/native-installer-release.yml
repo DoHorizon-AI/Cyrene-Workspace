@@ -318,6 +318,8 @@ jobs:
             --target-profile "$TARGET_PROFILE" \
             --python-runtime-archive "$archive" \
             --uv-executable "$uv" \
+            --bootstrap-catalog "$INPUT_ROOT/component-catalog-v1.json" \
+            --source-receipt "$INPUT_ROOT/native-installer-source-receipt-v1.json" \
             --verified-service-artifacts "$INPUT_ROOT/verified-service-artifacts/$TARGET_PROFILE"
           mapfile -t packages < <(find "$output" -maxdepth 1 -type f -name '*.deb' -print)
           test "${#packages[@]}" -eq 1

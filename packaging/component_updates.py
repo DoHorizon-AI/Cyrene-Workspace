@@ -59,6 +59,8 @@ MAX_RELEASE_ASSET_BYTES = 2_000_000_000
 MAX_ATTESTATION_RESPONSE_BYTES = 16_000_000
 MAX_ATTESTATION_BUNDLE_BYTES = 2_000_000
 INSTALLED_CATALOG = Path("/usr/share/cyrene/component-catalog-v1.json")
+INSTALLED_BOOTSTRAP_CATALOG_BINDING = Path("/usr/share/cyrene/bootstrap-catalog-binding-v1.json")
+INSTALLED_HELPER_DIRECTORY = Path("/usr/lib/cyrene/scripts")
 ACTIVE_CATALOG_ROOT = Path("/usr/share/cyrene/component-catalogs")
 ACTIVE_CATALOG_POINTER = Path("/usr/share/cyrene/component-catalog-state.json")
 CATALOG_SCHEMA_ROOT = Path("/usr/share/cyrene/catalog-schemas")
@@ -669,6 +671,46 @@ def _verify_private_file(path: Path) -> None:
 class ComponentUpdater:
     """Drive the fixed JSON helper protocol against trusted local catalog data."""
 
+    @staticmethod
+    def _running_from_installed_helper() -> bool:
+        """Return whether this code is running from the immutable package helper path."""
+
+        return Path(__file__).resolve().parent == INSTALLED_HELPER_DIRECTORY
+
+    def _load_installed_bootstrap_catalog_binding(self) -> dict[str, Any]:
+        """Validate the fixed package binding against the fixed installed catalog."""
+
+        helper_path = Path(__file__).resolve().with_name("bootstrap_catalog_binding.py")
+        if helper_path.is_symlink() or not helper_path.is_file():
+            raise UpdateError(
+                "INVALID_BOOTSTRAP_BINDING",
+                "The installed bootstrap catalog binding verifier is missing or unsafe.",
+            )
+        import importlib.util
+
+        module_name = "_cyrene_bootstrap_catalog_binding"
+        spec = importlib.util.spec_from_file_location(module_name, helper_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError(
+                "INVALID_BOOTSTRAP_BINDING",
+                "The installed bootstrap catalog binding verifier cannot be loaded.",
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+            binding = module.load_bootstrap_catalog_binding(
+                INSTALLED_BOOTSTRAP_CATALOG_BINDING,
+                INSTALLED_CATALOG,
+                source_catalog_digest=TRUSTED_CATALOG_DIGEST,
+            )
+        except Exception as error:
+            raise UpdateError(
+                "INVALID_BOOTSTRAP_BINDING",
+                f"The installed bootstrap catalog binding could not be verified: {error}",
+            ) from error
+        return binding
+
     def __init__(
         self,
         *,
@@ -688,7 +730,14 @@ class ComponentUpdater:
         load_active_catalog: bool = True,
         allow_incomplete_catalog: bool = False,
     ) -> None:
-        self.catalog_path = Path(catalog_path)
+        requested_catalog_path = Path(catalog_path)
+        packaged_helper = self._running_from_installed_helper()
+        if packaged_helper and requested_catalog_path != INSTALLED_CATALOG:
+            raise UpdateError(
+                "UNSAFE_CATALOG",
+                "The installed updater can use only its fixed bootstrap catalog path.",
+            )
+        self.catalog_path = requested_catalog_path
         self.activity_catalog_path = Path(activity_catalog_path)
         self.socket_path = Path(socket_path)
         # None means resolve only the catalog-pinned, installed broker. An explicit
@@ -729,11 +778,34 @@ class ComponentUpdater:
             )
         bootstrap_bytes = self.catalog_path.read_bytes()
         bootstrap_digest = "sha256:" + hashlib.sha256(bootstrap_bytes).hexdigest()
-        if trusted_catalog_digest is not None and bootstrap_digest != trusted_catalog_digest:
-            raise UpdateError(
-                "CATALOG_DIGEST_MISMATCH",
-                "The installed component catalog does not match its compiled authority pin.",
+        self.bootstrap_catalog_binding: dict[str, Any] | None = None
+        if self.catalog_path == INSTALLED_CATALOG:
+            # The package binding selects the official catalog release without baking a
+            # release-specific digest into this helper's source bytes.
+            self.bootstrap_catalog_binding = self._load_installed_bootstrap_catalog_binding()
+            binding_catalog = self.bootstrap_catalog_binding.get("catalog")
+            binding_digest = (
+                binding_catalog.get("sha256") if isinstance(binding_catalog, dict) else None
             )
+            if (
+                not isinstance(binding_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None
+                or "sha256:" + binding_digest != bootstrap_digest
+            ):
+                raise UpdateError(
+                    "CATALOG_DIGEST_MISMATCH",
+                    "The installed component catalog differs from its validated package binding.",
+                )
+            self.bootstrap_catalog_authorized = True
+        else:
+            if trusted_catalog_digest is not None and bootstrap_digest != trusted_catalog_digest:
+                raise UpdateError(
+                    "CATALOG_DIGEST_MISMATCH",
+                    "The source component catalog does not match its compiled authority pin.",
+                )
+            # Keep broker resolution tied to the source-compiled authority pin even
+            # when a development caller supplies a separate catalog digest.
+            self.bootstrap_catalog_authorized = bootstrap_digest == TRUSTED_CATALOG_DIGEST
         self.bootstrap_catalog_digest = bootstrap_digest
         self.bootstrap_catalog_bytes = bootstrap_bytes
         self.load_active_catalog = load_active_catalog
@@ -6801,7 +6873,7 @@ class ComponentUpdater:
             not isinstance(component, dict)
             or component.get("componentId") != component_id
             or component.get("kind") != "native-binary"
-            or self.bootstrap_catalog_digest != TRUSTED_CATALOG_DIGEST
+            or not self.bootstrap_catalog_authorized
         ):
             raise UpdateError(
                 "GATE_UNKNOWN",
@@ -11913,15 +11985,268 @@ class ComponentUpdater:
                 f"Schema rollback could not be verified: {error}; maintenance remains held.",
             )
 
-    def _validate_legacy_core_health(self, transaction: dict[str, Any]) -> None:
-        result = self._broker_request("Health", {})
+    def _validate_legacy_source_identity(self, component_id: str, manifest: dict[str, Any]) -> None:
+        """Check source fields on a C9 manifest whose digest was verified before adoption."""
+
+        component = self.components[component_id]
+        repository = component.get("publisher")
+        publisher = self.publishers.get(repository)
+        channel = manifest.get("channel")
+        source = manifest.get("source")
+        provenance = manifest.get("provenance")
+        attestation = provenance.get("attestation") if isinstance(provenance, dict) else None
+        channels = self.catalog.get("channels")
+        channel_config = channels.get(channel) if isinstance(channels, dict) else None
+        source_refs = channel_config.get("sourceRefs") if isinstance(channel_config, dict) else None
+        source_commit = source.get("commit") if isinstance(source, dict) else None
+        source_ref = source.get("ref") if isinstance(source, dict) else None
+        workflow = publisher.get("workflow") if isinstance(publisher, dict) else None
         if (
-            result.get("status") != "SERVING"
-            or result.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
+            not isinstance(repository, str)
+            or not isinstance(publisher, dict)
+            or publisher.get("repository") != repository
+            or not isinstance(workflow, str)
+            or channel not in {"stable", "preview"}
+            or not isinstance(source_refs, list)
+            or source_ref not in source_refs
+            or not isinstance(source_commit, str)
+            or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+            or not isinstance(source, dict)
+            or source.get("repository") != f"https://github.com/{repository}"
+            or not isinstance(attestation, dict)
+            or attestation.get("kind") != "github-artifact-attestation"
+            or attestation.get("repository") != repository
+            or attestation.get("workflow") != workflow
+            or attestation.get("predicateType") != "https://slsa.dev/provenance/v1"
+            or attestation.get("run") is None
+        ):
+            raise UpdateError(
+                "SCHEMA_ROLLBACK_UNKNOWN",
+                f"Restored C9 {component_id} source identity is not pinned.",
+                retryable=True,
+            )
+
+    def _validate_restored_legacy_core_identity(self, transaction: dict[str, Any]) -> Path:
+        """Reconcile the signed C9 cohort and running Broker before accepting legacy health."""
+
+        self._validate_schema_adoption_transaction(transaction)
+        self._validate_recovery_identity(transaction)
+        previous = {
+            item["componentId"]: item
+            for item in transaction.get("previous", [])
+            if isinstance(item, dict) and isinstance(item.get("componentId"), str)
+        }
+        current = {
+            item["componentId"]: item
+            for item in self._capture_active_versions(transaction["components"])
+        }
+        if not self._same_release_identities(previous, current, require_attested=False):
+            raise UpdateError(
+                "SCHEMA_ROLLBACK_UNKNOWN",
+                "Restored C9 release pointers differ from the transaction's prior identities.",
+                retryable=True,
+            )
+
+        migration = self._load_native_runtime_schema_migration()
+        for component_id in (
+            "cyrene-runtime-maintenance",
+            "cyrene-kernel",
+            "cy-package-runtime",
+        ):
+            prior = previous.get(component_id)
+            if prior is None or prior.get("version") is None:
+                continue
+            if component_id in {BROKER_COMPONENT_ID, "cyrene-kernel"} and (
+                prior.get("identityAttested") is not True
+            ):
+                raise UpdateError(
+                    "SCHEMA_ROLLBACK_UNKNOWN",
+                    f"Restored C9 {component_id} prior receipt was not attested.",
+                    retryable=True,
+                )
+            component = self.components.get(component_id)
+            installed = self._installed(component) if isinstance(component, dict) else None
+            manifest = installed.get("manifest") if isinstance(installed, dict) else None
+            if (
+                not isinstance(component, dict)
+                or not isinstance(installed, dict)
+                or installed.get("active") is not True
+                or installed.get("identityAttested") is not True
+                or not isinstance(manifest, dict)
+                or type(manifest.get("schemaVersion")) is not int
+                or manifest.get("schemaVersion") != 1
+                or "compatibility" in manifest
+                or manifest.get("manifestDigest") != prior.get("manifestDigest")
+                or manifest.get("version") != prior.get("version")
+            ):
+                raise UpdateError(
+                    "SCHEMA_ROLLBACK_UNKNOWN",
+                    f"Restored C9 {component_id} receipt or manifest identity is unknown.",
+                    retryable=True,
+                )
+            target = self._target_for(component)
+            if target is None or manifest.get("target") != target.get("target"):
+                raise UpdateError(
+                    "SCHEMA_ROLLBACK_UNKNOWN",
+                    f"Restored C9 {component_id} target identity is not supported.",
+                    retryable=True,
+                )
+            self._validate_legacy_source_identity(component_id, manifest)
+            try:
+                migration.verify_active_native_payload(self, component_id)
+            except Exception as error:
+                raise UpdateError(
+                    "SCHEMA_ROLLBACK_UNKNOWN",
+                    f"Restored C9 {component_id} payload did not match its verified receipt.",
+                    retryable=True,
+                ) from error
+
+        broker_id = BROKER_COMPONENT_ID
+        broker_component = self.components[broker_id]
+        broker = self._installed(broker_component)
+        broker_manifest = broker.get("manifest")
+        broker_unit = self._catalog_matched_unit(broker_component)
+        inventory = transaction.get("preActiveUnits")
+        prior_broker_units = (
+            [
+                row
+                for row in inventory
+                if isinstance(row, dict)
+                and row.get("componentId") == broker_id
+                and row.get("unit") == broker_unit
+            ]
+            if isinstance(inventory, list)
+            else []
+        )
+        if (
+            broker.get("active") is not True
+            or broker.get("identityAttested") is not True
+            or not isinstance(broker_manifest, dict)
+            or type(broker_manifest.get("schemaVersion")) is not int
+            or broker_manifest.get("schemaVersion") != 1
+            or not isinstance(broker_unit, str)
+            or transaction.get("targetKind") != "CORE_RUNTIME"
+            or not isinstance(transaction.get("maintenanceToken"), str)
+            or len(transaction.get("maintenanceToken", "")) < 32
+            or len(prior_broker_units) != 1
+            or prior_broker_units[0].get("active") is not True
+            or not self._unit_exists(broker_component)
+        ):
+            raise UpdateError(
+                "SCHEMA_ROLLBACK_UNKNOWN",
+                "Restored C9 Broker unit or signed release identity is unknown.",
+                retryable=True,
+            )
+        executable = self._resolve_installed_broker()
+        self._validate_active_legacy_broker_process(broker_unit, executable, broker_manifest)
+        return executable
+
+    def _validate_active_legacy_broker_process(
+        self, unit: str, executable: Path, manifest: dict[str, Any]
+    ) -> None:
+        """Require the restored Broker unit PID to run its verified C9 executable."""
+
+        try:
+            completed = self.runner(
+                [
+                    "systemctl",
+                    "show",
+                    unit,
+                    "--property=ActiveState",
+                    "--property=SubState",
+                    "--property=MainPID",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UpdateError(
+                "SCHEMA_ROLLBACK_UNKNOWN",
+                "Cannot inspect the restored C9 Broker service process.",
+                retryable=True,
+            ) from error
+        properties: dict[str, str] = {}
+        for line in completed.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in {"ActiveState", "SubState", "MainPID"}:
+                if key in properties:
+                    raise UpdateError(
+                        "SCHEMA_ROLLBACK_UNKNOWN",
+                        "Restored C9 Broker service process identity is malformed.",
+                        retryable=True,
+                    )
+                properties[key] = value
+        pid_text = properties.get("MainPID")
+        if (
+            completed.returncode != 0
+            or set(properties) != {"ActiveState", "SubState", "MainPID"}
+            or properties.get("ActiveState") != "active"
+            or properties.get("SubState") != "running"
+            or not isinstance(pid_text, str)
+            or not pid_text.isdecimal()
+            or int(pid_text) <= 1
+        ):
+            raise UpdateError(
+                "SCHEMA_ROLLBACK_UNKNOWN",
+                "Restored C9 Broker service is not confirmed active with a MainPID.",
+                retryable=True,
+            )
+        artifact = manifest.get("artifact")
+        files = artifact.get("files") if isinstance(artifact, dict) else None
+        entrypoint = artifact.get("entrypoint") if isinstance(artifact, dict) else None
+        expected_digest = files.get(entrypoint) if isinstance(files, dict) else None
+        proc_exe = Path("/proc") / pid_text / "exe"
+        try:
+            executable_link = os.readlink(proc_exe)
+            executable_info = proc_exe.stat()
+            executable_digest = _file_digest(proc_exe)
+        except OSError as error:
+            raise UpdateError(
+                "SCHEMA_ROLLBACK_UNKNOWN",
+                "Cannot verify the restored C9 Broker executable.",
+                retryable=True,
+            ) from error
+        if (
+            not isinstance(expected_digest, str)
+            or not _valid_digest(expected_digest)
+            or executable_link.endswith(" (deleted)")
+            or Path(executable_link) != executable
+            or not stat.S_ISREG(executable_info.st_mode)
+            or executable_digest != expected_digest
+        ):
+            raise UpdateError(
+                "SCHEMA_ROLLBACK_UNKNOWN",
+                "Restored C9 Broker PID does not run its receipt-pinned executable.",
+                retryable=True,
+            )
+
+    def _validate_legacy_core_health(self, transaction: dict[str, Any]) -> None:
+        self._validate_restored_legacy_core_identity(transaction)
+        result = self._broker_request("Health", {})
+        required_fields = {
+            "status",
+            "core_bootstrap_eligible",
+            "catalog_generation",
+            "gate_generation",
+        }
+        if (
+            set(result) != required_fields
+            or result.get("status") != "SERVING"
+            or type(result.get("core_bootstrap_eligible")) is not bool
+            or type(result.get("catalog_generation")) is not int
+            or type(result.get("gate_generation")) is not int
+            or type(transaction.get("expectedCatalogGeneration")) is not int
+            or type(transaction.get("maintenanceGateGeneration")) is not int
             or result.get("catalog_generation") != transaction.get("expectedCatalogGeneration")
             or result.get("gate_generation") != transaction.get("maintenanceGateGeneration")
         ):
-            raise UpdateError("SCHEMA_ROLLBACK_UNKNOWN", "Restored C9 Broker health is unknown.")
+            raise UpdateError(
+                "SCHEMA_ROLLBACK_UNKNOWN",
+                "Restored C9 Broker health is unknown or does not match its held generations.",
+                retryable=True,
+            )
 
     def _restore_previously_active_clients(
         self, transaction: dict[str, Any], *, core_only: bool

@@ -524,6 +524,162 @@ def test_release_workflow_stages_platform_fetcher_schemas_with_catalog() -> None
     assert "native-installer-inputs/component-catalog-v1.json" in fetch_step["env"]["CATALOG_PATH"]
 
 
+def _write_catalog_binding_inputs(
+    tmp_path: Path, module: ModuleType
+) -> tuple[Path, Path, dict[str, object]]:
+    """Write the exact selected catalog and its source-receipt projection."""
+
+    catalog_path = tmp_path / "component-catalog-v1.json"
+    catalog_bytes = b'{"schemaVersion":1,"generation":27}\n'
+    catalog_path.write_bytes(catalog_bytes)
+    receipt_path = tmp_path / "native-installer-source-receipt-v1.json"
+    catalog_evidence = {
+        "repository": module.REPOSITORY,
+        "workflow": module.CATALOG_WORKFLOW,
+        "releaseId": "catalog-stable-" + "a" * 40,
+        "source": {"ref": "refs/heads/main", "commit": "a" * 40},
+        "assetName": "component-catalog-v1.json",
+        "sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "attestationBundleSha256": "b" * 64,
+    }
+    receipt = {
+        "schemaVersion": 1,
+        "workspaceSource": {
+            "repository": module.REPOSITORY,
+            "ref": "refs/heads/main",
+            "commit": "c" * 40,
+            "workflow": f"{module.REPOSITORY}/{module.WORKFLOW_PATH}",
+        },
+        "releaseInputs": {"workspaceCatalog": catalog_evidence},
+    }
+    receipt_path.write_text(json.dumps(receipt, sort_keys=True), encoding="utf-8")
+    return catalog_path, receipt_path, receipt
+
+
+def test_production_catalog_binding_embeds_exact_selected_catalog_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    catalog_path, receipt_path, receipt = _write_catalog_binding_inputs(tmp_path, module)
+    monkeypatch.setattr(module, "_validate_source_receipt", lambda *_args, **_kwargs: None)
+    binding_path = tmp_path / "output" / module.BOOTSTRAP_CATALOG_BINDING_PATH.rsplit("/", 1)[-1]
+    arguments = argparse.Namespace(
+        catalog=catalog_path,
+        source_receipt=receipt_path,
+        development_source_build=False,
+        source_ref="refs/heads/main",
+        source_commit="c" * 40,
+        output=binding_path,
+    )
+
+    assert module._prepare_bootstrap_catalog_binding(arguments) == 0
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert binding == {
+        "schemaVersion": 1,
+        "catalog": {
+            **receipt["releaseInputs"]["workspaceCatalog"],  # type: ignore[index]
+            "generation": 27,
+        },
+    }
+    helper = module._bootstrap_catalog_binding_module()
+    assert (
+        helper.load_bootstrap_catalog_binding(binding_path, catalog_path, require_root=False)
+        == binding
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_input",
+    ["missing-catalog", "symlink-catalog", "missing-receipt", "symlink-receipt", "wrong-digest"],
+)
+def test_production_catalog_binding_rejects_absent_symlink_or_unselected_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_input: str
+) -> None:
+    module = _module()
+    catalog_path, receipt_path, _receipt = _write_catalog_binding_inputs(tmp_path, module)
+    monkeypatch.setattr(module, "_validate_source_receipt", lambda *_args, **_kwargs: None)
+    if bad_input == "missing-catalog":
+        catalog_path.unlink()
+    elif bad_input == "symlink-catalog":
+        real_path = catalog_path.with_suffix(".real")
+        catalog_path.rename(real_path)
+        catalog_path.symlink_to(real_path.name)
+    elif bad_input == "missing-receipt":
+        receipt_path.unlink()
+    elif bad_input == "symlink-receipt":
+        real_path = receipt_path.with_suffix(".real")
+        receipt_path.rename(real_path)
+        receipt_path.symlink_to(real_path.name)
+    else:
+        catalog_path.write_bytes(b'{"schemaVersion":1,"generation":28}\n')
+    arguments = argparse.Namespace(
+        catalog=catalog_path,
+        source_receipt=receipt_path,
+        development_source_build=False,
+        source_ref="refs/heads/main",
+        source_commit="c" * 40,
+        output=tmp_path / "output" / module.BOOTSTRAP_CATALOG_BINDING_PATH.rsplit("/", 1)[-1],
+    )
+
+    with pytest.raises(module.ReleaseError):
+        module._prepare_bootstrap_catalog_binding(arguments)
+
+
+def test_development_catalog_binding_is_unsigned_and_uses_source_pin(tmp_path: Path) -> None:
+    module = _module()
+    source_catalog = WORKSPACE_ROOT / "packaging/component-catalog-bootstrap-v1.json"
+    catalog_path = tmp_path / "component-catalog-v1.json"
+    catalog_path.write_bytes(source_catalog.read_bytes())
+    binding_path = tmp_path / "bootstrap-catalog-binding-v1.json"
+    arguments = argparse.Namespace(
+        catalog=catalog_path,
+        source_receipt=None,
+        development_source_build=True,
+        source_ref=None,
+        source_commit=None,
+        output=binding_path,
+    )
+
+    assert module._prepare_bootstrap_catalog_binding(arguments) == 0
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert binding["provenance"] == "development-source-pin"
+    assert "releaseId" not in binding["catalog"]
+    helper = module._bootstrap_catalog_binding_module()
+    with pytest.raises(helper.BootstrapCatalogBindingError, match="source-compiled"):
+        helper.load_bootstrap_catalog_binding(binding_path, catalog_path, require_root=False)
+    assert (
+        helper.load_bootstrap_catalog_binding(
+            binding_path,
+            catalog_path,
+            require_root=False,
+            source_catalog_digest=module._compiled_development_catalog_digest(),
+        )
+        == binding
+    )
+
+
+def test_release_workflow_and_builder_pass_the_verified_selected_catalog() -> None:
+    workflow = yaml.safe_load(
+        (WORKSPACE_ROOT / ".github/workflows/native-installer-release.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    build_step = next(
+        step
+        for step in workflow["jobs"]["build-deb"]["steps"]
+        if step.get("name") == "Build the DEB from the original verified published Product bytes"
+    )
+    build_script = (WORKSPACE_ROOT / "packaging/build-deb.sh").read_text(encoding="utf-8")
+
+    assert '--bootstrap-catalog "$INPUT_ROOT/component-catalog-v1.json"' in build_step["run"]
+    assert (
+        '--source-receipt "$INPUT_ROOT/native-installer-source-receipt-v1.json"'
+        in build_step["run"]
+    )
+    assert 'cp "${SELECTED_BOOTSTRAP_CATALOG}"' in build_script
+    assert '--catalog "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"' in build_script
+
+
 def test_release_workflow_scopes_github_token_to_locked_python_prepare() -> None:
     workflow_path = WORKSPACE_ROOT / ".github/workflows/native-installer-release.yml"
     workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
@@ -711,6 +867,31 @@ def _write_package_fixture(
     staged_root.mkdir(parents=True)
     control_root.mkdir()
 
+    catalog_path = package_root / module.BOOTSTRAP_CATALOG_PATH
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_generation = 12
+    catalog_bytes = (
+        json.dumps({"schemaVersion": 1, "generation": catalog_generation}, sort_keys=True) + "\n"
+    ).encode()
+    catalog_path.write_bytes(catalog_bytes)
+    catalog_evidence = {
+        "repository": module.REPOSITORY,
+        "workflow": module.CATALOG_WORKFLOW,
+        "releaseId": "catalog-stable-" + "e" * 40,
+        "source": {"ref": "refs/heads/main", "commit": "e" * 40},
+        "assetName": "component-catalog-v1.json",
+        "sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "attestationBundleSha256": hashlib.sha256(b"catalog-attestation").hexdigest(),
+    }
+    catalog_binding = {
+        "schemaVersion": 1,
+        "catalog": {**catalog_evidence, "generation": catalog_generation},
+    }
+    binding_path = package_root / module.BOOTSTRAP_CATALOG_BINDING_PATH
+    binding_path.write_text(
+        json.dumps(catalog_binding, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+
     index_services: dict[str, object] = {}
     receipt_tuples = []
     for number, (product, (repository, component_id)) in enumerate(
@@ -879,6 +1060,10 @@ def _write_package_fixture(
         WORKSPACE_ROOT / "packaging/service_bundle.py",
         packaged_scripts / "service_bundle.py",
     )
+    shutil.copy2(
+        WORKSPACE_ROOT / "packaging/bootstrap_catalog_binding.py",
+        packaged_scripts / "bootstrap_catalog_binding.py",
+    )
     unit_root = package_root / "lib/systemd/system"
     unit_root.mkdir(parents=True)
     for _, component_id in module.PRODUCTS.values():
@@ -989,7 +1174,9 @@ def _write_package_fixture(
     )
     assert result.returncode == 0, result.stderr
     receipt = {
+        "schemaVersion": 1,
         "verifiedTuples": receipt_tuples,
+        "releaseInputs": {"workspaceCatalog": catalog_evidence},
         "pythonRuntimeLock": {
             "path": "packaging/python-runtime.lock.json",
             "sha256": runtime_lock_sha,
@@ -999,6 +1186,7 @@ def _write_package_fixture(
             "repository": module.REPOSITORY,
             "ref": "refs/heads/main",
             "commit": "d" * 40,
+            "workflow": f"{module.REPOSITORY}/{module.WORKFLOW_PATH}",
         },
     }
     return deb_path, receipt, package_root
@@ -1031,6 +1219,47 @@ def test_offline_deb_proof_checks_actual_marker_scripts_and_published_bytes(tmp_
     }
     assert set(proof["services"]) == {component_id for _, component_id in module.PRODUCTS.values()}
     assert proof["debSha256"] == hashlib.sha256(deb_path.read_bytes()).hexdigest()
+    assert proof["workspaceCatalogSha256"] == receipt["releaseInputs"]["workspaceCatalog"]["sha256"]
+    assert proof["workspaceCatalogGeneration"] == 12
+    assert len(proof["bootstrapCatalogBindingSha256"]) == 64
+
+
+@pytest.mark.parametrize("substitution", ["catalog", "binding"])
+def test_offline_deb_proof_rejects_substituted_catalog_or_binding(
+    tmp_path: Path, substitution: str
+) -> None:
+    if shutil.which("dpkg-deb") is None:
+        pytest.skip("dpkg-deb is required for the DEB payload proof test")
+    module = _module()
+    _deb_path, receipt, package_root = _write_package_fixture(tmp_path, module)
+    catalog_path = package_root / module.BOOTSTRAP_CATALOG_PATH
+    binding_path = package_root / module.BOOTSTRAP_CATALOG_BINDING_PATH
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    if substitution == "catalog":
+        catalog_bytes = b'{"schemaVersion":1,"generation":13}\n'
+        catalog_path.write_bytes(catalog_bytes)
+        binding["catalog"]["sha256"] = hashlib.sha256(catalog_bytes).hexdigest()
+        binding["catalog"]["generation"] = 13
+    else:
+        binding["catalog"]["source"]["commit"] = "f" * 40
+    binding_path.write_text(json.dumps(binding, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    rebuilt = tmp_path / f"substituted-{substitution}.deb"
+    result = subprocess.run(
+        ["dpkg-deb", "--build", "--root-owner-group", str(package_root), str(rebuilt)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    with pytest.raises(module.ReleaseError, match="selected source receipt|exact source receipt"):
+        module._inspect_deb_initialization(
+            rebuilt,
+            module.PROFILE_IDS[0],
+            receipt,
+            verify_attestations=False,
+            gh_executable="gh",
+        )
 
 
 def test_stage_only_verifier_derives_fail_closed_from_packaged_units(

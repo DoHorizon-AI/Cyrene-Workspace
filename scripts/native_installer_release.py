@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -84,6 +85,9 @@ RELEASE_SUBJECT_NAMES = (
 )
 SERVICE_ARTIFACT_INDEX_PATH = "usr/share/cyrene/service-artifacts/index.json"
 INSTALL_CONTRACT_PATH = "usr/share/cyrene/native-install-contract-v1.json"
+BOOTSTRAP_CATALOG_PATH = "usr/share/cyrene/component-catalog-v1.json"
+BOOTSTRAP_CATALOG_BINDING_PATH = "usr/share/cyrene/bootstrap-catalog-binding-v1.json"
+BOOTSTRAP_CATALOG_BINDING_LOADER_PATH = "usr/lib/cyrene/scripts/bootstrap_catalog_binding.py"
 INSTALL_CONTRACT_POLICY = {
     "schemaVersion": 1,
     "initializationMode": "stage-only",
@@ -102,6 +106,19 @@ LOCKED_PYTHON_RELEASE_COMMIT = "b498734a5791d0e6786695a226fd398a41c6f7f6"
 
 class ReleaseError(ValueError):
     """Raised when a native installer release cannot be proven complete."""
+
+
+def _bootstrap_catalog_binding_module() -> Any:
+    """Load the sibling binding validator without resolving an installed package."""
+
+    path = Path(__file__).resolve().parents[1] / "packaging" / "bootstrap_catalog_binding.py"
+    spec = importlib.util.spec_from_file_location("cyrene_release_bootstrap_catalog_binding", path)
+    if spec is None or spec.loader is None:
+        raise ReleaseError("cannot load the source-bound bootstrap catalog binding validator")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @dataclass(frozen=True)
@@ -1485,7 +1502,7 @@ def _inspect_deb_initialization(
     verify_attestations: bool,
     gh_executable: str,
 ) -> dict[str, Any]:
-    """Extract the actual DEB and prove its marker, service index, and scripts are stage-only."""
+    """Prove stage-only behavior and exact selected catalog binding in the DEB."""
 
     _require_file(deb_path, f"DEB for {profile_id}")
     with tempfile.TemporaryDirectory(prefix="cyrene-native-deb-verify-") as temporary:
@@ -1506,9 +1523,88 @@ def _inspect_deb_initialization(
         index_path = extraction / SERVICE_ARTIFACT_INDEX_PATH
         original_root = extraction / "usr/share/cyrene/verified-service-artifacts" / profile_id
         original_index_path = original_root / "index.json"
+        catalog_path = extraction / BOOTSTRAP_CATALOG_PATH
+        binding_path = extraction / BOOTSTRAP_CATALOG_BINDING_PATH
+        loader_path = extraction / BOOTSTRAP_CATALOG_BINDING_LOADER_PATH
         _require_file(marker_path, f"DEB install contract marker for {profile_id}")
         _require_file(index_path, f"DEB service artifact index for {profile_id}")
         _require_file(original_index_path, f"DEB original verified service index for {profile_id}")
+        _require_file(catalog_path, f"DEB selected Workspace catalog for {profile_id}")
+        _require_file(binding_path, f"DEB selected catalog binding for {profile_id}")
+        _require_file(loader_path, f"DEB packaged catalog binding loader for {profile_id}")
+        release_inputs = receipt.get("releaseInputs")
+        catalog_evidence = (
+            release_inputs.get("workspaceCatalog") if isinstance(release_inputs, dict) else None
+        )
+        if not isinstance(catalog_evidence, dict) or set(catalog_evidence) != {
+            "repository",
+            "workflow",
+            "releaseId",
+            "source",
+            "assetName",
+            "sha256",
+            "attestationBundleSha256",
+        }:
+            raise ReleaseError("source receipt Workspace catalog evidence is malformed")
+        if catalog_evidence.get("assetName") != "component-catalog-v1.json" or _sha256(
+            catalog_path
+        ) != catalog_evidence.get("sha256"):
+            raise ReleaseError(
+                "DEB selected Workspace catalog bytes differ from the exact source receipt"
+            )
+        catalog_document = _read_json_object(catalog_path, "DEB selected Workspace catalog")
+        catalog_generation = catalog_document.get("generation")
+        if (
+            catalog_document.get("schemaVersion") != 1
+            or type(catalog_generation) is not int
+            or catalog_generation < 1
+        ):
+            raise ReleaseError("DEB selected Workspace catalog schema or generation is invalid")
+        expected_binding = {
+            "schemaVersion": 1,
+            "catalog": {**catalog_evidence, "generation": catalog_generation},
+        }
+        binding_document = _read_json_object(binding_path, "DEB selected catalog binding")
+        if binding_document != expected_binding:
+            raise ReleaseError("DEB catalog binding differs from the exact selected source receipt")
+        try:
+            _bootstrap_catalog_binding_module().load_bootstrap_catalog_binding(
+                binding_path, catalog_path, require_root=False
+            )
+        except (OSError, ValueError) as error:
+            raise ReleaseError(f"DEB selected catalog binding is invalid: {error}") from error
+        loader_digest = _sha256(loader_path)
+        initialization = receipt.get("safeInitialization")
+        if isinstance(initialization, dict):
+            target_rows = initialization.get("targets")
+            target_proof = (
+                next(
+                    (
+                        row
+                        for row in target_rows
+                        if isinstance(row, dict) and row.get("targetId") == profile_id
+                    ),
+                    None,
+                )
+                if isinstance(target_rows, list)
+                else None
+            )
+            if (
+                not isinstance(target_proof, dict)
+                or target_proof.get("bootstrapCatalogBindingLoaderSha256") != loader_digest
+            ):
+                raise ReleaseError(
+                    "DEB catalog binding loader bytes differ from the signed source receipt"
+                )
+        else:
+            source_loader_path = (
+                Path(__file__).resolve().parents[1] / "packaging" / "bootstrap_catalog_binding.py"
+            )
+            _require_file(source_loader_path, "source-bound bootstrap catalog binding loader")
+            if loader_digest != _sha256(source_loader_path):
+                raise ReleaseError(
+                    "DEB catalog binding loader bytes differ from the source-bound helper"
+                )
         marker = _read_json_object(marker_path, f"DEB install contract marker for {profile_id}")
         index = _read_json_object(index_path, f"DEB embedded service index for {profile_id}")
         original_index = _read_json_object(
@@ -1568,6 +1664,13 @@ def _inspect_deb_initialization(
             "markerSha256": _sha256(marker_path),
             "serviceArtifactsIndexPath": f"/{SERVICE_ARTIFACT_INDEX_PATH}",
             "serviceArtifactsIndexSha256": _sha256(index_path),
+            "workspaceCatalogPath": f"/{BOOTSTRAP_CATALOG_PATH}",
+            "workspaceCatalogSha256": _sha256(catalog_path),
+            "workspaceCatalogGeneration": catalog_generation,
+            "bootstrapCatalogBindingPath": f"/{BOOTSTRAP_CATALOG_BINDING_PATH}",
+            "bootstrapCatalogBindingSha256": _sha256(binding_path),
+            "bootstrapCatalogBindingLoaderPath": f"/{BOOTSTRAP_CATALOG_BINDING_LOADER_PATH}",
+            "bootstrapCatalogBindingLoaderSha256": _sha256(loader_path),
             "maintainerScriptsSha256": script_hashes,
             "services": {
                 component_id: _marker_service_summary(row)
@@ -2080,6 +2183,13 @@ def _validate_source_receipt(
                 "markerSha256",
                 "serviceArtifactsIndexPath",
                 "serviceArtifactsIndexSha256",
+                "workspaceCatalogPath",
+                "workspaceCatalogSha256",
+                "workspaceCatalogGeneration",
+                "bootstrapCatalogBindingPath",
+                "bootstrapCatalogBindingSha256",
+                "bootstrapCatalogBindingLoaderPath",
+                "bootstrapCatalogBindingLoaderSha256",
                 "maintainerScriptsSha256",
                 "services",
                 "checks",
@@ -2092,6 +2202,18 @@ def _validate_source_receipt(
                 or not SHA256_PATTERN.fullmatch(str(row.get("markerSha256", "")))
                 or row.get("serviceArtifactsIndexPath") != f"/{SERVICE_ARTIFACT_INDEX_PATH}"
                 or not SHA256_PATTERN.fullmatch(str(row.get("serviceArtifactsIndexSha256", "")))
+                or row.get("workspaceCatalogPath") != f"/{BOOTSTRAP_CATALOG_PATH}"
+                or not SHA256_PATTERN.fullmatch(str(row.get("workspaceCatalogSha256", "")))
+                or row.get("workspaceCatalogSha256") != catalog.get("sha256")
+                or type(row.get("workspaceCatalogGeneration")) is not int
+                or row.get("workspaceCatalogGeneration") < 1
+                or row.get("bootstrapCatalogBindingPath") != f"/{BOOTSTRAP_CATALOG_BINDING_PATH}"
+                or not SHA256_PATTERN.fullmatch(str(row.get("bootstrapCatalogBindingSha256", "")))
+                or row.get("bootstrapCatalogBindingLoaderPath")
+                != f"/{BOOTSTRAP_CATALOG_BINDING_LOADER_PATH}"
+                or not SHA256_PATTERN.fullmatch(
+                    str(row.get("bootstrapCatalogBindingLoaderSha256", ""))
+                )
                 or row.get("checks")
                 != {
                     "serviceActivation": "deferred",
@@ -3036,6 +3158,119 @@ def _write_fetch_plan(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _compiled_development_catalog_digest() -> str:
+    """Read the unique source-compiled updater catalog digest without importing it."""
+
+    path = Path(__file__).resolve().parents[1] / "packaging" / "component_updates.py"
+    _require_file(path, "source-pinned ComponentUpdater module")
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, UnicodeDecodeError, SyntaxError) as error:
+        raise ReleaseError(f"cannot read source-pinned ComponentUpdater digest: {error}") from error
+    values: list[Any] = []
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "TRUSTED_CATALOG_DIGEST"
+                for target in node.targets
+            )
+        ) or (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "TRUSTED_CATALOG_DIGEST"
+        ):
+            values.append(node.value)
+    if (
+        len(values) != 1
+        or not isinstance(values[0], ast.Constant)
+        or not isinstance(values[0].value, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", values[0].value) is None
+    ):
+        raise ReleaseError("ComponentUpdater must define one literal typed TRUSTED_CATALOG_DIGEST")
+    return values[0].value
+
+
+def _prepare_bootstrap_catalog_binding(arguments: argparse.Namespace) -> int:
+    """Create the package binding from the exact signed receipt or source pin."""
+
+    catalog_path = arguments.catalog
+    _require_file(catalog_path, "selected bootstrap Workspace catalog")
+    if catalog_path.name != "component-catalog-v1.json":
+        raise ReleaseError("selected bootstrap catalog file must use its canonical asset name")
+    catalog = _read_json_object(catalog_path, "selected bootstrap Workspace catalog")
+    generation = catalog.get("generation")
+    if catalog.get("schemaVersion") != 1 or type(generation) is not int or generation < 1:
+        raise ReleaseError("selected bootstrap catalog schema or generation is invalid")
+
+    source_catalog_digest: str | None = None
+    if arguments.development_source_build:
+        source_catalog_digest = _compiled_development_catalog_digest()
+        if _sha256(catalog_path) != source_catalog_digest.removeprefix("sha256:"):
+            raise ReleaseError(
+                "checked-in bootstrap catalog bytes differ from the source-compiled updater pin"
+            )
+        binding = {
+            "schemaVersion": 1,
+            "provenance": "development-source-pin",
+            "catalog": {
+                "assetName": "component-catalog-v1.json",
+                "sha256": _sha256(catalog_path),
+                "generation": generation,
+            },
+        }
+    else:
+        receipt_path = arguments.source_receipt
+        if receipt_path is None:
+            raise ReleaseError("production catalog binding requires a verified source receipt")
+        _require_file(receipt_path, "verified native installer source receipt")
+        if receipt_path.name != "native-installer-source-receipt-v1.json":
+            raise ReleaseError("source receipt file must use its canonical release asset name")
+        receipt = _read_json_object(receipt_path, "verified native installer source receipt")
+        source = receipt.get("workspaceSource")
+        if not isinstance(source, dict):
+            raise ReleaseError("source receipt has no Workspace source identity")
+        _validate_source_receipt(receipt, source, require_safe_initialization=False)
+        if (
+            arguments.source_ref is None
+            or arguments.source_commit is None
+            or not SHA1_PATTERN.fullmatch(arguments.source_commit)
+            or source.get("repository") != REPOSITORY
+            or source.get("workflow") != f"{REPOSITORY}/{WORKFLOW_PATH}"
+            or source.get("ref") != arguments.source_ref
+            or source.get("commit") != arguments.source_commit
+        ):
+            raise ReleaseError(
+                "source receipt does not match the exact Workspace build source identity"
+            )
+        evidence = receipt["releaseInputs"]["workspaceCatalog"]
+        if (
+            evidence["assetName"] != catalog_path.name
+            or _sha256(catalog_path) != evidence["sha256"]
+        ):
+            raise ReleaseError(
+                "selected bootstrap catalog bytes differ from the exact verified source receipt"
+            )
+        binding = {
+            "schemaVersion": 1,
+            "catalog": {**evidence, "generation": generation},
+        }
+
+    helper = _bootstrap_catalog_binding_module()
+    arguments.output.parent.mkdir(parents=True, exist_ok=True)
+    if arguments.output.is_symlink() or arguments.output.is_dir():
+        raise ReleaseError("bootstrap catalog binding output must not be a symlink or directory")
+    _write_json(arguments.output, binding)
+    helper.load_bootstrap_catalog_binding(
+        arguments.output,
+        catalog_path,
+        require_root=False,
+        source_catalog_digest=source_catalog_digest,
+    )
+    print(f"Wrote exact {'development' if source_catalog_digest else 'signed'} catalog binding")
+    return 0
+
+
 def _write_service_artifacts(arguments: argparse.Namespace) -> int:
     """Stage verified Product archive/manifest/bundle bytes for one target DEB."""
 
@@ -3175,6 +3410,16 @@ def _parser() -> argparse.ArgumentParser:
     fetch_plan.add_argument("--source-commit", required=True)
     fetch_plan.add_argument("--output", type=Path, required=True)
     fetch_plan.set_defaults(handler=_write_fetch_plan)
+
+    catalog_binding = commands.add_parser("prepare-bootstrap-catalog-binding")
+    catalog_binding.add_argument("--catalog", type=Path, required=True)
+    catalog_binding.add_argument("--output", type=Path, required=True)
+    binding_mode = catalog_binding.add_mutually_exclusive_group(required=True)
+    binding_mode.add_argument("--source-receipt", type=Path)
+    binding_mode.add_argument("--development-source-build", action="store_true")
+    catalog_binding.add_argument("--source-ref")
+    catalog_binding.add_argument("--source-commit")
+    catalog_binding.set_defaults(handler=_prepare_bootstrap_catalog_binding)
 
     receipt = commands.add_parser("record-inputs")
     receipt.add_argument("--inputs", type=Path, required=True)

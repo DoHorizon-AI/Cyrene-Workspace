@@ -67,6 +67,7 @@ jobs:
         run: >-
           uvx ruff==0.16.5 check
           packaging/component_updates.py packaging/prepare_service_wheelhouse.py
+          packaging/bootstrap_catalog_binding.py
           packaging/service_bundle.py tests/test_cyrene_cli.py
           tests/test_service_wheelhouse_export.py
           tests/test_linux_component_update_builders.py
@@ -74,10 +75,14 @@ jobs:
           tests/test_data_bundle_source_workflows.py
           tests/test_data_bundle_inner_manifest.py
           tests/test_linux_component_updates.py
+          tests/test_bootstrap_catalog_binding.py
+          tests/test_native_updater_bootstrap_binding.py
+          tests/test_native_legacy_rollback_health.py
       - name: Check component updater and bundle producer formatting
         run: >-
           uvx ruff==0.16.5 format --check
           packaging/component_updates.py packaging/prepare_service_wheelhouse.py
+          packaging/bootstrap_catalog_binding.py
           packaging/service_bundle.py tests/test_cyrene_cli.py
           tests/test_service_wheelhouse_export.py
           tests/test_linux_component_update_builders.py
@@ -85,6 +90,9 @@ jobs:
           tests/test_data_bundle_source_workflows.py
           tests/test_data_bundle_inner_manifest.py
           tests/test_linux_component_updates.py
+          tests/test_bootstrap_catalog_binding.py
+          tests/test_native_updater_bootstrap_binding.py
+          tests/test_native_legacy_rollback_health.py
       - name: Test updater, identity, and bundle metadata paths
         run: >-
           uvx --from pytest==9.1.1 --with jsonschema==4.26.0 --with PyYAML==6.0.3 pytest -q
@@ -93,6 +101,9 @@ jobs:
           tests/test_data_bundle_source_workflows.py
           tests/test_data_bundle_inner_manifest.py
           tests/test_linux_component_updates.py tests/test_cyrene_cli.py
+          tests/test_bootstrap_catalog_binding.py
+          tests/test_native_updater_bootstrap_binding.py
+          tests/test_native_legacy_rollback_health.py
           tests/test_service_wheelhouse_export.py
       - name: Check package and privileged helper shell syntax
         run: |
@@ -190,6 +201,7 @@ jobs:
           packaging/native_install_contract.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
+          packaging/bootstrap_catalog_binding.py
           packaging/component_placement.py
           cyrene
           packaging/native_first_products.py
@@ -206,6 +218,9 @@ jobs:
           tooling/acceptance/native-components-v2/training_evidence.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
+          tests/test_bootstrap_catalog_binding.py
+          tests/test_native_updater_bootstrap_binding.py
+          tests/test_native_legacy_rollback_health.py
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
@@ -249,6 +264,7 @@ jobs:
           packaging/native_install_contract.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
+          packaging/bootstrap_catalog_binding.py
           packaging/component_placement.py
           cyrene
           packaging/native_first_products.py
@@ -265,6 +281,9 @@ jobs:
           tooling/acceptance/native-components-v2/training_evidence.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
+          tests/test_bootstrap_catalog_binding.py
+          tests/test_native_updater_bootstrap_binding.py
+          tests/test_native_legacy_rollback_health.py
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
@@ -306,6 +325,9 @@ jobs:
           pytest -q
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
+          tests/test_bootstrap_catalog_binding.py
+          tests/test_native_updater_bootstrap_binding.py
+          tests/test_native_legacy_rollback_health.py
           tests/test_native_components_v2_acceptance.py
           tests/test_native_admin_packet.py
           tests/test_native_update_tool_and_dependencies.py
@@ -347,6 +369,7 @@ jobs:
           python -m py_compile \
             packaging/python_runtime.py packaging/verified_service_artifacts.py \
             packaging/native_install_contract.py packaging/native_core_bootstrap.py \
+            packaging/bootstrap_catalog_binding.py \
             cyrene \
             packaging/native_first_products.py \
             packaging/native_component_bootstrap.py packaging/native_package_runtime_bootstrap.py \
