@@ -229,6 +229,7 @@ jobs:
           tests/test_component_placement.py
           tests/test_component_catalog_deployment_roles.py
           tests/test_component_update_placement_integration.py
+          tests/test_component_placement_adoption_lifecycle.py
           tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
@@ -287,6 +288,7 @@ jobs:
           tests/test_component_placement.py
           tests/test_component_catalog_deployment_roles.py
           tests/test_component_update_placement_integration.py
+          tests/test_component_placement_adoption_lifecycle.py
           tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
@@ -327,6 +329,7 @@ jobs:
           tests/test_component_placement.py
           tests/test_component_catalog_deployment_roles.py
           tests/test_component_update_placement_integration.py
+          tests/test_component_placement_adoption_lifecycle.py
           tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
