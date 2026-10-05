@@ -190,6 +190,8 @@ jobs:
           packaging/native_install_contract.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
+          packaging/component_placement.py
+          cyrene
           packaging/native_first_products.py
           packaging/native_component_bootstrap.py
           packaging/native_package_runtime_bootstrap.py
@@ -224,6 +226,10 @@ jobs:
           tests/test_package_runtime_authority_probe.py
           tests/test_package_runtime_bootstrap_transaction.py
           tests/test_package_runtime_catalog.py
+          tests/test_component_placement.py
+          tests/test_component_catalog_deployment_roles.py
+          tests/test_component_update_placement_integration.py
+          tests/test_component_placement_adoption_lifecycle.py
           tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
@@ -243,6 +249,8 @@ jobs:
           packaging/native_install_contract.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
+          packaging/component_placement.py
+          cyrene
           packaging/native_first_products.py
           packaging/native_component_bootstrap.py
           packaging/native_package_runtime_bootstrap.py
@@ -277,6 +285,10 @@ jobs:
           tests/test_package_runtime_authority_probe.py
           tests/test_package_runtime_bootstrap_transaction.py
           tests/test_package_runtime_catalog.py
+          tests/test_component_placement.py
+          tests/test_component_catalog_deployment_roles.py
+          tests/test_component_update_placement_integration.py
+          tests/test_component_placement_adoption_lifecycle.py
           tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
@@ -314,6 +326,10 @@ jobs:
           tests/test_package_runtime_authority_probe.py
           tests/test_package_runtime_bootstrap_transaction.py
           tests/test_package_runtime_catalog.py
+          tests/test_component_placement.py
+          tests/test_component_catalog_deployment_roles.py
+          tests/test_component_update_placement_integration.py
+          tests/test_component_placement_adoption_lifecycle.py
           tests/test_component_v2_dependency_ranges.py
           tests/test_native_admin_host_identity.py
           tests/test_native_first_product_receipt.py tests/test_native_first_products.py
@@ -331,6 +347,7 @@ jobs:
           python -m py_compile \
             packaging/python_runtime.py packaging/verified_service_artifacts.py \
             packaging/native_install_contract.py packaging/native_core_bootstrap.py \
+            cyrene \
             packaging/native_first_products.py \
             packaging/native_component_bootstrap.py packaging/native_package_runtime_bootstrap.py \
             packaging/native_runtime_schema_migration.py \

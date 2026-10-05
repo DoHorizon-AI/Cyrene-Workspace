@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 11,
+  "generation": 12,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -1091,6 +1091,35 @@
           "componentId": "cyrene-product-contract-bundle",
           "requiredForAdoption": false,
           "protocolVersion": "cyrene.workspace.product.v2"
+        }
+      ],
+      "deploymentRoles": [
+        {
+          "roleId": "control-host",
+          "requiredMembers": [
+            "cy-workspace-relay",
+            "cy-workspace-web-bff",
+            "cy-workspace-frontend-bridge",
+            "cy-workspace-authority-host",
+            "cyrene-product-contract-bundle"
+          ],
+          "allowedMembers": [
+            "cy-workspace-relay",
+            "cy-workspace-web-bff",
+            "cy-workspace-frontend-bridge",
+            "cy-workspace-authority-host",
+            "cyrene-product-contract-bundle"
+          ]
+        },
+        {
+          "roleId": "connector-host",
+          "requiredMembers": [
+            "cy-workspace-connector"
+          ],
+          "allowedMembers": [
+            "cy-workspace-connector",
+            "cy-workspace-sidecar"
+          ]
         }
       ]
     },

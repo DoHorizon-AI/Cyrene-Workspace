@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import grp
 import hashlib
 import json
 import os
 import platform
+import pwd
 import re
 import shlex
 import shutil
@@ -76,8 +78,19 @@ DEFAULT_RELEASE_LOCK = Path("/usr/lib/cyrene/release-lock.json")
 DEFAULT_PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
 DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
 DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT = Path("/etc/cyrene/runtime-activity-sources.env")
+CONTROL_ADMISSION_ROOT = Path("/var/lib/cyrene-control-host/deployment-admission")
+CONTROL_ADMISSION_PROFILE = Path("/etc/cyrene/workspace-admission.env")
+CONTROL_ADMISSION_DROPINS = {
+    "cyrene-workspace-authority.service": Path(
+        "/etc/systemd/system/cyrene-workspace-authority.service.d/20-deployment-admission.conf"
+    ),
+    "cy-workspace-web-bff.service": Path(
+        "/etc/systemd/system/cy-workspace-web-bff.service.d/20-deployment-admission.conf"
+    ),
+}
+PLACEMENT_ADOPTION_JOURNAL = "workspace-product-v2.json"
 DEFAULT_CHANNEL = "stable"
-TRUSTED_CATALOG_DIGEST = "sha256:fc2d6dc485bfc6a6fbbef426c93acf2a640b771e6e24a7284b030804fd02fab0"
+TRUSTED_CATALOG_DIGEST = "sha256:4f0696f0f7dd24fe65d955a5269f3e2591517f4b75c79b7b7fced921dfb4bb81"
 USER_AGENT = "CyreneComponentUpdater/1"
 BEGIN_NO_TOKEN_STATUSES = frozenset(
     {
@@ -429,6 +442,37 @@ def _atomic_json(path: Path, value: dict[str, Any], *, mode: int = 0o600) -> Non
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temporary, mode)
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _atomic_control_state(path: Path, value: dict[str, Any], *, gid: int) -> None:
+    """Atomically persist one reader-accessible gate record without exposing a token."""
+
+    temporary = path.parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            os.fchown(descriptor, 0, gid)
+            os.fchmod(descriptor, 0o640)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            os.close(descriptor)
+            raise
         os.replace(temporary, path)
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
@@ -1015,7 +1059,7 @@ class ComponentUpdater:
         return self.state_root
 
     def _private_state_directory(self, name: str) -> Path:
-        if name not in {"plans", "staged", "transactions", "locks", "installed"}:
+        if name not in {"plans", "staged", "transactions", "locks", "installed", "placement"}:
             raise UpdateError("UNSAFE_STATE", "Invalid updater state directory.")
         root = self._ensure_state_root()
         directory = root / name
@@ -1189,7 +1233,7 @@ class ComponentUpdater:
     def catalog_status(self) -> dict[str, Any]:
         """Report the active trusted catalog identity without changing it."""
 
-        self._reload_catalog_for_operation()
+        self._verify_placement_catalog_readonly()
         active = self._read_active_catalog()
         if active is None:
             metadata: dict[str, Any] = {
@@ -1478,6 +1522,2158 @@ class ComponentUpdater:
                 pass
             os.close(descriptor)
 
+    @contextmanager
+    def _placement_read_lock(self):
+        """Take a shared lock without creating updater state or changing files."""
+
+        lock_path = self.state_root / "locks" / "update.lock"
+        try:
+            info = lock_path.lstat()
+            if (
+                lock_path.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != 0
+                or info.st_nlink != 1
+                or stat.S_IMODE(info.st_mode) & 0o077
+            ):
+                raise UpdateError("UNSAFE_STATE", "Updater read lock is unsafe.")
+            descriptor = os.open(
+                lock_path,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError as error:
+            raise UpdateError(
+                "PLACEMENT_STATE_UNKNOWN",
+                "The persistent updater lock is missing; peer state cannot be read safely.",
+                retryable=True,
+            ) from error
+        except OSError as error:
+            raise UpdateError("UNSAFE_STATE", f"Cannot open updater read lock: {error}") from error
+        try:
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise UpdateError(
+                            "UPDATE_IN_PROGRESS",
+                            "A component update is changing local state; retry the peer read.",
+                            retryable=True,
+                        )
+                    time.sleep(0.05)
+            yield
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(descriptor)
+
+    def placement_peer_response(
+        self,
+        *,
+        operation: str,
+        deployment_id: str,
+        requester_host_id: str,
+        requester_role_id: str,
+        group_id: str,
+        nonce: str,
+        expected_phase: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a fresh read-only response from protected local evidence."""
+
+        if not _running_as_root():
+            raise UpdateError("PRIVILEGE_REQUIRED", "Peer placement evidence requires root.")
+        if (
+            operation not in {"placement-peer-plan", "placement-peer-receipt"}
+            or not isinstance(nonce, str)
+            or re.fullmatch(r"[0-9a-f]{64}", nonce) is None
+            or not isinstance(deployment_id, str)
+            or not isinstance(requester_host_id, str)
+            or not isinstance(requester_role_id, str)
+            or group_id != "workspace-product-v2"
+            or (operation == "placement-peer-plan" and expected_phase is not None)
+            or (
+                operation == "placement-peer-receipt"
+                and expected_phase
+                not in {None, "any", "ABSENT", "STAGED", "PREPARED_HELD", "ACTIVE_HELD", "ACTIVE"}
+            )
+        ):
+            raise UpdateError("INVALID_REQUEST", "Peer placement request is invalid.")
+        self._reload_catalog_for_operation()
+        group = next(
+            (
+                item
+                for item in self.catalog.get("compatibilityGroups", [])
+                if isinstance(item, dict) and item.get("groupId") == group_id
+            ),
+            None,
+        )
+        if not isinstance(group, dict) or "deploymentRoles" not in group:
+            raise UpdateError("PLACEMENT_INVALID", "The signed host-role group is unavailable.")
+        module = self._load_component_placement()
+        try:
+            context = module.load_placement(group, trusted_catalog_digest=self.catalog_digest)
+        except Exception as error:
+            raise UpdateError(
+                "PLACEMENT_INVALID", f"Local placement is invalid: {error}"
+            ) from error
+        if (
+            context is None
+            or context.deployment_id != deployment_id
+            or context.peer.host_id != requester_host_id
+            or context.peer.role_id != requester_role_id
+        ):
+            raise UpdateError(
+                "PLACEMENT_PEER_IDENTITY_MISMATCH",
+                "The caller does not match the fixed signed peer identity.",
+            )
+        with self._placement_read_lock():
+            self._verify_placement_catalog_readonly()
+            try:
+                current_context = module.load_placement(
+                    group, trusted_catalog_digest=self.catalog_digest
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "PLACEMENT_INVALID", f"Local placement changed: {error}", retryable=True
+                ) from error
+            if current_context is None or module.plan_binding(
+                current_context
+            ) != module.plan_binding(context):
+                raise UpdateError(
+                    "PLACEMENT_CHANGED", "Local placement changed during peer read.", retryable=True
+                )
+            snapshot = self._placement_local_snapshot(module, context, group)
+            now = int(time.time())
+            base = {
+                "schemaVersion": 1,
+                "deploymentId": context.deployment_id,
+                "topologyDigest": context.topology_digest,
+                "hostConfigDigest": context.local_config_digest,
+                "catalogDigest": context.catalog_digest,
+                "groupId": context.group_id,
+                "groupVersion": context.group_version,
+                "contractLock": context.contract_lock,
+                "requesterHostId": requester_host_id,
+                "requesterRoleId": requester_role_id,
+                "hostId": context.host_id,
+                "roleId": context.role_id,
+                "issuedAt": now,
+                "expiresAt": now + module.MAX_PEER_TTL_SECONDS,
+                "planId": snapshot["planId"],
+                "planDigest": snapshot["planDigest"],
+                "desiredComponents": snapshot["desiredComponents"],
+            }
+            if operation == "placement-peer-plan":
+                return {**base, "challengeNonce": nonce}
+            phase = snapshot["phase"]
+            requested = None if expected_phase in {None, "any"} else expected_phase
+            if requested is not None and requested != phase:
+                raise UpdateError(
+                    "PLACEMENT_PHASE_CHANGED",
+                    "Peer phase changed; fetch fresh evidence.",
+                    retryable=True,
+                )
+            admission, hold = self._placement_admission_evidence(module, context, phase, snapshot)
+            return {
+                **base,
+                "phase": phase,
+                "challengeNonce": nonce,
+                "activePointer": snapshot["activePointer"],
+                "stagedComponents": snapshot["stagedComponents"],
+                "activeComponents": snapshot["activeComponents"],
+                "transaction": snapshot["transaction"],
+                "admissionHold": hold,
+                "businessAdmission": admission,
+                "services": snapshot["services"],
+            }
+
+    def _verify_placement_catalog_readonly(self) -> None:
+        """Require the active catalog and monotonic receipt without updating either."""
+
+        active = self._read_active_catalog()
+        if active is None:
+            if self.catalog_source is not None:
+                raise UpdateError(
+                    "UNSAFE_CATALOG", "The active catalog pointer disappeared during peer read."
+                )
+            return
+        _catalog_bytes, metadata = active
+        floor = self._read_catalog_floor()
+        if (
+            self.catalog_source is None
+            or metadata.get("catalogSha256") != self.catalog_digest
+            or metadata.get("generation") != self.catalog_generation
+            or floor is None
+            or floor.get("catalogSha256") != metadata.get("catalogSha256")
+            or floor.get("generation") != metadata.get("generation")
+        ):
+            raise UpdateError(
+                "PLACEMENT_CATALOG_CHANGED",
+                "The active signed catalog or its monotonic receipt changed during peer read.",
+                retryable=True,
+            )
+
+    def _placement_local_snapshot(
+        self, module: Any, context: Any, group: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Read exact stage, pointer, service, and transaction state for this role."""
+
+        if self.state_root.is_symlink():
+            raise UpdateError("UNSAFE_STATE", "Updater state root is a symbolic link.")
+        if not self.state_root.exists():
+            return self._placement_empty_snapshot()
+        _verify_private_directory(self.state_root)
+        members = {
+            member.get("componentId")
+            for member in group.get("members", [])
+            if isinstance(member, dict) and isinstance(member.get("componentId"), str)
+        }
+        role = context.local_role
+        staged_matches: list[dict[str, Any]] = []
+        staged_root = self.state_root / "staged"
+        if staged_root.exists() or staged_root.is_symlink():
+            _verify_private_directory(staged_root)
+            for child in sorted(staged_root.iterdir()):
+                if child.is_symlink() or not child.is_dir():
+                    raise UpdateError("UNSAFE_STATE", "Staged updater inventory is unsafe.")
+                stage_path = child / "stage.json"
+                if not stage_path.exists() and not stage_path.is_symlink():
+                    continue
+                record = _read_object(stage_path, "staged component plan")
+                plan = record.get("plan")
+                if not isinstance(plan, dict):
+                    raise UpdateError("INVALID_STAGE", "Staged component plan identity is missing.")
+                plan_id, plan_digest = plan.get("planId"), plan.get("planDigest")
+                if (
+                    not isinstance(plan_id, str)
+                    or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+                    or not _valid_digest(plan_digest)
+                    or child.name != plan_id
+                ):
+                    raise UpdateError("INVALID_STAGE", "Staged placement plan identity is invalid.")
+                self._validate_staged_record(
+                    record,
+                    expected_plan_id=plan_id,
+                    expected_plan_digest=plan_digest,
+                )
+                record_ids = {
+                    item.get("componentId")
+                    for item in record.get("components", [])
+                    if isinstance(item, dict) and isinstance(item.get("componentId"), str)
+                }
+                if not record_ids <= set(self.components):
+                    raise UpdateError("INVALID_STAGE", "Staged component IDs are unknown.")
+                if not record_ids & (members & role.allowed_members):
+                    continue
+                binding = self._placement_binding_for_group(plan, context.group_id)
+                if binding is None:
+                    raise UpdateError(
+                        "PLACEMENT_STATE_UNKNOWN",
+                        "A staged placement-group plan has no trusted host-role binding.",
+                        retryable=True,
+                    )
+                desired = module._valid_desired_components(binding.get("localDesiredComponents"))
+                if not role.required_members <= {item["componentId"] for item in desired}:
+                    raise UpdateError(
+                        "INVALID_STAGE", "Staged placement plan omits required members."
+                    )
+                stage_items = {
+                    item["componentId"]: item
+                    for item in record["components"]
+                    if item.get("componentId") in members & role.allowed_members
+                }
+                if not stage_items:
+                    continue
+                staged_matches.append(
+                    {
+                        "planId": plan_id,
+                        "planDigest": plan_digest,
+                        "desiredComponents": desired,
+                        "stageItems": stage_items,
+                    }
+                )
+        if len(staged_matches) > 1:
+            raise UpdateError(
+                "PLACEMENT_STATE_UNKNOWN", "Multiple staged role plans are ambiguous."
+            )
+
+        transactions = self._placement_transaction_state()
+
+        staged_ids: set[str] = set()
+        active_rows: list[dict[str, Any]] = []
+        desired: list[dict[str, Any]] = []
+        plan_id: str | None = None
+        plan_digest: str | None = None
+        phase: str
+        if staged_matches:
+            match = staged_matches[0]
+            desired = match["desiredComponents"]
+            plan_id, plan_digest = match["planId"], match["planDigest"]
+            desired_by_id = {item["componentId"]: item for item in desired}
+            staged_rows = []
+            observed_stage_ids = set(match["stageItems"])
+            for component_id, item in sorted(match["stageItems"].items()):
+                if component_id not in desired_by_id or not self._placement_item_matches_desired(
+                    item, desired_by_id[component_id]
+                ):
+                    raise UpdateError(
+                        "INVALID_STAGE", "Staged payload differs from placement plan."
+                    )
+                current = self._installed(self.components[component_id])
+                if current.get("active") is True and not self._placement_installed_matches(
+                    current, desired_by_id[component_id]
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_STATE_UNKNOWN",
+                        f"Staged {component_id} differs from its still-active release pointer.",
+                        retryable=True,
+                    )
+                identity = self._placement_component_identity(item, desired_by_id[component_id])
+                if current.get("active") is True:
+                    active_rows.append(identity)
+                else:
+                    staged_rows.append(identity)
+                    staged_ids.add(component_id)
+            for component_id, identity in sorted(desired_by_id.items()):
+                if component_id in observed_stage_ids:
+                    continue
+                component = self.components[component_id]
+                installed = self._installed(component)
+                if not self._placement_installed_matches(installed, identity):
+                    raise UpdateError(
+                        "PLACEMENT_STATE_UNKNOWN",
+                        f"Unstaged desired component {component_id} is not the exact active release.",
+                    )
+                active_rows.append(self._placement_component_identity(installed, identity))
+            phase = "ACTIVE" if not staged_rows else "STAGED"
+        else:
+            active_rows = self._placement_active_components(group, role.allowed_members)
+            active_ids = {row["componentId"] for row in active_rows}
+            if not active_ids:
+                phase = "ABSENT"
+                desired = []
+                staged_rows = []
+            elif role.required_members <= active_ids:
+                phase = "ACTIVE"
+                desired = self._placement_desired_from_active(active_rows)
+                staged_rows = []
+            else:
+                raise UpdateError(
+                    "PLACEMENT_STATE_UNKNOWN",
+                    "Local role has a partial active cohort without a matching staged plan.",
+                    retryable=True,
+                )
+
+        active_ids = {row["componentId"] for row in active_rows}
+        adoption = self._read_placement_adoption(required=False)
+        if (
+            adoption is not None
+            and adoption.get("phase") == "ACTIVE"
+            and (adoption.get("planId") != plan_id or adoption.get("planDigest") != plan_digest)
+        ):
+            # A settled adoption journal proves the deployment identity, not every
+            # later release plan. Subsequent ordinary updates are bound by their
+            # own signed plan and live admission evidence.
+            adoption = None
+        if adoption is not None and adoption.get("groupId") == context.group_id:
+            if (
+                adoption.get("deploymentId") != context.deployment_id
+                or adoption.get("roleId") != context.role_id
+                or adoption.get("topologyDigest") != context.topology_digest
+                or adoption.get("localConfigDigest") != context.local_config_digest
+                or adoption.get("catalogDigest") != context.catalog_digest
+                or adoption.get("planId") != plan_id
+                or adoption.get("planDigest") != plan_digest
+                or adoption.get("desiredComponents") != desired
+            ):
+                raise UpdateError(
+                    "PLACEMENT_STATE_UNKNOWN",
+                    "The protected adoption journal no longer matches the signed local plan.",
+                    retryable=True,
+                )
+            adoption_phase = adoption.get("phase")
+            if adoption_phase == "RELEASE_PENDING":
+                observed_phase = self._observed_placement_release_phase(adoption, module, context)
+                adoption = {**adoption, "phase": observed_phase}
+                adoption_phase = observed_phase
+            if adoption_phase == "PREPARED_HELD":
+                if (
+                    phase != "STAGED"
+                    or active_rows
+                    or staged_ids != {item["componentId"] for item in desired}
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_STATE_UNKNOWN",
+                        "Prepared adoption does not match a fully staged, inactive cohort.",
+                        retryable=True,
+                    )
+                phase = "PREPARED_HELD"
+            elif adoption_phase == "ACTIVE_HELD":
+                if active_ids != {item["componentId"] for item in desired} or staged_rows:
+                    raise UpdateError(
+                        "PLACEMENT_STATE_UNKNOWN",
+                        "Held adoption does not match the exact active cohort.",
+                        retryable=True,
+                    )
+                phase = "ACTIVE_HELD"
+            elif adoption_phase == "ACTIVE":
+                if active_ids != {item["componentId"] for item in desired} or staged_rows:
+                    raise UpdateError(
+                        "PLACEMENT_STATE_UNKNOWN",
+                        "Released adoption does not match the exact active cohort.",
+                        retryable=True,
+                    )
+                phase = "ACTIVE"
+            else:
+                raise UpdateError(
+                    "PLACEMENT_STATE_UNKNOWN",
+                    "The protected adoption journal is in an unresolved phase.",
+                    retryable=True,
+                )
+        active_pointer = {
+            "present": bool(active_rows),
+            "digest": (
+                "sha256:" + hashlib.sha256(canonical_jcs(active_rows)).hexdigest()
+                if active_rows
+                else None
+            ),
+            "components": active_rows,
+        }
+        # A staged target does not imply its prior service is inactive or ready.
+        # Service inventory is asserted only for an active or held lifecycle phase.
+        services = (
+            self._placement_service_inventory(
+                desired,
+                active_ids=active_ids,
+            )
+            if desired and phase in {"ACTIVE", "PREPARED_HELD", "ACTIVE_HELD"}
+            else []
+        )
+        return {
+            "phase": phase,
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "desiredComponents": desired,
+            "stagedComponents": staged_rows,
+            "activeComponents": active_rows,
+            "activePointer": active_pointer,
+            "transaction": transactions,
+            "services": services,
+        }
+
+    @staticmethod
+    def _placement_empty_snapshot() -> dict[str, Any]:
+        return {
+            "phase": "ABSENT",
+            "planId": None,
+            "planDigest": None,
+            "desiredComponents": [],
+            "stagedComponents": [],
+            "activeComponents": [],
+            "activePointer": {"present": False, "digest": None, "components": []},
+            "transaction": {"present": False, "phase": "none"},
+            "services": [],
+        }
+
+    @staticmethod
+    def _placement_binding_for_group(plan: dict[str, Any], group_id: str) -> dict[str, Any] | None:
+        bindings = plan.get("deploymentPlacement", [])
+        if not isinstance(bindings, list):
+            raise UpdateError("INVALID_STAGE", "Staged placement bindings are malformed.")
+        matches = [
+            item for item in bindings if isinstance(item, dict) and item.get("groupId") == group_id
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _placement_transaction_state(self) -> dict[str, Any]:
+        directory = self.state_root / "transactions"
+        if not directory.exists() and not directory.is_symlink():
+            return {"present": False, "phase": "none"}
+        _verify_private_directory(directory)
+        terminal = {"succeeded", "rolled_back", "succeeded-held", "rolled_back-held"}
+        pending: list[str] = []
+        for path in sorted(directory.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                raise UpdateError("UNSAFE_STATE", "Updater transaction inventory is unsafe.")
+            record = _read_object(path, "component update transaction")
+            phase = record.get("phase")
+            if not isinstance(phase, str):
+                raise UpdateError(
+                    "PLACEMENT_STATE_UNKNOWN", "Updater transaction phase is unknown."
+                )
+            if phase not in terminal:
+                pending.append(phase)
+        if pending:
+            return {"present": True, "phase": "pending"}
+        return {"present": False, "phase": "none"}
+
+    def _placement_active_components(
+        self, group: dict[str, Any], allowed_ids: frozenset[str]
+    ) -> list[dict[str, Any]]:
+        result = []
+        all_ids = {
+            member.get("componentId")
+            for member in group.get("members", [])
+            if isinstance(member, dict) and isinstance(member.get("componentId"), str)
+        }
+        if not all_ids or not allowed_ids <= all_ids:
+            raise UpdateError("PLACEMENT_INVALID", "Signed group role membership is inconsistent.")
+        for component_id in sorted(all_ids):
+            component = self.components.get(component_id)
+            if not isinstance(component, dict):
+                raise UpdateError(
+                    "PLACEMENT_INVALID", "Signed role references an unknown component."
+                )
+            installed = self._installed(component)
+            if installed.get("active") is not True:
+                continue
+            if component_id not in allowed_ids:
+                raise UpdateError(
+                    "PLACEMENT_FOREIGN_ACTIVE",
+                    f"Active {component_id} belongs to the other host role.",
+                )
+            if installed.get("identityAttested") is not True:
+                raise UpdateError(
+                    "PLACEMENT_IDENTITY_UNKNOWN", f"Active {component_id} is unattested."
+                )
+            manifest = installed.get("manifest")
+            source = manifest.get("source") if isinstance(manifest, dict) else None
+            channel = manifest.get("channel") if isinstance(manifest, dict) else None
+            target_id = (
+                self._manifest_target_id(component, manifest)
+                if isinstance(manifest, dict)
+                else None
+            )
+            if (
+                not isinstance(source, dict)
+                or not isinstance(source.get("commit"), str)
+                or channel not in {"stable", "preview"}
+                or target_id is None
+                or not isinstance(component.get("publisher"), str)
+            ):
+                raise UpdateError(
+                    "PLACEMENT_IDENTITY_UNKNOWN", f"Active {component_id} identity is incomplete."
+                )
+            prefix = self._component_release_tag_prefix(component, channel) or (
+                "preview-" if channel == "preview" else "stable-"
+            )
+            desired = [
+                {
+                    "componentId": component_id,
+                    "version": installed.get("activeVersion"),
+                    "manifestDigest": installed.get("manifestDigest"),
+                    "artifactDigest": installed.get("artifactDigest"),
+                    "targetId": target_id,
+                    "releaseId": prefix + source["commit"],
+                    "sourceCommit": source["commit"],
+                    "sourceRepository": component["publisher"],
+                    "channel": channel,
+                }
+            ]
+            result.append(self._placement_component_identity(installed, desired[0]))
+        return result
+
+    def _placement_desired_from_active(
+        self, active_rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        result = []
+        for row in active_rows:
+            component = self.components[row["componentId"]]
+            installed = self._installed(component)
+            manifest = installed.get("manifest")
+            source = manifest.get("source") if isinstance(manifest, dict) else None
+            channel = manifest.get("channel") if isinstance(manifest, dict) else None
+            if not isinstance(source, dict) or channel not in {"stable", "preview"}:
+                raise UpdateError("PLACEMENT_IDENTITY_UNKNOWN", "Active release source is invalid.")
+            prefix = self._component_release_tag_prefix(component, channel) or (
+                "preview-" if channel == "preview" else "stable-"
+            )
+            result.append(
+                {
+                    "componentId": row["componentId"],
+                    "version": installed["activeVersion"],
+                    "manifestDigest": installed["manifestDigest"],
+                    "artifactDigest": installed["artifactDigest"],
+                    "targetId": row["targetId"],
+                    "releaseId": prefix + source["commit"],
+                    "sourceCommit": source["commit"],
+                    "sourceRepository": component["publisher"],
+                    "channel": channel,
+                }
+            )
+        return sorted(result, key=lambda item: item["componentId"])
+
+    def _placement_item_matches_desired(
+        self, item: dict[str, Any], desired: dict[str, Any]
+    ) -> bool:
+        manifest = item.get("manifest")
+        if not isinstance(manifest, dict):
+            return False
+        source = manifest.get("source")
+        component = self.components.get(item.get("componentId"), {})
+        return (
+            item.get("version") == desired["version"]
+            and item.get("manifestDigest") == desired["manifestDigest"]
+            and item.get("artifactDigest") == desired["artifactDigest"]
+            and self._manifest_target_id(component, manifest) == desired["targetId"]
+            and isinstance(source, dict)
+            and source.get("commit") == desired["sourceCommit"]
+            and component.get("publisher") == desired["sourceRepository"]
+            and manifest.get("channel") == desired["channel"]
+            and desired["releaseId"]
+            == (
+                self._component_release_tag_prefix(component, desired["channel"])
+                or ("preview-" if desired["channel"] == "preview" else "stable-")
+            )
+            + desired["sourceCommit"]
+        )
+
+    def _placement_installed_matches(
+        self, installed: dict[str, Any], desired: dict[str, Any]
+    ) -> bool:
+        return (
+            installed.get("active") is True
+            and installed.get("identityAttested") is True
+            and installed.get("activeVersion") == desired["version"]
+            and installed.get("manifestDigest") == desired["manifestDigest"]
+            and installed.get("artifactDigest") == desired["artifactDigest"]
+            and installed.get("releaseIdentity") == desired["manifestDigest"]
+            and self._placement_item_matches_desired(
+                {
+                    "version": installed.get("activeVersion"),
+                    "manifestDigest": installed.get("manifestDigest"),
+                    "artifactDigest": installed.get("artifactDigest"),
+                    "manifest": installed.get("manifest"),
+                    "componentId": desired["componentId"],
+                },
+                desired,
+            )
+        )
+
+    def _placement_component_identity(
+        self, installed: dict[str, Any], desired: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "componentId": desired["componentId"],
+            "manifestDigest": desired["manifestDigest"],
+            "artifactDigest": desired["artifactDigest"],
+            "targetId": desired["targetId"],
+            "releaseIdentity": desired["manifestDigest"],
+            "identityAttested": True,
+        }
+
+    def _placement_service_inventory(
+        self,
+        desired: list[dict[str, Any]],
+        *,
+        active_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """Read service, process, executable, and signed health state without changing it."""
+
+        rows = []
+        for identity in desired:
+            component_id = identity["componentId"]
+            component = self.components[component_id]
+            if component.get("kind") == "data-bundle":
+                continue
+            unit = component.get("systemdUnit")
+            if not isinstance(unit, str) or not unit.endswith(".service"):
+                continue
+            installed = self._installed(component)
+            manifest = installed.get("manifest")
+            if not isinstance(manifest, dict):
+                # The candidate manifest is available from its immutable local receipt.
+                receipt = self._read_release_receipt(component_id, identity["manifestDigest"])
+                manifest = receipt.get("manifest") if isinstance(receipt, dict) else None
+            if not isinstance(manifest, dict):
+                raise UpdateError(
+                    "PLACEMENT_IDENTITY_UNKNOWN",
+                    f"Signed service manifest is missing for {component_id}.",
+                )
+            artifact = manifest.get("artifact")
+            entrypoint = artifact.get("entrypoint") if isinstance(artifact, dict) else None
+            files = artifact.get("files") if isinstance(artifact, dict) else None
+            if (
+                not isinstance(entrypoint, str)
+                or not isinstance(files, dict)
+                or not _valid_digest(files.get(entrypoint))
+            ):
+                raise UpdateError(
+                    "PLACEMENT_IDENTITY_UNKNOWN",
+                    f"Signed executable map is missing for {component_id}.",
+                )
+            release_path = (
+                self.install_root
+                / "components"
+                / component_id
+                / "releases"
+                / (f"{identity['version']}--{identity['manifestDigest'].removeprefix('sha256:')}")
+            )
+            executable_path = release_path.joinpath(
+                *_safe_relative(entrypoint, field="entrypoint").parts
+            )
+            expected_digest = files[entrypoint]
+            completed = self.runner(
+                [
+                    "systemctl",
+                    "show",
+                    unit,
+                    "--property=ActiveState",
+                    "--property=SubState",
+                    "--property=MainPID",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise UpdateError("PLACEMENT_SERVICE_UNKNOWN", f"Cannot inspect {unit}.")
+            properties = {}
+            for line in completed.stdout.splitlines():
+                key, separator, value = line.partition("=")
+                if separator and key in {"ActiveState", "SubState", "MainPID"}:
+                    properties[key] = value
+            active_state = properties.get("ActiveState")
+            sub_state = properties.get("SubState")
+            pid_text = properties.get("MainPID")
+            if pid_text is None or not pid_text.isdecimal():
+                raise UpdateError("PLACEMENT_SERVICE_UNKNOWN", f"{unit} process state is unknown.")
+            main_pid = int(pid_text)
+            if component_id in active_ids:
+                if active_state != "active" or sub_state != "running" or main_pid <= 1:
+                    raise UpdateError("PLACEMENT_SERVICE_UNHEALTHY", f"{unit} is not running.")
+                proc_exe = Path("/proc") / str(main_pid) / "exe"
+                try:
+                    executable_link = os.readlink(proc_exe)
+                    stat_info = proc_exe.stat()
+                    digest = _file_digest(proc_exe)
+                except OSError as error:
+                    raise UpdateError(
+                        "PLACEMENT_PROCESS_UNKNOWN", f"Cannot verify {unit} executable."
+                    ) from error
+                if (
+                    executable_link.endswith(" (deleted)")
+                    or Path(executable_link) != executable_path
+                    or not stat.S_ISREG(stat_info.st_mode)
+                    or digest != expected_digest
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_PROCESS_MISMATCH",
+                        f"{unit} executable differs from its signed release.",
+                    )
+                self._placement_health_check(component_id, unit, manifest)
+                health = "healthy"
+                process_digest = digest
+            else:
+                if active_state != "inactive" or sub_state != "dead" or main_pid != 0:
+                    raise UpdateError(
+                        "PLACEMENT_SERVICE_UNHEALTHY", f"{unit} is not confirmed inactive."
+                    )
+                if (
+                    executable_path.is_symlink()
+                    or not executable_path.is_file()
+                    or _file_digest(executable_path) != expected_digest
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_SERVICE_IDENTITY_UNKNOWN",
+                        f"Staged executable differs for {component_id}.",
+                    )
+                health = None
+                process_digest = None
+            rows.append(
+                {
+                    "componentId": component_id,
+                    "unit": unit,
+                    "activeState": active_state,
+                    "subState": sub_state,
+                    "mainPid": main_pid,
+                    "executablePath": str(executable_path),
+                    "executableDigest": expected_digest,
+                    "processExecutableDigest": process_digest,
+                    "identityAttested": True,
+                    "health": health,
+                }
+            )
+        return rows
+
+    def _placement_health_check(
+        self, component_id: str, unit: str, manifest: dict[str, Any]
+    ) -> None:
+        health = manifest.get("health")
+        if not isinstance(health, dict):
+            raise UpdateError(
+                "PLACEMENT_SERVICE_UNHEALTHY", f"Signed health contract is missing for {unit}."
+            )
+        if health.get("kind") == "systemd-active":
+            return
+        if health.get("kind") != "http":
+            raise UpdateError(
+                "PLACEMENT_SERVICE_UNHEALTHY", f"Signed health contract is unsupported for {unit}."
+            )
+        url = f"http://127.0.0.1:{health['port']}{health['path']}"
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                if not 200 <= response.status < 400:
+                    raise UpdateError(
+                        "PLACEMENT_SERVICE_UNHEALTHY", f"{component_id} health check failed."
+                    )
+        except (OSError, urllib.error.URLError, TimeoutError) as error:
+            raise UpdateError(
+                "PLACEMENT_SERVICE_UNHEALTHY", f"{component_id} health check failed."
+            ) from error
+
+    def _placement_admission_evidence(
+        self, module: Any, context: Any, phase: str, snapshot: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        unavailable = {
+            "source": "unavailable",
+            "scope": module._role_admission_scope(context.role_id),
+            "state": "unavailable",
+        }
+        if phase in {"ABSENT", "STAGED"}:
+            return unavailable, None
+        adoption = self._read_placement_adoption(required=False)
+        if phase in {"PREPARED_HELD", "ACTIVE_HELD"} and adoption is None:
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "A persisted local adoption hold is unavailable.",
+                retryable=True,
+            )
+        if phase == "ACTIVE" and adoption is None:
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "A released local placement identity is unavailable.",
+                retryable=True,
+            )
+        if adoption is None:
+            # ABSENT/STAGED receipts intentionally carry no business admission proof.
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN", "Placement admission is unavailable.", retryable=True
+            )
+        if adoption.get("phase") == "RELEASE_PENDING":
+            adoption = {
+                **adoption,
+                "phase": self._observed_placement_release_phase(adoption, module, context),
+            }
+        if context.role_id == "control-host":
+            state = self._read_control_admission_state(context)
+            expected_phase = phase
+            hold = state["adoptionHold"] if phase in {"PREPARED_HELD", "ACTIVE_HELD"} else None
+            if phase == "ACTIVE":
+                health = self._control_readyz()
+                try:
+                    module._validate_control_admission(health, None, context)
+                except Exception as error:
+                    raise UpdateError(
+                        "PLACEMENT_ADMISSION_UNKNOWN",
+                        "Control-host business admission is not proven open.",
+                        retryable=True,
+                    ) from error
+                return health, None
+            if (
+                state.get("adoptionHold") is None
+                or state["adoptionHold"].get("phase") != expected_phase
+                or state["adoptionHold"].get("planDigest") != adoption.get("planDigest")
+            ):
+                raise UpdateError(
+                    "PLACEMENT_ADMISSION_UNKNOWN",
+                    "Control-host admission state does not match the protected adoption journal.",
+                    retryable=True,
+                )
+            if phase == "PREPARED_HELD":
+                return self._control_admission_response(state, api_ready=False), hold
+            health = self._control_readyz()
+            self._validate_control_readyz(module, context, state, health)
+            return health, hold
+        if phase in {"PREPARED_HELD", "ACTIVE_HELD"}:
+            hold, admission = self._validate_connector_adoption_hold(adoption)
+            return admission, hold
+        if phase == "ACTIVE" and context.role_id == "connector-host":
+            readiness = self._readiness_for("CORE_RUNTIME", requires_restart=False, force=True)
+            catalog, _ = self._activity_catalog()
+            gate_generation = readiness.get("gate_generation")
+            catalog_generation = readiness.get("install_catalog_generation")
+            if (
+                type(gate_generation) is not int
+                or type(catalog_generation) is not int
+                or catalog_generation != catalog["generation"]
+            ):
+                raise UpdateError(
+                    "GATE_UNKNOWN", "Connector readiness generation is stale.", retryable=True
+                )
+            return {
+                "source": "runtime-maintenance.GetUpdateReadiness",
+                "scope": "kernel-task-and-runtime-admission",
+                "state": self._readiness_admission_state(readiness),
+                "gateGeneration": gate_generation,
+                "catalogGeneration": catalog_generation,
+                "readiness": readiness,
+            }, None
+        raise UpdateError(
+            "PLACEMENT_ADMISSION_UNKNOWN",
+            "A real persisted adoption hold or released business-admission proof is unavailable.",
+            retryable=True,
+        )
+
+    def _placement_adoption_path(self, *, create: bool = False) -> Path:
+        directory = self.state_root / "placement"
+        if create:
+            directory = self._private_state_directory("placement")
+        elif directory.exists() or directory.is_symlink():
+            _verify_private_directory(directory)
+        return directory / PLACEMENT_ADOPTION_JOURNAL
+
+    def _read_placement_adoption(self, *, required: bool) -> dict[str, Any] | None:
+        path = self._placement_adoption_path()
+        if not path.exists() and not path.is_symlink():
+            if required:
+                raise UpdateError(
+                    "PLACEMENT_ADOPTION_UNKNOWN",
+                    "No protected host-placement adoption transaction exists.",
+                    retryable=True,
+                )
+            return None
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise UpdateError("UNSAFE_STATE", "Cannot inspect the placement journal.") from error
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise UpdateError("UNSAFE_STATE", "Placement journal ownership or mode is unsafe.")
+        value = _read_object(path, "host-placement adoption journal")
+        if (
+            value.get("schemaVersion") != 1
+            or value.get("groupId") != "workspace-product-v2"
+            or value.get("phase")
+            not in {
+                "PREPARE_PENDING",
+                "PREPARED_HELD",
+                "APPLY_PENDING",
+                "ACTIVE_HELD",
+                "RELEASE_PENDING",
+                "ACTIVE",
+            }
+            or not isinstance(value.get("planId"), str)
+            or PLAN_ID_PATTERN.fullmatch(value["planId"]) is None
+            or not _valid_digest(value.get("planDigest"))
+            or not isinstance(value.get("desiredComponents"), list)
+            or not isinstance(value.get("componentArtifactDigests"), dict)
+            or not isinstance(value.get("deploymentId"), str)
+            or value.get("roleId") not in {"control-host", "connector-host"}
+        ):
+            raise UpdateError("PLACEMENT_STATE_UNKNOWN", "Placement journal schema is invalid.")
+        if (
+            value.get("roleId") == "connector-host"
+            and value.get("phase")
+            in {"PREPARED_HELD", "APPLY_PENDING", "ACTIVE_HELD", "RELEASE_PENDING"}
+            and (
+                not isinstance(value.get("maintenanceToken"), str)
+                or len(value["maintenanceToken"]) < 32
+            )
+        ):
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "Connector adoption journal is missing its protected maintenance token.",
+                retryable=True,
+            )
+        return value
+
+    def _write_placement_adoption(self, value: dict[str, Any]) -> Path:
+        path = self._placement_adoption_path(create=True)
+        _atomic_json(path, value, mode=0o600)
+        return path
+
+    @staticmethod
+    def _verify_root_directory(path: Path, *, mode: int | None = None) -> None:
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN", "Control admission path is unavailable."
+            ) from error
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or (mode is not None and stat.S_IMODE(info.st_mode) != mode)
+        ):
+            raise UpdateError("UNSAFE_CONTROL_ADMISSION", "Control admission directory is unsafe.")
+
+    @staticmethod
+    def _verify_root_file(path: Path, *, mode: int, gid: int = 0) -> os.stat_result:
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN", "Control admission file is unavailable."
+            ) from error
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != gid
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != mode
+        ):
+            raise UpdateError("UNSAFE_CONTROL_ADMISSION", "Control admission file is unsafe.")
+        return info
+
+    def _control_admission_identity(self, context: Any) -> tuple[int, dict[str, str]]:
+        """Bind control gate writes to the preapproved host profile and actual service identity."""
+
+        path = CONTROL_ADMISSION_PROFILE
+        self._verify_root_path_chain(path.parent)
+        self._verify_root_directory(path.parent)
+        info = self._verify_root_file(path, mode=0o600)
+        if info.st_size > 4096:
+            raise UpdateError(
+                "UNSAFE_CONTROL_ADMISSION", "Workspace admission profile is too large."
+            )
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN", "Workspace admission profile is unreadable."
+            ) from error
+        expected_names = {
+            "CYRENE_CONTROL_HOST_ADMISSION_PROFILE",
+            "CYRENE_ORGANIZATION_ID",
+            "CYRENE_WORKSPACE_ID",
+            "CYRENE_WORKSPACE_AUTHORITY_INSTANCE_ID",
+        }
+        parsed: dict[str, str] = {}
+        for line in lines:
+            if not line or "=" not in line:
+                raise UpdateError(
+                    "UNSAFE_CONTROL_ADMISSION", "Workspace admission profile syntax is invalid."
+                )
+            key, value = line.split("=", 1)
+            if (
+                key not in expected_names
+                or key in parsed
+                or not value
+                or any(ch.isspace() for ch in value)
+            ):
+                raise UpdateError(
+                    "UNSAFE_CONTROL_ADMISSION", "Workspace admission profile fields are invalid."
+                )
+            parsed[key] = value
+        if (
+            set(parsed) != expected_names
+            or parsed["CYRENE_CONTROL_HOST_ADMISSION_PROFILE"] != "cyrene.control-host.v1"
+        ):
+            raise UpdateError(
+                "UNSAFE_CONTROL_ADMISSION", "Workspace admission profile is incomplete."
+            )
+        identity = {
+            "organizationId": parsed["CYRENE_ORGANIZATION_ID"],
+            "workspaceId": parsed["CYRENE_WORKSPACE_ID"],
+            "authorityInstanceId": parsed["CYRENE_WORKSPACE_AUTHORITY_INSTANCE_ID"],
+        }
+        if identity != context.workspace_identity:
+            raise UpdateError(
+                "PLACEMENT_IDENTITY_MISMATCH",
+                "Workspace admission profile does not match the reviewed host identity.",
+            )
+        for unit, dropin in CONTROL_ADMISSION_DROPINS.items():
+            self._verify_root_path_chain(dropin.parent)
+            self._verify_root_directory(dropin.parent)
+            self._verify_root_file(dropin, mode=0o644)
+            try:
+                content = dropin.read_bytes()
+            except OSError as error:
+                raise UpdateError(
+                    "CONTROL_ADMISSION_UNKNOWN", "Admission EnvironmentFile drop-in is unreadable."
+                ) from error
+            if content != b"[Service]\nEnvironmentFile=/etc/cyrene/workspace-admission.env\n":
+                raise UpdateError(
+                    "UNSAFE_CONTROL_ADMISSION",
+                    f"{unit} does not have the exact mandatory admission EnvironmentFile drop-in.",
+                )
+        unit = "cyrene-workspace-authority.service"
+        fragment = self._systemd_property(unit, "FragmentPath")
+        fragment_path = Path(fragment)
+        if not fragment_path.is_absolute() or not any(
+            self._path_is_under(fragment_path, root)
+            for root in (
+                Path("/etc/systemd/system"),
+                Path("/usr/lib/systemd/system"),
+                Path("/lib/systemd/system"),
+            )
+        ):
+            raise UpdateError(
+                "UNSAFE_CONTROL_ADMISSION",
+                "Authority unit fragment is outside systemd directories.",
+            )
+        fragment_real = fragment_path.resolve(strict=True)
+        self._verify_root_file(fragment_real, mode=0o644)
+        user = self._systemd_property(unit, "User")
+        group = self._systemd_property(unit, "Group")
+        try:
+            gid = grp.getgrnam(group).gr_gid if group else pwd.getpwnam(user).pw_gid
+        except (KeyError, TypeError) as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN", "Authority service effective group is unknown."
+            ) from error
+        if gid <= 0:
+            raise UpdateError(
+                "UNSAFE_CONTROL_ADMISSION", "Authority service must run with a non-root group."
+            )
+        return gid, identity
+
+    def _systemd_property(self, unit: str, name: str) -> str:
+        try:
+            result = self.runner(
+                ["systemctl", "show", f"--property={name}", "--value", unit],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN", f"Cannot read {name} for {unit}."
+            ) from error
+        value = result.stdout.strip()
+        if result.returncode != 0 or "\n" in value or "\r" in value:
+            raise UpdateError("CONTROL_ADMISSION_UNKNOWN", f"Systemd {name} for {unit} is unknown.")
+        return value
+
+    @staticmethod
+    def _verify_root_path_chain(path: Path) -> None:
+        absolute = path.absolute()
+        current = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            current /= part
+            try:
+                info = current.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "CONTROL_ADMISSION_UNKNOWN", "Control admission path chain is unavailable."
+                ) from error
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise UpdateError(
+                    "UNSAFE_CONTROL_ADMISSION", "Control admission path chain is unsafe."
+                )
+
+    def _control_lock(self, reader_gid: int, *, exclusive: bool):
+        """Open the fixed control gate lock with the service's exact effective group."""
+
+        root = CONTROL_ADMISSION_ROOT
+        if not root.exists():
+            if not exclusive:
+                raise UpdateError(
+                    "CONTROL_ADMISSION_UNKNOWN",
+                    "Control admission state is absent.",
+                    retryable=True,
+                )
+            parent = root.parent
+            if not parent.exists():
+                self._verify_root_directory(parent.parent)
+                parent.mkdir(mode=0o755)
+            self._verify_root_directory(parent)
+            root.mkdir(mode=0o750)
+            os.chown(root, 0, reader_gid)
+            os.chmod(root, 0o750)
+        self._verify_root_path_chain(root.parent)
+        self._verify_root_directory(root, mode=0o750)
+        if root.stat().st_gid != reader_gid:
+            raise UpdateError("UNSAFE_CONTROL_ADMISSION", "Control admission reader group changed.")
+        lock_path = root / "admission.lock"
+        flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        if exclusive:
+            flags |= os.O_CREAT
+        created = False
+        try:
+            if exclusive:
+                try:
+                    descriptor = os.open(lock_path, flags | os.O_CREAT | os.O_EXCL, 0o660)
+                    created = True
+                except FileExistsError:
+                    descriptor = os.open(lock_path, flags)
+            else:
+                descriptor = os.open(lock_path, flags)
+        except OSError as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN",
+                "Control admission lock is unavailable.",
+                retryable=True,
+            ) from error
+        info = os.fstat(descriptor)
+        if created:
+            os.fchown(descriptor, 0, reader_gid)
+            os.fchmod(descriptor, 0o660)
+            info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_gid != reader_gid
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o660
+        ):
+            os.close(descriptor)
+            raise UpdateError(
+                "UNSAFE_CONTROL_ADMISSION", "Control admission lock identity is unsafe."
+            )
+        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        return descriptor
+
+    def _read_control_admission_state(self, context: Any) -> dict[str, Any]:
+        gid, identity = self._control_admission_identity(context)
+        descriptor = self._control_lock(gid, exclusive=False)
+        try:
+            path = CONTROL_ADMISSION_ROOT / "state.json"
+            info = self._verify_root_file(path, mode=0o640, gid=gid)
+            if info.st_size > 32 * 1024:
+                raise UpdateError(
+                    "UNSAFE_CONTROL_ADMISSION", "Control admission state exceeds its size limit."
+                )
+            state = _read_object(path, "control admission state")
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        keys = {
+            "schema",
+            "source",
+            "scope",
+            "state",
+            "generation",
+            "readerGid",
+            "catalogDigest",
+            "topologyDigest",
+            "planDigest",
+            "adoptionHold",
+        }
+        hold_keys = {
+            "requestId",
+            "organizationId",
+            "workspaceId",
+            "authorityInstanceId",
+            "phase",
+            "planDigest",
+        }
+        hold = state.get("adoptionHold")
+        if (
+            set(state) != keys
+            or state.get("schema") != "cyrene.control-host.product-admission.v1"
+            or state.get("source") != "control-host-adoption-helper.v1"
+            or state.get("scope") != "workspace-product-v2/control-host"
+            or state.get("state") not in {"closed", "open"}
+            or type(state.get("generation")) is not int
+            or state["generation"] < 1
+            or state.get("readerGid") != gid
+            or state.get("catalogDigest") != context.catalog_digest
+            or state.get("topologyDigest") != context.topology_digest
+            or not _valid_digest(state.get("planDigest"))
+            or not isinstance(hold, dict)
+            or set(hold) != hold_keys
+            or {key: hold.get(key) for key in identity} != identity
+            or hold.get("planDigest") != state.get("planDigest")
+            or hold.get("phase") not in {"PREPARED_HELD", "ACTIVE_HELD", "ACTIVE"}
+            or (state["state"] == "open") != (hold.get("phase") == "ACTIVE")
+        ):
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN",
+                "Control admission state does not match the fixed host identity.",
+                retryable=True,
+            )
+        return state
+
+    def _write_control_admission_state(
+        self, context: Any, *, plan_id: str, plan_digest: str, phase: str
+    ) -> dict[str, Any]:
+        gid, identity = self._control_admission_identity(context)
+        descriptor = self._control_lock(gid, exclusive=True)
+        try:
+            state_path = CONTROL_ADMISSION_ROOT / "state.json"
+            old: dict[str, Any] | None = None
+            if state_path.exists() or state_path.is_symlink():
+                info = self._verify_root_file(state_path, mode=0o640, gid=gid)
+                if info.st_size > 32 * 1024:
+                    raise UpdateError(
+                        "UNSAFE_CONTROL_ADMISSION",
+                        "Control admission state exceeds its size limit.",
+                    )
+                old = _read_object(state_path, "control admission state")
+            if phase not in {"PREPARED_HELD", "ACTIVE_HELD", "ACTIVE"}:
+                raise UpdateError("INVALID_REQUEST", "Control admission phase is unsupported.")
+            if old is not None:
+                old_hold = old.get("adoptionHold")
+                if (
+                    not isinstance(old_hold, dict)
+                    or {key: old_hold.get(key) for key in identity} != identity
+                    or old.get("catalogDigest") != context.catalog_digest
+                    or old.get("topologyDigest") != context.topology_digest
+                    or old_hold.get("planDigest") != plan_digest
+                    or old.get("planDigest") != plan_digest
+                    or (old.get("state") == "open") != (old_hold.get("phase") == "ACTIVE")
+                ):
+                    raise UpdateError(
+                        "CONTROL_ADMISSION_UNKNOWN",
+                        "Existing control gate is bound to another adoption plan.",
+                        retryable=True,
+                    )
+                if old_hold.get("phase") == phase:
+                    return old
+                allowed_transitions = {
+                    "PREPARED_HELD": {"PREPARED_HELD", "ACTIVE_HELD"},
+                    "ACTIVE_HELD": {"ACTIVE_HELD", "ACTIVE"},
+                    "ACTIVE": {"ACTIVE"},
+                }
+                if phase not in allowed_transitions.get(old_hold.get("phase"), set()):
+                    raise UpdateError(
+                        "CONTROL_ADMISSION_UNKNOWN",
+                        "Control gate transition is not permitted.",
+                        retryable=True,
+                    )
+            elif phase != "PREPARED_HELD":
+                raise UpdateError(
+                    "CONTROL_ADMISSION_UNKNOWN",
+                    "Control gate must be prepared before activation.",
+                    retryable=True,
+                )
+            generation = old["generation"] + 1 if old else 1
+            request_id = "cyrene-update-" + plan_id
+            state = {
+                "schema": "cyrene.control-host.product-admission.v1",
+                "source": "control-host-adoption-helper.v1",
+                "scope": "workspace-product-v2/control-host",
+                "state": "open" if phase == "ACTIVE" else "closed",
+                "generation": generation,
+                "readerGid": gid,
+                "catalogDigest": context.catalog_digest,
+                "topologyDigest": context.topology_digest,
+                "planDigest": plan_digest,
+                "adoptionHold": {
+                    "requestId": request_id,
+                    **identity,
+                    "phase": phase,
+                    "planDigest": plan_digest,
+                },
+            }
+            _atomic_control_state(state_path, state, gid=gid)
+            return state
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+
+    def _control_admission_response(
+        self, state: dict[str, Any], *, api_ready: bool
+    ) -> dict[str, Any]:
+        return {
+            "status": "ready" if api_ready else "not_ready",
+            "apiReady": api_ready,
+            "executionReady": False,
+            "businessReady": False,
+            "gate": {
+                "source": "cy-workspace-control-plane.deployment-admission.v1",
+                "scope": state["scope"],
+                "state": state["state"],
+                "readerGid": state["readerGid"],
+                "generation": state["generation"],
+                "catalogDigest": state["catalogDigest"],
+                "topologyDigest": state["topologyDigest"],
+                "planDigest": state["planDigest"],
+                "adoptionHold": state["adoptionHold"],
+            },
+        }
+
+    def _control_readyz(self) -> dict[str, Any]:
+        request = urllib.request.Request(
+            "http://127.0.0.1:8080/readyz", headers={"User-Agent": USER_AGENT}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=2) as response:
+                payload = response.read(32 * 1024 + 1)
+                if response.status != 200 or len(payload) > 32 * 1024:
+                    raise UpdateError(
+                        "CONTROL_ADMISSION_UNKNOWN",
+                        "Authority readyz response is not valid.",
+                        retryable=True,
+                    )
+        except (OSError, urllib.error.URLError, TimeoutError) as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN", "Authority readyz is unavailable.", retryable=True
+            ) from error
+        try:
+            value = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_json_object)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN",
+                "Authority readyz response is malformed.",
+                retryable=True,
+            ) from error
+        if not isinstance(value, dict):
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN",
+                "Authority readyz response is not an object.",
+                retryable=True,
+            )
+        return value
+
+    def _validate_control_readyz(
+        self, module: Any, context: Any, state: dict[str, Any], health: dict[str, Any]
+    ) -> None:
+        hold = state["adoptionHold"] if state["adoptionHold"]["phase"] != "ACTIVE" else None
+        try:
+            module._validate_control_admission(health, hold, context)
+        except Exception as error:
+            raise UpdateError(
+                "CONTROL_ADMISSION_UNKNOWN",
+                "Authority readyz does not match the protected gate state.",
+                retryable=True,
+            ) from error
+
+    def _validate_connector_adoption_hold(
+        self, adoption: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        catalog_generation = adoption.get("catalogGeneration")
+        gate_generation = adoption.get("gateGeneration")
+        components = adoption.get("desiredComponents")
+        component_digests = adoption.get("componentArtifactDigests")
+        if (
+            not isinstance(catalog_generation, int)
+            or isinstance(catalog_generation, bool)
+            or not isinstance(gate_generation, int)
+            or isinstance(gate_generation, bool)
+            or not isinstance(components, list)
+            or not isinstance(component_digests, dict)
+            or set(component_digests)
+            != {item.get("componentId") for item in components if isinstance(item, dict)}
+        ):
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "Connector adoption hold identity is malformed.",
+                retryable=True,
+            )
+        token = adoption.get("maintenanceToken")
+        proofs = []
+        for component_id, artifact_digest in sorted(component_digests.items()):
+            request_id = adoption["requestId"]
+            result = self._broker_request(
+                "ValidateMaintenanceHold",
+                {
+                    "request_id": adoption["requestId"],
+                    "maintenance_token": token,
+                    "target_kind": "CORE_RUNTIME",
+                    "plan_id": adoption["planId"],
+                    "plan_digest": adoption["planDigest"],
+                    "component_artifact_digests": component_digests,
+                    "component_id": component_id,
+                    "artifact_digest": artifact_digest,
+                    "expected_gate_generation": gate_generation,
+                    "expected_catalog_generation": catalog_generation,
+                },
+                request_id=request_id,
+            )
+            expected = {
+                "valid": True,
+                "request_id": request_id,
+                "target_kind": "CORE_RUNTIME",
+                "plan_id": adoption["planId"],
+                "plan_digest": adoption["planDigest"],
+                "component_artifact_digests": component_digests,
+                "component_id": component_id,
+                "artifact_digest": artifact_digest,
+                "gate_generation": gate_generation,
+                "catalog_generation": catalog_generation,
+            }
+            if result != expected:
+                raise UpdateError(
+                    "PLACEMENT_ADMISSION_UNKNOWN",
+                    "Connector maintenance proof differs from the protected adoption plan.",
+                    retryable=True,
+                )
+            proofs.append(
+                {
+                    "valid": True,
+                    "request_id": request_id,
+                    "target_kind": "CORE_RUNTIME",
+                    "plan": {
+                        "plan_id": adoption["planId"],
+                        "plan_digest": adoption["planDigest"],
+                        "component_artifact_digests": component_digests,
+                    },
+                    "component_id": component_id,
+                    "artifact_digest": artifact_digest,
+                    "gate_generation": gate_generation,
+                    "catalog_generation": catalog_generation,
+                }
+            )
+        return (
+            {
+                "kind": "CORE_RUNTIME",
+                "requestId": adoption["requestId"],
+                "planId": adoption["planId"],
+                "planDigest": adoption["planDigest"],
+                "componentArtifactDigests": component_digests,
+                "gateGeneration": gate_generation,
+                "catalogGeneration": catalog_generation,
+            },
+            {
+                "source": "runtime-maintenance.ValidateMaintenanceHold",
+                "scope": "kernel-task-and-runtime-admission",
+                "state": "closed",
+                "proofs": proofs,
+            },
+        )
+
+    def _placement_peer_evidence(
+        self, plan: dict[str, Any], *, operation: str, expected_peer_phases: set[str]
+    ) -> tuple[Any, Any, Any, dict[str, Any]]:
+        """Read and verify the exact remote release target and fresh phase evidence."""
+
+        groups = [
+            item
+            for item in self.catalog.get("compatibilityGroups", [])
+            if isinstance(item, dict) and item.get("groupId") == "workspace-product-v2"
+        ]
+        if len(groups) != 1:
+            raise UpdateError(
+                "PLACEMENT_INVALID", "Signed workspace placement group is unavailable."
+            )
+        group = groups[0]
+        loaded = self._placement_module_for_group(group)
+        if loaded is None:
+            raise UpdateError("PLACEMENT_INVALID", "Fixed host placement profile is unavailable.")
+        module, context = loaded
+        binding = self._placement_binding_for_group(plan, context.group_id)
+        if binding is None or module.plan_binding(context) != {
+            key: binding.get(key) for key in module.plan_binding(context)
+        }:
+            raise UpdateError(
+                "PLACEMENT_CHANGED", "Host placement configuration changed.", retryable=True
+            )
+        self._revalidate_plan_placement(plan, operation=operation)
+        peer_plan = module.fetch_peer_plan(context)
+        _peer_candidates, units, paths, digests = self._verify_peer_placement_plan(
+            context, peer_plan
+        )
+        evidence = module.fetch_peer_receipt(
+            context,
+            plan=peer_plan.payload,
+            required_service_ids=frozenset(units),
+            required_service_units=units,
+            required_service_executable_paths=paths,
+            required_service_executable_digests=digests,
+        )
+        if (
+            evidence.stable_digest != peer_plan.stable_digest
+            or evidence.phase not in expected_peer_phases
+        ):
+            raise UpdateError(
+                "PLACEMENT_PEER_PHASE", "Peer phase or target changed.", retryable=True
+            )
+        module.authorize_peer_operation(context, evidence, operation)
+        if evidence.stable_digest != binding.get("peerEvidenceDigest"):
+            raise UpdateError(
+                "PLACEMENT_CHANGED",
+                "Peer desired release set changed after staging.",
+                retryable=True,
+            )
+        return module, context, evidence, binding
+
+    def _staged_placement_record(
+        self, plan_id: Any, plan_digest: Any
+    ) -> tuple[
+        dict[str, Any], Path, dict[str, Any], Any, Any, dict[str, Any], list[dict[str, Any]]
+    ]:
+        self._validate_plan_identity(plan_id, plan_digest)
+        stage_path = self.state_root / "staged" / plan_id / "stage.json"
+        record = _read_object(stage_path, "staged placement plan")
+        self._validate_staged_record(
+            record, expected_plan_id=plan_id, expected_plan_digest=plan_digest
+        )
+        plan = record.get("plan")
+        group = next(
+            (
+                item
+                for item in self.catalog.get("compatibilityGroups", [])
+                if isinstance(item, dict) and item.get("groupId") == "workspace-product-v2"
+            ),
+            None,
+        )
+        if not isinstance(plan, dict) or not isinstance(group, dict):
+            raise UpdateError("PLACEMENT_INVALID", "Staged host placement plan is unavailable.")
+        loaded = self._placement_module_for_group(group)
+        if loaded is None:
+            raise UpdateError("PLACEMENT_INVALID", "Fixed host placement profile is unavailable.")
+        module, context = loaded
+        binding = self._placement_binding_for_group(plan, context.group_id)
+        if binding is None:
+            raise UpdateError("PLACEMENT_INVALID", "Staged plan has no exact deployment binding.")
+        desired = module._valid_desired_components(binding.get("localDesiredComponents"))
+        desired_ids = {item["componentId"] for item in desired}
+        stage_items = {
+            item.get("componentId"): item
+            for item in record.get("components", [])
+            if isinstance(item, dict)
+            and item.get("componentId") in context.local_role.allowed_members
+        }
+        if (
+            not context.local_role.required_members <= desired_ids
+            or set(stage_items) != desired_ids
+            or any(
+                not self._placement_item_matches_desired(stage_items[component_id], desired_item)
+                for component_id, desired_item in {
+                    item["componentId"]: item for item in desired
+                }.items()
+            )
+        ):
+            raise UpdateError(
+                "PLACEMENT_INVALID",
+                "Adoption requires every desired local component to be staged at its exact signed identity.",
+            )
+        return record, stage_path, plan, module, context, group, desired
+
+    @staticmethod
+    def _placement_confirmation(plan_id: Any, plan_digest: Any, confirmation: Any) -> None:
+        if (
+            not isinstance(confirmation, dict)
+            or set(confirmation) != {"planId", "planDigest", "confirmed"}
+            or confirmation.get("confirmed") is not True
+            or confirmation.get("planId") != plan_id
+            or confirmation.get("planDigest") != plan_digest
+        ):
+            raise UpdateError(
+                "CONFIRMATION_MISMATCH",
+                "Host adoption requires confirmation bound to the exact planId and planDigest.",
+            )
+
+    def prepare_placement_adoption(
+        self, plan_id: Any, plan_digest: Any, confirmation: Any
+    ) -> dict[str, Any]:
+        """Acquire the fixed host admission hold for one fully staged deployment role."""
+
+        self._require_authorized_process()
+        self._placement_confirmation(plan_id, plan_digest, confirmation)
+        with self._exclusive_update_lock():
+            self._reload_catalog_for_operation()
+            _record, _stage_path, plan, module, context, group, desired = (
+                self._staged_placement_record(plan_id, plan_digest)
+            )
+            self._revalidate_plan_placement(plan, operation="stage")
+            peer_phases = {"STAGED", "PREPARED_HELD"}
+            _module, _context, peer, binding = self._placement_peer_evidence(
+                plan, operation="stage", expected_peer_phases=peer_phases
+            )
+            path = self._placement_adoption_path(create=True)
+            adoption = self._read_placement_adoption(required=False)
+            if adoption is not None:
+                if (
+                    adoption.get("planId") != plan_id
+                    or adoption.get("planDigest") != plan_digest
+                    or adoption.get("deploymentId") != context.deployment_id
+                    or adoption.get("roleId") != context.role_id
+                    or adoption.get("desiredComponents") != desired
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_ADOPTION_CONFLICT",
+                        "Another confirmed host adoption must be resolved first.",
+                        retryable=True,
+                    )
+                if adoption.get("phase") in {"PREPARED_HELD", "ACTIVE_HELD", "ACTIVE"}:
+                    self._validate_local_placement_adoption(adoption, module, context)
+                    return {
+                        "status": adoption["phase"].lower(),
+                        "planId": plan_id,
+                        "planDigest": plan_digest,
+                        "peerPhase": peer.phase,
+                    }
+                if adoption.get("phase") == "PREPARE_PENDING":
+                    if context.role_id == "connector-host":
+                        if not isinstance(adoption.get("maintenanceToken"), str):
+                            raise UpdateError(
+                                "PLACEMENT_ADMISSION_UNKNOWN",
+                                "BeginMaintenance outcome is unknown; refusing to acquire a second hold.",
+                                retryable=True,
+                            )
+                        self._validate_connector_adoption_hold(adoption)
+                        adoption["phase"] = "PREPARED_HELD"
+                        _atomic_json(path, adoption, mode=0o600)
+                        self._validate_local_placement_adoption(adoption, module, context)
+                        return {
+                            "status": "prepared_held",
+                            "planId": plan_id,
+                            "planDigest": plan_digest,
+                            "peerPhase": peer.phase,
+                            "gateGeneration": adoption.get("gateGeneration"),
+                            "catalogGeneration": adoption.get("catalogGeneration"),
+                        }
+                    state_path = CONTROL_ADMISSION_ROOT / "state.json"
+                    state = (
+                        self._read_control_admission_state(context)
+                        if state_path.exists() or state_path.is_symlink()
+                        else None
+                    )
+                    if state is None:
+                        # No state was committed, so retrying this local atomic prepare is safe.
+                        pass
+                    elif (
+                        state.get("adoptionHold", {}).get("phase") == "PREPARED_HELD"
+                        and state.get("planDigest") == plan_digest
+                    ):
+                        adoption["phase"] = "PREPARED_HELD"
+                        adoption["gateGeneration"] = state["generation"]
+                        _atomic_json(path, adoption, mode=0o600)
+                        self._validate_local_placement_adoption(adoption, module, context)
+                        return {
+                            "status": "prepared_held",
+                            "planId": plan_id,
+                            "planDigest": plan_digest,
+                            "peerPhase": peer.phase,
+                            "gateGeneration": state["generation"],
+                            "catalogGeneration": 0,
+                        }
+                    else:
+                        raise UpdateError(
+                            "PLACEMENT_ADMISSION_UNKNOWN",
+                            "Control gate prepare outcome is unknown; refusing to replace it.",
+                            retryable=True,
+                        )
+            snapshot = self._placement_local_snapshot(module, context, group)
+            if (
+                snapshot.get("phase") != "STAGED"
+                or snapshot.get("activeComponents")
+                or snapshot.get("transaction", {}).get("present") is not False
+                or {item["componentId"] for item in snapshot.get("stagedComponents", [])}
+                != {item["componentId"] for item in desired}
+            ):
+                raise UpdateError(
+                    "PLACEMENT_NOT_COLD",
+                    "Explicit first adoption requires the complete signed cohort staged with no active pointer.",
+                    retryable=True,
+                )
+            service_rows = self._placement_service_inventory(desired, active_ids=set())
+            if any(
+                row.get("activeState") != "inactive"
+                or row.get("subState") != "dead"
+                or row.get("mainPid") != 0
+                or row.get("processExecutableDigest") is not None
+                for row in service_rows
+            ):
+                raise UpdateError(
+                    "PLACEMENT_NOT_COLD",
+                    "All signed host-role services must be confirmed inactive before adoption.",
+                    retryable=True,
+                )
+            desired_digests = {item["componentId"]: item["artifactDigest"] for item in desired}
+            request_id = "cyrene-update-" + plan_id
+            activity_catalog: dict[str, Any] | None = None
+            activity_sources: list[dict[str, Any]] | None = None
+            preflight_readiness: dict[str, Any] | None = None
+            if context.role_id == "connector-host":
+                activity_catalog, activity_sources = self._activity_catalog()
+                preflight_readiness = self._readiness_for(
+                    "CORE_RUNTIME", requires_restart=True, force=True
+                )
+                self._require_ready(preflight_readiness, "CORE_RUNTIME")
+                if (
+                    preflight_readiness.get("install_catalog_generation")
+                    != activity_catalog["generation"]
+                ):
+                    raise UpdateError(
+                        "GATE_UNKNOWN",
+                        "Activity catalog changed before adoption hold.",
+                        retryable=True,
+                    )
+            else:
+                self._control_admission_identity(context)
+            journal: dict[str, Any] = {
+                "schemaVersion": 1,
+                "groupId": context.group_id,
+                "deploymentId": context.deployment_id,
+                "roleId": context.role_id,
+                "topologyDigest": context.topology_digest,
+                "localConfigDigest": context.local_config_digest,
+                "catalogDigest": context.catalog_digest,
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "desiredComponents": desired,
+                "componentArtifactDigests": desired_digests,
+                "peerEvidenceDigest": binding["peerEvidenceDigest"],
+                "peerRoleId": context.peer.role_id,
+                "peerHostId": context.peer.host_id,
+                "requestId": request_id,
+                "targetKind": "CORE_RUNTIME"
+                if context.role_id == "connector-host"
+                else "PACKAGE_ONLY",
+                "phase": "PREPARE_PENDING",
+                "createdAt": int(time.time()),
+            }
+            if context.role_id == "connector-host":
+                assert activity_catalog is not None and activity_sources is not None
+                assert preflight_readiness is not None
+                journal.update(
+                    {
+                        "expectedGateGeneration": preflight_readiness.get("gate_generation"),
+                        "expectedCatalogGeneration": activity_catalog["generation"],
+                        "expectedActivitySources": activity_sources,
+                    }
+                )
+            _atomic_json(path, journal, mode=0o600)
+            if context.role_id == "connector-host":
+                begin_transaction = {
+                    "planId": plan_id,
+                    "requestId": request_id,
+                    "planDigest": plan_digest,
+                    "componentArtifactDigests": desired_digests,
+                    "targetKind": "CORE_RUNTIME",
+                    "expectedGateGeneration": journal["expectedGateGeneration"],
+                    "expectedCatalogGeneration": journal["expectedCatalogGeneration"],
+                    "expectedActivitySources": activity_sources,
+                }
+                try:
+                    token = self._begin_maintenance(begin_transaction)
+                except UpdateError as error:
+                    if error.maintenance_not_acquired:
+                        current = self._read_placement_adoption(required=True)
+                        if (
+                            current.get("phase") == "PREPARE_PENDING"
+                            and current.get("planId") == plan_id
+                            and current.get("planDigest") == plan_digest
+                        ):
+                            path.unlink()
+                            self._fsync_directory(path.parent)
+                    raise
+                journal["maintenanceToken"] = token
+                journal["gateGeneration"] = begin_transaction.get(
+                    "maintenanceGateGeneration", journal["expectedGateGeneration"]
+                )
+                journal["catalogGeneration"] = journal["expectedCatalogGeneration"]
+            else:
+                state = self._write_control_admission_state(
+                    context, plan_id=plan_id, plan_digest=plan_digest, phase="PREPARED_HELD"
+                )
+                journal["gateGeneration"] = state["generation"]
+                journal["catalogGeneration"] = 0
+            journal["phase"] = "PREPARED_HELD"
+            _atomic_json(path, journal, mode=0o600)
+            self._validate_local_placement_adoption(journal, module, context)
+            return {
+                "status": "prepared_held",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "peerPhase": peer.phase,
+                "gateGeneration": journal["gateGeneration"],
+                "catalogGeneration": journal["catalogGeneration"],
+            }
+
+    def validate_placement_adoption(self, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
+        """Re-read the exact local hold and peer proof without changing admission state."""
+
+        self._require_authorized_process()
+        self._validate_plan_identity(plan_id, plan_digest)
+        with self._exclusive_update_lock():
+            self._reload_catalog_for_operation()
+            _record, _stage_path, plan, module, context, _group, _desired = (
+                self._staged_placement_record(plan_id, plan_digest)
+            )
+            adoption = self._read_placement_adoption(required=True)
+            assert adoption is not None
+            if adoption.get("planId") != plan_id or adoption.get("planDigest") != plan_digest:
+                raise UpdateError(
+                    "PLACEMENT_ADOPTION_CONFLICT", "The protected hold belongs to another plan."
+                )
+            self._validate_local_placement_adoption(adoption, module, context)
+            peer_phases = (
+                {"PREPARED_HELD", "ACTIVE_HELD", "ACTIVE"}
+                if adoption.get("phase") != "PREPARED_HELD"
+                else {"STAGED", "PREPARED_HELD"}
+            )
+            _module, _context, peer, _binding = self._placement_peer_evidence(
+                plan,
+                operation="apply" if peer_phases != {"STAGED", "PREPARED_HELD"} else "stage",
+                expected_peer_phases=peer_phases,
+            )
+            return {
+                "status": adoption["phase"].lower(),
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "peerPhase": peer.phase,
+                "gateGeneration": adoption.get("gateGeneration"),
+                "catalogGeneration": adoption.get("catalogGeneration"),
+            }
+
+    def _validate_local_placement_adoption(
+        self, adoption: dict[str, Any], module: Any, context: Any
+    ) -> None:
+        if (
+            adoption.get("deploymentId") != context.deployment_id
+            or adoption.get("roleId") != context.role_id
+            or adoption.get("topologyDigest") != context.topology_digest
+            or adoption.get("localConfigDigest") != context.local_config_digest
+            or adoption.get("catalogDigest") != context.catalog_digest
+        ):
+            raise UpdateError("PLACEMENT_ADOPTION_CONFLICT", "Host identity changed after prepare.")
+        phase = adoption.get("phase")
+        if phase not in {"PREPARED_HELD", "ACTIVE_HELD", "ACTIVE"}:
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "Local adoption is not in a proven held or released phase.",
+                retryable=True,
+            )
+        if context.role_id == "connector-host":
+            if phase in {"PREPARED_HELD", "ACTIVE_HELD"}:
+                self._validate_connector_adoption_hold(adoption)
+            else:
+                readiness = self._readiness_for("CORE_RUNTIME", requires_restart=False, force=True)
+                catalog, _sources = self._activity_catalog()
+                if (
+                    self._readiness_admission_state(readiness) != "open"
+                    or readiness.get("install_catalog_generation") != catalog["generation"]
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_ADMISSION_UNKNOWN",
+                        "Connector admission is not proven open.",
+                        retryable=True,
+                    )
+        else:
+            state = self._read_control_admission_state(context)
+            state_phase = state.get("adoptionHold", {}).get("phase")
+            if state.get("planDigest") != adoption.get("planDigest") or state_phase != phase:
+                raise UpdateError(
+                    "PLACEMENT_ADMISSION_UNKNOWN",
+                    "Control gate no longer matches the protected adoption journal.",
+                    retryable=True,
+                )
+            if phase in {"ACTIVE_HELD", "ACTIVE"}:
+                module_health = self._control_readyz()
+                self._validate_control_readyz(module, context, state, module_health)
+
+    def release_placement_adoption(
+        self, plan_id: Any, plan_digest: Any, confirmation: Any
+    ) -> dict[str, Any]:
+        """Release this host's exact hold only after both hosts prove ACTIVE_HELD."""
+
+        self._require_authorized_process()
+        self._placement_confirmation(plan_id, plan_digest, confirmation)
+        with self._exclusive_update_lock():
+            self._reload_catalog_for_operation()
+            _record, _stage_path, plan, module, context, group, desired = (
+                self._staged_placement_record(plan_id, plan_digest)
+            )
+            adoption = self._read_placement_adoption(required=True)
+            assert adoption is not None
+            if adoption.get("planId") != plan_id or adoption.get("planDigest") != plan_digest:
+                raise UpdateError(
+                    "PLACEMENT_ADOPTION_CONFLICT", "The protected hold belongs to another plan."
+                )
+            if adoption.get("phase") == "ACTIVE":
+                self._validate_local_placement_adoption(adoption, module, context)
+                return {"status": "active", "planId": plan_id, "planDigest": plan_digest}
+            if adoption.get("phase") == "RELEASE_PENDING":
+                self._verify_local_active_held(plan, module, context, allow_release_pending=True)
+                _module, _context, peer, _binding = self._placement_peer_evidence(
+                    plan, operation="apply", expected_peer_phases={"ACTIVE_HELD", "ACTIVE"}
+                )
+                return self._recover_placement_release(adoption, module, context, peer=peer)
+            if adoption.get("phase") != "ACTIVE_HELD":
+                raise UpdateError(
+                    "PLACEMENT_NOT_ACTIVE_HELD",
+                    "All local signed services must be healthy under the hold before release.",
+                    retryable=True,
+                )
+            snapshot = self._placement_local_snapshot(module, context, group)
+            desired_ids = {item["componentId"] for item in desired}
+            if (
+                snapshot.get("phase") != "ACTIVE_HELD"
+                or {item["componentId"] for item in snapshot.get("activeComponents", [])}
+                != desired_ids
+            ):
+                raise UpdateError(
+                    "PLACEMENT_NOT_ACTIVE_HELD",
+                    "Local pointer and signed service inventory are not healthy under the hold.",
+                    retryable=True,
+                )
+            _module, _context, peer, _binding = self._placement_peer_evidence(
+                plan, operation="apply", expected_peer_phases={"ACTIVE_HELD", "ACTIVE"}
+            )
+            adoption["phase"] = "RELEASE_PENDING"
+            _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+            if context.role_id == "connector-host":
+                self._validate_connector_adoption_hold(adoption)
+                end_transaction = {
+                    "planId": plan_id,
+                    "requestId": adoption["requestId"],
+                    "planDigest": plan_digest,
+                    "targetKind": "CORE_RUNTIME",
+                    "maintenanceToken": adoption["maintenanceToken"],
+                }
+                try:
+                    self._end_maintenance(end_transaction, outcome="SUCCESS", healthy=True)
+                except UpdateError as error:
+                    readiness = self._readiness_for(
+                        "CORE_RUNTIME", requires_restart=False, force=True
+                    )
+                    if self._readiness_admission_state(readiness) != "open":
+                        raise UpdateError(
+                            "PLACEMENT_RELEASE_PENDING",
+                            "Connector hold release is unconfirmed; it remains journaled for retry.",
+                            retryable=True,
+                        ) from error
+                readiness = self._readiness_for("CORE_RUNTIME", requires_restart=False, force=True)
+                catalog, _sources = self._activity_catalog()
+                if (
+                    self._readiness_admission_state(readiness) != "open"
+                    or readiness.get("install_catalog_generation") != catalog["generation"]
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_RELEASE_PENDING",
+                        "Connector READY admission readback failed after release.",
+                        retryable=True,
+                    )
+            else:
+                self._write_control_admission_state(
+                    context, plan_id=plan_id, plan_digest=plan_digest, phase="ACTIVE_HELD"
+                )
+                state = self._read_control_admission_state(context)
+                self._validate_control_readyz(module, context, state, self._control_readyz())
+                self._write_control_admission_state(
+                    context, plan_id=plan_id, plan_digest=plan_digest, phase="ACTIVE"
+                )
+                opened = self._read_control_admission_state(context)
+                self._validate_control_readyz(module, context, opened, self._control_readyz())
+            adoption["phase"] = "ACTIVE"
+            adoption.pop("maintenanceToken", None)
+            _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+            return {
+                "status": "active",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "peerPhase": peer.phase,
+            }
+
+    def _recover_placement_release(
+        self, adoption: dict[str, Any], module: Any, context: Any, peer: Any
+    ) -> dict[str, Any]:
+        """Resolve a lost End response from authoritative local admission state."""
+
+        plan_id = adoption["planId"]
+        plan_digest = adoption["planDigest"]
+        if context.role_id == "connector-host":
+            readiness = self._readiness_for("CORE_RUNTIME", requires_restart=False, force=True)
+            catalog, _sources = self._activity_catalog()
+            if readiness.get("install_catalog_generation") != catalog["generation"]:
+                raise UpdateError(
+                    "PLACEMENT_RELEASE_PENDING",
+                    "Connector catalog generation changed during release recovery.",
+                    retryable=True,
+                )
+            if self._readiness_admission_state(readiness) != "open":
+                # The exact hold still exists: prove it before retrying End.
+                self._validate_connector_adoption_hold(adoption)
+                self._end_maintenance(
+                    {
+                        "planId": plan_id,
+                        "requestId": adoption["requestId"],
+                        "planDigest": plan_digest,
+                        "targetKind": "CORE_RUNTIME",
+                        "maintenanceToken": adoption["maintenanceToken"],
+                    },
+                    outcome="SUCCESS",
+                    healthy=True,
+                )
+                readiness = self._readiness_for("CORE_RUNTIME", requires_restart=False, force=True)
+                catalog, _sources = self._activity_catalog()
+                if (
+                    self._readiness_admission_state(readiness) != "open"
+                    or readiness.get("install_catalog_generation") != catalog["generation"]
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_RELEASE_PENDING",
+                        "Connector release remains unconfirmed after EndMaintenance retry.",
+                        retryable=True,
+                    )
+        else:
+            state = self._read_control_admission_state(context)
+            if state.get("state") != "open" or state.get("planDigest") != plan_digest:
+                self._write_control_admission_state(
+                    context, plan_id=plan_id, plan_digest=plan_digest, phase="ACTIVE"
+                )
+            state = self._read_control_admission_state(context)
+            self._validate_control_readyz(module, context, state, self._control_readyz())
+        adoption["phase"] = "ACTIVE"
+        adoption.pop("maintenanceToken", None)
+        _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+        return {"status": "active", "planId": plan_id, "planDigest": plan_digest}
+
+    @staticmethod
+    def _readiness_admission_state(readiness: dict[str, Any]) -> str:
+        """Preserve real busy and unknown snapshots without calling them idle."""
+
+        status = readiness.get("status")
+        if status in {
+            "READY",
+            "ACTIVE_TASKS",
+            "ACTIVE_BINDING_OPERATIONS",
+            "IDLE_RUNTIME_REQUIRES_UNLOAD",
+            "USER_CONFIRMATION_REQUIRED",
+        }:
+            return "open"
+        if status == "MAINTENANCE_ACTIVE":
+            return "closed"
+        return "unknown"
+
+    def _observed_placement_release_phase(
+        self, adoption: dict[str, Any], module: Any, context: Any
+    ) -> str:
+        """Resolve RELEASE_PENDING from the live gate, not from journal intent."""
+
+        if context.role_id == "connector-host":
+            readiness = self._readiness_for("CORE_RUNTIME", requires_restart=False, force=True)
+            catalog, _sources = self._activity_catalog()
+            if readiness.get("install_catalog_generation") != catalog["generation"]:
+                raise UpdateError(
+                    "PLACEMENT_ADMISSION_UNKNOWN",
+                    "Connector catalog generation changed while release outcome was pending.",
+                    retryable=True,
+                )
+            state = self._readiness_admission_state(readiness)
+            if state == "open":
+                return "ACTIVE"
+            if state == "closed":
+                self._validate_connector_adoption_hold(adoption)
+                return "ACTIVE_HELD"
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "Connector release outcome is still unknown.",
+                retryable=True,
+            )
+        state = self._read_control_admission_state(context)
+        if state.get("planDigest") != adoption.get("planDigest"):
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "Control gate plan differs from the pending release journal.",
+                retryable=True,
+            )
+        phase = state.get("adoptionHold", {}).get("phase")
+        if phase not in {"ACTIVE_HELD", "ACTIVE"}:
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "Control gate release outcome is unknown.",
+                retryable=True,
+            )
+        self._validate_control_readyz(module, context, state, self._control_readyz())
+        return phase
+
     def handle(self, request: Any) -> dict[str, Any]:
         """Validate and dispatch one fixed request, returning a shared envelope."""
         operation = request.get("operation") if isinstance(request, dict) else None
@@ -1490,6 +3686,9 @@ class ComponentUpdater:
                 "check",
                 "stage",
                 "apply",
+                "prepare-adoption",
+                "validate-adoption",
+                "release-adoption",
                 "check-plugin-package",
                 "install-plugin-package",
             }
@@ -1531,6 +3730,26 @@ class ComponentUpdater:
                     "confirmation",
                     "channel",
                     "bootstrapMode",
+                },
+                "prepare-adoption": {
+                    "protocolVersion",
+                    "operation",
+                    "planId",
+                    "planDigest",
+                    "confirmation",
+                },
+                "validate-adoption": {
+                    "protocolVersion",
+                    "operation",
+                    "planId",
+                    "planDigest",
+                },
+                "release-adoption": {
+                    "protocolVersion",
+                    "operation",
+                    "planId",
+                    "planDigest",
+                    "confirmation",
                 },
                 "check-plugin-package": {"protocolVersion", "operation"},
                 "install-plugin-package": {
@@ -1593,6 +3812,22 @@ class ComponentUpdater:
                 )
             elif operation == "check-plugin-package":
                 result = self.inspect_plugin_package_plan()
+            elif operation == "prepare-adoption":
+                result = self.prepare_placement_adoption(
+                    request.get("planId"),
+                    request.get("planDigest"),
+                    request.get("confirmation"),
+                )
+            elif operation == "validate-adoption":
+                result = self.validate_placement_adoption(
+                    request.get("planId"), request.get("planDigest")
+                )
+            elif operation == "release-adoption":
+                result = self.release_placement_adoption(
+                    request.get("planId"),
+                    request.get("planDigest"),
+                    request.get("confirmation"),
+                )
             elif operation == "install-plugin-package":
                 result = self.bootstrap_plugin_package_runtime(
                     plan_id=request.get("planId"),
@@ -1666,6 +3901,7 @@ class ComponentUpdater:
         *,
         channel: Any = None,
         include_readiness: bool = True,
+        _placement_operation: str = "check",
     ) -> dict[str, Any]:
         """Discover trusted channel releases and produce digest-bound plans."""
 
@@ -1675,7 +3911,7 @@ class ComponentUpdater:
         if channel not in {"stable", "preview"}:
             raise UpdateError("INVALID_CATALOG", "The default release channel is invalid.")
         if component_ids is None:
-            selected = list(self.components)
+            selected = self._default_placement_selection()
         elif (
             isinstance(component_ids, list)
             and component_ids
@@ -1691,11 +3927,15 @@ class ComponentUpdater:
             raise UpdateError(
                 "INVALID_REQUEST", "componentIds must be a unique, non-empty component ID list."
             )
+        if _placement_operation not in {"check", "stage"}:
+            raise UpdateError("INVALID_REQUEST", "Unsupported internal placement operation.")
         unknown = sorted(set(selected) - set(self.components))
         if unknown:
             raise UpdateError(
                 "INVALID_COMPONENT", f"Unknown trusted component IDs: {', '.join(unknown)}"
             )
+        if component_ids is not None:
+            self._validate_requested_placement(set(selected))
 
         candidates: dict[str, Candidate] = {}
         skipped: dict[str, str] = {}
@@ -1714,6 +3954,10 @@ class ComponentUpdater:
         candidates = self._expand_compatibility_groups(candidates, channel)
         self._validate_runtime_dependencies(candidates)
         selected = list(dict.fromkeys([*selected, *candidates.keys()]))
+        placement_bindings = self._placement_bindings(
+            candidates,
+            operation=_placement_operation,
+        )
         plan_components = []
         for component_id, candidate in sorted(candidates.items()):
             installed = self._installed(candidate.component)
@@ -1746,6 +3990,8 @@ class ComponentUpdater:
                 "catalogDigest": self.catalog_digest,
                 "components": plan_components,
             }
+            if placement_bindings:
+                digest_material["deploymentPlacement"] = placement_bindings
             plan_digest = _digest_json(digest_material, "planDigest")
             plan_id = "plan-" + plan_digest.split(":", 1)[1][:32]
             plan = {
@@ -1757,6 +4003,8 @@ class ComponentUpdater:
                 "phase": "checked",
                 "components": plan_components,
             }
+            if placement_bindings:
+                plan["deploymentPlacement"] = placement_bindings
         rows = []
         for component_id in selected:
             component = self.components[component_id]
@@ -1865,7 +4113,12 @@ class ComponentUpdater:
             for item in stored_plan.get("components", [])
             if isinstance(item, dict)
         ]
-        checked = self.check(component_ids, channel=channel, include_readiness=False)
+        checked = self.check(
+            component_ids,
+            channel=channel,
+            include_readiness=False,
+            _placement_operation="stage",
+        )
         plan = self._find_plan(checked, plan_id, plan_digest)
         candidate_map = self._resolve_plan_candidates(plan, channel)
         staged_root = self._private_state_directory("staged")
@@ -1884,6 +4137,7 @@ class ComponentUpdater:
                 staged_components.append(
                     self._stage_candidate(candidate, plan_root, plan_id, plan_digest)
                 )
+            self._revalidate_plan_placement(plan, operation="stage")
             record = {
                 "schemaVersion": 2,
                 "plan": plan,
@@ -1975,12 +4229,47 @@ class ComponentUpdater:
             expected_plan_id=plan_id,
             expected_plan_digest=plan_digest,
         )
+        self._revalidate_plan_placement(record["plan"], operation="apply")
         transaction_path = self._private_state_directory("transactions") / f"{plan_id}.json"
         existing = (
             _read_object(transaction_path, "update transaction")
             if transaction_path.exists()
             else None
         )
+        placement_binding = self._placement_binding_for_group(
+            record.get("plan", {}), "workspace-product-v2"
+        )
+        if placement_binding is not None:
+            adoption = self._read_placement_adoption(required=False)
+            if adoption is None:
+                raise UpdateError(
+                    "PLACEMENT_ADOPTION_REQUIRED",
+                    "The exact staged two-host plan must be explicitly prepared before apply.",
+                    retryable=True,
+                )
+            if adoption.get("phase") != "ACTIVE" and (
+                adoption.get("planId") != plan_id or adoption.get("planDigest") != plan_digest
+            ):
+                raise UpdateError(
+                    "PLACEMENT_ADOPTION_CONFLICT",
+                    "A different two-host adoption hold must be resolved before apply.",
+                    retryable=True,
+                )
+            if adoption.get("planId") == plan_id and adoption.get("planDigest") == plan_digest:
+                if adoption.get("phase") in {"PREPARED_HELD", "APPLY_PENDING", "ACTIVE_HELD"}:
+                    return self._apply_placement_held(
+                        record,
+                        transaction_path,
+                        existing,
+                        adoption,
+                        confirmation,
+                    )
+                if adoption.get("phase") != "ACTIVE":
+                    raise UpdateError(
+                        "PLACEMENT_ADMISSION_UNKNOWN",
+                        "The exact adoption journal is not in an applyable phase.",
+                        retryable=True,
+                    )
         if existing and existing.get("schemaAdoption") is True:
             if existing.get("phase") == "succeeded":
                 return self._applied_result(existing)
@@ -2101,6 +4390,7 @@ class ComponentUpdater:
             self._restart_transaction(transaction)
             self._health_transaction(transaction)
             self._activate_authority_bundle(transaction)
+            self._revalidate_plan_placement(record["plan"], operation="apply")
         except Exception as failure:
             healthy_rollback, rollback_message = self._rollback_transaction(transaction)
             transaction["phase"] = (
@@ -2149,6 +4439,331 @@ class ComponentUpdater:
         transaction.pop("recoveryError", None)
         _atomic_json(transaction_path, transaction)
         return self._applied_result(transaction)
+
+    def _apply_placement_held(
+        self,
+        record: dict[str, Any],
+        transaction_path: Path,
+        existing: dict[str, Any] | None,
+        adoption: dict[str, Any],
+        confirmation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Apply this staged role while retaining its separately prepared adoption hold."""
+
+        plan = record["plan"]
+        plan_id = plan["planId"]
+        plan_digest = plan["planDigest"]
+        module, context, _group = self._placement_for_plan(plan)
+        if adoption.get("planId") != plan_id or adoption.get("planDigest") != plan_digest:
+            raise UpdateError("PLACEMENT_ADOPTION_CONFLICT", "The held plan identity changed.")
+        phase = adoption.get("phase")
+        if phase == "ACTIVE_HELD":
+            if (
+                context.role_id == "control-host"
+                and existing is not None
+                and existing.get("controlGateAdvanced") is True
+            ):
+                return self._recover_placement_apply(
+                    existing, transaction_path, adoption, module, context
+                )
+            if existing is None or existing.get("phase") != "succeeded-held":
+                raise UpdateError(
+                    "PLACEMENT_ADMISSION_UNKNOWN",
+                    "ACTIVE_HELD has no matching completed updater transaction.",
+                    retryable=True,
+                )
+            self._validate_local_placement_adoption(adoption, module, context)
+            return {**self._applied_result(existing), "adoptionPhase": "ACTIVE_HELD"}
+
+        if not _running_as_root():
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED",
+                "Applying staged components requires the root-owned local update helper.",
+            )
+        self._require_managed_services(record["components"])
+        self._validate_local_placement_adoption(
+            {**adoption, "phase": "PREPARED_HELD"}, module, context
+        )
+        self._revalidate_plan_placement(plan, operation="apply")
+        peer_phases = {"PREPARED_HELD", "ACTIVE_HELD", "ACTIVE"}
+        self._placement_peer_evidence(plan, operation="apply", expected_peer_phases=peer_phases)
+        if phase == "APPLY_PENDING":
+            return self._recover_placement_apply(
+                existing, transaction_path, adoption, module, context
+            )
+        if phase != "PREPARED_HELD":
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "The local placement hold is not ready for apply.",
+                retryable=True,
+            )
+        if existing is not None and existing.get("phase") not in {
+            "rolled_back-held",
+            "succeeded-held",
+        }:
+            return self._recover_placement_apply(
+                existing, transaction_path, adoption, module, context
+            )
+        if existing is not None and existing.get("phase") == "succeeded-held":
+            raise UpdateError(
+                "PLACEMENT_ADMISSION_UNKNOWN",
+                "The updater transaction completed but the held journal did not advance.",
+                retryable=True,
+            )
+
+        target_kind = "CORE_RUNTIME" if context.role_id == "connector-host" else "PACKAGE_ONLY"
+        previous = self._capture_active_versions(record["components"])
+        artifact_digests = {
+            item["componentId"]: item["artifactDigest"] for item in record["components"]
+        }
+        transaction: dict[str, Any] = {
+            "schemaVersion": 2,
+            "planId": plan_id,
+            "requestId": adoption["requestId"],
+            "planDigest": plan_digest,
+            "componentArtifactDigests": artifact_digests,
+            "phase": "placement_applying",
+            "targetKind": target_kind,
+            "channel": record.get("channel"),
+            "expectedGateGeneration": adoption.get("gateGeneration"),
+            "expectedCatalogGeneration": adoption.get("catalogGeneration"),
+            "expectedActivitySources": adoption.get("expectedActivitySources", []),
+            "components": record["components"],
+            "previous": previous,
+            "authorityActivation": self._prepare_authority_activation(record, plan_id, plan_digest),
+            "placementAdoption": True,
+            "createdAt": int(time.time()),
+        }
+        adoption["phase"] = "APPLY_PENDING"
+        adoption["applyStartedAt"] = int(time.time())
+        _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+        _atomic_json(transaction_path, transaction)
+        control_gate_advanced = False
+        try:
+            self._activate_transaction(transaction)
+            self._restart_transaction(transaction)
+            self._health_transaction(transaction)
+            self._activate_authority_bundle(transaction)
+            self._revalidate_plan_placement(plan, operation="apply")
+            if context.role_id == "control-host":
+                self._write_control_admission_state(
+                    context, plan_id=plan_id, plan_digest=plan_digest, phase="ACTIVE_HELD"
+                )
+                control_gate_advanced = True
+                state = self._read_control_admission_state(context)
+                self._validate_control_readyz(module, context, state, self._control_readyz())
+            transaction["phase"] = "succeeded-held"
+            _atomic_json(transaction_path, transaction)
+            adoption["phase"] = "ACTIVE_HELD"
+            adoption.pop("applyStartedAt", None)
+            _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+            self._validate_local_placement_adoption(adoption, module, context)
+            self._verify_local_active_held(plan, module, context)
+            return {**self._applied_result(transaction), "adoptionPhase": "ACTIVE_HELD"}
+        except Exception as failure:
+            if context.role_id == "control-host" and control_gate_advanced:
+                transaction["phase"] = "placement_apply_unknown"
+                transaction["controlGateAdvanced"] = True
+                transaction["recoveryError"] = str(failure)
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "PLACEMENT_APPLY_UNKNOWN",
+                    f"Control admission remains closed under the existing hold, but apply verification is incomplete ({failure}); retry the same plan to reconcile.",
+                    retryable=True,
+                ) from failure
+            healthy, message = self._rollback_transaction(transaction)
+            transaction["phase"] = "rolled_back-held" if healthy else "rollback_required"
+            transaction["rollbackHealthy"] = healthy
+            transaction["rollbackMessage"] = message
+            _atomic_json(transaction_path, transaction)
+            if healthy:
+                adoption["phase"] = "PREPARED_HELD"
+                adoption.pop("applyStartedAt", None)
+                _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+            raise UpdateError(
+                "PLACEMENT_APPLY_ROLLED_BACK" if healthy else "PLACEMENT_ROLLBACK_UNKNOWN",
+                f"Placement apply failed ({failure}); {message}",
+                retryable=True,
+            ) from failure
+
+    def _placement_for_plan(self, plan: dict[str, Any]) -> tuple[Any, Any, dict[str, Any]]:
+        group = next(
+            (
+                item
+                for item in self.catalog.get("compatibilityGroups", [])
+                if isinstance(item, dict) and item.get("groupId") == "workspace-product-v2"
+            ),
+            None,
+        )
+        if not isinstance(group, dict):
+            raise UpdateError("PLACEMENT_INVALID", "The signed placement group is unavailable.")
+        loaded = self._placement_module_for_group(group)
+        if loaded is None:
+            raise UpdateError(
+                "PLACEMENT_INVALID", "The fixed host placement profile is unavailable."
+            )
+        module, context = loaded
+        if self._placement_binding_for_group(plan, context.group_id) is None:
+            raise UpdateError(
+                "PLACEMENT_INVALID", "The staged plan is not bound to this placement group."
+            )
+        return module, context, group
+
+    def _recover_placement_apply(
+        self,
+        transaction: dict[str, Any] | None,
+        transaction_path: Path,
+        adoption: dict[str, Any],
+        module: Any,
+        context: Any,
+    ) -> dict[str, Any]:
+        """Roll back an interrupted held apply; never infer success from its journal phase."""
+
+        if transaction is None or transaction.get("placementAdoption") is not True:
+            raise UpdateError(
+                "PLACEMENT_APPLY_UNKNOWN",
+                "Interrupted placement apply has no exact rollback identity.",
+                retryable=True,
+            )
+        if context.role_id == "control-host" and transaction.get("controlGateAdvanced") is True:
+            adoption["phase"] = "ACTIVE_HELD"
+            adoption.pop("applyStartedAt", None)
+            _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+            transaction["phase"] = "succeeded-held"
+            transaction.pop("recoveryError", None)
+            _atomic_json(transaction_path, transaction)
+            try:
+                self._validate_local_placement_adoption(adoption, module, context)
+                self._verify_local_active_held(
+                    {"planId": adoption["planId"], "planDigest": adoption["planDigest"]},
+                    module,
+                    context,
+                )
+            except UpdateError:
+                adoption["phase"] = "APPLY_PENDING"
+                adoption["applyStartedAt"] = transaction.get("createdAt", int(time.time()))
+                _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+                transaction["phase"] = "placement_apply_unknown"
+                _atomic_json(transaction_path, transaction)
+                raise
+            return {
+                **self._applied_result(transaction),
+                "adoptionPhase": "ACTIVE_HELD",
+            }
+        if transaction.get("phase") == "succeeded-held":
+            adoption["phase"] = "ACTIVE_HELD"
+            adoption.pop("applyStartedAt", None)
+            _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+            self._validate_local_placement_adoption(adoption, module, context)
+            self._verify_local_active_held(
+                {"planId": adoption["planId"], "planDigest": adoption["planDigest"]},
+                module,
+                context,
+            )
+            return {
+                **self._applied_result(transaction),
+                "adoptionPhase": "ACTIVE_HELD",
+            }
+        if transaction.get("phase") == "rolled_back-held":
+            adoption["phase"] = "PREPARED_HELD"
+            adoption.pop("applyStartedAt", None)
+            _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+            self._validate_local_placement_adoption(adoption, module, context)
+            raise UpdateError(
+                "PLACEMENT_APPLY_RECOVERED",
+                "The interrupted apply was already rolled back under the existing hold; retry the same confirmed plan to apply again.",
+                retryable=True,
+            )
+        self._validate_recovery_identity(transaction)
+        healthy, message = self._rollback_transaction(transaction)
+        transaction["phase"] = "rolled_back-held" if healthy else "rollback_required"
+        transaction["rollbackHealthy"] = healthy
+        transaction["rollbackMessage"] = message
+        _atomic_json(transaction_path, transaction)
+        if healthy:
+            adoption["phase"] = "PREPARED_HELD"
+            adoption.pop("applyStartedAt", None)
+            _atomic_json(self._placement_adoption_path(), adoption, mode=0o600)
+            self._validate_local_placement_adoption(adoption, module, context)
+            raise UpdateError(
+                "PLACEMENT_APPLY_RECOVERED",
+                "An interrupted apply was rolled back under the existing hold; retry the same confirmed plan to apply again.",
+                retryable=True,
+            )
+        raise UpdateError(
+            "PLACEMENT_ROLLBACK_UNKNOWN",
+            f"Interrupted apply could not be rolled back ({message}); the original hold remains active.",
+            retryable=True,
+        )
+
+    def _verify_local_active_held(
+        self,
+        plan: dict[str, Any],
+        module: Any,
+        context: Any,
+        *,
+        allow_release_pending: bool = False,
+    ) -> None:
+        group = next(
+            item
+            for item in self.catalog.get("compatibilityGroups", [])
+            if isinstance(item, dict) and item.get("groupId") == context.group_id
+        )
+        binding = self._placement_binding_for_group(plan, context.group_id)
+        if binding is None:
+            raise UpdateError("PLACEMENT_INVALID", "Active held plan binding is unavailable.")
+        desired = module._valid_desired_components(binding.get("localDesiredComponents"))
+        if allow_release_pending:
+            desired_ids = {item["componentId"] for item in desired}
+            active = self._placement_active_components(group, context.local_role.allowed_members)
+            if {item["componentId"] for item in active} != desired_ids:
+                raise UpdateError(
+                    "PLACEMENT_NOT_ACTIVE_HELD",
+                    "Release recovery found a different active signed component set.",
+                    retryable=True,
+                )
+            self._placement_service_inventory(desired, active_ids=desired_ids)
+            if self._placement_transaction_state() != {"present": False, "phase": "none"}:
+                raise UpdateError(
+                    "PLACEMENT_NOT_ACTIVE_HELD",
+                    "Release recovery found an unfinished updater transaction.",
+                    retryable=True,
+                )
+            adoption = self._read_placement_adoption(required=True)
+            assert adoption is not None
+            if context.role_id == "connector-host":
+                readiness = self._readiness_for("CORE_RUNTIME", requires_restart=False, force=True)
+                state = self._readiness_admission_state(readiness)
+                if state == "closed":
+                    self._validate_connector_adoption_hold(adoption)
+                elif state != "open":
+                    raise UpdateError(
+                        "PLACEMENT_ADMISSION_UNKNOWN",
+                        "Connector release state is neither proven open nor held.",
+                        retryable=True,
+                    )
+            else:
+                state = self._read_control_admission_state(context)
+                if state["adoptionHold"]["phase"] not in {"ACTIVE_HELD", "ACTIVE"}:
+                    raise UpdateError(
+                        "PLACEMENT_ADMISSION_UNKNOWN",
+                        "Control release state is not held or open for this adoption.",
+                        retryable=True,
+                    )
+                self._validate_control_readyz(module, context, state, self._control_readyz())
+            return
+        snapshot = self._placement_local_snapshot(module, context, group)
+        if (
+            snapshot.get("phase") != "ACTIVE_HELD"
+            or {item["componentId"] for item in snapshot.get("activeComponents", [])}
+            != {item["componentId"] for item in desired}
+            or snapshot.get("transaction") != {"present": False, "phase": "none"}
+        ):
+            raise UpdateError(
+                "PLACEMENT_NOT_ACTIVE_HELD",
+                "Local signed pointers, services, or transaction state are not healthy under the hold.",
+                retryable=True,
+            )
 
     def _resolve_channel(self, value: Any) -> str:
         channel = self.catalog.get("defaultChannel", DEFAULT_CHANNEL) if value is None else value
@@ -4573,13 +7188,19 @@ class ComponentUpdater:
         )
 
     def _channel_releases(
-        self, publisher: dict[str, Any], channel: str, component: dict[str, Any]
+        self,
+        publisher: dict[str, Any],
+        channel: str,
+        component: dict[str, Any],
+        *,
+        release_id: str | None = None,
     ) -> tuple[dict[str, Any], str, tuple[dict[str, Any], ...], str]:
         component_prefix = self._component_release_tag_prefix(component, channel)
         key = (
             publisher["repository"],
             channel,
             component["componentId"] if component_prefix else "",
+            release_id or "latest",
         )
         if key in self._index_cache:
             return self._index_cache[key]
@@ -4595,34 +7216,59 @@ class ComponentUpdater:
         channel_cfg = self.catalog["channels"][channel]
         expected_prerelease = channel_cfg["releasePrerelease"]
         selected_release = None
-        for page in range(1, 101):
-            page_uri = releases_uri if page == 1 else f"{releases_uri}&page={page}"
-            releases = self._get_json(page_uri)
-            if not isinstance(releases, list):
-                raise UpdateError(
-                    "RELEASE_DISCOVERY_INVALID",
-                    "GitHub Releases API did not return a release list.",
-                    retryable=True,
-                )
-            selected_release = next(
-                (
-                    item
-                    for item in releases
-                    if isinstance(item, dict)
-                    and item.get("draft") is False
-                    and item.get("prerelease") is expected_prerelease
-                    and (
-                        component_prefix is None
-                        or (
-                            isinstance(item.get("tag_name"), str)
-                            and item["tag_name"].startswith(component_prefix)
-                        )
-                    )
-                ),
-                None,
+        if release_id is not None:
+            if (
+                not isinstance(release_id, str)
+                or not release_id
+                or len(release_id) > 256
+                or "/" in release_id
+                or ".." in release_id
+                or (component_prefix is not None and not release_id.startswith(component_prefix))
+            ):
+                raise UpdateError("UNTRUSTED_RELEASE_TAG", "Peer release tag is invalid.")
+            exact_uri = (
+                f"https://api.github.com/repos/{publisher['repository']}/releases/tags/"
+                f"{urllib.parse.quote(release_id, safe='')}"
             )
-            if selected_release is not None or len(releases) < 100:
-                break
+            if releases_uri != expected_api_uri:
+                raise UpdateError("INVALID_CATALOG", "Release discovery URL is not pinned.")
+            candidate_release = self._get_json(exact_uri)
+            if (
+                isinstance(candidate_release, dict)
+                and candidate_release.get("tag_name") == release_id
+                and candidate_release.get("draft") is False
+                and candidate_release.get("prerelease") is expected_prerelease
+            ):
+                selected_release = candidate_release
+        else:
+            for page in range(1, 101):
+                page_uri = releases_uri if page == 1 else f"{releases_uri}&page={page}"
+                releases = self._get_json(page_uri)
+                if not isinstance(releases, list):
+                    raise UpdateError(
+                        "RELEASE_DISCOVERY_INVALID",
+                        "GitHub Releases API did not return a release list.",
+                        retryable=True,
+                    )
+                selected_release = next(
+                    (
+                        item
+                        for item in releases
+                        if isinstance(item, dict)
+                        and item.get("draft") is False
+                        and item.get("prerelease") is expected_prerelease
+                        and (
+                            component_prefix is None
+                            or (
+                                isinstance(item.get("tag_name"), str)
+                                and item["tag_name"].startswith(component_prefix)
+                            )
+                        )
+                    ),
+                    None,
+                )
+                if selected_release is not None or len(releases) < 100:
+                    break
         if selected_release is None:
             raise UpdateError(
                 "NO_RELEASE",
@@ -5004,7 +7650,12 @@ class ComponentUpdater:
         return prefix
 
     def _candidate(
-        self, component: dict[str, Any], target: dict[str, Any], channel: str
+        self,
+        component: dict[str, Any],
+        target: dict[str, Any],
+        channel: str,
+        *,
+        release_id: str | None = None,
     ) -> Candidate:
         publisher = self.publishers.get(component["publisher"])
         if publisher is None:
@@ -5013,7 +7664,7 @@ class ComponentUpdater:
                 f"No trusted publisher is configured for {component['componentId']}.",
             )
         index, index_uri, release_assets, release_tag = self._channel_releases(
-            publisher, channel, component
+            publisher, channel, component, release_id=release_id
         )
         entries = [
             item
@@ -5450,6 +8101,528 @@ class ComponentUpdater:
                         f"{component_id} requires {dependency_id} {version_range}, but the installed/planned version is {dependency_version}.",
                     )
 
+    def _load_component_placement(self) -> Any:
+        """Load the signed updater's role-placement verifier from its fixed sibling path."""
+
+        module_path = Path(__file__).with_name("component_placement.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError(
+                "PLACEMENT_HELPER_UNAVAILABLE",
+                "The signed component placement verifier is missing or unsafe.",
+            )
+        import importlib.util
+
+        module_name = "_cyrene_component_placement"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError(
+                "PLACEMENT_HELPER_UNAVAILABLE",
+                "The signed component placement verifier cannot be loaded.",
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            raise UpdateError(
+                "PLACEMENT_HELPER_UNAVAILABLE",
+                "The signed component placement verifier failed to load.",
+            ) from error
+        return module
+
+    def _placement_module_for_group(self, group: dict[str, Any]) -> Any | None:
+        if "deploymentRoles" not in group:
+            return None
+        module = self._load_component_placement()
+        try:
+            context = module.load_placement(
+                group,
+                trusted_catalog_digest=self.catalog_digest,
+            )
+        except Exception as error:
+            raise UpdateError("PLACEMENT_INVALID", f"Host placement is invalid: {error}") from error
+        return (module, context) if context is not None else None
+
+    def _default_placement_selection(self) -> list[str]:
+        """Keep default checks local to each configured deployment role."""
+
+        selected = list(self.components)
+        groups = self.catalog.get("compatibilityGroups", [])
+        for group in groups:
+            if not isinstance(group, dict) or "deploymentRoles" not in group:
+                continue
+            loaded = self._placement_module_for_group(group)
+            if loaded is None:
+                continue
+            module, context = loaded
+            member_ids = {
+                member["componentId"]
+                for member in group.get("members", [])
+                if isinstance(member, dict) and isinstance(member.get("componentId"), str)
+            }
+            supported_ids = {
+                component_id
+                for component_id in member_ids
+                if self._target_for(self.components[component_id]) is not None
+            }
+            active_ids = {
+                component_id
+                for component_id in member_ids
+                if self._installed(self.components[component_id]).get("active") is True
+            }
+            try:
+                selection = module.filter_group_members(
+                    context,
+                    group,
+                    supported_ids,
+                    active_ids,
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "PLACEMENT_INVALID", f"Host placement is invalid: {error}"
+                ) from error
+            if selection is None:
+                raise UpdateError("PLACEMENT_INVALID", "Host placement selection is unavailable.")
+            selected = [component_id for component_id in selected if component_id not in member_ids]
+            selected.extend(selection.component_ids)
+        return list(dict.fromkeys(selected))
+
+    def _validate_requested_placement(self, requested_ids: set[str]) -> None:
+        """Reject explicit requests for a signed group member assigned to the peer."""
+
+        for group in self.catalog.get("compatibilityGroups", []):
+            if not isinstance(group, dict) or "deploymentRoles" not in group:
+                continue
+            member_ids = {
+                member.get("componentId")
+                for member in group.get("members", [])
+                if isinstance(member, dict) and isinstance(member.get("componentId"), str)
+            }
+            group_requests = requested_ids & member_ids
+            if not group_requests:
+                continue
+            loaded = self._placement_module_for_group(group)
+            if loaded is None:
+                continue
+            module, context = loaded
+            supported_ids = {
+                component_id
+                for component_id in member_ids
+                if self._target_for(self.components[component_id]) is not None
+            }
+            active_ids = {
+                component_id
+                for component_id in member_ids
+                if self._installed(self.components[component_id]).get("active") is True
+            }
+            try:
+                module.filter_group_members(
+                    context,
+                    group,
+                    supported_ids,
+                    active_ids,
+                    requested_ids=group_requests,
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "PLACEMENT_INVALID", f"Requested member violates host placement: {error}"
+                ) from error
+
+    def _placement_bindings(
+        self,
+        candidates: dict[str, Candidate],
+        *,
+        operation: str,
+    ) -> list[dict[str, Any]]:
+        """Collect fresh, stable peer evidence for every role-enabled plan group."""
+
+        candidate_ids = set(candidates)
+        return self._placement_bindings_for_ids(
+            candidate_ids,
+            operation=operation,
+            candidate_overrides=candidates,
+            channel=next(
+                (candidate.manifest.get("channel") for candidate in candidates.values()),
+                self._resolve_channel(None),
+            ),
+        )
+
+    def _placement_bindings_for_ids(
+        self,
+        component_ids: set[str],
+        *,
+        operation: str,
+        candidate_overrides: dict[str, Candidate] | None = None,
+        channel: str | None = None,
+    ) -> list[dict[str, Any]]:
+        group_catalogs = {
+            item["groupId"]: item
+            for item in self.catalog.get("compatibilityGroups", [])
+            if isinstance(item, dict) and isinstance(item.get("groupId"), str)
+        }
+        groups: dict[str, dict[str, Any]] = {}
+        for component_id in component_ids:
+            component = self.components.get(component_id)
+            group_id = component.get("compatibilityGroup") if isinstance(component, dict) else None
+            group = group_catalogs.get(group_id)
+            if isinstance(group, dict) and "deploymentRoles" in group:
+                groups[group_id] = group
+
+        bindings: list[dict[str, Any]] = []
+        for group_id, group in sorted(groups.items()):
+            loaded = self._placement_module_for_group(group)
+            if loaded is None:
+                continue
+            module, context = loaded
+            member_ids = {
+                member["componentId"]
+                for member in group.get("members", [])
+                if isinstance(member, dict) and isinstance(member.get("componentId"), str)
+            }
+            local_supported_ids = {
+                component_id
+                for component_id in member_ids
+                if self._target_for(self.components[component_id]) is not None
+            }
+            active_ids = {
+                component_id
+                for component_id in member_ids
+                if self._installed(self.components[component_id]).get("active") is True
+            }
+            requested_ids = component_ids & member_ids
+            try:
+                selection = module.filter_group_members(
+                    context,
+                    group,
+                    local_supported_ids,
+                    active_ids,
+                    requested_ids=requested_ids,
+                )
+                if selection is None:
+                    raise ValueError("signed role selection is unavailable")
+                if not requested_ids <= set(selection.component_ids):
+                    raise ValueError("requested candidates are outside the local deployment role")
+                local_desired = self._placement_desired_components(
+                    group,
+                    selection.component_ids,
+                    local_role_id=context.role_id,
+                    candidates=self._placement_candidate_map_for_channel(
+                        component_ids,
+                        channel=channel or self._resolve_channel(None),
+                        overrides=candidate_overrides,
+                    ),
+                )
+                peer_plan = module.fetch_peer_plan(context)
+                _peer_candidates, required_service_units, executable_paths, executable_digests = (
+                    self._verify_peer_placement_plan(context, peer_plan)
+                )
+                required_service_ids = frozenset(required_service_units)
+                peer = module.fetch_peer_receipt(
+                    context,
+                    plan=peer_plan.payload,
+                    required_service_ids=required_service_ids,
+                    required_service_units=required_service_units,
+                    required_service_executable_paths=executable_paths,
+                    required_service_executable_digests=executable_digests,
+                )
+                if peer.stable_digest != peer_plan.stable_digest:
+                    raise ValueError("peer desired targets changed between plan and receipt reads")
+                module.authorize_peer_operation(context, peer, operation)
+                binding = {
+                    **module.plan_binding(context),
+                    "localMembers": list(selection.component_ids),
+                    "excludedOtherRoleMembers": list(selection.excluded_other_role_ids),
+                    "localDesiredComponents": local_desired,
+                    "peerHostId": context.peer.host_id,
+                    "peerRoleId": context.peer.role_id,
+                    "peerEvidenceDigest": peer.stable_digest,
+                }
+            except Exception as error:
+                raise UpdateError(
+                    "PLACEMENT_INVALID",
+                    f"Trusted peer placement proof failed for {group_id}: {error}",
+                    retryable=True,
+                ) from error
+            bindings.append(binding)
+        return bindings
+
+    def _placement_candidate_map(self, component_ids: set[str]) -> dict[str, Candidate]:
+        """Recover verified candidates for this check or revalidation boundary."""
+
+        return self._placement_candidate_map_for_channel(
+            component_ids, channel=self._resolve_channel(None), overrides=None
+        )
+
+    def _placement_candidate_map_for_channel(
+        self,
+        component_ids: set[str],
+        *,
+        channel: str,
+        overrides: dict[str, Candidate] | None,
+    ) -> dict[str, Candidate]:
+        """Recover candidates while preserving the operation's explicit channel."""
+
+        result = {
+            component_id: candidate
+            for component_id, candidate in (overrides or {}).items()
+            if component_id in component_ids
+        }
+        for component_id in component_ids:
+            if component_id in result:
+                continue
+            component = self.components.get(component_id)
+            if not isinstance(component, dict):
+                continue
+            target = self._target_for(component)
+            if target is None:
+                continue
+            try:
+                result[component_id] = self._candidate(component, target, channel)
+            except UpdateError:
+                # The caller's candidate map is authoritative for a plan. This method is
+                # only a fallback for active members whose release is already installed.
+                continue
+        return result
+
+    def _placement_desired_components(
+        self,
+        group: dict[str, Any],
+        selected_ids: tuple[str, ...],
+        *,
+        local_role_id: str,
+        candidates: dict[str, Candidate],
+    ) -> list[dict[str, Any]]:
+        """Bind the role's complete desired component identities into its plan."""
+
+        desired: list[dict[str, Any]] = []
+        role = next(
+            (
+                item
+                for item in group.get("deploymentRoles", [])
+                if isinstance(item, dict) and item.get("roleId") == local_role_id
+            ),
+            None,
+        )
+        required = set(role.get("requiredMembers", [])) if isinstance(role, dict) else set()
+        for component_id in selected_ids:
+            candidate = candidates.get(component_id)
+            if candidate is not None:
+                manifest = candidate.manifest
+                target_id = self._manifest_target_id(candidate.component, manifest)
+                source = manifest.get("source")
+                channel = manifest.get("channel")
+                if (
+                    target_id is None
+                    or candidate.release_tag is None
+                    or not isinstance(source, dict)
+                    or not isinstance(source.get("commit"), str)
+                    or not isinstance(channel, str)
+                ):
+                    raise UpdateError(
+                        "PLACEMENT_IDENTITY_UNKNOWN",
+                        f"Verified candidate identity is incomplete for {component_id}.",
+                    )
+                desired.append(
+                    {
+                        "componentId": component_id,
+                        "version": manifest["version"],
+                        "manifestDigest": candidate.manifest_digest,
+                        "artifactDigest": candidate.artifact_digest,
+                        "targetId": target_id,
+                        "releaseId": candidate.release_tag,
+                        "sourceCommit": source["commit"],
+                        "sourceRepository": candidate.component["publisher"],
+                        "channel": channel,
+                    }
+                )
+                continue
+
+            component = self.components.get(component_id)
+            installed = self._installed(component) if isinstance(component, dict) else None
+            manifest = installed.get("manifest") if isinstance(installed, dict) else None
+            source = manifest.get("source") if isinstance(manifest, dict) else None
+            channel = manifest.get("channel") if isinstance(manifest, dict) else None
+            if (
+                not isinstance(component, dict)
+                or installed.get("active") is not True
+                or installed.get("identityAttested") is not True
+                or not isinstance(manifest, dict)
+                or not isinstance(source, dict)
+                or not isinstance(source.get("commit"), str)
+                or channel not in {"stable", "preview"}
+            ):
+                if component_id in required:
+                    raise UpdateError(
+                        "PLACEMENT_IDENTITY_UNKNOWN",
+                        f"Required component {component_id} has no verified active or planned identity.",
+                        retryable=True,
+                    )
+                continue
+            target_id = self._manifest_target_id(component, manifest)
+            release_id = self._component_release_tag_prefix(component, channel) or (
+                "preview-" if channel == "preview" else "stable-"
+            )
+            release_id += source["commit"]
+            desired.append(
+                {
+                    "componentId": component_id,
+                    "version": manifest["version"],
+                    "manifestDigest": installed["manifestDigest"],
+                    "artifactDigest": installed["artifactDigest"],
+                    "targetId": target_id,
+                    "releaseId": release_id,
+                    "sourceCommit": source["commit"],
+                    "sourceRepository": component["publisher"],
+                    "channel": channel,
+                }
+            )
+        return sorted(desired, key=lambda item: item["componentId"])
+
+    def _manifest_target_id(
+        self, component: dict[str, Any], manifest: dict[str, Any]
+    ) -> str | None:
+        """Resolve a manifest's target only through its signed catalog component mapping."""
+
+        artifact = manifest.get("artifact")
+        if not isinstance(artifact, dict):
+            return None
+        matches = [
+            target_entry.get("targetId")
+            for target_entry in component.get("targets", [])
+            if isinstance(target_entry, dict)
+            and target_entry.get("support") == "supported"
+            and target_entry.get("artifactKind") == artifact.get("kind")
+            and isinstance(self.targets.get(target_entry.get("targetId")), dict)
+            and self.targets[target_entry["targetId"]].get("target") == manifest.get("target")
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _verify_peer_placement_plan(
+        self, context: Any, peer_plan: Any
+    ) -> tuple[dict[str, Candidate], dict[str, str], dict[str, str], dict[str, str]]:
+        """Verify every peer target against the trusted catalog and immutable release."""
+
+        payload = peer_plan.payload
+        desired = payload.get("desiredComponents")
+        if not isinstance(desired, list):
+            raise UpdateError("PLACEMENT_INVALID", "Peer target list is malformed.")
+        candidates: dict[str, Candidate] = {}
+        for item in desired:
+            if not isinstance(item, dict):
+                raise UpdateError("PLACEMENT_INVALID", "Peer target identity is malformed.")
+            component_id = item.get("componentId")
+            target_id = item.get("targetId")
+            channel = item.get("channel")
+            component = self.components.get(component_id)
+            target = self.targets.get(target_id)
+            if (
+                not isinstance(component, dict)
+                or component_id not in context.peer_role.allowed_members
+                or not isinstance(target, dict)
+                or channel not in {"stable", "preview"}
+                or not any(
+                    isinstance(entry, dict)
+                    and entry.get("targetId") == target_id
+                    and entry.get("support") == "supported"
+                    for entry in component.get("targets", [])
+                )
+            ):
+                raise UpdateError(
+                    "PLACEMENT_INVALID", "Peer target is outside the signed catalog mapping."
+                )
+            candidate = self._candidate(
+                component, target, channel, release_id=item.get("releaseId")
+            )
+            source = candidate.manifest.get("source")
+            if (
+                candidate.release_tag != item.get("releaseId")
+                or candidate.manifest.get("version") != item.get("version")
+                or candidate.manifest_digest != item.get("manifestDigest")
+                or candidate.artifact_digest != item.get("artifactDigest")
+                or candidate.component.get("publisher") != item.get("sourceRepository")
+                or not isinstance(source, dict)
+                or source.get("commit") != item.get("sourceCommit")
+                or candidate.manifest.get("channel") != channel
+                or self._manifest_target_id(component, candidate.manifest) != target_id
+            ):
+                raise UpdateError(
+                    "PLACEMENT_RELEASE_MISMATCH",
+                    f"Peer target differs from its independently verified release: {component_id}.",
+                )
+            candidates[component_id] = candidate
+
+        required_units: dict[str, str] = {}
+        executable_paths: dict[str, str] = {}
+        executable_digests: dict[str, str] = {}
+        desired_ids = set(candidates)
+        required_ids = context.peer_role.required_members & desired_ids
+        if desired and context.peer_role.required_members - desired_ids:
+            raise UpdateError("PLACEMENT_INVALID", "Peer plan omits required role members.")
+        for component_id in sorted(desired_ids):
+            candidate = candidates[component_id]
+            component = candidate.component
+            if component.get("kind") == "data-bundle":
+                continue
+            unit = component.get("systemdUnit")
+            artifact = candidate.manifest.get("artifact")
+            entrypoint = artifact.get("entrypoint") if isinstance(artifact, dict) else None
+            files = artifact.get("files") if isinstance(artifact, dict) else None
+            if (
+                not isinstance(unit, str)
+                or not unit.endswith(".service")
+                or not isinstance(entrypoint, str)
+                or not isinstance(files, dict)
+                or not _valid_digest(files.get(entrypoint))
+                or artifact.get("kind") != "native-binary"
+            ):
+                raise UpdateError(
+                    "PLACEMENT_SERVICE_IDENTITY_UNKNOWN",
+                    f"Required peer service has no signed executable identity: {component_id}.",
+                )
+            path_parts = _safe_relative(entrypoint, field="peer executable entrypoint")
+            release_identity = (
+                f"{candidate.manifest['version']}--"
+                f"{candidate.manifest_digest.removeprefix('sha256:')}"
+            )
+            executable_path = (
+                self.install_root / "components" / component_id / "releases" / release_identity
+            ).joinpath(*path_parts.parts)
+            required_units[component_id] = unit
+            executable_paths[component_id] = str(executable_path)
+            executable_digests[component_id] = files[entrypoint]
+        if not required_ids <= set(required_units):
+            raise UpdateError(
+                "PLACEMENT_SERVICE_IDENTITY_UNKNOWN",
+                "A required peer service has no signed executable identity.",
+            )
+        return candidates, required_units, executable_paths, executable_digests
+
+    def _revalidate_plan_placement(
+        self,
+        plan: dict[str, Any],
+        *,
+        operation: str,
+    ) -> None:
+        """Require current host config and peer evidence to match the immutable plan."""
+
+        component_ids = {
+            item.get("componentId")
+            for item in plan.get("components", [])
+            if isinstance(item, dict) and isinstance(item.get("componentId"), str)
+        }
+        current = self._placement_bindings_for_ids(
+            component_ids,
+            operation=operation,
+            channel=plan.get("channel") if plan.get("channel") in {"stable", "preview"} else None,
+        )
+        expected = plan.get("deploymentPlacement", [])
+        if not isinstance(expected, list) or current != expected:
+            raise UpdateError(
+                "PLACEMENT_CHANGED",
+                "Host placement or peer state changed after this plan was checked; check again.",
+                retryable=True,
+            )
+
     def _expand_compatibility_groups(
         self, candidates: dict[str, Candidate], channel: str
     ) -> dict[str, Candidate]:
@@ -5504,7 +8677,42 @@ class ComponentUpdater:
                 else compatibility["contractLock"]
             )
             members = group["members"]
+            member_protocol_versions = {
+                member["componentId"]: member.get("protocolVersion") for member in members
+            }
+            placement = self._placement_module_for_group(group)
+            placement_module = placement[0] if placement is not None else None
+            placement_context = placement[1] if placement is not None else None
+            placement_selection = None
+            if placement_context is not None:
+                member_ids = {member["componentId"] for member in members}
+                local_supported_ids = {
+                    component_id
+                    for component_id in member_ids
+                    if self._target_for(self.components[component_id]) is not None
+                }
+                active_ids = {
+                    component_id
+                    for component_id in member_ids
+                    if self._installed(self.components[component_id]).get("active") is True
+                }
+                placement_selection = placement_module.filter_group_members(
+                    placement_context,
+                    group,
+                    local_supported_ids,
+                    active_ids,
+                    requested_ids=set(expanded),
+                )
+                if placement_selection is None:
+                    raise UpdateError(
+                        "PLACEMENT_INVALID", "Signed deployment role selection is unavailable."
+                    )
+                selected_members = set(placement_selection.component_ids)
+            else:
+                selected_members = None
             for member in members:
+                if selected_members is not None and member["componentId"] not in selected_members:
+                    continue
                 member_component = self.components[member["componentId"]]
                 member_target = self._target_for(member_component)
                 if member_target is None:
@@ -5547,12 +8755,16 @@ class ComponentUpdater:
             if not adoption_needed:
                 continue
 
-            required_ids = {
-                member["componentId"]
-                for member in members
-                if member.get("requiredForAdoption")
-                or self.components.get(member["componentId"], {}).get("kind") == "data-bundle"
-            }
+            required_ids = (
+                set(placement_selection.component_ids)
+                if placement_selection is not None
+                else {
+                    member["componentId"]
+                    for member in members
+                    if member.get("requiredForAdoption")
+                    or self.components.get(member["componentId"], {}).get("kind") == "data-bundle"
+                }
+            )
             required_ids = {
                 component_id
                 for component_id in required_ids
@@ -5591,7 +8803,7 @@ class ComponentUpdater:
                         and (
                             member_compat.get("groupVersion") != group.get("groupVersion")
                             or member_candidate.manifest.get("protocolVersion")
-                            != member_component.get("protocolVersion")
+                            != member_protocol_versions.get(component_id)
                         )
                     )
                 ):
@@ -5634,6 +8846,8 @@ class ComponentUpdater:
             "catalogDigest": plan.get("catalogDigest"),
             "components": rebuilt_components,
         }
+        if "deploymentPlacement" in plan:
+            material["deploymentPlacement"] = plan["deploymentPlacement"]
         if "sha256:" + hashlib.sha256(canonical_jcs(material)).hexdigest() != plan["planDigest"]:
             raise UpdateError(
                 "PLAN_CHANGED",
@@ -6958,6 +10172,11 @@ class ComponentUpdater:
             "catalogDigest": plan["catalogDigest"],
             "components": plan_components,
         }
+        if "deploymentPlacement" in plan:
+            placement = plan["deploymentPlacement"]
+            if not isinstance(placement, list) or not placement:
+                raise UpdateError("INVALID_STAGE", "Placement plan evidence is invalid.")
+            plan_material["deploymentPlacement"] = placement
         expected_digest = "sha256:" + hashlib.sha256(canonical_jcs(plan_material)).hexdigest()
         expected_id = "plan-" + expected_digest.split(":", 1)[1][:32]
         if expected_digest != expected_plan_digest or expected_id != expected_plan_id:

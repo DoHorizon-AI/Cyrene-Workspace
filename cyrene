@@ -2496,6 +2496,31 @@ def cmd_update(args: argparse.Namespace) -> int:
     return module.run_json_stdio(updater)
 
 
+def cmd_placement_peer_evidence(args: argparse.Namespace) -> int:
+    """Serve one fixed, read-only host-placement challenge to the pinned peer."""
+
+    if os.geteuid() != 0:
+        print("ERROR: peer placement evidence requires the root helper.", file=sys.stderr)
+        return 1
+    try:
+        module = _load_component_updates_module()
+        updater = module.ComponentUpdater()
+        response = updater.placement_peer_response(
+            operation=args.operation,
+            deployment_id=args.deployment_id,
+            requester_host_id=args.requester_host_id,
+            requester_role_id=args.requester_role_id,
+            group_id=args.group_id,
+            nonce=args.nonce,
+            expected_phase=args.phase,
+        )
+    except Exception as error:  # noqa: BLE001 - the fixed peer protocol fails closed.
+        print(f"ERROR: peer placement evidence unavailable: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(response, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
 def cmd_catalog(args: argparse.Namespace) -> int:
     """Inspect, verify, or explicitly import the trusted component catalog."""
 
@@ -3035,6 +3060,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm only the exact digest returned by a prior read-only plan",
     )
     component_bootstrap_parser.set_defaults(func=cmd_component_bootstrap_runtime_maintenance)
+
+    placement_peer_parser = subparsers.add_parser("placement-peer-evidence", help=argparse.SUPPRESS)
+    placement_peer_parser.add_argument(
+        "operation", choices=("placement-peer-plan", "placement-peer-receipt")
+    )
+    placement_peer_parser.add_argument("--deployment-id", required=True)
+    placement_peer_parser.add_argument("--requester-host-id", required=True)
+    placement_peer_parser.add_argument("--requester-role-id", required=True)
+    placement_peer_parser.add_argument("--group-id", required=True)
+    placement_peer_parser.add_argument("--nonce", required=True)
+    placement_peer_parser.add_argument(
+        "--phase",
+        choices=("any", "ABSENT", "STAGED", "PREPARED_HELD", "ACTIVE_HELD", "ACTIVE"),
+    )
+    placement_peer_parser.set_defaults(func=cmd_placement_peer_evidence)
 
     # update
     update_parser = subparsers.add_parser(

@@ -261,6 +261,8 @@ cp "${SCRIPT_DIR}/service_bundle.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/servic
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
 cp "${SCRIPT_DIR}/component_updates.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
+cp "${SCRIPT_DIR}/component_placement.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_placement.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_placement.py"
 cp "${SCRIPT_DIR}/native_package_runtime_bootstrap.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"
 cp "${SCRIPT_DIR}/native_product_package_environment.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/native_product_package_environment.py"

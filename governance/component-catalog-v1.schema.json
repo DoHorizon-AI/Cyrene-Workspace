@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cyrene.dev/schemas/component-catalog-v1.schema.json",
   "title": "Cyrene Component Catalog v1",
-  "description": "Static component identity, platform matrix, restart topology, and provenance trust pins. This is independent of Product v2 contracts. Generation 9 and later retain the supported Ubuntu 22.04 Python 3.12 target for the five native Python Products.",
+  "description": "Static component identity, platform matrix, restart topology, and provenance trust pins. This is independent of Product v2 contracts. Generation 9 and later retain the supported Ubuntu 22.04 Python 3.12 target for the five native Python Products; generation 12 adds deployment roles to workspace-product-v2.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -460,6 +460,46 @@
             "$ref": "#/$defs/compatibilityGroupMember"
           },
           "uniqueItems": true
+        },
+        "deploymentRoles": {
+          "description": "Generation-12 host profiles for workspace-product-v2. Each role appears once and pins a unique required/allowed member set.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/deploymentRole"
+          },
+          "uniqueItems": true,
+          "allOf": [
+            {
+              "contains": {
+                "properties": {
+                  "roleId": {
+                    "const": "control-host"
+                  }
+                },
+                "required": [
+                  "roleId"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "roleId": {
+                    "const": "connector-host"
+                  }
+                },
+                "required": [
+                  "roleId"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
         }
       },
       "allOf": [
@@ -473,6 +513,124 @@
             "required": [
               "contractLock"
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "groupId": {
+                "const": "workspace-product-v2"
+              }
+            },
+            "required": [
+              "groupId"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "deploymentRoles"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "deploymentRole": {
+      "description": "A host profile whose requiredMembers are a subset of allowedMembers. C12 pins each role's member arrays in the schema and catalog.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "roleId",
+        "requiredMembers",
+        "allowedMembers"
+      ],
+      "properties": {
+        "roleId": {
+          "enum": [
+            "control-host",
+            "connector-host"
+          ]
+        },
+        "requiredMembers": {
+          "description": "Unique component members that must be present on this host role.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/componentId"
+          },
+          "uniqueItems": true
+        },
+        "allowedMembers": {
+          "description": "Unique component members permitted on this host role.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/componentId"
+          },
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "roleId": {
+                "const": "control-host"
+              }
+            },
+            "required": [
+              "roleId"
+            ]
+          },
+          "then": {
+            "properties": {
+              "requiredMembers": {
+                "const": [
+                  "cy-workspace-relay",
+                  "cy-workspace-web-bff",
+                  "cy-workspace-frontend-bridge",
+                  "cy-workspace-authority-host",
+                  "cyrene-product-contract-bundle"
+                ]
+              },
+              "allowedMembers": {
+                "const": [
+                  "cy-workspace-relay",
+                  "cy-workspace-web-bff",
+                  "cy-workspace-frontend-bridge",
+                  "cy-workspace-authority-host",
+                  "cyrene-product-contract-bundle"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "roleId": {
+                "const": "connector-host"
+              }
+            },
+            "required": [
+              "roleId"
+            ]
+          },
+          "then": {
+            "properties": {
+              "requiredMembers": {
+                "const": [
+                  "cy-workspace-connector"
+                ]
+              },
+              "allowedMembers": {
+                "const": [
+                  "cy-workspace-connector",
+                  "cy-workspace-sidecar"
+                ]
+              }
+            }
           }
         }
       ]
@@ -816,6 +974,41 @@
                 "maxContains": 1
               }
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "generation": {
+            "minimum": 12
+          }
+        },
+        "required": [
+          "generation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "compatibilityGroups": {
+            "items": {
+              "if": {
+                "properties": {
+                  "groupId": {
+                    "const": "workspace-product-v2"
+                  }
+                },
+                "required": [
+                  "groupId"
+                ]
+              },
+              "then": {
+                "required": [
+                  "deploymentRoles"
+                ]
+              }
+            }
           }
         }
       }
