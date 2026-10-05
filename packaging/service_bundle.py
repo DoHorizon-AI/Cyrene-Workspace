@@ -56,6 +56,7 @@ HEALTH_PATHS = {
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+WHEEL_TAG_PATTERN = re.compile(r"[A-Za-z0-9_]+-[A-Za-z0-9_]+-[A-Za-z0-9_]+\Z")
 WHEEL_REQUIREMENT_PATTERN = re.compile(
     r"^\s*([A-Za-z0-9][A-Za-z0-9_.-]*)\s*==\s*([A-Za-z0-9][A-Za-z0-9.+!_-]*)"
 )
@@ -518,6 +519,16 @@ def _wheel_tag_is_compatible(tag: str, profile: dict[str, Any]) -> bool:
     return False
 
 
+def _wheel_tags_are_compatible(tags: list[str], profile: dict[str, Any]) -> bool:
+    """Require valid tag syntax and at least one tag supported by the target."""
+
+    return (
+        bool(tags)
+        and all(WHEEL_TAG_PATTERN.fullmatch(tag) is not None for tag in tags)
+        and any(_wheel_tag_is_compatible(tag, profile) for tag in tags)
+    )
+
+
 def _verify_site_package_wheel_tags(site_packages: Path, profile: dict[str, Any]) -> list[str]:
     """Inspect installed WHEEL metadata and reject artifacts outside the selected ABI profile."""
 
@@ -534,15 +545,26 @@ def _verify_site_package_wheel_tags(site_packages: Path, profile: dict[str, Any]
             for line in wheel_metadata.read_text(encoding="utf-8").splitlines()
             if line.startswith("Tag:")
         ]
-        if not tags:
-            raise ServiceBundleError(f"installed wheel has no Tag entries: {wheel_metadata}")
-        for tag in tags:
-            if not _wheel_tag_is_compatible(tag, profile):
+        if not tags or len(tags) != len(set(tags)):
+            raise ServiceBundleError(
+                f"installed wheel has missing or duplicate Tag entries: {wheel_metadata}"
+            )
+        if not _wheel_tags_are_compatible(tags, profile):
+            invalid_tag = next(
+                (tag for tag in tags if WHEEL_TAG_PATTERN.fullmatch(tag) is None), None
+            )
+            if invalid_tag is not None:
                 raise ServiceBundleError(
-                    f"wheel tag {tag!r} is not compatible with {profile['abi']} "
-                    f"and CPython {profile['pythonVersion']}: {wheel_metadata}"
+                    f"installed wheel has invalid Tag entry {invalid_tag!r}: {wheel_metadata}"
                 )
-            observed.add(tag)
+            incompatible_tag = next(
+                tag for tag in tags if not _wheel_tag_is_compatible(tag, profile)
+            )
+            raise ServiceBundleError(
+                f"wheel tag {incompatible_tag!r} is not compatible with {profile['abi']} "
+                f"and CPython {profile['pythonVersion']}: {wheel_metadata}"
+            )
+        observed.update(tags)
     return sorted(observed)
 
 
@@ -569,9 +591,18 @@ def _validate_source_wheel_tags(
             or tags != sorted(set(tags))
         ):
             raise ServiceBundleError("bundle source wheel_tags contains an invalid wheel record")
-        for tag in tags:
-            if not _wheel_tag_is_compatible(tag, profile):
-                raise ServiceBundleError(f"source wheel tag {tag!r} is incompatible with profile")
+        if not _wheel_tags_are_compatible(tags, profile):
+            invalid_tag = next(
+                (tag for tag in tags if WHEEL_TAG_PATTERN.fullmatch(tag) is None), None
+            )
+            if invalid_tag is not None:
+                raise ServiceBundleError(f"source wheel tag {invalid_tag!r} is malformed")
+            incompatible_tag = next(
+                tag for tag in tags if not _wheel_tag_is_compatible(tag, profile)
+            )
+            raise ServiceBundleError(
+                f"source wheel tag {incompatible_tag!r} is incompatible with profile"
+            )
         result[filename] = tags
         all_tags.update(tags)
     if list(result) != sorted(result) or sorted(all_tags) != installed_wheel_tags:
@@ -619,9 +650,18 @@ def _wheelhouse_wheel_tags(wheels: list[Path], profile: dict[str, Any]) -> dict[
             raise ServiceBundleError(
                 f"wheel filename tags differ from WHEEL metadata: {wheel.name}"
             )
-        for tag in tags:
-            if not _wheel_tag_is_compatible(tag, profile):
-                raise ServiceBundleError(f"wheel tag {tag!r} is incompatible with the profile")
+        if not _wheel_tags_are_compatible(tags, profile):
+            invalid_tag = next(
+                (tag for tag in tags if WHEEL_TAG_PATTERN.fullmatch(tag) is None), None
+            )
+            if invalid_tag is not None:
+                raise ServiceBundleError(f"wheel has an invalid WHEEL Tag entry {invalid_tag!r}")
+            incompatible_tag = next(
+                tag for tag in tags if not _wheel_tag_is_compatible(tag, profile)
+            )
+            raise ServiceBundleError(
+                f"wheel tag {incompatible_tag!r} is incompatible with the profile"
+            )
         result[wheel.name] = sorted(tags)
     return result
 
