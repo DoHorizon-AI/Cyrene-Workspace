@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -37,6 +38,7 @@ BOOTSTRAP_UNIT = "cyrene-runtime-maintenance.service"
 PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
 BOOTSTRAP_HELPER_RELATIVE = PurePosixPath("share/cyrene-managed-runtime/cyrene_managed_runtime.py")
 COMPONENT_UPDATE_HELPER = Path("/usr/libexec/cyrene-component-update-helper")
+SYSTEMD_UNIT_DIRECTORY = Path("/usr/lib/systemd/system")
 OPERATOR_TOOLS_LOCK = Path(__file__).with_name("operator-tools.lock.json")
 PERSISTENT_GH = Path("/usr/libexec/cyrene-tools/gh")
 OPERATOR_NAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -103,6 +105,8 @@ SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RAW_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 PRODUCT_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+BROKER_READINESS_TIMEOUT_SECONDS = 15.0
+BROKER_READINESS_POLL_SECONDS = 0.1
 
 
 class AdminInitializationError(RuntimeError):
@@ -1489,10 +1493,15 @@ def _systemd_properties(unit: str) -> dict[str, str]:
 def _start_fresh_broker(
     activation: dict[str, Any], runner: Callable[..., subprocess.CompletedProcess[str]]
 ) -> dict[str, str]:
-    """Start only the new broker and prove systemd launched its signed binary."""
+    """Start only the new broker and prove systemd launched its signed binary.
+
+    Poll the exact unit and main process for a bounded interval because systemd may
+    report the Python launcher as active before it execs the signed broker ELF.
+    中文：systemd 报告 active 后仍须有界等待同一 PID 切换到签名 ELF。
+    """
 
     unit_path, binary_path = _broker_unit_and_entrypoint(activation)
-    installed_unit = Path("/usr/lib/systemd/system") / BOOTSTRAP_UNIT
+    installed_unit = SYSTEMD_UNIT_DIRECTORY / BOOTSTRAP_UNIT
     if (
         installed_unit.is_symlink()
         or not installed_unit.is_file()
@@ -1502,36 +1511,56 @@ def _start_fresh_broker(
             "Installed broker unit differs from the signed active release"
         )
     properties = _systemd_properties(BOOTSTRAP_UNIT)
+    _require_exact_broker_unit(properties, installed_unit)
+    if properties.get("ActiveState") != "active":
+        _run(["/usr/bin/systemctl", "start", BOOTSTRAP_UNIT], runner=runner)
+    deadline = time.monotonic() + BROKER_READINESS_TIMEOUT_SECONDS
+    while True:
+        properties = _systemd_properties(BOOTSTRAP_UNIT)
+        _require_exact_broker_unit(properties, installed_unit)
+        pid = properties.get("MainPID", "")
+        if properties.get("ActiveState") == "active" and pid.isdecimal() and int(pid) > 1:
+            try:
+                process_exe = Path(os.readlink(f"/proc/{pid}/exe"))
+            except OSError:
+                process_exe = None
+            if process_exe == binary_path:
+                confirmed = _systemd_properties(BOOTSTRAP_UNIT)
+                _require_exact_broker_unit(confirmed, installed_unit)
+                confirmed_pid = confirmed.get("MainPID", "")
+                if confirmed.get("ActiveState") == "active" and confirmed_pid == pid:
+                    try:
+                        confirmed_exe = Path(os.readlink(f"/proc/{confirmed_pid}/exe"))
+                    except OSError:
+                        confirmed_exe = None
+                    if confirmed_exe == binary_path:
+                        return {
+                            "unit": BOOTSTRAP_UNIT,
+                            "activeState": confirmed["ActiveState"],
+                            "mainPid": confirmed_pid,
+                            "binaryPath": str(binary_path),
+                            "binarySha256": _sha256_file(binary_path),
+                            "unitSha256": _sha256_file(unit_path),
+                        }
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(BROKER_READINESS_POLL_SECONDS, remaining))
+
+    raise AdminInitializationError(
+        "New broker did not reach a stable signed executable before the readiness timeout"
+    )
+
+
+def _require_exact_broker_unit(properties: dict[str, str], installed_unit: Path) -> None:
+    """Reject any unit path or drop-in change during broker startup verification."""
+
     if (
         properties.get("LoadState") != "loaded"
         or Path(properties.get("FragmentPath", "")).resolve() != installed_unit.resolve()
         or properties.get("DropInPaths", "")
     ):
         raise AdminInitializationError("Loaded broker unit identity or drop-ins are not exact")
-    if properties.get("ActiveState") != "active":
-        _run(["/usr/bin/systemctl", "start", BOOTSTRAP_UNIT], runner=runner)
-        properties = _systemd_properties(BOOTSTRAP_UNIT)
-    if properties.get("ActiveState") != "active":
-        raise AdminInitializationError("New maintenance broker did not become active")
-    pid = properties.get("MainPID", "")
-    if not pid.isdecimal() or int(pid) <= 1:
-        raise AdminInitializationError("New broker unit has no valid active MainPID")
-    try:
-        process_exe = Path(os.readlink(f"/proc/{pid}/exe"))
-    except OSError as error:
-        raise AdminInitializationError("New broker executable identity is unreadable") from error
-    if process_exe != binary_path:
-        raise AdminInitializationError(
-            "Broker MainPID is not executing the signed active entrypoint"
-        )
-    return {
-        "unit": BOOTSTRAP_UNIT,
-        "activeState": properties["ActiveState"],
-        "mainPid": pid,
-        "binaryPath": str(binary_path),
-        "binarySha256": _sha256_file(binary_path),
-        "unitSha256": _sha256_file(unit_path),
-    }
 
 
 def _read_os_release_version() -> str:

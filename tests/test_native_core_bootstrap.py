@@ -36,7 +36,7 @@ def _digest(payload: bytes) -> str:
 class FakeUpdater:
     """Record fixed updater operations without invoking a host service manager."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, c10: bool = False) -> None:
         self.state_root = root / "state"
         self.install_root = root / "usr-lib-cyrene"
         # Match ComponentUpdater's normal three-entry lookup order with isolated paths.
@@ -47,18 +47,57 @@ class FakeUpdater:
         )
         self.core_runtime_root = root / "var-lib-cyrene-runtime"
         self.core_run_root = root / "run-cyrene"
+        component_ids = (
+            bootstrap.C10_FIRST_CORE_COMPONENT_IDS if c10 else bootstrap.CORE_COMPONENT_IDS
+        )
         self.components = {
             component_id: {
                 "componentId": component_id,
                 "systemdUnit": component_id + ".service",
                 "restart": {
-                    "group": "core-runtime",
+                    "group": (
+                        "single-service"
+                        if component_id in {"cyrene-runtime-maintenance", "cy-package-runtime"}
+                        else "core-runtime"
+                    ),
                     "order": order,
                     "unit": component_id + ".service",
                 },
+                **(
+                    {
+                        "compatibilityGroup": bootstrap.PACKAGE_RUNTIME_GROUP_ID,
+                        "protocolVersion": bootstrap._PACKAGE_RUNTIME_PROTOCOLS[component_id],
+                    }
+                    if component_id in bootstrap._PACKAGE_RUNTIME_PROTOCOLS
+                    else {}
+                ),
             }
-            for order, component_id in enumerate(bootstrap.CORE_COMPONENT_IDS, start=10)
+            for order, component_id in enumerate(component_ids, start=10)
         }
+        self.catalog = {"compatibilityGroups": []}
+        if c10:
+            self.catalog["compatibilityGroups"] = [
+                {
+                    "groupId": bootstrap.PACKAGE_RUNTIME_GROUP_ID,
+                    "groupVersion": "2",
+                    "contractApiVersion": "0.1.0",
+                    "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+                    "contractLock": {
+                        "repository": "DoHorizon-AI/Cyrene-Workspace",
+                        "commit": "a" * 40,
+                        "path": "governance/package-runtime-protocols-v1.lock.json",
+                        "sha256": _digest(b"package runtime lock"),
+                    },
+                    "members": [
+                        {
+                            "componentId": component_id,
+                            "requiredForAdoption": True,
+                            "protocolVersion": protocol,
+                        }
+                        for component_id, protocol in bootstrap._PACKAGE_RUNTIME_PROTOCOLS.items()
+                    ],
+                }
+            ]
         self.targets = {"target-ubuntu": {"id": "target-ubuntu", "target": "linux-ubuntu-test"}}
         self.catalog_generation = 4
         self.catalog_digest = _digest(b"catalog")
@@ -66,7 +105,44 @@ class FakeUpdater:
         self.gate_generation = 9
         self.gpu_output = ""
         self.events: list[Any] = []
-        self.pointers: dict[str, str | None] = dict.fromkeys(bootstrap.CORE_COMPONENT_IDS)
+        self.pointers: dict[str, str | None] = dict.fromkeys(component_ids)
+        self.unit_pids: dict[str, str] = {}
+        self.bootstrap_broker_identity = None
+        self.initial_broker_manifest = None
+        if c10:
+            old_digest = _digest(b"initial broker manifest")
+            group = self.catalog["compatibilityGroups"][0]
+            self.initial_broker_manifest = {
+                "schemaVersion": 2,
+                "componentId": "cyrene-runtime-maintenance",
+                "version": "0.9.0",
+                "manifestDigest": old_digest,
+                "artifact": {"digest": _digest(b"initial broker artifact")},
+                "protocolVersion": bootstrap._PACKAGE_RUNTIME_PROTOCOLS[
+                    "cyrene-runtime-maintenance"
+                ],
+                "compatibility": {
+                    "groupId": bootstrap.PACKAGE_RUNTIME_GROUP_ID,
+                    "groupVersion": group["groupVersion"],
+                    "contractApiVersion": group["contractApiVersion"],
+                    "wireApiVersion": group["wireApiVersion"],
+                    "contractLock": group["contractLock"],
+                },
+            }
+            self.pointers["cyrene-runtime-maintenance"] = "0.9.0--" + old_digest.removeprefix(
+                "sha256:"
+            )
+            self.bootstrap_broker_identity = {
+                "componentId": "cyrene-runtime-maintenance",
+                "pointerIdentity": self.pointers["cyrene-runtime-maintenance"],
+                "version": "0.9.0",
+                "manifestDigest": old_digest,
+                "artifactDigest": _digest(b"initial broker artifact"),
+                "systemdUnit": "cyrene-runtime-maintenance.service",
+                "mainPid": "42",
+                "executable": "/usr/lib/cyrene/fake-initial-broker",
+            }
+            self.unit_pids["cyrene-runtime-maintenance.service"] = "42"
         self.gate_counts = {
             "status": "MAINTENANCE_ACTIVE",
             "blocker_codes": [],
@@ -77,7 +153,6 @@ class FakeUpdater:
             "active_allocation_count": 0,
         }
         self.main_pid = "0"
-        self.unit_pids: dict[str, str] = {}
         self.stopped_units: set[str] = set()
 
     def _reload_catalog_for_operation(self) -> None:
@@ -106,6 +181,29 @@ class FakeUpdater:
     def _active_native_pointer_identity(self, component_id: str) -> str | None:
         return self.pointers[component_id]
 
+    def _installed(self, component: dict[str, Any]) -> dict[str, Any]:
+        assert component["componentId"] == "cyrene-runtime-maintenance"
+        identity = self.bootstrap_broker_identity
+        assert identity is not None
+        return {
+            "active": True,
+            "identityAttested": True,
+            "manifest": self.initial_broker_manifest,
+            "pointerIdentity": identity["pointerIdentity"],
+            "manifestDigest": identity["manifestDigest"],
+            "artifactDigest": identity["artifactDigest"],
+        }
+
+    def _read_active_receipt(self, component_id: str) -> dict[str, Any]:
+        assert component_id == "cyrene-runtime-maintenance"
+        identity = self.bootstrap_broker_identity
+        assert identity is not None
+        return {
+            "manifest": self.initial_broker_manifest,
+            "manifestDigest": identity["manifestDigest"],
+            "artifactDigest": identity["artifactDigest"],
+        }
+
     def _target_for(self, component: dict[str, Any]) -> dict[str, Any]:
         return self.targets["target-ubuntu"]
 
@@ -114,12 +212,20 @@ class FakeUpdater:
     ) -> dict[str, Any]:
         self.events.append(("broker", method, params))
         if method == "Health":
-            return {
+            response = {
                 "status": "SERVING",
                 "catalog_generation": 1,
                 "gate_generation": self.gate_generation,
                 "core_bootstrap_eligible": self.core_bootstrap_eligible,
             }
+            if self.catalog["compatibilityGroups"]:
+                response.update(
+                    {
+                        "protocol_version": "cyrene.runtime-maintenance.broker.v1",
+                        "capabilities": ["cyrene.runtime-maintenance.state.v2"],
+                    }
+                )
+            return response
         if method == "BeginCoreBootstrap":
             return {
                 "status": "MAINTENANCE_ACTIVE",
@@ -140,9 +246,28 @@ class FakeUpdater:
     def _activity_catalog(self) -> tuple[dict[str, Any], list[str]]:
         return {"generation": 1}, ["source-a", "source-b"]
 
+    def _load_native_package_runtime_bootstrap(self) -> Any:
+        updater = self
+
+        class RuntimeProbe:
+            def probe_runtime_authority(
+                self, _catalog: dict[str, Any], *, expected_catalog_generation: int
+            ) -> dict[str, Any]:
+                updater.events.append(("package-runtime-authority", expected_catalog_generation))
+                return {
+                    "authority": "platform_package_runtime",
+                    "protocol_version": "cy-package-runtime.control.v1",
+                    "catalog_generation": expected_catalog_generation,
+                    "capabilities": ["cy-package-runtime.binding-operation-admission.v1"],
+                }
+
+        return RuntimeProbe()
+
     def check(
         self, component_ids: list[str], *, channel: Any = None, include_readiness: bool = True
     ) -> dict[str, Any]:
+        if self.catalog["compatibilityGroups"] and "cyrene-kernel" in component_ids:
+            component_ids = list(bootstrap.C10_FIRST_CORE_COMPONENT_IDS)
         components = [
             {
                 "componentId": component_id,
@@ -150,6 +275,11 @@ class FakeUpdater:
                 "manifestDigest": _digest(component_id.encode()),
                 "artifactDigest": _digest((component_id + " artifact").encode()),
                 "restartGroup": "core-runtime",
+                **(
+                    {"protocolVersion": bootstrap._PACKAGE_RUNTIME_PROTOCOLS[component_id]}
+                    if component_id in bootstrap._PACKAGE_RUNTIME_PROTOCOLS
+                    else {}
+                ),
             }
             for component_id in component_ids
         ]
@@ -191,6 +321,25 @@ class FakeUpdater:
                 "componentId": component_id,
                 "version": item["version"],
                 "manifestDigest": item["manifestDigest"],
+                "schemaVersion": (
+                    2
+                    if self.catalog["compatibilityGroups"]
+                    and component_id in bootstrap._PACKAGE_RUNTIME_PROTOCOLS
+                    else 1
+                ),
+                "protocolVersion": self.components[component_id].get("protocolVersion"),
+                "compatibility": (
+                    {
+                        "groupId": bootstrap.PACKAGE_RUNTIME_GROUP_ID,
+                        "groupVersion": "2",
+                        "contractApiVersion": "0.1.0",
+                        "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+                        "contractLock": self.catalog["compatibilityGroups"][0]["contractLock"],
+                    }
+                    if self.catalog["compatibilityGroups"]
+                    and component_id in bootstrap._PACKAGE_RUNTIME_PROTOCOLS
+                    else None
+                ),
                 "artifact": {"entrypoint": binary_path},
                 "health": None,
             }
@@ -220,7 +369,22 @@ class FakeUpdater:
             {
                 "componentId": item["componentId"],
                 "pointerIdentity": self.pointers[item["componentId"]],
-                "identityAttested": False,
+                "identityAttested": (
+                    item["componentId"] == "cyrene-runtime-maintenance"
+                    and self.bootstrap_broker_identity is not None
+                ),
+                **(
+                    {
+                        "releaseIdentity": self.bootstrap_broker_identity["manifestDigest"],
+                        "manifestDigest": self.bootstrap_broker_identity["manifestDigest"],
+                        "artifactDigest": self.bootstrap_broker_identity["artifactDigest"],
+                        "version": self.bootstrap_broker_identity["version"],
+                        "bundleIdentity": None,
+                    }
+                    if item["componentId"] == "cyrene-runtime-maintenance"
+                    and self.bootstrap_broker_identity is not None
+                    else {}
+                ),
             }
             for item in components
         ]
@@ -256,7 +420,12 @@ class FakeUpdater:
         stdout = self.gpu_output
         if command and command[:2] == ["systemctl", "show"]:
             unit = command[-1]
-            stdout = "0" if unit in self.stopped_units else self.unit_pids.get(unit, self.main_pid)
+            if "ActiveState" in command[2]:
+                stdout = "inactive" if unit in self.stopped_units else "active"
+            else:
+                stdout = (
+                    "0" if unit in self.stopped_units else self.unit_pids.get(unit, self.main_pid)
+                )
         return type("Completed", (), {"returncode": 0, "stdout": stdout})()
 
     def _readiness_for(
@@ -546,6 +715,14 @@ def test_historical_kernel_or_worker_ownership_blocks_fresh_check(
         bootstrap.check(updater, proc_root=_fake_proc(tmp_path / "proc-fresh"))
 
 
+def test_c9_fresh_inventory_keeps_maintenance_broker_outside_legacy_core_set(
+    tmp_path: Path,
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    proc_root = _fake_proc(tmp_path / "proc-c9-broker", core="cyrene-runtime-maintenance")
+    bootstrap._assert_fresh(updater, proc_root=proc_root)
+
+
 def test_stage_is_allowed_without_process_idle_proof(tmp_path: Path) -> None:
     updater = FakeUpdater(tmp_path)
     plan = _check_plan(updater, tmp_path)
@@ -556,6 +733,376 @@ def test_stage_is_allowed_without_process_idle_proof(tmp_path: Path) -> None:
     result = bootstrap.stage(updater, plan["planId"], plan["planDigest"])
     assert result["status"] == "staged"
     assert len(result["components"]) == 4
+
+
+def test_c10_first_core_checks_stages_and_applies_exact_group_in_dependency_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    monkeypatch.setattr(
+        bootstrap,
+        "_verified_running_c10_broker",
+        lambda *_args: updater.bootstrap_broker_identity,
+    )
+    monkeypatch.setattr(bootstrap, "_stop_initial_c10_broker", lambda *_args: None)
+    plan = bootstrap.check(updater, proc_root=_fake_proc(tmp_path / "proc-c10"))["plan"]
+    assert {item["componentId"] for item in plan["components"]} == set(
+        bootstrap.C10_FIRST_CORE_COMPONENT_IDS
+    )
+    staged = bootstrap.stage(updater, plan["planId"], plan["planDigest"])
+    assert len(staged["components"]) == 6
+
+    monkeypatch.setattr(bootstrap, "_is_root", lambda: True)
+    monkeypatch.setattr(bootstrap, "_verify_started_processes", lambda *_args: None)
+    confirmation = {
+        "mode": bootstrap.CORE_BOOTSTRAP_MODE,
+        "planId": plan["planId"],
+        "planDigest": plan["planDigest"],
+        "componentArtifactDigests": plan["componentArtifactDigests"],
+        "catalogGeneration": plan["catalogGeneration"],
+        "gateGeneration": plan["gateGeneration"],
+        "confirmed": True,
+        "bootstrapBroker": plan["bootstrapBroker"],
+    }
+    result = bootstrap.apply(
+        updater,
+        plan["planId"],
+        plan["planDigest"],
+        confirmation,
+        proc_root=_fake_proc(tmp_path / "proc-c10-apply"),
+    )
+
+    starts = [event[1] for event in updater.events if event[0] == "start"]
+    expected = [
+        updater.components[item]["systemdUnit"] for item in bootstrap.C10_FIRST_CORE_COMPONENT_IDS
+    ]
+    assert starts == expected
+    assert result["status"] == "installed"
+    assert result["components"] == list(bootstrap.C10_FIRST_CORE_COMPONENT_IDS)
+    assert set(updater.pointers) == set(bootstrap.C10_FIRST_CORE_COMPONENT_IDS)
+    assert all(pointer is not None for pointer in updater.pointers.values())
+    readiness = next(
+        index
+        for index, event in enumerate(updater.events)
+        if event[0] == "package-runtime-authority"
+    )
+    end = next(index for index, event in enumerate(updater.events) if event[0] == "end")
+    assert readiness < end
+
+
+@pytest.mark.parametrize("defect", ["missing-member", "mixed-member"])
+def test_c10_first_core_rejects_incomplete_or_mixed_group_before_planning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    monkeypatch.setattr(
+        bootstrap,
+        "_verified_running_c10_broker",
+        lambda *_args: updater.bootstrap_broker_identity,
+    )
+    original_check = updater.check
+
+    def incomplete_check(component_ids: list[str], **kwargs: Any) -> dict[str, Any]:
+        result = original_check(component_ids, **kwargs)
+        items = result["plan"]["components"]
+        if defect == "missing-member":
+            result["plan"]["components"] = [
+                item for item in items if item["componentId"] != "cy-package-runtime"
+            ]
+        else:
+            result["plan"]["components"] = [
+                item for item in items if item["componentId"] != "cy-package-runtime"
+            ] + [
+                {
+                    "componentId": "cyrene-untrusted-helper",
+                    "version": "1.0.0",
+                    "manifestDigest": _digest(b"untrusted manifest"),
+                    "artifactDigest": _digest(b"untrusted artifact"),
+                }
+            ]
+        return result
+
+    monkeypatch.setattr(updater, "check", incomplete_check)
+    with pytest.raises(ValueError, match="exact supported C9 or C10 cohort"):
+        bootstrap.check(updater, proc_root=_fake_proc(tmp_path / f"proc-c10-{defect}"))
+
+
+def test_c10_current_broker_receipt_rejects_schema_one_and_unpinned_identity(
+    tmp_path: Path,
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    group = updater.catalog["compatibilityGroups"][0]
+    component_id = "cyrene-runtime-maintenance"
+    manifest = {
+        "schemaVersion": 2,
+        "componentId": component_id,
+        "version": "0.9.0",
+        "manifestDigest": _digest(b"initial broker manifest"),
+        "protocolVersion": bootstrap._PACKAGE_RUNTIME_PROTOCOLS[component_id],
+        "compatibility": {
+            "groupId": bootstrap.PACKAGE_RUNTIME_GROUP_ID,
+            "groupVersion": group["groupVersion"],
+            "contractApiVersion": group["contractApiVersion"],
+            "wireApiVersion": group["wireApiVersion"],
+            "contractLock": group["contractLock"],
+        },
+    }
+    installed = {
+        "active": True,
+        "identityAttested": True,
+        "manifest": manifest,
+        "pointerIdentity": "0.9.0--" + manifest["manifestDigest"].removeprefix("sha256:"),
+        "manifestDigest": manifest["manifestDigest"],
+        "artifactDigest": _digest(b"initial broker artifact"),
+    }
+    assert bootstrap._validate_c10_broker_manifest(updater, installed) is manifest
+
+    for field, value in (
+        ("schemaVersion", 1),
+        ("protocolVersion", "cyrene.runtime-maintenance.broker.v0"),
+    ):
+        changed = {**manifest, field: value}
+        with pytest.raises(ValueError, match="exact C10 contract"):
+            bootstrap._validate_c10_broker_manifest(updater, {**installed, "manifest": changed})
+
+    with pytest.raises(ValueError, match="active pointer"):
+        bootstrap._validate_c10_broker_manifest(
+            updater, {**installed, "pointerIdentity": "different-release"}
+        )
+
+
+def _install_c10_broker_fixture(updater: FakeUpdater, tmp_path: Path) -> tuple[Path, Path]:
+    """Create the exact signed-release, active-unit, and live-PID evidence used by C10."""
+
+    component_id = "cyrene-runtime-maintenance"
+    identity = updater.bootstrap_broker_identity
+    assert identity is not None
+    executable = (
+        updater.install_root
+        / "components"
+        / component_id
+        / "releases"
+        / identity["pointerIdentity"]
+        / "bin"
+        / component_id
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"signed broker executable")
+    executable.chmod(0o755)
+    updater.bootstrap_broker_identity["executable"] = str(executable)
+    manifest = updater.initial_broker_manifest
+    assert manifest is not None
+    manifest["artifact"] = {
+        "entrypoint": "bin/" + component_id,
+        "files": {"bin/" + component_id: _digest(executable.read_bytes())},
+    }
+    unit_name = updater.components[component_id]["systemdUnit"]
+    unit_bytes = (
+        "[Service]\nExecStart=/usr/bin/cyrene component-run " + component_id + " --\n"
+    ).encode()
+    source_unit = executable.parent.parent / "systemd" / unit_name
+    source_unit.parent.mkdir(parents=True)
+    source_unit.write_bytes(unit_bytes)
+    source_unit.chmod(0o644)
+    installed_unit = updater.systemd_unit_dirs[0] / unit_name
+    installed_unit.parent.mkdir(parents=True)
+    installed_unit.write_bytes(unit_bytes)
+    installed_unit.chmod(0o644)
+    updater.unit_pids[unit_name] = "42"
+
+    proc_root = tmp_path / "proc-verified-c10-broker"
+    process = proc_root / "42"
+    process.mkdir(parents=True)
+    (process / "stat").write_text("42 (cyrene-runtime-maintenance) S 1")
+    (process / "cmdline").write_bytes(str(executable).encode() + b"\0")
+    (process / "exe").symlink_to(executable)
+    return proc_root, executable
+
+
+def test_c10_fresh_check_accepts_only_the_exact_attested_active_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    proc_root, executable = _install_c10_broker_fixture(updater, tmp_path)
+
+    # Fixtures run unprivileged; model the root-owned installed files required by production.
+    original_lstat = Path.lstat
+
+    def root_owned_lstat(path: Path) -> os.stat_result:
+        result = original_lstat(path)
+        if path == executable or path.parent in updater.systemd_unit_dirs:
+            fields = list(result)
+            fields[4] = 0
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", root_owned_lstat)
+    installed_unit = updater.systemd_unit_dirs[0] / "cyrene-runtime-maintenance.service"
+    assert installed_unit.lstat().st_uid == 0
+    assert installed_unit.lstat().st_nlink == 1
+    assert not (installed_unit.lstat().st_mode & 0o022)
+    verified = bootstrap._verified_running_c10_broker(updater, proc_root)
+    assert verified == updater.bootstrap_broker_identity
+    assert Path(verified["executable"]) == executable
+    assert bootstrap._assert_fresh(updater, proc_root=proc_root) == verified
+
+
+def test_c10_fresh_check_rejects_a_state_one_broker_receipt(tmp_path: Path) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    updater.initial_broker_manifest["schemaVersion"] = 1
+    with pytest.raises(ValueError, match="exact C10 contract"):
+        bootstrap._assert_fresh(updater, proc_root=_fake_proc(tmp_path / "proc-state-one"))
+
+
+@pytest.mark.parametrize("defect", ["foreign-live-broker", "mainpid-executable-mismatch"])
+def test_c10_fresh_check_rejects_unknown_or_mismatched_broker_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    proc_root, executable = _install_c10_broker_fixture(updater, tmp_path)
+
+    original_lstat = Path.lstat
+
+    def root_owned_lstat(path: Path) -> os.stat_result:
+        result = original_lstat(path)
+        if path == executable or path.parent in updater.systemd_unit_dirs:
+            fields = list(result)
+            fields[4] = 0
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", root_owned_lstat)
+    if defect == "foreign-live-broker":
+        foreign = proc_root / "43"
+        foreign.mkdir()
+        foreign_executable = tmp_path / "foreign" / "cyrene-runtime-maintenance"
+        foreign_executable.parent.mkdir()
+        foreign_executable.write_bytes(b"untrusted executable")
+        (foreign / "stat").write_text("43 (cyrene-runtime-maintenance) S 1")
+        (foreign / "cmdline").write_bytes(str(foreign_executable).encode() + b"\0")
+        (foreign / "exe").symlink_to(foreign_executable)
+        expected = "Legacy or manually started Core process"
+    else:
+        foreign_executable = tmp_path / "foreign" / "cyrene-runtime-maintenance"
+        foreign_executable.parent.mkdir()
+        foreign_executable.write_bytes(b"untrusted executable")
+        (proc_root / "42" / "exe").unlink()
+        (proc_root / "42" / "exe").symlink_to(foreign_executable)
+        expected = "not its signed executable"
+    with pytest.raises((RuntimeError, ValueError), match=expected):
+        bootstrap._assert_fresh(updater, proc_root=proc_root)
+
+
+def test_c10_broker_hold_token_is_journaled_before_broker_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    broker_identity = updater.bootstrap_broker_identity
+    assert broker_identity is not None
+    candidate_digest = _digest(b"candidate broker manifest")
+    candidate = {
+        "componentId": "cyrene-runtime-maintenance",
+        "version": "1.0.0",
+        "manifestDigest": candidate_digest,
+        "artifactDigest": _digest(b"candidate broker artifact"),
+        "manifest": {},
+    }
+    transaction = {
+        "phase": "installing",
+        "maintenanceToken": "t" * 40,
+        "bootstrapBroker": broker_identity,
+        "components": [candidate],
+        "brokerRestartPhase": None,
+    }
+    journal_path = bootstrap._journal_path(updater)
+    monkeypatch.setattr(
+        bootstrap,
+        "_verified_running_c10_broker",
+        lambda *_args: broker_identity,
+    )
+    monkeypatch.setattr(bootstrap, "_core_process_snapshot", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(bootstrap, "_remove_verified_broker_units", lambda *_args, **_kwargs: None)
+    original_stop = updater._run_systemctl
+
+    def stop_with_journal_check(operation: str, unit: str) -> None:
+        if operation == "stop":
+            persisted = json.loads(journal_path.read_text())
+            assert persisted["maintenanceToken"] == "t" * 40
+            assert persisted["brokerRestartPhase"] == "stop_pending"
+        original_stop(operation, unit)
+
+    monkeypatch.setattr(updater, "_run_systemctl", stop_with_journal_check)
+    bootstrap._stop_initial_c10_broker(updater, transaction, journal_path)
+
+    assert transaction["brokerRestartPhase"] == "stopped"
+    assert json.loads(journal_path.read_text())["maintenanceToken"] == "t" * 40
+
+
+def test_c10_broker_pid_must_match_the_exact_live_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proc_root = _fake_proc(tmp_path / "proc-c10-broker-process", core="cyrene-runtime-maintenance")
+    executable = Path(os.readlink(proc_root / "100" / "exe"))
+    bootstrap._verify_process_executable(proc_root, "100", executable, description="Test Broker")
+    with pytest.raises(ValueError, match="not its signed executable"):
+        bootstrap._verify_process_executable(
+            proc_root,
+            "100",
+            executable.with_name("untrusted-broker"),
+            description="Test Broker",
+        )
+
+    original_readlink = os.readlink
+    exe_link = proc_root / "100" / "exe"
+
+    def deleted_broker_link(path: Any, *args: Any, **kwargs: Any) -> str:
+        target = original_readlink(path, *args, **kwargs)
+        return target + " (deleted)" if Path(path) == exe_link else target
+
+    monkeypatch.setattr(os, "readlink", deleted_broker_link)
+    with pytest.raises(ValueError, match="not its signed executable"):
+        bootstrap._verify_process_executable(
+            proc_root, "100", executable, description="Test Broker"
+        )
+
+
+def test_c10_fresh_check_allows_only_verified_broker_and_rejects_other_core_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    monkeypatch.setattr(
+        bootstrap,
+        "_verified_running_c10_broker",
+        lambda *_args: updater.bootstrap_broker_identity,
+    )
+    proc_root = _fake_proc(tmp_path / "proc-c10-foreign-core", core="cyrene-kernel")
+    with pytest.raises(ValueError, match="Legacy or manually started Core process"):
+        bootstrap._assert_fresh(updater, proc_root=proc_root)
+
+
+@pytest.mark.parametrize(
+    "field,value,expected_error",
+    [
+        ("protocol_version", "cyrene.runtime-maintenance.broker.v0", "state-v2 contract"),
+        ("capabilities", [], "state-v2 contract"),
+        ("core_bootstrap_eligible", False, "fresh first-Core bootstrap state"),
+    ],
+)
+def test_c10_health_requires_state_v2_and_fresh_bootstrap_eligibility(
+    tmp_path: Path, field: str, value: Any, expected_error: str
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    original_request = updater._broker_request
+
+    def invalid_health(method: str, params: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        result = original_request(method, params, **kwargs)
+        if method == "Health":
+            result[field] = value
+        return result
+
+    updater._broker_request = invalid_health
+    with pytest.raises(RuntimeError, match=expected_error):
+        bootstrap._health_snapshot(updater)
 
 
 def test_products_opt_in_is_boolean_and_status_does_not_claim_product_readiness(

@@ -4,7 +4,7 @@
   "name": "cyrene-0.1.0-rc.1",
   "description": "Single release lock for the first usable Cyrene RC: supported environment, native Python profiles, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine, plugin, and native Python runtime entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
   "generatedAt": "2026-10-04T11:08:13Z",
-  "sourceState": "Final source pins record the native closeout sources. The five native Product source commits are Catalyst 6f999daacf8a2afd76033bfc5d0d7bcf68202de1 (publisher run 37197062283), Exchange 7f1823f6eabe9956ff40cc2e4aa9035197b51e83 (37194428287), Navigator 04e84f7b7943bbe0d60604ff65194904b37ad821 (37196333182), Reactor 49b560975c10e815ad5aac42a6c224dd4d39a8e8 (37196339516), and Yield 65b5e77682d59b05e23f3d248765fb4986499a8e (37195208591); those publisher runs completed successfully. The acceptance scope here is immutable signed publication and matching-container validation only. Actual native-host installation, training-task submission, controlled update, and recovery remain NOT_RUN. Echo runtime/OCI remains 7480d72c3d2520ccf7684ae43e2f2558c5c6e828; its separately signed Product contract source is a6923bf1e326069143b0b56d32b5891d36655e3f. The existing wheelResolver.arguments field is target compatibility metadata for the pinned uv target, not argv passed to uv export: uv export uses the locked host interpreter without --python-platform, while pip download enforces CPython 3.12/cp312 and the profile’s accepted manylinux tags with source and hash verification. Cyrene-Workspace records validated predecessor 2b1210a19b5596cb90e3ac7c46a912a8a255da80 because release-lock cannot self-reference.",
+  "sourceState": "Final source pins record the native closeout sources. The five native Product source commits are Catalyst 6f999daacf8a2afd76033bfc5d0d7bcf68202de1 (publisher run 37197062283), Exchange 7f1823f6eabe9956ff40cc2e4aa9035197b51e83 (37194428287), Navigator 04e84f7b7943bbe0d60604ff65194904b37ad821 (37196333182), Reactor 49b560975c10e815ad5aac42a6c224dd4d39a8e8 (37196339516), and Yield 65b5e77682d59b05e23f3d248765fb4986499a8e (37195208591); those publisher runs completed successfully. The acceptance scope here is immutable signed publication and matching-container validation only. Actual native-host installation, training-task submission, controlled update, and recovery remain NOT_RUN. Echo runtime/OCI remains 7480d72c3d2520ccf7684ae43e2f2558c5c6e828; its separately signed Product contract source is a6923bf1e326069143b0b56d32b5891d36655e3f. The existing wheelResolver.arguments field is target compatibility metadata for the pinned uv target, not argv passed to uv export: uv export uses the locked host interpreter without --python-platform, while pip download enforces CPython 3.12/cp312 and the profile’s accepted manylinux tags with source and hash verification. Cyrene-Workspace records validated predecessor 83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8 because release-lock cannot self-reference.",
   "supportedEnvironment": {
     "os": "Ubuntu 24.04 x86_64",
     "gpu": {
@@ -146,9 +146,9 @@
     }
   },
   "repositories": {
-    "Cyrene-Platform": "cc31061d0c5f7282dac36ec6ce356b49c1044033",
-    "Cyrene-Plugins-Official": "0387f487ccfb0f2dd77d31126c0f5669abdde822",
-    "Cyrene-Workspace": "2b1210a19b5596cb90e3ac7c46a912a8a255da80",
+    "Cyrene-Platform": "ba253cff6f865c288e18af28b8cba64d91977261",
+    "Cyrene-Plugins-Official": "96733779d187b13efcadcde95a6b6737fe102d25",
+    "Cyrene-Workspace": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
     "Cyrene-Reactor": "49b560975c10e815ad5aac42a6c224dd4d39a8e8",
     "Cyrene-Yield": "65b5e77682d59b05e23f3d248765fb4986499a8e",
     "Cyrene-Exchange": "7f1823f6eabe9956ff40cc2e4aa9035197b51e83",

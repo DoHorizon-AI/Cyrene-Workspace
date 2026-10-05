@@ -261,6 +261,8 @@ cp "${SCRIPT_DIR}/service_bundle.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/servic
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
 cp "${SCRIPT_DIR}/component_updates.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
+cp "${SCRIPT_DIR}/native_package_runtime_bootstrap.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"
 cp "${SCRIPT_DIR}/catalog_metadata.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
 cp "${SCRIPT_DIR}/native_component_bootstrap.py" \
@@ -269,6 +271,9 @@ chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_component_bootstrap.py"
 cp "${SCRIPT_DIR}/native_core_bootstrap.py" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/native_core_bootstrap.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_core_bootstrap.py"
+cp "${SCRIPT_DIR}/native_runtime_schema_migration.py" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/native_runtime_schema_migration.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_runtime_schema_migration.py"
 cp "${SCRIPT_DIR}/native_first_products.py" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/native_first_products.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_first_products.py"

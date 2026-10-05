@@ -42,6 +42,15 @@ COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 SEMVER3_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PLAN_ID_PATTERN = re.compile(r"^plan-[0-9a-f]{32}$")
+ACTIVITY_SCOPE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9._-]{0,159}$")
+ACTIVITY_INSTALLATION_ID_PATTERN = re.compile(r"^installation-[0-9a-f]{32}$")
+ACTIVITY_BINDING_OPERATIONS = frozenset({"activate", "deactivate", "recover"})
+TRUSTED_CONTRACT_LOCK_PATHS = frozenset(
+    {
+        "governance/workspace-connection-protocols-v2.lock.json",
+        "governance/package-runtime-protocols-v1.lock.json",
+    }
+)
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 INSTALLED_CATALOG = Path("/usr/share/cyrene/component-catalog-v1.json")
 ACTIVE_CATALOG_ROOT = Path("/usr/share/cyrene/component-catalogs")
@@ -55,6 +64,8 @@ DEFAULT_CATALOG = (
 DEFAULT_ACTIVITY_CATALOG = Path("/var/lib/cyrene/runtime/activity-sources.json")
 DEFAULT_SOCKET = Path("/run/cyrene/runtime-maintenance.sock")
 DEFAULT_BROKER = Path("/usr/bin/cyrene-runtime-maintenance")
+BROKER_COMPONENT_ID = "cyrene-runtime-maintenance"
+BROKER_BOOTSTRAP_JOURNAL = "native-first-bootstrap/runtime-maintenance-first-install.json"
 DEFAULT_INSTALL_ROOT = Path("/usr/lib/cyrene")
 DEFAULT_STATE_ROOT = Path("/var/lib/cyrene-updates")
 DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
@@ -62,7 +73,7 @@ DEFAULT_RELEASE_LOCK = Path("/usr/lib/cyrene/release-lock.json")
 DEFAULT_PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
 DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
 DEFAULT_CHANNEL = "stable"
-TRUSTED_CATALOG_DIGEST = "sha256:9908229d8abee4cb3f1b5a55d8be5264310939e4b43700de0dfd37be7318c701"
+TRUSTED_CATALOG_DIGEST = "sha256:6ddce58276388c4c9f58c811ba4fa703e4c3c3970ee7a7d990fdab9389fba7d6"
 USER_AGENT = "CyreneComponentUpdater/1"
 BEGIN_NO_TOKEN_STATUSES = frozenset(
     {
@@ -189,7 +200,7 @@ def _trusted_contract_lock(value: Any) -> bool:
         value.get("repository") != "DoHorizon-AI/Cyrene-Workspace"
         or not isinstance(value.get("commit"), str)
         or re.fullmatch(r"[0-9a-f]{40}", value["commit"]) is None
-        or value.get("path") != "governance/workspace-connection-protocols-v2.lock.json"
+        or value.get("path") not in TRUSTED_CONTRACT_LOCK_PATHS
         or not _valid_digest(value.get("sha256"))
     ):
         return False
@@ -292,6 +303,48 @@ def _safe_relative(value: Any, *, field: str) -> PurePosixPath:
     if path.as_posix() != value:
         raise UpdateError("INVALID_MANIFEST", f"{field} is not normalized.")
     return path
+
+
+def _native_executable_files(artifact: Any) -> set[str]:
+    """Validate the signed native file map and return its executable paths."""
+
+    if not isinstance(artifact, dict):
+        raise UpdateError("INVALID_MANIFEST", "Native artifact metadata is invalid.")
+    entrypoint_value = artifact.get("entrypoint")
+    files = artifact.get("files")
+    if not isinstance(files, dict) or not files or not isinstance(entrypoint_value, str):
+        raise UpdateError("INVALID_MANIFEST", "Native artifact payload map is invalid.")
+    entrypoint = _safe_relative(entrypoint_value, field="artifact.entrypoint").as_posix()
+    for name, file_digest in files.items():
+        _safe_relative(name, field="artifact.files path")
+        if not _valid_digest(file_digest):
+            raise UpdateError("INVALID_MANIFEST", "Native artifact file digest is invalid.")
+    if entrypoint not in files:
+        raise UpdateError("INVALID_MANIFEST", "Native artifact entrypoint is not a signed file.")
+
+    if "executableFiles" not in artifact:
+        return {entrypoint}
+    executable_files = artifact["executableFiles"]
+    if (
+        not isinstance(executable_files, list)
+        or not executable_files
+        or any(not isinstance(name, str) for name in executable_files)
+        or len(set(executable_files)) != len(executable_files)
+    ):
+        raise UpdateError("INVALID_MANIFEST", "Native artifact executableFiles is invalid.")
+    normalized = {
+        _safe_relative(name, field="artifact.executableFiles path").as_posix()
+        for name in executable_files
+    }
+    if len(normalized) != len(executable_files) or entrypoint not in normalized:
+        raise UpdateError(
+            "INVALID_MANIFEST", "Native artifact executableFiles must include the entrypoint."
+        )
+    if not normalized.issubset(files):
+        raise UpdateError(
+            "INVALID_MANIFEST", "Native artifact executableFiles must name signed files."
+        )
+    return normalized
 
 
 def _artifact_digest_from_manifest(manifest: Any) -> str | None:
@@ -529,6 +582,40 @@ def _verify_private_directory(path: Path) -> None:
         )
 
 
+def _verify_private_file(path: Path) -> None:
+    """Require a single-link root-owned private file before passing proof to a native CLI."""
+    descriptor: int | None = None
+    try:
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != 0
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+        ):
+            raise UpdateError("UNSAFE_STATE", f"Private proof file metadata is unsafe: {path}")
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_uid != 0
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+        ):
+            raise UpdateError("UNSAFE_STATE", f"Private proof file changed while opening: {path}")
+    except OSError as error:
+        raise UpdateError(
+            "UNSAFE_STATE", f"Cannot verify private proof file {path}: {error}"
+        ) from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 class ComponentUpdater:
     """Drive the fixed JSON helper protocol against trusted local catalog data."""
 
@@ -538,7 +625,7 @@ class ComponentUpdater:
         catalog_path: Path = DEFAULT_CATALOG,
         activity_catalog_path: Path = DEFAULT_ACTIVITY_CATALOG,
         socket_path: Path = DEFAULT_SOCKET,
-        broker_path: Path = DEFAULT_BROKER,
+        broker_path: Path | None = None,
         install_root: Path = DEFAULT_INSTALL_ROOT,
         state_root: Path = DEFAULT_STATE_ROOT,
         release_lock_path: Path = DEFAULT_RELEASE_LOCK,
@@ -554,7 +641,8 @@ class ComponentUpdater:
         self.catalog_path = Path(catalog_path)
         self.activity_catalog_path = Path(activity_catalog_path)
         self.socket_path = Path(socket_path)
-        self.broker_path = Path(broker_path)
+        self._broker_path_explicit = broker_path is not None
+        self.broker_path = Path(broker_path) if broker_path is not None else DEFAULT_BROKER
         self.install_root = Path(install_root)
         self.state_root = Path(state_root)
         self.data_bundle_root = Path(data_bundle_root)
@@ -1385,7 +1473,16 @@ class ComponentUpdater:
         operation = request.get("operation") if isinstance(request, dict) else None
         envelope_operation = (
             operation
-            if isinstance(operation, str) and operation in {"status", "check", "stage", "apply"}
+            if isinstance(operation, str)
+            and operation
+            in {
+                "status",
+                "check",
+                "stage",
+                "apply",
+                "check-plugin-package",
+                "install-plugin-package",
+            }
             else "status"
         )
         try:
@@ -1424,6 +1521,14 @@ class ComponentUpdater:
                     "confirmation",
                     "channel",
                     "bootstrapMode",
+                },
+                "check-plugin-package": {"protocolVersion", "operation"},
+                "install-plugin-package": {
+                    "protocolVersion",
+                    "operation",
+                    "planId",
+                    "planDigest",
+                    "confirmation",
                 },
             }
             if (
@@ -1475,6 +1580,14 @@ class ComponentUpdater:
             elif operation == "stage":
                 result = self.stage(
                     request.get("planId"), request.get("planDigest"), channel=request.get("channel")
+                )
+            elif operation == "check-plugin-package":
+                result = self.inspect_plugin_package_plan()
+            elif operation == "install-plugin-package":
+                result = self.bootstrap_plugin_package_runtime(
+                    plan_id=request.get("planId"),
+                    plan_digest=request.get("planDigest"),
+                    confirmation=request.get("confirmation"),
                 )
             else:
                 result = self.apply(
@@ -1858,7 +1971,17 @@ class ComponentUpdater:
             if transaction_path.exists()
             else None
         )
+        if existing and existing.get("schemaAdoption") is True:
+            if existing.get("phase") == "succeeded":
+                return self._applied_result(existing)
+            if existing.get("phase") == "rolled_back":
+                raise UpdateError(
+                    "APPLY_ROLLED_BACK",
+                    existing.get("rollbackMessage", "Schema adoption was rolled back."),
+                )
         if existing and existing.get("phase") not in {"succeeded", "rolled_back"}:
+            if existing.get("schemaAdoption") is True:
+                return self._recover_schema_adoption(existing, transaction_path, confirmation)
             return self._recover_transaction(existing, transaction_path, stage_path, confirmation)
         self._require_managed_services(record["components"])
         if not _running_as_root():
@@ -1884,6 +2007,41 @@ class ComponentUpdater:
                 "Installed activity catalog changed during readiness; check again before applying.",
                 retryable=True,
             )
+        staged_component_ids = {item["componentId"] for item in record["components"]}
+        schema_adoption = False
+        migration_profile = None
+        unit_inventory = None
+        if staged_component_ids.intersection(
+            {
+                "cyrene-runtime-maintenance",
+                "cyrene-kernel",
+                "cy-package-runtime",
+            }
+        ):
+            migration = self._load_native_runtime_schema_migration()
+            try:
+                schema_adoption = migration.is_schema1_group_adoption(self, record)
+                migration_profile = (
+                    migration.read_schema1_profile(Path("/var/lib/cyrene/runtime"))
+                    if schema_adoption
+                    else None
+                )
+                unit_inventory = (
+                    migration.capture_unit_inventory(self, staged_component_ids)
+                    if schema_adoption
+                    else None
+                )
+            except migration.MigrationError as error:
+                raise UpdateError(
+                    "SCHEMA_ADOPTION_UNKNOWN",
+                    f"Cannot verify the installed Core schema-adoption prerequisites: {error}",
+                    retryable=True,
+                ) from error
+        if schema_adoption and target_kind != "CORE_RUNTIME":
+            raise UpdateError(
+                "SCHEMA_ADOPTION_INVALID",
+                "A schema adoption plan must use the complete CORE_RUNTIME maintenance gate.",
+            )
         artifact_digests = {
             item["componentId"]: item["artifactDigest"] for item in record["components"]
         }
@@ -1905,6 +2063,17 @@ class ComponentUpdater:
             "authorityActivation": authority_activation,
             "createdAt": int(time.time()),
         }
+        if schema_adoption:
+            transaction.update(
+                {
+                    "schemaAdoption": True,
+                    "schema1Profile": migration_profile,
+                    "preActiveUnits": unit_inventory,
+                    "migrationPhase": "planned",
+                    "requiresRestart": True,
+                    "userConfirmedRestart": True,
+                }
+            )
         _atomic_json(transaction_path, transaction)
         try:
             token = self._begin_maintenance(transaction)
@@ -1915,6 +2084,8 @@ class ComponentUpdater:
         transaction["maintenanceToken"] = token
         transaction["phase"] = "applying"
         _atomic_json(transaction_path, transaction)
+        if schema_adoption:
+            return self._execute_schema_adoption(transaction, transaction_path)
         try:
             self._activate_transaction(transaction)
             self._restart_transaction(transaction)
@@ -2708,10 +2879,362 @@ class ComponentUpdater:
         spec.loader.exec_module(module)
         return module
 
+    def _load_native_package_runtime_bootstrap(self) -> Any:
+        module_path = Path(__file__).with_name("native_package_runtime_bootstrap.py")
+        if not module_path.is_file():
+            raise UpdateError(
+                "PACKAGE_RUNTIME_BOOTSTRAP_MISSING",
+                "The signed Package Runtime bootstrap helper is missing.",
+            )
+        import importlib.util
+
+        module_name = "_cyrene_native_package_runtime_bootstrap"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_BOOTSTRAP_MISSING",
+                "The signed Package Runtime bootstrap helper cannot be loaded.",
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def _load_native_runtime_schema_migration(self) -> Any:
+        """Load the signed helper that derives legacy state profile and proof bytes."""
+        import importlib.util
+
+        module_path = Path(__file__).with_name("native_runtime_schema_migration.py")
+        if not module_path.is_file() or module_path.is_symlink():
+            raise UpdateError(
+                "SCHEMA_ADOPTION_UNAVAILABLE",
+                "The signed Core schema-migration helper is missing or unsafe.",
+            )
+        module_name = "_cyrene_native_runtime_schema_migration"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError(
+                "SCHEMA_ADOPTION_UNAVAILABLE",
+                "The signed Core schema-migration helper cannot be loaded.",
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            raise UpdateError(
+                "SCHEMA_ADOPTION_UNAVAILABLE",
+                "The signed Core schema-migration helper failed to load.",
+            ) from error
+        return module
+
+    def inspect_plugin_package_plan(self) -> dict[str, Any]:
+        """Verify the fixed package cache and return its current confirmable plan."""
+
+        self._require_authorized_process()
+        helper = self._load_native_package_runtime_bootstrap()
+        with self._exclusive_update_lock():
+            verified = helper.verify_cached_package_candidate()
+            activity_catalog, _sources = self._activity_catalog()
+            readiness = self._readiness_for("PACKAGE_ONLY", requires_restart=False, force=True)
+            self._require_ready(readiness, "PACKAGE_ONLY")
+            gate_generation = readiness.get("gate_generation")
+            if type(gate_generation) is not int or gate_generation < 1:
+                raise UpdateError(
+                    "GATE_UNKNOWN", "Package Runtime gate generation is unknown.", retryable=True
+                )
+            plan = helper.build_package_bootstrap_plan(
+                verified,
+                catalog_generation=activity_catalog["generation"],
+                gate_generation=gate_generation,
+            )
+        return {
+            "planId": plan.plan_id,
+            "planDigest": plan.plan_digest,
+            "catalogGeneration": plan.catalog_generation,
+            "gateGeneration": plan.gate_generation,
+            "componentArtifactDigests": plan.component_artifact_digests,
+            "candidate": plan.material,
+        }
+
+    def bootstrap_plugin_package_runtime(
+        self,
+        *,
+        plan_id: Any,
+        plan_digest: Any,
+        confirmation: Any,
+    ) -> dict[str, Any]:
+        """Install one reverified package under an exact confirmed broker hold."""
+
+        self._require_authorized_process()
+        if not _running_as_root():
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED", "Package Runtime bootstrap requires the root updater."
+            )
+        helper = self._load_native_package_runtime_bootstrap()
+        with self._exclusive_update_lock():
+            self._assert_no_pending_catalog_intent()
+            verified = helper.verify_cached_package_candidate()
+            activity_catalog, activity_sources = self._activity_catalog()
+            readiness = self._readiness_for("PACKAGE_ONLY", requires_restart=False, force=True)
+            self._require_ready(readiness, "PACKAGE_ONLY")
+            gate_generation = readiness.get("gate_generation")
+            if type(gate_generation) is not int or gate_generation < 1:
+                raise UpdateError(
+                    "GATE_UNKNOWN", "Package Runtime gate generation is unknown.", retryable=True
+                )
+            plan = helper.build_package_bootstrap_plan(
+                verified,
+                catalog_generation=activity_catalog["generation"],
+                gate_generation=gate_generation,
+            )
+            if plan_id != plan.plan_id or plan_digest != plan.plan_digest:
+                raise UpdateError(
+                    "PLAN_CHANGED", "Package Runtime candidate differs from the reviewed plan."
+                )
+            try:
+                helper.validate_package_bootstrap_confirmation(
+                    plan,
+                    {
+                        "plan_id": plan_id,
+                        "plan_digest": plan_digest,
+                        "confirmed": confirmation is True,
+                    },
+                )
+            except helper.PackageRuntimeBootstrapError as error:
+                raise UpdateError("CONFIRMATION_MISMATCH", str(error)) from error
+
+            if readiness.get("install_catalog_generation") != activity_catalog["generation"]:
+                raise UpdateError(
+                    "GATE_UNKNOWN",
+                    "Activity catalog changed during Package Runtime readiness.",
+                    retryable=True,
+                )
+
+            transaction_id = f"cyrene-update-{plan.plan_id}"
+            transaction_path = (
+                self._private_state_directory("transactions") / f"{plan.plan_id}.json"
+            )
+            if transaction_path.exists() or transaction_path.is_symlink():
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "An existing package plan journal must be reconciled before retry.",
+                    retryable=True,
+                )
+            transaction = {
+                "schemaVersion": 1,
+                "transactionKind": "package-runtime-bootstrap.v1",
+                "planId": plan.plan_id,
+                "planDigest": plan.plan_digest,
+                "requestId": transaction_id,
+                "componentArtifactDigests": plan.component_artifact_digests,
+                "targetKind": "PACKAGE_ONLY",
+                "expectedGateGeneration": readiness.get("gate_generation"),
+                "expectedCatalogGeneration": activity_catalog["generation"],
+                "expectedActivitySources": activity_sources,
+                "phase": "begin_pending",
+                "candidate": {
+                    **plan.material,
+                    "attestationBundleDigests": verified.attestation_bundle_digests,
+                },
+                "confirmed": True,
+                "createdAt": int(time.time()),
+            }
+            _atomic_json(transaction_path, transaction)
+            try:
+                begin = self._broker_request(
+                    "BeginMaintenance",
+                    {
+                        "request_id": transaction_id,
+                        "target_kind": "PACKAGE_ONLY",
+                        "requires_restart": False,
+                        "expected_catalog_generation": activity_catalog["generation"],
+                        "expected_activity_sources": activity_sources,
+                        "expected_gate_generation": readiness.get("gate_generation"),
+                        "user_confirmed_restart": True,
+                        "plan_id": plan.plan_id,
+                        "plan_digest": plan.plan_digest,
+                        "component_artifact_digests": plan.component_artifact_digests,
+                    },
+                    request_id=transaction_id,
+                )
+            except UpdateError as error:
+                if error.maintenance_not_acquired:
+                    self._clear_begin_pending(transaction, transaction_path)
+                raise
+            maintenance_token = begin.get("maintenance_token")
+            begin_gate_generation = begin.get("gate_generation")
+            if (
+                begin.get("status") != "MAINTENANCE_ACTIVE"
+                or not isinstance(maintenance_token, str)
+                or len(maintenance_token) < 32
+                or type(begin_gate_generation) is not int
+                or begin_gate_generation < 1
+            ):
+                transaction["phase"] = "maintenance_state_unknown"
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "GATE_UNKNOWN",
+                    "Package Runtime maintenance ownership was not confirmed; the journal remains pending.",
+                    retryable=True,
+                )
+            transaction["maintenanceToken"] = maintenance_token
+            transaction["expectedGateGeneration"] = begin_gate_generation
+            transaction["phase"] = "maintenance_active"
+            _atomic_json(transaction_path, transaction)
+
+            maintenance = {
+                "transaction_id": transaction_id,
+                "maintenance_token": maintenance_token,
+                "target_kind": "PACKAGE_ONLY",
+                "plan_id": plan.plan_id,
+                "plan_digest": plan.plan_digest,
+                "component_artifact_digests": plan.component_artifact_digests,
+                "expected_gate_generation": begin_gate_generation,
+                "expected_catalog_generation": activity_catalog["generation"],
+            }
+            request_directory, _request_path = helper.stage_offline_install_request(
+                verified,
+                request_id=transaction_id,
+                maintenance=maintenance,
+            )
+            transaction["stageDirectory"] = str(request_directory)
+            _atomic_json(transaction_path, transaction)
+            request = helper.build_offline_install_input(
+                verified,
+                request_id=transaction_id,
+                descriptor_path=request_directory / "descriptor.json",
+                archive_path=request_directory / "archive.zip",
+                maintenance=maintenance,
+            )
+            installation = helper.run_offline_install(verified, request)
+            transaction["installation"] = installation
+            transaction["phase"] = "install_complete"
+            _atomic_json(transaction_path, transaction)
+
+            current_catalog, _current_sources = self._activity_catalog()
+            if current_catalog["generation"] != activity_catalog["generation"]:
+                transaction["phase"] = "catalog_generation_unknown"
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "GATE_UNKNOWN",
+                    "Activity catalog changed before package scope commit; maintenance remains held.",
+                    retryable=True,
+                )
+            catalog_update = helper.build_activity_catalog_update(
+                verified, installation, current_catalog
+            )
+            proof_path, scopes_path = helper.stage_catalog_commit_inputs(
+                request_directory,
+                request_id=transaction_id,
+                maintenance=maintenance,
+                catalog_update=catalog_update,
+            )
+            transaction["phase"] = "catalog_update_pending"
+            _atomic_json(transaction_path, transaction)
+            catalog_command_result = helper.run_activity_catalog_update(
+                catalog_update, proof_path=proof_path, scopes_path=scopes_path
+            )
+            updated_catalog, updated_sources = self._activity_catalog()
+            helper.validate_activity_catalog_readback(
+                updated_catalog, catalog_update, catalog_command_result
+            )
+            transaction["expectedCatalogGeneration"] = updated_catalog["generation"]
+            transaction["expectedActivitySources"] = updated_sources
+            transaction["catalogGeneration"] = updated_catalog["generation"]
+            transaction["catalogDigest"] = _file_digest(self.activity_catalog_path)
+            transaction["phase"] = "catalog_updated"
+            _atomic_json(transaction_path, transaction)
+
+            policy = helper.build_runtime_source_policy(verified, installation, updated_catalog)
+            transaction["policyDigest"] = helper.write_runtime_source_policy(policy)
+            helper.validate_runtime_source_policy(
+                helper.read_runtime_source_policy(), verified, installation, updated_catalog
+            )
+            transaction["phase"] = "policy_written"
+            _atomic_json(transaction_path, transaction)
+
+            transaction["phase"] = "runtime_start_pending"
+            _atomic_json(transaction_path, transaction)
+            try:
+                self._run_systemctl("start", "cyrene-package-runtime.service")
+                self._wait_unit_active("cyrene-package-runtime.service")
+                runtime_authority = helper.probe_runtime_authority(
+                    updated_catalog,
+                    expected_catalog_generation=updated_catalog["generation"],
+                )
+            except Exception as error:
+                transaction["phase"] = "runtime_health_unknown"
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_HEALTH_UNKNOWN",
+                    "Package Runtime did not prove the installed source generation and admission capability; maintenance remains held.",
+                    retryable=True,
+                ) from error
+            transaction["runtimeAuthority"] = runtime_authority
+            transaction["phase"] = "runtime_health_verified"
+            _atomic_json(transaction_path, transaction)
+
+            validate_id = f"cyrene-package-validate-{uuid.uuid4().hex}"
+            validation = self._broker_request(
+                "ValidateMaintenanceHold",
+                {
+                    "request_id": validate_id,
+                    "maintenance_token": maintenance_token,
+                    "target_kind": "PACKAGE_ONLY",
+                    "plan_id": plan.plan_id,
+                    "plan_digest": plan.plan_digest,
+                    "component_artifact_digests": plan.component_artifact_digests,
+                    "component_id": verified.package_id,
+                    "artifact_digest": verified.artifact_digest,
+                    "expected_gate_generation": begin_gate_generation,
+                    "expected_catalog_generation": updated_catalog["generation"],
+                },
+                request_id=validate_id,
+            )
+            expected_validation = {
+                "valid": True,
+                "request_id": validate_id,
+                "target_kind": "PACKAGE_ONLY",
+                "plan_id": plan.plan_id,
+                "plan_digest": plan.plan_digest,
+                "component_artifact_digests": plan.component_artifact_digests,
+                "component_id": verified.package_id,
+                "artifact_digest": verified.artifact_digest,
+                "gate_generation": begin_gate_generation,
+                "catalog_generation": updated_catalog["generation"],
+            }
+            if validation != expected_validation:
+                transaction["phase"] = "hold_validation_unknown"
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "GATE_UNKNOWN",
+                    "Package Runtime hold changed before completion; maintenance remains held.",
+                    retryable=True,
+                )
+            transaction["phase"] = "end_pending"
+            _atomic_json(transaction_path, transaction)
+            self._end_maintenance(transaction, outcome="SUCCESS", healthy=True)
+            transaction["phase"] = "succeeded"
+            transaction.pop("maintenanceToken", None)
+            transaction.pop("recoveryError", None)
+            _atomic_json(transaction_path, transaction)
+            return {
+                "status": "installed",
+                "planId": plan.plan_id,
+                "planDigest": plan.plan_digest,
+                "installation": installation,
+                "catalogGeneration": updated_catalog["generation"],
+                "policyDigest": transaction["policyDigest"],
+                "runtimeActivated": False,
+            }
+
     def _activity_catalog(self) -> tuple[dict[str, Any], list[str]]:
         catalog = _read_object(self.activity_catalog_path, "runtime activity source catalog")
         if (
-            catalog.get("schema_version") != 1
+            set(catalog) != {"schema_version", "generation", "sources"}
+            or type(catalog.get("schema_version")) is not int
+            or catalog["schema_version"] != 1
             or not isinstance(catalog.get("generation"), int)
             or isinstance(catalog.get("generation"), bool)
             or catalog["generation"] < 1
@@ -2730,12 +3253,10 @@ class ComponentUpdater:
             )
         ids: list[str] = []
         for source in sources:
-            if not isinstance(source, dict) or set(source) != {
-                "source_id",
-                "uid",
-                "gid",
-                "source_token_sha256",
-            }:
+            if not isinstance(source, dict) or set(source) not in (
+                {"source_id", "uid", "gid", "source_token_sha256"},
+                {"source_id", "uid", "gid", "source_token_sha256", "binding_scopes"},
+            ):
                 raise UpdateError(
                     "GATE_UNKNOWN",
                     "Runtime activity source catalog contains an invalid source record.",
@@ -2764,6 +3285,7 @@ class ComponentUpdater:
                     f"Runtime activity source {source_id} has invalid trust metadata.",
                     retryable=True,
                 )
+            self._validate_activity_binding_scopes(source)
             ids.append(source_id)
         if len(set(ids)) != len(ids) or ids != sorted(ids):
             raise UpdateError(
@@ -2773,6 +3295,69 @@ class ComponentUpdater:
             )
         return catalog, ids
 
+    @staticmethod
+    def _validate_activity_binding_scopes(source: dict[str, Any]) -> None:
+        """Validate optional mutation scopes; absence and empty lists deny by default."""
+
+        if "binding_scopes" not in source:
+            return
+        scopes = source["binding_scopes"]
+        if not isinstance(scopes, list):
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Runtime activity binding scopes must be a JSON array.",
+                retryable=True,
+            )
+        binding_ids: list[str] = []
+        for scope in scopes:
+            if not isinstance(scope, dict) or set(scope) != {
+                "binding_id",
+                "package_id",
+                "installation_ids",
+                "operations",
+            }:
+                raise UpdateError(
+                    "GATE_UNKNOWN",
+                    "Runtime activity catalog contains a malformed binding scope.",
+                    retryable=True,
+                )
+            binding_id = scope["binding_id"]
+            package_id = scope["package_id"]
+            installation_ids = scope["installation_ids"]
+            operations = scope["operations"]
+            if (
+                not isinstance(binding_id, str)
+                or ACTIVITY_SCOPE_ID_PATTERN.fullmatch(binding_id) is None
+                or not isinstance(package_id, str)
+                or ACTIVITY_SCOPE_ID_PATTERN.fullmatch(package_id) is None
+                or not isinstance(installation_ids, list)
+                or not installation_ids
+                or any(
+                    not isinstance(installation_id, str)
+                    or ACTIVITY_INSTALLATION_ID_PATTERN.fullmatch(installation_id) is None
+                    for installation_id in installation_ids
+                )
+                or installation_ids != sorted(set(installation_ids))
+                or not isinstance(operations, list)
+                or any(
+                    not isinstance(operation, str) or operation not in ACTIVITY_BINDING_OPERATIONS
+                    for operation in operations
+                )
+                or operations != sorted(set(operations))
+            ):
+                raise UpdateError(
+                    "GATE_UNKNOWN",
+                    "Runtime activity catalog contains invalid binding scope fields.",
+                    retryable=True,
+                )
+            binding_ids.append(binding_id)
+        if binding_ids != sorted(set(binding_ids)):
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Runtime activity binding IDs must be unique and sorted.",
+                retryable=True,
+            )
+
     def _broker_request(
         self, method: str, params: dict[str, Any], *, request_id: str | None = None
     ) -> dict[str, Any]:
@@ -2780,7 +3365,8 @@ class ComponentUpdater:
         sources: list[str] = []
         if method in {"GetUpdateReadiness", "BeginMaintenance"}:
             catalog, sources = self._activity_catalog()
-        if not self.broker_path.is_file() or not os.access(self.broker_path, os.X_OK):
+        broker_path = self._resolve_broker_executable()
+        if not broker_path.is_file() or not os.access(broker_path, os.X_OK):
             raise UpdateError(
                 "GATE_UNKNOWN",
                 "The native runtime maintenance broker is unavailable; apply is fail-closed.",
@@ -2800,8 +3386,11 @@ class ComponentUpdater:
             },
         }
         try:
+            command = [str(broker_path), "request", "--socket", str(self.socket_path)]
+            if method != "Health":
+                command.append("--operator")
             completed = self.runner(
-                [str(self.broker_path), "request", "--socket", str(self.socket_path), "--operator"],
+                command,
                 input=json.dumps(payload, separators=(",", ":")) + "\n",
                 capture_output=True,
                 text=True,
@@ -2883,6 +3472,278 @@ class ComponentUpdater:
                 retryable=True,
             )
         return result
+
+    def _resolve_broker_executable(self) -> Path:
+        """Resolve an explicit test override or the exact active signed Broker."""
+        if self._broker_path_explicit:
+            return self.broker_path
+        return self._resolve_installed_broker()
+
+    def _resolve_installed_broker(self) -> Path:
+        """Resolve the default broker only through its verified active release.
+
+        Explicitly configured paths retain their existing local/test behavior. The default
+        path follows the root-owned immutable release recorded by the updater rather than
+        relying on an unsigned /usr/bin alias.
+        显式路径维持原有行为；默认入口只能来自已验证的活动签名发布目录。
+        """
+        component_id = BROKER_COMPONENT_ID
+        component = self.components.get(component_id)
+        if (
+            not isinstance(component, dict)
+            or component.get("componentId") != component_id
+            or component.get("kind") != "native-binary"
+            or self.bootstrap_catalog_digest != TRUSTED_CATALOG_DIGEST
+        ):
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "The trusted component catalog does not contain the runtime maintenance broker.",
+                retryable=True,
+            )
+        installed = self._installed(component)
+        manifest = installed.get("manifest")
+        if (
+            installed.get("active") is not True
+            or not isinstance(manifest, dict)
+            or manifest.get("componentId") != component_id
+            or manifest.get("manifestDigest") != installed.get("manifestDigest")
+            or manifest.get("version") != installed.get("activeVersion")
+            or _artifact_kind_from_manifest(manifest) != "native-binary"
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                "The active runtime maintenance broker has no matching verified release identity.",
+                retryable=True,
+            )
+
+        root = self.install_root / "components" / component_id
+        pointer_identity = installed.get("pointerIdentity")
+        if not isinstance(pointer_identity, str):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", "The active broker release pointer is unavailable."
+            )
+        release = root / "releases" / pointer_identity
+        trusted_directories = (
+            self.install_root,
+            self.install_root / "components",
+            root,
+            root / "releases",
+            release,
+        )
+        for directory in trusted_directories:
+            try:
+                info = directory.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Cannot inspect active broker release directory {directory}: {error}",
+                ) from error
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+                or not stat.S_IMODE(info.st_mode) & 0o001
+            ):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Active broker release directory is not root-owned and immutable: {directory}.",
+                )
+        if self.install_root == DEFAULT_INSTALL_ROOT:
+            for directory in (Path("/"), Path("/usr"), Path("/usr/lib")):
+                try:
+                    info = directory.lstat()
+                except OSError as error:
+                    raise UpdateError(
+                        "INVALID_INSTALLED_RELEASE",
+                        f"Cannot inspect active broker path ancestor {directory}: {error}",
+                    ) from error
+                if (
+                    not stat.S_ISDIR(info.st_mode)
+                    or directory.is_symlink()
+                    or info.st_uid != 0
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or not stat.S_IMODE(info.st_mode) & 0o001
+                ):
+                    raise UpdateError(
+                        "INVALID_INSTALLED_RELEASE",
+                        f"Active broker path ancestor is not root-controlled: {directory}.",
+                    )
+
+        active = root / "active"
+        try:
+            active_info = active.lstat()
+            active_target = os.readlink(active)
+        except OSError as error:
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", f"Cannot inspect active broker pointer: {error}"
+            ) from error
+        if (
+            not stat.S_ISLNK(active_info.st_mode)
+            or active_info.st_uid != 0
+            or active_target != f"releases/{pointer_identity}"
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", "The active broker pointer is unsafe or changed."
+            )
+
+        artifact = manifest.get("artifact")
+        if not isinstance(artifact, dict):
+            raise UpdateError("INVALID_INSTALLED_RELEASE", "The active broker artifact is invalid.")
+        executable_files = _native_executable_files(artifact)
+        entrypoint = artifact["entrypoint"]
+        if entrypoint not in executable_files:
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                "The active broker entrypoint is not signed executable content.",
+            )
+        manifest_path = release / "component-manifest.json"
+        try:
+            manifest_info = manifest_path.lstat()
+            installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", "The active broker manifest cannot be re-read."
+            ) from error
+        if (
+            not stat.S_ISREG(manifest_info.st_mode)
+            or manifest_info.st_uid != 0
+            or manifest_info.st_nlink != 1
+            or stat.S_IMODE(manifest_info.st_mode) & 0o022
+            or installed_manifest != manifest
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                "The active broker manifest differs from its verified receipt.",
+            )
+        files = artifact["files"]
+        for relative_name, expected_digest in files.items():
+            relative = _safe_relative(relative_name, field="artifact.files path")
+            current_directory = release
+            for part in relative.parts[:-1]:
+                current_directory = current_directory / part
+                try:
+                    directory_info = current_directory.lstat()
+                except OSError as error:
+                    raise UpdateError(
+                        "INVALID_INSTALLED_RELEASE",
+                        f"Cannot inspect active broker payload directory {current_directory}: {error}",
+                    ) from error
+                if (
+                    not stat.S_ISDIR(directory_info.st_mode)
+                    or directory_info.st_uid != 0
+                    or stat.S_IMODE(directory_info.st_mode) & 0o022
+                ):
+                    raise UpdateError(
+                        "INVALID_INSTALLED_RELEASE",
+                        f"Active broker payload directory is unsafe: {current_directory}.",
+                    )
+            payload_file = release.joinpath(*relative.parts)
+            try:
+                file_info = payload_file.lstat()
+                with payload_file.open("rb") as source:
+                    actual_digest = hashlib.sha256(source.read()).hexdigest()
+            except OSError as error:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Cannot verify active broker payload file {relative_name}: {error}",
+                ) from error
+            if (
+                not stat.S_ISREG(file_info.st_mode)
+                or file_info.st_uid != 0
+                or file_info.st_nlink != 1
+                or stat.S_IMODE(file_info.st_mode) & 0o022
+                or actual_digest != expected_digest.removeprefix("sha256:")
+            ):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Active broker payload differs from its signed file map: {relative_name}.",
+                )
+            if relative_name == entrypoint and not stat.S_IMODE(file_info.st_mode) & 0o111:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "The signed broker entrypoint is not executable."
+                )
+        if installed.get("identityAttested") is not True:
+            self._verify_broker_bootstrap_journal(manifest, installed, pointer_identity)
+        return release.joinpath(*_safe_relative(entrypoint, field="artifact.entrypoint").parts)
+
+    def _verify_broker_bootstrap_journal(
+        self, manifest: dict[str, Any], installed: dict[str, Any], pointer: str
+    ) -> None:
+        """Use the exact completed first-install journal only when no receipt exists."""
+        journal_path = self.state_root / BROKER_BOOTSTRAP_JOURNAL
+        journal_dir = journal_path.parent
+        for directory in list(self.state_root.parents)[:3]:
+            try:
+                info = directory.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "Broker journal ancestor is unavailable."
+                ) from error
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or directory.is_symlink()
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "Broker journal ancestor is not root-controlled."
+                )
+        for directory in (self.state_root, journal_dir):
+            try:
+                info = directory.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "Broker bootstrap journal is unavailable."
+                ) from error
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or directory.is_symlink()
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o077
+            ):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "Broker bootstrap journal directory is unsafe."
+                )
+        try:
+            info = journal_path.lstat()
+        except OSError as error:
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", "Broker first-install journal is missing."
+            ) from error
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or journal_path.is_symlink()
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) & 0o077
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", "Broker first-install journal is unsafe."
+            )
+        journal = _read_object(journal_path, "maintenance broker first-install journal")
+        identity = journal.get("identity")
+        artifact = manifest.get("artifact")
+        target_id = identity.get("targetId") if isinstance(identity, dict) else None
+        if (
+            journal.get("schemaVersion") != 1
+            or journal.get("phase") != "complete"
+            or re.fullmatch(r"[0-9a-f]{64}", str(journal.get("planDigest"))) is None
+            or journal.get("releaseIdentity") != pointer
+            or not isinstance(identity, dict)
+            or identity.get("componentId") != BROKER_COMPONENT_ID
+            or identity.get("version") != manifest.get("version")
+            or identity.get("manifestDigest") != manifest.get("manifestDigest")
+            or identity.get("artifactDigest") != artifact.get("sha256")
+            or installed.get("artifactDigest") != identity.get("artifactDigest")
+            or not any(
+                target.get("id") == target_id and target.get("target") == manifest.get("target")
+                for target in self.targets.values()
+            )
+            or not _valid_digest(identity.get("indexDigest"))
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                "First-install journal does not bind the active Broker receipt.",
+            )
 
     def _readiness(self, component: dict[str, Any]) -> dict[str, Any]:
         target_kind = (
@@ -3560,6 +4421,7 @@ class ComponentUpdater:
                     "INVALID_MANIFEST",
                     f"Native artifact payload map is invalid for {component['componentId']}.",
                 )
+            _native_executable_files(artifact)
         elif artifact["kind"] in {"python-bundle", "data-bundle"}:
             if (
                 artifact.get("format") not in {"tar.gz", "tar.zst", "zip"}
@@ -4937,11 +5799,11 @@ class ComponentUpdater:
         expected = artifact["files"]
         self._extract_tar(archive, destination, expected_files=expected)
         entrypoint = _safe_relative(artifact["entrypoint"], field="artifact.entrypoint")
+        executable_paths = _native_executable_files(artifact)
         binary = destination.joinpath(*entrypoint.parts)
         if not binary.is_file():
             raise UpdateError("INVALID_ARTIFACT", "Native artifact entrypoint is missing.")
-        binary.chmod(0o755)
-        self._normalize_payload(destination, entrypoint.as_posix())
+        self._normalize_payload(destination, executable_paths)
 
     def _extract_tar(
         self,
@@ -5023,7 +5885,7 @@ class ComponentUpdater:
                 )
 
     @staticmethod
-    def _normalize_payload(root: Path, entrypoint: str) -> None:
+    def _normalize_payload(root: Path, executable_files: set[str]) -> None:
         for current, directory_names, file_names in os.walk(root, followlinks=False):
             current_path = Path(current)
             current_path.chmod(0o755)
@@ -5038,7 +5900,9 @@ class ComponentUpdater:
                 path = current_path / name
                 if path.is_symlink() or not path.is_file():
                     raise UpdateError("UNSAFE_ARTIFACT", f"Payload contains an unsafe file: {path}")
-                path.chmod(0o755 if path.relative_to(root).as_posix() == entrypoint else 0o644)
+                path.chmod(
+                    0o755 if path.relative_to(root).as_posix() in executable_files else 0o644
+                )
 
     def _install_native_release(self, candidate: Candidate, payload_root: Path) -> Path:
         component_id = candidate.component["componentId"]
@@ -5051,6 +5915,11 @@ class ComponentUpdater:
             )
         release_identity = f"{version}--{manifest_digest.removeprefix('sha256:')}"
         release = root / "releases" / release_identity
+        if payload_root.is_symlink() or not payload_root.is_dir():
+            raise UpdateError(
+                "UNSAFE_ARTIFACT", "Staged native payload root is not a real directory."
+            )
+        self._ensure_native_release_directories(component_id)
         if release.exists():
             existing_manifest = _read_object(
                 release / "component-manifest.json", "existing component manifest"
@@ -5062,12 +5931,6 @@ class ComponentUpdater:
                     f"Native release identity collision for {component_id} {version}.",
                 )
             return release
-        root.mkdir(parents=True, exist_ok=True, mode=0o755)
-        (root / "releases").mkdir(exist_ok=True, mode=0o755)
-        if payload_root.is_symlink() or not payload_root.is_dir():
-            raise UpdateError(
-                "UNSAFE_ARTIFACT", "Staged native payload root is not a real directory."
-            )
         os.replace(payload_root, release)
         self._atomic_json_file(release / "component-manifest.json", candidate.manifest, mode=0o644)
         item = {
@@ -5081,6 +5944,63 @@ class ComponentUpdater:
         }
         self._write_release_receipt(item)
         return release
+
+    def _ensure_native_release_directories(self, component_id: str) -> None:
+        """Create traversable immutable release ancestors despite a restrictive umask."""
+
+        component_root = self.install_root / "components" / component_id
+        directories = (
+            self.install_root,
+            self.install_root / "components",
+            component_root,
+            component_root / "releases",
+        )
+        for directory in directories:
+            try:
+                directory.mkdir(mode=0o755)
+            except FileExistsError:
+                pass
+            except OSError as error:
+                raise UpdateError(
+                    "UNSAFE_INSTALL_ROOT",
+                    f"Cannot create native release directory: {directory}.",
+                ) from error
+
+            try:
+                metadata = directory.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "UNSAFE_INSTALL_ROOT",
+                    f"Cannot inspect native release directory: {directory}.",
+                ) from error
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) & 0o022
+            ):
+                raise UpdateError(
+                    "UNSAFE_INSTALL_ROOT",
+                    f"Native release directory is not a private-owner directory: {directory}.",
+                )
+            try:
+                # mkdir's mode is filtered by umask; restore the runner's required
+                # traversable mode only after rejecting links and writable ancestors.
+                os.chmod(directory, 0o755, follow_symlinks=False)
+                verified = directory.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "UNSAFE_INSTALL_ROOT",
+                    f"Cannot set native release directory permissions: {directory}.",
+                ) from error
+            if (
+                not stat.S_ISDIR(verified.st_mode)
+                or verified.st_uid != os.geteuid()
+                or stat.S_IMODE(verified.st_mode) != 0o755
+            ):
+                raise UpdateError(
+                    "UNSAFE_INSTALL_ROOT",
+                    f"Native release directory did not retain its required mode: {directory}.",
+                )
 
     @staticmethod
     def _atomic_json_file(path: Path, value: dict[str, Any], *, mode: int) -> None:
@@ -5975,6 +6895,8 @@ class ComponentUpdater:
                 "Maintenance broker did not return a durable transaction token.",
                 retryable=True,
             )
+        if transaction.get("schemaAdoption") is True:
+            transaction["maintenanceGateGeneration"] = gate_generation
         return token
 
     def _clear_begin_pending(self, transaction: dict[str, Any], transaction_path: Path) -> None:
@@ -6327,6 +7249,604 @@ class ComponentUpdater:
             )
         except Exception as error:  # noqa: BLE001 - rollback must retain the gate for every unexpected failure.
             return False, f"Rollback could not be verified: {error}; maintenance gate remains held."
+
+    def _schema_migrator_path(self, transaction: dict[str, Any]) -> Path:
+        """Resolve the candidate Broker migrator from its staged signed file map."""
+        broker = next(
+            (
+                item
+                for item in transaction.get("components", [])
+                if isinstance(item, dict)
+                and item.get("componentId") == "cyrene-runtime-maintenance"
+            ),
+            None,
+        )
+        if not isinstance(broker, dict) or not isinstance(broker.get("manifest"), dict):
+            raise UpdateError("SCHEMA_ADOPTION_UNKNOWN", "The staged Broker candidate is missing.")
+        artifact = broker["manifest"].get("artifact")
+        if not isinstance(artifact, dict):
+            raise UpdateError("SCHEMA_ADOPTION_UNKNOWN", "The staged Broker artifact is malformed.")
+        entrypoint = artifact.get("entrypoint")
+        files = artifact.get("files")
+        if not isinstance(entrypoint, str) or not isinstance(files, dict):
+            raise UpdateError("SCHEMA_ADOPTION_UNKNOWN", "The staged Broker file map is malformed.")
+        relative = _safe_relative(entrypoint, field="Broker migration entrypoint")
+        expected = files.get(relative.as_posix())
+        if not _valid_digest(expected):
+            raise UpdateError(
+                "SCHEMA_ADOPTION_UNKNOWN", "The staged Broker entrypoint is not signed."
+            )
+        release = Path(broker["releasePath"])
+        directories = [self.install_root, self.install_root / "components"]
+        component_root = self.install_root / "components" / "cyrene-runtime-maintenance"
+        directories.extend((component_root, component_root / "releases", release))
+        current = release
+        for part in relative.parts[:-1]:
+            current = current / part
+            directories.append(current)
+        for directory in directories:
+            try:
+                info = directory.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "SCHEMA_ADOPTION_UNKNOWN", "Staged Broker path is unavailable."
+                ) from error
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise UpdateError("SCHEMA_ADOPTION_UNKNOWN", "Staged Broker path is unsafe.")
+        executable = release.joinpath(*relative.parts)
+        try:
+            info = executable.lstat()
+            digest = _file_digest(executable)
+        except OSError as error:
+            raise UpdateError(
+                "SCHEMA_ADOPTION_UNKNOWN", "Staged Broker executable is unavailable."
+            ) from error
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or not stat.S_IMODE(info.st_mode) & 0o111
+            or digest != expected
+        ):
+            raise UpdateError(
+                "SCHEMA_ADOPTION_UNKNOWN",
+                "Staged Broker executable failed signed-file verification.",
+            )
+        return executable
+
+    def _run_schema_migrator(
+        self, transaction: dict[str, Any], operation: str, proof_path: Path
+    ) -> dict[str, Any]:
+        if operation not in {"migrate-state", "rollback-state"}:
+            raise UpdateError(
+                "SCHEMA_ADOPTION_INVALID", "Unsupported internal migration operation."
+            )
+        command = [
+            str(self._schema_migrator_path(transaction)),
+            operation,
+            "--state-dir",
+            "/var/lib/cyrene/runtime",
+            "--maintenance-proof-file",
+            str(proof_path),
+        ]
+        try:
+            completed = self.runner(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UpdateError(
+                "SCHEMA_MIGRATION_UNKNOWN",
+                f"The signed Broker {operation} command did not return a known result.",
+                retryable=True,
+            ) from error
+        if completed.returncode != 0:
+            detail = completed.stderr.strip() or completed.stdout.strip() or "unknown failure"
+            raise UpdateError(
+                "SCHEMA_MIGRATION_FAILED",
+                f"The signed Broker {operation} command refused the transaction: {detail}",
+                retryable=True,
+            )
+        lines = completed.stdout.splitlines()
+        if len(lines) != 1:
+            raise UpdateError("SCHEMA_MIGRATION_UNKNOWN", "Broker migration output is malformed.")
+        try:
+            result = json.loads(lines[0])
+        except json.JSONDecodeError as error:
+            raise UpdateError(
+                "SCHEMA_MIGRATION_UNKNOWN", "Broker migration output is not JSON."
+            ) from error
+        return result if isinstance(result, dict) else {}
+
+    def _schema_migration_proof(self, transaction: dict[str, Any]) -> tuple[dict[str, Any], Path]:
+        helper = self._load_native_runtime_schema_migration()
+        try:
+            proof = helper.create_migration_proof(transaction, transaction.get("schema1Profile"))
+        except helper.MigrationError as error:
+            raise UpdateError("SCHEMA_ADOPTION_UNKNOWN", str(error), retryable=True) from error
+        proof_path = (
+            self._private_state_directory("transactions")
+            / f"{transaction['planId']}.migration-proof.json"
+        )
+        if proof_path.exists() or proof_path.is_symlink():
+            existing = _read_object(proof_path, "Core schema migration proof")
+            if existing != proof:
+                raise UpdateError(
+                    "SCHEMA_ADOPTION_UNKNOWN",
+                    "Persisted migration proof differs from the confirmed plan.",
+                )
+        else:
+            _atomic_json(proof_path, proof, mode=0o600)
+        _verify_private_file(proof_path)
+        return proof, proof_path
+
+    def _validate_schema_adoption_transaction(self, transaction: dict[str, Any]) -> None:
+        helper = self._load_native_runtime_schema_migration()
+        staged = transaction.get("components")
+        if not isinstance(staged, list) or {
+            item.get("componentId") for item in staged if isinstance(item, dict)
+        } != set(helper.NATIVE_GROUP_MEMBERS):
+            raise UpdateError(
+                "TRANSACTION_IDENTITY_UNKNOWN", "Schema-adoption candidate set changed."
+            )
+        inventory = transaction.get("preActiveUnits")
+        if not isinstance(inventory, list):
+            raise UpdateError(
+                "TRANSACTION_IDENTITY_UNKNOWN", "Schema-adoption unit inventory is missing."
+            )
+        known_units: set[str] = set()
+        for row in inventory:
+            if not isinstance(row, dict) or set(row) != {
+                "unit",
+                "componentId",
+                "unitFileState",
+                "active",
+            }:
+                raise UpdateError(
+                    "TRANSACTION_IDENTITY_UNKNOWN", "Schema-adoption unit inventory is malformed."
+                )
+            component = self.components.get(row.get("componentId"))
+            unit = self._catalog_matched_unit(component) if isinstance(component, dict) else None
+            if (
+                not isinstance(row.get("unit"), str)
+                or row["unit"] != unit
+                or row["unit"] in known_units
+                or not isinstance(row.get("unitFileState"), str)
+                or type(row.get("active")) is not bool
+            ):
+                raise UpdateError(
+                    "TRANSACTION_IDENTITY_UNKNOWN",
+                    "Schema-adoption unit inventory identity changed.",
+                )
+            known_units.add(row["unit"])
+        if transaction.get("schema1Profile") not in helper.SCHEMA1_PROFILES:
+            raise UpdateError("TRANSACTION_IDENTITY_UNKNOWN", "Schema-adoption profile is invalid.")
+        if (
+            transaction.get("targetKind") != "CORE_RUNTIME"
+            or transaction.get("schemaAdoption") is not True
+        ):
+            raise UpdateError(
+                "TRANSACTION_IDENTITY_UNKNOWN", "Schema-adoption transaction identity is invalid."
+            )
+
+    def _execute_schema_adoption(
+        self, transaction: dict[str, Any], transaction_path: Path
+    ) -> dict[str, Any]:
+        """Apply the exact held schema migration, then start and verify the complete C10 cohort."""
+        self._validate_schema_adoption_transaction(transaction)
+        helper = self._load_native_runtime_schema_migration()
+        _, proof_path = self._schema_migration_proof(transaction)
+        try:
+            if transaction.get("migrationPhase") in {"planned", "quiesce_pending"}:
+                transaction["migrationPhase"] = "quiesce_pending"
+                _atomic_json(transaction_path, transaction)
+                helper.stop_captured_units(self, transaction["preActiveUnits"])
+                transaction["migrationPhase"] = "quiesced"
+                _atomic_json(transaction_path, transaction)
+
+            if transaction.get("migrationPhase") in {"quiesced", "migrate_pending"}:
+                transaction["migrationPhase"] = "migrate_pending"
+                _atomic_json(transaction_path, transaction)
+                result = self._run_schema_migrator(transaction, "migrate-state", proof_path)
+                if (
+                    result.get("migrated") is not True
+                    or result.get("schema_version") != 2
+                    or type(result.get("gate_generation")) is not int
+                    or result.get("gate_generation") != transaction.get("maintenanceGateGeneration")
+                    or type(result.get("catalog_generation")) is not int
+                    or result.get("catalog_generation")
+                    != transaction.get("expectedCatalogGeneration")
+                    or not isinstance(result.get("migration_id"), str)
+                    or not result["migration_id"]
+                ):
+                    raise UpdateError(
+                        "SCHEMA_MIGRATION_UNKNOWN",
+                        "Broker did not confirm the exact schema-2 migration.",
+                    )
+                transaction["migrationId"] = result["migration_id"]
+                transaction["migrationPhase"] = "migrated"
+                _atomic_json(transaction_path, transaction)
+
+            if transaction.get("migrationPhase") in {"migrated", "activation_pending"}:
+                transaction["migrationPhase"] = "activation_pending"
+                _atomic_json(transaction_path, transaction)
+                self._activate_schema_adoption_candidates(transaction)
+                transaction["migrationPhase"] = "candidate_active"
+                _atomic_json(transaction_path, transaction)
+
+            if transaction.get("migrationPhase") in {"candidate_active", "core_start_pending"}:
+                transaction["migrationPhase"] = "core_start_pending"
+                _atomic_json(transaction_path, transaction)
+                for unit in helper.start_core_unit_order(self, transaction["preActiveUnits"]):
+                    self._run_systemctl("start", unit)
+                    self._wait_unit_active(unit)
+                self._validate_schema2_core_health(transaction)
+                transaction["migrationPhase"] = "core_healthy"
+                _atomic_json(transaction_path, transaction)
+
+            if transaction.get("migrationPhase") not in {"core_healthy", "success_end_pending"}:
+                raise UpdateError(
+                    "SCHEMA_ADOPTION_UNKNOWN", "Schema-adoption journal phase is unsupported."
+                )
+        except Exception as failure:
+            healthy, message = self._rollback_schema_adoption(
+                transaction, transaction_path, proof_path
+            )
+            transaction["phase"] = "rollback_end_pending" if healthy else "rollback_required"
+            transaction["migrationPhase"] = (
+                "rollback_end_pending" if healthy else "rollback_required"
+            )
+            transaction["rollbackHealthy"] = healthy
+            transaction["rollbackMessage"] = message
+            _atomic_json(transaction_path, transaction)
+            if not healthy:
+                raise UpdateError(
+                    "SCHEMA_ROLLBACK_REQUIRED",
+                    f"Schema adoption failed ({failure}); {message}",
+                    retryable=True,
+                ) from failure
+            try:
+                self._end_maintenance(transaction, outcome="ROLLED_BACK", healthy=True)
+            except UpdateError as end_error:
+                transaction["recoveryError"] = str(end_error)
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "SCHEMA_ROLLBACK_GATE_HELD",
+                    f"Schema adoption failed ({failure}); rollback is verified but the maintenance hold remains active: {end_error}",
+                    retryable=True,
+                ) from failure
+            transaction["phase"] = "rollback_clients_pending"
+            transaction["migrationPhase"] = "rollback_clients_pending"
+            _atomic_json(transaction_path, transaction)
+            self._restore_previously_active_clients(transaction, core_only=False)
+            transaction["phase"] = "rolled_back"
+            transaction["migrationPhase"] = "rolled_back"
+            transaction.pop("maintenanceToken", None)
+            _atomic_json(transaction_path, transaction)
+            raise UpdateError(
+                "SCHEMA_ADOPTION_ROLLED_BACK", f"Schema adoption failed ({failure}). {message}"
+            ) from failure
+        return self._complete_schema_adoption(transaction, transaction_path)
+
+    def _complete_schema_adoption(
+        self, transaction: dict[str, Any], transaction_path: Path
+    ) -> dict[str, Any]:
+        transaction["phase"] = "success_end_pending"
+        transaction["migrationPhase"] = "success_end_pending"
+        _atomic_json(transaction_path, transaction)
+        self._validate_schema2_core_health(transaction)
+        expected = {item["componentId"]: item for item in transaction["components"]}
+        current = {
+            item["componentId"]: item
+            for item in self._capture_active_versions(transaction["components"])
+        }
+        if not self._same_release_identities(expected, current, require_attested=True):
+            raise UpdateError(
+                "TRANSACTION_STATE_MISMATCH",
+                "C10 active receipt set differs from the confirmed adoption plan.",
+                retryable=True,
+            )
+        readiness = self._readiness_for("CORE_RUNTIME", requires_restart=True, force=True)
+        if readiness.get("status") == "MAINTENANCE_ACTIVE":
+            self._end_maintenance(transaction, outcome="SUCCESS", healthy=True)
+        elif readiness.get("status") != "READY":
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Cannot reconcile C10 maintenance completion while Broker state is unknown.",
+                retryable=True,
+            )
+        transaction["phase"] = "clients_restore_pending"
+        transaction["migrationPhase"] = "clients_restore_pending"
+        _atomic_json(transaction_path, transaction)
+        self._restore_previously_active_clients(transaction, core_only=False)
+        transaction["phase"] = "succeeded"
+        transaction["migrationPhase"] = "complete"
+        transaction.pop("maintenanceToken", None)
+        transaction.pop("recoveryError", None)
+        _atomic_json(transaction_path, transaction)
+        return self._applied_result(transaction)
+
+    def _recover_schema_adoption(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        confirmation: dict[str, Any],
+    ) -> dict[str, Any]:
+        if transaction.get("planId") != confirmation.get("planId") or transaction.get(
+            "planDigest"
+        ) != confirmation.get("planDigest"):
+            raise UpdateError(
+                "TRANSACTION_MISMATCH",
+                "Pending schema adoption belongs to a different confirmed plan.",
+            )
+        if not _running_as_root():
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED", "Schema adoption recovery requires the root updater."
+            )
+        self._validate_recovery_identity(transaction)
+        self._validate_schema_adoption_transaction(transaction)
+        phase = transaction.get("migrationPhase")
+        if phase in {"success_end_pending", "clients_restore_pending"}:
+            return self._complete_schema_adoption(transaction, transaction_path)
+        if phase in {
+            "rollback_required",
+            "rollback_migration_pending",
+            "rollback_state_restored",
+            "rollback_activation_pending",
+            "rollback_core_start_pending",
+        }:
+            _, proof_path = self._schema_migration_proof(transaction)
+            healthy, message = self._rollback_schema_adoption(
+                transaction, transaction_path, proof_path
+            )
+            if not healthy:
+                transaction["phase"] = "rollback_required"
+                transaction["migrationPhase"] = "rollback_required"
+                transaction["rollbackMessage"] = message
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError("SCHEMA_ROLLBACK_REQUIRED", message, retryable=True)
+            transaction["phase"] = "rollback_end_pending"
+            transaction["migrationPhase"] = "rollback_end_pending"
+            transaction["rollbackHealthy"] = True
+            transaction["rollbackMessage"] = message
+            _atomic_json(transaction_path, transaction)
+            return self._finish_schema_rollback(transaction, transaction_path)
+        if phase in {"rollback_end_pending", "rollback_clients_pending"}:
+            expected_previous = {
+                item["componentId"]: item for item in transaction.get("previous", [])
+            }
+            current_previous = {
+                item["componentId"]: item
+                for item in self._capture_active_versions(transaction["components"])
+            }
+            if not self._same_release_identities(
+                expected_previous, current_previous, require_attested=False
+            ):
+                raise UpdateError(
+                    "TRANSACTION_STATE_MISMATCH",
+                    "Restored C9 receipts differ from the recorded rollback identities.",
+                    retryable=True,
+                )
+            self._validate_legacy_core_health(transaction)
+            if phase == "rollback_end_pending":
+                readiness = self._readiness_for("CORE_RUNTIME", requires_restart=True, force=True)
+                if readiness.get("status") == "MAINTENANCE_ACTIVE":
+                    self._end_maintenance(transaction, outcome="ROLLED_BACK", healthy=True)
+                elif readiness.get("status") != "READY":
+                    raise UpdateError(
+                        "GATE_UNKNOWN",
+                        "Cannot reconcile schema rollback while Broker state is unknown.",
+                        retryable=True,
+                    )
+                transaction["phase"] = "rollback_clients_pending"
+                transaction["migrationPhase"] = "rollback_clients_pending"
+                _atomic_json(transaction_path, transaction)
+            return self._finish_schema_rollback(transaction, transaction_path)
+        if phase == "planned" and transaction.get("phase") == "begin_pending":
+            try:
+                transaction["maintenanceToken"] = self._begin_maintenance(transaction)
+            except UpdateError as error:
+                if error.maintenance_not_acquired:
+                    self._clear_begin_pending(transaction, transaction_path)
+                raise
+            transaction["phase"] = "applying"
+            _atomic_json(transaction_path, transaction)
+        return self._execute_schema_adoption(transaction, transaction_path)
+
+    def _finish_schema_rollback(self, transaction: dict[str, Any], transaction_path: Path) -> None:
+        self._restore_previously_active_clients(transaction, core_only=False)
+        transaction["phase"] = "rolled_back"
+        transaction["migrationPhase"] = "rolled_back"
+        transaction.pop("maintenanceToken", None)
+        _atomic_json(transaction_path, transaction)
+        raise UpdateError(
+            "INTERRUPTED_UPDATE_ROLLED_BACK",
+            transaction.get("rollbackMessage", "Schema adoption was rolled back."),
+        )
+
+    def _activate_schema_adoption_candidates(self, transaction: dict[str, Any]) -> None:
+        previous = {item["componentId"]: item for item in transaction["previous"]}
+        for item in transaction["components"]:
+            component_id = item["componentId"]
+            current = self._active_native_pointer_identity(component_id)
+            candidate_pointer = item["pointerIdentity"]
+            old_pointer = previous[component_id].get("pointerIdentity")
+            if current == candidate_pointer:
+                installed = self._installed(self.components[component_id])
+                if installed.get("manifestDigest") != item["manifestDigest"]:
+                    raise UpdateError(
+                        "TRANSACTION_STATE_MISMATCH",
+                        f"Active {component_id} receipt differs from the candidate.",
+                    )
+                continue
+            if current != old_pointer:
+                raise UpdateError(
+                    "TRANSACTION_STATE_MISMATCH",
+                    f"Active {component_id} pointer changed outside the confirmed plan.",
+                )
+            self._activate_native(component_id, candidate_pointer, expected_current=old_pointer)
+            self._write_active_receipt(item)
+
+    def _validate_schema2_core_health(self, transaction: dict[str, Any]) -> None:
+        result = self._broker_request("Health", {})
+        required = {
+            "cyrene.runtime-maintenance.state.v2",
+            "cyrene.runtime-maintenance.binding-operations.v1",
+        }
+        capabilities = result.get("capabilities")
+        if (
+            result.get("status") != "SERVING"
+            or result.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
+            or result.get("catalog_generation") != transaction.get("expectedCatalogGeneration")
+            or result.get("gate_generation") != transaction.get("maintenanceGateGeneration")
+            or not isinstance(capabilities, list)
+            or any(not isinstance(value, str) or not value for value in capabilities)
+            or len(capabilities) != len(set(capabilities))
+            or not required.issubset(capabilities)
+        ):
+            raise UpdateError(
+                "SCHEMA_CORE_HEALTH_UNKNOWN",
+                "The C10 Broker did not prove schema-2 and binding-operation readiness.",
+                retryable=True,
+            )
+        helper = self._load_native_package_runtime_bootstrap()
+        catalog, _sources = self._activity_catalog()
+        if catalog.get("generation") != transaction.get("expectedCatalogGeneration"):
+            raise UpdateError(
+                "SCHEMA_CORE_HEALTH_UNKNOWN",
+                "The activity catalog generation changed during Core activation.",
+                retryable=True,
+            )
+        try:
+            helper.probe_runtime_authority(
+                catalog, expected_catalog_generation=transaction["expectedCatalogGeneration"]
+            )
+        except Exception as error:
+            raise UpdateError(
+                "SCHEMA_CORE_HEALTH_UNKNOWN",
+                "Package Runtime did not prove source-authenticated C10 readiness.",
+                retryable=True,
+            ) from error
+
+    def _rollback_schema_adoption(
+        self, transaction: dict[str, Any], transaction_path: Path, proof_path: Path
+    ) -> tuple[bool, str]:
+        helper = self._load_native_runtime_schema_migration()
+        try:
+            for item in transaction["components"]:
+                unit = self._catalog_matched_unit(self.components[item["componentId"]])
+                if unit:
+                    self._run_systemctl("stop", unit)
+                    helper._wait_unit_stopped(self, unit)
+            helper.stop_captured_units(self, transaction["preActiveUnits"])
+            if transaction.get("migrationPhase") in {
+                "migrate_pending",
+                "migrated",
+                "activation_pending",
+                "candidate_active",
+                "core_start_pending",
+                "core_healthy",
+                "success_end_pending",
+                "rollback_required",
+                "rollback_migration_pending",
+                "rollback_state_restored",
+                "rollback_activation_pending",
+                "rollback_core_start_pending",
+            }:
+                transaction["migrationPhase"] = "rollback_migration_pending"
+                _atomic_json(transaction_path, transaction)
+                result = self._run_schema_migrator(transaction, "rollback-state", proof_path)
+                if result.get("schema_version") != 1 or result.get("rolled_back") is not True:
+                    raise UpdateError(
+                        "SCHEMA_ROLLBACK_UNKNOWN",
+                        "Broker did not confirm restoration of the schema-1 state.",
+                    )
+                transaction["migrationPhase"] = "rollback_state_restored"
+                _atomic_json(transaction_path, transaction)
+            transaction["migrationPhase"] = "rollback_activation_pending"
+            _atomic_json(transaction_path, transaction)
+            previous = {item["componentId"]: item for item in transaction["previous"]}
+            for item in transaction["components"]:
+                component_id = item["componentId"]
+                prior = previous[component_id]
+                current = self._active_native_pointer_identity(component_id)
+                candidate_pointer = item["pointerIdentity"]
+                old_pointer = prior.get("pointerIdentity")
+                if current not in {candidate_pointer, old_pointer}:
+                    raise UpdateError(
+                        "TRANSACTION_STATE_MISMATCH",
+                        f"Active {component_id} pointer cannot be reconciled.",
+                    )
+                if current != old_pointer:
+                    self._activate_native(component_id, old_pointer, expected_current=current)
+                self._restore_active_receipt(component_id, prior)
+                _atomic_json(transaction_path, transaction)
+            transaction["migrationPhase"] = "rollback_core_start_pending"
+            _atomic_json(transaction_path, transaction)
+            self._restore_previously_active_clients(transaction, core_only=True)
+            self._validate_legacy_core_health(transaction)
+            return (
+                True,
+                "The signed prior Core cohort and schema-1 state were restored and verified.",
+            )
+        except Exception as error:  # noqa: BLE001 - any uncertainty must keep the hold active.
+            return (
+                False,
+                f"Schema rollback could not be verified: {error}; maintenance remains held.",
+            )
+
+    def _validate_legacy_core_health(self, transaction: dict[str, Any]) -> None:
+        result = self._broker_request("Health", {})
+        if (
+            result.get("status") != "SERVING"
+            or result.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
+            or result.get("catalog_generation") != transaction.get("expectedCatalogGeneration")
+            or result.get("gate_generation") != transaction.get("maintenanceGateGeneration")
+        ):
+            raise UpdateError("SCHEMA_ROLLBACK_UNKNOWN", "Restored C9 Broker health is unknown.")
+
+    def _restore_previously_active_clients(
+        self, transaction: dict[str, Any], *, core_only: bool
+    ) -> None:
+        rows = transaction.get("preActiveUnits", [])
+        selected = []
+        for row in rows:
+            if not row.get("active"):
+                continue
+            component = self.components[row["componentId"]]
+            is_core = component.get("restart", {}).get("group") == "core-runtime"
+            if is_core != core_only:
+                continue
+            if core_only:
+                selected.append(row)
+            else:
+                selected.append(row)
+        if core_only:
+            selected.sort(
+                key=lambda row: (
+                    25
+                    if row["componentId"] == "cyrene-runtime-maintenance"
+                    else 30
+                    if row["componentId"] == "cyrene-kernel"
+                    else int(
+                        self.components[row["componentId"]].get("restart", {}).get("order", 50)
+                    ),
+                    row["unit"],
+                )
+            )
+        else:
+            selected.sort(key=lambda row: (row["componentId"], row["unit"]))
+        for row in selected:
+            self._run_systemctl("start", row["unit"])
+            self._wait_unit_active(row["unit"])
 
     def _active_python_pointer_identity(self, service: str) -> str | None:
         try:
@@ -7216,7 +8736,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--activity-catalog", type=Path, default=DEFAULT_ACTIVITY_CATALOG)
     parser.add_argument("--socket", type=Path, default=DEFAULT_SOCKET)
-    parser.add_argument("--broker", type=Path, default=DEFAULT_BROKER)
+    parser.add_argument("--broker", type=Path)
     parser.add_argument("--install-root", type=Path, default=DEFAULT_INSTALL_ROOT)
     parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     args = parser.parse_args(argv)
