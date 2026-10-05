@@ -14,9 +14,13 @@ ARCH="amd64"
 TARGET_PROFILE=""
 SERVICE_WHEELHOUSE="${CYRENE_SERVICE_WHEELHOUSE:-${SCRIPT_DIR}/service-wheelhouse}"
 VERIFIED_SERVICE_ARTIFACTS=""
+SELECTED_BOOTSTRAP_CATALOG=""
+NATIVE_SOURCE_RECEIPT=""
 PYTHON_RUNTIME_ARCHIVE=""
 UV_EXECUTABLE=""
 DEVELOPMENT_SOURCE_BUILD=0
+SOURCE_REF="${SOURCE_REF:-}"
+SOURCE_COMMIT="${SOURCE_COMMIT:-}"
 
 print_help() {
     cat <<EOF
@@ -35,6 +39,12 @@ Options:
                         Optional verified uv 0.12.21 build executable; it is also staged at its locked runtime path
   --verified-service-artifacts <dir>
                         Index plus original Product tar/manifest/attestation release assets
+  --bootstrap-catalog <file>
+                        Exact selected, attested Workspace catalog for production builds
+  --source-receipt <file>
+                        Exact verifier-derived source receipt for production builds
+  SOURCE_REF and SOURCE_COMMIT environment variables
+                        Exact Workspace ref and commit for production builds
   --development-source-build
                         Build service bundles from a wheelhouse for local development only
   --service-wheelhouse <dir>
@@ -71,6 +81,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --verified-service-artifacts)
             VERIFIED_SERVICE_ARTIFACTS="$2"
+            shift 2
+            ;;
+        --bootstrap-catalog)
+            SELECTED_BOOTSTRAP_CATALOG="$2"
+            shift 2
+            ;;
+        --source-receipt)
+            NATIVE_SOURCE_RECEIPT="$2"
             shift 2
             ;;
         --development-source-build)
@@ -110,6 +128,24 @@ fi
 
 if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" && "${DEVELOPMENT_SOURCE_BUILD}" -eq 1 ]]; then
     echo "ERROR: --verified-service-artifacts cannot be combined with --development-source-build." >&2
+    exit 2
+fi
+if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
+    if [[ -z "${SELECTED_BOOTSTRAP_CATALOG}" || -z "${NATIVE_SOURCE_RECEIPT}" ]]; then
+        echo "ERROR: production assembly requires the exact selected --bootstrap-catalog and --source-receipt." >&2
+        exit 2
+    fi
+    if [[ -L "${SELECTED_BOOTSTRAP_CATALOG}" || ! -f "${SELECTED_BOOTSTRAP_CATALOG}" \
+        || -L "${NATIVE_SOURCE_RECEIPT}" || ! -f "${NATIVE_SOURCE_RECEIPT}" ]]; then
+        echo "ERROR: selected catalog and source receipt must be regular non-symlink files." >&2
+        exit 2
+    fi
+    if [[ -z "${SOURCE_REF}" || ! "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "ERROR: production assembly requires exact SOURCE_REF and full-SHA SOURCE_COMMIT." >&2
+        exit 2
+    fi
+elif [[ -n "${SELECTED_BOOTSTRAP_CATALOG}" || -n "${NATIVE_SOURCE_RECEIPT}" ]]; then
+    echo "ERROR: --bootstrap-catalog and --source-receipt are production-only inputs." >&2
     exit 2
 fi
 if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" && -n "${CYRENE_SERVICE_WHEELHOUSE:-}" ]]; then
@@ -272,6 +308,9 @@ chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
 cp "${SCRIPT_DIR}/native_component_bootstrap.py" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/native_component_bootstrap.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_component_bootstrap.py"
+cp "${SCRIPT_DIR}/bootstrap_catalog_binding.py" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/bootstrap_catalog_binding.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/bootstrap_catalog_binding.py"
 cp "${SCRIPT_DIR}/native_core_bootstrap.py" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/native_core_bootstrap.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_core_bootstrap.py"
@@ -281,8 +320,31 @@ chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_runtime_schema_migration.p
 cp "${SCRIPT_DIR}/native_first_products.py" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/native_first_products.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_first_products.py"
-cp "${SCRIPT_DIR}/component-catalog-bootstrap-v1.json" "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
+if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
+    cp "${SELECTED_BOOTSTRAP_CATALOG}" \
+        "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
+else
+    cp "${SCRIPT_DIR}/component-catalog-bootstrap-v1.json" \
+        "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
+fi
 chmod 644 "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
+CATALOG_BINDING_ARGS=(
+    prepare-bootstrap-catalog-binding
+    --catalog "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
+    --output "${STAGE_DIR}/usr/share/cyrene/bootstrap-catalog-binding-v1.json"
+)
+if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
+    CATALOG_BINDING_ARGS+=(
+        --source-receipt "${NATIVE_SOURCE_RECEIPT}"
+        --source-ref "${SOURCE_REF}"
+        --source-commit "${SOURCE_COMMIT}"
+    )
+else
+    CATALOG_BINDING_ARGS+=(--development-source-build)
+fi
+"${BUILD_PYTHON}" "${WORKSPACE_ROOT}/scripts/native_installer_release.py" \
+    "${CATALOG_BINDING_ARGS[@]}"
+chmod 644 "${STAGE_DIR}/usr/share/cyrene/bootstrap-catalog-binding-v1.json"
 mkdir -p "${STAGE_DIR}/usr/share/cyrene/catalog-schemas"
 cp "${WORKSPACE_ROOT}/governance/component-catalog-v1.schema.json" \
     "${STAGE_DIR}/usr/share/cyrene/catalog-schemas/component-catalog-v1.schema.json"
@@ -314,7 +376,7 @@ if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
         --target-profile "${TARGET_PROFILE}" \
         --output-root "${VERIFIED_STAGE}" \
         --release-lock "${WORKSPACE_ROOT}/release-lock.json" \
-        --catalog "${SCRIPT_DIR}/component-catalog-bootstrap-v1.json" \
+        --catalog "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json" \
         --json > "${BUILD_WORK_DIR}/verified-service-artifacts-receipt.json"
     cp -a "${VERIFIED_STAGE}/service-artifacts/." \
         "${STAGE_DIR}/usr/share/cyrene/service-artifacts/"
