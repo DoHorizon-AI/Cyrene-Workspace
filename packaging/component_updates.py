@@ -63,7 +63,6 @@ DEFAULT_CATALOG = (
 )
 DEFAULT_ACTIVITY_CATALOG = Path("/var/lib/cyrene/runtime/activity-sources.json")
 DEFAULT_SOCKET = Path("/run/cyrene/runtime-maintenance.sock")
-DEFAULT_BROKER = Path("/usr/bin/cyrene-runtime-maintenance")
 BROKER_COMPONENT_ID = "cyrene-runtime-maintenance"
 BROKER_BOOTSTRAP_JOURNAL = "native-first-bootstrap/runtime-maintenance-first-install.json"
 DEFAULT_INSTALL_ROOT = Path("/usr/lib/cyrene")
@@ -641,8 +640,9 @@ class ComponentUpdater:
         self.catalog_path = Path(catalog_path)
         self.activity_catalog_path = Path(activity_catalog_path)
         self.socket_path = Path(socket_path)
-        self._broker_path_explicit = broker_path is not None
-        self.broker_path = Path(broker_path) if broker_path is not None else DEFAULT_BROKER
+        # None means resolve only the catalog-pinned, installed broker. An explicit
+        # path preserves the legacy/test override without changing its semantics.
+        self.broker_path = Path(broker_path) if broker_path is not None else None
         self.install_root = Path(install_root)
         self.state_root = Path(state_root)
         self.data_bundle_root = Path(data_bundle_root)
@@ -3475,18 +3475,20 @@ class ComponentUpdater:
 
     def _resolve_broker_executable(self) -> Path:
         """Resolve an explicit test override or the exact active signed Broker."""
-        if self._broker_path_explicit:
+
+        if self.broker_path is not None:
             return self.broker_path
         return self._resolve_installed_broker()
 
     def _resolve_installed_broker(self) -> Path:
-        """Resolve the default broker only through its verified active release.
+        """Resolve the default Broker only through its verified active release.
 
-        Explicitly configured paths retain their existing local/test behavior. The default
-        path follows the root-owned immutable release recorded by the updater rather than
-        relying on an unsigned /usr/bin alias.
-        显式路径维持原有行为；默认入口只能来自已验证的活动签名发布目录。
+        An ordinary verified release receipt is authoritative. The private completed
+        first-install journal is a constrained fallback for installations that predate
+        release receipts; it never authorizes an unsigned alias.
+        中文：默认 Broker 仅来自已验证的活动签名发布目录；无收据时才核验首次安装日志。
         """
+
         component_id = BROKER_COMPONENT_ID
         component = self.components.get(component_id)
         if (
@@ -3500,6 +3502,7 @@ class ComponentUpdater:
                 "The trusted component catalog does not contain the runtime maintenance broker.",
                 retryable=True,
             )
+
         installed = self._installed(component)
         manifest = installed.get("manifest")
         if (
@@ -3516,218 +3519,170 @@ class ComponentUpdater:
                 retryable=True,
             )
 
-        root = self.install_root / "components" / component_id
-        pointer_identity = installed.get("pointerIdentity")
-        if not isinstance(pointer_identity, str):
+        artifact = manifest.get("artifact")
+        files = artifact.get("files") if isinstance(artifact, dict) else None
+        entrypoint = artifact.get("entrypoint") if isinstance(artifact, dict) else None
+        if not isinstance(files, dict) or not isinstance(entrypoint, str):
             raise UpdateError(
-                "INVALID_INSTALLED_RELEASE", "The active broker release pointer is unavailable."
+                "INVALID_INSTALLED_RELEASE",
+                "The active broker manifest has no trusted entrypoint or file map.",
             )
-        release = root / "releases" / pointer_identity
-        trusted_directories = (
+        relative_entrypoint = _safe_relative(entrypoint, field="broker.artifact.entrypoint")
+        expected_entrypoint_digest = files.get(relative_entrypoint.as_posix())
+        if not _valid_digest(expected_entrypoint_digest):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                "The active broker entrypoint has no pinned file digest.",
+            )
+
+        try:
+            executable_files = _native_executable_files(artifact)
+            if relative_entrypoint.as_posix() not in executable_files:
+                raise ValueError("entrypoint is not signed executable content")
+
+            component_root = self.install_root / "components" / component_id
+            active = component_root / "active"
+            active_info = active.lstat()
+            if not stat.S_ISLNK(active_info.st_mode) or active_info.st_uid != 0:
+                raise ValueError("active pointer is not a root-owned symlink")
+            pointer_target = os.readlink(active)
+            match = re.fullmatch(r"releases/([^/]+)", pointer_target)
+            pointer_identity = installed.get("pointerIdentity")
+            if (
+                match is None
+                or not isinstance(pointer_identity, str)
+                or match.group(1) != pointer_identity
+            ):
+                raise ValueError("active pointer differs from the verified receipt")
+
+            release = component_root / pointer_target
+            self._verify_broker_directory_chain(release, relative_paths=[relative_entrypoint])
+            manifest_path = release / "component-manifest.json"
+            manifest_info = manifest_path.lstat()
+            if (
+                manifest_path.is_symlink()
+                or not stat.S_ISREG(manifest_info.st_mode)
+                or manifest_info.st_uid != 0
+                or manifest_info.st_nlink != 1
+                or stat.S_IMODE(manifest_info.st_mode) & 0o022
+                or json.loads(manifest_path.read_text(encoding="utf-8")) != manifest
+            ):
+                raise ValueError("installed manifest differs from the verified release identity")
+
+            # Every signed payload path and digest remains part of the active identity check.
+            for relative_name, expected_digest in files.items():
+                relative = _safe_relative(relative_name, field="artifact.files path")
+                if not _valid_digest(expected_digest):
+                    raise ValueError(f"signed file digest is invalid: {relative_name}")
+                self._verify_broker_directory_chain(release, relative_paths=[relative])
+                payload_file = release.joinpath(*relative.parts)
+                file_info = payload_file.lstat()
+                if (
+                    payload_file.is_symlink()
+                    or not stat.S_ISREG(file_info.st_mode)
+                    or file_info.st_uid != 0
+                    or file_info.st_nlink != 1
+                    or stat.S_IMODE(file_info.st_mode) & 0o022
+                    or _file_digest(payload_file) != expected_digest
+                    or (
+                        relative.as_posix() in executable_files
+                        and not stat.S_IMODE(file_info.st_mode) & 0o111
+                    )
+                ):
+                    raise ValueError(
+                        f"active Broker payload differs from its signed map: {relative_name}"
+                    )
+
+            if installed.get("identityAttested") is not True:
+                # New receipts bind the release directly; legacy installations need the
+                # exact first-install journal as an additional identity source.
+                self._verify_broker_bootstrap_journal(manifest, installed, pointer_target)
+        except UpdateError:
+            raise
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                f"The active maintenance broker failed install verification: {error}",
+                retryable=True,
+            ) from error
+        return release.joinpath(*relative_entrypoint.parts)
+
+    def _verify_broker_directory_chain(
+        self, release: Path, *, relative_paths: list[PurePosixPath]
+    ) -> None:
+        """Require real root-owned, non-writable install directories and payload parents."""
+
+        component_root = self.install_root / "components" / BROKER_COMPONENT_ID
+        directories = [
             self.install_root,
             self.install_root / "components",
-            root,
-            root / "releases",
+            component_root,
+            component_root / "releases",
             release,
-        )
-        for directory in trusted_directories:
-            try:
-                info = directory.lstat()
-            except OSError as error:
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE",
-                    f"Cannot inspect active broker release directory {directory}: {error}",
-                ) from error
+        ]
+        for relative in relative_paths:
+            current = release
+            for part in relative.parts[:-1]:
+                current /= part
+                directories.append(current)
+        if self.install_root == DEFAULT_INSTALL_ROOT:
+            directories = [Path("/"), Path("/usr"), Path("/usr/lib"), *directories]
+        for directory in dict.fromkeys(directories):
+            info = directory.lstat()
             if (
                 not stat.S_ISDIR(info.st_mode)
+                or directory.is_symlink()
                 or info.st_uid != 0
                 or stat.S_IMODE(info.st_mode) & 0o022
                 or not stat.S_IMODE(info.st_mode) & 0o001
             ):
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE",
-                    f"Active broker release directory is not root-owned and immutable: {directory}.",
-                )
-        if self.install_root == DEFAULT_INSTALL_ROOT:
-            for directory in (Path("/"), Path("/usr"), Path("/usr/lib")):
-                try:
-                    info = directory.lstat()
-                except OSError as error:
-                    raise UpdateError(
-                        "INVALID_INSTALLED_RELEASE",
-                        f"Cannot inspect active broker path ancestor {directory}: {error}",
-                    ) from error
-                if (
-                    not stat.S_ISDIR(info.st_mode)
-                    or directory.is_symlink()
-                    or info.st_uid != 0
-                    or stat.S_IMODE(info.st_mode) & 0o022
-                    or not stat.S_IMODE(info.st_mode) & 0o001
-                ):
-                    raise UpdateError(
-                        "INVALID_INSTALLED_RELEASE",
-                        f"Active broker path ancestor is not root-controlled: {directory}.",
-                    )
-
-        active = root / "active"
-        try:
-            active_info = active.lstat()
-            active_target = os.readlink(active)
-        except OSError as error:
-            raise UpdateError(
-                "INVALID_INSTALLED_RELEASE", f"Cannot inspect active broker pointer: {error}"
-            ) from error
-        if (
-            not stat.S_ISLNK(active_info.st_mode)
-            or active_info.st_uid != 0
-            or active_target != f"releases/{pointer_identity}"
-        ):
-            raise UpdateError(
-                "INVALID_INSTALLED_RELEASE", "The active broker pointer is unsafe or changed."
-            )
-
-        artifact = manifest.get("artifact")
-        if not isinstance(artifact, dict):
-            raise UpdateError("INVALID_INSTALLED_RELEASE", "The active broker artifact is invalid.")
-        executable_files = _native_executable_files(artifact)
-        entrypoint = artifact["entrypoint"]
-        if entrypoint not in executable_files:
-            raise UpdateError(
-                "INVALID_INSTALLED_RELEASE",
-                "The active broker entrypoint is not signed executable content.",
-            )
-        manifest_path = release / "component-manifest.json"
-        try:
-            manifest_info = manifest_path.lstat()
-            installed_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise UpdateError(
-                "INVALID_INSTALLED_RELEASE", "The active broker manifest cannot be re-read."
-            ) from error
-        if (
-            not stat.S_ISREG(manifest_info.st_mode)
-            or manifest_info.st_uid != 0
-            or manifest_info.st_nlink != 1
-            or stat.S_IMODE(manifest_info.st_mode) & 0o022
-            or installed_manifest != manifest
-        ):
-            raise UpdateError(
-                "INVALID_INSTALLED_RELEASE",
-                "The active broker manifest differs from its verified receipt.",
-            )
-        files = artifact["files"]
-        for relative_name, expected_digest in files.items():
-            relative = _safe_relative(relative_name, field="artifact.files path")
-            current_directory = release
-            for part in relative.parts[:-1]:
-                current_directory = current_directory / part
-                try:
-                    directory_info = current_directory.lstat()
-                except OSError as error:
-                    raise UpdateError(
-                        "INVALID_INSTALLED_RELEASE",
-                        f"Cannot inspect active broker payload directory {current_directory}: {error}",
-                    ) from error
-                if (
-                    not stat.S_ISDIR(directory_info.st_mode)
-                    or directory_info.st_uid != 0
-                    or stat.S_IMODE(directory_info.st_mode) & 0o022
-                ):
-                    raise UpdateError(
-                        "INVALID_INSTALLED_RELEASE",
-                        f"Active broker payload directory is unsafe: {current_directory}.",
-                    )
-            payload_file = release.joinpath(*relative.parts)
-            try:
-                file_info = payload_file.lstat()
-                with payload_file.open("rb") as source:
-                    actual_digest = hashlib.sha256(source.read()).hexdigest()
-            except OSError as error:
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE",
-                    f"Cannot verify active broker payload file {relative_name}: {error}",
-                ) from error
-            if (
-                not stat.S_ISREG(file_info.st_mode)
-                or file_info.st_uid != 0
-                or file_info.st_nlink != 1
-                or stat.S_IMODE(file_info.st_mode) & 0o022
-                or actual_digest != expected_digest.removeprefix("sha256:")
-            ):
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE",
-                    f"Active broker payload differs from its signed file map: {relative_name}.",
-                )
-            if relative_name == entrypoint and not stat.S_IMODE(file_info.st_mode) & 0o111:
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE", "The signed broker entrypoint is not executable."
-                )
-        if installed.get("identityAttested") is not True:
-            self._verify_broker_bootstrap_journal(manifest, installed, pointer_identity)
-        return release.joinpath(*_safe_relative(entrypoint, field="artifact.entrypoint").parts)
+                raise ValueError(f"active broker directory is not root-controlled: {directory}")
 
     def _verify_broker_bootstrap_journal(
         self, manifest: dict[str, Any], installed: dict[str, Any], pointer: str
     ) -> None:
         """Use the exact completed first-install journal only when no receipt exists."""
+
         journal_path = self.state_root / BROKER_BOOTSTRAP_JOURNAL
         journal_dir = journal_path.parent
+        # Public state ancestors allow normal root-owned 0755 paths; private state stays 0700.
         for directory in list(self.state_root.parents)[:3]:
-            try:
-                info = directory.lstat()
-            except OSError as error:
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE", "Broker journal ancestor is unavailable."
-                ) from error
+            info = directory.lstat()
             if (
                 not stat.S_ISDIR(info.st_mode)
                 or directory.is_symlink()
                 or info.st_uid != 0
                 or stat.S_IMODE(info.st_mode) & 0o022
             ):
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE", "Broker journal ancestor is not root-controlled."
-                )
+                raise ValueError("first-install journal ancestor is not root-controlled")
         for directory in (self.state_root, journal_dir):
-            try:
-                info = directory.lstat()
-            except OSError as error:
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE", "Broker bootstrap journal is unavailable."
-                ) from error
+            info = directory.lstat()
             if (
                 not stat.S_ISDIR(info.st_mode)
                 or directory.is_symlink()
                 or info.st_uid != 0
                 or stat.S_IMODE(info.st_mode) & 0o077
             ):
-                raise UpdateError(
-                    "INVALID_INSTALLED_RELEASE", "Broker bootstrap journal directory is unsafe."
-                )
-        try:
-            info = journal_path.lstat()
-        except OSError as error:
-            raise UpdateError(
-                "INVALID_INSTALLED_RELEASE", "Broker first-install journal is missing."
-            ) from error
+                raise ValueError("first-install journal directory is not private and root-owned")
+        info = journal_path.lstat()
         if (
             not stat.S_ISREG(info.st_mode)
             or journal_path.is_symlink()
             or info.st_uid != 0
+            or info.st_nlink != 1
             or stat.S_IMODE(info.st_mode) & 0o077
         ):
-            raise UpdateError(
-                "INVALID_INSTALLED_RELEASE", "Broker first-install journal is unsafe."
-            )
+            raise ValueError("first-install journal is not a private root-owned file")
+
         journal = _read_object(journal_path, "maintenance broker first-install journal")
         identity = journal.get("identity")
         artifact = manifest.get("artifact")
-        target_id = identity.get("targetId") if isinstance(identity, dict) else None
+        release_identity = pointer.removeprefix("releases/")
         if (
             journal.get("schemaVersion") != 1
             or journal.get("phase") != "complete"
             or re.fullmatch(r"[0-9a-f]{64}", str(journal.get("planDigest"))) is None
-            or journal.get("releaseIdentity") != pointer
+            or journal.get("releaseIdentity") != release_identity
             or not isinstance(identity, dict)
             or identity.get("componentId") != BROKER_COMPONENT_ID
             or identity.get("version") != manifest.get("version")
@@ -3735,15 +3690,13 @@ class ComponentUpdater:
             or identity.get("artifactDigest") != artifact.get("sha256")
             or installed.get("artifactDigest") != identity.get("artifactDigest")
             or not any(
-                target.get("id") == target_id and target.get("target") == manifest.get("target")
+                target.get("id") == identity.get("targetId")
+                and target.get("target") == manifest.get("target")
                 for target in self.targets.values()
             )
             or not _valid_digest(identity.get("indexDigest"))
         ):
-            raise UpdateError(
-                "INVALID_INSTALLED_RELEASE",
-                "First-install journal does not bind the active Broker receipt.",
-            )
+            raise ValueError("first-install journal does not bind the active broker receipt")
 
     def _readiness(self, component: dict[str, Any]) -> dict[str, Any]:
         target_kind = (

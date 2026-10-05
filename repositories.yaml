@@ -7,7 +7,7 @@ global_policy:
     - "windows"
     - "linux"
     - "macos"
-  windows_role: "DEVELOPMENT_HOST_ONLY (IDE indexing, rust-analyzer, local diagnostics, Python/DotNet tooling)"
+  windows_role: "DEVELOPMENT_HOST; optional standalone Navigator work assistant may execute on Windows x64"
   canonical_runtime_os: "linux"
   canonical_rust_target: "x86_64-unknown-linux-gnu"
   secondary_rust_targets:
@@ -384,6 +384,7 @@ repositories:
     roles:
       - "native-client-harness"
       - "deepseek-harness-runtime"
+      - "standalone-work-assistant"
     ci_authority:
       source: "github_actions"
       delivery: "azure_pipelines"
@@ -393,6 +394,11 @@ repositories:
     development_hosts: ["windows", "macos", "linux"]
     canonical_runtime_os: "linux"
     canonical_build_target: "multi-target"
+    work_assistant_targets:
+      - "linux-x64"
+      - "linux-arm64"
+      - "windows-x64"
+    work_assistant_target_policy: "Intended targets; real host evidence and release packaging are recorded separately. QQ and CLI execute on the Navigator host."
     ide:
       python_root: "../Cyrene-Services/Cyrene-Navigator"
       node_root: "../Cyrene-Services/Cyrene-Navigator/harness"
