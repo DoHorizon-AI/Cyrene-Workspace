@@ -28,7 +28,7 @@ UPDATER_PATH = WORKSPACE_ROOT / "packaging/component_updates.py"
 DEFAULT_CATALOG = WORKSPACE_ROOT / "packaging/component-catalog-bootstrap-v1.json"
 COMPONENT_ID = "cyrene-product-contract-bundle"
 DATA_BUNDLE_TARGET = "portable-contract-data-v1"
-TRUSTED_CATALOG_DIGEST = "sha256:6ddce58276388c4c9f58c811ba4fa703e4c3c3970ee7a7d990fdab9389fba7d6"
+TRUSTED_CATALOG_DIGEST = "sha256:fc2d6dc485bfc6a6fbbef426c93acf2a640b771e6e24a7284b030804fd02fab0"
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TENANT_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
