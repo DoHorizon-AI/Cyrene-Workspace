@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "profile": "text-model-lifecycle-v1",
   "scope": "targeted-http-fixtures-not-gpu-acceptance",
-  "platformRevision": "cc31061d0c5f7282dac36ec6ce356b49c1044033",
+  "platformRevision": "ba253cff6f865c288e18af28b8cba64d91977261",
   "products": {
     "Catalyst": "6f999daacf8a2afd76033bfc5d0d7bcf68202de1",
     "Yield": "65b5e77682d59b05e23f3d248765fb4986499a8e",
