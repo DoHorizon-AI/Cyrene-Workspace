@@ -1361,11 +1361,10 @@ def validate_peer_receipt(
                 "unavailable admission evidence cannot authorize held or active state"
             )
         admission_state = "unavailable"
-        admission_details = admission
     elif context.peer.role_id == "control-host":
-        admission_state, admission_details = _validate_control_admission(admission, hold, context)
+        admission_state, _admission_details = _validate_control_admission(admission, hold, context)
     else:
-        admission_state, admission_details = _validate_connector_admission(
+        admission_state, _admission_details = _validate_connector_admission(
             admission, hold, context, desired
         )
         if phase in {"PREPARED_HELD", "ACTIVE_HELD"} and (
@@ -1468,11 +1467,6 @@ def validate_peer_receipt(
                 raise PlacementError("peer ACTIVE_HELD receipt lacks its current hold proof")
         elif admission_state != "open" or hold is not None:
             raise PlacementError("peer settled ACTIVE receipt lacks real released admission proof")
-        if phase == "ACTIVE" and context.peer.role_id == "connector-host":
-            readiness = admission_details.get("readiness")
-            if not isinstance(readiness, dict) or readiness.get("status") != "READY":
-                raise PlacementError("connector settled ACTIVE requires actual READY readback")
-
     if phase in {"ABSENT", "STAGED"} and hold is not None:
         raise PlacementError("preparation-only peer state cannot carry an adoption hold")
     if phase in {"PREPARED_HELD", "ACTIVE_HELD"} and transaction["present"]:
@@ -1500,6 +1494,12 @@ def authorize_peer_operation(
     permitted = {"check": pre_apply, "stage": pre_apply, "apply": apply}
     if evidence.phase not in permitted[operation]:
         raise PlacementError("peer phase does not permit this host operation")
+    if operation == "apply" and context.peer.role_id == "connector-host":
+        readiness = evidence.payload.get("businessAdmission", {}).get("readiness")
+        if evidence.phase == "ACTIVE" and (
+            not isinstance(readiness, dict) or readiness.get("status") != "READY"
+        ):
+            raise PlacementError("connector peer must be idle and READY before apply")
 
 
 def _collect_bounded(process: subprocess.Popen[bytes], *, timeout: float) -> tuple[bytes, bytes]:

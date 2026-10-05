@@ -607,6 +607,31 @@ def test_validated_phases_allow_check_stage_but_apply_requires_hold_or_active(co
     assert active.payload["businessAdmission"]["gate"]["state"] == "open"
 
 
+def test_active_busy_and_unknown_peer_remain_checkable_but_not_applicable(contexts) -> None:
+    control, _connector = contexts
+    busy_receipt = _receipt(control, "ACTIVE", now=100)
+    busy = busy_receipt["businessAdmission"]["readiness"]
+    busy["status"] = "ACTIVE_TASKS"
+    busy["active_task_count"] = 1
+    busy["active_tasks"] = [{"source_id": "product", "task_id": "task-1", "state": "active"}]
+    busy_evidence = _validate(control, busy_receipt, now=100)
+    assert busy_evidence.phase == "ACTIVE"
+    placement.authorize_peer_operation(control, busy_evidence, "check")
+    placement.authorize_peer_operation(control, busy_evidence, "stage")
+    with pytest.raises(placement.PlacementError, match="idle and READY"):
+        placement.authorize_peer_operation(control, busy_evidence, "apply")
+
+    unknown_receipt = _receipt(control, "ACTIVE", now=100)
+    unknown = unknown_receipt["businessAdmission"]["readiness"]
+    unknown["status"] = "UNKNOWN"
+    unknown["blocker_codes"] = ["GATE_UNKNOWN"]
+    unknown_evidence = _validate(control, unknown_receipt, now=100)
+    placement.authorize_peer_operation(control, unknown_evidence, "check")
+    placement.authorize_peer_operation(control, unknown_evidence, "stage")
+    with pytest.raises(placement.PlacementError, match="idle and READY"):
+        placement.authorize_peer_operation(control, unknown_evidence, "apply")
+
+
 def test_receipts_reject_stale_plan_lock_open_admission_and_unknown_transaction(contexts) -> None:
     control, _connector = contexts
     receipt = _receipt(control, "PREPARED_HELD")
