@@ -233,6 +233,7 @@ jobs:
           tests/test_service_wheelhouse_export.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
+          tests/test_component_attestation_bundles.py
           tests/test_data_bundle_source_workflows.py
           tests/test_data_bundle_inner_manifest.py
       - name: Check native-profile formatting
@@ -285,6 +286,7 @@ jobs:
           tests/test_service_wheelhouse_export.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
+          tests/test_component_attestation_bundles.py
           tests/test_data_bundle_source_workflows.py
           tests/test_data_bundle_inner_manifest.py
       - name: Test runtime lock, signed service bytes, installer receipts, and native updates
@@ -321,6 +323,7 @@ jobs:
           tests/test_service_wheelhouse_export.py
           tests/test_linux_component_updates.py tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
+          tests/test_component_attestation_bundles.py
           tests/test_data_bundle_source_workflows.py
           tests/test_data_bundle_inner_manifest.py
       - name: Compile Python helpers and check package shell syntax

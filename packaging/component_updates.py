@@ -7,6 +7,7 @@ activation, and rollback in separate operations. Product v2 manifests are not re
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import json
@@ -52,6 +53,9 @@ TRUSTED_CONTRACT_LOCK_PATHS = frozenset(
     }
 )
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
+MAX_RELEASE_ASSET_BYTES = 2_000_000_000
+MAX_ATTESTATION_RESPONSE_BYTES = 16_000_000
+MAX_ATTESTATION_BUNDLE_BYTES = 2_000_000
 INSTALLED_CATALOG = Path("/usr/share/cyrene/component-catalog-v1.json")
 ACTIVE_CATALOG_ROOT = Path("/usr/share/cyrene/component-catalogs")
 ACTIVE_CATALOG_POINTER = Path("/usr/share/cyrene/component-catalog-state.json")
@@ -129,6 +133,8 @@ class Candidate:
     index: dict[str, Any]
     index_uri: str
     manifest_bytes: bytes | None = None
+    release_assets: tuple[dict[str, Any], ...] = ()
+    release_tag: str | None = None
 
 
 def _jcs_string(value: str) -> str:
@@ -687,7 +693,10 @@ class ComponentUpdater:
         self.bootstrap_catalog_digest = bootstrap_digest
         self.bootstrap_catalog_bytes = bootstrap_bytes
         self.load_active_catalog = load_active_catalog
-        self._index_cache: dict[tuple[str, ...], tuple[dict[str, Any], str]] = {}
+        self._index_cache: dict[
+            tuple[str, ...],
+            tuple[dict[str, Any], str, tuple[dict[str, Any], ...], str],
+        ] = {}
         self._readiness_cache: dict[tuple[str, bool], dict[str, Any]] = {}
         self.catalog_source: dict[str, Any] | None = None
         self.catalog_bytes = bootstrap_bytes
@@ -4565,7 +4574,7 @@ class ComponentUpdater:
 
     def _channel_releases(
         self, publisher: dict[str, Any], channel: str, component: dict[str, Any]
-    ) -> tuple[dict[str, Any], str]:
+    ) -> tuple[dict[str, Any], str, tuple[dict[str, Any], ...], str]:
         component_prefix = self._component_release_tag_prefix(component, channel)
         key = (
             publisher["repository"],
@@ -4640,9 +4649,18 @@ class ComponentUpdater:
                 f"The selected {channel} release has no component index asset.",
                 retryable=True,
             )
+        if not isinstance(assets, list) or not all(isinstance(item, dict) for item in assets):
+            raise UpdateError(
+                "INVALID_RELEASE_ASSETS", "The selected release asset list is invalid."
+            )
+        release_assets = tuple(dict(item) for item in assets)
         index_uri = asset["browser_download_url"]
-        self._require_github_asset_uri(index_uri, publisher["repository"])
-        index_bytes = self._get_bytes(index_uri)
+        index_bytes = self._get_release_asset_bytes(
+            release_assets,
+            index_uri,
+            repository=publisher["repository"],
+            release_tag=selected_release.get("tag_name"),
+        )
         try:
             index = json.loads(index_bytes)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -4650,17 +4668,244 @@ class ComponentUpdater:
                 "INVALID_RELEASE_INDEX", "The component release index is not valid UTF-8 JSON."
             ) from error
         self._validate_index(index, publisher, channel, selected_release, component)
-        self._verify_attestation(
-            index_bytes,
-            subject_name=index["provenance"]["attestation"]["subjectName"],
-            digest="sha256:" + hashlib.sha256(index_bytes).hexdigest(),
+        self._release_attestation_bundle(
+            payload=index_bytes,
             repository=publisher["repository"],
+            digest="sha256:" + hashlib.sha256(index_bytes).hexdigest(),
             workflow=publisher["workflow"],
             source_ref=index["source"]["ref"],
             source_commit=index["source"]["commit"],
+            subject_name=index["provenance"]["attestation"]["subjectName"],
         )
-        self._index_cache[key] = (index, index_uri)
-        return index, index_uri
+        result = (index, index_uri, release_assets, selected_release["tag_name"])
+        self._index_cache[key] = result
+        return result
+
+    def _release_asset_metadata(
+        self,
+        assets: tuple[dict[str, Any], ...],
+        uri: Any,
+        *,
+        repository: str,
+        release_tag: str,
+    ) -> dict[str, Any]:
+        """Resolve one exact immutable release asset entry from GitHub API metadata."""
+        self._require_github_asset_uri(uri, repository)
+        parts = urllib.parse.urlsplit(uri)
+        expected_prefix = f"/{repository}/releases/download/{release_tag}/"
+        if not isinstance(release_tag, str) or not parts.path.startswith(expected_prefix):
+            raise UpdateError(
+                "UNTRUSTED_URI", "Release asset URL is outside the selected immutable tag."
+            )
+        basename = PurePosixPath(parts.path).name
+        matches = [
+            item
+            for item in assets
+            if item.get("name") == basename and item.get("browser_download_url") == uri
+        ]
+        if len(matches) != 1:
+            raise UpdateError(
+                "RELEASE_ASSET_AMBIGUOUS",
+                "Selected immutable release does not contain one exact matching asset.",
+            )
+        asset = matches[0]
+        size = asset.get("size")
+        digest = asset.get("digest")
+        if (
+            isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 1
+            or size > MAX_RELEASE_ASSET_BYTES
+            or not _valid_digest(digest)
+        ):
+            raise UpdateError(
+                "INVALID_RELEASE_ASSET_METADATA",
+                "Release asset size or SHA-256 metadata is invalid.",
+            )
+        return asset
+
+    def _get_release_asset_bytes(
+        self,
+        assets: tuple[dict[str, Any], ...],
+        uri: Any,
+        *,
+        repository: str,
+        release_tag: str,
+        expected_digest: str | None = None,
+        expected_size: int | None = None,
+    ) -> bytes:
+        """Fetch an asset only when API and signed-manifest identities agree."""
+        asset = self._release_asset_metadata(
+            assets, uri, repository=repository, release_tag=release_tag
+        )
+        if (expected_digest is not None and asset["digest"] != expected_digest) or (
+            expected_size is not None and asset["size"] != expected_size
+        ):
+            raise UpdateError(
+                "RELEASE_ASSET_IDENTITY_MISMATCH",
+                "Release asset metadata differs from its trusted signed tuple.",
+            )
+        payload = self._get_bytes(uri)
+        actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+        if len(payload) != asset["size"] or actual_digest != asset["digest"]:
+            raise UpdateError(
+                "RELEASE_ASSET_DIGEST_MISMATCH",
+                "Downloaded release asset differs from its immutable API size or digest.",
+            )
+        return payload
+
+    def _release_attestation_bundle(
+        self,
+        *,
+        payload: bytes,
+        repository: str,
+        digest: str,
+        workflow: str,
+        source_ref: str,
+        source_commit: str,
+        subject_name: str,
+    ) -> bytes:
+        """Return a signed GitHub API bundle matching the exact pinned subject."""
+        if (
+            re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
+            or not _valid_digest(digest)
+            or not isinstance(subject_name, str)
+            or PurePosixPath(subject_name).name != subject_name
+        ):
+            raise UpdateError("INVALID_ATTESTATION", "Attestation lookup identity is invalid.")
+        endpoint = (
+            f"https://api.github.com/repos/{repository}/attestations/"
+            f"{urllib.parse.quote(digest, safe=':')}?per_page=100"
+        )
+        response_bytes = self._get_bytes(endpoint, max_bytes=MAX_ATTESTATION_RESPONSE_BYTES)
+        try:
+            response = json.loads(response_bytes, object_pairs_hook=_unique_json_object)
+        except (UnicodeDecodeError, json.JSONDecodeError, UpdateError) as error:
+            raise UpdateError(
+                "INVALID_ATTESTATION", "GitHub returned invalid attestation JSON."
+            ) from error
+        if not isinstance(response, dict) or set(response) != {"attestations"}:
+            raise UpdateError(
+                "INVALID_ATTESTATION", "GitHub returned an unknown attestation response shape."
+            )
+        attestations = response.get("attestations")
+        if not isinstance(attestations, list) or not attestations or len(attestations) >= 100:
+            raise UpdateError(
+                "ATTESTATION_MISSING",
+                "GitHub returned no complete attestation set for this subject.",
+            )
+
+        verification_errors: list[UpdateError] = []
+        for item in attestations:
+            if not isinstance(item, dict) or set(item) != {
+                "repository_id",
+                "bundle_url",
+                "initiator",
+                "bundle",
+            }:
+                raise UpdateError(
+                    "INVALID_ATTESTATION", "GitHub returned an unknown attestation record shape."
+                )
+            repository_id = item.get("repository_id")
+            bundle_url = item.get("bundle_url")
+            initiator = item.get("initiator")
+            bundle = item.get("bundle")
+            bundle_url_parts = (
+                urllib.parse.urlsplit(bundle_url) if isinstance(bundle_url, str) else None
+            )
+            if (
+                isinstance(repository_id, bool)
+                or not isinstance(repository_id, int)
+                or repository_id < 1
+                or not isinstance(initiator, str)
+                or initiator not in {"github", "user"}
+                or bundle_url_parts is None
+                or bundle_url_parts.scheme != "https"
+                or not bundle_url_parts.hostname
+                or not isinstance(bundle, dict)
+                or set(bundle) != {"mediaType", "verificationMaterial", "dsseEnvelope"}
+            ):
+                raise UpdateError(
+                    "INVALID_ATTESTATION", "GitHub returned malformed attestation bundle metadata."
+                )
+            bundle_bytes = json.dumps(bundle, separators=(",", ":")).encode("utf-8")
+            if len(bundle_bytes) > MAX_ATTESTATION_BUNDLE_BYTES:
+                raise UpdateError(
+                    "INVALID_ATTESTATION", "GitHub attestation bundle exceeds the size limit."
+                )
+            if not self._bundle_declares_subject(bundle, subject_name, digest):
+                continue
+            try:
+                self._verify_attestation(
+                    payload,
+                    subject_name=subject_name,
+                    digest=digest,
+                    repository=repository,
+                    workflow=workflow,
+                    source_ref=source_ref,
+                    source_commit=source_commit,
+                    bundle_bytes=bundle_bytes,
+                )
+            except UpdateError as error:
+                if error.code in {"ATTESTATION_INVALID", "ATTESTATION_SUBJECT_MISMATCH"}:
+                    verification_errors.append(error)
+                    continue
+                raise
+            return bundle_bytes
+        if verification_errors:
+            raise UpdateError(
+                "ATTESTATION_INVALID",
+                "No GitHub attestation bundle matches the pinned workflow, source, and subject.",
+            ) from verification_errors[-1]
+        raise UpdateError(
+            "ATTESTATION_INVALID", "No acceptable GitHub attestation bundle was returned."
+        )
+
+    @staticmethod
+    def _bundle_declares_subject(bundle: dict[str, Any], subject_name: str, digest: str) -> bool:
+        """Skip unrelated well-formed bundles before invoking the cryptographic verifier."""
+        envelope = bundle.get("dsseEnvelope")
+        if not isinstance(envelope, dict) or set(envelope) != {
+            "payloadType",
+            "payload",
+            "signatures",
+        }:
+            raise UpdateError(
+                "INVALID_ATTESTATION", "GitHub attestation DSSE envelope is malformed."
+            )
+        encoded_payload = envelope.get("payload")
+        if envelope.get("payloadType") != "application/vnd.in-toto+json" or not isinstance(
+            encoded_payload, str
+        ):
+            raise UpdateError(
+                "INVALID_ATTESTATION", "GitHub attestation DSSE payload is malformed."
+            )
+        try:
+            statement = json.loads(
+                base64.b64decode(encoded_payload, validate=True),
+                object_pairs_hook=_unique_json_object,
+            )
+        except (ValueError, json.JSONDecodeError, UpdateError) as error:
+            raise UpdateError(
+                "INVALID_ATTESTATION", "GitHub attestation DSSE payload is invalid."
+            ) from error
+        if not isinstance(statement, dict):
+            raise UpdateError("INVALID_ATTESTATION", "GitHub attestation statement is malformed.")
+        if statement.get("predicateType") != "https://slsa.dev/provenance/v1":
+            return False
+        subjects = statement.get("subject")
+        if not isinstance(subjects, list):
+            raise UpdateError(
+                "INVALID_ATTESTATION", "GitHub attestation subject list is malformed."
+            )
+        raw_digest = digest.removeprefix("sha256:")
+        return any(
+            isinstance(subject, dict)
+            and subject.get("name") == subject_name
+            and isinstance(subject.get("digest"), dict)
+            and subject["digest"].get("sha256") == raw_digest
+            for subject in subjects
+        )
 
     def _validate_index(
         self,
@@ -4767,7 +5012,9 @@ class ComponentUpdater:
                 "INVALID_CATALOG",
                 f"No trusted publisher is configured for {component['componentId']}.",
             )
-        index, index_uri = self._channel_releases(publisher, channel, component)
+        index, index_uri, release_assets, release_tag = self._channel_releases(
+            publisher, channel, component
+        )
         entries = [
             item
             for item in index.get("releases", [])
@@ -4782,8 +5029,12 @@ class ComponentUpdater:
                 retryable=True,
             )
         entry = entries[0]
-        self._require_github_asset_uri(entry.get("manifestUri"), publisher["repository"])
-        manifest_bytes = self._get_bytes(entry["manifestUri"])
+        manifest_bytes = self._get_release_asset_bytes(
+            release_assets,
+            entry.get("manifestUri"),
+            repository=publisher["repository"],
+            release_tag=release_tag,
+        )
         try:
             manifest = json.loads(manifest_bytes, object_pairs_hook=_unique_json_object)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -4802,6 +5053,8 @@ class ComponentUpdater:
             index,
             index_uri,
             manifest_bytes,
+            release_assets,
+            release_tag,
         )
 
     def _validate_manifest(
@@ -5830,18 +6083,21 @@ class ComponentUpdater:
         component_root = plan_root / candidate.component["componentId"]
         component_root.mkdir(mode=0o700)
         archive_path = component_root / filename
-        payload = self._get_bytes(artifact["uri"])
-        if (
-            len(payload) != artifact["sizeBytes"]
-            or "sha256:" + hashlib.sha256(payload).hexdigest() != artifact["sha256"]
-        ):
+        if candidate.release_tag is None:
             raise UpdateError(
-                "ARTIFACT_DIGEST_MISMATCH",
-                f"Downloaded artifact digest/size mismatch for {candidate.component['componentId']}.",
+                "INVALID_CANDIDATE", "Candidate is not bound to an immutable release tag."
             )
+        payload = self._get_release_asset_bytes(
+            candidate.release_assets,
+            artifact["uri"],
+            repository=candidate.component["publisher"],
+            release_tag=candidate.release_tag,
+            expected_digest=artifact["sha256"],
+            expected_size=artifact["sizeBytes"],
+        )
         self._write_private_file(archive_path, payload)
-        self._verify_attestation(
-            payload,
+        self._release_attestation_bundle(
+            payload=payload,
             subject_name=candidate.manifest["provenance"]["attestation"]["subjectName"],
             digest=artifact["sha256"],
             repository=candidate.component["publisher"],
@@ -8946,7 +9202,7 @@ class ComponentUpdater:
                 "INVALID_HTTP_JSON", f"Response from {uri} is not valid JSON.", retryable=True
             ) from error
 
-    def _get_bytes(self, uri: str) -> bytes:
+    def _get_bytes(self, uri: str, *, max_bytes: int = MAX_RELEASE_ASSET_BYTES) -> bytes:
         if not isinstance(uri, str) or urllib.parse.urlsplit(uri).scheme != "https":
             raise UpdateError("UNTRUSTED_URI", "Release assets must use HTTPS.")
         request = urllib.request.Request(
@@ -8966,10 +9222,10 @@ class ComponentUpdater:
                         "UNTRUSTED_REDIRECT",
                         f"GitHub asset redirected to an untrusted host: {final_host}.",
                     )
-                data = response.read(2_000_000_001)
-                if len(data) > 2_000_000_000:
+                data = response.read(max_bytes + 1)
+                if len(data) > max_bytes:
                     raise UpdateError(
-                        "ARTIFACT_TOO_LARGE", "Release asset exceeds the 2 GB safety limit."
+                        "ARTIFACT_TOO_LARGE", "Remote asset exceeds its configured size limit."
                     )
                 return data
         except UpdateError:
@@ -9004,14 +9260,20 @@ class ComponentUpdater:
         source_ref: str,
         source_commit: str,
         bundle_path: Path | None = None,
+        bundle_bytes: bytes | None = None,
     ) -> None:
-        if Path(repository).name == "" or not _valid_digest(digest):
+        if (
+            Path(repository).name == ""
+            or not _valid_digest(digest)
+            or (bundle_path is not None and bundle_bytes is not None)
+        ):
             raise UpdateError("INVALID_ATTESTATION", "Attestation subject identity is invalid.")
         with tempfile.NamedTemporaryFile(
             prefix="cyrene-attest-", suffix="-" + Path(subject_name).name, delete=False
         ) as stream:
             stream.write(payload)
             temporary_path = Path(stream.name)
+        bundle_temporary_path: Path | None = None
         try:
             if shutil.which("gh") is None:
                 raise UpdateError(
@@ -9042,6 +9304,14 @@ class ComponentUpdater:
                 if bundle_path.is_symlink() or not bundle_path.is_file():
                     raise UpdateError("INVALID_ATTESTATION", "Attestation bundle path is unsafe.")
                 arguments.extend(["--bundle", str(bundle_path)])
+            elif bundle_bytes is not None:
+                with tempfile.NamedTemporaryFile(
+                    prefix="cyrene-attest-bundle-", suffix=".json", delete=False
+                ) as stream:
+                    stream.write(bundle_bytes)
+                    bundle_temporary_path = Path(stream.name)
+                bundle_temporary_path.chmod(0o600)
+                arguments.extend(["--bundle", str(bundle_temporary_path)])
             completed = self.runner(
                 arguments,
                 capture_output=True,
@@ -9104,6 +9374,8 @@ class ComponentUpdater:
             ) from error
         finally:
             temporary_path.unlink(missing_ok=True)
+            if bundle_temporary_path is not None:
+                bundle_temporary_path.unlink(missing_ok=True)
 
     def _run_systemctl(self, operation: str, unit: str) -> None:
         try:
