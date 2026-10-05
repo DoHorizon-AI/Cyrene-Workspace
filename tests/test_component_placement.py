@@ -622,6 +622,7 @@ def test_active_busy_and_unknown_peer_remain_checkable_but_not_applicable(contex
         placement.authorize_peer_operation(control, busy_evidence, "apply")
 
     unknown_receipt = _receipt(control, "ACTIVE", now=100)
+    unknown_receipt["businessAdmission"]["state"] = "unknown"
     unknown = unknown_receipt["businessAdmission"]["readiness"]
     unknown["status"] = "UNKNOWN"
     unknown["blocker_codes"] = ["GATE_UNKNOWN"]
@@ -630,6 +631,12 @@ def test_active_busy_and_unknown_peer_remain_checkable_but_not_applicable(contex
     placement.authorize_peer_operation(control, unknown_evidence, "stage")
     with pytest.raises(placement.PlacementError, match="idle and READY"):
         placement.authorize_peer_operation(control, unknown_evidence, "apply")
+
+    mislabeled_receipt = _receipt(control, "ACTIVE", now=100)
+    mislabeled = mislabeled_receipt["businessAdmission"]["readiness"]
+    mislabeled["status"] = "UNKNOWN"
+    with pytest.raises(placement.PlacementError, match="contradicts its status"):
+        _validate(control, mislabeled_receipt, now=100)
 
 
 def test_receipts_reject_stale_plan_lock_open_admission_and_unknown_transaction(contexts) -> None:

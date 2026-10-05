@@ -1100,7 +1100,7 @@ def _validate_connector_admission(
         )
         if (
             scope != "kernel-task-and-runtime-admission"
-            or state != "open"
+            or state not in {"open", "unknown"}
             or hold is not None
             or not _positive_u64(value.get("gateGeneration"))
             or not _positive_u64(value.get("catalogGeneration"))
@@ -1161,6 +1161,9 @@ def _validate_connector_admission(
             or not isinstance(readiness.get("requires_restart_confirmation"), bool)
         ):
             raise PlacementError("connector readiness snapshot is malformed")
+        unknown_status = readiness["status"] in {"UNKNOWN", "STALE_READINESS"}
+        if (state == "unknown") != unknown_status:
+            raise PlacementError("connector readiness state contradicts its status")
         if readiness["status"] == "READY" and (
             any(
                 readiness[key] != 0
@@ -1179,7 +1182,7 @@ def _validate_connector_admission(
             or readiness["requires_restart_confirmation"]
         ):
             raise PlacementError("connector READY snapshot contains active usage")
-        return "open", value
+        return state, value
     raise PlacementError("connector business-admission source is not trusted")
 
 
@@ -1465,7 +1468,11 @@ def validate_peer_receipt(
         if phase == "ACTIVE_HELD":
             if admission_state != "closed" or not _hold_matches_phase(hold, "ACTIVE_HELD"):
                 raise PlacementError("peer ACTIVE_HELD receipt lacks its current hold proof")
-        elif admission_state != "open" or hold is not None:
+        elif (
+            hold is not None
+            or admission_state != "open"
+            and not (context.peer.role_id == "connector-host" and admission_state == "unknown")
+        ):
             raise PlacementError("peer settled ACTIVE receipt lacks real released admission proof")
     if phase in {"ABSENT", "STAGED"} and hold is not None:
         raise PlacementError("preparation-only peer state cannot carry an adoption hold")
@@ -1495,9 +1502,12 @@ def authorize_peer_operation(
     if evidence.phase not in permitted[operation]:
         raise PlacementError("peer phase does not permit this host operation")
     if operation == "apply" and context.peer.role_id == "connector-host":
-        readiness = evidence.payload.get("businessAdmission", {}).get("readiness")
+        admission = evidence.payload.get("businessAdmission", {})
+        readiness = admission.get("readiness")
         if evidence.phase == "ACTIVE" and (
-            not isinstance(readiness, dict) or readiness.get("status") != "READY"
+            admission.get("state") != "open"
+            or not isinstance(readiness, dict)
+            or readiness.get("status") != "READY"
         ):
             raise PlacementError("connector peer must be idle and READY before apply")
 
