@@ -1028,7 +1028,7 @@
         "capabilities": {
           "type": "array",
           "uniqueItems": true,
-          "minItems": 1,
+          "minItems": 2,
           "items": {
             "type": "string",
             "minLength": 1,
@@ -1049,7 +1049,18 @@
         "gate_generation": {
           "$ref": "#/$defs/unsignedInteger"
         }
-      }
+      },
+      "allOf": [
+        {
+          "properties": {
+            "capabilities": {
+              "contains": {
+                "const": "cyrene.runtime-maintenance.state.v2"
+              }
+            }
+          }
+        }
+      ]
     },
     "admissionResult": {
       "type": "object",
@@ -1303,6 +1314,7 @@
         "lockVersion",
         "lockId",
         "compatibilityGroup",
+        "persistence",
         "transport",
         "protocols",
         "bindingAdmission"
@@ -1329,7 +1341,7 @@
               "const": "package-runtime-native-v1"
             },
             "groupVersion": {
-              "const": "1"
+              "const": "2"
             },
             "contractApiVersion": {
               "const": "0.1.0"
@@ -1345,11 +1357,536 @@
                   "protocolVersion": "cyrene.runtime-maintenance.broker.v1"
                 },
                 {
+                  "componentId": "cyrene-kernel",
+                  "requiredForAdoption": true,
+                  "protocolVersion": "cyrene.runtime-maintenance.state.v2"
+                },
+                {
                   "componentId": "cy-package-runtime",
                   "requiredForAdoption": true,
                   "protocolVersion": "cy-package-runtime.control.v1"
                 }
               ]
+            }
+          }
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "protocolVersion",
+            "directory",
+            "schemaVersion",
+            "snapshot",
+            "journal",
+            "lockFile",
+            "writerComponents",
+            "writerUnits",
+            "additionalWriterCommands",
+            "brokerHealthCapability",
+            "migration",
+            "runtimeOpen"
+          ],
+          "properties": {
+            "protocolVersion": {
+              "const": "cyrene.runtime-maintenance.state.v2"
+            },
+            "directory": {
+              "const": "/var/lib/cyrene/runtime"
+            },
+            "schemaVersion": {
+              "const": 2
+            },
+            "snapshot": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "file",
+                "versionField"
+              ],
+              "properties": {
+                "file": {
+                  "const": "maintenance-state.json"
+                },
+                "versionField": {
+                  "const": "schema_version"
+                }
+              }
+            },
+            "journal": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "file",
+                "checkpointVersionPath"
+              ],
+              "properties": {
+                "file": {
+                  "const": "maintenance-journal.jsonl"
+                },
+                "checkpointVersionPath": {
+                  "const": "StateCheckpoint.state.schema_version"
+                }
+              }
+            },
+            "lockFile": {
+              "const": "maintenance.lock"
+            },
+            "writerComponents": {
+              "const": [
+                "cyrene-kernel",
+                "cyrene-runtime-maintenance"
+              ]
+            },
+            "writerUnits": {
+              "const": [
+                "cyrene-runtime-maintenance.service",
+                "cyrene-kernel.service"
+              ]
+            },
+            "additionalWriterCommands": {
+              "const": [
+                "cyrene-runtime-maintenance init-catalog"
+              ]
+            },
+            "brokerHealthCapability": {
+              "const": "cyrene.runtime-maintenance.state.v2"
+            },
+            "migration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "fromSchemaVersion",
+                "toSchemaVersion",
+                "mode",
+                "command",
+                "requiredOptions",
+                "acceptsAdditionalArguments",
+                "rootOnly",
+                "requiresMutationClientsQuiesced",
+                "requiresWritersStopped",
+                "serializesWith",
+                "requiresExistingSnapshotAndJournal",
+                "offlineStopOrder",
+                "legacyStateProfiles",
+                "proof",
+                "validatesSnapshotAndJournalReplay",
+                "rejectsUnknownCorruptOrInconsistentRecords",
+                "preservesPresentPendingAndCompletedBindingOperations",
+                "preservesOtherGateState",
+                "schema1Backups",
+                "marker",
+                "rollback",
+                "binaryOnlyRollbackSupported",
+                "schemaDowngradeSupported",
+                "schemaDowngradeMechanism",
+                "failedOrInterruptedMigration",
+                "proofSchema"
+              ],
+              "properties": {
+                "fromSchemaVersion": {
+                  "const": 1
+                },
+                "toSchemaVersion": {
+                  "const": 2
+                },
+                "mode": {
+                  "const": "offline-stopped-writers"
+                },
+                "command": {
+                  "const": "cyrene-runtime-maintenance migrate-state"
+                },
+                "requiredOptions": {
+                  "const": [
+                    "--state-dir",
+                    "--maintenance-proof-file"
+                  ]
+                },
+                "acceptsAdditionalArguments": {
+                  "const": false
+                },
+                "rootOnly": {
+                  "const": true
+                },
+                "requiresMutationClientsQuiesced": {
+                  "const": true
+                },
+                "requiresWritersStopped": {
+                  "const": true
+                },
+                "serializesWith": {
+                  "const": "maintenance.lock"
+                },
+                "requiresExistingSnapshotAndJournal": {
+                  "const": true
+                },
+                "offlineStopOrder": {
+                  "const": [
+                    "BeginMaintenance an active CORE_RUNTIME hold with restart confirmation",
+                    "stop Package Runtime mutation daemon, Products, Workspace updater/timers, and other control clients; drain requests",
+                    "stop cyrene-kernel.service and confirm process exit",
+                    "ensure cyrene-runtime-maintenance init-catalog and all other direct state writers are not running",
+                    "stop cyrene-runtime-maintenance.service and verify MainPID=0 and no live UDS"
+                  ]
+                },
+                "legacyStateProfiles": {
+                  "const": {
+                    "profileField": "schema1_profile",
+                    "profileMustMatchSnapshotJournalAndActiveHold": true,
+                    "exactlyOneBindingMapPresent": "reject",
+                    "unknownStateFields": "reject",
+                    "profiles": [
+                      {
+                        "id": "released-v1-no-binding-admissions",
+                        "bindingMapPresence": "both-absent-in-snapshot-and-checkpoint",
+                        "workspaceVerifiesInstalledSignedArtifactIdentitiesAndDigests": true
+                      },
+                      {
+                        "id": "experimental-v1-binding-admissions",
+                        "bindingMapPresence": "both-present-in-snapshot-and-checkpoint",
+                        "preservePendingAndCompletedBindingOperations": true
+                      }
+                    ]
+                  }
+                },
+                "proof": {
+                  "const": {
+                    "fileMode": "0600",
+                    "owner": "root",
+                    "regularFile": true,
+                    "symlink": false,
+                    "requiredFields": [
+                      "schema1_profile",
+                      "request_id",
+                      "maintenance_token",
+                      "target_kind",
+                      "plan_id",
+                      "plan_digest",
+                      "component_artifact_digests",
+                      "expected_gate_generation",
+                      "expected_catalog_generation"
+                    ],
+                    "profileField": "schema1_profile",
+                    "profileValues": [
+                      "released-v1-no-binding-admissions",
+                      "experimental-v1-binding-admissions"
+                    ],
+                    "targetKind": "CORE_RUNTIME",
+                    "requiresRestart": true,
+                    "userConfirmedRestart": true,
+                    "planDigestEncoding": "sha256:<64 lowercase hex>",
+                    "requiredComponentArtifactDigests": [
+                      "cyrene-kernel",
+                      "cyrene-runtime-maintenance"
+                    ],
+                    "componentArtifactDigestEncoding": "sha256:<64 lowercase hex>",
+                    "componentArtifactDigestMapIsComplete": true,
+                    "componentArtifactDigestMapMatchesActiveHoldExactly": true,
+                    "workspaceVerifiesInstalledSignedArtifactIdentitiesAndDigests": true,
+                    "mustMatchActiveMaintenanceHold": true,
+                    "schema1ProfileMustMatchSnapshotJournalAndActiveHold": true,
+                    "expectedGateGenerationMatchesState": true,
+                    "expectedCatalogGenerationMatchesStateAndHold": true,
+                    "acceptsTrustPassedBoolean": false
+                  }
+                },
+                "validatesSnapshotAndJournalReplay": {
+                  "const": true
+                },
+                "rejectsUnknownCorruptOrInconsistentRecords": {
+                  "const": true
+                },
+                "preservesPresentPendingAndCompletedBindingOperations": {
+                  "const": true
+                },
+                "preservesOtherGateState": {
+                  "const": true
+                },
+                "schema1Backups": {
+                  "const": {
+                    "statePattern": "maintenance-state.schema1-backup-<migration_id>.json",
+                    "journalPattern": "maintenance-journal.schema1-backup-<migration_id>.jsonl",
+                    "owner": "root",
+                    "mode": "0600",
+                    "preservesExactSourceBytes": true,
+                    "namesBoundToMigrationId": true,
+                    "mustMatchSourceHashes": true
+                  }
+                },
+                "marker": {
+                  "const": {
+                    "file": "maintenance-schema-migration.json",
+                    "owner": "root",
+                    "group": "authority-group",
+                    "mode": "0640",
+                    "migrationVersion": 1,
+                    "migrationIdFormat": "UUID",
+                    "requiredFields": [
+                      "migration_version",
+                      "migration_id",
+                      "from_schema_version",
+                      "to_schema_version",
+                      "phase",
+                      "schema1_profile",
+                      "maintenance_token_sha256",
+                      "request_id",
+                      "target_kind",
+                      "plan_id",
+                      "plan_digest",
+                      "component_artifact_digests",
+                      "expected_gate_generation",
+                      "expected_catalog_generation",
+                      "source_state_sha256",
+                      "source_journal_sha256",
+                      "target_state_sha256",
+                      "target_journal_sha256",
+                      "backup_state_file",
+                      "backup_journal_file",
+                      "rollback_from_state_sha256",
+                      "rollback_from_journal_sha256",
+                      "rollback_target_state_sha256",
+                      "rollback_target_journal_sha256",
+                      "backup_schema2_state_file",
+                      "backup_schema2_journal_file",
+                      "rollback_target_state_file",
+                      "rollback_target_journal_file"
+                    ],
+                    "phases": [
+                      "PREPARED",
+                      "JOURNAL_REPLACED",
+                      "SNAPSHOT_REPLACED",
+                      "COMPLETE",
+                      "ROLLBACK_PREPARED",
+                      "ROLLBACK_JOURNAL_REPLACED",
+                      "ROLLBACK_SNAPSHOT_REPLACED"
+                    ],
+                    "phaseFileHashCombinations": [
+                      {
+                        "phase": "PREPARED",
+                        "state": "source_state_sha256",
+                        "journal": "source_journal_sha256",
+                        "rollbackFields": "all-null"
+                      },
+                      {
+                        "phase": "JOURNAL_REPLACED",
+                        "state": "source_state_sha256",
+                        "journal": "target_journal_sha256",
+                        "rollbackFields": "all-null"
+                      },
+                      {
+                        "phase": "SNAPSHOT_REPLACED",
+                        "state": "target_state_sha256",
+                        "journal": "target_journal_sha256",
+                        "rollbackFields": "all-null"
+                      },
+                      {
+                        "phase": "COMPLETE",
+                        "state": "target_state_sha256",
+                        "journal": "target_journal_sha256",
+                        "rollbackFields": "all-null"
+                      },
+                      {
+                        "phase": "ROLLBACK_PREPARED",
+                        "state": "rollback_from_state_sha256",
+                        "journal": "rollback_from_journal_sha256",
+                        "rollbackFields": "all-four-set"
+                      },
+                      {
+                        "phase": "ROLLBACK_JOURNAL_REPLACED",
+                        "state": "rollback_from_state_sha256",
+                        "journal": "rollback_target_journal_sha256",
+                        "rollbackFields": "all-four-set"
+                      },
+                      {
+                        "phase": "ROLLBACK_SNAPSHOT_REPLACED",
+                        "state": "rollback_target_state_sha256",
+                        "journal": "rollback_target_journal_sha256",
+                        "rollbackFields": "all-four-set"
+                      }
+                    ],
+                    "sha256Encoding": "sha256:<64 lowercase hex>",
+                    "lifetime": "COMPLETE-persists-as-rollback-manifest; removed-after-exact-rollback",
+                    "storesPlaintextMaintenanceToken": false,
+                    "ordinaryGateOpenWhilePresent": "allow only a structurally valid COMPLETE marker; strictly load schema2 live snapshot and replay the full journal; do not compare live file hashes with frozen target or backup hashes",
+                    "invalidMarker": "fail-closed",
+                    "resumeRequiresExactProofMarkerIdentityBackupsAndPhaseHashCombination": true,
+                    "unknownPhaseOrHash": "fail-closed; no rewrite or clear",
+                    "rollbackHashFields": {
+                      "fields": [
+                        "rollback_from_state_sha256",
+                        "rollback_from_journal_sha256",
+                        "rollback_target_state_sha256",
+                        "rollback_target_journal_sha256"
+                      ],
+                      "type": "nullable-sha256",
+                      "nullThroughMigrationPhases": true,
+                      "setBeforeRollbackFileReplacement": true,
+                      "rollbackTargetFileFields": [
+                        "rollback_target_state_file",
+                        "rollback_target_journal_file"
+                      ]
+                    },
+                    "schema": "#/$defs/maintenanceSchemaMigrationMarker",
+                    "artifactBasenames": {
+                      "migrationIdSource": "migration_id UUID",
+                      "schema1SourceBackups": [
+                        "maintenance-state.schema1-backup-<migration_id>.json",
+                        "maintenance-journal.schema1-backup-<migration_id>.jsonl"
+                      ],
+                      "schema2TargetBackups": [
+                        "maintenance-state.schema2-backup-<migration_id>.json",
+                        "maintenance-journal.schema2-backup-<migration_id>.jsonl"
+                      ],
+                      "rollbackTargetFiles": [
+                        "maintenance-state.rollback-target-<migration_id>.json",
+                        "maintenance-journal.rollback-target-<migration_id>.jsonl"
+                      ],
+                      "rollbackTargetFieldsNullableThroughMigrationPhases": true,
+                      "allFileNamesBindExactMigrationId": true
+                    },
+                    "rootOnlyArtifactFiles": {
+                      "owner": "root",
+                      "mode": "0600",
+                      "schema1SourceBackups": "exact original v1 source bytes; match source hashes",
+                      "schema2TargetBackups": "exact v2 migration target bytes; match target hashes",
+                      "rollbackTargetFiles": "exact generated compatible v1 rollback pair; match rollback target hashes",
+                      "resumeValidatesAllArtifactsAgainstMarkerHashes": true
+                    },
+                    "maintenanceTokenBinding": {
+                      "field": "maintenance_token_sha256",
+                      "encoding": "sha256:<64 lowercase hex>",
+                      "comparedWith": "sha256 of CLI proof maintenance_token and the active persisted maintenance hold token",
+                      "storesPlaintextToken": false
+                    },
+                    "phaseHashScope": "phaseFileHashCombinations are checked only while completing or recovering the offline migration before ordinary schema2 writes begin",
+                    "completePhaseSemantics": {
+                      "phaseFileHashCombination": "target_state_sha256+target_journal_sha256 marks the migration completion image",
+                      "terminalMigrationPhase": true,
+                      "migrationCommandResume": "treat as completed; do not rewrite live state or require current live hashes to equal the frozen migration image",
+                      "rollbackBaseline": "target hashes bind immutable schema2 target backup files and migration baseline, not live files after normal writes"
+                    }
+                  }
+                },
+                "rollback": {
+                  "const": {
+                    "command": "cyrene-runtime-maintenance rollback-state",
+                    "requiredOptions": [
+                      "--state-dir",
+                      "--maintenance-proof-file"
+                    ],
+                    "acceptsAdditionalArguments": false,
+                    "rootOnly": true,
+                    "mode": "offline-stopped-writers",
+                    "requiresSameExactProofAndCurrentActiveCoreRuntimeHold": true,
+                    "requiresMutationClientsQuiesced": true,
+                    "requiresAllWritersStopped": true,
+                    "requiresExactBackupsAndSourceHashes": true,
+                    "restoresExactSchema1Bytes": false,
+                    "preservesActiveMaintenanceHold": true,
+                    "removesMarkerAfterSuccessfulRestore": true,
+                    "phases": [
+                      "ROLLBACK_PREPARED",
+                      "ROLLBACK_JOURNAL_REPLACED",
+                      "ROLLBACK_SNAPSHOT_REPLACED"
+                    ],
+                    "resumesOnlyAtExactKnownPhaseAndFileHashCombinations": true,
+                    "offlineStopOrder": [
+                      "stop Package Runtime mutation daemon, Products, Workspace updater/timers, and other control clients; drain requests",
+                      "stop candidate cyrene-kernel.service and confirm process exit",
+                      "stop candidate cyrene-runtime-maintenance.service and verify no live UDS",
+                      "run rollback-state with the same proof while all state writers remain stopped",
+                      "start old Broker then old Kernel; verify old Health and exact active hold",
+                      "EndMaintenance as RolledBack, then resume mutation clients"
+                    ],
+                    "requiresCurrentSchema2SnapshotAndJournalReplayValid": true,
+                    "preservesExactActiveCoreRuntimeHold": true,
+                    "preservesGateGeneration": true,
+                    "preservesTasks": true,
+                    "preservesRuntimeLeasesAndAdmissions": true,
+                    "preservesBindingAndCompletedAdmissionMaps": "exactly according to schema1_profile rules; released profile requires empty maps and omits them, experimental profile preserves exact migration baseline",
+                    "preservesCompletedTransactions": true,
+                    "permittedSchema2Differences": [
+                      "SourceHeartbeat-compatible timestamps/bootstrap eligibility",
+                      "monotonic CatalogConfigured catalog_generation"
+                    ],
+                    "requiresCatalogGenerationMonotonic": true,
+                    "requiresMigrationBackupsMatchOriginalSourceHashes": true,
+                    "convertsCompatibleCurrentSchema2StateToSchema1Checkpoint": true,
+                    "restoresExactSchema1BackupBytes": false,
+                    "schema1ProfileRules": {
+                      "profileField": "schema1_profile",
+                      "profiles": [
+                        {
+                          "id": "released-v1-no-binding-admissions",
+                          "allowedOnlyWhenBothV2BindingMapsEmpty": [
+                            "binding_operations",
+                            "completed_binding_operations"
+                          ],
+                          "v1OutputOmitsBothBindingMaps": true,
+                          "rejectsAnyActiveOrCompletedBindingRecord": true
+                        },
+                        {
+                          "id": "experimental-v1-binding-admissions",
+                          "requiresBothV2BindingMapsExactlyEqualMigrationBaseline": true,
+                          "preservesBothBindingMapsWithoutDroppingAdmissionsOrReceipts": true
+                        }
+                      ]
+                    },
+                    "requiresSchema2TargetBackupsMatchMigrationTargetHashes": true,
+                    "usesSchema2TargetBackupAsExperimentalBindingMapBaseline": true,
+                    "rollbackTargetFiles": [
+                      "maintenance-state.rollback-target-<migration_id>.json",
+                      "maintenance-journal.rollback-target-<migration_id>.jsonl"
+                    ],
+                    "rollbackTargetFilesAreRootOnlyMode0600": true,
+                    "rollbackTargetFilesHashBoundInMarkerBeforeReplacement": true
+                  }
+                },
+                "binaryOnlyRollbackSupported": {
+                  "const": false
+                },
+                "schemaDowngradeSupported": {
+                  "const": true
+                },
+                "schemaDowngradeMechanism": {
+                  "const": "rollback-state-only-with-preserved-hold-and-validated-schema2-deltas"
+                },
+                "failedOrInterruptedMigration": {
+                  "const": {
+                    "knownPhaseRecovery": "resume only with exact proof, marker identity, backup identities, and the phase-specific source/target hashes",
+                    "unknownPhaseOrHashOrMalformedArtifact": "fail-closed; do not rewrite or clear; explicit repair required",
+                    "normalGateOpenOutsideComplete": "fail-closed"
+                  }
+                },
+                "proofSchema": {
+                  "const": "#/$defs/maintenanceSchemaMigrationProof"
+                }
+              }
+            },
+            "runtimeOpen": {
+              "const": {
+                "withoutMigrationMarker": {
+                  "requiresSchemaVersion": 2,
+                  "validatesLiveSnapshotAndFullJournalReplay": true,
+                  "rejectsUnknownCorruptOrInconsistentRecords": true
+                },
+                "withCompleteMarker": {
+                  "requiresStructurallyValidMarker": true,
+                  "validatesLiveSnapshotAndFullJournalReplay": true,
+                  "comparesLiveFilesToMigrationTargetHashes": false,
+                  "comparesLiveFilesToSchema2TargetBackupHashes": false
+                },
+                "withAnyNonCompleteMarker": "fail-closed; no ordinary Gate open or service readiness",
+                "completeTargetHashes": {
+                  "meaning": "frozen migration completion image and rollback baseline",
+                  "checkedFor": "migration completion/recovery phase and immutable backup verification",
+                  "notUsedAs": "post-migration live state or journal integrity hashes"
+                },
+                "rollbackBaseline": {
+                  "schema2TargetBackupsMustMatchMarkerTargetHashes": true,
+                  "liveStateMustPassStrictSchema2ReplayAndRollbackDeltaChecks": true
+                }
+              }
             }
           }
         },
@@ -1449,6 +1986,8 @@
             "healthMethod",
             "requiredBrokerProtocolVersion",
             "requiredCapability",
+            "requiredPersistenceCapability",
+            "requiredHealthCapabilities",
             "methods",
             "operations",
             "controlOperationMap",
@@ -1481,6 +2020,15 @@
             },
             "requiredCapability": {
               "const": "cyrene.runtime-maintenance.binding-operations.v1"
+            },
+            "requiredPersistenceCapability": {
+              "const": "cyrene.runtime-maintenance.state.v2"
+            },
+            "requiredHealthCapabilities": {
+              "const": [
+                "cyrene.runtime-maintenance.state.v2",
+                "cyrene.runtime-maintenance.binding-operations.v1"
+              ]
             },
             "methods": {
               "const": [
@@ -1531,7 +2079,7 @@
               "const": "cy-package-runtime.binding-operation-admission.v1"
             },
             "authorityAdvertisesOnlyAfter": {
-              "const": "SERVING+exact broker protocol_version+required broker capability+same catalog_generation"
+              "const": "SERVING+exact broker protocol_version+both required state and binding capabilities present+same catalog_generation; unrelated capabilities allowed"
             },
             "completionOwner": {
               "const": "product-sdk-after-durable-owner-state-commit"
@@ -1615,7 +2163,7 @@
           "items": {
             "const": "cy-package-runtime.binding-operation-admission.v1"
           },
-          "description": "Empty unless the exact broker Health protocol, binding-operations capability, and catalog generation all match."
+          "description": "Empty unless the broker Health result has the exact supported broker protocol, both required persistence and binding capabilities, and the same catalog generation; only this exact Package Runtime capability is advertised."
         }
       }
     },
@@ -1806,6 +2354,337 @@
                 "binding_operation": {
                   "$ref": "#/$defs/bindingOperationReceipt"
                 }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "maintenanceArtifactDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "maintenanceComponentArtifactDigests": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/maintenanceArtifactDigest"
+      },
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]{1,127}$"
+      },
+      "required": [
+        "cyrene-kernel",
+        "cyrene-runtime-maintenance"
+      ],
+      "minProperties": 2
+    },
+    "maintenanceSchemaMigrationProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema1_profile",
+        "request_id",
+        "maintenance_token",
+        "target_kind",
+        "plan_id",
+        "plan_digest",
+        "component_artifact_digests",
+        "expected_gate_generation",
+        "expected_catalog_generation"
+      ],
+      "properties": {
+        "schema1_profile": {
+          "enum": [
+            "released-v1-no-binding-admissions",
+            "experimental-v1-binding-admissions"
+          ]
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "maintenance_token": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Secret hold capability; do not log or include in the marker."
+        },
+        "target_kind": {
+          "const": "CORE_RUNTIME"
+        },
+        "plan_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/maintenanceArtifactDigest"
+        },
+        "component_artifact_digests": {
+          "$ref": "#/$defs/maintenanceComponentArtifactDigests"
+        },
+        "expected_gate_generation": {
+          "$ref": "#/$defs/unsignedInteger"
+        },
+        "expected_catalog_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "maintenanceSchemaMigrationMarker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "migration_version",
+        "migration_id",
+        "from_schema_version",
+        "to_schema_version",
+        "phase",
+        "schema1_profile",
+        "maintenance_token_sha256",
+        "request_id",
+        "target_kind",
+        "plan_id",
+        "plan_digest",
+        "component_artifact_digests",
+        "expected_gate_generation",
+        "expected_catalog_generation",
+        "source_state_sha256",
+        "source_journal_sha256",
+        "target_state_sha256",
+        "target_journal_sha256",
+        "backup_state_file",
+        "backup_journal_file",
+        "rollback_from_state_sha256",
+        "rollback_from_journal_sha256",
+        "rollback_target_state_sha256",
+        "rollback_target_journal_sha256",
+        "backup_schema2_state_file",
+        "backup_schema2_journal_file",
+        "rollback_target_state_file",
+        "rollback_target_journal_file"
+      ],
+      "properties": {
+        "migration_version": {
+          "const": 1
+        },
+        "migration_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "from_schema_version": {
+          "const": 1
+        },
+        "to_schema_version": {
+          "const": 2
+        },
+        "phase": {
+          "enum": [
+            "PREPARED",
+            "JOURNAL_REPLACED",
+            "SNAPSHOT_REPLACED",
+            "COMPLETE",
+            "ROLLBACK_PREPARED",
+            "ROLLBACK_JOURNAL_REPLACED",
+            "ROLLBACK_SNAPSHOT_REPLACED"
+          ]
+        },
+        "schema1_profile": {
+          "enum": [
+            "released-v1-no-binding-admissions",
+            "experimental-v1-binding-admissions"
+          ]
+        },
+        "request_id": {
+          "$ref": "#/$defs/requestId"
+        },
+        "target_kind": {
+          "const": "CORE_RUNTIME"
+        },
+        "plan_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/maintenanceArtifactDigest"
+        },
+        "component_artifact_digests": {
+          "$ref": "#/$defs/maintenanceComponentArtifactDigests"
+        },
+        "expected_gate_generation": {
+          "$ref": "#/$defs/unsignedInteger"
+        },
+        "expected_catalog_generation": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "source_state_sha256": {
+          "$ref": "#/$defs/maintenanceArtifactDigest"
+        },
+        "source_journal_sha256": {
+          "$ref": "#/$defs/maintenanceArtifactDigest"
+        },
+        "target_state_sha256": {
+          "$ref": "#/$defs/maintenanceArtifactDigest"
+        },
+        "target_journal_sha256": {
+          "$ref": "#/$defs/maintenanceArtifactDigest"
+        },
+        "backup_state_file": {
+          "type": "string",
+          "pattern": "^maintenance-state\\.schema1-backup-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.json$"
+        },
+        "backup_journal_file": {
+          "type": "string",
+          "pattern": "^maintenance-journal\\.schema1-backup-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.jsonl$"
+        },
+        "backup_schema2_state_file": {
+          "type": "string",
+          "pattern": "^maintenance-state\\.schema2-backup-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.json$"
+        },
+        "backup_schema2_journal_file": {
+          "type": "string",
+          "pattern": "^maintenance-journal\\.schema2-backup-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.jsonl$"
+        },
+        "rollback_target_state_file": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^maintenance-state\\.rollback-target-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.json$"
+            }
+          ]
+        },
+        "rollback_target_journal_file": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^maintenance-journal\\.rollback-target-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.jsonl$"
+            }
+          ]
+        },
+        "rollback_from_state_sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/maintenanceArtifactDigest"
+            }
+          ]
+        },
+        "rollback_from_journal_sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/maintenanceArtifactDigest"
+            }
+          ]
+        },
+        "rollback_target_state_sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/maintenanceArtifactDigest"
+            }
+          ]
+        },
+        "rollback_target_journal_sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/maintenanceArtifactDigest"
+            }
+          ]
+        },
+        "maintenance_token_sha256": {
+          "$ref": "#/$defs/maintenanceArtifactDigest"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "PREPARED",
+                  "JOURNAL_REPLACED",
+                  "SNAPSHOT_REPLACED",
+                  "COMPLETE"
+                ]
+              }
+            },
+            "required": [
+              "phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "rollback_target_state_file": {
+                "type": "null"
+              },
+              "rollback_target_journal_file": {
+                "type": "null"
+              },
+              "rollback_from_state_sha256": {
+                "type": "null"
+              },
+              "rollback_from_journal_sha256": {
+                "type": "null"
+              },
+              "rollback_target_state_sha256": {
+                "type": "null"
+              },
+              "rollback_target_journal_sha256": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "phase": {
+                "enum": [
+                  "ROLLBACK_PREPARED",
+                  "ROLLBACK_JOURNAL_REPLACED",
+                  "ROLLBACK_SNAPSHOT_REPLACED"
+                ]
+              }
+            },
+            "required": [
+              "phase"
+            ]
+          },
+          "then": {
+            "properties": {
+              "rollback_target_state_file": {
+                "type": "string"
+              },
+              "rollback_target_journal_file": {
+                "type": "string"
+              },
+              "rollback_from_state_sha256": {
+                "$ref": "#/$defs/maintenanceArtifactDigest"
+              },
+              "rollback_from_journal_sha256": {
+                "$ref": "#/$defs/maintenanceArtifactDigest"
+              },
+              "rollback_target_state_sha256": {
+                "$ref": "#/$defs/maintenanceArtifactDigest"
+              },
+              "rollback_target_journal_sha256": {
+                "$ref": "#/$defs/maintenanceArtifactDigest"
               }
             }
           }

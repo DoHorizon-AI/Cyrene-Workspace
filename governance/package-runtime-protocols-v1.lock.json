@@ -3,7 +3,7 @@
   "lockId": "package-runtime-protocols-v1",
   "compatibilityGroup": {
     "groupId": "package-runtime-native-v1",
-    "groupVersion": "1",
+    "groupVersion": "2",
     "contractApiVersion": "0.1.0",
     "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
     "members": [
@@ -13,11 +13,392 @@
         "protocolVersion": "cyrene.runtime-maintenance.broker.v1"
       },
       {
+        "componentId": "cyrene-kernel",
+        "requiredForAdoption": true,
+        "protocolVersion": "cyrene.runtime-maintenance.state.v2"
+      },
+      {
         "componentId": "cy-package-runtime",
         "requiredForAdoption": true,
         "protocolVersion": "cy-package-runtime.control.v1"
       }
     ]
+  },
+  "persistence": {
+    "protocolVersion": "cyrene.runtime-maintenance.state.v2",
+    "directory": "/var/lib/cyrene/runtime",
+    "schemaVersion": 2,
+    "snapshot": {
+      "file": "maintenance-state.json",
+      "versionField": "schema_version"
+    },
+    "journal": {
+      "file": "maintenance-journal.jsonl",
+      "checkpointVersionPath": "StateCheckpoint.state.schema_version"
+    },
+    "lockFile": "maintenance.lock",
+    "writerComponents": [
+      "cyrene-kernel",
+      "cyrene-runtime-maintenance"
+    ],
+    "writerUnits": [
+      "cyrene-runtime-maintenance.service",
+      "cyrene-kernel.service"
+    ],
+    "additionalWriterCommands": [
+      "cyrene-runtime-maintenance init-catalog"
+    ],
+    "brokerHealthCapability": "cyrene.runtime-maintenance.state.v2",
+    "migration": {
+      "fromSchemaVersion": 1,
+      "toSchemaVersion": 2,
+      "mode": "offline-stopped-writers",
+      "command": "cyrene-runtime-maintenance migrate-state",
+      "requiredOptions": [
+        "--state-dir",
+        "--maintenance-proof-file"
+      ],
+      "acceptsAdditionalArguments": false,
+      "rootOnly": true,
+      "requiresMutationClientsQuiesced": true,
+      "requiresWritersStopped": true,
+      "serializesWith": "maintenance.lock",
+      "requiresExistingSnapshotAndJournal": true,
+      "offlineStopOrder": [
+        "BeginMaintenance an active CORE_RUNTIME hold with restart confirmation",
+        "stop Package Runtime mutation daemon, Products, Workspace updater/timers, and other control clients; drain requests",
+        "stop cyrene-kernel.service and confirm process exit",
+        "ensure cyrene-runtime-maintenance init-catalog and all other direct state writers are not running",
+        "stop cyrene-runtime-maintenance.service and verify MainPID=0 and no live UDS"
+      ],
+      "legacyStateProfiles": {
+        "profileField": "schema1_profile",
+        "profileMustMatchSnapshotJournalAndActiveHold": true,
+        "exactlyOneBindingMapPresent": "reject",
+        "unknownStateFields": "reject",
+        "profiles": [
+          {
+            "id": "released-v1-no-binding-admissions",
+            "bindingMapPresence": "both-absent-in-snapshot-and-checkpoint",
+            "workspaceVerifiesInstalledSignedArtifactIdentitiesAndDigests": true
+          },
+          {
+            "id": "experimental-v1-binding-admissions",
+            "bindingMapPresence": "both-present-in-snapshot-and-checkpoint",
+            "preservePendingAndCompletedBindingOperations": true
+          }
+        ]
+      },
+      "proof": {
+        "fileMode": "0600",
+        "owner": "root",
+        "regularFile": true,
+        "symlink": false,
+        "requiredFields": [
+          "schema1_profile",
+          "request_id",
+          "maintenance_token",
+          "target_kind",
+          "plan_id",
+          "plan_digest",
+          "component_artifact_digests",
+          "expected_gate_generation",
+          "expected_catalog_generation"
+        ],
+        "profileField": "schema1_profile",
+        "profileValues": [
+          "released-v1-no-binding-admissions",
+          "experimental-v1-binding-admissions"
+        ],
+        "targetKind": "CORE_RUNTIME",
+        "requiresRestart": true,
+        "userConfirmedRestart": true,
+        "planDigestEncoding": "sha256:<64 lowercase hex>",
+        "requiredComponentArtifactDigests": [
+          "cyrene-kernel",
+          "cyrene-runtime-maintenance"
+        ],
+        "componentArtifactDigestEncoding": "sha256:<64 lowercase hex>",
+        "componentArtifactDigestMapIsComplete": true,
+        "componentArtifactDigestMapMatchesActiveHoldExactly": true,
+        "workspaceVerifiesInstalledSignedArtifactIdentitiesAndDigests": true,
+        "mustMatchActiveMaintenanceHold": true,
+        "schema1ProfileMustMatchSnapshotJournalAndActiveHold": true,
+        "expectedGateGenerationMatchesState": true,
+        "expectedCatalogGenerationMatchesStateAndHold": true,
+        "acceptsTrustPassedBoolean": false
+      },
+      "validatesSnapshotAndJournalReplay": true,
+      "rejectsUnknownCorruptOrInconsistentRecords": true,
+      "preservesPresentPendingAndCompletedBindingOperations": true,
+      "preservesOtherGateState": true,
+      "schema1Backups": {
+        "statePattern": "maintenance-state.schema1-backup-<migration_id>.json",
+        "journalPattern": "maintenance-journal.schema1-backup-<migration_id>.jsonl",
+        "owner": "root",
+        "mode": "0600",
+        "preservesExactSourceBytes": true,
+        "namesBoundToMigrationId": true,
+        "mustMatchSourceHashes": true
+      },
+      "marker": {
+        "file": "maintenance-schema-migration.json",
+        "owner": "root",
+        "group": "authority-group",
+        "mode": "0640",
+        "migrationVersion": 1,
+        "migrationIdFormat": "UUID",
+        "requiredFields": [
+          "migration_version",
+          "migration_id",
+          "from_schema_version",
+          "to_schema_version",
+          "phase",
+          "schema1_profile",
+          "maintenance_token_sha256",
+          "request_id",
+          "target_kind",
+          "plan_id",
+          "plan_digest",
+          "component_artifact_digests",
+          "expected_gate_generation",
+          "expected_catalog_generation",
+          "source_state_sha256",
+          "source_journal_sha256",
+          "target_state_sha256",
+          "target_journal_sha256",
+          "backup_state_file",
+          "backup_journal_file",
+          "rollback_from_state_sha256",
+          "rollback_from_journal_sha256",
+          "rollback_target_state_sha256",
+          "rollback_target_journal_sha256",
+          "backup_schema2_state_file",
+          "backup_schema2_journal_file",
+          "rollback_target_state_file",
+          "rollback_target_journal_file"
+        ],
+        "phases": [
+          "PREPARED",
+          "JOURNAL_REPLACED",
+          "SNAPSHOT_REPLACED",
+          "COMPLETE",
+          "ROLLBACK_PREPARED",
+          "ROLLBACK_JOURNAL_REPLACED",
+          "ROLLBACK_SNAPSHOT_REPLACED"
+        ],
+        "phaseFileHashCombinations": [
+          {
+            "phase": "PREPARED",
+            "state": "source_state_sha256",
+            "journal": "source_journal_sha256",
+            "rollbackFields": "all-null"
+          },
+          {
+            "phase": "JOURNAL_REPLACED",
+            "state": "source_state_sha256",
+            "journal": "target_journal_sha256",
+            "rollbackFields": "all-null"
+          },
+          {
+            "phase": "SNAPSHOT_REPLACED",
+            "state": "target_state_sha256",
+            "journal": "target_journal_sha256",
+            "rollbackFields": "all-null"
+          },
+          {
+            "phase": "COMPLETE",
+            "state": "target_state_sha256",
+            "journal": "target_journal_sha256",
+            "rollbackFields": "all-null"
+          },
+          {
+            "phase": "ROLLBACK_PREPARED",
+            "state": "rollback_from_state_sha256",
+            "journal": "rollback_from_journal_sha256",
+            "rollbackFields": "all-four-set"
+          },
+          {
+            "phase": "ROLLBACK_JOURNAL_REPLACED",
+            "state": "rollback_from_state_sha256",
+            "journal": "rollback_target_journal_sha256",
+            "rollbackFields": "all-four-set"
+          },
+          {
+            "phase": "ROLLBACK_SNAPSHOT_REPLACED",
+            "state": "rollback_target_state_sha256",
+            "journal": "rollback_target_journal_sha256",
+            "rollbackFields": "all-four-set"
+          }
+        ],
+        "sha256Encoding": "sha256:<64 lowercase hex>",
+        "lifetime": "COMPLETE-persists-as-rollback-manifest; removed-after-exact-rollback",
+        "storesPlaintextMaintenanceToken": false,
+        "ordinaryGateOpenWhilePresent": "allow only a structurally valid COMPLETE marker; strictly load schema2 live snapshot and replay the full journal; do not compare live file hashes with frozen target or backup hashes",
+        "invalidMarker": "fail-closed",
+        "resumeRequiresExactProofMarkerIdentityBackupsAndPhaseHashCombination": true,
+        "unknownPhaseOrHash": "fail-closed; no rewrite or clear",
+        "rollbackHashFields": {
+          "fields": [
+            "rollback_from_state_sha256",
+            "rollback_from_journal_sha256",
+            "rollback_target_state_sha256",
+            "rollback_target_journal_sha256"
+          ],
+          "type": "nullable-sha256",
+          "nullThroughMigrationPhases": true,
+          "setBeforeRollbackFileReplacement": true,
+          "rollbackTargetFileFields": [
+            "rollback_target_state_file",
+            "rollback_target_journal_file"
+          ]
+        },
+        "schema": "#/$defs/maintenanceSchemaMigrationMarker",
+        "artifactBasenames": {
+          "migrationIdSource": "migration_id UUID",
+          "schema1SourceBackups": [
+            "maintenance-state.schema1-backup-<migration_id>.json",
+            "maintenance-journal.schema1-backup-<migration_id>.jsonl"
+          ],
+          "schema2TargetBackups": [
+            "maintenance-state.schema2-backup-<migration_id>.json",
+            "maintenance-journal.schema2-backup-<migration_id>.jsonl"
+          ],
+          "rollbackTargetFiles": [
+            "maintenance-state.rollback-target-<migration_id>.json",
+            "maintenance-journal.rollback-target-<migration_id>.jsonl"
+          ],
+          "rollbackTargetFieldsNullableThroughMigrationPhases": true,
+          "allFileNamesBindExactMigrationId": true
+        },
+        "rootOnlyArtifactFiles": {
+          "owner": "root",
+          "mode": "0600",
+          "schema1SourceBackups": "exact original v1 source bytes; match source hashes",
+          "schema2TargetBackups": "exact v2 migration target bytes; match target hashes",
+          "rollbackTargetFiles": "exact generated compatible v1 rollback pair; match rollback target hashes",
+          "resumeValidatesAllArtifactsAgainstMarkerHashes": true
+        },
+        "maintenanceTokenBinding": {
+          "field": "maintenance_token_sha256",
+          "encoding": "sha256:<64 lowercase hex>",
+          "comparedWith": "sha256 of CLI proof maintenance_token and the active persisted maintenance hold token",
+          "storesPlaintextToken": false
+        },
+        "phaseHashScope": "phaseFileHashCombinations are checked only while completing or recovering the offline migration before ordinary schema2 writes begin",
+        "completePhaseSemantics": {
+          "phaseFileHashCombination": "target_state_sha256+target_journal_sha256 marks the migration completion image",
+          "terminalMigrationPhase": true,
+          "migrationCommandResume": "treat as completed; do not rewrite live state or require current live hashes to equal the frozen migration image",
+          "rollbackBaseline": "target hashes bind immutable schema2 target backup files and migration baseline, not live files after normal writes"
+        }
+      },
+      "rollback": {
+        "command": "cyrene-runtime-maintenance rollback-state",
+        "requiredOptions": [
+          "--state-dir",
+          "--maintenance-proof-file"
+        ],
+        "acceptsAdditionalArguments": false,
+        "rootOnly": true,
+        "mode": "offline-stopped-writers",
+        "requiresSameExactProofAndCurrentActiveCoreRuntimeHold": true,
+        "requiresMutationClientsQuiesced": true,
+        "requiresAllWritersStopped": true,
+        "requiresExactBackupsAndSourceHashes": true,
+        "restoresExactSchema1Bytes": false,
+        "preservesActiveMaintenanceHold": true,
+        "removesMarkerAfterSuccessfulRestore": true,
+        "phases": [
+          "ROLLBACK_PREPARED",
+          "ROLLBACK_JOURNAL_REPLACED",
+          "ROLLBACK_SNAPSHOT_REPLACED"
+        ],
+        "resumesOnlyAtExactKnownPhaseAndFileHashCombinations": true,
+        "offlineStopOrder": [
+          "stop Package Runtime mutation daemon, Products, Workspace updater/timers, and other control clients; drain requests",
+          "stop candidate cyrene-kernel.service and confirm process exit",
+          "stop candidate cyrene-runtime-maintenance.service and verify no live UDS",
+          "run rollback-state with the same proof while all state writers remain stopped",
+          "start old Broker then old Kernel; verify old Health and exact active hold",
+          "EndMaintenance as RolledBack, then resume mutation clients"
+        ],
+        "requiresCurrentSchema2SnapshotAndJournalReplayValid": true,
+        "preservesExactActiveCoreRuntimeHold": true,
+        "preservesGateGeneration": true,
+        "preservesTasks": true,
+        "preservesRuntimeLeasesAndAdmissions": true,
+        "preservesBindingAndCompletedAdmissionMaps": "exactly according to schema1_profile rules; released profile requires empty maps and omits them, experimental profile preserves exact migration baseline",
+        "preservesCompletedTransactions": true,
+        "permittedSchema2Differences": [
+          "SourceHeartbeat-compatible timestamps/bootstrap eligibility",
+          "monotonic CatalogConfigured catalog_generation"
+        ],
+        "requiresCatalogGenerationMonotonic": true,
+        "requiresMigrationBackupsMatchOriginalSourceHashes": true,
+        "convertsCompatibleCurrentSchema2StateToSchema1Checkpoint": true,
+        "restoresExactSchema1BackupBytes": false,
+        "schema1ProfileRules": {
+          "profileField": "schema1_profile",
+          "profiles": [
+            {
+              "id": "released-v1-no-binding-admissions",
+              "allowedOnlyWhenBothV2BindingMapsEmpty": [
+                "binding_operations",
+                "completed_binding_operations"
+              ],
+              "v1OutputOmitsBothBindingMaps": true,
+              "rejectsAnyActiveOrCompletedBindingRecord": true
+            },
+            {
+              "id": "experimental-v1-binding-admissions",
+              "requiresBothV2BindingMapsExactlyEqualMigrationBaseline": true,
+              "preservesBothBindingMapsWithoutDroppingAdmissionsOrReceipts": true
+            }
+          ]
+        },
+        "requiresSchema2TargetBackupsMatchMigrationTargetHashes": true,
+        "usesSchema2TargetBackupAsExperimentalBindingMapBaseline": true,
+        "rollbackTargetFiles": [
+          "maintenance-state.rollback-target-<migration_id>.json",
+          "maintenance-journal.rollback-target-<migration_id>.jsonl"
+        ],
+        "rollbackTargetFilesAreRootOnlyMode0600": true,
+        "rollbackTargetFilesHashBoundInMarkerBeforeReplacement": true
+      },
+      "binaryOnlyRollbackSupported": false,
+      "schemaDowngradeSupported": true,
+      "schemaDowngradeMechanism": "rollback-state-only-with-preserved-hold-and-validated-schema2-deltas",
+      "failedOrInterruptedMigration": {
+        "knownPhaseRecovery": "resume only with exact proof, marker identity, backup identities, and the phase-specific source/target hashes",
+        "unknownPhaseOrHashOrMalformedArtifact": "fail-closed; do not rewrite or clear; explicit repair required",
+        "normalGateOpenOutsideComplete": "fail-closed"
+      },
+      "proofSchema": "#/$defs/maintenanceSchemaMigrationProof"
+    },
+    "runtimeOpen": {
+      "withoutMigrationMarker": {
+        "requiresSchemaVersion": 2,
+        "validatesLiveSnapshotAndFullJournalReplay": true,
+        "rejectsUnknownCorruptOrInconsistentRecords": true
+      },
+      "withCompleteMarker": {
+        "requiresStructurallyValidMarker": true,
+        "validatesLiveSnapshotAndFullJournalReplay": true,
+        "comparesLiveFilesToMigrationTargetHashes": false,
+        "comparesLiveFilesToSchema2TargetBackupHashes": false
+      },
+      "withAnyNonCompleteMarker": "fail-closed; no ordinary Gate open or service readiness",
+      "completeTargetHashes": {
+        "meaning": "frozen migration completion image and rollback baseline",
+        "checkedFor": "migration completion/recovery phase and immutable backup verification",
+        "notUsedAs": "post-migration live state or journal integrity hashes"
+      },
+      "rollbackBaseline": {
+        "schema2TargetBackupsMustMatchMarkerTargetHashes": true,
+        "liveStateMustPassStrictSchema2ReplayAndRollbackDeltaChecks": true
+      }
+    }
   },
   "transport": {
     "framing": "one-jsonl-request-and-response-per-unix-connection",
@@ -42,7 +423,7 @@
       "definition": {
         "repository": "DoHorizon-AI/Cyrene-Workspace",
         "path": "governance/package-runtime-control-v1.schema.json",
-        "sha256": "6e4a4bf0e5c62a1af0852510749555832a82c3f131929da55b35a748a0b350e1"
+        "sha256": "01f7eef0af894bbbd061563ab9af264643b2c318498073d5bf705b77f0463b1b"
       },
       "requestSchema": "#/$defs/controlRequest",
       "responseSchema": "#/$defs/controlResponse",
@@ -54,7 +435,7 @@
       "definition": {
         "repository": "DoHorizon-AI/Cyrene-Workspace",
         "path": "governance/package-runtime-control-v1.schema.json",
-        "sha256": "6e4a4bf0e5c62a1af0852510749555832a82c3f131929da55b35a748a0b350e1"
+        "sha256": "01f7eef0af894bbbd061563ab9af264643b2c318498073d5bf705b77f0463b1b"
       },
       "requestSchema": "#/$defs/brokerHealthRequest",
       "responseSchema": "#/$defs/brokerHealthResponse"
@@ -64,7 +445,7 @@
       "definition": {
         "repository": "DoHorizon-AI/Cyrene-Workspace",
         "path": "governance/package-runtime-control-v1.schema.json",
-        "sha256": "6e4a4bf0e5c62a1af0852510749555832a82c3f131929da55b35a748a0b350e1"
+        "sha256": "01f7eef0af894bbbd061563ab9af264643b2c318498073d5bf705b77f0463b1b"
       },
       "requestSchema": "#/$defs/bindingOperationRequest",
       "responseSchema": "#/$defs/bindingOperationResponse"
@@ -74,6 +455,11 @@
     "healthMethod": "Health",
     "requiredBrokerProtocolVersion": "cyrene.runtime-maintenance.broker.v1",
     "requiredCapability": "cyrene.runtime-maintenance.binding-operations.v1",
+    "requiredPersistenceCapability": "cyrene.runtime-maintenance.state.v2",
+    "requiredHealthCapabilities": [
+      "cyrene.runtime-maintenance.state.v2",
+      "cyrene.runtime-maintenance.binding-operations.v1"
+    ],
     "methods": [
       "AdmitBindingOperation",
       "CompleteBindingOperation"
@@ -102,7 +488,7 @@
       "executeWhenAlreadyCompleted": false
     },
     "requiredDaemonCapability": "cy-package-runtime.binding-operation-admission.v1",
-    "authorityAdvertisesOnlyAfter": "SERVING+exact broker protocol_version+required broker capability+same catalog_generation",
+    "authorityAdvertisesOnlyAfter": "SERVING+exact broker protocol_version+both required state and binding capabilities present+same catalog_generation; unrelated capabilities allowed",
     "completionOwner": "product-sdk-after-durable-owner-state-commit",
     "daemonCompletesOperation": false,
     "pendingAdmissionBlocksUpdates": true,
