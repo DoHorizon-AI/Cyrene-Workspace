@@ -2901,7 +2901,9 @@ class ComponentUpdater:
             or component.get("kind") != "native-binary"
             or self.bootstrap_catalog_digest != TRUSTED_CATALOG_DIGEST
         ):
-            raise UpdateError("GATE_UNKNOWN", "The trusted maintenance broker catalog is unavailable.")
+            raise UpdateError(
+                "GATE_UNKNOWN", "The trusted maintenance broker catalog is unavailable."
+            )
 
         # Reuse the updater's release, active-pointer, manifest, and install receipt checks.
         installed = self._installed(component)
@@ -2914,17 +2916,23 @@ class ComponentUpdater:
             or manifest.get("version") != installed.get("activeVersion")
             or _artifact_kind_from_manifest(manifest) != "native-binary"
         ):
-            raise UpdateError("GATE_UNKNOWN", "The active maintenance broker identity is unverified.")
+            raise UpdateError(
+                "GATE_UNKNOWN", "The active maintenance broker identity is unverified."
+            )
 
         artifact = manifest.get("artifact")
         files = artifact.get("files") if isinstance(artifact, dict) else None
         entrypoint = artifact.get("entrypoint") if isinstance(artifact, dict) else None
         if not isinstance(files, dict) or not isinstance(entrypoint, str):
-            raise UpdateError("GATE_UNKNOWN", "The active broker manifest has no trusted entrypoint.")
+            raise UpdateError(
+                "GATE_UNKNOWN", "The active broker manifest has no trusted entrypoint."
+            )
         relative = _safe_relative(entrypoint, field="broker.artifact.entrypoint")
         expected_digest = files.get(relative.as_posix())
         if not _valid_digest(expected_digest):
-            raise UpdateError("GATE_UNKNOWN", "The active broker entrypoint has no pinned file digest.")
+            raise UpdateError(
+                "GATE_UNKNOWN", "The active broker entrypoint has no pinned file digest."
+            )
 
         component_root = self.install_root / "components" / BROKER_COMPONENT_ID
         active = component_root / "active"
@@ -2967,7 +2975,8 @@ class ComponentUpdater:
                 self._verify_broker_bootstrap_journal(manifest, installed, pointer)
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             raise UpdateError(
-                "GATE_UNKNOWN", f"The active maintenance broker failed install verification: {error}"
+                "GATE_UNKNOWN",
+                f"The active maintenance broker failed install verification: {error}",
             ) from error
         return binary
 
@@ -3022,11 +3031,7 @@ class ComponentUpdater:
             ):
                 raise ValueError("first-install journal directory is not private and root-owned")
         info = journal_path.lstat()
-        if (
-            not stat.S_ISREG(info.st_mode)
-            or info.st_uid != 0
-            or stat.S_IMODE(info.st_mode) & 0o077
-        ):
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o077:
             raise ValueError("first-install journal is not a private root-owned file")
         journal = _read_object(journal_path, "maintenance broker first-install journal")
         identity = journal.get("identity")

@@ -89,7 +89,9 @@ def _install_active_broker(
         "restart": {"group": "single-service", "unit": component["systemdUnit"]},
     }
     manifest["manifestDigest"] = updates._digest_json(manifest, "manifestDigest")
-    pointer_identity = f"{manifest['version']}--{manifest['manifestDigest'].removeprefix('sha256:')}"
+    pointer_identity = (
+        f"{manifest['version']}--{manifest['manifestDigest'].removeprefix('sha256:')}"
+    )
     component_root = updater.install_root / "components" / COMPONENT_ID
     release = component_root / "releases" / pointer_identity
     binary = release / "bin" / "cyrene-runtime-maintenance"
@@ -99,7 +101,14 @@ def _install_active_broker(
     manifest_path = release / "component-manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     manifest_path.chmod(0o644)
-    for directory in (updater.install_root, updater.install_root / "components", component_root, component_root / "releases", release, binary.parent):
+    for directory in (
+        updater.install_root,
+        updater.install_root / "components",
+        component_root,
+        component_root / "releases",
+        release,
+        binary.parent,
+    ):
         directory.chmod(0o755)
     (component_root / "active").symlink_to(f"releases/{pointer_identity}")
     active_item = {
@@ -143,7 +152,9 @@ def _install_active_broker(
     return binary
 
 
-def test_default_resolution_uses_active_manifest_and_trusted_install_receipt(tmp_path: Path) -> None:
+def test_default_resolution_uses_active_manifest_and_trusted_install_receipt(
+    tmp_path: Path,
+) -> None:
     updater = _updater(tmp_path)
     binary = _install_active_broker(updater)
     assert updater._resolve_installed_broker() == binary
@@ -171,7 +182,9 @@ def test_bootstrap_fallback_accepts_root_owned_0755_state_ancestors(tmp_path: Pa
     assert updater._resolve_installed_broker() == binary
 
 
-@pytest.mark.parametrize("unsafe", ["owner", "symlink", "hash", "missing-journal", "missing-active"])
+@pytest.mark.parametrize(
+    "unsafe", ["owner", "symlink", "hash", "missing-journal", "missing-active"]
+)
 def test_default_resolution_fails_closed_for_unsafe_or_unbound_install(
     tmp_path: Path, unsafe: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
