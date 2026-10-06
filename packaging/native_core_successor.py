@@ -11,6 +11,7 @@ import hashlib
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ _SELECTOR_KEYS = frozenset(
         "parentPlanDigest",
         "parentComponentArtifactDigests",
         "maintenanceGateGeneration",
+        "replacementReleaseId",
     }
 )
 
@@ -72,6 +74,15 @@ def validate_selector(value: Any) -> dict[str, Any]:
     generation = value.get("maintenanceGateGeneration")
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
         raise ValueError("heldRecovery maintenanceGateGeneration must be a positive integer")
+    replacement_release_id = value.get("replacementReleaseId")
+    if (
+        not isinstance(replacement_release_id, str)
+        or not replacement_release_id
+        or len(replacement_release_id) > 256
+        or "/" in replacement_release_id
+        or ".." in replacement_release_id
+    ):
+        raise ValueError("heldRecovery replacementReleaseId must select one immutable release")
     return {
         "schemaVersion": 1,
         "mode": SUCCESSOR_MODE,
@@ -79,6 +90,7 @@ def validate_selector(value: Any) -> dict[str, Any]:
         "parentPlanDigest": value["parentPlanDigest"],
         "parentComponentArtifactDigests": dict(sorted(artifacts.items())),
         "maintenanceGateGeneration": generation,
+        "replacementReleaseId": replacement_release_id,
     }
 
 
@@ -109,6 +121,7 @@ def _successor_binding(
         "maintenanceGateGeneration": transaction["maintenanceGateGeneration"],
         "candidateCatalogGeneration": normal_plan["catalogGeneration"],
         "candidateCatalogDigest": normal_plan["catalogDigest"],
+        "replacementReleaseId": normal_plan["replacementReleaseId"],
     }
 
 
@@ -172,6 +185,30 @@ def build_plan(
     )
     if parent_ids != expected_ids or candidate_ids != expected_ids:
         raise ValueError("Held successor must preserve the exact four-component Core cohort")
+    previous_items = parent_plan.get("components")
+    if not isinstance(previous_items, list):
+        raise TypeError("Held parent plan lacks its signed four-component identity")
+    previous_by_id = {
+        item.get("componentId"): item for item in previous_items if isinstance(item, dict)
+    }
+    candidate_by_id = {
+        item.get("componentId"): item for item in candidate_items if isinstance(item, dict)
+    }
+    if set(previous_by_id) != expected_ids:
+        raise ValueError("Held parent plan does not describe the exact legacy C9 cohort")
+    unchanged_ids = expected_ids - {"cyrene-sandboxd"}
+    identity_fields = ("version", "manifestDigest", "artifactDigest")
+    for component_id in unchanged_ids:
+        previous = previous_by_id[component_id]
+        candidate = candidate_by_id[component_id]
+        if any(previous.get(field) != candidate.get(field) for field in identity_fields):
+            raise ValueError(
+                f"Held successor may replace only cyrene-sandboxd; {component_id} identity changed"
+            )
+    if previous_by_id["cyrene-sandboxd"].get("artifactDigest") == candidate_by_id[
+        "cyrene-sandboxd"
+    ].get("artifactDigest"):
+        raise ValueError("Held successor must bind the signed cyrene-sandboxd replacement artifact")
     if held_snapshot.get("gateGeneration") != transaction.get("maintenanceGateGeneration"):
         raise ValueError("Live held gate generation differs from the protected parent journal")
     if held_snapshot.get("catalogGeneration") != parent_plan.get("catalogGeneration"):
@@ -236,6 +273,7 @@ def selector_for_plan(plan: dict[str, Any]) -> dict[str, Any]:
             "parentPlanDigest": binding.get("parentPlanDigest"),
             "parentComponentArtifactDigests": binding.get("parentComponentArtifactDigests"),
             "maintenanceGateGeneration": binding.get("maintenanceGateGeneration"),
+            "replacementReleaseId": binding.get("replacementReleaseId"),
         }
     )
 
@@ -243,7 +281,7 @@ def selector_for_plan(plan: dict[str, Any]) -> dict[str, Any]:
 def confirmation(plan: dict[str, Any]) -> dict[str, Any]:
     """Build explicit confirmation data for exactly one staged successor plan."""
 
-    return {
+    result = {
         "mode": plan["mode"],
         "planId": plan["planId"],
         "planDigest": plan["planDigest"],
@@ -254,6 +292,9 @@ def confirmation(plan: dict[str, Any]) -> dict[str, Any]:
         "includeProducts": False,
         "successorBinding": plan["successorBinding"],
     }
+    if "bootstrapBroker" in plan:
+        result["bootstrapBroker"] = plan["bootstrapBroker"]
+    return result
 
 
 def _canonical_json(updater: Any) -> Any:
@@ -426,20 +467,29 @@ def check(updater: Any, selector_value: Any, *, channel: Any, core: Any) -> dict
             }
         if not isinstance(channel, str) or updater._resolve_channel(channel) != channel:
             raise ValueError("Held successor check requires an explicit supported channel")
-        checked = updater.check(
-            list(core.CORE_COMPONENT_IDS), channel=channel, include_readiness=False
-        )
-        normal = checked.get("plan")
-        if not isinstance(normal, dict):
-            raise TypeError("Trusted release index did not produce a complete Core cohort")
-        items = normal.get("components")
-        if not isinstance(items, list):
-            raise TypeError("Trusted release index did not produce a Core component cohort")
-        cohort = core._component_cohort(
-            updater, {item.get("componentId") for item in items if isinstance(item, dict)}
-        )
-        if cohort != core._catalog_core_component_ids(updater):
-            raise ValueError("Signed successor candidates differ from the trusted Core cohort")
+        cohort = tuple(core.CORE_COMPONENT_IDS)
+        if tuple(core._catalog_core_component_ids(updater)) != cohort:
+            raise ValueError("Held successor requires the trusted legacy C9 four-member cohort")
+        core._component_cohort(updater, set(cohort))
+        candidates = _exact_successor_candidates(updater, selector, parent, channel, cohort, core)
+        candidates = updater._expand_compatibility_groups(candidates, channel)
+        if set(candidates) != set(cohort):
+            raise ValueError("Trusted compatibility expansion changes the fixed C9 Core cohort")
+        updater._validate_runtime_dependencies(candidates)
+        items = [
+            _candidate_plan_item(component_id, candidates[component_id]) for component_id in cohort
+        ]
+        placement = updater._placement_bindings(candidates, operation="check")
+        candidate_plan = {
+            "channel": channel,
+            "catalogGeneration": updater.catalog_generation,
+            "catalogDigest": updater.catalog_digest,
+            "components": items,
+            "replacementReleaseId": selector["replacementReleaseId"],
+            **({"deploymentPlacement": placement} if placement else {}),
+        }
+        base_plan = _base_plan(updater, candidate_plan)
+        normal = {**base_plan, **candidate_plan}
         targets = {
             updater._target_for(updater.components[component_id]).get("id")
             for component_id in cohort
@@ -487,6 +537,211 @@ def _is_root(updater: Any) -> bool:
         return False
     updater._require_authorized_process()
     return True
+
+
+def _component_release_id(
+    updater: Any, component: dict[str, Any], channel: str, commit: str
+) -> str:
+    """Derive the immutable publisher tag for a parent-pinned component identity."""
+
+    prefix = updater._component_release_tag_prefix(component, channel)
+    return (prefix or ("preview-" if channel == "preview" else "stable-")) + commit
+
+
+def _parent_release_pins(
+    updater: Any, parent: dict[str, Any], core: Any
+) -> dict[str, dict[str, Any]]:
+    """Read old release tags solely as proof of the immutable held cohort identity."""
+
+    base_id = parent.get("basePlanId")
+    base_digest = parent.get("basePlanDigest")
+    if not isinstance(base_id, str) or not isinstance(base_digest, str):
+        raise TypeError("Held parent has no original checked Core base plan")
+    path = Path(updater.state_root) / "staged" / base_id / "stage.json"
+    record = core._read_private_json(path)
+    if (
+        not isinstance(record, dict)
+        or record.get("phase") != "staged"
+        or not isinstance(record.get("plan"), dict)
+        or not isinstance(record.get("components"), list)
+    ):
+        raise ValueError("Original held stage is unavailable as cohort identity evidence")
+    base = record["plan"]
+    if (
+        base.get("planId") != base_id
+        or base.get("planDigest") != base_digest
+        or base.get("catalogDigest") != parent.get("catalogDigest")
+        or base.get("channel") != parent.get("channel")
+    ):
+        raise ValueError("Original held stage no longer matches the immutable parent base plan")
+    expected_material = {
+        key: base[key]
+        for key in ("schemaVersion", "channel", "catalogGeneration", "catalogDigest", "components")
+    }
+    if "deploymentPlacement" in base:
+        expected_material["deploymentPlacement"] = base["deploymentPlacement"]
+    expected_digest = (
+        "sha256:" + hashlib.sha256(_canonical_json(updater)(expected_material)).hexdigest()
+    )
+    if expected_digest != base_digest or base_id != "plan-" + expected_digest.split(":", 1)[1][:32]:
+        raise ValueError("Original held base plan digest is invalid")
+    planned = {
+        item.get("componentId"): item
+        for item in parent.get("components", [])
+        if isinstance(item, dict)
+    }
+    staged = {
+        item.get("componentId"): item for item in record["components"] if isinstance(item, dict)
+    }
+    base_items = {
+        item.get("componentId"): item
+        for item in base.get("components", [])
+        if isinstance(item, dict)
+    }
+    cohort = set(core.CORE_COMPONENT_IDS)
+    if set(planned) != cohort or set(staged) != cohort or set(base_items) != cohort:
+        raise ValueError("Original held stage does not prove the exact four-member C9 cohort")
+    pins: dict[str, dict[str, Any]] = {}
+    for component_id in cohort:
+        item = staged[component_id]
+        plan_item = planned[component_id]
+        base_item = base_items[component_id]
+        manifest = item.get("manifest")
+        if not isinstance(manifest, dict):
+            raise TypeError(f"Original held stage lacks its {component_id} signed manifest")
+        updater._validate_manifest_digest(manifest, plan_item.get("manifestDigest"))
+        source = manifest.get("source")
+        source_commit = source.get("commit") if isinstance(source, dict) else None
+        artifact = manifest.get("artifact")
+        artifact_digest = (
+            artifact.get("digest", artifact.get("sha256")) if isinstance(artifact, dict) else None
+        )
+        component = updater.components.get(component_id)
+        if not isinstance(component, dict):
+            raise TypeError(f"Current trusted catalog omits held component {component_id}")
+        if (
+            item.get("componentId") != component_id
+            or item.get("version") != plan_item.get("version")
+            or item.get("manifestDigest") != plan_item.get("manifestDigest")
+            or item.get("artifactDigest") != plan_item.get("artifactDigest")
+            or base_item.get("componentId") != component_id
+            or base_item.get("version") != plan_item.get("version")
+            or base_item.get("manifestDigest") != plan_item.get("manifestDigest")
+            or base_item.get("artifactDigest") != plan_item.get("artifactDigest")
+            or base_item != plan_item
+            or manifest.get("componentId") != component_id
+            or manifest.get("version") != plan_item.get("version")
+            or artifact_digest != plan_item.get("artifactDigest")
+            or not isinstance(source_commit, str)
+            or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None
+            or manifest.get("channel") != parent.get("channel")
+            or updater._manifest_target_id(component, manifest) != parent.get("targetId")
+        ):
+            raise ValueError(
+                f"Original held stage does not prove the pinned {component_id} identity"
+            )
+        release_id = _component_release_id(updater, component, parent["channel"], source_commit)
+        pins[component_id] = {**plan_item, "sourceCommit": source_commit, "releaseId": release_id}
+    return pins
+
+
+def _exact_successor_candidates(
+    updater: Any,
+    selector: dict[str, Any],
+    parent: dict[str, Any],
+    channel: str,
+    cohort: tuple[str, ...],
+    core: Any,
+) -> dict[str, Any]:
+    """Resolve each Core member by immutable release tag and prove the parent pins."""
+
+    parent_items = _parent_release_pins(updater, parent, core)
+    if set(parent_items) != set(cohort):
+        raise ValueError("Held parent does not pin the exact C9 component identities")
+    candidates: dict[str, Any] = {}
+    for component_id in cohort:
+        component = updater.components.get(component_id)
+        target = updater._target_for(component) if isinstance(component, dict) else None
+        if not isinstance(component, dict) or not isinstance(target, dict):
+            raise TypeError(f"Trusted catalog no longer supports held component {component_id}")
+        if component_id == "cyrene-sandboxd":
+            release_id = selector["replacementReleaseId"]
+        else:
+            prior = parent_items[component_id]
+            release_id = prior["releaseId"]
+        candidates[component_id] = updater._candidate(
+            component, target, channel, release_id=release_id
+        )
+    for component_id in set(cohort) - {"cyrene-sandboxd"}:
+        prior = parent_items[component_id]
+        candidate = candidates[component_id]
+        source = candidate.manifest.get("source")
+        if (
+            candidate.manifest.get("version") != prior.get("version")
+            or candidate.manifest_digest != prior.get("manifestDigest")
+            or candidate.artifact_digest != prior.get("artifactDigest")
+            or not isinstance(source, dict)
+            or source.get("commit") != prior["sourceCommit"]
+        ):
+            raise ValueError(
+                f"Exact successor release differs from original {component_id} identity"
+            )
+    replacement = candidates["cyrene-sandboxd"]
+    if replacement.release_tag != selector["replacementReleaseId"]:
+        raise ValueError("Selected sandboxd release tag differs from heldRecovery selector")
+    return candidates
+
+
+def _candidate_plan_item(component_id: str, candidate: Any) -> dict[str, Any]:
+    """Project one fully verified candidate into the canonical plan identity."""
+
+    source = candidate.manifest.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("commit"), str):
+        raise TypeError(f"Verified release lacks source identity for {component_id}")
+    return {
+        "componentId": component_id,
+        "version": candidate.manifest["version"],
+        "manifestDigest": candidate.manifest_digest,
+        "artifactDigest": candidate.artifact_digest,
+        "sourceCommit": source["commit"],
+        "restartGroup": candidate.component["restart"]["group"],
+        "releaseId": candidate.release_tag,
+    }
+
+
+def _base_plan(updater: Any, plan: dict[str, Any]) -> dict[str, Any]:
+    """Build the updater-native checked-plan envelope for exact selected candidates."""
+
+    components = [
+        {
+            key: item[key]
+            for key in (
+                "componentId",
+                "version",
+                "manifestDigest",
+                "artifactDigest",
+                "restartGroup",
+            )
+        }
+        for item in sorted(plan["components"], key=lambda value: value["componentId"])
+    ]
+    material = {
+        "schemaVersion": 1,
+        "channel": plan["channel"],
+        "catalogGeneration": updater.catalog_generation,
+        "catalogDigest": updater.catalog_digest,
+        "components": components,
+    }
+    if "deploymentPlacement" in plan:
+        material["deploymentPlacement"] = plan["deploymentPlacement"]
+    canonical = _canonical_json(updater)
+    digest = "sha256:" + hashlib.sha256(canonical(material)).hexdigest()
+    return {
+        **material,
+        "planId": "plan-" + digest.split(":", 1)[1][:32],
+        "planDigest": digest,
+        "phase": "checked",
+    }
 
 
 def stage(
@@ -554,8 +809,61 @@ def _stage_locked(
         raise ValueError("Successor attempt is not in the checked phase")
     if channel is not None and updater._resolve_channel(channel) != plan["channel"]:
         raise ValueError("Stage channel differs from the digest-bound successor plan")
-    base_path = Path(updater.state_root) / "staged" / plan["basePlanId"] / "stage.json"
-    updater._stage_locked(plan["basePlanId"], plan["basePlanDigest"], channel=plan["channel"])
+    candidates = _exact_successor_candidates(
+        updater,
+        selector,
+        parent,
+        plan["channel"],
+        tuple(core.CORE_COMPONENT_IDS),
+        core,
+    )
+    base_plan = _base_plan(updater, plan)
+    if (
+        base_plan["planId"] != plan["basePlanId"]
+        or base_plan["planDigest"] != plan["basePlanDigest"]
+    ):
+        raise ValueError("Exact selected candidates differ from the successor's base plan binding")
+    staged_root = updater._private_state_directory("staged")
+    plan_root = staged_root / plan["basePlanId"]
+    if plan_root.is_symlink():
+        raise ValueError("Refusing symlinked successor base stage directory")
+    if plan_root.exists():
+        import shutil
+
+        shutil.rmtree(plan_root)
+    plan_root.mkdir(parents=True, mode=0o700)
+    updater._atomic_json_file(
+        updater._private_state_directory("plans") / f"{plan['basePlanId']}.json",
+        base_plan,
+        mode=0o600,
+    )
+    staged_components: list[dict[str, Any]] = []
+    try:
+        for component_id in tuple(core.CORE_COMPONENT_IDS):
+            staged_components.append(
+                updater._stage_candidate(
+                    candidates[component_id], plan_root, plan["basePlanId"], plan["basePlanDigest"]
+                )
+            )
+        updater._revalidate_plan_placement(base_plan, operation="stage")
+        updater._atomic_json_file(
+            plan_root / "stage.json",
+            {
+                "schemaVersion": 2,
+                "plan": base_plan,
+                "channel": plan["channel"],
+                "components": staged_components,
+                "phase": "staged",
+                "createdAt": int(time.time()),
+            },
+            mode=0o600,
+        )
+    except Exception:
+        import shutil
+
+        shutil.rmtree(plan_root, ignore_errors=True)
+        raise
+    base_path = plan_root / "stage.json"
     base_record = core._read_private_json(base_path)
     if base_record is None or base_record.get("phase") != "staged":
         raise ValueError("Verified successor Core cohort was not completely staged")
@@ -615,6 +923,12 @@ def handle(updater: Any, request: dict[str, Any], core: Any) -> dict[str, Any] |
             core=core,
         )
     if operation == "apply":
-        # Apply integration is added with the cleanup-aware bootstrap hook; keep closed meanwhile.
-        raise RuntimeError("Held successor apply integration is not available")
+        return core.apply(
+            updater,
+            request.get("planId"),
+            request.get("planDigest"),
+            request.get("confirmation"),
+            channel=request.get("channel"),
+            held_recovery=request["heldRecovery"],
+        )
     raise ValueError("heldRecovery is supported only for first-Core check, stage, and apply")
