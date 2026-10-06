@@ -59,6 +59,16 @@ class StartupUpdater:
     def runner(self, command: list[str], **_kwargs: Any) -> Any:
         if command[:2] != ["systemctl", "show"]:
             return _completed("")
+        if len(command) > 2 and command[2] == (
+            "--property=ActiveState,SubState,MainPID,ControlPID"
+        ):
+            unit = command[-1]
+            active = self.active_states[unit]
+            substate = "running" if active == "active" else "dead"
+            pid = self.unit_pids[unit] if active == "active" else "0"
+            values = f"{active}\n{substate}\n{pid}\n0"
+            self.events.append(("show", "unit-state", unit, values))
+            return _completed(values)
         property_name = next(
             argument.removeprefix("--property=")
             for argument in command
