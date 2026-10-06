@@ -72,6 +72,8 @@ LINUX_SYS_ADAPTER_SOCKET = Path("linux-sys-adapter.sock")
 _DELETED_EXE_SUFFIX = " (deleted)"
 CORE_EXEC_STARTUP_WAIT_SECONDS = 10.0
 CORE_EXEC_STARTUP_POLL_SECONDS = 0.1
+CORE_UNIT_QUIESCE_WAIT_SECONDS = 10.0
+CORE_UNIT_QUIESCE_POLL_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -960,6 +962,27 @@ def _first_products_module() -> Any:
     return module
 
 
+def _first_core_successor_module() -> Any:
+    """Load the fixed helper that validates and stages held successor plans."""
+
+    name = "_cyrene_native_core_successor"
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    import importlib.util
+
+    helper_path = Path(__file__).with_name("native_core_successor.py")
+    if not helper_path.is_file() or helper_path.is_symlink():
+        raise RuntimeError("The fixed held-successor helper is unavailable")
+    spec = importlib.util.spec_from_file_location(name, helper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("The fixed held-successor helper cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_plan(updater: Any, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
     updater._validate_plan_identity(plan_id, plan_digest)
     value = _read_private_json(_plan_path(updater, plan_id))
@@ -1036,6 +1059,12 @@ def _load_plan(updater: Any, plan_id: Any, plan_digest: Any) -> dict[str, Any]:
         material["firstProducts"] = first_products
     elif "firstProducts" in value:
         raise ValueError("Core-only plan unexpectedly contains Product cohort data")
+    successor_binding = value.get("successorBinding")
+    if successor_binding is not None:
+        if value.get("includeProducts") is not False:
+            raise ValueError("Held successor plan must be Core-only")
+        successor = _first_core_successor_module()
+        material = successor.plan_material(value)
     expected_digest = _digest(canonical(material))
     if expected_digest != plan_digest or plan_id != "plan-" + expected_digest.split(":", 1)[1][:32]:
         raise ValueError("First-Core plan digest does not match its immutable cohort data")
@@ -1472,7 +1501,12 @@ def _proc_executable_matches(pid: str, expected: Path, *, proc_root: Path | None
 
 
 def _verify_candidate_pid(
-    updater: Any, item: dict[str, Any], pid: str, *, deadline: float | None = None
+    updater: Any,
+    item: dict[str, Any],
+    pid: str,
+    *,
+    deadline: float | None = None,
+    proc_root: Path | None = None,
 ) -> None:
     """Wait briefly for exec, then require the exact signed candidate process identity.
 
@@ -1492,19 +1526,20 @@ def _verify_candidate_pid(
         deadline = _startup_time(clock) + CORE_EXEC_STARTUP_WAIT_SECONDS
     if not math.isfinite(deadline):
         raise RuntimeError("Core candidate startup deadline is invalid")
+    proc_root = PROC_ROOT if proc_root is None else proc_root
 
     # ── Phase 1: Observe only the original, active systemd MainPID.
     # 第一阶段：仅轮询原始且仍处于 active 的 MainPID。
     while True:
         _systemd_candidate_identity(updater, unit, pid, deadline=deadline, clock=clock)
-        if _proc_executable_matches(pid, expected):
+        if _proc_executable_matches(pid, expected, proc_root=proc_root):
             # Revalidate immutable release bytes and the same process identity at success.
             confirmed = _candidate_executable(updater, item)
             if confirmed != expected:
                 raise RuntimeError("Core staged entrypoint path changed during candidate startup")
             _startup_remaining(clock, deadline, unit)
             _systemd_candidate_identity(updater, unit, pid, deadline=deadline, clock=clock)
-            if not _proc_executable_matches(pid, confirmed):
+            if not _proc_executable_matches(pid, confirmed, proc_root=proc_root):
                 raise RuntimeError(
                     f"{unit} MainPID changed executable during candidate startup verification"
                 )
@@ -1515,44 +1550,339 @@ def _verify_candidate_pid(
         sleeper(min(CORE_EXEC_STARTUP_POLL_SECONDS, remaining))
 
 
+def _quiesce_remaining(clock: Any, deadline: float, unit: str) -> float:
+    """Return the remaining bounded unit-quiesce budget."""
+
+    remaining = deadline - _startup_time(clock)
+    if remaining <= 0:
+        raise RuntimeError(f"{unit} did not reach inactive/dead with MainPID 0 in time")
+    return remaining
+
+
+def _systemd_unit_property(
+    updater: Any,
+    unit: str,
+    property_name: str,
+    *,
+    deadline: float,
+    clock: Any,
+) -> str:
+    """Read one systemd property within the caller's quiesce deadline."""
+
+    timeout = min(5.0, _quiesce_remaining(clock, deadline, unit))
+    try:
+        completed = updater.runner(
+            ["systemctl", "show", f"--property={property_name}", "--value", unit],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"Cannot confirm {unit} {property_name} during quiesce") from error
+    _quiesce_remaining(clock, deadline, unit)
+    if completed.returncode != 0:
+        raise RuntimeError(f"Cannot confirm {unit} {property_name} during quiesce")
+    return completed.stdout.strip()
+
+
+def _signed_candidate_unit_source(
+    updater: Any, item: dict[str, Any]
+) -> tuple[dict[str, Any], str, Path, bytes]:
+    """Return the staged unit only when its bytes match the plan's signed file map."""
+
+    component_id = item.get("componentId")
+    component = updater.components.get(component_id)
+    unit = component.get("systemdUnit") if isinstance(component, dict) else None
+    manifest = item.get("manifest")
+    artifact = manifest.get("artifact") if isinstance(manifest, dict) else None
+    files = artifact.get("files") if isinstance(artifact, dict) else None
+    if (
+        not isinstance(component_id, str)
+        or not isinstance(unit, str)
+        or not isinstance(files, dict)
+    ):
+        raise TypeError("Staged Core candidate has no signed systemd unit identity")
+    pointer = f"{item['version']}--{item['manifestDigest'].removeprefix('sha256:')}"
+    source = (
+        updater.install_root / "components" / component_id / "releases" / pointer / "systemd" / unit
+    )
+    try:
+        info = source.lstat()
+        payload = source.read_bytes()
+    except OSError as error:
+        raise RuntimeError(
+            f"Signed staged systemd unit is unavailable for {component_id}"
+        ) from error
+    expected = files.get(f"systemd/{unit}")
+    if (
+        source.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or expected != _digest(payload)
+        or not updater._unit_uses_component_runner(source, component_id)
+    ):
+        raise RuntimeError(f"Staged systemd unit differs from its signed Core plan: {component_id}")
+    return component, unit, source, payload
+
+
+def _verify_candidate_unit_file(path: Path, expected_bytes: bytes, *, component_id: str) -> bool:
+    """Require an installed unit file to be the exact private plan-owned bytes."""
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise RuntimeError(f"Cannot inspect the candidate unit file for {component_id}") from error
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or path.read_bytes() != expected_bytes
+    ):
+        raise RuntimeError(f"Loaded systemd unit is not the exact signed plan file: {component_id}")
+    return True
+
+
+def _run_bounded_systemctl(
+    updater: Any,
+    arguments: list[str],
+    *,
+    unit: str,
+    deadline: float,
+    clock: Any,
+) -> None:
+    """Run a fixed systemctl operation without exceeding the unit deadline."""
+
+    timeout = min(5.0, _quiesce_remaining(clock, deadline, unit))
+    try:
+        completed = updater.runner(
+            ["systemctl", *arguments],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"Cannot complete systemctl {arguments[0]} for {unit}") from error
+    _quiesce_remaining(clock, deadline, unit)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(f"systemctl {arguments[0]} failed for {unit}: {detail}")
+
+
+def _prove_candidate_unit_loaded(
+    updater: Any,
+    item: dict[str, Any],
+    *,
+    deadline: float,
+    clock: Any,
+    restore_missing: bool,
+) -> str:
+    """Bind systemd's loaded unit to the signed release before stopping it.
+
+    The fragment must be the first fixed Cyrene unit path with no drop-ins. If an
+    interrupted cleanup unlinked that fragment, restore the signed bytes and
+    reload systemd before acting on its cached auto-restart state.
+    中文：只操作同一计划签名unit；文件已被旧cleanup unlink时，先还原并重载再停止。
+    """
+
+    component, unit, source, payload = _signed_candidate_unit_source(updater, item)
+    unit_dirs = getattr(updater, "systemd_unit_dirs", None)
+    if not isinstance(unit_dirs, (list, tuple)) or not unit_dirs:
+        raise RuntimeError("First-Core quiesce has no fixed systemd unit directory")
+    destination = Path(unit_dirs[0]) / unit
+    if not destination.is_absolute() or destination.is_symlink():
+        raise RuntimeError(f"Candidate systemd unit path is unsafe for {component['componentId']}")
+
+    fragment = _systemd_unit_property(updater, unit, "FragmentPath", deadline=deadline, clock=clock)
+    drop_ins = _systemd_unit_property(updater, unit, "DropInPaths", deadline=deadline, clock=clock)
+    if fragment != str(destination) or drop_ins:
+        raise RuntimeError(
+            f"Loaded systemd unit path or drop-ins differ from the signed plan: {unit}"
+        )
+
+    installed = _verify_candidate_unit_file(
+        destination, payload, component_id=component["componentId"]
+    )
+    needs_reload = _systemd_unit_property(
+        updater, unit, "NeedDaemonReload", deadline=deadline, clock=clock
+    )
+    if not installed:
+        if not restore_missing:
+            raise RuntimeError(
+                f"Signed candidate unit file is absent for {component['componentId']}"
+            )
+        _write_unit(updater, component, source.parent.parent)
+        _verify_candidate_unit_file(destination, payload, component_id=component["componentId"])
+        needs_reload = "yes"
+    if needs_reload not in {"yes", "no"}:
+        raise RuntimeError(f"systemd reload state is unknown for {unit}")
+    if needs_reload == "yes":
+        _run_bounded_systemctl(
+            updater, ["daemon-reload"], unit=unit, deadline=deadline, clock=clock
+        )
+        fragment = _systemd_unit_property(
+            updater, unit, "FragmentPath", deadline=deadline, clock=clock
+        )
+        drop_ins = _systemd_unit_property(
+            updater, unit, "DropInPaths", deadline=deadline, clock=clock
+        )
+        needs_reload = _systemd_unit_property(
+            updater, unit, "NeedDaemonReload", deadline=deadline, clock=clock
+        )
+        _verify_candidate_unit_file(destination, payload, component_id=component["componentId"])
+    if fragment != str(destination) or drop_ins or needs_reload != "no":
+        raise RuntimeError(f"systemd did not load the exact signed unit for {unit}")
+    return unit
+
+
+def _candidate_unit_state(
+    updater: Any,
+    unit: str,
+    *,
+    deadline: float,
+    clock: Any,
+) -> tuple[str, str, str, str]:
+    """Read one coherent unit state and both PIDs within the quiesce deadline."""
+
+    timeout = min(5.0, _quiesce_remaining(clock, deadline, unit))
+    try:
+        completed = updater.runner(
+            [
+                "systemctl",
+                "show",
+                "--property=ActiveState,SubState,MainPID,ControlPID",
+                "--value",
+                unit,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(f"Cannot confirm {unit} state during quiesce") from error
+    _quiesce_remaining(clock, deadline, unit)
+    if completed.returncode != 0:
+        raise RuntimeError(f"Cannot confirm {unit} state during quiesce")
+    values = completed.stdout.splitlines()
+    if len(values) != 4:
+        raise RuntimeError(f"Cannot parse coherent systemd state for {unit}")
+    active, substate, main_pid, control_pid = values
+    if (
+        not main_pid.isascii()
+        or not main_pid.isdecimal()
+        or not control_pid.isascii()
+        or not control_pid.isdecimal()
+    ):
+        raise RuntimeError(f"Cannot prove systemd PIDs for {unit}")
+    return active, substate, main_pid, control_pid
+
+
+def _wait_candidate_unit_dead(
+    updater: Any,
+    item: dict[str, Any],
+    unit: str,
+    *,
+    deadline: float,
+    clock: Any,
+    sleeper: Any,
+) -> None:
+    """Wait until the exact candidate unit is fully inactive with no owned PID."""
+
+    while True:
+        state = _candidate_unit_state(updater, unit, deadline=deadline, clock=clock)
+        active, substate, main_pid, control_pid = state
+        if (active, substate, main_pid, control_pid) == ("inactive", "dead", "0", "0"):
+            return
+        if main_pid != "0":
+            expected = _candidate_executable(updater, item)
+            if not _proc_executable_matches(main_pid, expected):
+                raise RuntimeError(f"Refusing an unexpected live MainPID for candidate unit {unit}")
+        remaining = _quiesce_remaining(clock, deadline, unit)
+        sleeper(min(CORE_UNIT_QUIESCE_POLL_SECONDS, remaining))
+
+
+def _quiesce_candidate_unit(
+    updater: Any,
+    item: dict[str, Any],
+    *,
+    stop_running: bool,
+    restore_missing: bool,
+    proc_root: Path | None = None,
+) -> None:
+    """Stop a plan-owned unit, including a PID0 systemd auto-restart, with proof."""
+
+    component = updater.components[item["componentId"]]
+    unit = component["systemdUnit"]
+    clock, sleeper = _candidate_startup_clock(updater)
+    deadline = _startup_time(clock) + CORE_UNIT_QUIESCE_WAIT_SECONDS
+    state = _candidate_unit_state(updater, unit, deadline=deadline, clock=clock)
+    active, substate, main_pid, control_pid = state
+    if (active, substate, main_pid, control_pid) == ("inactive", "dead", "0", "0"):
+        return
+    if main_pid != "0":
+        _verify_candidate_pid(updater, item, main_pid, deadline=deadline, proc_root=proc_root)
+        if not stop_running:
+            return
+    elif (active, substate, main_pid, control_pid) != ("activating", "auto-restart", "0", "0"):
+        raise RuntimeError(f"Cannot prove a stoppable PID0 state for candidate unit {unit}")
+
+    _prove_candidate_unit_loaded(
+        updater,
+        item,
+        deadline=deadline,
+        clock=clock,
+        restore_missing=restore_missing,
+    )
+    # The loaded unit is now the exact plan file; recheck any live process before stopping it.
+    state = _candidate_unit_state(updater, unit, deadline=deadline, clock=clock)
+    active, substate, main_pid, control_pid = state
+    if main_pid != "0":
+        _verify_candidate_pid(updater, item, main_pid, deadline=deadline, proc_root=proc_root)
+    elif (active, substate, control_pid) != ("activating", "auto-restart", "0"):
+        if (active, substate, main_pid, control_pid) == ("inactive", "dead", "0", "0"):
+            return
+        raise RuntimeError(f"Candidate unit state changed before bounded stop: {unit}")
+    _run_bounded_systemctl(updater, ["stop", unit], unit=unit, deadline=deadline, clock=clock)
+    _wait_candidate_unit_dead(updater, item, unit, deadline=deadline, clock=clock, sleeper=sleeper)
+
+
+def _quiesce_hold_recovery_units(
+    updater: Any, components: list[dict[str, Any]], *, proc_root: Path | None = None
+) -> None:
+    """Quiesce only orphaned PID0 auto-restarts before rebuilding a held plan."""
+
+    cohort = _validate_staged_cohort(updater, components)
+    by_id = {item["componentId"]: item for item in components}
+    for component_id in reversed(cohort):
+        _quiesce_candidate_unit(
+            updater,
+            by_id[component_id],
+            stop_running=False,
+            restore_missing=True,
+            proc_root=proc_root,
+        )
+
+
 def _stop_candidate_services(updater: Any, components: list[dict[str, Any]]) -> None:
     """Stop only exact plan-owned unit PIDs, in reverse dependency order."""
 
     cohort = _validate_staged_cohort(updater, components)
-    order = {component_id: index for index, component_id in enumerate(cohort)}
-    ordered = sorted(components, key=lambda item: order[item["componentId"]], reverse=True)
-    for item in ordered:
-        unit = updater.components[item["componentId"]]["systemdUnit"]
-        completed = updater.runner(
-            ["systemctl", "show", "--property=MainPID", "--value", unit],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
+    by_id = {item["componentId"]: item for item in components}
+    for component_id in reversed(cohort):
+        _quiesce_candidate_unit(
+            updater,
+            by_id[component_id],
+            stop_running=True,
+            restore_missing=False,
         )
-        if completed.returncode != 0 or not completed.stdout.strip().isdecimal():
-            raise RuntimeError(
-                f"Cannot prove the owned PID for {unit}; leave candidate files and hold intact"
-            )
-        pid = completed.stdout.strip()
-        if pid == "0":
-            continue
-        _verify_candidate_pid(updater, item, pid)
-        updater._run_systemctl("stop", unit)
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            state = updater.runner(
-                ["systemctl", "show", "--property=MainPID", "--value", unit],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            if state.returncode == 0 and state.stdout.strip() == "0":
-                break
-            time.sleep(0.1)
-        else:
-            raise RuntimeError(f"Owned candidate unit {unit} did not stop; keep the hold and files")
 
 
 def _remove_verified_broker_units(
@@ -1895,6 +2225,419 @@ def _verify_held_core_bootstrap(
         raise RuntimeError("Broker did not confirm the same active first-Core maintenance hold")
 
 
+def _persist_successor_transaction(
+    updater: Any,
+    journal_path: Path,
+    parent_plan: dict[str, Any],
+    plan: dict[str, Any],
+    transaction: dict[str, Any],
+) -> None:
+    """Persist child progress under the parent without rewriting its authority record."""
+
+    current = _read_private_json(journal_path)
+    if not isinstance(current, dict):
+        raise TypeError("Held parent journal disappeared during successor apply")
+    immutable = ("planId", "planDigest", "requestId", "componentArtifactDigests")
+    if any(current.get(key) != parent_plan.get(key) for key in immutable) or current.get(
+        "beginRequest"
+    ) != _core_bootstrap_begin_request(parent_plan):
+        raise ValueError("Original first-Core authority changed during successor apply")
+    attempts = current.get("successorAttempts")
+    if not isinstance(attempts, list) or len(attempts) != 1:
+        raise ValueError("Held parent no longer contains its unique successor attempt")
+    attempt = attempts[0]
+    if (
+        not isinstance(attempt, dict)
+        or attempt.get("planId") != plan["planId"]
+        or attempt.get("planDigest") != plan["planDigest"]
+        or attempt.get("successorBinding") != plan["successorBinding"]
+    ):
+        raise ValueError("Successor attempt identity changed during apply")
+    saved_transaction = dict(transaction)
+    saved_transaction.pop("maintenanceToken", None)
+    attempt["transaction"] = saved_transaction
+    attempt["phase"] = transaction["phase"]
+    if transaction.get("gateReleaseConfirmed") is True:
+        current["gateReleaseConfirmed"] = True
+        current["phase"] = "successor_end_confirmed"
+        current["successorReleaseProof"] = {
+            "planId": plan["planId"],
+            "planDigest": plan["planDigest"],
+            "requestId": transaction["endRequestId"],
+            "maintenanceGateGeneration": current["maintenanceGateGeneration"],
+            "unlocked": True,
+            "status": transaction.get("endResultStatus", "UNKNOWN"),
+        }
+    if transaction.get("phase") == "succeeded":
+        current["phase"] = "successor_succeeded"
+    _write_private_json(updater, journal_path, current)
+
+
+def _apply_held_successor(
+    updater: Any,
+    plan: dict[str, Any],
+    confirmation: Any,
+    selector_value: Any,
+    *,
+    channel: Any,
+    proc_root: Path,
+) -> dict[str, Any]:
+    """Apply a checked successor using the original durable hold and End authority."""
+
+    successor = _first_core_successor_module()
+    selector = successor.validate_selector(selector_value)
+    if selector != successor.selector_for_plan(plan):
+        raise ValueError("Apply selector differs from the digest-bound successor parent")
+    if plan.get("includeProducts") is not False:
+        raise ValueError("Held successor apply supports only the four-member C9 Core cohort")
+    expected_confirmation = successor.confirmation(plan)
+    if "bootstrapBroker" in plan:
+        expected_confirmation["bootstrapBroker"] = plan["bootstrapBroker"]
+    if confirmation != expected_confirmation:
+        raise ValueError(
+            "Apply confirmation must bind the exact held successor and full artifact map"
+        )
+    if channel is not None and updater._resolve_channel(channel) != plan["channel"]:
+        raise ValueError("Apply channel differs from the staged held successor plan")
+    if not _is_root():
+        raise PermissionError("Held successor activation requires the root-authorized updater")
+
+    journal_path = _journal_path(updater)
+    with updater._exclusive_update_lock():
+        parent = _load_plan(updater, selector["parentPlanId"], selector["parentPlanDigest"])
+        parent_transaction = _read_private_json(journal_path)
+        if not isinstance(parent_transaction, dict):
+            raise TypeError("Held successor parent journal is unavailable")
+        parent_phase = parent_transaction.get("phase")
+        if parent_phase not in {"hold_required", "successor_end_confirmed", "successor_succeeded"}:
+            raise ValueError("Held successor parent journal is in an unsupported phase")
+        if (
+            parent.get("includeProducts", False) is not False
+            or "firstProducts" in parent
+            or parent_transaction.get("planId") != parent["planId"]
+            or parent_transaction.get("planDigest") != parent["planDigest"]
+            or parent_transaction.get("requestId") != parent["requestId"]
+            or parent_transaction.get("componentArtifactDigests")
+            != parent["componentArtifactDigests"]
+            or parent_transaction.get("beginRequest") != _core_bootstrap_begin_request(parent)
+            or parent_transaction.get("maintenanceGateGeneration")
+            != selector["maintenanceGateGeneration"]
+            or not isinstance(parent_transaction.get("maintenanceToken"), str)
+            or not parent_transaction["maintenanceToken"].strip()
+            or not successor._selector_matches_parent(
+                selector,
+                parent,
+                parent_transaction.get("maintenanceGateGeneration"),
+            )
+        ):
+            raise ValueError("Original held parent identity or Begin authority changed")
+        attempts = parent_transaction.get("successorAttempts")
+        if not isinstance(attempts, list) or len(attempts) != 1:
+            raise ValueError("The exact successor attempt is not recorded under its parent")
+        attempt = attempts[0]
+        if (
+            not isinstance(attempt, dict)
+            or attempt.get("planId") != plan["planId"]
+            or attempt.get("planDigest") != plan["planDigest"]
+            or attempt.get("successorBinding") != plan["successorBinding"]
+            or attempt.get("componentArtifactDigests") != plan["componentArtifactDigests"]
+        ):
+            raise ValueError("The exact signed successor is not the parent's selected attempt")
+        staged_path = Path(updater.state_root) / "staged" / plan["planId"] / "stage.json"
+        staged = _read_private_json(staged_path)
+        if (
+            not isinstance(staged, dict)
+            or staged.get("phase") != "staged"
+            or staged.get("plan") != {**plan, "phase": "staged"}
+            or staged.get("successorBinding") != plan["successorBinding"]
+        ):
+            raise ValueError("The exact confirmed held successor is not staged")
+        base_path = Path(updater.state_root) / "staged" / plan["basePlanId"] / "stage.json"
+        base_record = _read_private_json(base_path)
+        if not isinstance(base_record, dict):
+            raise TypeError("Signed successor Core artifact stage is missing")
+        updater._validate_staged_record(
+            base_record,
+            expected_plan_id=plan["basePlanId"],
+            expected_plan_digest=plan["basePlanDigest"],
+        )
+        components = base_record["components"]
+        cohort = _validate_staged_cohort(updater, components)
+        if cohort != CORE_COMPONENT_IDS or {
+            item.get("componentId") for item in plan["components"]
+        } != set(CORE_COMPONENT_IDS):
+            raise ValueError("Held successor is not the exact legacy C9 four-component cohort")
+        digests = {
+            item.get("componentId"): item.get("artifactDigest")
+            for item in components
+            if isinstance(item, dict)
+        }
+        if digests != plan["componentArtifactDigests"]:
+            raise ValueError("Staged successor artifact map differs from explicit confirmation")
+        planned_by_id = {
+            item.get("componentId"): item
+            for item in plan.get("components", [])
+            if isinstance(item, dict)
+        }
+        for item in components:
+            component_id = item.get("componentId")
+            planned = planned_by_id.get(component_id)
+            manifest = item.get("manifest")
+            source = manifest.get("source") if isinstance(manifest, dict) else None
+            if (
+                not isinstance(planned, dict)
+                or not isinstance(manifest, dict)
+                or item.get("version") != planned.get("version")
+                or item.get("manifestDigest") != planned.get("manifestDigest")
+                or item.get("artifactDigest") != planned.get("artifactDigest")
+                or manifest.get("releaseId") != planned.get("releaseId")
+                or not isinstance(source, dict)
+                or source.get("commit") != planned.get("sourceCommit")
+            ):
+                raise ValueError(
+                    f"Staged signed manifest differs from successor selection: {component_id}"
+                )
+
+        transaction = attempt.get("transaction")
+        if transaction is None:
+            if parent_transaction.get("gateReleaseConfirmed") is True:
+                raise ValueError("Released hold has no successor transaction to finalize")
+            transaction = {
+                "schemaVersion": 1,
+                "requestId": plan["requestId"],
+                "planId": plan["planId"],
+                "planDigest": plan["planDigest"],
+                "targetKind": "CORE_RUNTIME",
+                "expectedGateGeneration": parent["gateGeneration"],
+                "expectedCatalogGeneration": parent["catalogGeneration"],
+                "expectedActivitySources": parent["activitySources"],
+                "componentArtifactDigests": plan["componentArtifactDigests"],
+                **(
+                    {"bootstrapBroker": plan["bootstrapBroker"]}
+                    if "bootstrapBroker" in plan
+                    else {}
+                ),
+                "includeProducts": False,
+                "components": components,
+                "previous": updater._capture_active_versions(components),
+                "successorBinding": plan["successorBinding"],
+                "phase": "hold_required",
+                "createdAt": int(time.time()),
+            }
+        else:
+            if not isinstance(transaction, dict):
+                raise TypeError("Successor transaction journal is malformed")
+            for key, expected in {
+                "requestId": plan["requestId"],
+                "planId": plan["planId"],
+                "planDigest": plan["planDigest"],
+                "targetKind": "CORE_RUNTIME",
+                "expectedGateGeneration": parent["gateGeneration"],
+                "expectedCatalogGeneration": parent["catalogGeneration"],
+                "expectedActivitySources": parent["activitySources"],
+                "componentArtifactDigests": plan["componentArtifactDigests"],
+                "components": components,
+                "successorBinding": plan["successorBinding"],
+            }.items():
+                if transaction.get(key) != expected:
+                    raise ValueError(f"Held successor transaction changed immutable field {key}")
+            if transaction.get("maintenanceToken") not in {
+                None,
+                parent_transaction["maintenanceToken"],
+            }:
+                raise ValueError("Held successor transaction has a different authority token")
+        transaction["maintenanceToken"] = parent_transaction["maintenanceToken"]
+        transaction["components"] = components
+
+        def persist() -> None:
+            _persist_successor_transaction(updater, journal_path, parent, plan, transaction)
+
+        if transaction.get("phase") == "succeeded":
+            return {
+                "status": "installed",
+                "planId": plan["planId"],
+                "planDigest": plan["planDigest"],
+                "postEndReadiness": transaction.get("postEndReadiness", "UNKNOWN"),
+            }
+        if transaction.get("phase") == "end_confirmed":
+            transaction["postEndReadiness"] = "UNKNOWN"
+            try:
+                post_end = updater._readiness_for("CORE_RUNTIME", requires_restart=True, force=True)
+                transaction["postEndReadiness"] = post_end.get("status", "UNKNOWN")
+            except Exception as error:  # noqa: BLE001 - End is already confirmed.
+                transaction["postEndReadinessError"] = str(error)[:300]
+            transaction["phase"] = "succeeded"
+            persist()
+            return {
+                "status": "installed",
+                "planId": plan["planId"],
+                "planDigest": plan["planDigest"],
+                "postEndReadiness": transaction["postEndReadiness"],
+            }
+
+        authority_released = parent_transaction.get("gateReleaseConfirmed") is True
+        if transaction.get("phase") not in {"end_call_pending", "end_confirmed", "succeeded"}:
+            if authority_released:
+                raise ValueError("Parent records released admission without successor End proof")
+            _verify_held_core_bootstrap(updater, parent, parent_transaction)
+            snapshot = _health_snapshot(updater, require_eligible=False)
+            if (
+                snapshot["gateGeneration"] != selector["maintenanceGateGeneration"]
+                or snapshot["catalogGeneration"] != plan["catalogGeneration"]
+                or snapshot["activitySources"] != plan["activitySources"]
+            ):
+                raise RuntimeError("Live Broker changed while the held successor was pending")
+            try:
+                _assert_fresh(
+                    updater,
+                    proc_root=proc_root,
+                    planned_components=components,
+                    expected_bootstrap_broker=plan.get("bootstrapBroker"),
+                )
+                if transaction.get("phase") in {
+                    "hold_required",
+                    "installing",
+                    "starting",
+                    "started",
+                }:
+                    _quiesce_hold_recovery_units(updater, components, proc_root=proc_root)
+            except Exception as error:
+                transaction["failure"] = str(error)[:500]
+                transaction["phase"] = "hold_required"
+                persist()
+                raise RuntimeError(
+                    "Successor recovery identity is not proven; the original admission hold remains closed"
+                ) from error
+            if transaction.get("phase") == "hold_required":
+                transaction["phase"] = "installing"
+                persist()
+
+        if transaction.get("phase") not in {
+            "installing",
+            "starting",
+            "started",
+            "end_pending",
+            "end_call_pending",
+        }:
+            raise ValueError("Held successor transaction has an unsupported phase")
+
+        try:
+            if transaction.get("phase") == "installing":
+                _stop_initial_c10_broker(updater, transaction, journal_path)
+                for item in components:
+                    component = updater.components[item["componentId"]]
+                    pointer = f"{item['version']}--{item['manifestDigest'].removeprefix('sha256:')}"
+                    release = (
+                        updater.install_root
+                        / "components"
+                        / item["componentId"]
+                        / "releases"
+                        / pointer
+                    )
+                    _write_unit(updater, component, release)
+                _activate_core_cohort(updater, transaction)
+                completed = updater.runner(
+                    ["systemctl", "daemon-reload"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                if completed.returncode != 0:
+                    raise RuntimeError("systemd daemon-reload failed")
+                transaction["phase"] = "starting"
+                persist()
+            if transaction.get("phase") in {"starting", "started"}:
+                _start_core_components(updater, components)
+                updater._health_transaction(transaction)
+                transaction["phase"] = "end_pending"
+                persist()
+        except Exception as error:
+            try:
+                _stop_candidate_services(updater, components)
+                _remove_candidate_pointers_and_units(updater, components)
+            except Exception as cleanup_error:  # noqa: BLE001 - never release an unclear hold.
+                transaction["cleanupError"] = str(cleanup_error)[:300]
+            transaction["failure"] = str(error)[:500]
+            transaction["phase"] = "hold_required"
+            persist()
+            raise RuntimeError(
+                f"Held successor failed; original admission hold remains closed: {error}"
+            ) from error
+
+        try:
+            _verify_live_core_cohort(updater, transaction, plan)
+            _require_core_ready(updater, plan)
+        except Exception as error:
+            if transaction.get("phase") == "end_call_pending":
+                transaction["endRecoveryError"] = str(error)[:500]
+                persist()
+                raise RuntimeError(
+                    "Successor End outcome is uncertain and live Core proof failed; retain candidate and hold"
+                ) from error
+            try:
+                _rollback_pre_end(updater, plan, transaction, components)
+            except Exception as cleanup_error:  # noqa: BLE001 - retain all evidence under the hold.
+                transaction["cleanupError"] = str(cleanup_error)[:300]
+            transaction["failure"] = str(error)[:500]
+            transaction["phase"] = "hold_required"
+            persist()
+            raise RuntimeError(
+                f"Successor health proof failed; original admission hold remains closed: {error}"
+            ) from error
+
+        if transaction.get("phase") != "end_call_pending":
+            transaction["phase"] = "end_call_pending"
+            transaction["endRequestId"] = parent["requestId"]
+            persist()
+        end_request_id = "bootstrap-end-" + parent["planDigest"].split(":", 1)[1][:32]
+        try:
+            end_result = updater._broker_request(
+                "EndMaintenance",
+                {
+                    "request_id": parent["requestId"],
+                    "target_kind": "CORE_RUNTIME",
+                    "maintenance_token": parent_transaction["maintenanceToken"],
+                    "outcome": "SUCCESS",
+                    "healthy": True,
+                },
+                request_id=end_request_id,
+            )
+        except Exception as error:
+            transaction["endError"] = str(error)[:300]
+            persist()
+            raise RuntimeError(
+                "Successor EndMaintenance result is uncertain; retry this same plan and original authority"
+            ) from error
+        if end_result.get("unlocked") is not True:
+            transaction["endError"] = "Platform did not confirm the durable gate release"
+            persist()
+            raise RuntimeError(
+                "Platform did not confirm successor gate release; hold remains recorded"
+            )
+        transaction["phase"] = "end_confirmed"
+        transaction["gateReleaseConfirmed"] = True
+        transaction["endRequestId"] = parent["requestId"]
+        transaction["endResultStatus"] = end_result.get("status", "UNKNOWN")
+        transaction["endGateGeneration"] = end_result.get("gate_generation")
+        persist()
+        transaction["postEndReadiness"] = "UNKNOWN"
+        try:
+            post_end = updater._readiness_for("CORE_RUNTIME", requires_restart=True, force=True)
+            transaction["postEndReadiness"] = post_end.get("status", "UNKNOWN")
+        except Exception as error:  # noqa: BLE001 - admission release is already proven.
+            transaction["postEndReadinessError"] = str(error)[:300]
+        transaction["phase"] = "succeeded"
+        persist()
+        return {
+            "status": "installed",
+            "planId": plan["planId"],
+            "planDigest": plan["planDigest"],
+            "components": list(cohort),
+            "postEndReadiness": transaction["postEndReadiness"],
+        }
+
+
 def apply(
     updater: Any,
     plan_id: Any,
@@ -1903,10 +2646,24 @@ def apply(
     *,
     channel: Any = None,
     proc_root: Path = PROC_ROOT,
+    held_recovery: Any = None,
 ) -> dict[str, Any]:
     """Install the confirmed Core cohort under a durable hold, preserving it on failure."""
 
     plan = _load_plan(updater, plan_id, plan_digest)
+    if "successorBinding" in plan:
+        if held_recovery is None:
+            raise ValueError("Held successor apply requires its explicit parent selector")
+        return _apply_held_successor(
+            updater,
+            plan,
+            confirmation,
+            held_recovery,
+            channel=channel,
+            proc_root=proc_root,
+        )
+    if held_recovery is not None:
+        raise ValueError("heldRecovery cannot authorize an ordinary first-Core plan")
     expected_confirmation = {
         "mode": CORE_BOOTSTRAP_MODE,
         "planId": plan_id,
@@ -1991,6 +2748,10 @@ def apply(
             "createdAt": int(time.time()),
         }
         existing = _read_private_json(journal_path)
+        if existing is not None and existing.get("successorAttempts"):
+            raise ValueError(
+                "An explicitly selected held successor owns recovery for the original first-Core hold"
+            )
         recovering_hold_required = existing is not None and existing.get("phase") == "hold_required"
         if existing is not None:
             if (
@@ -2170,6 +2931,7 @@ def apply(
                     expected_bootstrap_broker=plan.get("bootstrapBroker"),
                     held_adapter_socket_proof=recovery_socket_proof,
                 )
+                _quiesce_hold_recovery_units(updater, components, proc_root=proc_root)
             except Exception as error:
                 transaction["failure"] = str(error)[:500]
                 transaction["phase"] = "hold_required"

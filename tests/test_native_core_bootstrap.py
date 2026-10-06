@@ -316,7 +316,13 @@ class FakeUpdater:
             release_name = item["version"] + "--" + item["manifestDigest"].removeprefix("sha256:")
             release = self.install_root / "components" / component_id / "releases" / release_name
             (release / "systemd").mkdir(mode=0o755, parents=True, exist_ok=True)
-            (release / "systemd" / unit_path.removeprefix("systemd/")).write_bytes(unit)
+            unit_file = release / "systemd" / unit_path.removeprefix("systemd/")
+            unit_file.write_bytes(unit)
+            unit_file.chmod(0o644)
+            binary_file = release / binary_path
+            binary_file.parent.mkdir(parents=True, exist_ok=True)
+            binary_file.write_bytes(b"signed test executable")
+            binary_file.chmod(0o755)
             manifest = {
                 "componentId": component_id,
                 "version": item["version"],
@@ -340,7 +346,13 @@ class FakeUpdater:
                     and component_id in bootstrap._PACKAGE_RUNTIME_PROTOCOLS
                     else None
                 ),
-                "artifact": {"entrypoint": binary_path},
+                "artifact": {
+                    "entrypoint": binary_path,
+                    "files": {
+                        binary_path: _digest(binary_file.read_bytes()),
+                        unit_path: _digest((release / unit_path).read_bytes()),
+                    },
+                },
                 "health": None,
             }
             components.append({**item, "bundleIdentity": None, "manifest": manifest})
@@ -418,11 +430,31 @@ class FakeUpdater:
     def runner(self, *_args: Any, **_kwargs: Any) -> Any:
         command = _args[0] if _args else []
         stdout = self.gpu_output
+        if command[:2] == ["systemctl", "show"] and len(command) > 2:
+            unit = command[-1]
+            property_arg = command[2]
+            if property_arg == "--property=ActiveState,SubState,MainPID,ControlPID":
+                pid = self.unit_pids.get(unit, "0")
+                active = "active" if pid != "0" and unit not in self.stopped_units else "inactive"
+                substate = "running" if active == "active" else "dead"
+                stdout = f"{active}\n{substate}\n{pid if active == 'active' else '0'}\n0"
+            elif property_arg.startswith("--property=FragmentPath"):
+                stdout = str(self.systemd_unit_dirs[0] / unit)
+            elif property_arg.startswith("--property=DropInPaths"):
+                stdout = ""
+            elif property_arg.startswith("--property=NeedDaemonReload"):
+                stdout = "no"
+        if command[:2] == ["systemctl", "stop"]:
+            unit = command[2]
+            self.events.append(("stop", unit))
+            self.stopped_units.add(unit)
+        if command[:2] == ["systemctl", "daemon-reload"]:
+            self.events.append(("daemon-reload",))
         if command and command[:2] == ["systemctl", "show"]:
             unit = command[-1]
-            if "ActiveState" in command[2]:
+            if len(command) > 2 and command[2] == "--property=ActiveState":
                 stdout = "inactive" if unit in self.stopped_units else "active"
-            else:
+            elif len(command) > 2 and command[2] == "--property=MainPID":
                 stdout = (
                     "0" if unit in self.stopped_units else self.unit_pids.get(unit, self.main_pid)
                 )
@@ -1302,7 +1334,7 @@ def test_owned_product_cleanup_precedes_core_cleanup_before_end(
     monkeypatch.setattr(bootstrap, "_is_root", lambda: True)
     monkeypatch.setattr(bootstrap, "_verify_started_processes", lambda *_: None)
     monkeypatch.setattr(bootstrap, "_verify_live_core_cohort", lambda *_: None)
-    monkeypatch.setattr(bootstrap, "_verify_candidate_pid", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_verify_candidate_pid", lambda *_, **__: None)
 
     with pytest.raises(RuntimeError, match="hold remains closed"):
         bootstrap.apply(
@@ -1530,7 +1562,7 @@ def test_failure_stops_only_candidate_units_in_reverse_order_before_pointer_remo
     bootstrap.stage(updater, plan["planId"], plan["planDigest"])
     monkeypatch.setattr(bootstrap, "_is_root", lambda: True)
     monkeypatch.setattr(bootstrap, "_verify_started_processes", lambda *_: None)
-    monkeypatch.setattr(bootstrap, "_verify_candidate_pid", lambda *_: None)
+    monkeypatch.setattr(bootstrap, "_verify_candidate_pid", lambda *_, **__: None)
     confirmation = {
         "mode": bootstrap.CORE_BOOTSTRAP_MODE,
         "planId": plan["planId"],
@@ -1552,7 +1584,9 @@ def test_failure_stops_only_candidate_units_in_reverse_order_before_pointer_remo
     expected = [
         updater.components[item]["systemdUnit"] for item in reversed(bootstrap.CORE_COMPONENT_IDS)
     ]
-    assert stopped == expected
+    assert stopped == expected, json.loads(bootstrap._journal_path(updater).read_text()).get(
+        "cleanupError"
+    )
     assert all(pointer is None for pointer in updater.pointers.values())
 
 
