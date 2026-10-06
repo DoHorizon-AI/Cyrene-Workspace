@@ -528,15 +528,11 @@ def test_activity_sources_come_from_exact_signed_and_installed_units(
             "EnvironmentFile=/etc/cyrene/runtime-activity-sources.env",
         ]
         if source_id == "cyrene-yield":
-            environment_files.append(
-                "EnvironmentFile=-/etc/cyrene/yield-package-runtime.env"
-            )
+            environment_files.append("EnvironmentFile=-/etc/cyrene/yield-package-runtime.env")
         payload = (
             "[Service]\n"
             "User=cyrene\n"
-            "Group=cyrene\n"
-            + "\n".join(environment_files)
-            + "\n"
+            "Group=cyrene\n" + "\n".join(environment_files) + "\n"
             "LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/"
             f"{source_id}.token\n"
         ).encode()
@@ -591,9 +587,7 @@ def test_activity_source_unit_requires_the_activity_environment_exactly_once(
     payload = (
         "[Service]\n"
         "User=cyrene\n"
-        "Group=cyrene\n"
-        + "\n".join(activity_environment_files)
-        + "\n"
+        "Group=cyrene\n" + "\n".join(activity_environment_files) + "\n"
         "EnvironmentFile=-/etc/cyrene/yield-package-runtime.env\n"
         "LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/"
         "cyrene-yield.token\n"
