@@ -3785,6 +3785,7 @@ class ComponentUpdater:
                     "channel",
                     "bootstrapMode",
                     "includeProducts",
+                    "heldRecovery",
                 },
                 "stage": {
                     "protocolVersion",
@@ -3793,6 +3794,7 @@ class ComponentUpdater:
                     "planDigest",
                     "channel",
                     "bootstrapMode",
+                    "heldRecovery",
                 },
                 "apply": {
                     "protocolVersion",
@@ -3802,6 +3804,7 @@ class ComponentUpdater:
                     "confirmation",
                     "channel",
                     "bootstrapMode",
+                    "heldRecovery",
                 },
                 "prepare-adoption": {
                     "protocolVersion",
@@ -3842,6 +3845,10 @@ class ComponentUpdater:
             self._require_authorized_process()
             if "bootstrapMode" in request and request.get("bootstrapMode") != "first-core":
                 raise UpdateError("INVALID_REQUEST", "Unsupported first-install bootstrap mode.")
+            if "heldRecovery" in request and request.get("bootstrapMode") != "first-core":
+                raise UpdateError(
+                    "INVALID_REQUEST", "heldRecovery requires explicit first-core mode."
+                )
             if "includeProducts" in request and request.get("bootstrapMode") != "first-core":
                 raise UpdateError(
                     "INVALID_REQUEST", "Product first-start selection requires first-core mode."
@@ -3866,7 +3873,23 @@ class ComponentUpdater:
                 module = importlib.util.module_from_spec(spec)
                 sys.modules[spec.name] = module
                 spec.loader.exec_module(module)
-                bootstrap_result = module.handle(self, request)
+                if "heldRecovery" in request:
+                    successor_path = Path(__file__).with_name("native_core_successor.py")
+                    if not successor_path.is_file() or successor_path.is_symlink():
+                        raise UpdateError(
+                            "HELPER_UNAVAILABLE", "Held successor helper is missing."
+                        )
+                    successor_spec = importlib.util.spec_from_file_location(
+                        "_cyrene_native_core_successor", successor_path
+                    )
+                    if successor_spec is None or successor_spec.loader is None:
+                        raise UpdateError("HELPER_UNAVAILABLE", "Held successor helper is missing.")
+                    successor_module = importlib.util.module_from_spec(successor_spec)
+                    sys.modules[successor_spec.name] = successor_module
+                    successor_spec.loader.exec_module(successor_module)
+                    bootstrap_result = successor_module.handle(self, request, module)
+                else:
+                    bootstrap_result = module.handle(self, request)
                 if bootstrap_result is not None:
                     return {
                         "protocolVersion": PROTOCOL_VERSION,
