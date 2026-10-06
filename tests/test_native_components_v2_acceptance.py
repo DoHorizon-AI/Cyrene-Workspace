@@ -523,11 +523,20 @@ def test_activity_sources_come_from_exact_signed_and_installed_units(
     installed.mkdir()
     for source_id in sorted(admin_initialize.PRODUCT_SOURCE_IDS):
         unit = f"cyrene-{source_id.removeprefix('cyrene-')}.service"
+        environment_files = [
+            "EnvironmentFile=-/etc/cyrene/cyrene.env",
+            "EnvironmentFile=/etc/cyrene/runtime-activity-sources.env",
+        ]
+        if source_id == "cyrene-yield":
+            environment_files.append(
+                "EnvironmentFile=-/etc/cyrene/yield-package-runtime.env"
+            )
         payload = (
             "[Service]\n"
             "User=cyrene\n"
             "Group=cyrene\n"
-            "EnvironmentFile=/etc/cyrene/runtime-activity-sources.env\n"
+            + "\n".join(environment_files)
+            + "\n"
             "LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/"
             f"{source_id}.token\n"
         ).encode()
@@ -558,6 +567,43 @@ def test_activity_sources_come_from_exact_signed_and_installed_units(
         admin_initialize.AdminInitializationError, match="differs from verified DEB"
     ):
         admin_initialize._activity_source_arguments(resolved_units, installed)
+
+
+@pytest.mark.parametrize(
+    "activity_environment_files",
+    (
+        (),
+        ("EnvironmentFile=-/etc/cyrene/runtime-activity-sources.env",),
+        (
+            "EnvironmentFile=/etc/cyrene/runtime-activity-sources.env",
+            "EnvironmentFile=/etc/cyrene/runtime-activity-sources.env",
+        ),
+    ),
+)
+def test_activity_source_unit_requires_the_activity_environment_exactly_once(
+    activity_environment_files: tuple[str, ...],
+) -> None:
+    """Additional product config files cannot shadow the required activity env.
+
+    中文：产品自有配置可并存，但不能替代或重复受信活动源环境文件。
+    """
+
+    payload = (
+        "[Service]\n"
+        "User=cyrene\n"
+        "Group=cyrene\n"
+        + "\n".join(activity_environment_files)
+        + "\n"
+        "EnvironmentFile=-/etc/cyrene/yield-package-runtime.env\n"
+        "LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/"
+        "cyrene-yield.token\n"
+    ).encode()
+
+    with pytest.raises(
+        admin_initialize.AdminInitializationError,
+        match="required activity-source environment exactly once",
+    ):
+        admin_initialize._unit_service_fields(payload, Path("cyrene-yield.service"))
 
 
 def test_extracted_merged_usr_alias_is_not_counted_twice(tmp_path: Path) -> None:

@@ -836,7 +836,14 @@ def _fresh_activity_state(
 
 
 def _unit_service_fields(unit_bytes: bytes, unit_path: Path) -> dict[str, str]:
-    """Extract required source identity and credential-file fields from a unit."""
+    """Extract required source identity and credential-file fields from a unit.
+
+    ``EnvironmentFile`` is repeatable in systemd. Product-specific files may
+    coexist, while the shared activity-source file must be loaded once as a
+    required input.
+
+    中文：systemd 允许多条 EnvironmentFile；产品配置可并存，共享活动源文件须且仅须必需加载一次。
+    """
 
     try:
         text = unit_bytes.decode("utf-8")
@@ -845,7 +852,7 @@ def _unit_service_fields(unit_bytes: bytes, unit_path: Path) -> dict[str, str]:
             f"Signed service unit is not UTF-8: {unit_path.name}"
         ) from error
     section = ""
-    service: dict[str, str] = {}
+    service: dict[str, list[str]] = {}
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
@@ -855,25 +862,47 @@ def _unit_service_fields(unit_bytes: bytes, unit_path: Path) -> dict[str, str]:
             continue
         key, separator, value = stripped.partition("=")
         if separator and key in {"User", "Group", "LoadCredential", "EnvironmentFile"}:
-            service[key] = value
-    credential = service.get("LoadCredential", "")
+            service.setdefault(key, []).append(value)
+    singleton_fields: dict[str, str] = {}
+    for key in ("User", "Group", "LoadCredential"):
+        values = service.get(key, [])
+        if len(values) != 1:
+            raise AdminInitializationError(
+                f"Product unit must declare exactly one {key}: {unit_path.name}"
+            )
+        singleton_fields[key] = values[0]
+    environment_files = service.get("EnvironmentFile", [])
+    required_environment = "/etc/cyrene/runtime-activity-sources.env"
+    credential = singleton_fields["LoadCredential"]
     credential_name, separator, credential_source = credential.partition(":")
     match = re.fullmatch(
         r"/etc/cyrene/runtime-activity-source-tokens/([a-z0-9._-]+)\.token",
         credential_source,
     )
     if (
-        service.get("User") != "cyrene"
-        or service.get("Group") != "cyrene"
+        singleton_fields["User"] != "cyrene"
+        or singleton_fields["Group"] != "cyrene"
         or credential_name != "activity-token"
         or not separator
         or match is None
-        or service.get("EnvironmentFile") != "/etc/cyrene/runtime-activity-sources.env"
     ):
         raise AdminInitializationError(
-            f"Product unit owner or credential path differs from the signed initialization contract: {unit_path.name}"
+            "Product unit owner or credential path differs from the signed "
+            f"initialization contract: {unit_path.name}"
         )
-    return {"sourceId": match.group(1), "user": service["User"], "group": service["Group"]}
+    if (
+        environment_files.count(required_environment) != 1
+        or f"-{required_environment}" in environment_files
+    ):
+        raise AdminInitializationError(
+            "Product unit must load the required activity-source environment "
+            f"exactly once: {unit_path.name}"
+        )
+    return {
+        "sourceId": match.group(1),
+        "user": singleton_fields["User"],
+        "group": singleton_fields["Group"],
+    }
 
 
 def _activity_source_arguments(
