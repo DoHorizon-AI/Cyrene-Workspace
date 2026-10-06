@@ -13,10 +13,13 @@ import json
 import math
 import os
 import shutil
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +66,24 @@ CORE_EXECUTABLE_NAMES = frozenset(
 PROC_ROOT = Path("/proc")
 CORE_RUNTIME_ROOT = Path("/var/lib/cyrene/runtime")
 CORE_RUN_ROOT = Path("/run/cyrene")
+LINUX_SYS_ADAPTER_COMPONENT_ID = "cyrene-linux-sys-adapter"
+LINUX_SYS_ADAPTER_UNIT = "cyrene-linux-sys-adapter.service"
+LINUX_SYS_ADAPTER_SOCKET = Path("linux-sys-adapter.sock")
 _DELETED_EXE_SUFFIX = " (deleted)"
 CORE_EXEC_STARTUP_WAIT_SECONDS = 10.0
 CORE_EXEC_STARTUP_POLL_SECONDS = 0.1
+
+
+@dataclass(frozen=True)
+class _HeldAdapterSocketProof:
+    """Snapshot the exact held adapter process and its fixed runtime socket."""
+
+    socket_path: Path
+    parent_identity: tuple[int, int, int, int, int]
+    socket_identity: tuple[int, int, int, int, int]
+    main_pid: str
+    executable: Path
+    executable_identity: tuple[int, int]
 
 
 def _digest(value: Any) -> str:
@@ -199,6 +217,165 @@ def _read_process_executable(exe_link: Path) -> tuple[str, str]:
     if not name:
         raise OSError(errno.EINVAL, "process executable name is empty", str(exe_link))
     return target, name
+
+
+def _path_identity(path: Path, *, kind: str) -> tuple[int, int, int, int, int]:
+    """Return a safe root-owned identity for the fixed adapter socket path."""
+
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise RuntimeError("Held System Adapter socket identity is unavailable") from error
+    if path.is_symlink() or info.st_uid != 0:
+        raise RuntimeError("Held System Adapter socket path is not root-owned and direct")
+    if kind == "directory":
+        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o022:
+            raise RuntimeError("Held System Adapter socket parent is unsafe")
+    elif kind == "socket":
+        if not stat.S_ISSOCK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o660:
+            raise RuntimeError("Held System Adapter socket metadata is invalid")
+    else:
+        raise ValueError("Unsupported held adapter path identity kind")
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+
+def _unix_socket_peer_credentials(path: Path) -> tuple[int, int, int]:
+    """Read Linux SO_PEERCRED without sending a command to the adapter."""
+
+    if not hasattr(socket, "SO_PEERCRED"):
+        raise RuntimeError("Linux Unix-socket peer credentials are unavailable")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(1.0)
+            connection.connect(str(path))
+            value = connection.getsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_PEERCRED,
+                struct.calcsize("3i"),
+            )
+    except OSError as error:
+        raise RuntimeError("Cannot read held System Adapter socket peer identity") from error
+    if not isinstance(value, bytes) or len(value) != struct.calcsize("3i"):
+        raise RuntimeError("Held System Adapter returned malformed peer credentials")
+    return struct.unpack("3i", value)
+
+
+def _adapter_unit_main_pid(updater: Any) -> str:
+    """Require the fixed Linux System Adapter unit to remain active with one PID."""
+
+    unit = updater.components[LINUX_SYS_ADAPTER_COMPONENT_ID].get("systemdUnit")
+    if unit != LINUX_SYS_ADAPTER_UNIT:
+        raise RuntimeError("Trusted catalog changed the fixed Linux System Adapter unit")
+    values: dict[str, str] = {}
+    for property_name in ("ActiveState", "MainPID"):
+        try:
+            result = updater.runner(
+                ["systemctl", "show", f"--property={property_name}", "--value", unit],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError("Cannot confirm held System Adapter unit identity") from error
+        if result.returncode != 0:
+            raise RuntimeError("Cannot confirm held System Adapter unit identity")
+        values[property_name] = result.stdout.strip()
+    pid = values["MainPID"]
+    if values["ActiveState"] != "active" or not pid.isascii() or not pid.isdecimal() or pid == "0":
+        raise RuntimeError("Held System Adapter is not the exact active unit process")
+    return pid
+
+
+def _verify_held_linux_sys_adapter_socket(
+    updater: Any,
+    planned_components: list[dict[str, Any]],
+    *,
+    proc_root: Path = PROC_ROOT,
+    expected: _HeldAdapterSocketProof | None = None,
+) -> _HeldAdapterSocketProof:
+    """Prove the one permitted socket belongs to the exact staged adapter process.
+
+    The caller may use this only after an idempotent BeginCoreBootstrap replay
+    confirms the journal's active hold. Socket metadata alone is never ownership
+    proof: the fixed unit PID, staged signed ELF inode, and SO_PEERCRED must agree.
+    中文：只有同一计划的持久维护hold得到Broker确认后，才可识别这一个适配器socket。
+    """
+
+    candidates = [
+        item
+        for item in planned_components
+        if item.get("componentId") == LINUX_SYS_ADAPTER_COMPONENT_ID
+    ]
+    if len(candidates) != 1:
+        raise RuntimeError("Held plan does not identify one Linux System Adapter candidate")
+    item = candidates[0]
+    component = updater.components.get(LINUX_SYS_ADAPTER_COMPONENT_ID)
+    if not isinstance(component, dict) or component.get("systemdUnit") != LINUX_SYS_ADAPTER_UNIT:
+        raise RuntimeError("Trusted catalog does not identify the fixed Linux System Adapter unit")
+
+    run_root = Path(getattr(updater, "core_run_root", CORE_RUN_ROOT))
+    if not run_root.is_absolute() or run_root != Path(CORE_RUN_ROOT):
+        raise RuntimeError(
+            "Held System Adapter runtime path is not the fixed Cyrene runtime directory"
+        )
+    socket_path = run_root / LINUX_SYS_ADAPTER_SOCKET
+    parent_identity = _path_identity(run_root, kind="directory")
+    socket_identity = _path_identity(socket_path, kind="socket")
+    if expected is not None and (
+        expected.socket_path != socket_path
+        or expected.parent_identity != parent_identity
+        or expected.socket_identity != socket_identity
+    ):
+        raise RuntimeError("Held System Adapter socket or parent identity changed")
+
+    executable = _candidate_executable(updater, item)
+    executable_info = executable.stat()
+    executable_identity = (executable_info.st_dev, executable_info.st_ino)
+    pid = _adapter_unit_main_pid(updater)
+    if expected is not None and (
+        expected.main_pid != pid
+        or expected.executable != executable
+        or expected.executable_identity != executable_identity
+    ):
+        raise RuntimeError("Held System Adapter process differs from the recovery proof")
+    if not _proc_executable_matches(pid, executable, proc_root=proc_root):
+        raise RuntimeError("Held System Adapter MainPID is not the exact signed staged entrypoint")
+
+    peer_pid, peer_uid, peer_gid = _unix_socket_peer_credentials(socket_path)
+    if (
+        peer_pid != int(pid)
+        or peer_uid != 0
+        or peer_uid != socket_identity[3]
+        or peer_gid != socket_identity[4]
+    ):
+        raise RuntimeError("Held System Adapter socket peer differs from its signed unit process")
+
+    after_parent = _path_identity(run_root, kind="directory")
+    after_socket = _path_identity(socket_path, kind="socket")
+    after_executable = _candidate_executable(updater, item)
+    after_info = after_executable.stat()
+    if (
+        after_parent != parent_identity
+        or after_socket != socket_identity
+        or after_executable != executable
+        or (after_info.st_dev, after_info.st_ino) != executable_identity
+        or _adapter_unit_main_pid(updater) != pid
+        or not _proc_executable_matches(pid, after_executable, proc_root=proc_root)
+    ):
+        raise RuntimeError("Held System Adapter identity changed during socket verification")
+
+    proof = _HeldAdapterSocketProof(
+        socket_path=socket_path,
+        parent_identity=parent_identity,
+        socket_identity=socket_identity,
+        main_pid=pid,
+        executable=executable,
+        executable_identity=executable_identity,
+    )
+    if expected is not None and proof != expected:
+        raise RuntimeError("Held System Adapter identity differs from the original recovery proof")
+    return proof
 
 
 def _core_process_snapshot(
@@ -513,9 +690,12 @@ def _assert_fresh(
     planned_components: list[dict[str, Any]] | None = None,
     require_empty_kernel_state: bool = True,
     expected_bootstrap_broker: dict[str, Any] | None = None,
+    held_adapter_socket_proof: _HeldAdapterSocketProof | None = None,
 ) -> dict[str, Any] | None:
     """Require a genuine empty first install; never take over old Core state."""
 
+    if held_adapter_socket_proof is not None and not require_empty_kernel_state:
+        raise ValueError("Held adapter socket proof is valid only during full state validation")
     planned = {item["componentId"]: item for item in planned_components or []}
     planned_executables: dict[str, dict[str, Any]] = {}
     cohort = _catalog_core_component_ids(updater)
@@ -627,12 +807,22 @@ def _assert_fresh(
             Path("kernel.sock"),
             Path("worker.sock"),
             Path("provider.sock"),
-            Path("linux-sys-adapter.sock"),
+            LINUX_SYS_ADAPTER_SOCKET,
             Path("nvidia-adapter.sock"),
             Path("sandboxd.sock"),
         ):
             path = run_root / relative
             if path.exists() or path.is_symlink():
+                if relative == LINUX_SYS_ADAPTER_SOCKET and held_adapter_socket_proof is not None:
+                    parent_identity = _path_identity(run_root, kind="directory")
+                    socket_identity = _path_identity(path, kind="socket")
+                    if (
+                        path != held_adapter_socket_proof.socket_path
+                        or parent_identity != held_adapter_socket_proof.parent_identity
+                        or socket_identity != held_adapter_socket_proof.socket_identity
+                    ):
+                        raise RuntimeError("Held System Adapter socket identity changed")
+                    continue
                 raise ValueError(
                     f"Existing Core runtime ownership path blocks first install: {relative}"
                 )
@@ -689,6 +879,13 @@ def _assert_fresh(
         raise RuntimeError("GPU resource inventory failed; first-Core eligibility is UNKNOWN")
     if gpu.stdout.strip():
         raise ValueError("Existing GPU compute resources block first-Core installation")
+    if held_adapter_socket_proof is not None:
+        _verify_held_linux_sys_adapter_socket(
+            updater,
+            planned_components or [],
+            proc_root=proc_root,
+            expected=held_adapter_socket_proof,
+        )
     return current_broker
 
 
@@ -1256,10 +1453,11 @@ def _systemd_candidate_identity(
             raise RuntimeError(f"{unit} MainPID changed during candidate startup")
 
 
-def _proc_executable_matches(pid: str, expected: Path) -> bool:
+def _proc_executable_matches(pid: str, expected: Path, *, proc_root: Path | None = None) -> bool:
     """Compare proc's live executable path and inode with the signed entrypoint."""
 
-    proc_executable = PROC_ROOT / pid / "exe"
+    proc_root = PROC_ROOT if proc_root is None else proc_root
+    proc_executable = proc_root / pid / "exe"
     try:
         executable = proc_executable.resolve(strict=True)
         live_info = proc_executable.stat()
@@ -1643,6 +1841,60 @@ def _remove_candidate_pointers_and_units(updater: Any, components: list[dict[str
                 updater._fsync_directory(unit_path.parent)
 
 
+def _core_bootstrap_begin_request(plan: dict[str, Any]) -> dict[str, Any]:
+    """Build the exact idempotency payload persisted with a Core bootstrap plan."""
+
+    return {
+        "request_id": plan["requestId"],
+        "target_kind": "CORE_RUNTIME",
+        "requires_restart": True,
+        "user_confirmed_restart": True,
+        "expected_gate_generation": plan["gateGeneration"],
+        "expected_catalog_generation": plan["catalogGeneration"],
+        "expected_activity_sources": plan["activitySources"],
+        "plan_id": plan["planId"],
+        "plan_digest": plan["planDigest"],
+        "component_artifact_digests": plan["componentArtifactDigests"],
+    }
+
+
+def _verify_held_core_bootstrap(
+    updater: Any, plan: dict[str, Any], transaction: dict[str, Any]
+) -> None:
+    """Replay the exact BeginCoreBootstrap request and require its existing hold."""
+
+    request = transaction.get("beginRequest")
+    if (
+        transaction.get("phase") != "hold_required"
+        or transaction.get("requestId") != plan.get("requestId")
+        or transaction.get("planId") != plan.get("planId")
+        or transaction.get("planDigest") != plan.get("planDigest")
+        or request != _core_bootstrap_begin_request(plan)
+    ):
+        raise RuntimeError("Held first-Core journal does not match the exact staged plan")
+    token = transaction.get("maintenanceToken")
+    gate_generation = transaction.get("maintenanceGateGeneration")
+    if (
+        not isinstance(token, str)
+        or not token.strip()
+        or not isinstance(gate_generation, int)
+        or isinstance(gate_generation, bool)
+    ):
+        raise RuntimeError("Held first-Core journal has no exact maintenance hold identity")
+
+    response = updater._broker_request("BeginCoreBootstrap", request, request_id=plan["requestId"])
+    if (
+        response.get("status") != "MAINTENANCE_ACTIVE"
+        or response.get("maintenance_origin") != "CORE_BOOTSTRAP"
+        or response.get("readiness_claimed") is not False
+        or response.get("held") is not True
+        or response.get("maintenance_token") != token
+        or response.get("gate_generation") != gate_generation
+        or isinstance(response.get("gate_generation"), bool)
+    ):
+        raise RuntimeError("Broker did not confirm the same active first-Core maintenance hold")
+
+
 def apply(
     updater: Any,
     plan_id: Any,
@@ -1734,22 +1986,12 @@ def apply(
             ),
             "components": components,
             "previous": updater._capture_active_versions(components),
-            "beginRequest": {
-                "request_id": plan["requestId"],
-                "target_kind": "CORE_RUNTIME",
-                "requires_restart": True,
-                "user_confirmed_restart": True,
-                "expected_gate_generation": plan["gateGeneration"],
-                "expected_catalog_generation": plan["catalogGeneration"],
-                "expected_activity_sources": plan["activitySources"],
-                "plan_id": plan_id,
-                "plan_digest": plan_digest,
-                "component_artifact_digests": plan["componentArtifactDigests"],
-            },
+            "beginRequest": _core_bootstrap_begin_request(plan),
             "phase": "begin_pending",
             "createdAt": int(time.time()),
         }
         existing = _read_private_json(journal_path)
+        recovering_hold_required = existing is not None and existing.get("phase") == "hold_required"
         if existing is not None:
             if (
                 existing.get("planDigest") != plan_digest
@@ -1911,19 +2153,47 @@ def apply(
                 "Interrupted first-Core journal has an unknown phase; hold remains closed"
             )
 
-        # ── Phase 1: Install the exact staged cohort while admission is closed.
-        # 第一阶段：先持久闭门，再安装并启动本次签名Core组。
-        try:
-            if transaction["phase"] in {"held", "hold_required"}:
-                transaction["phase"] = "installing"
-                _write_private_json(updater, journal_path, transaction)
-            if transaction["phase"] == "installing":
+        recovery_socket_proof: _HeldAdapterSocketProof | None = None
+        if recovering_hold_required:
+            try:
+                _verify_held_core_bootstrap(updater, plan, transaction)
+                run_root = Path(getattr(updater, "core_run_root", CORE_RUN_ROOT))
+                adapter_socket = run_root / LINUX_SYS_ADAPTER_SOCKET
+                if adapter_socket.exists() or adapter_socket.is_symlink():
+                    recovery_socket_proof = _verify_held_linux_sys_adapter_socket(
+                        updater, components, proc_root=proc_root
+                    )
                 _assert_fresh(
                     updater,
                     proc_root=proc_root,
                     planned_components=components,
                     expected_bootstrap_broker=plan.get("bootstrapBroker"),
+                    held_adapter_socket_proof=recovery_socket_proof,
                 )
+            except Exception as error:
+                transaction["failure"] = str(error)[:500]
+                transaction["phase"] = "hold_required"
+                _write_private_json(updater, journal_path, transaction)
+                raise RuntimeError(
+                    "First-Core recovery identity is not proven; durable admission hold remains closed"
+                ) from error
+            transaction["phase"] = "installing"
+            _write_private_json(updater, journal_path, transaction)
+
+        # ── Phase 1: Install the exact staged cohort while admission is closed.
+        # 第一阶段：先持久闭门，再安装并启动本次签名Core组。
+        try:
+            if transaction["phase"] == "held":
+                transaction["phase"] = "installing"
+                _write_private_json(updater, journal_path, transaction)
+            if transaction["phase"] == "installing":
+                if not recovering_hold_required:
+                    _assert_fresh(
+                        updater,
+                        proc_root=proc_root,
+                        planned_components=components,
+                        expected_bootstrap_broker=plan.get("bootstrapBroker"),
+                    )
                 _stop_initial_c10_broker(updater, transaction, journal_path)
                 for item in components:
                     component = updater.components[item["componentId"]]
