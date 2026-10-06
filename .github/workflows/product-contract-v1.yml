@@ -201,6 +201,7 @@ jobs:
           packaging/native_install_contract.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
+          packaging/native_core_successor.py
           packaging/bootstrap_catalog_binding.py
           packaging/component_placement.py
           cyrene
@@ -230,6 +231,9 @@ jobs:
           tests/test_native_core_bootstrap.py
           tests/test_native_first_core_startup_wait.py
           tests/test_native_first_core_held_recovery.py
+          tests/test_native_first_core_candidate_cleanup.py
+          tests/test_native_first_core_successor.py
+          tests/test_native_first_core_recovery_packaging.py
           tests/test_component_catalog_linux22.py
           tests/test_component_executable_files.py
           tests/test_native_admin_broker_readiness.py
@@ -266,6 +270,7 @@ jobs:
           packaging/native_install_contract.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
+          packaging/native_core_successor.py
           packaging/bootstrap_catalog_binding.py
           packaging/component_placement.py
           cyrene
@@ -295,6 +300,9 @@ jobs:
           tests/test_native_core_bootstrap.py
           tests/test_native_first_core_startup_wait.py
           tests/test_native_first_core_held_recovery.py
+          tests/test_native_first_core_candidate_cleanup.py
+          tests/test_native_first_core_successor.py
+          tests/test_native_first_core_recovery_packaging.py
           tests/test_component_catalog_linux22.py
           tests/test_component_executable_files.py
           tests/test_native_admin_broker_readiness.py
@@ -341,6 +349,9 @@ jobs:
           tests/test_native_core_bootstrap.py
           tests/test_native_first_core_startup_wait.py
           tests/test_native_first_core_held_recovery.py
+          tests/test_native_first_core_candidate_cleanup.py
+          tests/test_native_first_core_successor.py
+          tests/test_native_first_core_recovery_packaging.py
           tests/test_component_catalog_linux22.py
           tests/test_component_executable_files.py
           tests/test_native_admin_broker_readiness.py
@@ -377,6 +388,7 @@ jobs:
             packaging/native_install_contract.py packaging/native_core_bootstrap.py \
             packaging/bootstrap_catalog_binding.py \
             cyrene \
+            packaging/native_core_successor.py \
             packaging/native_first_products.py \
             packaging/native_component_bootstrap.py packaging/native_package_runtime_bootstrap.py \
             packaging/native_runtime_schema_migration.py \

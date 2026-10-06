@@ -314,6 +314,9 @@ chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/bootstrap_catalog_binding.py"
 cp "${SCRIPT_DIR}/native_core_bootstrap.py" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/native_core_bootstrap.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_core_bootstrap.py"
+cp "${SCRIPT_DIR}/native_core_successor.py" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/native_core_successor.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_core_successor.py"
 cp "${SCRIPT_DIR}/native_runtime_schema_migration.py" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/native_runtime_schema_migration.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_runtime_schema_migration.py"
