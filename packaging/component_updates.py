@@ -3876,9 +3876,7 @@ class ComponentUpdater:
                 if "heldRecovery" in request:
                     successor_path = Path(__file__).with_name("native_core_successor.py")
                     if not successor_path.is_file() or successor_path.is_symlink():
-                        raise UpdateError(
-                            "HELPER_UNAVAILABLE", "Held successor helper is missing."
-                        )
+                        raise UpdateError("HELPER_UNAVAILABLE", "Held successor helper is missing.")
                     successor_spec = importlib.util.spec_from_file_location(
                         "_cyrene_native_core_successor", successor_path
                     )

@@ -91,7 +91,11 @@ class UnitUpdater:
 
     def runner(self, command: list[str], **_kwargs: Any) -> Any:
         stdout = ""
-        if command[:3] == ["systemctl", "show", "--property=ActiveState,SubState,MainPID,ControlPID"]:
+        if command[:3] == [
+            "systemctl",
+            "show",
+            "--property=ActiveState,SubState,MainPID,ControlPID",
+        ]:
             unit = command[-1]
             values = self.states[unit]
             stdout = "\n".join(values)
@@ -149,9 +153,7 @@ def _fixture(root: Path) -> tuple[UnitUpdater, list[dict[str, Any]]]:
         release = updater.install_root / "components" / component_id / "releases" / pointer
         binary = ("signed " + component_id).encode()
         unit_bytes = (
-            "[Service]\nExecStart=/usr/bin/cyrene component-run "
-            + component_id
-            + " --\n"
+            "[Service]\nExecStart=/usr/bin/cyrene component-run " + component_id + " --\n"
         ).encode()
         (release / "bin").mkdir(parents=True)
         (release / "systemd").mkdir()
@@ -197,7 +199,18 @@ def test_pid0_auto_restart_restores_signed_unit_and_stops_before_pointer_cleanup
 
     bootstrap._quiesce_hold_recovery_units(updater, items)
     assert updater.states[unit] == ("inactive", "dead", "0", "0")
-    assert destination.read_bytes() == (updater.install_root / "components" / component_id / "releases" / pointer / "systemd" / unit).read_bytes()
+    assert (
+        destination.read_bytes()
+        == (
+            updater.install_root
+            / "components"
+            / component_id
+            / "releases"
+            / pointer
+            / "systemd"
+            / unit
+        ).read_bytes()
+    )
     assert updater.events.index(("daemon-reload",)) < updater.events.index(("stop", unit))
     assert updater.clock.now < bootstrap.CORE_UNIT_QUIESCE_WAIT_SECONDS
 
