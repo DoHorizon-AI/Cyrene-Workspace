@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import shutil
 import socket
 import stat
@@ -1586,6 +1587,57 @@ def _systemd_unit_property(
     return completed.stdout.strip()
 
 
+def _systemd_manager_property(
+    updater: Any,
+    property_name: str,
+    *,
+    deadline: float,
+    clock: Any,
+) -> str:
+    """Read one systemd manager property within the caller's quiesce deadline."""
+
+    timeout = min(5.0, _quiesce_remaining(clock, deadline, "systemd manager"))
+    try:
+        completed = updater.runner(
+            ["systemctl", "show", f"--property={property_name}", "--value"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(
+            f"Cannot confirm systemd manager {property_name} during quiesce"
+        ) from error
+    _quiesce_remaining(clock, deadline, "systemd manager")
+    if completed.returncode != 0:
+        raise RuntimeError(f"Cannot confirm systemd manager {property_name} during quiesce")
+    return completed.stdout.strip()
+
+
+def _systemd_unit_search_dirs(updater: Any, *, deadline: float, clock: Any) -> tuple[Path, ...]:
+    """Return configured and live manager paths used to reject unit shadows."""
+
+    configured = getattr(updater, "systemd_unit_dirs", None)
+    if not isinstance(configured, (list, tuple)) or not configured:
+        raise RuntimeError("First-Core quiesce has no fixed systemd unit directory")
+    raw_paths = _systemd_manager_property(updater, "UnitPath", deadline=deadline, clock=clock)
+    try:
+        manager_paths = shlex.split(raw_paths)
+    except ValueError as error:
+        raise RuntimeError("Cannot parse systemd manager UnitPath during quiesce") from error
+    if not manager_paths:
+        raise RuntimeError("Cannot confirm systemd manager UnitPath during quiesce")
+    result: list[Path] = []
+    for raw_path in (*configured, *manager_paths):
+        path = Path(raw_path)
+        if not path.is_absolute():
+            raise RuntimeError("Systemd unit search path contains a non-absolute path")
+        if path not in result:
+            result.append(path)
+    return tuple(result)
+
+
 def _signed_candidate_unit_source(
     updater: Any, item: dict[str, Any]
 ) -> tuple[dict[str, Any], str, Path, bytes]:
@@ -1649,6 +1701,47 @@ def _verify_candidate_unit_file(path: Path, expected_bytes: bytes, *, component_
     return True
 
 
+def _require_missing_candidate_unit_unshadowed(
+    updater: Any,
+    unit: str,
+    *,
+    component_id: str,
+    deadline: float,
+    clock: Any,
+) -> None:
+    """Reject alternate unit fragments and drop-in paths before restoring a missing unit.
+
+    This is used only when systemd reports an exact ``not-found`` unit after a reload.
+    The signed plan is the only permitted source for restoring the missing fragment.
+    中文：仅在 systemd 明确报告 not-found 时，排除所有搜索路径中的替代 unit 和 drop-in。
+    """
+
+    unit_dirs = _systemd_unit_search_dirs(updater, deadline=deadline, clock=clock)
+    for directory in unit_dirs:
+        root = Path(directory)
+        fragment = root / unit
+        if fragment.exists() or fragment.is_symlink():
+            raise RuntimeError(
+                f"A conflicting systemd unit fragment exists for {component_id}: {fragment}"
+            )
+        drop_in_dir = root / f"{unit}.d"
+        try:
+            if drop_in_dir.is_symlink():
+                raise RuntimeError(
+                    f"A conflicting systemd drop-in path exists for {component_id}: {drop_in_dir}"
+                )
+            if drop_in_dir.exists() and (
+                not drop_in_dir.is_dir() or next(drop_in_dir.iterdir(), None) is not None
+            ):
+                raise RuntimeError(
+                    f"A conflicting systemd drop-in path exists for {component_id}: {drop_in_dir}"
+                )
+        except OSError as error:
+            raise RuntimeError(
+                f"Cannot inspect systemd drop-in path for {component_id}: {drop_in_dir}"
+            ) from error
+
+
 def _run_bounded_systemctl(
     updater: Any,
     arguments: list[str],
@@ -1702,9 +1795,24 @@ def _prove_candidate_unit_loaded(
 
     fragment = _systemd_unit_property(updater, unit, "FragmentPath", deadline=deadline, clock=clock)
     drop_ins = _systemd_unit_property(updater, unit, "DropInPaths", deadline=deadline, clock=clock)
-    if fragment != str(destination) or drop_ins:
+    missing_after_reload = False
+    loaded_state_after_reload: str | None = None
+    if fragment != str(destination):
+        load_state = _systemd_unit_property(
+            updater, unit, "LoadState", deadline=deadline, clock=clock
+        )
+        missing_after_reload = fragment == "" and load_state == "not-found" and restore_missing
+    if (fragment != str(destination) and not missing_after_reload) or drop_ins:
         raise RuntimeError(
             f"Loaded systemd unit path or drop-ins differ from the signed plan: {unit}"
+        )
+    if missing_after_reload:
+        _require_missing_candidate_unit_unshadowed(
+            updater,
+            unit,
+            component_id=component["componentId"],
+            deadline=deadline,
+            clock=clock,
         )
 
     installed = _verify_candidate_unit_file(
@@ -1736,8 +1844,17 @@ def _prove_candidate_unit_loaded(
         needs_reload = _systemd_unit_property(
             updater, unit, "NeedDaemonReload", deadline=deadline, clock=clock
         )
+        if missing_after_reload:
+            loaded_state_after_reload = _systemd_unit_property(
+                updater, unit, "LoadState", deadline=deadline, clock=clock
+            )
         _verify_candidate_unit_file(destination, payload, component_id=component["componentId"])
-    if fragment != str(destination) or drop_ins or needs_reload != "no":
+    if (
+        fragment != str(destination)
+        or drop_ins
+        or needs_reload != "no"
+        or (missing_after_reload and loaded_state_after_reload != "loaded")
+    ):
         raise RuntimeError(f"systemd did not load the exact signed unit for {unit}")
     return unit
 

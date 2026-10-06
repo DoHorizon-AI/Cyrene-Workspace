@@ -56,6 +56,7 @@ class UnitUpdater:
             root / "lib-systemd",
             root / "usr-lib-systemd",
         )
+        self.unit_search_path = self.systemd_unit_dirs
         self.catalog = {"compatibilityGroups": []}
         self.clock = VirtualClock()
         self.monotonic = self.clock.monotonic
@@ -64,8 +65,10 @@ class UnitUpdater:
         self.states: dict[str, tuple[str, str, str, str]] = {}
         self.fragments: dict[str, str] = {}
         self.dropins: dict[str, str] = {}
+        self.load_states: dict[str, str] = {}
         self.reload_states: dict[str, str] = {}
         self.keep_restarting: set[str] = set()
+        self.reload_state_changes: dict[str, tuple[str, str, str, str]] = {}
         self.pointers: dict[str, str | None] = {}
         self.components: dict[str, dict[str, Any]] = {}
         self.items: list[dict[str, Any]] = []
@@ -100,6 +103,8 @@ class UnitUpdater:
             values = self.states[unit]
             stdout = "\n".join(values)
             self.events.append(("state", unit, values))
+        elif command == ["systemctl", "show", "--property=UnitPath", "--value"]:
+            stdout = " ".join(str(path) for path in self.unit_search_path)
         elif command[:2] == ["systemctl", "show"]:
             unit = command[-1]
             property_name = command[2].removeprefix("--property=")
@@ -107,6 +112,8 @@ class UnitUpdater:
                 stdout = self.fragments[unit]
             elif property_name == "DropInPaths":
                 stdout = self.dropins[unit]
+            elif property_name == "LoadState":
+                stdout = self.load_states[unit]
             elif property_name == "NeedDaemonReload":
                 stdout = self.reload_states[unit]
             elif property_name == "ActiveState":
@@ -119,6 +126,13 @@ class UnitUpdater:
             self.events.append(("daemon-reload",))
             for unit in self.reload_states:
                 self.reload_states[unit] = "no"
+                if self.load_states[unit] == "not-found":
+                    candidate = self.systemd_unit_dirs[0] / unit
+                    if candidate.is_file() and not candidate.is_symlink():
+                        self.fragments[unit] = str(candidate)
+                        self.load_states[unit] = "loaded"
+                if unit in self.reload_state_changes:
+                    self.states[unit] = self.reload_state_changes[unit]
         elif command[:2] == ["systemctl", "stop"]:
             unit = command[2]
             self.events.append(("stop", unit))
@@ -142,6 +156,7 @@ def _fixture(root: Path) -> tuple[UnitUpdater, list[dict[str, Any]]]:
         updater.states[unit] = ("inactive", "dead", "0", "0")
         updater.fragments[unit] = str(updater.systemd_unit_dirs[0] / unit)
         updater.dropins[unit] = ""
+        updater.load_states[unit] = "loaded"
         updater.reload_states[unit] = "no"
 
     items = []
@@ -220,6 +235,134 @@ def test_pid0_auto_restart_restores_signed_unit_and_stops_before_pointer_cleanup
     assert stop_event < pointer_event
     assert updater.pointers[component_id] is None
     assert not destination.exists()
+
+
+def test_not_found_unit_after_reload_restores_exact_plan_bytes_before_stop(tmp_path: Path) -> None:
+    """A missing unit is restored only from the signed staged plan, then reloaded and stopped."""
+
+    updater, items = _fixture(tmp_path)
+    item = items[0]
+    component_id = item["componentId"]
+    unit = updater.components[component_id]["systemdUnit"]
+    destination = updater.systemd_unit_dirs[0] / unit
+    pointer = f"{item['version']}--{item['manifestDigest'].removeprefix('sha256:')}"
+    signed_source = (
+        updater.install_root / "components" / component_id / "releases" / pointer / "systemd" / unit
+    )
+    updater.pointers[component_id] = pointer
+    updater.states[unit] = ("activating", "auto-restart", "0", "0")
+    updater.fragments[unit] = ""
+    updater.load_states[unit] = "not-found"
+    updater.reload_states[unit] = "no"
+
+    bootstrap._quiesce_hold_recovery_units(updater, items)
+
+    assert destination.read_bytes() == signed_source.read_bytes()
+    assert updater.load_states[unit] == "loaded"
+    assert updater.fragments[unit] == str(destination)
+    assert updater.states[unit] == ("inactive", "dead", "0", "0")
+    assert updater.events.index(("daemon-reload",)) < updater.events.index(("stop", unit))
+    assert updater.clock.now < bootstrap.CORE_UNIT_QUIESCE_WAIT_SECONDS
+
+
+@pytest.mark.parametrize(
+    ("defect", "expected_error"),
+    [
+        ("empty-fragment-loaded", "path or drop-ins"),
+        ("empty-fragment-unknown-load-state", "path or drop-ins"),
+        ("not-found-foreign-fragment", "path or drop-ins"),
+        ("not-found-property-drop-in", "path or drop-ins"),
+        ("not-found-unit-file", "conflicting systemd unit fragment"),
+        ("not-found-unit-symlink", "conflicting systemd unit fragment"),
+        ("not-found-runtime-unit-symlink", "conflicting systemd unit fragment"),
+        ("not-found-filesystem-drop-in", "conflicting systemd drop-in path"),
+        ("state-race-control-pid", "state changed before bounded stop"),
+        ("state-race-unproven-main-pid", "did not reach the exact staged release entrypoint"),
+    ],
+)
+def test_not_found_recovery_rejects_unknown_bindings_and_state_races(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    defect: str,
+    expected_error: str,
+) -> None:
+    """Only an exact missing unit with no shadows and a stable PID0 state is restorable."""
+
+    updater, items = _fixture(tmp_path)
+    item = items[0]
+    component_id = item["componentId"]
+    unit = updater.components[component_id]["systemdUnit"]
+    pointer = f"{item['version']}--{item['manifestDigest'].removeprefix('sha256:')}"
+    destination = updater.systemd_unit_dirs[0] / unit
+    updater.pointers[component_id] = pointer
+    updater.states[unit] = ("activating", "auto-restart", "0", "0")
+    updater.fragments[unit] = ""
+    updater.load_states[unit] = "not-found"
+    updater.reload_states[unit] = "no"
+
+    if defect == "empty-fragment-loaded":
+        updater.load_states[unit] = "loaded"
+    elif defect == "empty-fragment-unknown-load-state":
+        updater.load_states[unit] = "error"
+    elif defect == "not-found-foreign-fragment":
+        updater.fragments[unit] = str(tmp_path / "foreign.service")
+    elif defect == "not-found-property-drop-in":
+        updater.dropins[unit] = str(tmp_path / "override.conf")
+    elif defect == "not-found-unit-file":
+        alternate = updater.systemd_unit_dirs[1] / unit
+        alternate.parent.mkdir(parents=True, exist_ok=True)
+        alternate.write_text("[Service]\nExecStart=/bin/false\n", encoding="utf-8")
+    elif defect == "not-found-unit-symlink":
+        alternate = updater.systemd_unit_dirs[1] / unit
+        alternate.parent.mkdir(parents=True, exist_ok=True)
+        alternate.symlink_to(tmp_path / "foreign.service")
+    elif defect == "not-found-runtime-unit-symlink":
+        runtime_dir = tmp_path / "run-systemd-system"
+        runtime_dir.mkdir()
+        updater.unit_search_path = (*updater.unit_search_path, runtime_dir)
+        (runtime_dir / unit).symlink_to(tmp_path / "foreign.service")
+    elif defect == "not-found-filesystem-drop-in":
+        drop_in = updater.systemd_unit_dirs[1] / f"{unit}.d"
+        drop_in.mkdir(parents=True)
+        (drop_in / "override.conf").write_text("[Service]\nRestart=no\n", encoding="utf-8")
+    elif defect == "state-race-control-pid":
+        updater.reload_state_changes[unit] = ("activating", "auto-restart", "0", "123")
+    elif defect == "state-race-unproven-main-pid":
+        updater.reload_state_changes[unit] = ("active", "running", "123", "0")
+        signed_source = (
+            updater.install_root
+            / "components"
+            / component_id
+            / "releases"
+            / pointer
+            / "systemd"
+            / unit
+        )
+        monkeypatch.setattr(bootstrap, "_candidate_executable", lambda *_args: signed_source)
+        monkeypatch.setattr(bootstrap, "_proc_executable_matches", lambda *_args, **_kwargs: False)
+
+    with pytest.raises(RuntimeError, match=expected_error):
+        bootstrap._quiesce_hold_recovery_units(updater, items)
+
+    assert updater.pointers[component_id] == pointer
+    assert not any(event[0] == "stop" for event in updater.events)
+    assert not any(event[0] == "pointer" for event in updater.events)
+    assert not any(event[0] == "end" for event in updater.events)
+    if defect in {"state-race-control-pid", "state-race-unproven-main-pid"}:
+        assert (
+            destination.read_bytes()
+            == (
+                updater.install_root
+                / "components"
+                / component_id
+                / "releases"
+                / pointer
+                / "systemd"
+                / unit
+            ).read_bytes()
+        )
+    else:
+        assert not destination.exists()
 
 
 @pytest.mark.parametrize(
