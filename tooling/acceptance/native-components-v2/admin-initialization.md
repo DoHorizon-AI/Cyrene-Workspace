@@ -13,6 +13,41 @@ installer 发行尚未发布，staging 受阻于 Actions run `37205539712`。本
 不是安装器。不得猜填签名、源码提交、builder 身份、manifest 或摘要。后续已验证 packet receipt
 将取代此日期状态。
 
+## 2026-10-06 installer and host-identity follow-up
+
+An administrator packet attempted on 2026-10-06 was pinned to Workspace source
+`6b76667310a0a1f2c836a2a77f7df4ab6596f9f0`; that source rejected `/etc/os-release`
+when it was a symlink. Ubuntu's canonical root-owned link is
+`/etc/os-release -> ../usr/lib/os-release`. The strict acceptance for this exact
+link was added in Workspace commit `8649acdaa55c295f5581ffaee2ec8e0a970ebf63`
+and is present in later source commits. Do not bypass the host-identity check or
+edit a generated administrator packet to work around it.
+
+The immutable native installer release for Workspace source
+`de66cd5c176d31737449bfe255e79d37264f9fd1` embeds component catalog generation
+9 (`sha256:9908229d8abee4cb3f1b5a55d8be5264310939e4b43700de0dfd37be7318c701`).
+The later signed Workspace catalog `catalog-preview-aa35c08060210f4986eb7d5a45cb7210917f684d`
+is generation 12. A packet for a generation-12 component set must use a signed
+installer release whose source receipt and embedded catalog bind that same
+generation-12 input, plus the exact matching Workspace source bundle and
+verified Platform bootstrap assets. Earlier packet hashes and release receipts
+do not transfer to a rebuilt packet.
+
+2026-10-06 曾尝试使用固定到 Workspace 提交
+`6b76667310a0a1f2c836a2a77f7df4ab6596f9f0` 的管理员 packet；该版本会在
+`/etc/os-release` 是符号链接时拒绝主机。Ubuntu 的标准 root-owned 链接是
+`/etc/os-release -> ../usr/lib/os-release`。Workspace 提交
+`8649acdaa55c295f5581ffaee2ec8e0a970ebf63` 加入了对该精确链接的严格校验，后续提交已包含此修复。
+不得绕过主机身份校验，也不得手改生成的管理员 packet 来规避该问题。
+
+Workspace 源码 `de66cd5c176d31737449bfe255e79d37264f9fd1` 对应的不可变 native
+installer release 嵌入的是 generation 9 catalog（摘要
+`sha256:9908229d8abee4cb3f1b5a55d8be5264310939e4b43700de0dfd37be7318c701`）。之后签名发布的
+Workspace catalog `catalog-preview-aa35c08060210f4986eb7d5a45cb7210917f684d` 为 generation 12。
+generation 12 组件集的管理员 packet 必须使用 source receipt 和内嵌 catalog 均绑定同一
+generation 12 输入的签名 installer release，并同时绑定精确匹配的 Workspace 源码 bundle
+和已验证 Platform bootstrap 产物。重建 packet 后不得沿用旧 packet 的摘要或发行回执。
+
 ## Inputs that must be pinned first
 
 Do not hand-fill [`admin-init-tuple.template.json`](admin-init-tuple.template.json)
