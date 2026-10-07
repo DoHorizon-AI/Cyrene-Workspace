@@ -24,7 +24,7 @@ from typing import Any
 from zipfile import BadZipFile, ZipFile
 
 TASK_ROOT = Path(__file__).resolve().parents[2]
-FIXTURE_ROOT = TASK_ROOT / "workspace/tests/fixtures/catalyst-v02"
+FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests/fixtures/catalyst-v02"
 DEFAULT_PROVIDER_RUNTIME = TASK_ROOT / "reports/model-api-connector-runtime.json"
 DEFAULT_PROVIDER_READINESS = TASK_ROOT / "reports/local-provider-readiness.json"
 DEFAULT_PROVIDER_USAGE = TASK_ROOT / "reports/local-provider-usage.jsonl"
