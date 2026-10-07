@@ -309,10 +309,10 @@ def build() -> None:
             "expectedSplitByFamily": {
                 **{
                     f"family-{index:02d}": "train"
-                    for index in (1, 2, 3, 4, 6, 7, 8, 9)
+                    for index in (1, 2, 4, 5, 7, 8, 9, 32)
                 },
-                "family-05": "validation",
-                "family-32": "test",
+                "family-03": "validation",
+                "family-06": "test",
             },
         },
         "echo": {

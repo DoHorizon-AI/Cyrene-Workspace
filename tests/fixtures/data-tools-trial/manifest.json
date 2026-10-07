@@ -73,14 +73,14 @@
     "expectedSplitByFamily": {
       "family-01": "train",
       "family-02": "train",
-      "family-03": "train",
+      "family-03": "validation",
       "family-04": "train",
-      "family-05": "validation",
-      "family-06": "train",
+      "family-05": "train",
+      "family-06": "test",
       "family-07": "train",
       "family-08": "train",
       "family-09": "train",
-      "family-32": "test"
+      "family-32": "train"
     },
     "path": "trial-training.jsonl",
     "privateMarker": "TRIAL_INTERNAL_REVIEW_NOTE_DO_NOT_TRAIN_7f4a",

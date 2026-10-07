@@ -754,10 +754,10 @@ def _run_reference_consumer(
         response = json.loads(completed.stdout)
     except json.JSONDecodeError as error:
         raise TrialFailure("independent KB consumer did not return JSON") from error
-    results = response.get("results") if isinstance(response, dict) else None
-    if not isinstance(results, list):
-        raise TrialFailure("independent KB consumer response is missing results")
-    serialized = json.dumps(results, ensure_ascii=False)
+    hits = response.get("hits") if isinstance(response, dict) else None
+    if not isinstance(hits, list):
+        raise TrialFailure("independent KB consumer response is missing hits")
+    serialized = json.dumps(hits, ensure_ascii=False)
     if expected_denied_ref in serialized:
         raise TrialFailure("knowledge consumer leaked a training-only source")
     if expected_allowed_ref not in serialized:
@@ -798,7 +798,7 @@ def _check_sft_package(
             raise TrialFailure("SFT manifest is invalid JSON") from error
         if not isinstance(manifest, dict) or manifest.get("schema_version") != "cyrene.sft.bundle.v1":
             raise TrialFailure("SFT manifest has an unsupported schema")
-        if manifest.get("split_algorithm") != "sha256-source-family-v1":
+        if manifest.get("split_algorithm") != "sha256-ranked-source-family-v1":
             raise TrialFailure("SFT package does not declare the deterministic source-family split algorithm")
         receipts = manifest.get("files")
         if not isinstance(receipts, dict):
@@ -860,7 +860,14 @@ def _check_sft_package(
             raise TrialFailure(f"SFT provenance row {index} is missing a valid split or source family")
         if not isinstance(sample_id, str) or not sample_id or sample_id in seen_sample_ids:
             raise TrialFailure("SFT provenance sample IDs must be non-empty and unique")
-        if item.get("policy") != {"allow_training": True}:
+        policy = item.get("policy")
+        purposes = policy.get("allowed_use_purposes") if isinstance(policy, dict) else None
+        if (
+            not isinstance(policy, dict)
+            or policy.get("allow_training") is not True
+            or not isinstance(purposes, list)
+            or "model_training" not in purposes
+        ):
             raise TrialFailure("SFT sidecar contains a sample without explicit training permission")
         seen_sample_ids.add(sample_id)
         groups_by_split[split].add(family)

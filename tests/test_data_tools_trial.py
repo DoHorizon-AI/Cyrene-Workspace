@@ -148,9 +148,9 @@ def _sft_package(provenance: list[dict[str, str]]) -> bytes:
     }
     manifest = {
         "schema_version": "cyrene.sft.bundle.v1",
-        "split_algorithm": "sha256-source-family-v1",
+        "split_algorithm": "sha256-ranked-source-family-v1",
         "split_stats": {
-            "algorithm": "sha256-source-family-v1",
+            "algorithm": "sha256-ranked-source-family-v1",
             "ratios": {"train": 0.8, "validation": 0.1, "test": 0.1},
             "samples": {"train": 2, "validation": 1, "test": 1},
             "source_families": {"train": 1, "validation": 1, "test": 1},
@@ -188,10 +188,42 @@ def test_sft_verifier_uses_provenance_sidecar_to_check_family_isolation() -> Non
     使用 provenance sidecar 验证来源组互斥，学习行不承载管理 ID。
     """
     provenance = [
-        {"sample_id": "a1", "source_family_id": "family-a", "split": "train", "policy": {"allow_training": True}},
-        {"sample_id": "a2", "source_family_id": "family-a", "split": "train", "policy": {"allow_training": True}},
-        {"sample_id": "b1", "source_family_id": "family-b", "split": "validation", "policy": {"allow_training": True}},
-        {"sample_id": "c1", "source_family_id": "family-c", "split": "test", "policy": {"allow_training": True}},
+        {
+            "sample_id": "a1",
+            "source_family_id": "family-a",
+            "split": "train",
+            "policy": {
+                "allow_training": True,
+                "allowed_use_purposes": ["knowledge_retrieval", "model_training"],
+            },
+        },
+        {
+            "sample_id": "a2",
+            "source_family_id": "family-a",
+            "split": "train",
+            "policy": {
+                "allow_training": True,
+                "allowed_use_purposes": ["knowledge_retrieval", "model_training"],
+            },
+        },
+        {
+            "sample_id": "b1",
+            "source_family_id": "family-b",
+            "split": "validation",
+            "policy": {
+                "allow_training": True,
+                "allowed_use_purposes": ["knowledge_retrieval", "model_training"],
+            },
+        },
+        {
+            "sample_id": "c1",
+            "source_family_id": "family-c",
+            "split": "test",
+            "policy": {
+                "allow_training": True,
+                "allowed_use_purposes": ["knowledge_retrieval", "model_training"],
+            },
+        },
     ]
     verifier = _trial_verifier_module()
     counts = verifier._check_sft_package(
@@ -201,11 +233,32 @@ def test_sft_verifier_uses_provenance_sidecar_to_check_family_isolation() -> Non
 
     contaminated = [
         *provenance[:2],
-        {"sample_id": "b1", "source_family_id": "family-a", "split": "validation", "policy": {"allow_training": True}},
+        {
+            "sample_id": "b1",
+            "source_family_id": "family-a",
+            "split": "validation",
+            "policy": {
+                "allow_training": True,
+                "allowed_use_purposes": ["knowledge_retrieval", "model_training"],
+            },
+        },
         provenance[3],
     ]
     with pytest.raises(verifier.TrialFailure, match="leaked between"):
         verifier._check_sft_package(_sft_package(contaminated), set())
+
+    no_training_purpose = [
+        {
+            **provenance[0],
+            "policy": {
+                "allow_training": True,
+                "allowed_use_purposes": ["knowledge_retrieval"],
+            },
+        },
+        *provenance[1:],
+    ]
+    with pytest.raises(verifier.TrialFailure, match="explicit training permission"):
+        verifier._check_sft_package(_sft_package(no_training_purpose), set())
 
 
 def test_data_tools_trial_verifier_fixture_mode() -> None:
