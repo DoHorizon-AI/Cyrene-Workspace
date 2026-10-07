@@ -1,0 +1,5 @@
+IT EQUIPMENT HANDOFF — ORCHID-42
+Asset: SP-204
+Bay: 07
+Status: received
+Synthetic document for mixed-corpus parser acceptance.

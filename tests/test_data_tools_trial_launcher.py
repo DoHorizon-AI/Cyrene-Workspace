@@ -75,6 +75,47 @@ def test_generic_plugin_configuration_is_not_inherited_by_trial_processes(
     assert trial.CAPABILITY_CONFIGURATION_ENV not in environment
 
 
+def test_catalyst_only_starts_without_echo_or_exact_match() -> None:
+    arguments = trial.build_parser().parse_args(["start", "--catalyst-only"])
+    plugin_names = {
+        name
+        for name, _, _ in trial.PLUGIN_SPECS
+        if not arguments.catalyst_only or name in trial.CATALYST_ONLY_PLUGIN_NAMES
+    }
+
+    assert arguments.catalyst_only is True
+    assert "exact-match" not in plugin_names
+    assert "document-parsing" in plugin_names
+    assert "knowledge-preparation" in plugin_names
+    assert "dataset-generation" in plugin_names
+    assert "dataset-preparation" in plugin_names
+
+
+def test_document_parser_environment_pins_isolated_tesseract_paths(tmp_path: Path) -> None:
+    root = tmp_path / "isolated-ocr"
+    libraries = root / "usr/lib/x86_64-linux-gnu"
+    tessdata = root / "usr/share/tesseract-ocr/5/tessdata"
+    executable = root / "usr/bin/tesseract"
+
+    environment = trial._document_parser_environment(
+        {"LD_LIBRARY_PATH": "/existing/lib", "CYRENE_DATA_TOOLS_TOKEN": "secret"},
+        ocr_runtime_root=root,
+        languages="eng,chi_sim",
+        engine="auto",
+        dpi=200,
+        minimum_confidence=0.8,
+        docling_artifacts_path=None,
+    )
+
+    assert environment["CYRENE_DOCUMENT_PARSING_TESSERACT_CMD"] == str(executable)
+    assert environment["CYRENE_DOCUMENT_PARSING_TESSDATA_PREFIX"] == str(tessdata)
+    assert environment["TESSDATA_PREFIX"] == str(tessdata)
+    assert environment["LD_LIBRARY_PATH"].split(os.pathsep) == [str(libraries), "/existing/lib"]
+    assert environment["CYRENE_DOCUMENT_PARSING_OCR_LANGUAGES"] == "eng,chi_sim"
+    assert "CYRENE_DOCUMENT_PARSING_ARTIFACTS_PATH" not in environment
+    assert environment[trial.TOKEN_ENV] == "secret"
+
+
 def test_supervised_child_survives_launcher_exit_and_redacts_late_output(
     tmp_path: Path,
 ) -> None:

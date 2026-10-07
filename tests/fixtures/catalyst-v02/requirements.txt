@@ -1,0 +1,8 @@
+# Pinned synthetic Catalyst v0.2 fixture-builder and focused test dependencies.
+Pillow==12.3.0
+reportlab==5.0.1
+python-docx==1.2.0
+python-pptx==1.0.2
+openpyxl==3.1.5
+pytest==9.1.1
+ruff==0.16.5

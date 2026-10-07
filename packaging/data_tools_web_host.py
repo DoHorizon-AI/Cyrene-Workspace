@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the existing Navigator Web Host with fixed Catalyst/Echo proxy targets.
+"""Run the existing Navigator Web Host with fixed Product proxy targets.
 
 The trial passes the API bearer from this process environment into each
 server-owned ProxyTarget; browser requests never receive the bearer value.
@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--navigator-root", type=Path, required=True)
     parser.add_argument("--pairing-code-file", type=Path, required=True)
     parser.add_argument("--catalyst-url", required=True)
-    parser.add_argument("--echo-url", required=True)
+    parser.add_argument("--echo-url")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8100)
     args = parser.parse_args(argv)
@@ -50,21 +50,29 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("pairing code file is empty")
 
     token = os.environ.get("CYRENE_DATA_TOOLS_TOKEN")
+    proxy_targets = {
+        "/api/v1/catalyst/api/v1": ProxyTarget(
+            f"{args.catalyst_url.rstrip('/')}/api/v1", bearer_token=token
+        ),
+        "/api/v1/catalyst": ProxyTarget(
+            f"{args.catalyst_url.rstrip('/')}/api/v1", bearer_token=token
+        ),
+    }
+    if args.echo_url:
+        proxy_targets.update(
+            {
+                "/api/v1/echo/api/v1": ProxyTarget(
+                    f"{args.echo_url.rstrip('/')}/api/v1", bearer_token=token
+                ),
+                "/api/v1/echo": ProxyTarget(
+                    f"{args.echo_url.rstrip('/')}/api/v1", bearer_token=token
+                ),
+            }
+        )
     app = create_web_host_app(
         pairing_code=pairing_code,
         pairing_code_issued_at=time.time(),
-        proxy_targets={
-            "/api/v1/catalyst/api/v1": ProxyTarget(
-                f"{args.catalyst_url.rstrip('/')}/api/v1", bearer_token=token
-            ),
-            "/api/v1/catalyst": ProxyTarget(
-                f"{args.catalyst_url.rstrip('/')}/api/v1", bearer_token=token
-            ),
-            "/api/v1/echo/api/v1": ProxyTarget(
-                f"{args.echo_url.rstrip('/')}/api/v1", bearer_token=token
-            ),
-            "/api/v1/echo": ProxyTarget(f"{args.echo_url.rstrip('/')}/api/v1", bearer_token=token),
-        },
+        proxy_targets=proxy_targets,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning", access_log=False)
     return 0

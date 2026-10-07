@@ -1,0 +1,4 @@
+asset_id,bay,handoff_step,status,recovery_code
+SP-204,07,receive,complete,ORCHID-42
+SP-205,07,verify,complete,ORCHID-42
+SP-206,12,wipe,pending,ORCHID-43

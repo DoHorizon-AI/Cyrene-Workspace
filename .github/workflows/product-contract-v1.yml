@@ -52,6 +52,33 @@ jobs:
           ruff format --check tests/test_data_bundle_release.py
           pytest -q tests/test_data_bundle_release.py
 
+  catalyst-v02-fixtures:
+    name: ci / catalyst-v02-fixtures
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install fixture font and pinned Python test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fonts-dejavu-core
+          python -m pip install --disable-pip-version-check \
+            -r tests/fixtures/catalyst-v02/requirements.txt
+      - name: Lint and check formatting for Catalyst v0.2 fixture tests
+        run: |
+          ruff check tests/fixtures/catalyst-v02/build_fixtures.py \
+            tests/test_catalyst_v02_fixtures.py tests/test_catalyst_v02_launcher.py \
+            scripts/verify-catalyst-v02.py tests/test_catalyst_v02_acceptance.py
+          ruff format --check tests/fixtures/catalyst-v02/build_fixtures.py \
+            tests/test_catalyst_v02_fixtures.py tests/test_catalyst_v02_launcher.py \
+            scripts/verify-catalyst-v02.py tests/test_catalyst_v02_acceptance.py
+      - name: Verify v0.2 fixture, launcher, and acceptance safeguards
+        run: >-
+          pytest -q tests/test_catalyst_v02_fixtures.py tests/test_catalyst_v02_launcher.py
+          tests/test_catalyst_v02_acceptance.py
+
   component-updates:
     name: ci / component-updates
     runs-on: ubuntu-latest
