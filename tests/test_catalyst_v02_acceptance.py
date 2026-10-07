@@ -32,6 +32,55 @@ def test_fixed_manifest_verifies_native_synthetic_corpus() -> None:
     assert len(manifest["files"]) == 14
 
 
+def test_parser_evidence_keeps_all_ocr_lines_for_each_source() -> None:
+    filenames = verifier._fixture_manifest()["files"]
+    sources = {name: {"id": f"source-{name}"} for name in filenames}
+    reports = []
+    for filename, source in sources.items():
+        status = "SUCCEEDED"
+        if filename in {"malformed.pdf", "unsupported.rtf"}:
+            status = "FAILED"
+        elif filename in {"handoff-scanned.pdf", "handoff.pptx"}:
+            status = "WARNING"
+        report = {"sourceRevisionId": source["id"], "status": status}
+        if filename == "handoff-scanned.pdf":
+            report["diagnostics"] = [{"kind": "parser", "locator": {"page_number": 1}}]
+        if filename == "handoff.pptx":
+            report["unsupportedContent"] = [{"kind": "chart"}]
+        if filename == "handoff.xlsx":
+            report["diagnostics"] = [{"code": "xlsx.formula_uncached", "formula": "=SUM(C3:C4)"}]
+        reports.append(report)
+
+    blocks = [
+        {
+            "sourceRevisionId": sources["handoff.txt"]["id"],
+            "text": "Order ORCHID-42 references shipment SP-204.",
+        },
+        {
+            "sourceRevisionId": sources["handoff-scanned.pdf"]["id"],
+            "text": "Scanned page text",
+            "locator": {
+                "sourcePages": [1],
+                "provenance": [{"type": "ocr", "engine": "tesseract-cli", "confidence": 0.95}],
+            },
+        },
+        {"sourceRevisionId": sources["handoff-ocr-clear.png"]["id"], "text": "ORCHID-42"},
+        {"sourceRevisionId": sources["handoff-ocr-clear.png"]["id"], "text": "SP-204"},
+        {
+            "sourceRevisionId": sources["handoff.pptx"]["id"],
+            "text": "Synthetic presenter note: verify ORCHID-42",
+        },
+        {
+            "sourceRevisionId": sources["handoff.xlsx"]["id"],
+            "text": "F3: formula =SUM(C3:C4); cached value unavailable",
+        },
+    ]
+
+    evidence = verifier._assert_parser_evidence(reports, sources, blocks)
+
+    assert evidence["blockCount"] == len(blocks)
+
+
 def test_batch_form_uses_repeated_literal_files_field() -> None:
     manifest = verifier._fixture_manifest()
     boundary = "cyrene-v02-unit-boundary"
@@ -187,6 +236,55 @@ def test_generation_call_marker_is_exclusive(tmp_path: Path) -> None:
         verifier._call_marker(path, {"maxCalls": 1})
 
 
+def test_resume_requires_matching_original_marker_and_exact_single_call_identity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "generation-call-issued.json"
+    identity = {
+        "bindingId": "catalyst-v02-local-qwen",
+        "model": "qwen2.5-1.5b-instruct-local",
+        "revision": verifier.EXPECTED_QWEN_REVISION,
+    }
+    marker = {
+        "createdAt": 1_797_000_000,
+        "bindingId": identity["bindingId"],
+        "model": identity["model"],
+        "modelRevision": identity["revision"],
+        "maxCalls": 1,
+        "maxExamples": 1,
+        "maxOutputTokens": 512,
+        "datasetId": "dataset-1",
+        "contentRevisionId": "revision-1",
+    }
+    path.write_text(json.dumps(marker), encoding="utf-8")
+
+    assert (
+        verifier._validate_resume_marker(
+            path,
+            dataset_id="dataset-1",
+            content_revision_id="revision-1",
+            identity=identity,
+        )
+        == marker
+    )
+    with pytest.raises(verifier.AcceptanceFailure, match="does not match"):
+        verifier._validate_resume_marker(
+            path,
+            dataset_id="dataset-2",
+            content_revision_id="revision-1",
+            identity=identity,
+        )
+    marker["maxCalls"] = 2
+    path.write_text(json.dumps(marker), encoding="utf-8")
+    with pytest.raises(verifier.AcceptanceFailure, match="does not match"):
+        verifier._validate_resume_marker(
+            path,
+            dataset_id="dataset-1",
+            content_revision_id="revision-1",
+            identity=identity,
+        )
+
+
 def test_sft_archive_rejects_operator_metadata() -> None:
     payload = BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
@@ -306,7 +404,12 @@ def test_knowledge_bundle_covers_successful_sources_and_office_evidence() -> Non
         )
         archive.writestr(
             "manifest.json",
-            json.dumps({"sourceRevisionIds": ["pptx-source", "xlsx-source"]}),
+            json.dumps(
+                {
+                    "sourceRevisionIds": ["pptx-source", "xlsx-source"],
+                    "conversionReport": {"emptyTextBlockCount": 1},
+                }
+            ),
         )
         archive.writestr(
             "sources.jsonl",
@@ -323,3 +426,4 @@ def test_knowledge_bundle_covers_successful_sources_and_office_evidence() -> Non
     assert result["coveredSuccessfulSources"] == ["handoff.pptx", "handoff.xlsx"]
     assert result["speakerNotesReadable"] is True
     assert result["xlsxFormulaEvidenceReadable"] is True
+    assert result["emptyTextBlockCount"] == 1

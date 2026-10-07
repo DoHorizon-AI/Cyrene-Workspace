@@ -234,14 +234,15 @@ until they are acknowledged. For this synthetic trial only, it explicitly
 enables Knowledge policy on every block from a successful parse source. It keeps
 all 24 JSONL conversation blocks out of model context until after generation,
 and initially permits model context from only one rich original prose block
-(preferring `handoff.txt`). The operator-only metadata remains outside learned
+(this corpus selects `handoff.md` because its TXT counterpart has no sufficiently rich block).
+The operator-only metadata remains outside learned
 text.
 
 在线验收器会通过重复 `files[]` multipart 字段一次上传 manifest 固定的 14 个原生文件；启动一个
 parse run；读取每个文件的持久化报告；检查原生文本、带定位信息的 OCR 输出、Office 结构、损坏
 输入和不支持输入；并验证未解决的 parser/OCR issue 会阻断审批，直到人工确认。仅在这份合成试用
 数据上，所有成功解析来源的 block 都会显式启用 Knowledge 策略。24 个 JSONL 对话 block 在模型
-生成前保持不可训练；QA 生成时只允许一个原始富内容 prose block（优先 `handoff.txt`）作为上下文。
+生成前保持不可训练；QA 生成时只允许一个原始富内容 prose block（当前固定语料选择 `handoff.md`）作为上下文。
 仅操作员使用的元数据不会进入学习文本。
 
 The verifier places an exclusive marker before issuing exactly one `generateQa`
@@ -254,10 +255,14 @@ preserves the generated receipt while projecting its QA into the approved
 conversation format, then enables training on the 24 manually reviewed JSONL
 records in a new immutable revision. The Knowledge ZIP must cover every
 successful parse source, including readable PPTX speaker notes and XLSX formula
-cache evidence. The SFT ZIP must contain the 12 manual source families and the
-generated prose family. The verifier prepares both profiles, publishes a
-DatasetVersion, restarts the launcher-owned runtime, and compares parse reports,
-review queue, blocks, package bytes, and published version snapshots. The result
+cache evidence. Empty Knowledge blocks are skipped and counted in the plugin's
+conversion report. The SFT ZIP must contain the 12 manual source families and the
+generated prose family. Before approval, the verifier restarts the launcher-owned
+runtime with the generated revision still in DRAFT, compares its generation
+receipt, blocks, parse reports, and review queue, and confirms publication still
+returns HTTP 409. It then prepares both profiles, publishes a DatasetVersion,
+restarts again, and compares parse reports, review queue, blocks, package bytes,
+and published version snapshots. The result
 and sanitized evidence are written to
 `reports/catalyst-v02-acceptance/acceptance.json` with mode 0600. A failure
 after the generation marker is created must be investigated; rerunning cannot
@@ -268,8 +273,10 @@ issue a second model call from that evidence directory.
 完成记录及 token 数；验证未审批草稿不能发布。Acceptance operator 会通过 human-review API 明确
 记录 reviewer approval；验收器保留生成回执，将 QA 转换为已审核的 conversation 格式，再在新的不可变
 修订上为 24 条 JSONL 手工审核记录启用训练。Knowledge ZIP 必须覆盖每个成功解析来源，并可读回 PPTX
-演讲者备注和 XLSX 公式缓存证据；SFT ZIP 必须包含 12 个手工 source family 和生成 prose family。
-验收器准备两个 profile、发布 DatasetVersion、重启启动器管理的 runtime，并比较 parse reports、review
+演讲者备注和 XLSX 公式缓存证据；Knowledge 会跳过空 block 并在 conversion report 中计数；SFT ZIP 必须包含
+12 个手工 source family 和生成 prose family。生成草稿后、审批前，验收器会重启启动器管理的 runtime，比较
+generation receipt、blocks、parse reports 和 review queue，并确认未审批内容仍以 HTTP 409 阻止发布。
+之后验收器准备两个 profile、发布 DatasetVersion、再次重启 runtime，并比较 parse reports、review
 queue、blocks、制品 bytes 和已发布版本快照。脱敏证据写入
 `reports/catalyst-v02-acceptance/acceptance.json`，权限为 0600。创建 generation marker 后若验收失败，
 必须先调查；相同 evidence directory 会阻止再次发起模型调用。
@@ -283,10 +290,25 @@ the end user personally reviewed or approved the synthetic records.
 `--skip-restart` is available for debugging; it records `PARTIAL` and exits with
 status 2, so it cannot be mistaken for complete restart-recovery acceptance.
 
+If a live verifier stops after a persisted `generateQa` run fails with
+`INVALID_REQUEST` before the model provider accepts a completion, recovery is
+limited to the same dataset and evidence directory. Confirm that the provider
+usage ledger is empty and its loopback health reports `calls_started=0`, then
+rerun with `--resume-dataset-id <existing-dataset-id>`. The verifier preserves
+the original marker and failed run, writes an exclusive resume marker, and
+admits at most one retry. Provider usage or an existing resume marker blocks
+recovery. Never use this path after a provider call has started.
+
 本流程使用身份明确的本地 Qwen 模型。synthetic/mock/scripted provider 不能作为真实模型证据。
 生成前，验收器只读取 loopback `/healthz`，并要求模型 revision 固定、调用预算为 0/1、输出上限为 512 tokens。
 其中 human-review API 操作由 acceptance operator 执行，不表示终端用户本人查看或批准了这些合成记录。
 `--skip-restart` 仅供调试；结果会标记为 `PARTIAL` 并以状态码 2 退出，不能误认为完整的重启恢复验收。
+
+如果验收器在 provider 尚未接受 completion 前，因为已持久化的 `generateQa` `INVALID_REQUEST` 失败而停止，
+只能在同一 dataset 和 evidence directory 上恢复。先确认 usage ledger 为空且 loopback health 的
+`calls_started=0`，再使用 `--resume-dataset-id <现有 dataset ID>`。验收器保留原 marker 和失败 run，
+创建独占 resume marker，最多重新提交一次；出现 provider 使用记录或已有 resume marker 时都会拒绝恢复。
+Provider 已开始调用后不能使用此恢复路径。
 
 ## Test and lint
 

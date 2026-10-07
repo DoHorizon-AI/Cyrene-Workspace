@@ -405,29 +405,36 @@ def _assert_parser_evidence(
             raise AcceptanceFailure(f"native parser did not produce usable content for {filename}")
     if status("handoff-scanned.pdf") not in {"WARNING", "SUCCEEDED"}:
         raise AcceptanceFailure("scanned PDF did not produce a persisted OCR outcome")
-    by_source = {
-        str(_pick(block, "sourceRevisionId", "source_revision_id")): block
-        for block in blocks
-        if isinstance(block, dict)
-    }
     searchable = "\n".join(str(block.get("text", "")) for block in blocks)
     if "ORCHID-42" not in searchable or "SP-204" not in searchable:
         raise AcceptanceFailure("parsed business text is missing its fixed native sentinels")
+    scan_source_id = _id(sources_by_name["handoff-scanned.pdf"], "scanned PDF source")
+    scanned_ocr_blocks = [
+        block
+        for block in blocks
+        if isinstance(block, dict)
+        and _pick(block, "sourceRevisionId", "source_revision_id") == scan_source_id
+        and isinstance(block.get("locator"), dict)
+        and isinstance(block["locator"].get("provenance"), list)
+        and any(
+            isinstance(item, dict) and item.get("type") == "ocr"
+            for item in block["locator"]["provenance"]
+        )
+    ]
+    if not scanned_ocr_blocks:
+        raise AcceptanceFailure("scanned PDF has no located OCR-provenance content blocks")
     clear_image_id = _id(sources_by_name["handoff-ocr-clear.png"], "clear OCR source")
     if not any(
-        block_id == clear_image_id and "ORCHID-42" in str(block.get("text", ""))
-        for block_id, block in by_source.items()
+        _pick(block, "sourceRevisionId", "source_revision_id") == clear_image_id
+        and "ORCHID-42" in str(block.get("text", ""))
+        for block in blocks
+        if isinstance(block, dict)
     ):
         raise AcceptanceFailure("clear image OCR text is missing from located parsed blocks")
     scan = reports_by_name["handoff-scanned.pdf"]
     diagnostics = scan.get("diagnostics", [])
-    if not isinstance(diagnostics, list) or not any(
-        isinstance(row, dict)
-        and str(_pick(row, "kind")).lower() == "ocr"
-        and isinstance(_pick(row, "locator"), dict)
-        for row in diagnostics
-    ):
-        raise AcceptanceFailure("scanned PDF report is missing located OCR diagnostics")
+    if not isinstance(diagnostics, list):
+        raise AcceptanceFailure("scanned PDF diagnostics must be an array")
     pptx = reports_by_name["handoff.pptx"]
     unsupported = pptx.get("unsupportedContent", pptx.get("unsupported_content", []))
     if not isinstance(unsupported, list) or not unsupported:
@@ -462,6 +469,7 @@ def _assert_parser_evidence(
             for row in report.get("diagnostics", [])
             if isinstance(row, dict) and str(_pick(row, "kind")).lower() == "ocr"
         ),
+        "scannedPdfOcrBlockCount": len(scanned_ocr_blocks),
     }
 
 
@@ -561,12 +569,22 @@ def _assert_knowledge_bundle(
         if _pick(source, "sourceRevisionId", "source_revision_id") is not None
     }
     manifest_source_ids = manifest.get("sourceRevisionIds")
+    conversion_report = manifest.get("conversionReport")
+    empty_text_block_count = (
+        conversion_report.get("emptyTextBlockCount")
+        if isinstance(conversion_report, dict)
+        else None
+    )
     if (
         source_record_ids != chunk_source_ids
         or not isinstance(manifest_source_ids, list)
         or set(manifest_source_ids) != chunk_source_ids
+        or not isinstance(empty_text_block_count, int)
+        or empty_text_block_count < 1
     ):
-        raise AcceptanceFailure("Knowledge source records and manifest do not match chunk coverage")
+        raise AcceptanceFailure(
+            "Knowledge manifest source coverage or skipped-empty-block count is invalid"
+        )
     chunks_by_source = {
         source_id: "\n".join(
             str(_pick(chunk, "text") or "")
@@ -609,6 +627,7 @@ def _assert_knowledge_bundle(
     return {
         "chunkCount": len(chunks),
         "coveredSuccessfulSources": sorted(successful_names),
+        "emptyTextBlockCount": empty_text_block_count,
         "speakerNotesReadable": True,
         "xlsxFormulaEvidenceReadable": True,
     }
@@ -768,6 +787,310 @@ def _call_marker(path: Path, data: dict[str, Any]) -> None:
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def _validate_resume_marker(
+    path: Path,
+    *,
+    dataset_id: str,
+    content_revision_id: str,
+    identity: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate the original one-call admission marker before a safe resume.
+
+    中文：恢复前确认首次生成 admission 的数据集、revision、模型身份和预算一致。
+    """
+
+    if path.is_symlink() or not path.is_file():
+        raise AcceptanceFailure("original generation-call marker is missing or unsafe")
+    marker = _json_object(path, label="original generation-call marker")
+    expected = {
+        "bindingId": identity["bindingId"],
+        "model": identity["model"],
+        "modelRevision": identity["revision"],
+        "maxCalls": 1,
+        "maxExamples": 1,
+        "maxOutputTokens": 512,
+        "datasetId": dataset_id,
+        "contentRevisionId": content_revision_id,
+    }
+    if any(marker.get(key) != value for key, value in expected.items()):
+        raise AcceptanceFailure(
+            "original generation-call marker does not match the requested safe resume"
+        )
+    if not isinstance(marker.get("createdAt"), (int, float)):
+        raise AcceptanceFailure("original generation-call marker has no durable admission time")
+    return marker
+
+
+def _resume_live(args: argparse.Namespace) -> dict[str, Any]:
+    """Continue one pre-provider rejection on its existing approved Dataset.
+
+    中文：仅在原请求被插件拒绝且 Provider 尚未接收调用时，沿用同一数据集恢复。
+    """
+
+    if not args.catalyst_url:
+        raise AcceptanceFailure("--catalyst-url is required for live acceptance")
+    if args.host not in {"127.0.0.1", "::1", "localhost"} and not os.environ.get(args.token_env):
+        raise AcceptanceFailure(
+            f"set {args.token_env} in the environment for non-loopback acceptance"
+        )
+    fixture_root = args.fixture_root.expanduser().absolute()
+    manifest = _fixture_manifest(fixture_root)
+    files = manifest["files"]
+    token = os.environ.get(args.token_env)
+    client = ApiClient(args.catalyst_url, token)
+    provider_config = _json_object(args.generation_config, label="generation config")
+    identity = _provider_identity(args, provider_config)
+    usage_before = _usage_ledger(args.provider_usage_ledger)
+    if usage_before:
+        raise AcceptanceFailure(
+            "provider usage ledger is not empty; refusing to spend another call"
+        )
+    dataset_id = args.resume_dataset_id
+    original_marker_path = args.evidence_dir / "generation-call-issued.json"
+    retry_marker_path = args.evidence_dir / "generation-resume-issued.json"
+    if retry_marker_path.exists() or retry_marker_path.is_symlink():
+        raise AcceptanceFailure(
+            "generation resume marker already exists; refusing another generateQa admission"
+        )
+    runtime_path = args.state_dir / "runtime.json"
+    launch = _check_mode_and_health(client, runtime_path, args.catalyst_url)
+    ui_was_enabled = isinstance(_json_object(runtime_path, label="runtime.json").get("ui"), dict)
+
+    _, _, raw_sources = client.json("GET", f"/api/v1/datasets/{dataset_id}/sources", expected={200})
+    if not isinstance(raw_sources, list) or len(raw_sources) != len(files):
+        raise AcceptanceFailure("resume Dataset does not contain the fixed 14-source fixture")
+    sources_by_name: dict[str, dict[str, Any]] = {}
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            raise AcceptanceFailure("resume Dataset has a malformed source record")
+        filename = _pick(source, "filename")
+        if filename not in files or filename in sources_by_name:
+            raise AcceptanceFailure("resume Dataset source filenames differ from the fixed fixture")
+        if (
+            _pick(source, "byteLength", "byte_length") != files[filename]["sizeBytes"]
+            or _pick(source, "mediaType", "media_type") != files[filename]["mediaType"]
+        ):
+            raise AcceptanceFailure(f"resume Dataset source metadata changed for {filename}")
+        sources_by_name[filename] = source
+    if set(sources_by_name) != set(files):
+        raise AcceptanceFailure("resume Dataset does not cover every fixed fixture filename")
+
+    _, _, runs = client.json(
+        "GET", f"/api/v1/datasets/{dataset_id}/processing-runs", expected={200}
+    )
+    if not isinstance(runs, list):
+        raise AcceptanceFailure("resume Dataset processing runs are not an array")
+    parse_runs = [
+        row
+        for row in runs
+        if isinstance(row, dict)
+        and str(_pick(row, "operation")).lower() == "parse"
+        and str(_pick(row, "state")).upper() == "SUCCEEDED"
+    ]
+    failed_generation_runs = [
+        row
+        for row in runs
+        if isinstance(row, dict)
+        and str(_pick(row, "operation")).lower() == "generateqa"
+        and str(_pick(row, "state")).upper() == "FAILED"
+    ]
+    if len(parse_runs) != 1 or len(failed_generation_runs) != 1:
+        raise AcceptanceFailure(
+            "safe resume requires exactly one successful parse and one failed generateQa run"
+        )
+    parse_run = parse_runs[0]
+    failed_run = failed_generation_runs[0]
+    failed_run_id = _id(failed_run, "previous failed generateQa ProcessingRun")
+    failure = failed_run.get("failure")
+    if (
+        not isinstance(failure, dict)
+        or _pick(failure, "code") != "INVALID_REQUEST"
+        or _pick(failed_run, "contentRevisionId", "content_revision_id") is None
+    ):
+        raise AcceptanceFailure(
+            "only a persisted pre-provider INVALID_REQUEST generateQa failure is resumable"
+        )
+    parse_run_id = _id(parse_run, "parse ProcessingRun")
+    reports = _wait_parse_reports(
+        client, dataset_id, parse_run_id, len(sources_by_name), args.run_timeout
+    )
+    report_revision_ids = {
+        str(_pick(report, "contentRevisionId", "content_revision_id"))
+        for report in reports
+        if isinstance(report, dict)
+        and _pick(report, "contentRevisionId", "content_revision_id") is not None
+    }
+    if len(report_revision_ids) != 1:
+        raise AcceptanceFailure("resume parse reports do not identify one source snapshot")
+    source_revision_id = next(iter(report_revision_ids))
+    source_revision = _revision(client, dataset_id, source_revision_id)
+    if str(_pick(source_revision, "state")).upper() != "APPROVED":
+        raise AcceptanceFailure("resume source snapshot is not approved after issue review")
+    source_blocks = _revision_blocks(client, source_revision_id)
+    parser_evidence = _assert_parser_evidence(reports, sources_by_name, source_blocks)
+    successful_source_ids = {
+        _id(sources_by_name[name], "successful parse source")
+        for name, report in parser_evidence["reportsByName"].items()
+        if str(_pick(report, "status")).upper() in {"SUCCEEDED", "WARNING"}
+    }
+
+    approved_policy_revision_id = str(_pick(failed_run, "contentRevisionId", "content_revision_id"))
+    _validate_resume_marker(
+        original_marker_path,
+        dataset_id=dataset_id,
+        content_revision_id=approved_policy_revision_id,
+        identity=identity,
+    )
+    approved_policy_revision = _revision(client, dataset_id, approved_policy_revision_id)
+    if str(_pick(approved_policy_revision, "state")).upper() != "APPROVED":
+        raise AcceptanceFailure("previously admitted policy snapshot is not approved")
+    policy_blocks = _revision_blocks(client, approved_policy_revision_id)
+    if {str(_pick(block, "sourceRevisionId", "source_revision_id")) for block in policy_blocks} != {
+        str(_pick(block, "sourceRevisionId", "source_revision_id")) for block in source_blocks
+    }:
+        raise AcceptanceFailure("approved policy revision changed source block lineage")
+    prose_block, generation_source_name = _select_generation_prose_block(
+        source_blocks, sources_by_name, parser_evidence["reportsByName"]
+    )
+    prose_block_id = _id(prose_block, "generation prose ContentBlock")
+    prose_source_id = _id(
+        sources_by_name[generation_source_name], "generation prose SourceRevision"
+    )
+    conversation_source_id = _id(
+        sources_by_name["source-conversations.jsonl"], "conversation source"
+    )
+    conversation_blocks = [
+        block
+        for block in policy_blocks
+        if _pick(block, "sourceRevisionId", "source_revision_id") == conversation_source_id
+    ]
+    if len(conversation_blocks) != 24:
+        raise AcceptanceFailure("approved policy revision lost the 24 manual JSONL blocks")
+    blocks_to_enable = [
+        block
+        for block in source_blocks
+        if _pick(block, "sourceRevisionId", "source_revision_id") in successful_source_ids
+    ]
+    if len(blocks_to_enable) != 83:
+        raise AcceptanceFailure(
+            "approved policy revision does not cover all parsed Knowledge blocks"
+        )
+    initially_trainable = [
+        block
+        for block in policy_blocks
+        if _pick(block.get("policy", {}), "allowTraining", "allow_training") is True
+    ]
+    if len(initially_trainable) != 1 or _id(initially_trainable[0]) != prose_block_id:
+        raise AcceptanceFailure("resume policy must train only the selected original prose block")
+    for block in policy_blocks:
+        policy = block.get("policy")
+        block_id = _id(block, "approved policy ContentBlock")
+        source_id = _pick(block, "sourceRevisionId", "source_revision_id")
+        should_know = source_id in successful_source_ids
+        should_train = block_id == prose_block_id
+        purposes = _pick(policy or {}, "allowedUsePurposes", "allowed_use_purposes", default=[])
+        if (
+            not isinstance(policy, dict)
+            or _pick(policy, "allowKnowledge", "allow_knowledge") is not should_know
+            or _pick(policy, "allowTraining", "allow_training") is not should_train
+            or ("knowledge_retrieval" in purposes) is not should_know
+            or ("model_training" in purposes) is not should_train
+        ):
+            raise AcceptanceFailure("resume policy scope differs from the one-call acceptance plan")
+
+    queue = _queue(client, dataset_id)
+    applicable = [
+        row
+        for row in queue["items"]
+        if isinstance(row, dict)
+        and _pick(row, "contentRevisionId", "content_revision_id") == source_revision_id
+    ]
+    acknowledged_items = [
+        row for row in applicable if str(_pick(row, "state")).upper() == "ACKNOWLEDGED"
+    ]
+    if not applicable or len(acknowledged_items) != len(applicable):
+        raise AcceptanceFailure("resume source issues are not all acknowledged")
+    if queue["generatedDrafts"]:
+        raise AcceptanceFailure("resume Dataset already has generated drafts")
+    _, _, versions = client.json(
+        "GET", f"/api/v1/datasets/{dataset_id}/data-tools/versions", expected={200}
+    )
+    if not isinstance(versions, list) or versions:
+        raise AcceptanceFailure("resume Dataset already contains a published data-tools version")
+
+    retry_marker = {
+        "createdAt": time.time(),
+        "resume": True,
+        "previousFailedRunId": failed_run_id,
+        "bindingId": identity["bindingId"],
+        "model": identity["model"],
+        "modelRevision": identity["revision"],
+        "maxCalls": 1,
+        "maxExamples": 1,
+        "maxOutputTokens": 512,
+        "datasetId": dataset_id,
+        "contentRevisionId": approved_policy_revision_id,
+    }
+    if (
+        _usage_ledger(args.provider_usage_ledger)
+        or _provider_health(args.provider_health_url).get("budget", {}).get("calls_started") != 0
+    ):
+        raise AcceptanceFailure(
+            "provider use changed during resume preflight; refusing another generateQa admission"
+        )
+    _call_marker(retry_marker_path, retry_marker)
+    generate_admission = _run(
+        client,
+        dataset_id,
+        "generateQa",
+        contentRevisionId=approved_policy_revision_id,
+        config={
+            "generation": {"maxExamples": 1, "maxCalls": 1, "maxOutputTokens": 512},
+            "split": {"train": 0.8, "validation": 0.1, "test": 0.1},
+        },
+    )
+    generate_run_id = _id(generate_admission, "resumed generateQa ProcessingRun")
+    recovery_evidence = {
+        "resumed": True,
+        "previousFailedRunId": failed_run_id,
+        "previousFailureCode": "INVALID_REQUEST",
+        "originalCallMarkerPreserved": True,
+        "retryMarker": retry_marker_path.name,
+        "usageLedgerWasEmptyBeforeResume": True,
+        "providerCallsStartedBeforeResume": 0,
+        "datasetId": dataset_id,
+        "approvedPolicyRevisionId": approved_policy_revision_id,
+    }
+    return _finish_after_generation(
+        args=args,
+        client=client,
+        manifest=manifest,
+        files=files,
+        dataset_id=dataset_id,
+        sources_by_name=sources_by_name,
+        parser_evidence=parser_evidence,
+        source_revision_id=source_revision_id,
+        approved_policy_revision_id=approved_policy_revision_id,
+        parse_run_id=parse_run_id,
+        generation_source_name=generation_source_name,
+        prose_block_id=prose_block_id,
+        prose_source_id=prose_source_id,
+        conversation_source_id=conversation_source_id,
+        expected_manual_families=_fixture_source_families(fixture_root),
+        blocks_to_enable=blocks_to_enable,
+        initially_trainable=initially_trainable,
+        applicable=applicable,
+        open_items=acknowledged_items,
+        blocked_status=409,
+        usage_before=usage_before,
+        identity=identity,
+        launch=launch,
+        ui_was_enabled=ui_was_enabled,
+        generate_run_id=generate_run_id,
+        recovery_evidence=recovery_evidence,
+    )
 
 
 def _assert_sft_bundle(
@@ -1021,6 +1344,497 @@ def _restart_runtime(args: argparse.Namespace, ui_was_enabled: bool) -> str | No
     if match:
         pair_code = match.group(1)
     return pair_code
+
+
+def _finish_after_generation(
+    *,
+    args: argparse.Namespace,
+    client: ApiClient,
+    manifest: dict[str, Any],
+    files: dict[str, Any],
+    dataset_id: str,
+    sources_by_name: dict[str, dict[str, Any]],
+    parser_evidence: dict[str, Any],
+    source_revision_id: str,
+    approved_policy_revision_id: str,
+    parse_run_id: str,
+    generation_source_name: str,
+    prose_block_id: str,
+    prose_source_id: str,
+    conversation_source_id: str,
+    expected_manual_families: set[str],
+    blocks_to_enable: list[dict[str, Any]],
+    initially_trainable: list[dict[str, Any]],
+    applicable: list[dict[str, Any]],
+    open_items: list[dict[str, Any]],
+    blocked_status: int,
+    usage_before: list[dict[str, Any]],
+    identity: dict[str, Any],
+    launch: dict[str, Any],
+    ui_was_enabled: bool,
+    generate_run_id: str,
+    recovery_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Verify the unique generation receipt and finish review/publication/restart."""
+
+    runtime_path = args.state_dir / "runtime.json"
+    generate_run = _terminal_run(client, generate_run_id, args.generation_timeout)
+    successful_source_ids = {
+        _id(sources_by_name[name], "successful parse source")
+        for name, report in parser_evidence["reportsByName"].items()
+        if str(_pick(report, "status")).upper() in {"SUCCEEDED", "WARNING"}
+    }
+    after_usage = _usage_ledger(args.provider_usage_ledger)
+    provider_usage = _assert_real_usage(
+        usage_before,
+        after_usage,
+        model=args.expected_model,
+        revision=args.expected_model_revision,
+    )
+    stages = generate_run.get("stages", [])
+    output = (
+        stages[0].get("output")
+        if isinstance(stages, list) and stages and isinstance(stages[0], dict)
+        else None
+    )
+    if not isinstance(output, dict):
+        raise AcceptanceFailure("successful generateQa run is missing its stage output receipt")
+    budget = output.get("budget")
+    if (
+        output.get("draftCount") != 1
+        or not isinstance(budget, dict)
+        or budget.get("calls_used") != 1
+        or budget.get("provider_completion_tokens") is None
+        or budget["provider_completion_tokens"] > 512
+        or budget["provider_completion_tokens"] != provider_usage["usage"]["completion_tokens"]
+        or output.get("provider", {}).get("binding_id") != identity["bindingId"]
+        or output.get("provider", {}).get("model") != identity["model"]
+    ):
+        raise AcceptanceFailure("generateQa receipt does not prove the exact one-call model budget")
+    generated_revision_id = output.get("generatedContentRevisionId")
+    if not isinstance(generated_revision_id, str):
+        raise AcceptanceFailure("generateQa did not create its draft ContentRevision")
+    generated_revision = _revision(client, dataset_id, generated_revision_id)
+    if str(_pick(generated_revision, "state")).upper() != "DRAFT":
+        raise AcceptanceFailure("generated ContentRevision must remain a human-reviewable DRAFT")
+    generated_blocks = _revision_blocks(client, generated_revision_id)
+    generated = [
+        block for block in generated_blocks if str(_pick(block, "origin")).upper() == "GENERATED"
+    ]
+    if len(generated) != 1:
+        raise AcceptanceFailure("maxExamples=1 did not yield exactly one generated training draft")
+    if (
+        _pick(generated[0], "sourceRevisionId", "source_revision_id") != prose_source_id
+        or _id(generated[0], "generated prose block") == prose_block_id
+    ):
+        raise AcceptanceFailure("generated QA is not bound to the selected original prose source")
+    receipts = [
+        block.get("generationReceipt", block.get("generation_receipt")) for block in generated
+    ]
+    for receipt in receipts:
+        receipt_usage = receipt.get("usage") if isinstance(receipt, dict) else None
+        completion_tokens = (
+            _pick(receipt_usage, "providerCompletionTokens", "provider_completion_tokens")
+            if isinstance(receipt_usage, dict)
+            else None
+        )
+        if (
+            not isinstance(receipt, dict)
+            or _pick(receipt, "bindingId", "binding_id") != identity["bindingId"]
+            or _pick(receipt, "model") != identity["model"]
+            or _pick(receipt, "sourceBlockIds", "source_block_ids") != [prose_block_id]
+            or not isinstance(completion_tokens, int)
+            or not 1 <= completion_tokens <= 512
+            or completion_tokens != provider_usage["usage"]["completion_tokens"]
+        ):
+            raise AcceptanceFailure(
+                "generated draft receipt does not match the real provider identity"
+            )
+    if MANAGEMENT_SENTINEL in json.dumps(generated_blocks, ensure_ascii=False):
+        raise AcceptanceFailure("operator-only metadata leaked into generated QA content")
+    generated_queue = _queue(client, dataset_id)
+    if not any(
+        isinstance(row, dict)
+        and _pick(row, "id", "revisionId") == generated_revision_id
+        and str(_pick(row, "state")).upper() == "DRAFT"
+        for row in generated_queue["generatedDrafts"]
+    ):
+        raise AcceptanceFailure("review queue does not expose the generated DRAFT projection")
+
+    draft_restart_evidence: dict[str, Any] = {"skipped": True}
+    pair_code = None
+    if not args.skip_restart:
+        reports_before_draft_restart = _wait_parse_reports(
+            client, dataset_id, parse_run_id, len(sources_by_name), args.run_timeout
+        )
+        draft_restart_before = {
+            "generationRun": _canonical_digest(generate_run),
+            "generatedBlocks": _canonical_digest(generated_blocks),
+            "parseReports": _canonical_digest(reports_before_draft_restart),
+            "reviewQueue": _canonical_digest(generated_queue),
+        }
+        pair_code = _restart_runtime(args, ui_was_enabled)
+        _, _, draft_health = client.json("GET", "/healthz", expected={200}, timeout=15)
+        draft_runtime = _check_mode_and_health(client, runtime_path, args.catalyst_url)
+        run_after_draft_restart = _terminal_run(client, generate_run_id, args.generation_timeout)
+        revision_after_draft_restart = _revision(client, dataset_id, generated_revision_id)
+        if str(_pick(revision_after_draft_restart, "state")).upper() != "DRAFT":
+            raise AcceptanceFailure("generated revision did not remain DRAFT after restart")
+        blocks_after_draft_restart = _revision_blocks(client, generated_revision_id)
+        reports_after_draft_restart = _wait_parse_reports(
+            client, dataset_id, parse_run_id, len(sources_by_name), args.run_timeout
+        )
+        queue_after_draft_restart = _queue(client, dataset_id)
+        queued_draft_after_restart = any(
+            isinstance(row, dict)
+            and _pick(row, "id", "revisionId") == generated_revision_id
+            and str(_pick(row, "state")).upper() == "DRAFT"
+            for row in queue_after_draft_restart["generatedDrafts"]
+        )
+        draft_restart_after = {
+            "generationRun": _canonical_digest(run_after_draft_restart),
+            "generatedBlocks": _canonical_digest(blocks_after_draft_restart),
+            "parseReports": _canonical_digest(reports_after_draft_restart),
+            "reviewQueue": _canonical_digest(queue_after_draft_restart),
+        }
+        if draft_restart_after != draft_restart_before or not queued_draft_after_restart:
+            raise AcceptanceFailure(
+                "generated DRAFT, receipt, reports, or review queue changed after intermediate restart"
+            )
+        draft_restart_evidence = {
+            "healthy": draft_health,
+            "mode": draft_runtime["mode"],
+            "stable": draft_restart_after,
+            "generatedRevisionState": "DRAFT",
+            "generatedDraftInReviewQueue": True,
+        }
+
+    blocked_publish_status, _, blocked_publish_body = client.request(
+        "POST",
+        f"/api/v1/datasets/{dataset_id}/data-tools/versions",
+        json_body={
+            "contentRevisionId": generated_revision_id,
+            "knowledgeRunId": str(uuid.uuid4()),
+            "sftRunId": str(uuid.uuid4()),
+        },
+    )
+    if blocked_publish_status != 409:
+        raise AcceptanceFailure(
+            "publication accepted an unapproved generated draft; "
+            f"HTTP {blocked_publish_status}, {_error_detail(blocked_publish_body)}"
+        )
+    if not args.skip_restart and blocked_publish_status != 409:
+        raise AcceptanceFailure("unapproved publication was not blocked after DRAFT restart")
+    _, _, approved_generated = client.json(
+        "POST",
+        f"/api/v1/content-revisions/{generated_revision_id}/review",
+        json_body={
+            "decision": "APPROVE",
+            "note": "Explicit reviewer approval via the human-review API (acceptance operator) of the single generated QA draft.",
+        },
+        expected={200},
+    )
+    if str(_pick(approved_generated, "state")).upper() != "APPROVED":
+        raise AcceptanceFailure("acceptance-operator review did not approve the generated draft")
+
+    generated_record = json.loads(str(generated[0].get("text", "")))
+    if (
+        not isinstance(generated_record, dict)
+        or set(generated_record) - {"instruction", "input", "output"}
+        or not isinstance(generated_record.get("instruction"), str)
+        or not generated_record["instruction"].strip()
+        or not isinstance(generated_record.get("output"), str)
+        or not generated_record["output"].strip()
+        or not isinstance(generated_record.get("input", ""), str)
+    ):
+        raise AcceptanceFailure("generated QA draft is not a valid instruction/output record")
+    user_turn = generated_record["instruction"]
+    if generated_record.get("input", "").strip():
+        user_turn += "\n\n" + generated_record["input"].strip()
+    conversation_text = json.dumps(
+        {
+            "conversations": [
+                {"from": "human", "value": user_turn},
+                {"from": "gpt", "value": generated_record["output"]},
+            ]
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    _, _, edited_generated = client.json(
+        "POST",
+        f"/api/v1/content-revisions/{generated_revision_id}/blocks/{urllib.parse.quote(_id(generated[0]), safe='')}/edits",
+        json_body={
+            "expectedRevisionId": generated_revision_id,
+            "text": conversation_text,
+        },
+        expected={201},
+    )
+    publish_revision_id = _id(edited_generated, "SFT-projected generated ContentRevision")
+    if str(_pick(edited_generated, "state")).upper() != "DRAFT":
+        raise AcceptanceFailure("projecting generated QA must create a new DRAFT revision")
+    post_generation_blocks = _revision_blocks(client, publish_revision_id)
+    conversation_blocks_after_generation = [
+        block
+        for block in post_generation_blocks
+        if _pick(block, "sourceRevisionId", "source_revision_id") == conversation_source_id
+    ]
+    if len(conversation_blocks_after_generation) != 24:
+        raise AcceptanceFailure("manual conversation families disappeared after QA generation")
+    manual_training_block_ids = {
+        _id(block, "conversation ContentBlock") for block in conversation_blocks_after_generation
+    }
+    for block in conversation_blocks_after_generation:
+        block_id = _id(block, "conversation ContentBlock")
+        _, _, edited_policy = client.json(
+            "POST",
+            f"/api/v1/content-revisions/{publish_revision_id}/blocks/{urllib.parse.quote(block_id, safe='')}/edits",
+            json_body={
+                "expectedRevisionId": publish_revision_id,
+                "policy": {
+                    "allowKnowledge": True,
+                    "allowTraining": True,
+                    "allowedPrincipalRefs": ["org:synthetic-itops"],
+                    "allowedUsePurposes": ["knowledge_retrieval", "model_training"],
+                },
+            },
+            expected={201},
+        )
+        publish_revision_id = _id(edited_policy, "manual-family policy ContentRevision")
+        if str(_pick(edited_policy, "state")).upper() != "DRAFT":
+            raise AcceptanceFailure("JSONL policy edits must create a fresh DRAFT snapshot")
+
+    final_revision = _revision(client, dataset_id, publish_revision_id)
+    if str(_pick(final_revision, "state")).upper() != "DRAFT":
+        raise AcceptanceFailure("final generated revision must await explicit reviewer approval")
+    final_blocks = _revision_blocks(client, publish_revision_id)
+    final_generated = next(
+        (block for block in final_blocks if _id(block) == _id(generated[0])),
+        None,
+    )
+    if final_generated is None:
+        raise AcceptanceFailure("generated prose QA did not survive immutable policy edits")
+    final_generation_receipt = _pick(final_generated, "generationReceipt", "generation_receipt")
+    if (
+        _pick(final_generated, "sourceRevisionId", "source_revision_id") != prose_source_id
+        or _pick(final_generated, "origin").upper() != "HUMAN_EDITED"
+        or not isinstance(final_generation_receipt, dict)
+        or json.loads(str(final_generated.get("text", ""))).get("conversations")
+        != [
+            {"from": "human", "value": user_turn},
+            {"from": "gpt", "value": generated_record["output"]},
+        ]
+    ):
+        raise AcceptanceFailure(
+            "generated draft receipt or conversation projection was not preserved"
+        )
+    expected_training_ids = manual_training_block_ids | {prose_block_id, _id(final_generated)}
+    actual_training_ids = {
+        _id(block, "final ContentBlock")
+        for block in final_blocks
+        if _pick(block.get("policy", {}), "allowTraining", "allow_training") is True
+    }
+    if actual_training_ids != expected_training_ids:
+        raise AcceptanceFailure("final SFT policy is broader or narrower than the reviewed fixture")
+    for block in final_blocks:
+        policy = block.get("policy")
+        source_id = _pick(block, "sourceRevisionId", "source_revision_id")
+        block_id = _id(block, "final ContentBlock")
+        if (
+            not isinstance(policy, dict)
+            or _pick(policy, "allowKnowledge", "allow_knowledge")
+            is not (source_id in successful_source_ids)
+            or _pick(policy, "allowTraining", "allow_training")
+            is not (block_id in expected_training_ids)
+        ):
+            raise AcceptanceFailure(
+                "final Knowledge/SFT policy differs from the reviewed block set"
+            )
+    _, _, approved_final_revision = client.json(
+        "POST",
+        f"/api/v1/content-revisions/{publish_revision_id}/review",
+        json_body={
+            "decision": "APPROVE",
+            "note": "Explicit reviewer approval via the human-review API (acceptance operator) of the generated prose QA and 12 manual conversation families.",
+        },
+        expected={200},
+    )
+    if str(_pick(approved_final_revision, "state")).upper() != "APPROVED":
+        raise AcceptanceFailure("acceptance-operator review did not approve the final SFT revision")
+
+    knowledge_admission = _run(
+        client,
+        dataset_id,
+        "buildKnowledge",
+        contentRevisionId=publish_revision_id,
+    )
+    sft_admission = _run(
+        client,
+        dataset_id,
+        "prepareSft",
+        contentRevisionId=publish_revision_id,
+        config={
+            "sftMode": "conversation",
+            "split": {"train": 0.8, "validation": 0.1, "test": 0.1},
+        },
+    )
+    knowledge_id = _id(knowledge_admission, "knowledge ProcessingRun")
+    sft_id = _id(sft_admission, "SFT ProcessingRun")
+    _terminal_run(client, knowledge_id, args.run_timeout)
+    _terminal_run(client, sft_id, args.run_timeout)
+    _, _, version = client.json(
+        "POST",
+        f"/api/v1/datasets/{dataset_id}/data-tools/versions",
+        json_body={
+            "contentRevisionId": publish_revision_id,
+            "knowledgeRunId": knowledge_id,
+            "sftRunId": sft_id,
+        },
+        expected={201},
+    )
+    version_id = _id(version, "DatasetVersion")
+    data_tools = version.get("dataTools")
+    if (
+        not isinstance(data_tools, dict)
+        or not isinstance(data_tools.get("knowledgeArtifact"), dict)
+        or not isinstance(data_tools.get("sftArtifact"), dict)
+    ):
+        raise AcceptanceFailure("published DatasetVersion does not contain both profile artifacts")
+    _, _, knowledge_bytes = client.request(
+        "GET",
+        f"/api/v1/dataset-versions/{version_id}/data-tools/export?profile=knowledge",
+    )
+    _, _, sft_bytes = client.request(
+        "GET",
+        f"/api/v1/dataset-versions/{version_id}/data-tools/export?profile=sft",
+    )
+    if len(knowledge_bytes) < 100 or MANAGEMENT_SENTINEL.encode("utf-8") in knowledge_bytes:
+        raise AcceptanceFailure("knowledge export is empty or contains operator-only metadata")
+    knowledge_evidence = _assert_knowledge_bundle(
+        knowledge_bytes, sources_by_name, parser_evidence["reportsByName"]
+    )
+    sft_evidence = _assert_sft_bundle(
+        sft_bytes,
+        expected_manual_families=expected_manual_families,
+        expected_generated_source_id=prose_source_id,
+    )
+
+    reports_snapshot = _wait_parse_reports(
+        client, dataset_id, parse_run_id, len(sources_by_name), args.run_timeout
+    )
+    queue_snapshot = _queue(client, dataset_id)
+    versions_before = client.json(
+        "GET", f"/api/v1/datasets/{dataset_id}/data-tools/versions", expected={200}
+    )[2]
+    snapshots_before = {
+        "reports": _canonical_digest(reports_snapshot),
+        "queue": _canonical_digest(queue_snapshot),
+        "contentBlocks": _canonical_digest(_revision_blocks(client, publish_revision_id)),
+        "versions": _canonical_digest(versions_before),
+        "knowledgeExport": hashlib.sha256(knowledge_bytes).hexdigest(),
+        "sftExport": hashlib.sha256(sft_bytes).hexdigest(),
+    }
+    if not args.skip_restart:
+        pair_code = _restart_runtime(args, ui_was_enabled) or pair_code
+        _, _, health_after = client.json("GET", "/healthz", expected={200}, timeout=15)
+        runtime_after = _check_mode_and_health(client, runtime_path, args.catalyst_url)
+        reports_after = _wait_parse_reports(
+            client, dataset_id, parse_run_id, len(sources_by_name), args.run_timeout
+        )
+        queue_after = _queue(client, dataset_id)
+        versions_after = client.json(
+            "GET", f"/api/v1/datasets/{dataset_id}/data-tools/versions", expected={200}
+        )[2]
+        stable_after = {
+            "reports": _canonical_digest(reports_after),
+            "queue": _canonical_digest(queue_after),
+            "contentBlocks": _canonical_digest(_revision_blocks(client, publish_revision_id)),
+            "versions": _canonical_digest(versions_after),
+            "knowledgeExport": hashlib.sha256(
+                client.request(
+                    "GET",
+                    f"/api/v1/dataset-versions/{version_id}/data-tools/export?profile=knowledge",
+                )[2]
+            ).hexdigest(),
+            "sftExport": hashlib.sha256(
+                client.request(
+                    "GET",
+                    f"/api/v1/dataset-versions/{version_id}/data-tools/export?profile=sft",
+                )[2]
+            ).hexdigest(),
+        }
+        if stable_after != snapshots_before:
+            raise AcceptanceFailure(
+                "reports, review queue, published version, or package digest changed after restart"
+            )
+        restart_evidence = {
+            "generatedDraftBeforeApproval": draft_restart_evidence,
+            "healthy": health_after,
+            "mode": runtime_after["mode"],
+            "stable": stable_after,
+        }
+    else:
+        restart_evidence = {
+            "generatedDraftBeforeApproval": draft_restart_evidence,
+            "publishedState": {"skipped": True},
+        }
+
+    result = {
+        "status": _acceptance_status(restart_verified=not args.skip_restart),
+        "fixture": {
+            "synthetic": manifest["synthetic"],
+            "fileCount": len(files),
+            "sha256": _canonical_digest({name: record["sha256"] for name, record in files.items()}),
+        },
+        "runtime": launch,
+        "provider": identity,
+        "providerUsage": provider_usage,
+        "datasetId": dataset_id,
+        "sourceCount": len(sources_by_name),
+        "knowledgeEnabledBlockCount": len(blocks_to_enable),
+        "preGenerationTrainingBlockCount": len(initially_trainable),
+        "parseRunId": parse_run_id,
+        "parseReportDigest": snapshots_before["reports"],
+        "parser": {
+            "blockCount": parser_evidence["blockCount"],
+            "ocrDiagnosticCount": parser_evidence["ocrDiagnosticCount"],
+            "statuses": {
+                name: _pick(row, "status") for name, row in parser_evidence["reportsByName"].items()
+            },
+        },
+        "review": {
+            "applicableIssueCount": len(applicable),
+            "acknowledgedIssueCount": len(open_items),
+            "blockedApprovalHttpStatus": blocked_status,
+        },
+        "sourceContentRevisionId": source_revision_id,
+        "approvedPolicyRevisionId": approved_policy_revision_id,
+        "generateQaRunId": generate_run_id,
+        "generatedDraftId": generated_revision_id,
+        "approvedGeneratedRevisionId": publish_revision_id,
+        "generationSourceFilename": generation_source_name,
+        "generationSourceBlockId": prose_block_id,
+        "generatedDraftCount": 1,
+        "blockedUnapprovedPublishHttpStatus": blocked_publish_status,
+        "knowledgeRunId": knowledge_id,
+        "sftRunId": sft_id,
+        "datasetVersionId": version_id,
+        "sftSplitRows": {split: sft_evidence[split] for split in ("train", "validation", "test")},
+        "sftFamilyCount": sft_evidence["familyCount"],
+        "knowledgeEvidence": knowledge_evidence,
+        "snapshotsBeforeRestart": snapshots_before,
+        "restart": restart_evidence,
+    }
+    if recovery_evidence is not None:
+        result["recovery"] = recovery_evidence
+    args.evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    evidence_path = args.evidence_dir / "acceptance.json"
+    evidence_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(evidence_path, 0o600)
+    if pair_code:
+        result["navigatorPairingCode"] = pair_code
+    return result
 
 
 def _run_live(args: argparse.Namespace) -> dict[str, Any]:
@@ -1319,403 +2133,33 @@ def _run_live(args: argparse.Namespace) -> dict[str, Any]:
         },
     )
     generate_run_id = _id(generate_admission, "generateQa ProcessingRun")
-    generate_run = _terminal_run(client, generate_run_id, args.generation_timeout)
-    after_usage = _usage_ledger(args.provider_usage_ledger)
-    provider_usage = _assert_real_usage(
-        usage_before,
-        after_usage,
-        model=args.expected_model,
-        revision=args.expected_model_revision,
-    )
-    stages = generate_run.get("stages", [])
-    output = (
-        stages[0].get("output")
-        if isinstance(stages, list) and stages and isinstance(stages[0], dict)
-        else None
-    )
-    if not isinstance(output, dict):
-        raise AcceptanceFailure("successful generateQa run is missing its stage output receipt")
-    budget = output.get("budget")
-    if (
-        output.get("draftCount") != 1
-        or not isinstance(budget, dict)
-        or budget.get("calls_used") != 1
-        or budget.get("provider_completion_tokens") is None
-        or budget["provider_completion_tokens"] > 512
-        or budget["provider_completion_tokens"] != provider_usage["usage"]["completion_tokens"]
-        or output.get("provider", {}).get("binding_id") != identity["bindingId"]
-        or output.get("provider", {}).get("model") != identity["model"]
-    ):
-        raise AcceptanceFailure("generateQa receipt does not prove the exact one-call model budget")
-    generated_revision_id = output.get("generatedContentRevisionId")
-    if not isinstance(generated_revision_id, str):
-        raise AcceptanceFailure("generateQa did not create its draft ContentRevision")
-    generated_revision = _revision(client, dataset_id, generated_revision_id)
-    if str(_pick(generated_revision, "state")).upper() != "DRAFT":
-        raise AcceptanceFailure("generated ContentRevision must remain a human-reviewable DRAFT")
-    generated_blocks = _revision_blocks(client, generated_revision_id)
-    generated = [
-        block for block in generated_blocks if str(_pick(block, "origin")).upper() == "GENERATED"
-    ]
-    if len(generated) != 1:
-        raise AcceptanceFailure("maxExamples=1 did not yield exactly one generated training draft")
-    if (
-        _pick(generated[0], "sourceRevisionId", "source_revision_id") != prose_source_id
-        or _id(generated[0], "generated prose block") == prose_block_id
-    ):
-        raise AcceptanceFailure("generated QA is not bound to the selected original prose source")
-    receipts = [
-        block.get("generationReceipt", block.get("generation_receipt")) for block in generated
-    ]
-    for receipt in receipts:
-        receipt_usage = receipt.get("usage") if isinstance(receipt, dict) else None
-        completion_tokens = (
-            _pick(receipt_usage, "providerCompletionTokens", "provider_completion_tokens")
-            if isinstance(receipt_usage, dict)
-            else None
-        )
-        if (
-            not isinstance(receipt, dict)
-            or _pick(receipt, "bindingId", "binding_id") != identity["bindingId"]
-            or _pick(receipt, "model") != identity["model"]
-            or _pick(receipt, "sourceBlockIds", "source_block_ids") != [prose_block_id]
-            or not isinstance(completion_tokens, int)
-            or not 1 <= completion_tokens <= 512
-            or completion_tokens != provider_usage["usage"]["completion_tokens"]
-        ):
-            raise AcceptanceFailure(
-                "generated draft receipt does not match the real provider identity"
-            )
-    if MANAGEMENT_SENTINEL in json.dumps(generated_blocks, ensure_ascii=False):
-        raise AcceptanceFailure("operator-only metadata leaked into generated QA content")
-    generated_queue = _queue(client, dataset_id)
-    if not any(
-        isinstance(row, dict)
-        and _pick(row, "id", "revisionId") == generated_revision_id
-        and str(_pick(row, "state")).upper() == "DRAFT"
-        for row in generated_queue["generatedDrafts"]
-    ):
-        raise AcceptanceFailure("review queue does not expose the generated DRAFT projection")
-
-    blocked_publish_status, _, blocked_publish_body = client.request(
-        "POST",
-        f"/api/v1/datasets/{dataset_id}/data-tools/versions",
-        json_body={
-            "contentRevisionId": generated_revision_id,
-            "knowledgeRunId": str(uuid.uuid4()),
-            "sftRunId": str(uuid.uuid4()),
-        },
-    )
-    if blocked_publish_status != 409:
-        raise AcceptanceFailure(
-            "publication accepted an unapproved generated draft; "
-            f"HTTP {blocked_publish_status}, {_error_detail(blocked_publish_body)}"
-        )
-    _, _, approved_generated = client.json(
-        "POST",
-        f"/api/v1/content-revisions/{generated_revision_id}/review",
-        json_body={
-            "decision": "APPROVE",
-            "note": "Explicit reviewer approval via the human-review API (acceptance operator) of the single generated QA draft.",
-        },
-        expected={200},
-    )
-    if str(_pick(approved_generated, "state")).upper() != "APPROVED":
-        raise AcceptanceFailure("acceptance-operator review did not approve the generated draft")
-
-    generated_record = json.loads(str(generated[0].get("text", "")))
-    if (
-        not isinstance(generated_record, dict)
-        or set(generated_record) - {"instruction", "input", "output"}
-        or not isinstance(generated_record.get("instruction"), str)
-        or not generated_record["instruction"].strip()
-        or not isinstance(generated_record.get("output"), str)
-        or not generated_record["output"].strip()
-        or not isinstance(generated_record.get("input", ""), str)
-    ):
-        raise AcceptanceFailure("generated QA draft is not a valid instruction/output record")
-    user_turn = generated_record["instruction"]
-    if generated_record.get("input", "").strip():
-        user_turn += "\n\n" + generated_record["input"].strip()
-    conversation_text = json.dumps(
-        {
-            "conversations": [
-                {"from": "human", "value": user_turn},
-                {"from": "gpt", "value": generated_record["output"]},
-            ]
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    _, _, edited_generated = client.json(
-        "POST",
-        f"/api/v1/content-revisions/{generated_revision_id}/blocks/{urllib.parse.quote(_id(generated[0]), safe='')}/edits",
-        json_body={
-            "expectedRevisionId": generated_revision_id,
-            "text": conversation_text,
-        },
-        expected={201},
-    )
-    publish_revision_id = _id(edited_generated, "SFT-projected generated ContentRevision")
-    if str(_pick(edited_generated, "state")).upper() != "DRAFT":
-        raise AcceptanceFailure("projecting generated QA must create a new DRAFT revision")
-    post_generation_blocks = _revision_blocks(client, publish_revision_id)
-    conversation_blocks_after_generation = [
-        block
-        for block in post_generation_blocks
-        if _pick(block, "sourceRevisionId", "source_revision_id") == conversation_source_id
-    ]
-    if len(conversation_blocks_after_generation) != 24:
-        raise AcceptanceFailure("manual conversation families disappeared after QA generation")
-    manual_training_block_ids = {
-        _id(block, "conversation ContentBlock") for block in conversation_blocks_after_generation
-    }
-    for block in conversation_blocks_after_generation:
-        block_id = _id(block, "conversation ContentBlock")
-        _, _, edited_policy = client.json(
-            "POST",
-            f"/api/v1/content-revisions/{publish_revision_id}/blocks/{urllib.parse.quote(block_id, safe='')}/edits",
-            json_body={
-                "expectedRevisionId": publish_revision_id,
-                "policy": {
-                    "allowKnowledge": True,
-                    "allowTraining": True,
-                    "allowedPrincipalRefs": ["org:synthetic-itops"],
-                    "allowedUsePurposes": ["knowledge_retrieval", "model_training"],
-                },
-            },
-            expected={201},
-        )
-        publish_revision_id = _id(edited_policy, "manual-family policy ContentRevision")
-        if str(_pick(edited_policy, "state")).upper() != "DRAFT":
-            raise AcceptanceFailure("JSONL policy edits must create a fresh DRAFT snapshot")
-
-    final_revision = _revision(client, dataset_id, publish_revision_id)
-    if str(_pick(final_revision, "state")).upper() != "DRAFT":
-        raise AcceptanceFailure("final generated revision must await explicit reviewer approval")
-    final_blocks = _revision_blocks(client, publish_revision_id)
-    final_generated = next(
-        (block for block in final_blocks if _id(block) == _id(generated[0])),
-        None,
-    )
-    if final_generated is None:
-        raise AcceptanceFailure("generated prose QA did not survive immutable policy edits")
-    final_generation_receipt = _pick(final_generated, "generationReceipt", "generation_receipt")
-    if (
-        _pick(final_generated, "sourceRevisionId", "source_revision_id") != prose_source_id
-        or _pick(final_generated, "origin").upper() != "HUMAN_EDITED"
-        or not isinstance(final_generation_receipt, dict)
-        or json.loads(str(final_generated.get("text", ""))).get("conversations")
-        != [
-            {"from": "human", "value": user_turn},
-            {"from": "gpt", "value": generated_record["output"]},
-        ]
-    ):
-        raise AcceptanceFailure(
-            "generated draft receipt or conversation projection was not preserved"
-        )
-    expected_training_ids = manual_training_block_ids | {prose_block_id, _id(final_generated)}
-    actual_training_ids = {
-        _id(block, "final ContentBlock")
-        for block in final_blocks
-        if _pick(block.get("policy", {}), "allowTraining", "allow_training") is True
-    }
-    if actual_training_ids != expected_training_ids:
-        raise AcceptanceFailure("final SFT policy is broader or narrower than the reviewed fixture")
-    for block in final_blocks:
-        policy = block.get("policy")
-        source_id = _pick(block, "sourceRevisionId", "source_revision_id")
-        block_id = _id(block, "final ContentBlock")
-        if (
-            not isinstance(policy, dict)
-            or _pick(policy, "allowKnowledge", "allow_knowledge")
-            is not (source_id in successful_source_ids)
-            or _pick(policy, "allowTraining", "allow_training")
-            is not (block_id in expected_training_ids)
-        ):
-            raise AcceptanceFailure(
-                "final Knowledge/SFT policy differs from the reviewed block set"
-            )
-    _, _, approved_final_revision = client.json(
-        "POST",
-        f"/api/v1/content-revisions/{publish_revision_id}/review",
-        json_body={
-            "decision": "APPROVE",
-            "note": "Explicit reviewer approval via the human-review API (acceptance operator) of the generated prose QA and 12 manual conversation families.",
-        },
-        expected={200},
-    )
-    if str(_pick(approved_final_revision, "state")).upper() != "APPROVED":
-        raise AcceptanceFailure("acceptance-operator review did not approve the final SFT revision")
-
-    knowledge_admission = _run(
-        client,
-        dataset_id,
-        "buildKnowledge",
-        contentRevisionId=publish_revision_id,
-    )
-    sft_admission = _run(
-        client,
-        dataset_id,
-        "prepareSft",
-        contentRevisionId=publish_revision_id,
-        config={
-            "sftMode": "conversation",
-            "split": {"train": 0.8, "validation": 0.1, "test": 0.1},
-        },
-    )
-    knowledge_id = _id(knowledge_admission, "knowledge ProcessingRun")
-    sft_id = _id(sft_admission, "SFT ProcessingRun")
-    _terminal_run(client, knowledge_id, args.run_timeout)
-    _terminal_run(client, sft_id, args.run_timeout)
-    _, _, version = client.json(
-        "POST",
-        f"/api/v1/datasets/{dataset_id}/data-tools/versions",
-        json_body={
-            "contentRevisionId": publish_revision_id,
-            "knowledgeRunId": knowledge_id,
-            "sftRunId": sft_id,
-        },
-        expected={201},
-    )
-    version_id = _id(version, "DatasetVersion")
-    data_tools = version.get("dataTools")
-    if (
-        not isinstance(data_tools, dict)
-        or not isinstance(data_tools.get("knowledgeArtifact"), dict)
-        or not isinstance(data_tools.get("sftArtifact"), dict)
-    ):
-        raise AcceptanceFailure("published DatasetVersion does not contain both profile artifacts")
-    _, _, knowledge_bytes = client.request(
-        "GET",
-        f"/api/v1/dataset-versions/{version_id}/data-tools/export?profile=knowledge",
-    )
-    _, _, sft_bytes = client.request(
-        "GET",
-        f"/api/v1/dataset-versions/{version_id}/data-tools/export?profile=sft",
-    )
-    if len(knowledge_bytes) < 100 or MANAGEMENT_SENTINEL.encode("utf-8") in knowledge_bytes:
-        raise AcceptanceFailure("knowledge export is empty or contains operator-only metadata")
-    knowledge_evidence = _assert_knowledge_bundle(
-        knowledge_bytes, sources_by_name, parser_evidence["reportsByName"]
-    )
-    sft_evidence = _assert_sft_bundle(
-        sft_bytes,
+    return _finish_after_generation(
+        args=args,
+        client=client,
+        manifest=manifest,
+        files=files,
+        dataset_id=dataset_id,
+        sources_by_name=sources_by_name,
+        parser_evidence=parser_evidence,
+        source_revision_id=source_revision_id,
+        approved_policy_revision_id=approved_policy_revision_id,
+        parse_run_id=parse_run_id,
+        generation_source_name=generation_source_name,
+        prose_block_id=prose_block_id,
+        prose_source_id=prose_source_id,
+        conversation_source_id=conversation_source_id,
         expected_manual_families=expected_manual_families,
-        expected_generated_source_id=prose_source_id,
+        blocks_to_enable=blocks_to_enable,
+        initially_trainable=initially_trainable,
+        applicable=applicable,
+        open_items=open_items,
+        blocked_status=blocked_status,
+        usage_before=usage_before,
+        identity=identity,
+        launch=launch,
+        ui_was_enabled=ui_was_enabled,
+        generate_run_id=generate_run_id,
     )
-
-    reports_snapshot = _wait_parse_reports(
-        client, dataset_id, parse_run_id, len(sources_by_name), args.run_timeout
-    )
-    queue_snapshot = _queue(client, dataset_id)
-    versions_before = client.json(
-        "GET", f"/api/v1/datasets/{dataset_id}/data-tools/versions", expected={200}
-    )[2]
-    snapshots_before = {
-        "reports": _canonical_digest(reports_snapshot),
-        "queue": _canonical_digest(queue_snapshot),
-        "contentBlocks": _canonical_digest(_revision_blocks(client, publish_revision_id)),
-        "versions": _canonical_digest(versions_before),
-        "knowledgeExport": hashlib.sha256(knowledge_bytes).hexdigest(),
-        "sftExport": hashlib.sha256(sft_bytes).hexdigest(),
-    }
-    pair_code = None
-    if not args.skip_restart:
-        pair_code = _restart_runtime(args, ui_was_enabled)
-        _, _, health_after = client.json("GET", "/healthz", expected={200}, timeout=15)
-        runtime_after = _check_mode_and_health(client, runtime_path, args.catalyst_url)
-        reports_after = _wait_parse_reports(
-            client, dataset_id, parse_run_id, len(sources_by_name), args.run_timeout
-        )
-        queue_after = _queue(client, dataset_id)
-        versions_after = client.json(
-            "GET", f"/api/v1/datasets/{dataset_id}/data-tools/versions", expected={200}
-        )[2]
-        stable_after = {
-            "reports": _canonical_digest(reports_after),
-            "queue": _canonical_digest(queue_after),
-            "contentBlocks": _canonical_digest(_revision_blocks(client, publish_revision_id)),
-            "versions": _canonical_digest(versions_after),
-            "knowledgeExport": hashlib.sha256(
-                client.request(
-                    "GET",
-                    f"/api/v1/dataset-versions/{version_id}/data-tools/export?profile=knowledge",
-                )[2]
-            ).hexdigest(),
-            "sftExport": hashlib.sha256(
-                client.request(
-                    "GET",
-                    f"/api/v1/dataset-versions/{version_id}/data-tools/export?profile=sft",
-                )[2]
-            ).hexdigest(),
-        }
-        if stable_after != snapshots_before:
-            raise AcceptanceFailure(
-                "reports, review queue, published version, or package digest changed after restart"
-            )
-        restart_evidence = {
-            "healthy": health_after,
-            "mode": runtime_after["mode"],
-            "stable": stable_after,
-        }
-    else:
-        restart_evidence = {"skipped": True}
-
-    result = {
-        "status": _acceptance_status(restart_verified=not args.skip_restart),
-        "fixture": {
-            "synthetic": manifest["synthetic"],
-            "fileCount": len(files),
-            "sha256": _canonical_digest({name: record["sha256"] for name, record in files.items()}),
-        },
-        "runtime": launch,
-        "provider": identity,
-        "providerUsage": provider_usage,
-        "datasetId": dataset_id,
-        "sourceCount": len(sources_by_name),
-        "knowledgeEnabledBlockCount": len(blocks_to_enable),
-        "preGenerationTrainingBlockCount": len(initially_trainable),
-        "parseRunId": parse_run_id,
-        "parseReportDigest": snapshots_before["reports"],
-        "parser": {
-            "blockCount": parser_evidence["blockCount"],
-            "ocrDiagnosticCount": parser_evidence["ocrDiagnosticCount"],
-            "statuses": {
-                name: _pick(row, "status") for name, row in parser_evidence["reportsByName"].items()
-            },
-        },
-        "review": {
-            "applicableIssueCount": len(applicable),
-            "acknowledgedIssueCount": len(open_items),
-            "blockedApprovalHttpStatus": blocked_status,
-        },
-        "sourceContentRevisionId": source_revision_id,
-        "approvedPolicyRevisionId": approved_policy_revision_id,
-        "generateQaRunId": generate_run_id,
-        "generatedDraftId": generated_revision_id,
-        "approvedGeneratedRevisionId": publish_revision_id,
-        "generationSourceFilename": generation_source_name,
-        "generationSourceBlockId": prose_block_id,
-        "generatedDraftCount": 1,
-        "blockedUnapprovedPublishHttpStatus": blocked_publish_status,
-        "knowledgeRunId": knowledge_id,
-        "sftRunId": sft_id,
-        "datasetVersionId": version_id,
-        "sftSplitRows": {split: sft_evidence[split] for split in ("train", "validation", "test")},
-        "sftFamilyCount": sft_evidence["familyCount"],
-        "knowledgeEvidence": knowledge_evidence,
-        "snapshotsBeforeRestart": snapshots_before,
-        "restart": restart_evidence,
-    }
-    args.evidence_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    evidence_path = args.evidence_dir / "acceptance.json"
-    evidence_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.chmod(evidence_path, 0o600)
-    if pair_code:
-        result["navigatorPairingCode"] = pair_code
-    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1763,6 +2207,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-timeout", type=float, default=300)
     parser.add_argument("--generation-timeout", type=float, default=240)
     parser.add_argument("--skip-restart", action="store_true")
+    parser.add_argument(
+        "--resume-dataset-id",
+        help="resume one prior INVALID_REQUEST only when no provider completion was used",
+    )
     return parser
 
 
@@ -1780,7 +2228,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
-        evidence = _run_live(args)
+        evidence = _resume_live(args) if args.resume_dataset_id else _run_live(args)
     except (AcceptanceFailure, OSError, ValueError, KeyError) as error:
         print(f"CATALYST_V02_ACCEPTANCE_FAILED: {error}", file=sys.stderr)
         return 1
