@@ -482,6 +482,21 @@ def test_legacy_product_launchers_keep_their_existing_runtime_arguments() -> Non
     assert "cyrene_catalyst.cli serve" in launchers["catalyst"]
 
 
+def test_echo_has_an_independent_bundle_without_joining_the_deb_service_set() -> None:
+    echo_launcher = bundle._entrypoint_text("echo", bundle.PRIVATE_PYTHON_EXECUTABLE)
+    echo_spec = next(spec for spec in prepare.SERVICE_SPECS if spec.service == "echo")
+
+    assert "echo" in bundle.BUNDLE_SERVICES
+    assert "echo" not in bundle.SERVICES
+    assert prepare.DEFAULT_SERVICE_NAMES == bundle.SERVICES
+    assert echo_spec.repository == "Cyrene-Echo"
+    assert echo_spec.application_distributions == ("cyrene-echo",)
+    assert bundle.HEALTH_PATHS["echo"] == "/healthz"
+    assert "cyrene_echo.server serve" in echo_launcher
+    assert "--database" in echo_launcher
+    assert "--artifact-root" in echo_launcher
+
+
 @pytest.mark.parametrize("active_target", [None, "releases/" + "c" * 64])
 def test_prepare_execution_runtime_is_versioned_idempotent_and_never_activates(
     tmp_path: Path,

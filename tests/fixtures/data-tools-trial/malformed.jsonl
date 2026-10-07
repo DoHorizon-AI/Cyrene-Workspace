@@ -1,0 +1,2 @@
+{"sampleId":"valid-before-error","reference":"是","actual":"是"}
+{"sampleId":"broken","reference":"缺少结束引号}

@@ -4,12 +4,16 @@ The Debian package includes five offline, per-service Python releases:
 Navigator, Yield, Reactor, Exchange, and Catalyst. `build-deb.sh` still creates
 that complete installation package. The public component producer can build
 one service independently for a component release; it does not require a new
-five-service DEB for each Product change. Echo has no native Linux Python
-bundle in this installation path.
+five-service DEB for each Product change. Echo is supported as an independent
+Linux Python bundle for the data-tools trial; it is not added to the existing
+five-service Debian installation or systemd cohort.
 
 DEB 包离线携带 Navigator、Yield、Reactor、Exchange、Catalyst 五个独立 Python
 服务版本。任何服务缺少 wheelhouse，或来源 SHA 与 `release-lock.json` 不匹配时，
 `build-deb.sh` 都会明确失败，不会生成只有 unit、没有服务实现的包。
+
+Echo 也可单独生成供 Catalyst/Echo 数据工具试用使用的 Linux Python bundle；该 bundle 不属于上述
+DEB/systemd 五服务集合。准备工作目录和 bundle 的命令见本页英文 “Preparing inputs” 部分。
 
 ## Wheelhouse layout / Wheelhouse 目录
 
@@ -69,8 +73,8 @@ rollback; new releases can be staged only from v2 bundles.
 
 The application distributions required in each lock are `cyrene-navigator`,
 `cyrene-yield`, `cyrene-reactor-product`, `cyrene-exchange` plus
-`cyrene-exchange-product`, and `cyrene-catalyst`. Navigator also needs the
-`scripts/serve-web.py` launcher from its pinned source revision.
+`cyrene-exchange-product`, `cyrene-catalyst`, and `cyrene-echo`. Navigator also
+needs the `scripts/serve-web.py` launcher from its pinned source revision.
 
 ## Preparing inputs / 准备输入
 
@@ -117,6 +121,35 @@ python3.12 packaging/service_bundle.py build \
 The builder outputs one immutable `manifest.json` plus the complete runtime
 bundle. Release workflows validate that output and publish it without rewriting
 its inner manifest.
+
+Echo can be prepared independently from its exact `release-lock.json` source
+revision using the same Runtime Maintenance SDK provenance inputs:
+
+```bash
+python3.12 packaging/prepare_service_wheelhouse.py \
+  --service echo \
+  --output /path/to/echo-wheelhouse \
+  --target-profile linux-ubuntu-24.04-x86_64-python-3.12 \
+  --python-executable /path/to/verified/cpython-3.12.14/bin/python3.12 \
+  --uv /path/to/verified/uv \
+  --runtime-sdk-wheel /path/to/verified/cyrene_runtime_maintenance-0.1.0-py3-none-any.whl \
+  --runtime-sdk-version 0.1.0 \
+  --runtime-sdk-sha256 <raw-64-character-wheel-SHA> \
+  --runtime-sdk-manifest-digest sha256:<64-character-manifest-digest> \
+  --runtime-sdk-artifact-digest sha256:<64-character-bundle-digest>
+```
+
+Build Echo separately. Omitting `--service` still selects only the five Debian
+services:
+
+```bash
+python3.12 packaging/service_bundle.py build \
+  --service echo \
+  --wheelhouse /path/to/echo-wheelhouse \
+  --release-lock release-lock.json \
+  --output /path/to/data-tools-bundles \
+  --arch amd64
+```
 
 The lockfile inputs are Navigator, Yield, and Catalyst root `uv.lock`;
 Reactor `product/uv.lock`; and Exchange `product/uv.lock`, which covers the
@@ -208,6 +241,7 @@ unit active:
 | Reactor | `/openapi.json` | FastAPI control API is listening |
 | Exchange | `/healthz` | Product health response |
 | Catalyst | `/` | Product Web UI is serving |
+| Echo | `/healthz` | Echo Product API is ready |
 
 Reactor's HTTP check confirms the control API listener only; it does not
 establish that an external serving host or model is available.

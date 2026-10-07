@@ -102,7 +102,9 @@ SERVICE_SPECS = (
         ("cyrene-exchange", "cyrene-exchange-product"),
     ),
     ServiceSpec("catalyst", "Cyrene-Catalyst", "uv.lock", ("cyrene-catalyst",)),
+    ServiceSpec("echo", "Cyrene-Echo", "uv.lock", ("cyrene-echo",)),
 )
+DEFAULT_SERVICE_NAMES = ("navigator", "yield", "reactor", "exchange", "catalyst")
 
 
 class ProducerError(RuntimeError):
@@ -273,7 +275,9 @@ def _parse_yaml_scalar(value: str) -> str:
     return raw
 
 
-def _load_repository_remotes(path: Path) -> dict[str, tuple[str, str]]:
+def _load_repository_remotes(
+    path: Path, service_specs: tuple[ServiceSpec, ...] = SERVICE_SPECS
+) -> dict[str, tuple[str, str]]:
     """Read canonical path and remote fields for entries in repositories.yaml."""
 
     entries: dict[str, dict[str, str]] = {}
@@ -293,7 +297,7 @@ def _load_repository_remotes(path: Path) -> dict[str, tuple[str, str]]:
         entries[current["name"]] = current
 
     result: dict[str, tuple[str, str]] = {}
-    for spec in SERVICE_SPECS:
+    for spec in service_specs:
         entry = entries.get(spec.repository)
         if entry is None or not entry.get("path") or not entry.get("canonical_remote"):
             raise ProducerError(
@@ -1614,7 +1618,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     workspace_default = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
         description=(
-            "Build one or all exact-SHA Linux/Python 3.12 Product service "
+            "Build one exact-SHA Linux/Python 3.12 Product service "
             "wheelhouses from release-lock.json and frozen uv.lock files."
         )
     )
@@ -1628,12 +1632,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--output",
         type=Path,
         required=True,
-        help="destination root for the selected service directory or all five service directories",
+        help="destination root for the selected service directory or the five Debian service directories",
     )
     parser.add_argument(
         "--service",
         choices=[spec.service for spec in SERVICE_SPECS],
-        help="prepare one independently published Product instead of all five",
+        help="prepare one independently published Product instead of the five Debian services",
     )
     parser.add_argument(
         "--service-commit",
@@ -1722,9 +1726,17 @@ def main(argv: list[str] | None = None) -> int:
             raise ProducerError(
                 "release-lock.json supportedEnvironment.os must still declare x86_64 support"
             )
-        repository_metadata = _load_repository_remotes(workspace_root / "repositories.yaml")
         selected_specs = tuple(
-            spec for spec in SERVICE_SPECS if args.service is None or spec.service == args.service
+            spec
+            for spec in SERVICE_SPECS
+            if (
+                spec.service == args.service
+                if args.service is not None
+                else spec.service in DEFAULT_SERVICE_NAMES
+            )
+        )
+        repository_metadata = _load_repository_remotes(
+            workspace_root / "repositories.yaml", selected_specs
         )
         runtime_sdk, runtime_sdk_manifest_digest, runtime_sdk_artifact_digest = (
             _load_runtime_sdk_wheel(args)
