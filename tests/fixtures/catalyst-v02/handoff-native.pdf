@@ -1,0 +1,129 @@
+%PDF-1.3
+%“Œ‹ž ReportLab Generated PDF document (opensource)
+1 0 obj
+<<
+/F1 2 0 R /F2 3 0 R /F3 4 0 R
+>>
+endobj
+2 0 obj
+<<
+/BaseFont /Helvetica /Encoding /WinAnsiEncoding /Name /F1 /Subtype /Type1 /Type /Font
+>>
+endobj
+3 0 obj
+<<
+/BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding /Name /F2 /Subtype /Type1 /Type /Font
+>>
+endobj
+4 0 obj
+<<
+/BaseFont /STSong-Light /DescendantFonts [ <<
+/BaseFont /STSong-Light /CIDSystemInfo <<
+/Ordering (GB1) /Registry (Adobe) /Supplement 0
+>> /DW 1000 /FontDescriptor <<
+/Ascent 752 /CapHeight 737 /Descent -271 /Flags 6 /FontBBox [ -25 -254 1000 880 ] /FontName /STSongStd-Light 
+  /ItalicAngle 0 /Leading 148 /MaxWidth 1000 /MissingWidth 500 /StemH 91 /StemV 58 
+  /Type /FontDescriptor /XHeight 553
+>> /Subtype /CIDFontType0 /Type /Font 
+  /W [ 1 [ 207 270 342 467 462 797 710 239 374 ] 10 [ 374 423 605 238 375 238 334 462 ] 18 26 462 27 28 238 
+  29 31 605 32 [ 344 748 684 560 695 739 563 511 729 793 
+  318 312 666 526 896 758 772 544 772 628 
+  465 607 753 711 972 647 620 607 374 333 
+  374 606 500 239 417 503 427 529 415 264 
+  444 518 241 230 495 228 793 527 524 ] 81 [ 524 504 338 336 277 517 450 652 466 452 
+  407 370 258 370 605 ] ]
+>> ] /Encoding /UniGB-UCS2-H /Name /F3 /Subtype /Type0 /Type /Font
+>>
+endobj
+5 0 obj
+<<
+/Contents 9 0 R /MediaBox [ 0 0 612 792 ] /Parent 8 0 R /Resources <<
+/Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>> /Rotate 0 /Trans <<
+
+>> 
+  /Type /Page
+>>
+endobj
+6 0 obj
+<<
+/PageMode /UseNone /Pages 8 0 R /Type /Catalog
+>>
+endobj
+7 0 obj
+<<
+/Author (Cyrene synthetic fixture builder) /CreationDate (D:20000101000000+00'00') /Creator (anonymous) /Keywords () /ModDate (D:20000101000000+00'00') /Producer (ReportLab PDF Library - \(opensource\)) 
+  /Subject (Synthetic IT equipment handoff workflow) /Title (IT Equipment Handoff ORCHID-42) /Trapped /False
+>>
+endobj
+8 0 obj
+<<
+/Count 1 /Kids [ 5 0 R ] /Type /Pages
+>>
+endobj
+9 0 obj
+<<
+/Length 1359
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 18 Tf 21.6 TL ET
+BT 1 0 0 1 48 744 Tm (IT EQUIPMENT HANDOFF / ORCHID-42) Tj T* ET
+BT /F3 13 Tf 15.6 TL ET
+BT 1 0 0 1 48 713 Tm /F3 13 Tf 15.6 TL (\000I\000T\000 \213\276Y\007N\244c\245mAz\013\377\032_R\217\3300\001h8[\3710\001`bY\015) Tj T* ET
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 48 676 Tm (Ticket: ORCHID-42     Asset: SP-204     Bay: 07) Tj T* ET
+BT 1 0 0 1 48 653 Tm (Synthetic training material; no personal or customer data.) Tj T* ET
+.18 .3 .4 RG
+n 48 593 m 560 593 l S
+n 48 565 m 560 565 l S
+n 48 537 m 560 537 l S
+n 48 509 m 560 509 l S
+BT /F2 10 Tf 12 TL ET
+BT 1 0 0 1 48 600 Tm (Step) Tj T* ET
+BT 1 0 0 1 85 600 Tm (Action) Tj T* ET
+BT 1 0 0 1 310 600 Tm (Evidence) Tj T* ET
+BT 1 0 0 1 440 600 Tm (Status) Tj T* ET
+BT /F1 10 Tf 12 TL ET
+BT 1 0 0 1 48 572 Tm (1) Tj T* ET
+BT 1 0 0 1 85 572 Tm (Receive device) Tj T* ET
+BT 1 0 0 1 310 572 Tm (SP-204 serial check) Tj T* ET
+BT 1 0 0 1 440 572 Tm (complete) Tj T* ET
+BT /F1 10 Tf 12 TL ET
+BT 1 0 0 1 48 544 Tm (2) Tj T* ET
+BT 1 0 0 1 85 544 Tm (Verify recovery) Tj T* ET
+BT 1 0 0 1 310 544 Tm (ORCHID-42 token) Tj T* ET
+BT 1 0 0 1 440 544 Tm (complete) Tj T* ET
+BT /F1 10 Tf 12 TL ET
+BT 1 0 0 1 48 516 Tm (3) Tj T* ET
+BT 1 0 0 1 85 516 Tm (Wipe and return) Tj T* ET
+BT 1 0 0 1 310 516 Tm (intake receipt) Tj T* ET
+BT 1 0 0 1 440 516 Tm (pending) Tj T* ET
+ 
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000061 00000 n 
+0000000112 00000 n 
+0000000219 00000 n 
+0000000331 00000 n 
+0000001264 00000 n 
+0000001457 00000 n 
+0000001525 00000 n 
+0000001859 00000 n 
+0000001918 00000 n 
+trailer
+<<
+/ID 
+[<938b4b9885957765ef22e776ddb1d048><938b4b9885957765ef22e776ddb1d048>]
+% ReportLab generated PDF document -- digest (opensource)
+
+/Info 7 0 R
+/Root 6 0 R
+/Size 10
+>>
+startxref
+3328
+%%EOF

@@ -1,0 +1,221 @@
+{
+  "files": {
+    "handoff-native.pdf": {
+      "expectedStructure": {
+        "nativeText": true,
+        "pages": 1,
+        "sentinels": [
+          "ORCHID-42",
+          "SP-204"
+        ]
+      },
+      "mediaType": "application/pdf",
+      "sha256": "4ef4253899a357b4dd50aabfa0ed8efa6d1761a9aac665f41bb46ff8151425c6",
+      "sizeBytes": 3741,
+      "warningExpectation": []
+    },
+    "handoff-ocr-clear.jpg": {
+      "expectedStructure": {
+        "height": 500,
+        "ocrSentinels": [
+          "ORCHID-42",
+          "SP-204"
+        ],
+        "quality": "clear",
+        "width": 1600
+      },
+      "mediaType": "image/jpeg",
+      "sha256": "afca262582ae3fc4b5019e98b6b9b018cbf3a610800ca1f37407c5c75d4af966",
+      "sizeBytes": 119901,
+      "warningExpectation": []
+    },
+    "handoff-ocr-clear.png": {
+      "expectedStructure": {
+        "height": 500,
+        "ocrSentinels": [
+          "ORCHID-42",
+          "SP-204"
+        ],
+        "quality": "clear",
+        "width": 1600
+      },
+      "mediaType": "image/png",
+      "sha256": "a177f65b319a345db3a5ba248912071570ac0a3a0786b123c500ebe0a81bcfe2",
+      "sizeBytes": 29688,
+      "warningExpectation": []
+    },
+    "handoff-ocr-low-quality.jpg": {
+      "expectedStructure": {
+        "height": 100,
+        "ocrSentinels": [
+          "ORCHID-42",
+          "SP-204"
+        ],
+        "quality": "low",
+        "width": 320
+      },
+      "mediaType": "image/jpeg",
+      "sha256": "91df22b25d956f6c02971d6d23215dc4ab6e1daba98621579177955f6b534983",
+      "sizeBytes": 2107,
+      "warningExpectation": [
+        "Low resolution and compression artifacts may reduce OCR confidence."
+      ]
+    },
+    "handoff-scanned.pdf": {
+      "expectedStructure": {
+        "imageObjects": 1,
+        "nativeText": false,
+        "pages": 1,
+        "sourceImage": "handoff-ocr-clear.png"
+      },
+      "mediaType": "application/pdf",
+      "sha256": "8935265bbaad1adbd342ad12c5eb02be61b5f3b24949f705778185df3629f1c2",
+      "sizeBytes": 35340,
+      "warningExpectation": [
+        "OCR is required because the page has no native text layer."
+      ]
+    },
+    "handoff.csv": {
+      "expectedStructure": {
+        "columns": 5,
+        "rows": 3,
+        "sentinels": [
+          "ORCHID-42",
+          "SP-204"
+        ]
+      },
+      "mediaType": "text/csv",
+      "sha256": "57e0ed61a933f0536cc4810308f5e1059f1c5bbf9026ae4c0efa47820dd6727b",
+      "sizeBytes": 153,
+      "warningExpectation": []
+    },
+    "handoff.docx": {
+      "expectedStructure": {
+        "paragraphsAtLeast": 5,
+        "sentinels": [
+          "ORCHID-42",
+          "SP-204"
+        ],
+        "tables": 1
+      },
+      "mediaType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "sha256": "ea87213a6ef2e1e44bd41a3480c097272143ffc1fb43603c50753eb97dcfee18",
+      "sizeBytes": 35002,
+      "warningExpectation": []
+    },
+    "handoff.md": {
+      "expectedStructure": {
+        "heading": "IT 设备交接流程 / ORCHID-42",
+        "tableRows": 3
+      },
+      "mediaType": "text/markdown",
+      "sha256": "c5e129fae8d49ed85049c381f8856d208530ddb274081de8082a9871477da503",
+      "sizeBytes": 312,
+      "warningExpectation": []
+    },
+    "handoff.pptx": {
+      "expectedStructure": {
+        "chartParts": 1,
+        "notesSlides": 1,
+        "positionedText": {
+          "leftEmu": 685800,
+          "text": "ORCHID-42 | IT EQUIPMENT HANDOFF",
+          "topEmu": 1143000
+        },
+        "slides": 2
+      },
+      "mediaType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      "sha256": "a22988db789c879f88bf997fd972b63f068c2e00fa269e5ee2d98b4a2ce9b785",
+      "sizeBytes": 40382,
+      "warningExpectation": "PPTX is supported, but chart object structure and data are not fully extracted, so an explicit warning is expected."
+    },
+    "handoff.txt": {
+      "expectedStructure": {
+        "sentinels": [
+          "ORCHID-42",
+          "SP-204",
+          "Bay: 07"
+        ]
+      },
+      "mediaType": "text/plain",
+      "sha256": "084bcccbeb1a618c0da3e64ede501d3516f1894b7f7ffe4d6c2b44521b8362f5",
+      "sizeBytes": 129,
+      "warningExpectation": []
+    },
+    "handoff.xlsx": {
+      "expectedStructure": {
+        "formulas": {
+          "F2": {
+            "cachedValue": 42,
+            "formula": "SUM(C2:C3)"
+          },
+          "F3": {
+            "cachedValue": null,
+            "formula": "SUM(C3:C4)"
+          }
+        },
+        "sheets": [
+          "Handoff Register",
+          "Recovery Lookup"
+        ],
+        "tables": [
+          "HandoffTable"
+        ]
+      },
+      "mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "sha256": "4c66ae69b8b1aaf23469fe4bb0d0d90ca1a06615ba50b846820d2c6aad0619c6",
+      "sizeBytes": 6453,
+      "warningExpectation": "F3 deliberately has no cached formula value; an explicit cache warning is expected."
+    },
+    "malformed.pdf": {
+      "expectedStructure": {
+        "reason": "missing xref and EOF marker",
+        "validPdf": false
+      },
+      "mediaType": "application/pdf",
+      "sha256": "3a2f8947dcddd794eb36560c188e2f6b629399083d2b1c2326a7d787df2ccd06",
+      "sizeBytes": 110,
+      "warningExpectation": [
+        "Invalid PDF structure should fail independently of unsupported input types."
+      ]
+    },
+    "source-conversations.jsonl": {
+      "expectedStructure": {
+        "conversations": 24,
+        "managementFields": [
+          "_acl",
+          "_ingestBatch",
+          "_operatorAnnotation",
+          "_reviewNote"
+        ],
+        "managementSentinel": "ORCHID42_OPERATOR_ONLY_SENTINEL_DO_NOT_TRAIN_20261007",
+        "records": 24,
+        "sourceFamilies": 12
+      },
+      "mediaType": "application/x-ndjson",
+      "sha256": "b07e34395adcecc4e0f0bebe6a41b158a29c426638c0e8f68904b4834dff711d",
+      "sizeBytes": 16416,
+      "warningExpectation": [
+        "Management fields must remain metadata and must not become answer text."
+      ]
+    },
+    "unsupported.rtf": {
+      "expectedStructure": {
+        "sentinel": "ORCHID-42",
+        "validRtfText": true
+      },
+      "mediaType": "application/rtf",
+      "sha256": "ffd6d99643ca045f9286881896af91b4016b01f545360c2780cc61abf3fad811",
+      "sizeBytes": 90,
+      "warningExpectation": [
+        "RTF is intentionally outside the supported v0.2 formats."
+      ]
+    }
+  },
+  "managementSentinel": "ORCHID42_OPERATOR_ONLY_SENTINEL_DO_NOT_TRAIN_20261007",
+  "personalOrCustomerData": false,
+  "purpose": "Synthetic fixed mixed corpus for Catalyst v0.2 parser acceptance.",
+  "schemaVersion": 1,
+  "synthetic": true,
+  "topic": "IT equipment handoff workflow / ORCHID-42"
+}

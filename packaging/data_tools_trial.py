@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start and manage an isolated Catalyst/Echo Linux trial runtime.
+"""Start and manage an isolated Catalyst data-tools Linux trial runtime.
 
 The launcher creates real local DirectPluginRuntime endpoints from the pinned
 package manifests, persists only their non-secret connection references, and
@@ -47,6 +47,9 @@ PLUGIN_SPECS = (
     ("exact-match", "evaluation.runner.v1", "CYRENE_EVALUATION_RUNNER_CONNECTION_REF"),
 )
 PRODUCTS = ("catalyst", "echo")
+CATALYST_ONLY_PLUGIN_NAMES = frozenset(
+    {"document-parsing", "knowledge-preparation", "dataset-generation", "dataset-preparation"}
+)
 TOKEN_ENV = "CYRENE_DATA_TOOLS_TOKEN"
 CAPABILITY_BINDING_ENV = "CYRENE_CAPABILITY_BINDING_ID"
 CAPABILITY_CONFIGURATION_ENV = "CYRENE_CAPABILITY_CONFIGURATION_JSON"
@@ -253,9 +256,9 @@ def _validate_bind(args: argparse.Namespace) -> tuple[str | None, bool]:
     try:
         if not 1 <= int(args.catalyst_port) <= 65535:
             raise TrialLauncherError("--catalyst-port must be between 1 and 65535")
-        if not 1 <= int(args.echo_port) <= 65535:
+        if not args.catalyst_only and not 1 <= int(args.echo_port) <= 65535:
             raise TrialLauncherError("--echo-port must be between 1 and 65535")
-        if int(args.catalyst_port) == int(args.echo_port):
+        if not args.catalyst_only and int(args.catalyst_port) == int(args.echo_port):
             raise TrialLauncherError("Catalyst and Echo must use distinct API ports")
     except ValueError as error:
         raise TrialLauncherError("API ports must be integers") from error
@@ -297,6 +300,14 @@ def _plugin_package_path(plugins_root: Path, plugin_name: str) -> Path:
             "exact-match": "evaluation/exact-match",
         }[plugin_name]
     )
+
+
+def _plugin_specs_for(catalyst_only: bool) -> tuple[tuple[str, str, str], ...]:
+    """Return the real stateless Plugin endpoints required by the selected mode."""
+
+    if not catalyst_only:
+        return PLUGIN_SPECS
+    return tuple(spec for spec in PLUGIN_SPECS if spec[0] in CATALYST_ONLY_PLUGIN_NAMES)
 
 
 def _plugin_manifest(package_root: Path, expected_capability: str) -> dict[str, str]:
@@ -536,6 +547,7 @@ def _prepare_plugin_environment(
     token: str | None,
     environment: dict[str, str],
     preferred_environment: Path | None,
+    plugin_specs: tuple[tuple[str, str, str], ...] = PLUGIN_SPECS,
 ) -> Path:
     """Install the manifest-owned Plugins into a per-trial virtual environment."""
 
@@ -543,7 +555,7 @@ def _prepare_plugin_environment(
     if uv is None:
         raise TrialLauncherError("uv is required to install the local trial runtime")
     package_roots = tuple(
-        _plugin_package_path(plugins_root, package_name) for package_name, _, _ in PLUGIN_SPECS
+        _plugin_package_path(plugins_root, package_name) for package_name, _, _ in plugin_specs
     )
     for package_root in package_roots:
         if package_root.is_symlink() or not (package_root / "pyproject.toml").is_file():
@@ -891,8 +903,46 @@ def _write_runtime(state_dir: Path, value: dict[str, Any]) -> None:
     _atomic_json(_runtime_path(state_dir), value)
 
 
+def _document_parser_environment(
+    environment: dict[str, str],
+    *,
+    ocr_runtime_root: Path,
+    languages: str,
+    engine: str,
+    dpi: int,
+    minimum_confidence: float,
+    docling_artifacts_path: Path | None,
+) -> dict[str, str]:
+    """Configure local OCR paths without falling back to host Tesseract."""
+
+    configured = environment.copy()
+    root = ocr_runtime_root.expanduser().absolute().resolve()
+    tessdata = root / "usr/share/tesseract-ocr/5/tessdata"
+    executable = root / "usr/bin/tesseract"
+    libraries = root / "usr/lib/x86_64-linux-gnu"
+    configured["CYRENE_DOCUMENT_PARSING_OCR_ENGINE"] = engine
+    configured["CYRENE_DOCUMENT_PARSING_OCR_LANGUAGES"] = languages
+    configured["CYRENE_DOCUMENT_PARSING_OCR_DPI"] = str(dpi)
+    configured["CYRENE_DOCUMENT_PARSING_OCR_MINIMUM_CONFIDENCE"] = str(minimum_confidence)
+    configured["CYRENE_DOCUMENT_PARSING_TESSERACT_CMD"] = str(executable)
+    configured["CYRENE_DOCUMENT_PARSING_TESSDATA_PREFIX"] = str(tessdata)
+    configured["TESSDATA_PREFIX"] = str(tessdata)
+    existing_libraries = configured.get("LD_LIBRARY_PATH", "")
+    library_paths = [str(libraries)]
+    if existing_libraries:
+        library_paths.append(existing_libraries)
+    configured["LD_LIBRARY_PATH"] = os.pathsep.join(library_paths)
+    if docling_artifacts_path is not None:
+        configured["CYRENE_DOCUMENT_PARSING_ARTIFACTS_PATH"] = str(
+            docling_artifacts_path.expanduser().absolute().resolve()
+        )
+    else:
+        configured.pop("CYRENE_DOCUMENT_PARSING_ARTIFACTS_PATH", None)
+    return configured
+
+
 def _start(args: argparse.Namespace) -> int:
-    """Prepare dependencies, start the Plugins, then both Product APIs."""
+    """Prepare dependencies, start required Plugins, and launch Product APIs."""
 
     state_dir = _safe_state_dir(args.state_dir, create=True)
     lock = _acquire_lock(state_dir)
@@ -922,9 +972,10 @@ def _start(args: argparse.Namespace) -> int:
             generation_binding_id = None
         source_root = args.source_root.expanduser().absolute().resolve()
         catalyst_root = _project_root(source_root, "catalyst")
-        echo_root = _project_root(source_root, "echo")
+        echo_root = None if args.catalyst_only else _project_root(source_root, "echo")
         plugins_root = _project_root(source_root, "plugins")
-        for package_name, capability, _ in PLUGIN_SPECS:
+        plugin_specs = _plugin_specs_for(args.catalyst_only)
+        for package_name, capability, _ in plugin_specs:
             _plugin_manifest(_plugin_package_path(plugins_root, package_name), capability)
 
         ui_ports: dict[str, int] = {}
@@ -933,7 +984,10 @@ def _start(args: argparse.Namespace) -> int:
                 port = int(getattr(args, f"{name}_port"))
                 if not 1 <= port <= 65535:
                     raise TrialLauncherError(f"--{name}-port must be between 1 and 65535")
-                if port in {args.catalyst_port, args.echo_port} or port in ui_ports.values():
+                api_ports = {args.catalyst_port}
+                if not args.catalyst_only:
+                    api_ports.add(args.echo_port)
+                if port in api_ports or port in ui_ports.values():
                     raise TrialLauncherError(
                         "API, Navigator, Client, and Control ports must be distinct"
                     )
@@ -944,15 +998,24 @@ def _start(args: argparse.Namespace) -> int:
                 )
         if args.startup_timeout <= 0:
             raise TrialLauncherError("--startup-timeout must be positive")
+        if args.ocr_dpi < 1:
+            raise TrialLauncherError("--ocr-dpi must be a positive integer")
+        if not 0.0 <= args.ocr_minimum_confidence <= 1.0:
+            raise TrialLauncherError("--ocr-minimum-confidence must be between 0 and 1")
+        if not args.ocr_languages.strip():
+            raise TrialLauncherError("--ocr-languages must include at least one language code")
         if args.plugin_port_base:
-            if not 1 <= args.plugin_port_base <= 65531:
+            max_port_base = 65536 - len(plugin_specs)
+            if not 1 <= args.plugin_port_base <= max_port_base:
                 raise TrialLauncherError(
-                    "--plugin-port-base must be 1 through 65531 so all five local endpoints fit"
+                    f"--plugin-port-base must be 1 through {max_port_base} so all local endpoints fit"
                 )
             plugin_ports = set(
-                range(args.plugin_port_base, args.plugin_port_base + len(PLUGIN_SPECS))
+                range(args.plugin_port_base, args.plugin_port_base + len(plugin_specs))
             )
-            reserved_ports = {args.catalyst_port, args.echo_port, *ui_ports.values()}
+            reserved_ports = {args.catalyst_port, *ui_ports.values()}
+            if not args.catalyst_only:
+                reserved_ports.add(args.echo_port)
             if plugin_ports & reserved_ports:
                 raise TrialLauncherError("Plugin endpoint ports must not overlap API or UI ports")
 
@@ -964,7 +1027,10 @@ def _start(args: argparse.Namespace) -> int:
         catalyst_home = state_dir / "catalyst"
         echo_home = state_dir / "echo"
         logs = state_dir / "logs"
-        for directory in (artifacts, catalyst_home, echo_home, logs):
+        state_directories = [artifacts, catalyst_home, logs]
+        if not args.catalyst_only:
+            state_directories.append(echo_home)
+        for directory in state_directories:
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         preferred_environment = source_root / ".venv"
@@ -976,6 +1042,7 @@ def _start(args: argparse.Namespace) -> int:
             token=token,
             environment=plugin_setup_environment,
             preferred_environment=preferred_environment,
+            plugin_specs=plugin_specs,
         )
         if generation_config is not None:
             _verify_model_provider_endpoint(
@@ -987,7 +1054,7 @@ def _start(args: argparse.Namespace) -> int:
         plugin_endpoints: dict[str, str] = {}
         plugin_records: list[dict[str, Any]] = []
         process_records: list[dict[str, Any]] = []
-        for index, (package_name, capability, variable) in enumerate(PLUGIN_SPECS):
+        for index, (package_name, capability, variable) in enumerate(plugin_specs):
             package_root = _plugin_package_path(plugins_root, package_name)
             expected = _plugin_manifest(package_root, capability)
             port = args.plugin_port_base + index if args.plugin_port_base else 0
@@ -1007,6 +1074,17 @@ def _start(args: argparse.Namespace) -> int:
                 listen,
             ]
             process_environment = plugin_env.copy()
+            if package_name == "document-parsing":
+                process_environment = _document_parser_environment(
+                    process_environment,
+                    ocr_runtime_root=args.ocr_runtime_root
+                    or source_root / "reports/ocr-runtime/extracted",
+                    languages=args.ocr_languages,
+                    engine=args.ocr_engine,
+                    dpi=args.ocr_dpi,
+                    minimum_confidence=args.ocr_minimum_confidence,
+                    docling_artifacts_path=args.docling_artifacts_path,
+                )
             if package_name == "dataset-generation" and generation_config is not None:
                 process_environment[CAPABILITY_BINDING_ENV] = generation_binding_id or ""
                 process_environment[CAPABILITY_CONFIGURATION_ENV] = json.dumps(
@@ -1036,18 +1114,21 @@ def _start(args: argparse.Namespace) -> int:
             environment=catalyst_env,
             preferred_environment=preferred_environment,
         )
-        echo_env = environment.copy()
-        echo_env["CYRENE_EVALUATION_RUNNER_CONNECTION_REF"] = plugin_endpoints[
-            "CYRENE_EVALUATION_RUNNER_CONNECTION_REF"
-        ]
-        echo_venv = _prepare_product_environment(
-            product="echo",
-            product_root=echo_root,
-            state_dir=state_dir,
-            token=token,
-            environment=echo_env,
-            preferred_environment=preferred_environment,
-        )
+        echo_env: dict[str, str] | None = None
+        echo_venv: Path | None = None
+        if echo_root is not None:
+            echo_env = environment.copy()
+            echo_env["CYRENE_EVALUATION_RUNNER_CONNECTION_REF"] = plugin_endpoints[
+                "CYRENE_EVALUATION_RUNNER_CONNECTION_REF"
+            ]
+            echo_venv = _prepare_product_environment(
+                product="echo",
+                product_root=echo_root,
+                state_dir=state_dir,
+                token=token,
+                environment=echo_env,
+                preferred_environment=preferred_environment,
+            )
 
         host = args.host
         local_host = "127.0.0.1" if host == "0.0.0.0" else "::1" if host == "::" else host
@@ -1069,23 +1150,8 @@ def _start(args: argparse.Namespace) -> int:
             "--port",
             str(args.catalyst_port),
         ]
-        echo_command = [
-            str(echo_venv / "bin/cyrene-echo"),
-            "serve",
-            "--database",
-            str(echo_home / "echo.sqlite3"),
-            "--artifact-root",
-            str(artifacts),
-            "--catalyst-url",
-            catalyst_url,
-            "--host",
-            host,
-            "--port",
-            str(args.echo_port),
-        ]
         if remote:
             catalyst_command.append("--allow-remote")
-            echo_command.append("--allow-remote")
 
         catalyst_handle = _launch_process(
             name="catalyst",
@@ -1096,25 +1162,42 @@ def _start(args: argparse.Namespace) -> int:
         )
         handles.append(catalyst_handle)
         process_records.append(catalyst_handle.record)
-        echo_handle = _launch_process(
-            name="echo",
-            command=echo_command,
-            cwd=echo_root,
-            environment=echo_env,
-            log_path=logs / "echo.log",
-        )
-        handles.append(echo_handle)
-        process_records.append(echo_handle.record)
-
         catalyst_base = catalyst_url
-        echo_url_host = (
-            f"[{local_host}]"
-            if ":" in local_host and not local_host.startswith("[")
-            else local_host
-        )
-        echo_base = f"http://{echo_url_host}:{args.echo_port}"
         _wait_health(catalyst_handle, catalyst_base + HEALTH_PATH, args.startup_timeout)
-        _wait_health(echo_handle, echo_base + HEALTH_PATH, args.startup_timeout)
+        echo_base: str | None = None
+        if echo_root is not None and echo_env is not None and echo_venv is not None:
+            echo_command = [
+                str(echo_venv / "bin/cyrene-echo"),
+                "serve",
+                "--database",
+                str(echo_home / "echo.sqlite3"),
+                "--artifact-root",
+                str(artifacts),
+                "--catalyst-url",
+                catalyst_url,
+                "--host",
+                host,
+                "--port",
+                str(args.echo_port),
+            ]
+            if remote:
+                echo_command.append("--allow-remote")
+            echo_handle = _launch_process(
+                name="echo",
+                command=echo_command,
+                cwd=echo_root,
+                environment=echo_env,
+                log_path=logs / "echo.log",
+            )
+            handles.append(echo_handle)
+            process_records.append(echo_handle.record)
+            echo_url_host = (
+                f"[{local_host}]"
+                if ":" in local_host and not local_host.startswith("[")
+                else local_host
+            )
+            echo_base = f"http://{echo_url_host}:{args.echo_port}"
+            _wait_health(echo_handle, echo_base + HEALTH_PATH, args.startup_timeout)
 
         ui_runtime: dict[str, Any] | None = None
         pairing_code: str | None = None
@@ -1177,13 +1260,13 @@ def _start(args: argparse.Namespace) -> int:
                 str(pairing_code_path),
                 "--catalyst-url",
                 catalyst_base,
-                "--echo-url",
-                echo_base,
                 "--host",
                 "127.0.0.1",
                 "--port",
                 str(ui_ports["navigator"]),
             ]
+            if echo_base is not None:
+                web_host_command.extend(("--echo-url", echo_base))
             web_host_handle = _launch_process(
                 name="navigator-web-host",
                 command=web_host_command,
@@ -1241,6 +1324,7 @@ def _start(args: argparse.Namespace) -> int:
         runtime = {
             "schemaVersion": SCHEMA_VERSION,
             "instanceId": str(uuid.uuid4()),
+            "mode": "catalyst-only" if args.catalyst_only else "catalyst-echo",
             "status": "running",
             "startedAt": _utc_now(),
             "updatedAt": _utc_now(),
@@ -1255,7 +1339,6 @@ def _start(args: argparse.Namespace) -> int:
             "storage": {
                 "artifactRoot": str(artifacts),
                 "catalystDatabase": str(catalyst_home / "catalyst.sqlite3"),
-                "echoDatabase": str(echo_home / "echo.sqlite3"),
             },
             "services": {
                 "catalyst": {
@@ -1263,12 +1346,6 @@ def _start(args: argparse.Namespace) -> int:
                     "healthUrl": catalyst_base + HEALTH_PATH,
                     "port": args.catalyst_port,
                     "pid": catalyst_handle.process.pid,
-                },
-                "echo": {
-                    "baseUrl": echo_base,
-                    "healthUrl": echo_base + HEALTH_PATH,
-                    "port": args.echo_port,
-                    "pid": echo_handle.process.pid,
                 },
             },
             "plugins": plugin_records,
@@ -1280,9 +1357,18 @@ def _start(args: argparse.Namespace) -> int:
         }
         if ui_runtime is not None:
             runtime["ui"] = ui_runtime
+        if echo_base is not None:
+            runtime["storage"]["echoDatabase"] = str(echo_home / "echo.sqlite3")
+            runtime["services"]["echo"] = {
+                "baseUrl": echo_base,
+                "healthUrl": echo_base + HEALTH_PATH,
+                "port": args.echo_port,
+                "pid": echo_handle.process.pid,
+            }
         _write_runtime(state_dir, runtime)
         print(f"Catalyst API: {catalyst_base} (health {HEALTH_PATH})")
-        print(f"Echo API: {echo_base} (health {HEALTH_PATH})")
+        if echo_base is not None:
+            print(f"Echo API: {echo_base} (health {HEALTH_PATH})")
         print(f"Runtime record: {_runtime_path(state_dir)}")
         print(f"Shared artifacts: {artifacts}")
         if generation_config is None:
@@ -1455,6 +1541,11 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--catalyst-port", type=int, default=8014)
     start.add_argument("--echo-port", type=int, default=8094)
     start.add_argument(
+        "--catalyst-only",
+        action="store_true",
+        help="start Catalyst and its required stateless Plugins without Echo",
+    )
+    start.add_argument(
         "--generation-config",
         type=Path,
         help="JSON config for an already-resolved local model.provider.v1 connection",
@@ -1479,6 +1570,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="first local gRPC port; 0 lets the OS assign unique loopback ports",
     )
     start.add_argument("--allow-remote", action="store_true")
+    start.add_argument(
+        "--ocr-runtime-root",
+        type=Path,
+        help="isolated extracted Tesseract root; defaults to <source-root>/reports/ocr-runtime/extracted",
+    )
+    start.add_argument(
+        "--ocr-engine",
+        choices=("auto", "tesseract-cli", "rapidocr", "none"),
+        default="auto",
+    )
+    start.add_argument("--ocr-languages", default="eng,chi_sim")
+    start.add_argument("--ocr-dpi", type=int, default=200)
+    start.add_argument("--ocr-minimum-confidence", type=float, default=0.8)
+    start.add_argument(
+        "--docling-artifacts-path",
+        type=Path,
+        help="optional preloaded Docling model artifacts path; separate from Tesseract data",
+    )
     start.add_argument("--startup-timeout", type=float, default=STARTUP_TIMEOUT_SECONDS)
     start.set_defaults(handler=_start)
 
