@@ -32,12 +32,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 SERVICES = ("navigator", "yield", "reactor", "exchange", "catalyst")
+BUNDLE_SERVICES = (*SERVICES, "echo")
 REPOSITORIES = {
     "navigator": "Cyrene-Navigator",
     "yield": "Cyrene-Yield",
     "reactor": "Cyrene-Reactor",
     "exchange": "Cyrene-Exchange",
     "catalyst": "Cyrene-Catalyst",
+    "echo": "Cyrene-Echo",
 }
 REQUIRED_DISTRIBUTIONS = {
     "navigator": ("cyrene-navigator",),
@@ -45,6 +47,7 @@ REQUIRED_DISTRIBUTIONS = {
     "reactor": ("cyrene-reactor-product",),
     "exchange": ("cyrene-exchange", "cyrene-exchange-product"),
     "catalyst": ("cyrene-catalyst",),
+    "echo": ("cyrene-echo",),
 }
 HEALTH_PATHS = {
     "navigator": "/api/v1/system/status",
@@ -52,6 +55,7 @@ HEALTH_PATHS = {
     "reactor": "/openapi.json",
     "exchange": "/healthz",
     "catalyst": "/",
+    "echo": "/healthz",
 }
 VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -977,7 +981,7 @@ def validate_bundle(
     if schema_version != 2 and "execution_runtime" in manifest:
         raise ServiceBundleError("execution_runtime requires bundle schema v2")
     service = manifest["service"]
-    if service not in SERVICES:
+    if service not in BUNDLE_SERVICES:
         raise ServiceBundleError(f"unsupported manifest service: {service!r}")
     if expected_service is not None and service != expected_service:
         raise ServiceBundleError(
@@ -1981,6 +1985,13 @@ def _entrypoint_text(
             '--home "${CYRENE_DATA_DIR:-/var/lib/cyrene}/catalyst" '
             '--port "${CYRENE_PORT_CATALYST:-8004}" "$@"'
         ),
+        "echo": (
+            "exec python3 -s -m cyrene_echo.server serve "
+            '--database "${CYRENE_DATA_DIR:-/var/lib/cyrene}/echo/echo.sqlite3" '
+            '--artifact-root "${CYRENE_ARTIFACT_ROOT:-${CYRENE_DATA_DIR:-/var/lib/cyrene}/artifacts}" '
+            '--host "${CYRENE_HOST_ECHO:-127.0.0.1}" '
+            '--port "${CYRENE_PORT_ECHO:-8094}" "$@"'
+        ),
     }
     execution_prelude = _execution_runtime_prelude(execution_runtime, service=service)
     if service == "yield":
@@ -2417,7 +2428,7 @@ def build_service_bundles(
     """Build one or all self-contained runtime bundles from pinned wheelhouses."""
 
     selected_services = (service,) if service is not None else SERVICES
-    if any(name not in SERVICES for name in selected_services):
+    if any(name not in BUNDLE_SERVICES for name in selected_services):
         raise ServiceBundleError(f"unsupported service name: {service!r}")
     if service_commit_override is not None and service is None:
         raise ServiceBundleError("--service-commit requires --service")
@@ -2593,7 +2604,9 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--target-profile", required=True)
     build.add_argument("--python-executable", type=Path, required=True)
     build.add_argument(
-        "--service", choices=SERVICES, help="build only this independent Product bundle"
+        "--service",
+        choices=BUNDLE_SERVICES,
+        help="build only this independent Product bundle (Echo is not part of the Debian service set)",
     )
     build.add_argument(
         "--service-commit",

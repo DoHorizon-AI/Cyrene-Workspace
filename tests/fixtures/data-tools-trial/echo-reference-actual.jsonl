@@ -1,0 +1,4 @@
+{"actual": "恢复代码是 ORCHID-42。🌱", "reference": "恢复代码是 ORCHID-42。🌱", "sampleId": "echo-01"}
+{"actual": "试用版本为二。", "reference": "试用版本为一。", "sampleId": "echo-02"}
+{"actual": "没有参考答案时应跳过。", "reference": null, "sampleId": "echo-03"}
+{"actual": null, "reference": "有参考答案但预测为空时应跳过。", "sampleId": "echo-04"}

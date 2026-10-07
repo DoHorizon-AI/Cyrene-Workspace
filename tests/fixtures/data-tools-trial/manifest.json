@@ -1,0 +1,91 @@
+{
+  "docxSentinels": [
+    "中文段落",
+    "🌱🧭",
+    "知识输出",
+    "训练输出",
+    "TRIAL_INTERNAL_REVIEW_NOTE_DO_NOT_TRAIN_7f4a"
+  ],
+  "duplicateSourceScenario": {
+    "path": "trial-handbook.pdf",
+    "sha256": "e2d819f790f0959cfc9074e0fa1cbeb8d4be7498da7d636d5572eec90e57e0f2",
+    "uploads": [
+      {
+        "alias": "knowledge-only-copy",
+        "policy": {
+          "allowKnowledge": true,
+          "allowTraining": false,
+          "allowedPrincipalRefs": [
+            "org:trial-alpha"
+          ],
+          "allowedUsePurposes": [
+            "knowledge_retrieval"
+          ]
+        }
+      },
+      {
+        "alias": "training-only-copy",
+        "policy": {
+          "allowKnowledge": false,
+          "allowTraining": true,
+          "allowedPrincipalRefs": [
+            "org:trial-beta"
+          ],
+          "allowedUsePurposes": [
+            "model_training"
+          ]
+        }
+      }
+    ]
+  },
+  "echo": {
+    "expectedEvaluated": 2,
+    "expectedMatched": 1,
+    "expectedSkipped": 2,
+    "path": "echo-reference-actual.jsonl",
+    "total": 4
+  },
+  "files": {
+    "echo-duplicate-sample-id.jsonl": "c5e11e16bb8d9944349748a8d6d5cfaa793b3480c4a23779380d2873ba488759",
+    "echo-reference-actual.jsonl": "a1b9f5e0aab4c36a7014ea2d8b417e3e58f18d1b2f8156aaea436fb7ea740ac3",
+    "malformed.jsonl": "a7d1191e43a4a5c30b3586457884a3be3c01d6f48021f9f7c6de4740f2d6a57e",
+    "malformed.pdf": "1c6bb16fe71ba9e7f808f0bd8f4041f2f43b1237e6e5b4bfaeff34057b825a29",
+    "trial-handbook.docx": "9eb199effe97b0951b965f9ff62be361d61363c312f0088597c4cf9ec8dd5719",
+    "trial-handbook.pdf": "e2d819f790f0959cfc9074e0fa1cbeb8d4be7498da7d636d5572eec90e57e0f2",
+    "trial-training.jsonl": "ac810b0a98a5d0d1d8990752115d0a9f8b92bdb7758c47d0501bb8c0230418b6"
+  },
+  "invalidInputs": [
+    "malformed.pdf",
+    "malformed.jsonl",
+    "echo-duplicate-sample-id.jsonl"
+  ],
+  "pdfSentinels": [
+    "Cyrene Data Tools Trial",
+    "来源键：trial-handbook-shared-bytes",
+    "恢复代码：ORCHID-42",
+    "此段用于验收知识检索和训练用途权限分离。",
+    "表格行：步骤 | 样本 | 用途",
+    "1 | alpha | 知识检索"
+  ],
+  "purpose": "Synthetic fixed acceptance corpus; no personal or customer data.",
+  "schemaVersion": 1,
+  "training": {
+    "expectedSplitByFamily": {
+      "family-01": "train",
+      "family-02": "train",
+      "family-03": "validation",
+      "family-04": "train",
+      "family-05": "train",
+      "family-06": "test",
+      "family-07": "train",
+      "family-08": "train",
+      "family-09": "train",
+      "family-32": "train"
+    },
+    "path": "trial-training.jsonl",
+    "privateMarker": "TRIAL_INTERNAL_REVIEW_NOTE_DO_NOT_TRAIN_7f4a",
+    "records": 20,
+    "recordsPerFamily": 2,
+    "sourceFamilies": 10
+  }
+}

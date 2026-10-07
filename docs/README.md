@@ -15,6 +15,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 ## 2. Engineering & Developer Guides
 - [**QUICKSTART.md**](QUICKSTART.md): Prerequisites, bootstrap, and developer onboarding.
 - [**DEVELOPMENT.md**](DEVELOPMENT.md): Multi-repo topology, agent worktree isolation, JetBrains IDE integration, and quality gates.
+- [**DATA_TOOLS_TRIAL.md**](DATA_TOOLS_TRIAL.md): Linux Catalyst/Echo trial launcher, optional UI, remote binding, backup, and cleanup.
 - [**Component update packaging**](../packaging/service-bundle.md): Linux component updater, verified catalog metadata, and immutable service packaging.
 
 ---
@@ -51,6 +52,8 @@ This directory contains the canonical, current-first documentation for the Cyren
 ## 2. 工程与开发者指南
 - [**QUICKSTART.md**](QUICKSTART.md)：前置条件、引导流程和开发者入门。
 - [**DEVELOPMENT.md**](DEVELOPMENT.md)：多仓库拓扑、Agent 工作树隔离、JetBrains IDE 集成和质量门禁。
+- [**DATA_TOOLS_TRIAL.md**](DATA_TOOLS_TRIAL.md)：Linux Catalyst/Echo 试用启动器、可选 UI、远程绑定、备份和清理。
+- [**Component update packaging**](../packaging/service-bundle.md)：Linux 组件更新器、已验证目录元数据和不可变服务打包。
 
 ---
 
