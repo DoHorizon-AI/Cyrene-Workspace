@@ -1,6 +1,6 @@
 # ADR: Modular distribution preview / 模块化发行预览
 
-Status: accepted for the Ubuntu 24.04 preview profile; release and installed-service acceptance remain separate gates.
+Status: accepted for the Ubuntu 24.04 preview architecture. Matching modular DEB, Client Control, and official Linux Echo releases and clean-host acceptance remain separate pending gates.
 
 状态：Ubuntu 24.04 预览配置采用本决策；正式发布与安装后验收必须分别提供实际证据。
 
@@ -70,6 +70,22 @@ The initial profile is Native-first Hybrid:
 | Echo | Optional official linux/amd64 OCI image |
 
 首发采用上述原生优先混合方案。Catalyst 的 OCI 路径继续保留，不替换当前原生入口。
+
+The Workspace implementation candidate serves the activated Client static-Web
+root through a managed Nginx listener on `127.0.0.1:8100` and proxies same-origin
+Studio API routes to local Client Control on `127.0.0.1:5182`. The Control and
+Web listeners remain loopback-only; remote access uses an existing approved SSH
+forward. This host configuration does not expose the installer through the
+Platform Workspace Web BFF and does not, by itself, prove that release assets
+or a clean-host installation are accepted. See
+[`MODULAR_DISTRIBUTION_V01.md`](MODULAR_DISTRIBUTION_V01.md) for the operator
+entrypoint and pending release pins.
+
+Workspace 实现候选通过受管 Nginx 在 `127.0.0.1:8100` 提供已激活的 Client 静态 Web 根目录，并将同源
+Studio API 路由转发到本机 Client Control `127.0.0.1:5182`。Control 与 Web listener 仅绑定 loopback；
+远程访问使用已有且获准的 SSH 转发。此主机配置不会经由 Platform Workspace Web BFF 暴露安装器，也不能单独证明
+release assets 或全新主机安装已验收。操作入口与待填发行 pin 见
+[`MODULAR_DISTRIBUTION_V01.md`](MODULAR_DISTRIBUTION_V01.md)。
 
 Platform's current plugin readiness contract returns a host-loopback gRPC
 connection reference. Its package-control and maintenance Unix sockets are
@@ -149,7 +165,17 @@ version conflict, failed upgrade and rollback have individual evidence statuses.
 A container-only base probe, a staged DEB, local green tests or transport smoke
 cannot be reported as this gate passing.
 
+At the time of this ADR update, the matching generation-15 native DEB, Client
+Control release, and official Linux Echo release are still pending; full clean-host
+acceptance is `NOT_RUN`. Treat the installation commands as instructions for the
+exact future immutable release pins, not as evidence that the release or host
+workflow has passed.
+
 最终门禁是在全新 Ubuntu 24.04 上仅消费官方发布物，完成 Catalyst 安装、激活、Web
 访问、真实审核和 SFT 导出及独立读取，再验证可选 Echo 的评测和独立删除。可靠性
 场景逐项记录 PASS/FAIL/NOT_RUN；基础容器检查、stage-only DEB、本地测试或传输
 smoke 都不能冒充完整安装验收。
+
+更新本文时，匹配 generation 15 的 native DEB、Client Control 发行物和 Echo 官方 Linux 发行物仍待发布；
+clean-host 整体验收为 `NOT_RUN`。安装命令是供未来精确不可变 release pins 使用的步骤，不代表发行物或主机流程
+已经通过。
