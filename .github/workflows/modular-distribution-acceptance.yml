@@ -75,6 +75,14 @@ jobs:
           WORKLOAD_PROTOCOL = "cyrene.workload-plan.v1"
           HOST_TARGET = "linux-ubuntu-24.04-x86_64"
           PRIVATE_PYTHON = "/opt/cyrene/python/3.12.14/bin/python3.12"
+          MINIMUM_GH_ATTESTATION_VERSION = (2, 102, 0)
+          GH_RELEASE_TAG = "v2.102.0"
+          GH_RELEASE_COMMIT = "fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd"
+          GH_RELEASE_ASSET = "gh_2.102.0_linux_amd64.deb"
+          GH_RELEASE_ASSET_SHA256 = "7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"
+          GH_RELEASE_ASSET_SIZE_BYTES = 15392446
+          GH_CHECKSUMS_ASSET_SHA256 = "afe49e9affa232faa8212aed035417166f6ade9b9470acb53d4dbd28c0504e8d"
+          GH_CHECKSUMS_ASSET_SIZE_BYTES = 1971
           CATALYST_ACCEPTANCE_MODULE = "cyrene_catalyst.external_acceptance"
           CATALYST_CONSUMER_MODULE = "cyrene_catalyst_consumer.training_bundle"
           CATALYST_REQUIRED_PLUGIN_IDS = frozenset(
@@ -89,6 +97,7 @@ jobs:
           PREFLIGHT_STAGE = "native_release_metadata"
           PHASES = (
               "release_pins_validation",
+              "attestation_cli_provision",
               "runner_identity",
               "native_release_metadata",
               "native_release_provenance",
@@ -233,8 +242,145 @@ jobs:
               if not condition:
                   raise RuntimeError(message)
 
+          def parse_gh_cli_version(
+              output: str, *, require_supported: bool = True
+          ) -> tuple[int, int, int]:
+              """Parse the installed GitHub CLI version used for strict SLSA verification."""
+              match = re.search(r"\bgh version ([0-9]+)\.([0-9]+)\.([0-9]+)\b", output)
+              require(match is not None, "GitHub CLI version output is missing or malformed")
+              assert match is not None
+              version = tuple(int(part) for part in match.groups())
+              if require_supported:
+                  require(
+                      version >= MINIMUM_GH_ATTESTATION_VERSION,
+                      "GitHub CLI must be at least 2.102.0 for strict attestation verification",
+                  )
+              return version
+
+          def ensure_attestation_cli() -> dict[str, Any]:
+              """Install the fixed official gh release only on this disposable runner when needed."""
+              (root() / "evidence").mkdir(parents=True, exist_ok=True)
+              before_output = run(
+                  ["gh", "--version"],
+                  label="gh-attestation-cli-before",
+                  timeout=30,
+                  retain_output=False,
+              ).stdout
+              before_version = parse_gh_cli_version(before_output, require_supported=False)
+              before_text = ".".join(str(part) for part in before_version)
+              facts: dict[str, Any] = {
+                  "minimumVersion": "2.102.0",
+                  "versionBefore": before_text,
+                  "repository": "cli/cli",
+                  "releaseTag": GH_RELEASE_TAG,
+                  "releaseCommit": GH_RELEASE_COMMIT,
+                  "releaseUrl": "https://github.com/cli/cli/releases/tag/v2.102.0",
+                  "releaseApiUrl": "https://api.github.com/repos/cli/cli/releases/tags/v2.102.0",
+                  "releaseImmutable": True,
+                  "upgraded": False,
+              }
+              if before_version < MINIMUM_GH_ATTESTATION_VERSION:
+                  base = root() / "downloads" / "official-gh-cli-v2.102.0"
+                  base.mkdir(parents=True, exist_ok=True)
+                  deb_path = base / GH_RELEASE_ASSET
+                  checksum_path = base / "gh_2.102.0_checksums.txt"
+                  release_base = "https://github.com/cli/cli/releases/download/v2.102.0"
+                  common_curl = [
+                      "curl", "--proto", "=https", "--proto-redir", "=https",
+                      "--tlsv1.2", "--fail", "--location", "--silent", "--show-error",
+                  ]
+                  release_api_path = base / "release-api.json"
+                  run(
+                      [*common_curl, facts["releaseApiUrl"], "--output", str(release_api_path)],
+                      label="read-official-gh-release-api",
+                      timeout=60,
+                  )
+                  release_api = load_json(release_api_path)
+                  require(release_api.get("tag_name") == GH_RELEASE_TAG, "official gh release API returned a different tag")
+                  require(release_api.get("immutable") is True and release_api.get("draft") is False, "official gh release is not immutable and published")
+                  require(release_api.get("target_commitish") == GH_RELEASE_COMMIT, "official gh release source commit differs from the pinned release")
+                  api_assets = release_api.get("assets")
+                  require(isinstance(api_assets, list), "official gh release API has no asset list")
+                  asset_rows = {row.get("name"): row for row in api_assets if isinstance(row, dict)}
+                  require(len(asset_rows) == len(api_assets), "official gh release API has malformed or duplicate assets")
+                  deb_asset = asset_rows.get(GH_RELEASE_ASSET)
+                  checksums_asset = asset_rows.get("gh_2.102.0_checksums.txt")
+                  require(isinstance(deb_asset, dict) and isinstance(checksums_asset, dict), "official gh release omits the pinned DEB or checksums asset")
+                  require(deb_asset.get("digest") == "sha256:" + GH_RELEASE_ASSET_SHA256 and deb_asset.get("size") == GH_RELEASE_ASSET_SIZE_BYTES, "official gh DEB GitHub API digest or size differs from pins")
+                  require(checksums_asset.get("digest") == "sha256:" + GH_CHECKSUMS_ASSET_SHA256 and checksums_asset.get("size") == GH_CHECKSUMS_ASSET_SIZE_BYTES, "official gh checksum asset GitHub API digest or size differs from pins")
+                  require(deb_asset.get("browser_download_url") == f"https://github.com/cli/cli/releases/download/v2.102.0/{GH_RELEASE_ASSET}", "official gh DEB download URL differs from the canonical release asset URL")
+                  require(checksums_asset.get("browser_download_url") == "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_checksums.txt", "official gh checksum download URL differs from the canonical release asset URL")
+                  shutil.copy2(release_api_path, root() / "evidence" / "gh-cli-release-api.json")
+                  run(
+                      [*common_curl, deb_asset["browser_download_url"], "--output", str(deb_path)],
+                      label="download-official-gh-deb",
+                      timeout=180,
+                  )
+                  run(
+                      [*common_curl, checksums_asset["browser_download_url"], "--output", str(checksum_path)],
+                      label="download-official-gh-checksums",
+                      timeout=60,
+                  )
+                  require(deb_path.is_file() and not deb_path.is_symlink(), "official gh DEB is not a regular downloaded file")
+                  require(deb_path.stat().st_size == GH_RELEASE_ASSET_SIZE_BYTES, "official gh DEB size differs from pinned GitHub release metadata")
+                  deb_digest = sha256(deb_path)
+                  require(deb_digest == GH_RELEASE_ASSET_SHA256, "official gh DEB SHA-256 differs from the pinned GitHub release asset")
+                  require(checksum_path.is_file() and not checksum_path.is_symlink(), "official gh checksum list is not a regular downloaded file")
+                  checksum_digest = sha256(checksum_path)
+                  require(checksum_digest == GH_CHECKSUMS_ASSET_SHA256, "official gh checksum list differs from the pinned immutable release asset")
+                  checksum_line = f"{GH_RELEASE_ASSET_SHA256}  {GH_RELEASE_ASSET}"
+                  checksum_lines = checksum_path.read_text(encoding="utf-8").splitlines()
+                  require(checksum_lines.count(checksum_line) == 1, "official gh checksum list does not bind the exact amd64 DEB")
+                  package = run(
+                      ["dpkg-deb", "-f", str(deb_path), "Package", "Version", "Architecture"],
+                      label="inspect-official-gh-deb",
+                      timeout=30,
+                      retain_output=False,
+                  ).stdout.splitlines()
+                  require(package == ["gh", "2.102.0", "amd64"], "official gh DEB metadata differs from the pinned package/version/architecture")
+                  run(
+                      ["sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends", str(deb_path)],
+                      label="install-official-gh-deb",
+                      timeout=300,
+                  )
+                  after_output = run(
+                      ["gh", "--version"],
+                      label="gh-attestation-cli-after",
+                      timeout=30,
+                      retain_output=False,
+                  ).stdout
+                  after_version = parse_gh_cli_version(after_output)
+                  facts.update({
+                      "upgraded": True,
+                      "assetName": GH_RELEASE_ASSET,
+                      "assetUrl": f"{release_base}/{GH_RELEASE_ASSET}",
+                      "assetSha256": deb_digest,
+                      "assetSizeBytes": deb_path.stat().st_size,
+                      "checksumsAssetName": "gh_2.102.0_checksums.txt",
+                      "checksumsAssetSha256": checksum_digest,
+                      "checksumsLine": checksum_line,
+                      "packageMetadata": {
+                          "name": package[0], "version": package[1], "architecture": package[2],
+                      },
+                      "versionAfter": ".".join(str(part) for part in after_version),
+                      "releaseApiAssetDigest": deb_asset["digest"],
+                      "releaseApiChecksumsDigest": checksums_asset["digest"],
+                      "installCommand": "sudo -n apt-get install -y --no-install-recommends <verified-official-gh-deb>",
+                  })
+              else:
+                  facts["versionAfter"] = before_text
+              write_json(root() / "evidence" / "attestation-cli-provision.json", facts)
+              return facts
+
           def runner_identity() -> dict[str, Any]:
               """Record the actual VM boundary and require Ubuntu 24.04 x86_64 systemd."""
+              gh_output = run(
+                  ["gh", "--version"],
+                  label="gh-attestation-cli-version",
+                  timeout=30,
+                  retain_output=False,
+              ).stdout
+              gh_version = parse_gh_cli_version(gh_output)
               os_release = {}
               for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
                   key, separator, value = line.partition("=")
@@ -252,6 +398,8 @@ jobs:
                   "workflowRepository": os.environ.get("GITHUB_REPOSITORY"),
                   "workflowGitRef": os.environ.get("GITHUB_REF"),
                   "uid": os.getuid(),
+                  "ghVersion": ".".join(str(part) for part in gh_version),
+                  "attestationVerifier": "gh attestation verify",
                   "sudoNoninteractive": False,
               }
               require(os_release.get("ID") == "ubuntu", "runner is not Ubuntu")
@@ -296,6 +444,7 @@ jobs:
                       "optional Echo pins are not executable until the signed OCI installer, installed evaluator, and safe uninstall contracts are integrated",
                   )
                   raise RuntimeError("Echo pins are schema-valid but this workflow revision cannot execute the installed Echo lifecycle")
+              phase("attestation_cli_provision", ensure_attestation_cli)
               phase("runner_identity", runner_identity)
               record("host_reboot_recovery", "NOT_RUN", "the disposable GitHub-hosted VM is not rebooted by this job")
               record("version_conflict_gate", "NOT_RUN", "runs against the read-only exact Catalyst resolution before staging")
@@ -2398,7 +2547,7 @@ jobs:
                   ]
                   produced = run(acceptance_command, label="installed-catalyst-acceptance-producer", timeout=900, env=environment, retain_output=False)
                   bundle_path = output_dir / "authored-business-sft.zip"
-                  require(bundle_path.is_file() and bundle_path.stat().st_size > 0, "installed Catalyst producer did not create authored-business-sft.zip")
+                  require(bundle_path.is_file() and not bundle_path.is_symlink() and bundle_path.stat().st_size > 0, "installed Catalyst producer did not create a regular authored-business-sft.zip")
                   output_bytes = produced.stdout.encode("utf-8")
                   error_bytes = produced.stderr.encode("utf-8")
                   return {"module": CATALYST_ACCEPTANCE_MODULE, "baseUrl": service["baseUrl"], "stdoutBytes": len(output_bytes), "stdoutSha256": hashlib.sha256(output_bytes).hexdigest(), "stderrBytes": len(error_bytes), "stderrSha256": hashlib.sha256(error_bytes).hexdigest(), "outputDirectory": str(output_dir), "bundleName": bundle_path.name, "bundleSizeBytes": bundle_path.stat().st_size, "bundleSha256": sha256(bundle_path)}
@@ -2410,13 +2559,22 @@ jobs:
                   output_bytes = consumed.stdout.encode("utf-8")
                   error_bytes = consumed.stderr.encode("utf-8")
                   evidence = {"module": CATALYST_CONSUMER_MODULE, "bundleName": bundle_path.name, "bundleSizeBytes": bundle_path.stat().st_size, "bundleSha256": sha256(bundle_path), "stdoutBytes": len(output_bytes), "stdoutSha256": hashlib.sha256(output_bytes).hexdigest(), "stderrBytes": len(error_bytes), "stderrSha256": hashlib.sha256(error_bytes).hexdigest()}
+                  # Publish only the fixed synthetic fixture after the independent installed consumer succeeds.
+                  # 仅在独立安装后 consumer 成功后，才暂存固定合成验收 ZIP 供用户查看。
+                  fixture_path = root() / "evidence" / "public-fixtures" / bundle_path.name
+                  fixture_path.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(bundle_path, fixture_path)
+                  require(sha256(fixture_path) == evidence["bundleSha256"], "published Catalyst fixture bytes differ from the consumer-verified ZIP")
                   write_json(root() / "evidence" / "catalyst-generated-bundle-identity.json", {
                       "name": bundle_path.name, "sizeBytes": bundle_path.stat().st_size,
                       "sha256": evidence["bundleSha256"],
+                      "artifactPath": "public-fixtures/" + bundle_path.name,
+                      "consumerStatus": "PASS",
+                      "fixtureScope": "fixed synthetic acceptance data",
                   })
                   return evidence
               phase("catalyst_independent_bundle_consumer", consumer_gate)
-              # The output ZIP stays outside artifacts because it can contain generated Product data.
+              # Only the consumer-verified fixed synthetic ZIP is copied to uploadable evidence.
 
           def restart_recovery() -> None:
               """Restart only the pinned Catalyst unit and prove it returns to HTTP service."""
@@ -2466,7 +2624,7 @@ jobs:
                   "catalyst_independent_bundle_consumer", "catalyst_service_restart_recovery",
                   "missing_selection_gate", "client_release_integration",
               )
-              required = ("release_pins_validation", *required)
+              required = ("release_pins_validation", "attestation_cli_provision", *required)
               value["requiredCorePass"] = all(phases[name]["status"] == "PASS" for name in required)
               value["requiredCoreFailures"] = [
                   name for name in required if phases[name]["status"] != "PASS"
@@ -2601,7 +2759,7 @@ jobs:
             python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" finalize
           fi
 
-      - name: Upload exact pins, receipts, plans, command logs, and phase ledger
+      - name: Upload exact pins, receipts, plans, logs, phase ledger, and verified public SFT fixture
         if: always()
         uses: actions/upload-artifact@v4
         with:
