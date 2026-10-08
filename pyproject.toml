@@ -37,6 +37,7 @@ text-lifecycle = [
     "mypy==2.3.1",
     "types-pyyaml==6.0.12.20260906",
     "types-jsonschema>=4.26.0.20260518",
+    "python-multipart==0.0.32",
 ]
 
 [tool.uv]
