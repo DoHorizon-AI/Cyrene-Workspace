@@ -181,12 +181,12 @@ def test_catalog_bootstrap_copy_and_release_lock_pin_are_exact() -> None:
         "Cyrene-Platform": "ba253cff6f865c288e18af28b8cba64d91977261",
         "Cyrene-Plugins-Official": "96733779d187b13efcadcde95a6b6737fe102d25",
         "Cyrene-Workspace": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
-        "Cyrene-Reactor": "49b560975c10e815ad5aac42a6c224dd4d39a8e8",
-        "Cyrene-Yield": "65b5e77682d59b05e23f3d248765fb4986499a8e",
+        "Cyrene-Reactor": "470cec30bc09c2ba0b1fd62da47152ffd27b41bb",
+        "Cyrene-Yield": "5c492b0932d0598ca140333611b2de6d85a6c458",
         "Cyrene-Exchange": "7f1823f6eabe9956ff40cc2e4aa9035197b51e83",
-        "Cyrene-Catalyst": "6f999daacf8a2afd76033bfc5d0d7bcf68202de1",
+        "Cyrene-Catalyst": "4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b",
         "Cyrene-Echo": "7480d72c3d2520ccf7684ae43e2f2558c5c6e828",
-        "Cyrene-Navigator": "04e84f7b7943bbe0d60604ff65194904b37ad821",
+        "Cyrene-Navigator": "d7c33d47dff899e26f3f8b1ef8c028373b826392",
         "Cyrene-Client": "9c51a27540951589157926d1ee717d912ed22fc2",
     }
     expected_connection_protocol_hashes = {
