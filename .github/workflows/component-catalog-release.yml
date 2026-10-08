@@ -68,8 +68,8 @@ jobs:
       SOURCE_COMMIT: ${{ github.sha }}
       SOURCE_REF: ${{ github.ref }}
       REQUESTED_CHANNEL: ${{ inputs.channel || 'auto' }}
-      RAW_ASSET: component-catalog-v1.json
-      BUNDLE_ASSET: component-catalog-v1.json.attestation.jsonl
+      RAW_ASSET: component-catalog-v2.json
+      BUNDLE_ASSET: component-catalog-v2.json.attestation.jsonl
 
     steps:
       - name: Check out the exact source commit
@@ -264,7 +264,7 @@ jobs:
           source_ref = os.environ["SOURCE_REF"]
           channel = "preview" if source_ref == "refs/heads/develop" else "stable"
           digest = hashlib.sha256(asset_bytes).hexdigest()
-          tag = f"catalog-{channel}-{os.environ['SOURCE_COMMIT']}"
+          tag = f"catalog-v2-{channel}-{os.environ['SOURCE_COMMIT']}"
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"channel={channel}\n")
               output.write(f"prerelease={'true' if channel == 'preview' else 'false'}\n")
@@ -309,7 +309,7 @@ jobs:
           bundle_name = os.environ["BUNDLE_ASSET"]
           workflow = f"{repository}/.github/workflows/component-catalog-release.yml"
           predicate = "https://slsa.dev/provenance/v1"
-          tag_pattern = re.compile(r"^catalog-(stable|preview)-([0-9a-f]{40})$")
+          tag_pattern = re.compile(r"^catalog-(?:v2-)?(stable|preview)-([0-9a-f]{40})$")
           allowed_refs = {
               "stable": ("refs/heads/main", "refs/heads/release"),
               "preview": ("refs/heads/develop",),
@@ -373,6 +373,12 @@ jobs:
               asset_names = {asset.get("name") for asset in release_assets}
               if release.get("tag_name") != tag:
                   raise RuntimeError(f"release lookup returned the wrong tag for {tag}")
+              match = tag_pattern.fullmatch(tag)
+              if match is None or match.group(1) != channel_name:
+                  raise RuntimeError(f"catalog release {tag} has an invalid source tag or channel")
+              expected_raw = "component-catalog-v2.json" if tag.startswith("catalog-v2-") else "component-catalog-v1.json"
+              if selected_raw != expected_raw:
+                  raise RuntimeError(f"catalog release {tag} tag and schema asset version do not match")
               if release.get("draft") is not False or release.get("immutable") is not True:
                   raise RuntimeError(f"catalog release {tag} is not published and immutable")
               if release.get("prerelease") is not (channel_name == "preview"):
@@ -416,6 +422,9 @@ jobs:
                   generation = catalog.get("generation") if isinstance(catalog, dict) else None
                   if type(generation) is not int or generation <= 0:
                       raise RuntimeError(f"immutable catalog release {tag} has an invalid generation")
+                  schema_version = catalog.get("schemaVersion")
+                  if type(schema_version) is not int or selected_raw != f"component-catalog-v{schema_version}.json":
+                      raise RuntimeError(f"immutable catalog release {tag} bytes and asset version do not match")
                   verify_bundle(raw_path, bundle_path, source_sha, channel_name)
                   return generation, digest
 
@@ -479,6 +488,7 @@ jobs:
           python - <<'PY'
           import json
           import os
+          import time
           from urllib.error import HTTPError
           from urllib.parse import quote
           from urllib.request import Request, urlopen
@@ -530,7 +540,14 @@ jobs:
           actual = tag_commit()
           if actual is None:
               api("POST", "git/refs", {"ref": f"refs/tags/{tag}", "sha": source_commit})
-              actual = tag_commit()
+              # A newly created reference can briefly return 404 on read-back.
+              # 新引用可短暂不可见；重试只读取，不移动或覆盖已有标签。
+              for delay in (0, 1, 2, 4):
+                  if delay:
+                      time.sleep(delay)
+                  actual = tag_commit()
+                  if actual is not None:
+                      break
           if actual != source_commit:
               raise RuntimeError(f"source tag {tag} resolves to {actual}, expected {source_commit}")
           print(f"Verified {tag} -> {source_commit}")

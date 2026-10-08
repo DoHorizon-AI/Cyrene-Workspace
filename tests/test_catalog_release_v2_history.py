@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import textwrap
 from pathlib import Path
 
@@ -23,11 +24,20 @@ def _history_gate() -> dict[str, object]:
     selected = [
         node
         for node in parsed.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name in {"catalog_asset_names", "check_release_metadata"}
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name in {"catalog_asset_names", "check_release_metadata"}
+        )
+        or (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "tag_pattern"
+                for target in node.targets
+            )
+        )
     ]
-    assert len(selected) == 2
-    namespace: dict[str, object] = {}
+    assert len(selected) == 3
+    namespace: dict[str, object] = {"re": re}
     # Execute only the two reviewed functions from the versioned local workflow.
     exec(  # noqa: S102 - exercises the exact release gate without invoking its network code
         compile(ast.Module(body=selected, type_ignores=[]), str(WORKFLOW), "exec"), namespace
@@ -39,7 +49,7 @@ def _release(version: int = 2) -> dict[str, object]:
     """Return published GitHub release metadata with the selected exact asset pair."""
     name = f"component-catalog-v{version}.json"
     return {
-        "tag_name": "catalog-preview-" + "a" * 40,
+        "tag_name": ("catalog-v2-preview-" if version == 2 else "catalog-preview-") + "a" * 40,
         "draft": False,
         "immutable": True,
         "prerelease": True,
@@ -99,3 +109,30 @@ def test_history_rejects_incomplete_uploads_and_wrong_tag() -> None:
         gate(release, release["tag_name"], "preview")
     with pytest.raises(RuntimeError, match="wrong tag"):
         gate(_release(), "catalog-preview-" + "b" * 40, "preview")
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_catalog_tag_cannot_claim_another_schema_version(version: int) -> None:
+    """Separate immutable namespaces protect publishers still pinned to v1 discovery."""
+    release = _release(version)
+    other_version = 1 if version == 2 else 2
+    release["tag_name"] = _release(other_version)["tag_name"]
+    with pytest.raises(RuntimeError, match="tag and schema asset version"):
+        _history_gate()["check_release_metadata"](release, release["tag_name"], "preview")
+
+
+@pytest.mark.parametrize("tag", ["catalog-v3-preview-" + "a" * 40, "catalog-v2-preview-deadbeef"])
+def test_history_rejects_unknown_or_partial_source_tags(tag: str) -> None:
+    """Only exact source SHA tags in the two published namespaces are accepted."""
+    release = _release()
+    release["tag_name"] = tag
+    with pytest.raises(RuntimeError, match="invalid source tag"):
+        _history_gate()["check_release_metadata"](release, tag, "preview")
+
+
+def test_source_tag_must_match_the_asserted_channel() -> None:
+    """A stable prerelease flag cannot disguise a preview source namespace."""
+    release = _release()
+    release["prerelease"] = False
+    with pytest.raises(RuntimeError, match="invalid source tag or channel"):
+        _history_gate()["check_release_metadata"](release, release["tag_name"], "stable")
