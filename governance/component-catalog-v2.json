@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generation": 14,
+  "generation": 15,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -155,6 +155,19 @@
       "hostSupport": "supported"
     },
     {
+      "id": "linux-ubuntu-24.04-x86_64-node-24",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "node:24"
+      },
+      "hostSupport": "supported"
+    },
+    {
       "id": "linux-ubuntu-24.04-x86_64-oci",
       "target": {
         "os": "linux",
@@ -254,6 +267,16 @@
       "id": "official-client-workspace-web",
       "repository": "DoHorizon-AI/Cyrene-Client",
       "workflow": "DoHorizon-AI/Cyrene-Client/.github/workflows/workspace-web-release.yml",
+      "tagFormat": "component-source-sha",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Client/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "id": "official-client-workspace-control",
+      "repository": "DoHorizon-AI/Cyrene-Client",
+      "workflow": "DoHorizon-AI/Cyrene-Client/.github/workflows/workspace-control-release.yml",
       "tagFormat": "component-source-sha",
       "releaseDiscovery": {
         "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Client/releases?per_page=100",
@@ -1317,6 +1340,36 @@
         }
       },
       "protocolVersion": "cyrene.static-web.v1"
+    },
+    {
+      "componentId": "cyrene-client-workspace-control",
+      "kind": "native-binary",
+      "role": "service",
+      "publisher": "DoHorizon-AI/Cyrene-Client",
+      "publisherId": "official-client-workspace-control",
+      "artifactKinds": [
+        "native-binary"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-node-24",
+          "artifactKind": "native-binary",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "single-service",
+        "unit": "cyrene-client-workspace-control.service"
+      },
+      "dependencies": [],
+      "systemdUnit": "cyrene-client-workspace-control.service",
+      "protocolVersion": "cyrene.client.studio-control.v1",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-client-workspace-control-",
+          "stable": "stable-cyrene-client-workspace-control-"
+        }
+      }
     }
   ],
   "compatibilityGroups": [
@@ -1478,6 +1531,7 @@
       ],
       "requiredComponents": [
         "cyrene-catalyst",
+        "cyrene-client-workspace-control",
         "cyrene-client-workspace-web",
         "cyrene-runtime-maintenance-sdk"
       ],
@@ -1502,6 +1556,10 @@
         {
           "componentId": "cyrene-client-workspace-web",
           "targetId": "linux-ubuntu-24.04-x86_64-web"
+        },
+        {
+          "componentId": "cyrene-client-workspace-control",
+          "targetId": "linux-ubuntu-24.04-x86_64-node-24"
         },
         {
           "componentId": "cyrene-tools-dataset-generation",
