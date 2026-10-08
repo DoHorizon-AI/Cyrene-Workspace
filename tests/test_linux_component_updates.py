@@ -106,6 +106,653 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
     )
 
 
+def test_workload_catalyst_token_projection_never_journals_bearer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    token = "t" * 64
+    group_id = 1234
+    monkeypatch.setattr(
+        updater,
+        "_workload_catalyst_token_configuration",
+        lambda *, generate: (token, updates.DEFAULT_CATALYST_API_TOKEN, group_id),
+    )
+    monkeypatch.setattr(updater, "_ensure_workload_config_directory", lambda *args, **kwargs: None)
+    monkeypatch.setattr(updater, "_daemon_reload", lambda: None)
+    written: dict[str, bytes] = {}
+
+    def write_config(transaction, _transaction_path, *, path, content, group_id, mode, entry_kind):
+        written[str(path)] = content
+        digest = "sha256:" + updates.hashlib.sha256(content).hexdigest()
+        if entry_kind != "catalyst-api-token":
+            transaction.setdefault("managedConfigFiles", []).append(
+                {
+                    "path": str(path),
+                    "kind": entry_kind,
+                    "priorDigest": None,
+                    "writtenDigest": digest,
+                    "mode": mode,
+                    "groupId": group_id,
+                }
+            )
+        return digest
+
+    monkeypatch.setattr(updater, "_write_workload_managed_config", write_config)
+    transaction: dict[str, object] = {}
+    journal_path = tmp_path / "transaction.json"
+    identity = updater._project_workload_catalyst_auth(transaction, journal_path)
+
+    assert written[str(updates.DEFAULT_CATALYST_API_TOKEN)] == f"{token}\n".encode()
+    assert written[str(updates.DEFAULT_CATALYST_AUTH_ENVIRONMENT)] == (
+        f"CYRENE_DATA_TOOLS_TOKEN={token}\n".encode()
+    )
+    assert written[str(updates.DEFAULT_STUDIO_CONTROL_ENVIRONMENT)] == (
+        "STUDIO_CATALYST_URL=http://127.0.0.1:8004\n"
+        f"STUDIO_CATALYST_API_TOKEN_FILE={updates.DEFAULT_CATALYST_API_TOKEN}\n"
+    ).encode()
+    assert transaction["catalystAuth"] == identity
+    assert all(
+        item["kind"] != "catalyst-api-token"
+        for item in transaction.get("managedConfigFiles", [])
+    )
+    assert token not in json.dumps(transaction)
+    assert token not in journal_path.read_text(encoding="utf-8")
+
+
+def test_workload_catalyst_auth_reuses_protected_service_owned_token_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    group_id = 1234
+    user_id = 5678
+    token = "a" * 64
+    files = {
+        updates.DEFAULT_CATALYST_API_TOKEN: (token + "\n").encode(),
+        updates.DEFAULT_CATALYST_AUTH_ENVIRONMENT: f"CYRENE_DATA_TOOLS_TOKEN={token}\n".encode(),
+        updates.DEFAULT_STUDIO_CONTROL_ENVIRONMENT: (
+            "STUDIO_CATALYST_URL=http://127.0.0.1:8004\n"
+            f"STUDIO_CATALYST_API_TOKEN_FILE={updates.DEFAULT_CATALYST_API_TOKEN}\n"
+        ).encode(),
+    }
+    monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=group_id))
+    monkeypatch.setattr(updates.pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=user_id))
+    monkeypatch.setattr(updater, "_check_workload_catalyst_auth_conflicts", lambda _gid: None)
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda path, **_kwargs: files.get(path),
+    )
+    monkeypatch.delenv("CYRENE_DATA_TOOLS_TOKEN", raising=False)
+
+    assert updater._workload_catalyst_token_configuration(generate=False) == (
+        token,
+        updates.DEFAULT_CATALYST_API_TOKEN,
+        group_id,
+    )
+
+
+def test_workload_managed_token_writer_accepts_exact_cyrene_0600_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    token = "b" * 64
+    group_id = 1234
+    user_id = 5678
+    token_path = updates.DEFAULT_CATALYST_API_TOKEN
+    allowed: set[tuple[int, int, int]] = set()
+
+    def read_protected(_path, *, allowed_identities, **_kwargs):
+        allowed.update(allowed_identities)
+        return f"{token}\n".encode()
+
+    monkeypatch.setattr(updates.pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=user_id))
+    monkeypatch.setattr(updater, "_read_workload_protected_file", read_protected)
+    transaction: dict[str, object] = {}
+    digest = updater._write_workload_managed_config(
+        transaction,
+        tmp_path / "transaction.json",
+        path=token_path,
+        content=f"{token}\n".encode(),
+        group_id=group_id,
+        mode=0o640,
+        entry_kind="catalyst-api-token",
+    )
+
+    assert digest == "sha256:" + updates.hashlib.sha256(f"{token}\n".encode()).hexdigest()
+    assert (user_id, group_id, 0o600) in allowed
+    assert transaction.get("managedConfigFiles", []) == []
+
+
+def test_workload_auth_preflight_rejects_token_in_general_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    token = "c" * 64
+
+    def read_protected(path, **_kwargs):
+        if path == Path("/etc/cyrene/cyrene.env"):
+            return f"CYRENE_DATA_TOOLS_TOKEN={token}\n".encode()
+        return None
+
+    monkeypatch.setattr(updater, "_read_workload_protected_file", read_protected)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._check_workload_catalyst_auth_conflicts(1234)
+
+    assert error.value.code == "CATALYST_AUTH_CONFIGURATION_CONFLICT"
+
+
+def test_workload_package_daemon_stop_requires_fresh_owner_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "active")
+
+    class Resolver:
+        @staticmethod
+        def potential_component_ids(_catalog, _workload_id):
+            return ("cyrene-tools-dataset-preparation",)
+
+    monkeypatch.setattr(updater, "_load_workload_resolver", lambda: Resolver())
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_package_inventory",
+        lambda _workload, _components: {
+            "sourceBindings": [
+                {
+                    "sourceId": "cyrene-plugin-standalone-operator",
+                    "bindingId": "cyrene-plugin-owner-dataset-preparation",
+                    "state": "RUNNING",
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_inventory_before_daemon_stop("plugins")
+
+    assert error.value.code == "COMPONENT_IN_USE"
+
+
+def _sdk_identity(
+    component: dict[str, object], *, source_plan_id: str = "plan-" + "a" * 32
+) -> dict[str, object]:
+    index_identity = component["indexIdentity"]
+    return {
+        **component,
+        "artifactDigest": component["digest"],
+        "releaseIdentity": component["manifestDigest"],
+        "releaseTag": index_identity["releaseTag"],
+        "installed": True,
+        "active": True,
+        "verification": {"identityAttested": True},
+        "identityAttested": True,
+        "pythonPath": "/opt/cyrene/workload-operator/releases/test/venv/bin/python",
+        "receiptPath": "/opt/cyrene/workload-operator/releases/test/.workload-sdk-install.json",
+        "sourceIdentity": {
+            "artifactDigest": component["digest"],
+            "manifestDigest": component["manifestDigest"],
+            "manifestAssetDigest": component["manifestAssetDigest"],
+            "releaseId": component["releaseId"],
+            "planId": source_plan_id,
+            "planDigest": "sha256:" + "f" * 64,
+        },
+    }
+
+
+def _sdk_selected_identity(*, version: str = "0.1.0") -> dict[str, object]:
+    manifest_digest = "sha256:" + ("a" if version == "0.1.0" else "b") * 64
+    asset_digest = "sha256:" + ("c" if version == "0.1.0" else "d") * 64
+    artifact_digest = "sha256:" + ("e" if version == "0.1.0" else "f") * 64
+    release_tag = f"preview-cyrene-runtime-maintenance-sdk-{version}-" + "1" * 40
+    publisher = {
+        "id": "official-platform-runtime-maintenance-sdk",
+        "repository": "DoHorizon-AI/Cyrene-Platform",
+        "workflow": "DoHorizon-AI/Cyrene-Platform/.github/workflows/runtime-maintenance-sdk-release.yml",
+        "tagFormat": "component-source-sha",
+    }
+    return {
+        "componentId": "cyrene-runtime-maintenance-sdk",
+        "artifactKind": "python-bundle",
+        "version": version,
+        "targetId": "linux-ubuntu-24.04-x86_64-python-3.12-library",
+        "releaseId": "preview-cyrene-runtime-maintenance-sdk-" + version + "-" + "1" * 40,
+        "manifestUri": "https://example.invalid/component-release-manifest-v2.json",
+        "manifestDigest": manifest_digest,
+        "manifestAssetDigest": asset_digest,
+        "digest": artifact_digest,
+        "indexIdentity": {
+            "assetName": "component-release-index-v1.json",
+            "assetUri": "https://example.invalid/component-release-index-v1.json",
+            "assetDigest": "sha256:" + "2" * 64,
+            "indexDigest": "sha256:" + "3" * 64,
+            "releaseTag": release_tag,
+            "publisherIdentity": publisher,
+        },
+        "publisherIdentity": publisher,
+        "attestationRef": {
+            "repository": publisher["repository"],
+            "workflow": publisher["workflow"],
+            "sourceCommit": "1" * 40,
+            "subjectName": "component-release-manifest-v2.json",
+            "subjectDigest": asset_digest,
+        },
+    }
+
+
+def test_workload_sdk_prepare_journals_prior_before_activation_and_resumes_readback(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "a" * 32
+    plan_digest = "sha256:" + "f" * 64
+    selected = _sdk_selected_identity()
+    staged_identity = {
+        "archivePath": "/var/lib/cyrene-updates/plans/test/sdk.tar.gz",
+        "bundlePath": "/var/lib/cyrene-updates/plans/test/sdk-bundle",
+        "wheelPath": "/var/lib/cyrene-updates/plans/test/sdk-bundle/cyrene_runtime_maintenance-0.1.0-py3-none-any.whl",
+        "wheelDigest": "sha256:" + "9" * 64,
+        "planId": plan_id,
+        "planDigest": plan_digest,
+    }
+    staged = {"status": "staged", "stagedIdentity": staged_identity}
+    prior = _sdk_identity(_sdk_selected_identity(version="0.0.9"), source_plan_id="plan-" + "0" * 32)
+    prepared = _sdk_identity(selected)
+    transaction_path = updater._private_state_directory("transactions") / f"{plan_id}.json"
+    transaction = {"planId": plan_id, "planDigest": plan_digest, "phase": "applying"}
+    updates._atomic_json(transaction_path, transaction)
+
+    class SdkModule:
+        current = prior
+        calls = 0
+
+        @classmethod
+        def read_workload_sdk_environment(cls):
+            return cls.current
+
+        @classmethod
+        def prepare_workload_sdk_environment(cls, _component, _staged):
+            journal = json.loads(transaction_path.read_text(encoding="utf-8"))
+            assert journal["sdkPrepareIntent"]["priorIdentity"] == prior
+            assert journal["sdkPrepareIntent"]["status"] == "pending"
+            cls.calls += 1
+            cls.current = prepared
+            raise RuntimeError("simulated process failure after current pointer switch")
+
+        @classmethod
+        def restore_workload_sdk_environment(cls, prior_identity, *, expected_current):
+            assert prior_identity == prior
+            assert expected_current == cls.current == prepared
+            cls.current = prior
+            return prior
+
+    updater._load_workload_sdk_environment = lambda: SdkModule
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._prepare_workload_sdk_durably(
+            transaction,
+            transaction_path,
+            SdkModule,
+            selected,
+            staged,
+            plan_id=plan_id,
+            plan_digest=plan_digest,
+        )
+    assert error.value.code == "WORKLOAD_SDK_INSTALL_FAILED"
+    assert SdkModule.calls == 1
+
+    recovered = updater._prepare_workload_sdk_durably(
+        transaction,
+        transaction_path,
+        SdkModule,
+        selected,
+        staged,
+        plan_id=plan_id,
+        plan_digest=plan_digest,
+    )
+    assert recovered == prepared
+    assert SdkModule.calls == 1
+    journal = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert journal["sdkPrepareIntent"]["status"] == "prepared"
+    assert journal["sdkEnvironment"] == prepared
+
+    updater._restore_workload_sdk_environment(transaction, transaction_path)
+    assert SdkModule.current == prior
+    journal = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert journal["sdkPrepareIntent"]["status"] == "restored"
+    assert journal["sdkEnvironmentRestored"] == prior
+
+
+def test_source_update_intent_reconcile_returns_committed_result_without_reprojection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "a" * 32
+    plan_digest = "sha256:" + "b" * 64
+    phase = "package-only"
+    result = {
+        "catalogGeneration": 6,
+        "catalogDigest": "sha256:" + "c" * 64,
+        "policyGeneration": 6,
+        "policyDigest": "sha256:" + "d" * 64,
+        "sourceIdentities": [],
+        "bindings": [],
+    }
+    source_identity = {"cyrene-catalyst": {"uid": 12001, "gid": 12002, "source_token_sha256": "e" * 64}}
+    intent = {
+        "schemaVersion": 1,
+        "phase": phase,
+        "requestId": "cyrene-wsource-package-only-" + "a" * 32,
+        "previousCatalogGeneration": 5,
+        "expectedCatalogGeneration": 6,
+        "previousPolicyDigest": "sha256:" + "f" * 64,
+        "bindingScopes": {"cyrene-catalyst": []},
+        "sourceIdentity": source_identity,
+        "sourceArguments": ["--source", "cyrene-catalyst=12001:12002"],
+        "runtimeBindings": {"cyrene-catalyst": []},
+        "changed": True,
+        "selectedBindings": [],
+        "componentArtifactDigests": {"cyrene-tools-dataset-preparation": "sha256:" + "9" * 64},
+        "requiredHoldComponentIds": ["cyrene-tools-dataset-preparation"],
+        "parentPlanId": plan_id,
+        "parentPlanDigest": plan_digest,
+    }
+    transaction = {
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "maintenanceToken": "held-token-private",
+        "sourceUpdateIntent": intent,
+        "sourceUpdateIntents": {phase: intent},
+    }
+    transaction_path = updater._private_state_directory("transactions") / f"{plan_id}.json"
+    updates._atomic_json(transaction_path, transaction)
+
+    captured: dict[str, object] = {}
+
+    class SourceUpdate:
+        def __init__(self, **fields: object) -> None:
+            captured["update"] = fields
+
+    class RuntimeHelper:
+        WorkloadSourceUpdate = SourceUpdate
+
+        @staticmethod
+        def reconcile_workload_source_update(update: SourceUpdate, **kwargs: object) -> dict[str, object]:
+            captured["reconcile"] = kwargs
+            assert captured["update"]["expected_generation"] == 6
+            return result
+
+    monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: RuntimeHelper)
+    monkeypatch.setattr(updater, "_workload_hold_echo", lambda _transaction: {"transaction_id": "held"})
+    generation_writes: list[int] = []
+    monkeypatch.setattr(
+        updater,
+        "_write_workload_activity_generation",
+        lambda generation, **_kwargs: generation_writes.append(generation),
+    )
+
+    recovered = updater._update_workload_source_policy(
+        transaction,
+        transaction_path,
+        source_policy={},
+        selected_rows=[],
+        installation_records={},
+        phase=phase,
+    )
+
+    assert recovered == result
+    assert captured["reconcile"]["activity_catalog_path"] == updater.activity_catalog_path
+    assert generation_writes == [6]
+    assert transaction["sourceUpdateIntents"][phase]["committed"] is True
+    assert transaction["sourceUpdateIntents"][phase]["result"] == result
+    assert transaction["sourceUpdates"][phase] == result
+
+
+def test_legacy_source_update_intent_persists_success_history_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "a" * 32
+    plan_digest = "sha256:" + "b" * 64
+    phase = "core-runtime"
+    component_id = "cyrene-client-workspace-control"
+    digest = "sha256:" + "c" * 64
+    prior_policy_digest = "sha256:" + "d" * 64
+    source_identity = {
+        "cyrene-catalyst": {
+            "uid": 12001,
+            "gid": 12002,
+            "source_token_sha256": "e" * 64,
+        }
+    }
+    binding_scopes = {"cyrene-catalyst": []}
+    runtime_bindings = {"cyrene-catalyst": []}
+    source_arguments = ("--source", "cyrene-catalyst=12001:12002")
+    selected_bindings: tuple[dict[str, str], ...] = ()
+    component_artifact_digests = {component_id: digest}
+    required_hold_component_ids = (component_id,)
+    update = SimpleNamespace(
+        source_arguments=source_arguments,
+        binding_scopes=binding_scopes,
+        source_identity=source_identity,
+        runtime_bindings=runtime_bindings,
+        expected_generation=6,
+        changed=True,
+        previous_policy_digest=prior_policy_digest,
+        selected_binding_ids=selected_bindings,
+        component_artifact_digests=component_artifact_digests,
+        required_hold_component_ids=required_hold_component_ids,
+    )
+    intent = {
+        "schemaVersion": 1,
+        "phase": phase,
+        "requestId": "cyrene-wsource-core-runtime-" + "a" * 32,
+        "previousCatalogGeneration": 5,
+        "expectedCatalogGeneration": 6,
+        "previousPolicyDigest": prior_policy_digest,
+        "bindingScopes": binding_scopes,
+        "sourceIdentity": source_identity,
+        "sourceArguments": list(source_arguments),
+        "runtimeBindings": runtime_bindings,
+        "changed": True,
+        "selectedBindings": [],
+        "componentArtifactDigests": component_artifact_digests,
+        "requiredHoldComponentIds": [component_id],
+        "parentPlanId": plan_id,
+        "parentPlanDigest": plan_digest,
+    }
+    transaction = {
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "maintenanceToken": "held-token-private",
+        "sourceUpdateIntent": intent,
+    }
+    transaction_path = updater._private_state_directory("transactions") / f"{plan_id}.json"
+    updates._atomic_json(transaction_path, transaction)
+
+    result = {
+        "catalogGeneration": 6,
+        "catalogDigest": "sha256:" + "f" * 64,
+        "policyGeneration": 6,
+        "policyDigest": "sha256:" + "1" * 64,
+        "sourceIdentities": [],
+        "bindings": [],
+    }
+
+    class RuntimeHelper:
+        class WorkloadSourceUpdate:
+            def __init__(self, **_fields: object) -> None:
+                pass
+
+        @staticmethod
+        def reconcile_workload_source_update(_update: object, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def build_workload_source_update(**_kwargs: object) -> SimpleNamespace:
+            return update
+
+        @staticmethod
+        def apply_workload_source_update(_update: object, **_kwargs: object) -> dict[str, object]:
+            return result
+
+    monkeypatch.setattr(
+        updater,
+        "_workload_source_state",
+        lambda _workload_id: ({"generation": 5}, {}, {}, RuntimeHelper),
+    )
+    monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: RuntimeHelper)
+    monkeypatch.setattr(updater, "_workload_hold_echo", lambda _transaction: {"transaction_id": "held"})
+    monkeypatch.setattr(updater, "_write_workload_activity_generation", lambda *_args, **_kwargs: None)
+
+    applied = updater._update_workload_source_policy(
+        transaction,
+        transaction_path,
+        source_policy={},
+        selected_rows=[],
+        installation_records={},
+        phase=phase,
+    )
+
+    assert applied == result
+    assert transaction["sourceUpdateIntents"][phase]["committed"] is True
+    assert transaction["sourceUpdateIntents"][phase]["result"] == result
+    assert transaction["sourceUpdateIntent"] == transaction["sourceUpdateIntents"][phase]
+
+
+def test_workload_receipt_upgrade_persists_exact_raw_release_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    artifact_digest = "sha256:" + "a" * 64
+    manifest_asset_digest = "sha256:" + "b" * 64
+    manifest = {
+        "schemaVersion": 2,
+        "releaseId": "preview-cyrene-client-workspace-web-" + "c" * 40,
+        "componentId": "cyrene-client-workspace-web",
+        "version": "0.1.0",
+        "channel": "preview",
+        "target": {"os": "linux", "architecture": "x86_64", "runtime": "static-web"},
+        "contentDigest": artifact_digest,
+        "artifact": {
+            "kind": "static-web",
+            "format": "tar.gz",
+            "uri": "https://example.invalid/release.tar.gz",
+            "sha256": artifact_digest,
+            "sizeBytes": 1,
+            "files": {"index.html": "sha256:" + "d" * 64},
+            "maxEntries": 1,
+            "maxUncompressedBytes": 128,
+            "entrypoint": "index.html",
+        },
+        "dependencies": [],
+        "restart": {"group": "none"},
+        "source": {
+            "repository": "Example-Corp/Client",
+            "ref": "refs/heads/develop",
+            "commit": "e" * 40,
+        },
+        "provenance": {},
+    }
+    manifest["manifestDigest"] = updates._digest_json(manifest, "manifestDigest")
+    base = {
+        "componentId": manifest["componentId"],
+        "version": manifest["version"],
+        "releaseIdentity": manifest["manifestDigest"],
+        "manifestDigest": manifest["manifestDigest"],
+        "artifactDigest": artifact_digest,
+        "bundleIdentity": None,
+        "manifest": manifest,
+    }
+    updater._write_release_receipt(base)
+    evidence = {
+        **base,
+        "releaseId": manifest["releaseId"],
+        "targetId": "linux-ubuntu-24.04-x86_64-web",
+        "manifestAssetDigest": manifest_asset_digest,
+        "manifestUri": "https://example.invalid/component-release-manifest-v2.json",
+        "releaseTag": manifest["releaseId"],
+        "indexIdentity": {
+            "assetName": "component-release-index-v1.json",
+            "assetDigest": "sha256:" + "f" * 64,
+        },
+        "publisherIdentity": {
+            "id": "official-client-workspace-web",
+            "repository": "Example-Corp/Client",
+            "workflow": "Example-Corp/Client/.github/workflows/web.yml",
+            "tagFormat": "component-source-sha",
+        },
+        "attestationRef": {
+            "repository": "Example-Corp/Client",
+            "workflow": "Example-Corp/Client/.github/workflows/web.yml",
+            "sourceCommit": "e" * 40,
+            "subjectName": "component-release-manifest-v2.json",
+            "subjectDigest": manifest_asset_digest,
+        },
+        "releasePath": str(tmp_path / "web" / "releases" / "release"),
+        "archivePath": str(tmp_path / "stage" / "release.tar.gz"),
+        "pointerIdentity": "release",
+    }
+    updater._write_release_receipt(evidence)
+    updater._write_active_receipt(evidence)
+
+    receipt = updater._read_release_receipt(manifest["componentId"], manifest["manifestDigest"])
+    assert receipt is not None
+    assert receipt["schemaVersion"] == 2
+    assert receipt["manifestAssetDigest"] == manifest_asset_digest
+    assert receipt["targetId"] == "linux-ubuntu-24.04-x86_64-web"
+    active = updater._read_active_receipt(manifest["componentId"])
+    assert active == receipt
+    active_path = updater._installed_component_directory(manifest["componentId"]) / "active.json"
+    assert json.loads(active_path.read_text(encoding="utf-8")) == {
+        "schemaVersion": 1,
+        "componentId": manifest["componentId"],
+        "releaseIdentity": manifest["manifestDigest"],
+        "bundleIdentity": None,
+    }
+
+    updater.components = {
+        manifest["componentId"]: {
+            "componentId": manifest["componentId"],
+            "kind": "static-web",
+        }
+    }
+    monkeypatch.setattr(
+        updater,
+        "_installed_static_web",
+        lambda _component: {
+            "active": True,
+            "activeVersion": manifest["version"],
+            "manifest": manifest,
+            "manifestDigest": manifest["manifestDigest"],
+            "releaseIdentity": manifest["manifestDigest"],
+            "artifactDigest": artifact_digest,
+            "pointerIdentity": "release",
+            "bundleIdentity": None,
+        },
+    )
+    monkeypatch.setattr(updater, "_reload_catalog_for_operation", lambda: None)
+    status = updater.workload_status()
+    row = next(row for row in status["components"] if row["componentId"] == manifest["componentId"])
+    assert row["installed"] is True
+    assert row["version"] == manifest["version"]
+    assert row["releaseId"] == manifest["releaseId"]
+    assert row["targetId"] == "linux-ubuntu-24.04-x86_64-web"
+    assert row["manifestDigest"] == manifest["manifestDigest"]
+    assert row["manifestAssetDigest"] == manifest_asset_digest
+    assert row["digest"] == artifact_digest
+    assert row["installationId"] is None
+    assert row["verification"] == {"identityAttested": True}
+
+    inventory, _package_inventory = updater._installed_workload_components(
+        (manifest["componentId"],), workload_id="catalyst"
+    )
+    assert inventory[manifest["componentId"]]["releaseId"] == manifest["releaseId"]
+    assert inventory[manifest["componentId"]]["manifestAssetDigest"] == manifest_asset_digest
+    assert inventory[manifest["componentId"]]["targetId"] == "linux-ubuntu-24.04-x86_64-web"
+
+
 def test_workspace_bootstrap_uses_the_compiled_catalog_authority_pin(tmp_path: Path) -> None:
     updater = updates.ComponentUpdater(
         catalog_path=updates.DEFAULT_CATALOG,
@@ -119,6 +766,239 @@ def test_workspace_bootstrap_uses_the_compiled_catalog_authority_pin(tmp_path: P
 
     assert updater.bootstrap_catalog_digest == updates.TRUSTED_CATALOG_DIGEST
     assert updater.catalog_generation == 13
+
+
+@pytest.mark.parametrize(
+    ("tag_format", "prefix", "version", "expected_tag"),
+    [
+        ("source-sha", "preview-example-component-", None, "preview-example-component-" + "a" * 40),
+        (
+            "component-source-sha",
+            "preview-example-component-",
+            None,
+            "preview-example-component-" + "a" * 40,
+        ),
+        (
+            "component-version-source-sha",
+            "preview-example-component-",
+            "0.2.0",
+            "preview-example-component-0.2.0-" + "a" * 40,
+        ),
+    ],
+)
+def test_index_release_tag_uses_exact_catalog_publisher_format(
+    tmp_path: Path,
+    tag_format: str,
+    prefix: str,
+    version: str | None,
+    expected_tag: str,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    updater.catalog = {"channels": {"preview": {"sourceRefs": ["refs/heads/develop"]}}}
+    component = {
+        "componentId": "example-component",
+        "releaseDiscovery": {
+            "tagPrefixes": {
+                "preview": prefix,
+                "stable": "stable-example-component-",
+            }
+        },
+    }
+    publisher = {
+        "repository": "Example-Corp/Release-Assets",
+        "workflow": "Example-Corp/Release-Assets/.github/workflows/release.yml",
+        "releaseDiscovery": {"indexAssetName": "component-release-index-v1.json"},
+        "tagFormat": tag_format,
+    }
+    release_rows: list[dict[str, object]] = [{"componentId": "example-component"}]
+    if version is not None:
+        release_rows[0]["version"] = version
+    index: dict[str, object] = {
+        "schemaVersion": 1,
+        "repository": publisher["repository"],
+        "channel": "preview",
+        "source": {
+            "repository": "https://github.com/Example-Corp/Release-Assets",
+            "ref": "refs/heads/develop",
+            "commit": "a" * 40,
+        },
+        "provenance": {
+            "attestation": {
+                "kind": "github-artifact-attestation",
+                "repository": publisher["repository"],
+                "workflow": publisher["workflow"],
+                "predicateType": "https://slsa.dev/provenance/v1",
+                "subjectName": "component-release-index-v1.json",
+                "run": {
+                    "id": "123",
+                    "attempt": 1,
+                    "url": "https://github.com/Example-Corp/Release-Assets/actions/runs/123/attempts/1",
+                },
+            }
+        },
+        "releases": release_rows,
+        "compatibilityGroups": [],
+    }
+    index["indexDigest"] = updates._digest_json(index, "indexDigest")
+    updater._validate_index(
+        index,
+        publisher,
+        "preview",
+        {"tag_name": expected_tag},
+        component,
+    )
+
+
+def test_index_release_tag_rejects_unversioned_plugin_tag_and_mixed_versions(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    updater.catalog = {"channels": {"preview": {"sourceRefs": ["refs/heads/develop"]}}}
+    component = {
+        "componentId": "example-component",
+        "releaseDiscovery": {
+            "tagPrefixes": {
+                "preview": "preview-example-component-",
+                "stable": "stable-example-component-",
+            }
+        },
+    }
+    publisher = {
+        "repository": "Example-Corp/Release-Assets",
+        "workflow": "Example-Corp/Release-Assets/.github/workflows/release.yml",
+        "releaseDiscovery": {"indexAssetName": "component-release-index-v1.json"},
+        "tagFormat": "component-version-source-sha",
+    }
+    index: dict[str, object] = {
+        "schemaVersion": 1,
+        "repository": publisher["repository"],
+        "channel": "preview",
+        "source": {
+            "repository": "https://github.com/Example-Corp/Release-Assets",
+            "ref": "refs/heads/develop",
+            "commit": "a" * 40,
+        },
+        "provenance": {
+            "attestation": {
+                "kind": "github-artifact-attestation",
+                "repository": publisher["repository"],
+                "workflow": publisher["workflow"],
+                "predicateType": "https://slsa.dev/provenance/v1",
+                "subjectName": "component-release-index-v1.json",
+                "run": {
+                    "id": "123",
+                    "attempt": 1,
+                    "url": "https://github.com/Example-Corp/Release-Assets/actions/runs/123/attempts/1",
+                },
+            }
+        },
+        "releases": [
+            {"componentId": "example-component", "version": "0.2.0"},
+            {"componentId": "example-component", "version": "0.3.0"},
+        ],
+        "compatibilityGroups": [],
+    }
+    index["indexDigest"] = updates._digest_json(index, "indexDigest")
+    with pytest.raises(updates.UpdateError, match="one exact component version"):
+        updater._validate_index(
+            index,
+            publisher,
+            "preview",
+            {"tag_name": "preview-example-component-0.2.0-" + "a" * 40},
+            component,
+        )
+
+
+def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_apply() -> None:
+    updater = object.__new__(updates.ComponentUpdater)
+    updater._require_authorized_process = lambda: None
+    calls: list[tuple[str, str | None]] = []
+    updater.check_workload = lambda workload_id, target_id, selections, *, action: (
+        calls.append(("check", action)) or {"status": "ready"}
+    )
+    updater.stage_workload = lambda workload_id, target_id, plan_id, plan_digest, *, action: (
+        calls.append(("stage", action)) or {"status": "staged"}
+    )
+    updater.apply_workload = (
+        lambda workload_id, target_id, plan_id, plan_digest, confirmation, *, action: (
+            calls.append(("apply", action)) or {"status": "installed"}
+        )
+    )
+
+    common = {
+        "protocolVersion": updates.WORKLOAD_PROTOCOL_VERSION,
+        "workloadId": "plugins",
+        "targetId": updates.WORKLOAD_HOST_TARGET,
+    }
+    check = updater.handle_workload(
+        {
+            **common,
+            "operation": "check",
+            "selections": {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}},
+        }
+    )
+    uninstall_check = updater.handle_workload(
+        {
+            **common,
+            "operation": "check",
+            "action": "uninstall",
+            "selections": {
+                "includeComponentIds": ["cyrene-tools-dataset-preparation"],
+                "excludeComponentIds": [],
+                "choices": {},
+            },
+        }
+    )
+    stage = updater.handle_workload(
+        {
+            **common,
+            "operation": "stage",
+            "action": "uninstall",
+            "planId": "plan-example",
+            "planDigest": "sha256:" + "a" * 64,
+        }
+    )
+    apply = updater.handle_workload(
+        {
+            **common,
+            "operation": "apply",
+            "action": "uninstall",
+            "planId": "plan-example",
+            "planDigest": "sha256:" + "a" * 64,
+            "confirmation": {
+                "planId": "plan-example",
+                "planDigest": "sha256:" + "a" * 64,
+                "confirmed": True,
+            },
+        }
+    )
+
+    assert check["ok"] is True and check["result"]["status"] == "ready"
+    assert uninstall_check["ok"] is True
+    assert stage["ok"] is True and apply["ok"] is True
+    assert calls == [
+        ("check", "install"),
+        ("check", "uninstall"),
+        ("stage", "uninstall"),
+        ("apply", "uninstall"),
+    ]
+
+
+def test_workload_protocol_rejects_stage_without_repeated_action() -> None:
+    updater = object.__new__(updates.ComponentUpdater)
+    response = updater.handle_workload(
+        {
+            "protocolVersion": updates.WORKLOAD_PROTOCOL_VERSION,
+            "operation": "stage",
+            "workloadId": "catalyst",
+            "targetId": updates.WORKLOAD_HOST_TARGET,
+            "planId": "plan-example",
+            "planDigest": "sha256:" + "a" * 64,
+        }
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INVALID_REQUEST"
 
 
 @pytest.mark.parametrize(
@@ -384,18 +1264,17 @@ def test_fixed_json_protocol_rejects_arbitrary_fields_and_extra_lines(tmp_path: 
     assert envelope["error"]["code"] == "INVALID_REQUEST"
 
 
-def test_empty_activity_catalog_is_unknown_instead_of_idle(tmp_path: Path) -> None:
+def test_empty_activity_catalog_is_a_valid_zero_owner_scope(tmp_path: Path) -> None:
     updater = _empty_updater(tmp_path)
     updater.activity_catalog_path.write_text(
         json.dumps({"schema_version": 1, "generation": 1, "sources": []}),
         encoding="utf-8",
     )
 
-    with pytest.raises(updates.UpdateError) as error:
-        updater._activity_catalog()
+    catalog, source_ids = updater._activity_catalog()
 
-    assert error.value.code == "GATE_UNKNOWN"
-    assert "will not assume the runtime is idle" in str(error.value)
+    assert catalog["sources"] == []
+    assert source_ids == []
 
 
 def test_apply_confirmation_is_bound_to_plan_id_and_digest(tmp_path: Path) -> None:
@@ -703,6 +1582,35 @@ def test_begin_invalid_argument_clears_unacquired_journal_for_retry(
     assert not transaction_path.exists()
 
 
+def test_workload_begin_refusal_keeps_parent_journal_and_phase_identity(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "a" * 32
+    transaction_path = updater._private_state_directory("transactions") / f"{plan_id}.json"
+    transaction = {
+        "transactionKind": "workload-assembly.v1",
+        "planId": plan_id,
+        "planDigest": "sha256:" + "b" * 64,
+        "maintenancePhase": "package-only",
+        "maintenanceRequestId": f"cyrene-workload-package-only-{plan_id}",
+        "phase": "begin_pending",
+        "targetKind": "PACKAGE_ONLY",
+        "componentArtifactDigests": {"cyrene-tools-example": "sha256:" + "c" * 64},
+    }
+    updates._atomic_json(transaction_path, transaction)
+
+    updater._clear_begin_pending(transaction, transaction_path)
+
+    journal = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert journal["planId"] == plan_id
+    assert journal["phase"] == "begin_pending"
+    assert journal["maintenanceHolds"]["package-only"] == {
+        "requestId": f"cyrene-workload-package-only-{plan_id}",
+        "status": "not_acquired",
+    }
+
+
 @pytest.mark.parametrize("target_kind", ["PACKAGE_ONLY", "CORE_RUNTIME"])
 def test_end_payload_carries_stable_request_id_and_target_kind(
     tmp_path: Path,
@@ -732,6 +1640,59 @@ def test_end_payload_carries_stable_request_id_and_target_kind(
     assert params["request_id"] == transaction["requestId"]
     assert captured["envelope_request_id"] == f"cyrene-update-end-{transaction['planId']}-success"
     assert params["target_kind"] == target_kind
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "core-runtime-install",
+        "package-only",
+        "core-runtime-activate",
+        "core-runtime-uninstall",
+    ],
+)
+def test_workload_maintenance_uses_unique_phase_request_ids(phase: str) -> None:
+    plan_id = "plan-" + "a" * 32
+    transaction = {
+        "transactionKind": "workload-assembly.v1",
+        "planId": plan_id,
+        "maintenancePhase": phase,
+    }
+
+    assert updates._maintenance_request_id(transaction) == f"cyrene-workload-{phase}-{plan_id}"
+    assert transaction["maintenanceRequestId"] == f"cyrene-workload-{phase}-{plan_id}"
+
+
+def test_workload_end_maintenance_uses_phase_scoped_idempotency_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "a" * 32
+    transaction = {
+        "transactionKind": "workload-assembly.v1",
+        "planId": plan_id,
+        "maintenancePhase": "package-only",
+        "maintenanceRequestId": f"cyrene-workload-package-only-{plan_id}",
+        "targetKind": "PACKAGE_ONLY",
+        "maintenanceToken": "t" * 32,
+    }
+    captured: dict[str, object] = {}
+
+    def broker_request(method: str, params: dict[str, object], *, request_id: str | None = None):
+        captured.update(method=method, params=params, envelope_request_id=request_id)
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(updater, "_broker_request", broker_request)
+
+    updater._end_maintenance(transaction, outcome="SUCCESS", healthy=True)
+
+    params = captured["params"]
+    assert captured["method"] == "EndMaintenance"
+    assert isinstance(params, dict)
+    assert params["request_id"] == transaction["maintenanceRequestId"]
+    assert captured["envelope_request_id"] == (
+        f"cyrene-workload-end-package-only-{plan_id}-success"
+    )
 
 
 def test_privileged_helper_has_a_fixed_root_only_command() -> None:

@@ -14,6 +14,8 @@ elif [ "$#" -eq 11 ] && [ "$1" = "placement-peer-plan" ] \
     && [ "$6" = "--requester-role-id" ] && [ "$8" = "--group-id" ] \
     && [ "$10" = "--nonce" ]; then
     mode=peer
+elif [ "$#" -eq 1 ] && [ "$1" = "workload" ]; then
+    mode=workload
 elif [ "$#" -eq 13 ] && [ "$1" = "placement-peer-receipt" ] \
     && [ "$2" = "--deployment-id" ] && [ "$4" = "--requester-host-id" ] \
     && [ "$6" = "--requester-role-id" ] && [ "$8" = "--group-id" ] \
@@ -57,5 +59,9 @@ fi
     printf '%s\n' 'cyrene-component-update-helper: pinned GitHub CLI config directory is missing or unsafe.' >&2
     exit 1
 }
+
+if [ "$mode" = "workload" ]; then
+    exec /usr/bin/cyrene workload --json
+fi
 
 exec /usr/bin/cyrene update --json

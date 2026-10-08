@@ -944,3 +944,190 @@ def test_policy_reader_rejects_symlinks(
     path.symlink_to(target.name)
     with pytest.raises(bootstrap.PackageRuntimeBootstrapError, match="missing or unsafe"):
         bootstrap.read_runtime_source_policy(root=root)
+
+
+def _workload_candidate(tmp_path: Path) -> bootstrap.WorkloadPackageCandidate:
+    descriptor = tmp_path / "descriptor.json"
+    archive = tmp_path / "archive.zip"
+    descriptor.write_bytes(b"descriptor")
+    archive.write_bytes(b"archive")
+    return bootstrap.WorkloadPackageCandidate(
+        component_id="cyrene-tools-dataset-preparation",
+        package_id="cyrene.tools.dataset-preparation",
+        package_version="0.2.0",
+        capability="dataset.preparation.v1",
+        interface_version="1",
+        artifact_digest=_digest(b"member-set"),
+        archive_digest=_digest(b"archive"),
+        descriptor_digest=_digest(b"descriptor"),
+        manifest_digest=_digest(b"manifest"),
+        dependency_lock_digest=_digest(b"requirements.lock"),
+        descriptor_path=descriptor,
+        archive_path=archive,
+    )
+
+
+def _workload_maintenance(candidate: bootstrap.WorkloadPackageCandidate) -> dict[str, Any]:
+    request_id = "cyrene-workload-plan-" + "a" * 32
+    return {
+        "transaction_id": request_id,
+        "maintenance_token": "opaque-maintenance-token",
+        "target_kind": "PACKAGE_ONLY",
+        "plan_id": "plan-" + "a" * 32,
+        "plan_digest": _digest(b"plan"),
+        "component_artifact_digests": {candidate.component_id: candidate.artifact_digest},
+        "expected_gate_generation": 17,
+        "expected_catalog_generation": 9,
+    }
+
+
+def test_workload_install_request_binds_catalog_component_not_dotted_package(
+    tmp_path: Path,
+) -> None:
+    candidate = _workload_candidate(tmp_path)
+    maintenance = _workload_maintenance(candidate)
+    descriptor_path = Path(
+        "/var/lib/cyrene-updates/plugin-package-bootstrap/request/descriptor.json"
+    )
+    archive_path = Path(
+        "/var/lib/cyrene-updates/plugin-package-bootstrap/request/archive.zip"
+    )
+    request = bootstrap.build_workload_offline_install_input(
+        candidate,
+        request_id="cyrene-workload-package-" + "b" * 32,
+        maintenance=maintenance,
+        descriptor_path=descriptor_path,
+        archive_path=archive_path,
+    )
+
+    assert request["candidate"]["component_id"] == candidate.component_id
+    assert request["candidate"]["package_id"] == candidate.package_id
+    assert request["candidate"]["artifact_digest"] == candidate.artifact_digest
+    assert request["candidate"]["archive_digest"] == candidate.archive_digest
+    with pytest.raises(bootstrap.PackageRuntimeBootstrapError, match="hold differs"):
+        bootstrap.build_workload_offline_install_input(
+            candidate,
+            request_id="cyrene-workload-package-" + "c" * 32,
+            maintenance={
+                **maintenance,
+                "component_artifact_digests": {candidate.package_id: candidate.artifact_digest},
+            },
+            descriptor_path=descriptor_path,
+            archive_path=archive_path,
+        )
+
+
+def test_workload_install_receipt_preserves_distinct_artifact_and_archive_digests(
+    tmp_path: Path,
+) -> None:
+    candidate = _workload_candidate(tmp_path)
+    maintenance = _workload_maintenance(candidate)
+    descriptor_path = Path(
+        "/var/lib/cyrene-updates/plugin-package-bootstrap/request/descriptor.json"
+    )
+    archive_path = Path(
+        "/var/lib/cyrene-updates/plugin-package-bootstrap/request/archive.zip"
+    )
+    request = bootstrap.build_workload_offline_install_input(
+        candidate,
+        request_id="cyrene-workload-package-" + "d" * 32,
+        maintenance=maintenance,
+        descriptor_path=descriptor_path,
+        archive_path=archive_path,
+    )
+    installation_id = "installation-" + hashlib.sha256(
+        f"{candidate.package_id}\0{candidate.package_version}\0{candidate.artifact_digest}".encode()
+    ).hexdigest()[:32]
+    installation = {
+        "record_version": 1,
+        "installation_id": installation_id,
+        "package_id": candidate.package_id,
+        "package_version": candidate.package_version,
+        "artifact_digest": candidate.artifact_digest,
+        "archive_digest": candidate.archive_digest,
+        "capabilities": [candidate.capability],
+        "state": "INSTALLED",
+        "verification": {
+            "verifier": "package-runtime-v1",
+            "verified_at_unix_ms": 10,
+            "artifact_digest": candidate.artifact_digest,
+            "archive_digest": candidate.archive_digest,
+            "descriptor_digest": candidate.descriptor_digest,
+            "manifest_digest": candidate.manifest_digest,
+            "dependency_lock_digest": candidate.dependency_lock_digest,
+        },
+        "dependencies": {
+            "preparer": "cyrene-plugin-python-preparer",
+            "prepared_at_unix_ms": 11,
+            "lock_digest": candidate.dependency_lock_digest,
+            "runtime_digest": _digest(b"runtime"),
+            "runtime_executable": "/var/lib/cyrene/package-runtime/runtimes/python/bin/python",
+        },
+        "installed_at_unix_ms": 12,
+    }
+    result = {
+        "transaction_id": maintenance["transaction_id"],
+        "target_kind": "PACKAGE_ONLY",
+        "plan_id": maintenance["plan_id"],
+        "plan_digest": maintenance["plan_digest"],
+        "component_artifact_digests": maintenance["component_artifact_digests"],
+        "component_id": candidate.component_id,
+        "artifact_digest": candidate.artifact_digest,
+        "expected_gate_generation": maintenance["expected_gate_generation"],
+        "expected_catalog_generation": maintenance["expected_catalog_generation"],
+        "gate_generation": maintenance["expected_gate_generation"],
+        "catalog_generation": maintenance["expected_catalog_generation"],
+        "installation": installation,
+    }
+    response = {"request_id": request["request_id"], "ok": True, "result": result}
+    assert (
+        bootstrap.validate_workload_offline_install_result(candidate, request, response)
+        == installation
+    )
+    wrong_artifact = {
+        **response,
+        "result": {**result, "artifact_digest": candidate.archive_digest},
+    }
+    with pytest.raises(bootstrap.PackageRuntimeBootstrapError, match="receipt differs"):
+        bootstrap.validate_workload_offline_install_result(candidate, request, wrong_artifact)
+
+
+def test_workload_uninstall_request_requires_exact_catalog_and_installation_identity() -> None:
+    component_id = "cyrene-tools-dataset-preparation"
+    artifact_digest = _digest(b"member-set")
+    installation = {
+        "component_id": component_id,
+        "installation_id": "installation-" + "a" * 32,
+        "package_id": "cyrene.tools.dataset-preparation",
+        "package_version": "0.2.0",
+        "artifact_digest": artifact_digest,
+        "archive_digest": _digest(b"archive"),
+        "descriptor_digest": _digest(b"descriptor"),
+        "manifest_digest": _digest(b"manifest"),
+        "dependency_lock_digest": _digest(b"lock"),
+    }
+    maintenance = {
+        "transaction_id": "cyrene-workload-uninstall-" + "e" * 32,
+        "maintenance_token": "opaque-maintenance-token",
+        "target_kind": "PACKAGE_ONLY",
+        "plan_id": "plan-" + "a" * 32,
+        "plan_digest": _digest(b"plan"),
+        "component_artifact_digests": {component_id: artifact_digest},
+        "expected_gate_generation": 17,
+        "expected_catalog_generation": 9,
+    }
+    request = bootstrap.build_workload_offline_uninstall_input(
+        request_id="cyrene-workload-uninstall-" + "f" * 32,
+        maintenance=maintenance,
+        installation=installation,
+    )
+    assert request["installation"] == installation
+    with pytest.raises(bootstrap.PackageRuntimeBootstrapError, match="differs from held"):
+        bootstrap.build_workload_offline_uninstall_input(
+            request_id="cyrene-workload-uninstall-" + "f" * 32,
+            maintenance={
+                **maintenance,
+                "component_artifact_digests": {installation["package_id"]: artifact_digest},
+            },
+            installation=installation,
+        )

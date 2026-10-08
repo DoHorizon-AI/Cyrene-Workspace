@@ -1085,6 +1085,238 @@ def apply_workload_source_update(
     }
 
 
+def reconcile_workload_source_update(
+    update: WorkloadSourceUpdate,
+    *,
+    maintenance: Mapping[str, Any],
+    activity_catalog_path: Path = DEFAULT_ACTIVITY_CATALOG_PATH,
+    policy_path: Path = DEFAULT_POLICY_PATH,
+    token_directory: Path = DEFAULT_TOKEN_DIRECTORY,
+) -> dict[str, Any] | None:
+    """Finish or reject a source update interrupted after Broker commit.
+
+    The caller must first persist ``update`` in its existing transaction journal
+    before invoking ``apply_workload_source_update``.  Recovery accepts only the
+    same active hold, complete artifact map, exact projected scopes, source
+    principals, and the one expected Broker generation.  It repairs the local
+    Runtime policy only while its bytes still have the journaled prior digest.
+
+    Returns ``None`` while the Broker catalog is still at the pre-update
+    generation, allowing the caller to run the normal held update.  Returns the
+    verified update receipt when the Broker commit already happened and the
+    Runtime policy was reconciled or already matches.  Any unrelated catalog or
+    policy change fails closed.
+    """
+
+    _require_root()
+    hold = _validate_policy_update_hold(maintenance)
+    if not isinstance(update, WorkloadSourceUpdate):
+        raise WorkloadPackageRuntimeError("Source update recovery identity is malformed")
+    if type(update.expected_generation) is not int or update.expected_generation < 1:
+        raise WorkloadPackageRuntimeError("Source update recovery generation is invalid")
+    previous_generation = update.expected_generation - (1 if update.changed else 0)
+    if previous_generation < 0 or type(update.changed) is not bool:
+        raise WorkloadPackageRuntimeError("Source update prior generation is invalid")
+    if not isinstance(update.binding_scopes, Mapping) or not isinstance(update.runtime_bindings, Mapping):
+        raise WorkloadPackageRuntimeError("Source update recovery scopes are malformed")
+    source_ids = set(update.source_identity)
+    selected_keys = [
+        (row.get("componentId"), row.get("sourceId"), row.get("bindingId"))
+        for row in update.selected_binding_ids
+        if isinstance(row, Mapping)
+    ]
+    if (
+        not source_ids
+        or source_ids != set(update.binding_scopes)
+        or source_ids != set(update.runtime_bindings)
+        or len(selected_keys) != len(update.selected_binding_ids)
+        or len(selected_keys) != len(set(selected_keys))
+        or any(not all(isinstance(value, str) and value for value in key) for key in selected_keys)
+        or _broker_projection(
+            [
+                {"source_id": source_id, "bindings": bindings}
+                for source_id, bindings in update.runtime_bindings.items()
+            ]
+        ) != update.binding_scopes
+    ):
+        raise WorkloadPackageRuntimeError("Source update recovery owner identities are incomplete")
+    hold_digests = hold["component_artifact_digests"]
+    if any(
+        hold_digests.get(component_id) != digest
+        for component_id, digest in update.component_artifact_digests.items()
+    ) or any(component_id not in hold_digests for component_id in update.required_hold_component_ids):
+        raise WorkloadPackageRuntimeError("Source update recovery is outside the held artifact map")
+    if update.previous_policy_digest is not None:
+        _require_digest(update.previous_policy_digest, "prior Package Runtime policy digest")
+
+    activity_catalog_path = Path(activity_catalog_path)
+    policy_path = Path(policy_path)
+    token_directory = Path(token_directory)
+    if any(not path.is_absolute() for path in (activity_catalog_path, policy_path, token_directory)):
+        raise WorkloadPackageRuntimeError("Package Runtime recovery paths must be absolute")
+    try:
+        activity_catalog_path.lstat()
+    except FileNotFoundError:
+        if previous_generation == 0 and update.expected_generation == 1:
+            current_catalog = {"schema_version": 1, "generation": 0, "sources": []}
+        else:
+            raise WorkloadPackageRuntimeError("Runtime activity catalog is unavailable for recovery")
+    else:
+        current_catalog = _read_activity_catalog(activity_catalog_path)
+    generation, current_sources = _catalog_identity(current_catalog, allow_uninitialized=True)
+
+    _validate_recovery_source_projection(update, hold, current_sources)
+    if generation == previous_generation:
+        current_bytes = _read_policy_bytes_optional(
+            policy_path,
+            group_id=_runtime_group_id(),
+            owner_id=_effective_uid(),
+        )
+        current_digest = (
+            "sha256:" + hashlib.sha256(current_bytes).hexdigest()
+            if current_bytes is not None
+            else None
+        )
+        if current_digest != update.previous_policy_digest:
+            raise WorkloadPackageRuntimeError("Package Runtime policy changed before Broker source commit")
+        return None
+    if generation != update.expected_generation or not update.changed:
+        raise WorkloadPackageRuntimeError("Runtime activity catalog advanced to an unexpected generation")
+
+    _validate_recovery_catalog(update, current_sources, token_directory)
+    desired_policy = _policy_from_catalog_and_update(current_catalog, update)
+    policy_bytes = _read_policy_bytes_optional(
+        policy_path,
+        group_id=_runtime_group_id(),
+        owner_id=_effective_uid(),
+    )
+    current_digest = (
+        "sha256:" + hashlib.sha256(policy_bytes).hexdigest()
+        if policy_bytes is not None
+        else None
+    )
+    if policy_bytes is not None:
+        current_policy = read_runtime_source_policy_generic(policy_path)
+        try:
+            _validate_runtime_policy_against_catalog(current_policy, current_catalog)
+        except WorkloadPackageRuntimeError:
+            # A policy one generation behind the newly committed Broker catalog
+            # is the exact recoverable crash window; all other policy shapes are
+            # still rejected by the digest/CAS checks below.
+            if current_policy.get("generation") != previous_generation:
+                raise
+    else:
+        current_policy = None
+
+    desired_digest = _runtime_policy_digest(desired_policy)
+    if current_policy == desired_policy:
+        if current_digest != desired_digest:
+            raise WorkloadPackageRuntimeError("Committed Package Runtime policy bytes are not canonical")
+        new_digest = current_digest
+    else:
+        if current_digest != update.previous_policy_digest:
+            raise WorkloadPackageRuntimeError("Package Runtime policy changed outside the pending source update")
+        new_digest = write_runtime_source_policy_cas(
+            desired_policy,
+            expected_prior_digest=update.previous_policy_digest,
+            policy_path=policy_path,
+        )
+    readback_policy = read_runtime_source_policy_generic(policy_path)
+    if readback_policy != desired_policy or _runtime_policy_digest(readback_policy) != new_digest:
+        raise WorkloadPackageRuntimeError("Reconciled Package Runtime policy readback differs")
+    return {
+        "catalogGeneration": generation,
+        "catalogDigest": _file_digest(activity_catalog_path),
+        "policyGeneration": readback_policy["generation"],
+        "policyDigest": new_digest,
+        "sourceIdentities": [
+            {"sourceId": source_id, "uid": row["uid"], "gid": row["gid"]}
+            for source_id, row in sorted(current_sources.items())
+        ],
+        "bindings": [dict(row) for row in update.selected_binding_ids],
+    }
+
+
+def _validate_recovery_source_projection(
+    update: WorkloadSourceUpdate,
+    hold: Mapping[str, Any],
+    current_sources: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Bind durable source intent to the active hold and exact signed owners."""
+
+    missing_new_sources: set[str] = set()
+    for source_id, expected in update.source_identity.items():
+        if not isinstance(expected, Mapping) or set(expected) != {
+            "uid",
+            "gid",
+            "source_token_sha256",
+        }:
+            raise WorkloadPackageRuntimeError("Source update principal identity is malformed")
+        if (
+            type(expected.get("uid")) is not int
+            or expected["uid"] <= 0
+            or type(expected.get("gid")) is not int
+            or expected["gid"] <= 0
+            or (
+                expected.get("source_token_sha256") is not None
+                and _RAW_SHA256.fullmatch(str(expected["source_token_sha256"])) is None
+            )
+        ):
+            raise WorkloadPackageRuntimeError("Source update principal trust fields are malformed")
+        if source_id not in current_sources and expected.get("source_token_sha256") is None:
+            missing_new_sources.add(source_id)
+    if set(current_sources) - set(update.source_identity) or set(current_sources) != (
+        set(update.source_identity) - missing_new_sources
+    ):
+        raise WorkloadPackageRuntimeError("Runtime activity source set differs from recovery intent")
+    for source_id, expected in update.source_identity.items():
+        actual = current_sources.get(source_id)
+        if actual is None:
+            continue
+        if actual.get("uid") != expected.get("uid") or actual.get("gid") != expected.get("gid"):
+            raise WorkloadPackageRuntimeError("Runtime activity source principal differs from recovery intent")
+        old_token_digest = expected.get("source_token_sha256")
+        if old_token_digest is not None and actual.get("source_token_sha256") != old_token_digest:
+            raise WorkloadPackageRuntimeError("Runtime activity source token identity changed")
+
+    if (
+        any(
+            not isinstance(component_id, str)
+            or hold["component_artifact_digests"].get(component_id) != digest
+            for component_id, digest in update.component_artifact_digests.items()
+        )
+        or any(
+            not isinstance(component_id, str)
+            or component_id not in hold["component_artifact_digests"]
+            for component_id in update.required_hold_component_ids
+        )
+    ):
+        raise WorkloadPackageRuntimeError("Source update component digest differs from held plan")
+
+
+def _validate_recovery_catalog(
+    update: WorkloadSourceUpdate,
+    current_sources: Mapping[str, Mapping[str, Any]],
+    token_directory: Path,
+) -> None:
+    """Require exact committed Broker scopes and source-token readback."""
+
+    if set(current_sources) != set(update.binding_scopes):
+        raise WorkloadPackageRuntimeError("Committed Broker source set differs from recovery intent")
+    for source_id, actual in current_sources.items():
+        expected = update.source_identity[source_id]
+        if (
+            actual.get("uid") != expected.get("uid")
+            or actual.get("gid") != expected.get("gid")
+            or actual.get("binding_scopes") != update.binding_scopes[source_id]
+        ):
+            raise WorkloadPackageRuntimeError("Committed Broker scopes differ from recovery intent")
+        expected_token_digest = expected.get("source_token_sha256")
+        if expected_token_digest is not None and actual.get("source_token_sha256") != expected_token_digest:
+            raise WorkloadPackageRuntimeError("Committed Broker token identity differs from recovery intent")
+        _verify_token_file(token_directory / f"{source_id}.token", actual["source_token_sha256"])
+
+
 def _validate_policy_update_hold(maintenance: Mapping[str, Any]) -> dict[str, Any]:
     """Validate fields needed to bind init-catalog to the current hold."""
 
@@ -2923,6 +3155,7 @@ __all__ = [
     "install_workload_package",
     "read_runtime_source_policy_generic",
     "read_workload_package_inventory",
+    "reconcile_workload_source_update",
     "run_package_binding_operation",
     "uninstall_workload_package",
     "write_runtime_source_policy_cas",

@@ -558,6 +558,199 @@ def test_source_update_rejects_policy_race_before_broker_mutation(
         )
 
 
+def test_reconcile_source_update_finishes_broker_commit_before_policy_cas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _package_row(standalone=True, binding_id="plugin-a-standalone")
+    record = _installation_record()
+    source_id = "cyrene-plugin-standalone-operator"
+    source_uid, source_gid = 12001, 12002
+    token_directory = tmp_path / "tokens"
+    source_digest = _raw_digest("standalone-token")
+    old_runtime_source = {
+        "source_id": source_id,
+        "uid": source_uid,
+        "gid": source_gid,
+        "source_token_sha256": source_digest,
+        "bindings": [],
+    }
+    old_policy = _runtime_policy([old_runtime_source], generation=5)
+    old_policy_bytes = _canonical(old_policy)
+    policy_path = tmp_path / "runtime-package-sources.json"
+    policy_path.write_bytes(old_policy_bytes)
+    policy_path.chmod(0o440)
+    catalog_path = tmp_path / "activity-sources.json"
+    update = runtime.build_workload_source_update(
+        source_policy=row["sourcePolicy"],
+        selected_rows=[row],
+        installation_records={row["componentId"]: record},
+        activity_catalog=_activity_catalog(
+            [
+                {
+                    "source_id": source_id,
+                    "uid": source_uid,
+                    "gid": source_gid,
+                    "source_token_sha256": source_digest,
+                    "binding_scopes": [],
+                }
+            ],
+            generation=5,
+        ),
+        source_principals={
+            source_id: _principal(
+                source_id,
+                uid=source_uid,
+                gid=source_gid,
+                token_path=token_directory / f"{source_id}.token",
+            )
+        },
+        runtime_policy=old_policy,
+    )
+    source_scope = {
+        "source_id": source_id,
+        "uid": source_uid,
+        "gid": source_gid,
+        "source_token_sha256": source_digest,
+        "binding_scopes": update.binding_scopes[source_id],
+    }
+    catalog_path.write_bytes(
+        _canonical(_activity_catalog([source_scope], generation=update.expected_generation))
+    )
+    catalog_path.chmod(0o600)
+
+    monkeypatch.setattr(runtime, "_require_root", lambda: None)
+    monkeypatch.setattr(runtime, "_effective_uid", os.getuid)
+    monkeypatch.setattr(runtime, "_runtime_group_id", os.getgid)
+    monkeypatch.setattr(runtime, "_validate_policy_parent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_verify_token_file", lambda *_args, **_kwargs: None)
+
+    result = runtime.reconcile_workload_source_update(
+        update,
+        maintenance=_maintenance(row["componentId"], record["artifact_digest"]),
+        activity_catalog_path=catalog_path,
+        policy_path=policy_path,
+        token_directory=token_directory,
+    )
+
+    assert result is not None
+    assert result["catalogGeneration"] == result["policyGeneration"] == update.expected_generation
+    assert json.loads(policy_path.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "generation": update.expected_generation,
+        "sources": [
+            {
+                **old_runtime_source,
+                "bindings": update.runtime_bindings[source_id],
+            }
+        ],
+    }
+    assert result["bindings"] == [
+        {
+            "componentId": row["componentId"],
+            "sourceId": source_id,
+            "bindingId": row["bindingId"],
+        }
+    ]
+
+
+def test_reconcile_source_update_refuses_unrelated_runtime_policy_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _package_row(standalone=True, binding_id="plugin-a-standalone")
+    record = _installation_record()
+    source_id = "cyrene-plugin-standalone-operator"
+    source_uid, source_gid = 12001, 12002
+    token_directory = tmp_path / "tokens"
+    source_digest = _raw_digest("standalone-token")
+    old_runtime_source = {
+        "source_id": source_id,
+        "uid": source_uid,
+        "gid": source_gid,
+        "source_token_sha256": source_digest,
+        "bindings": [],
+    }
+    old_policy = _runtime_policy([old_runtime_source], generation=5)
+    policy_path = tmp_path / "runtime-package-sources.json"
+    policy_path.write_bytes(_canonical(old_policy))
+    policy_path.chmod(0o440)
+    catalog_path = tmp_path / "activity-sources.json"
+    update = runtime.build_workload_source_update(
+        source_policy=row["sourcePolicy"],
+        selected_rows=[row],
+        installation_records={row["componentId"]: record},
+        activity_catalog=_activity_catalog(
+            [
+                {
+                    "source_id": source_id,
+                    "uid": source_uid,
+                    "gid": source_gid,
+                    "source_token_sha256": source_digest,
+                    "binding_scopes": [],
+                }
+            ],
+            generation=5,
+        ),
+        source_principals={
+            source_id: _principal(
+                source_id,
+                uid=source_uid,
+                gid=source_gid,
+                token_path=token_directory / f"{source_id}.token",
+            )
+        },
+        runtime_policy=old_policy,
+    )
+    source_scope = {
+        "source_id": source_id,
+        "uid": source_uid,
+        "gid": source_gid,
+        "source_token_sha256": source_digest,
+        "binding_scopes": update.binding_scopes[source_id],
+    }
+    catalog_path.write_bytes(
+        _canonical(_activity_catalog([source_scope], generation=update.expected_generation))
+    )
+    catalog_path.chmod(0o600)
+    raced_policy = _runtime_policy(
+        [
+            {
+                **old_runtime_source,
+                        "bindings": [
+                            _runtime_binding(
+                                "plugin-a-standalone",
+                                "org.example.plugin-a",
+                                [_installation_record(version="1.2.4")["installation_id"]],
+                            )
+                        ],
+            }
+        ],
+        generation=5,
+    )
+    policy_path.chmod(0o600)
+    policy_path.write_bytes(_canonical(raced_policy))
+    policy_path.chmod(0o440)
+
+    monkeypatch.setattr(runtime, "_require_root", lambda: None)
+    monkeypatch.setattr(runtime, "_effective_uid", os.getuid)
+    monkeypatch.setattr(runtime, "_runtime_group_id", os.getgid)
+    monkeypatch.setattr(runtime, "_validate_policy_parent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_verify_token_file", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runtime,
+        "write_runtime_source_policy_cas",
+        lambda *_args, **_kwargs: pytest.fail("an unrelated policy must never be overwritten"),
+    )
+
+    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="outside the pending source update"):
+        runtime.reconcile_workload_source_update(
+            update,
+            maintenance=_maintenance(row["componentId"], record["artifact_digest"]),
+            activity_catalog_path=catalog_path,
+            policy_path=policy_path,
+            token_directory=token_directory,
+        )
+
+
 def test_policy_cas_serializes_competing_writers_and_rejects_stale_digest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

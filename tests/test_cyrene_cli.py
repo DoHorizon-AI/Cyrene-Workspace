@@ -38,6 +38,22 @@ def _set_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return home
 
 
+def test_workload_cli_accepts_guided_install_and_exact_component_uninstall() -> None:
+    module = _module()
+
+    install = module.build_parser().parse_args(["workload", "install", "catalyst", "--yes"])
+    uninstall = module.build_parser().parse_args(
+        ["workload", "uninstall", "cyrene-tools-dataset-preparation", "--workload", "plugins"]
+    )
+
+    assert install.workload_action == "install"
+    assert install.workload_id == "catalyst"
+    assert install.yes is True
+    assert uninstall.workload_action == "uninstall"
+    assert uninstall.workload_id == "cyrene-tools-dataset-preparation"
+    assert uninstall.workload_owner == "plugins"
+
+
 def test_backup_rejects_destination_inside_data_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
