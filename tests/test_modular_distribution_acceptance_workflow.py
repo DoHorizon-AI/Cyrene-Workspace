@@ -238,13 +238,16 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     }
     assert '[[ "$GITHUB_REF" == "refs/heads/develop" ]]' in source
     assert '"workflowSha": os.environ.get("GITHUB_WORKFLOW_SHA")' in source
-    assert 'MINIMUM_GH_ATTESTATION_VERSION = (2, 102, 0)' in source
+    assert "MINIMUM_GH_ATTESTATION_VERSION = (2, 102, 0)" in source
     assert 'GH_RELEASE_TAG = "v2.102.0"' in source
     assert '"attestation_cli_provision"' in source
     assert '"sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends"' in source
-    assert 'https://github.com/cli/cli/releases/download/v2.102.0' in source
-    assert 'https://api.github.com/repos/cli/cli/releases/tags/v2.102.0' in source
-    assert 'GH_RELEASE_ASSET_SHA256 = "7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"' in source
+    assert "https://github.com/cli/cli/releases/download/v2.102.0" in source
+    assert "https://api.github.com/repos/cli/cli/releases/tags/v2.102.0" in source
+    assert (
+        'GH_RELEASE_ASSET_SHA256 = "7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"'
+        in source
+    )
     assert '"ghVersion": ".".join(str(part) for part in gh_version)' in source
     assert '"native-installer-release-v2.json"' in source
     assert '"native-installer-source-receipt-v2.json"' in source
@@ -260,6 +263,8 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     assert '"bindingScopeCount":len(verified_bindings)' in source
     assert 'phase("client_static_web_http", client_web_http)' in source
     assert '"http://127.0.0.1:8100/"' in source
+    assert 'origin + "/datasets"' in source
+    assert '"datasetsRoute"' in source
     assert '"http://127.0.0.1:5182/health/ready"' in source
     assert '"/api/v1/auth/session"' in source
     assert 'status.get("hostMetadata", {}).get("web")' in source
@@ -268,6 +273,12 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     assert '"/api/v1/catalyst/datasets"' in source
     assert '"/api/v1/datasets"' in source
     assert '"client_release_integration",' in source
+    assert '"client_curation_proxy_mutation",' in source
+    assert '"client_curation_browser_submission",' in source
+    assert '"X-CSRF-Token":csrf' in source
+    assert '"training-curation-v1"' in source
+    assert 'phase("client_curation_proxy_mutation", client_curation_proxy_mutation)' in source
+    assert '"retryAttempted":False' in source
     assert '"offline_retry_gate"' in source
     assert 'command.extend(["/usr/bin/unshare", "--net"])' in source
     assert 'error.get("code") == "NETWORK_ERROR"' in source
@@ -358,11 +369,14 @@ def test_attestation_cli_keeps_an_already_supported_runner_unchanged(
     assert evidence["versionAfter"] == "2.102.0"
     assert evidence["upgraded"] is False
     assert commands == [["gh", "--version"]]
-    assert json.loads(
-        (acceptance_root / "evidence" / "attestation-cli-provision.json").read_text(
-            encoding="utf-8"
+    assert (
+        json.loads(
+            (acceptance_root / "evidence" / "attestation-cli-provision.json").read_text(
+                encoding="utf-8"
+            )
         )
-    ) == evidence
+        == evidence
+    )
 
 
 def test_attestation_cli_upgrades_old_runner_from_exact_official_checksum_pins(
@@ -472,7 +486,9 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
         module.validate_pin_shape(wrong_workload_channel)
 
     wrong_index_channel = json.loads(json.dumps(pins))
-    wrong_index_channel["workloads"]["catalyst"]["selectedComponents"][0]["indexIdentity"]["channel"] = "stable"
+    wrong_index_channel["workloads"]["catalyst"]["selectedComponents"][0]["indexIdentity"][
+        "channel"
+    ] = "stable"
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.Draft202012Validator(schema).validate(wrong_index_channel)
     with pytest.raises(RuntimeError, match="index channel differs from the workload plan channel"):
@@ -764,6 +780,8 @@ def test_client_web_http_gate_checks_live_contract_without_saving_session_token(
         requests.append((url, headers))
         if url == "http://127.0.0.1:8100/":
             return 200, {}, index
+        if url == "http://127.0.0.1:8100/datasets":
+            return 200, {}, index
         if url == "http://127.0.0.1:8100/healthz":
             return 200, {}, b'{"status":"ok"}'
         if url == "http://127.0.0.1:5182/health/ready":
@@ -776,12 +794,18 @@ def test_client_web_http_gate_checks_live_contract_without_saving_session_token(
     result = module.client_web_http()
     assert [url for url, _headers in requests] == [
         "http://127.0.0.1:8100/",
+        "http://127.0.0.1:8100/datasets",
         "http://127.0.0.1:8100/healthz",
         "http://127.0.0.1:5182/health/ready",
         "http://127.0.0.1:8100/api/v1/auth/session",
     ]
     assert all(headers.get("X-Studio-Control-Token") is None for _url, headers in requests)
     assert result["httpRoot"]["sha256"] == index_digest
+    assert result["datasetsRoute"] == {
+        "path": "/datasets",
+        "status": 200,
+        "sha256": index_digest,
+    }
     assert result["csrfTokenStored"] is False
     evidence_text = (evidence_dir / "client-web-http-acceptance.json").read_text()
     assert token not in evidence_text
@@ -790,6 +814,110 @@ def test_client_web_http_gate_checks_live_contract_without_saving_session_token(
     module.write_json(evidence_dir / "installed-workload-receipt-identities.json", receipt)
     with pytest.raises(RuntimeError, match="HTTP root bytes differ"):
         module.client_web_http()
+
+
+def test_client_curation_gate_submits_once_with_local_csrf_and_discards_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Client curation contract uses the fixed synthetic report and never saves credentials."""
+    acceptance_root = tmp_path / "acceptance"
+    evidence_dir = acceptance_root / "evidence"
+    output_dir = acceptance_root / "catalyst-output"
+    evidence_dir.mkdir(parents=True)
+    output_dir.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_client_curation")
+    pins = _valid_pins()
+    module.write_json(acceptance_root / "release-pins-v1.json", pins)
+    dataset_id = "11111111-2222-4333-8444-555555555555"
+    original_run_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    module.write_json(
+        output_dir / "acceptance-report.json",
+        {
+            "status": "PASS",
+            "fixture": "release-packaged authored business examples; no customer data",
+            "fixtureVersion": "1",
+            "datasetId": dataset_id,
+            "curationRunId": original_run_id,
+        },
+    )
+    csrf_token = "0123456789abcdef" * 4
+    session = {
+        "authenticated": True,
+        "state": "AUTHENTICATED",
+        "sessionId": "local",
+        "refreshable": False,
+        "csrfToken": csrf_token,
+    }
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    def fake_loopback(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
+        requests.append((url, headers))
+        assert url == "http://127.0.0.1:8100/api/v1/auth/session"
+        return 200, {}, json.dumps(session).encode()
+
+    helper_result = {
+        "datasetIdSha256": hashlib.sha256(dataset_id.encode()).hexdigest(),
+        "originalCurationRunIdSha256": hashlib.sha256(original_run_id.encode()).hexdigest(),
+        "newCurationRunIdSha256": "f" * 64,
+        "sourceRevisionCount": 4,
+        "sourcesProxyMatchesDirect": True,
+        "originalRunProxyMatchesDirect": True,
+        "clientMutation": {
+            "method": "POST",
+            "status": 202,
+            "operation": "curateTrainingData",
+            "path": "/api/v1/catalyst/api/v1/datasets/{datasetId}/processing-runs",
+            "attempts": 1,
+            "retryAttempted": False,
+            "csrfHeaderPresent": True,
+            "origin": "http://127.0.0.1:8100",
+        },
+        "runReadback": {
+            "directStatus": 200,
+            "proxyStatus": 200,
+            "state": "SUCCEEDED",
+            "jsonSchemaSha256": "1" * 64,
+            "canonicalBodySha256": "2" * 64,
+        },
+        "recordsStored": False,
+        "csrfTokenStored": False,
+        "serverCredentialStored": False,
+    }
+    calls: list[dict[str, object]] = []
+
+    def fake_run(
+        command: list[str], *, label: str, input_text: str, retain_output: bool, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        assert label == "client-catalyst-curation-proxy-mutation"
+        assert command[:4] == ["sudo", "-n", "python3", "-s"]
+        assert retain_output is False
+        assert len(command[-1]) > 1000
+        assert '"X-CSRF-Token"' in command[-1]
+        assert '"training-curation-v1"' in command[-1]
+        assert '"operation":"curateTrainingData"' in command[-1]
+        parsed_input = json.loads(input_text)
+        assert parsed_input["datasetId"] == dataset_id
+        assert parsed_input["curationRunId"] == original_run_id
+        assert parsed_input["csrfToken"] == csrf_token
+        calls.append(parsed_input)
+        return subprocess.CompletedProcess(command, 0, json.dumps(helper_result), "")
+
+    monkeypatch.setattr(module, "request_loopback", fake_loopback)
+    monkeypatch.setattr(module, "run", fake_run)
+    result = module.client_curation_proxy_mutation()
+
+    assert len(requests) == 1
+    assert requests[0][1]["Host"] == "127.0.0.1:8100"
+    assert requests[0][1]["Origin"] == "http://127.0.0.1:8100"
+    assert len(calls) == 1
+    assert result["clientMutation"]["attempts"] == 1
+    assert result["clientMutation"]["retryAttempted"] is False
+    assert result["runReadback"]["state"] == "SUCCEEDED"
+    evidence_text = (evidence_dir / "client-catalyst-curation-proxy-mutation.json").read_text()
+    assert csrf_token not in evidence_text
+    assert dataset_id not in evidence_text
+    assert original_run_id not in evidence_text
 
 
 def test_catalyst_proxy_comparison_checks_status_and_json_shape_without_records(
@@ -888,8 +1016,12 @@ def test_public_sft_fixture_is_staged_only_after_consumer_success(
         assert identity["artifactPath"] == "public-fixtures/authored-business-sft.zip"
         assert identity["consumerStatus"] == "PASS"
         assert identity["sha256"] == hashlib.sha256(fixture_bytes).hexdigest()
-    assert all("test-gh-token-must-not-reach-product" not in str(env) for env in command_environments)
-    assert all("test-github-token-must-not-reach-product" not in str(env) for env in command_environments)
+    assert all(
+        "test-gh-token-must-not-reach-product" not in str(env) for env in command_environments
+    )
+    assert all(
+        "test-github-token-must-not-reach-product" not in str(env) for env in command_environments
+    )
     assert not (acceptance_root / "logs").exists()
 
 

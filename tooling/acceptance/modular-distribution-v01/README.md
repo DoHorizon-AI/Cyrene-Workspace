@@ -81,19 +81,39 @@ incomplete; they are not inferred from container or source-checkout evidence.
 The Node 24 Client Control and static Web current pointers, immutable receipts,
 and manifest-pinned file hashes are checked as part of workload receipt readback.
 The required HTTP gate
-then checks the installed index bytes at `http://127.0.0.1:8100/` against the
-verified receipt, the managed `cyrene-workspace-web.service` status, `/healthz`,
+then checks the installed index bytes at both `http://127.0.0.1:8100/` and
+`http://127.0.0.1:8100/datasets` against the verified receipt, the managed
+`cyrene-workspace-web.service` status, `/healthz`,
 direct Studio Control readiness at `127.0.0.1:5182/health/ready`, and the
 same-origin `/api/v1/auth/session` local-auth/CSRF contract. It validates the
 CSRF token in memory and discards it. The separate Client integration gate
 verifies the exact Control unit against its signed archive and compares the
 direct Catalyst dataset response with the same-origin read-only proxy's JSON
 schema; it stores only response hashes and lengths, never dataset records or
-credentials. It also reads the installed `/etc/cyrene/studio-control.env`
+credentials. After Catalyst's installed acceptance producer and independent
+consumer pass, a required Client curation gate reuses that report's fixed
+synthetic dataset and source revisions. It sends the published Client UI's
+`curateTrainingData` request once through the same-origin proxy with the local
+session's `X-CSRF-Token`, then reads the new processing run through the proxy and
+direct Catalyst until both report `SUCCEEDED`. The evidence retains only safe
+route/status facts, hashes, and source count. It never stores response rows,
+CSRF material, or the server bearer. This adds one curation draft to the
+synthetic acceptance dataset after the verified SFT export; it does not change
+or regenerate the published SFT bundle. Browser interaction itself remains
+`NOT_RUN`, since the workflow has no browser automation.
+
+The gate also reads the installed `/etc/cyrene/studio-control.env`
 inside a root-only probe, requires the pinned loopback Catalyst origin and its
 protected token-file reference, and verifies the signed unit's fixed
 `STUDIO_PUBLIC_ORIGINS`. The probe never returns either token-file path contents
 or token bytes.
+
+验收会对照已签名安装回执核验根路由和 `/datasets` 路由返回的 index 字节，并检查专属 Web 服务、health、Control readiness
+以及同源本地 session/CSRF 契约。随后，在已安装 Catalyst 的真实验收生产者与独立 consumer 成功后，驱动复用报告中的固定合成
+dataset 与 source revisions，通过同源代理只提交一次 Client UI 使用的 `curateTrainingData` 操作，并携带该 local session 的
+`X-CSRF-Token`。驱动通过代理和 Catalyst 直连轮询新 run，要求两端最终都为 `SUCCEEDED`。证据只保留路由、状态、hash 和来源数，不
+保存记录行、CSRF 凭据或服务端 bearer。该步骤会在合成验收 dataset 上增加一个 curation draft，但不会改变或重新生成已验证的
+SFT 发布包；真实浏览器交互单独记录为 `NOT_RUN`。
 
 该工作流始终运行带精确 pins 的 Catalyst core，并进行只读 resolver 检查，验证必需组件不能被排除及准确计划没有
 `VERSION_CONFLICT` blocker。此检查不声称测试了冲突配置的拒绝行为。离线 stage 重试只在一个 Linux network namespace
@@ -130,7 +150,8 @@ The job records its runner image, OS, architecture, PID 1 and systemd facts; the
 exact release tag and source identity; native SLSA verification results; downloaded
 asset hashes and sizes; the selected workload plan and its plan digest; dpkg and
 installed catalog/binding/status readback; exact active and immutable workload receipts,
-the static Web pointer/tree identity and live HTTP routes; ActivitySource/token/generation
+the static Web pointer/tree identity and live `/` and `/datasets` routes; same-origin
+Client curation mutation and direct Catalyst run readback; ActivitySource/token/generation
 and selected binding activation readback; Catalyst active bundle identity and receipt
 linkage; Catalyst HTTP liveness; producer and independent consumer results; and service
 restart recovery. After the installed independent consumer succeeds, the job artifact
@@ -143,6 +164,13 @@ and the installed resolver's check/stage requests. It has read-only repository
 and attestation permissions; apply, repeat-install, and Product invocations run
 without that token. The isolated network-failure attempt withholds raw stdout/stderr
 and persists only the error code and retryable flag.
+
+`client_curation_browser_submission` is explicitly `NOT_RUN`: the workflow does
+not automate a real browser. The required Client curation gate separately checks
+the published `/datasets` route, submits the official UI operation through the
+same-origin proxy with local CSRF, and verifies the resulting synthetic Product
+run through both proxy and direct Catalyst APIs. This is API integration evidence,
+not a claim that a human browser completed the page interaction.
 
 `GH_TOKEN` 仅授予仓库与 attestation 只读权限，用于发布物下载、验签以及已安装 resolver 的 check/stage；apply、重复安装与 Product 调用不会继承该 token。
 
@@ -180,7 +208,7 @@ The required Catalyst path is:
 2. Read back dpkg status, the root-owned baseline and active catalogs, the installed signed v2 binding through the DEB-installed binding validator, and the stage-only package contract. Query the fixed workload status API. Check the exact Catalyst plan against pins; stage and apply only that digest-bound plan; read back each root-owned active and immutable workload receipt through the installed manifest validator. Verify the Client static-Web current pointer, release tree, and manifest-pinned file hashes.
 3. Read back the ActivitySource catalog, Package Runtime source policy, exact Catalyst `cyrene` UID/GID, selected binding scopes, root-only token mode and hash match without exporting the token, shared catalog generation, and the running systemd process' loaded source/generation/socket identity. Compare each selected binding/package/installation ID with authenticated Platform UDS readback and require its active installation to be `RUNNING`. Require the Product's loaded port to match the pinned loopback URL. The workflow does not perform `init-catalog`; these scopes must be created by the installed workload transaction.
 4. Validate the installed Catalyst immutable bundle with the installed Workspace service-bundle validator and compare its active/immutable receipt release path, pointer and bundle identities plus signed Product source/target/digests with resolver pins. Check `/healthz`, then run the installed `cyrene_catalyst.external_acceptance` module and independently verify its ZIP with `cyrene_catalyst_consumer.training_bundle` from the same active bundle. No source checkout or development venv may supply modules or fixtures.
-5. Verify the installed Web host metadata and live HTTP routes against the exact Client receipt; restart `cyrene-catalyst.service`, wait for systemd and HTTP recovery, then repeat the public `sudo cyrene workload install catalyst --channel preview --yes` command to prove idempotence and read back the same exact installed identities.
+5. Verify the installed Web host metadata and live `/` and `/datasets` HTTP routes against the exact Client receipt. After the installed Catalyst producer and independent SFT consumer pass, submit the Client's `curateTrainingData` operation once through the same-origin proxy with the local session CSRF token; require the new fixed-synthetic run to reach `SUCCEEDED` through both proxy and direct Catalyst readback. Then restart `cyrene-catalyst.service`, wait for systemd and HTTP recovery, repeat the public `sudo cyrene workload install catalyst --channel preview --yes` command to prove idempotence, and read back the same exact installed identities.
 6. Submit a resolver check that excludes one required Catalyst component; require the expected blocked response and prove that no staging or apply request was sent.
 
 Catalyst 已安装验收模块当前由活动 immutable service bundle 提供；runner 使用固定私有解释器

@@ -3,8 +3,8 @@
   "schemaVersion": 1,
   "name": "cyrene-0.1.0-rc.1",
   "description": "Single release lock for the first usable Cyrene RC: supported environment, native Python profiles, acceptance model, engine pins, plugin packages, and repository revisions. The Workspace installation flow must read engine, plugin, and native Python runtime entries from this file instead of inventing local pins. Entries marked with a non-terminal status are blockers for the RC gate and must be resolved with real acceptance evidence before 0.1.0-rc.1 is published.",
-  "generatedAt": "2026-10-04T11:08:13Z",
-  "sourceState": "Final source pins record the native closeout sources. The five native Product source commits are Catalyst 6f999daacf8a2afd76033bfc5d0d7bcf68202de1 (publisher run 37197062283), Exchange 7f1823f6eabe9956ff40cc2e4aa9035197b51e83 (37194428287), Navigator 04e84f7b7943bbe0d60604ff65194904b37ad821 (37196333182), Reactor 49b560975c10e815ad5aac42a6c224dd4d39a8e8 (37196339516), and Yield 65b5e77682d59b05e23f3d248765fb4986499a8e (37195208591); those publisher runs completed successfully. The acceptance scope here is immutable signed publication and matching-container validation only. Actual native-host installation, training-task submission, controlled update, and recovery remain NOT_RUN. Echo runtime/OCI remains 7480d72c3d2520ccf7684ae43e2f2558c5c6e828; its separately signed Product contract source is a6923bf1e326069143b0b56d32b5891d36655e3f. The existing wheelResolver.arguments field is target compatibility metadata for the pinned uv target, not argv passed to uv export: uv export uses the locked host interpreter without --python-platform, while pip download enforces CPython 3.12/cp312 and the profile’s accepted manylinux tags with source and hash verification. Cyrene-Workspace records validated predecessor 83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8 because release-lock cannot self-reference.",
+  "generatedAt": "2026-10-08T23:40:06Z",
+  "sourceState": "The native verified-service-artifacts source lock covers the five Product bundle repositories compared by the strict native verifier. Resolve run 37859283502 verified immutable signed preview bundles for Catalyst 4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b, Exchange 7f1823f6eabe9956ff40cc2e4aa9035197b51e83, Navigator d7c33d47dff899e26f3f8b1ef8c028373b826392, Reactor 470cec30bc09c2ba0b1fd62da47152ffd27b41bb, and Yield 5c492b0932d0598ca140333611b2de6d85a6c458 for both Ubuntu Python targets; each preview release tag binds the exact source commit. The Platform base release preview-1ec629e55195fa803651fb23d1c50d04696a94a8 and the default runtime SDK are separate signed component tuples whose exact identities are recorded by the signed source receipt and selected workload or installation plan; this update does not redefine their pins. This five-Product source update also does not claim that existing Echo or Client repository entries represent installed sources in this native artifact set. Actual native-host installation, training-task submission, controlled update, and recovery remain NOT_RUN. The existing wheelResolver.arguments field is target compatibility metadata for the pinned uv target, not argv passed to uv export: uv export uses the locked host interpreter without --python-platform, while pip download enforces CPython 3.12/cp312 and the profile’s accepted manylinux tags with source and hash verification. Cyrene-Workspace records validated predecessor 83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8 because release-lock cannot self-reference.",
   "supportedEnvironment": {
     "os": "Ubuntu 24.04 x86_64",
     "gpu": {
@@ -149,12 +149,12 @@
     "Cyrene-Platform": "ba253cff6f865c288e18af28b8cba64d91977261",
     "Cyrene-Plugins-Official": "96733779d187b13efcadcde95a6b6737fe102d25",
     "Cyrene-Workspace": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
-    "Cyrene-Reactor": "49b560975c10e815ad5aac42a6c224dd4d39a8e8",
-    "Cyrene-Yield": "65b5e77682d59b05e23f3d248765fb4986499a8e",
+    "Cyrene-Reactor": "470cec30bc09c2ba0b1fd62da47152ffd27b41bb",
+    "Cyrene-Yield": "5c492b0932d0598ca140333611b2de6d85a6c458",
     "Cyrene-Exchange": "7f1823f6eabe9956ff40cc2e4aa9035197b51e83",
-    "Cyrene-Catalyst": "6f999daacf8a2afd76033bfc5d0d7bcf68202de1",
+    "Cyrene-Catalyst": "4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b",
     "Cyrene-Echo": "7480d72c3d2520ccf7684ae43e2f2558c5c6e828",
-    "Cyrene-Navigator": "04e84f7b7943bbe0d60604ff65194904b37ad821",
+    "Cyrene-Navigator": "d7c33d47dff899e26f3f8b1ef8c028373b826392",
     "Cyrene-Client": "9c51a27540951589157926d1ee717d912ed22fc2"
   }
 }
