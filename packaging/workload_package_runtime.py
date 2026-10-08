@@ -39,10 +39,22 @@ DEFAULT_SDK_PYTHON = Path("/opt/cyrene/workload-operator/current/venv/bin/python
 MAX_FILE_BYTES = 1024 * 1024
 MAX_IPC_BYTES = 256 * 1024
 MAX_FRAME_BYTES = 64 * 1024
-SOURCE_OPERATIONS = ("activate", "recover_binding", "deactivate", "runtime_status", "get_installation")
+SOURCE_OPERATIONS = (
+    "activate",
+    "recover_binding",
+    "deactivate",
+    "runtime_status",
+    "get_installation",
+)
 BINDING_OPERATION_PROTOCOL = "cyrene.runtime-maintenance.binding-operations.v1"
 BROKER_OPERATIONS = ("activate", "deactivate", "recover")
-RUNTIME_OPERATIONS = ("activate", "deactivate", "get_installation", "recover_binding", "runtime_status")
+RUNTIME_OPERATIONS = (
+    "activate",
+    "deactivate",
+    "get_installation",
+    "recover_binding",
+    "runtime_status",
+)
 _PACKAGE_ID = re.compile(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,7}\Z")
 _COMPONENT_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _SOURCE_ID = re.compile(r"[a-z][a-z0-9._-]{0,159}\Z")
@@ -136,7 +148,12 @@ def _require_root() -> None:
 def _require_text(value: Any, label: str) -> str:
     """Return one bounded, nonempty protocol string."""
 
-    if not isinstance(value, str) or not value or "\x00" in value or any(ord(ch) < 32 for ch in value):
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or any(ord(ch) < 32 for ch in value)
+    ):
         raise WorkloadPackageRuntimeError(f"{label} is invalid")
     return value
 
@@ -185,12 +202,16 @@ def _source_policy(policy: Any) -> tuple[str, tuple[str, ...]]:
     }:
         raise WorkloadPackageRuntimeError("Catalog sourcePolicy has an unsupported shape")
     if policy.get("operations") != list(SOURCE_OPERATIONS):
-        raise WorkloadPackageRuntimeError("Catalog sourcePolicy operations differ from Platform SDK")
+        raise WorkloadPackageRuntimeError(
+            "Catalog sourcePolicy operations differ from Platform SDK"
+        )
     products = policy.get("productComponentIds")
     product_sources = policy.get("productSources")
     if (
         not isinstance(products, list)
-        or any(not isinstance(item, str) or _COMPONENT_ID.fullmatch(item) is None for item in products)
+        or any(
+            not isinstance(item, str) or _COMPONENT_ID.fullmatch(item) is None for item in products
+        )
         or len(products) != len(set(products))
         or not isinstance(product_sources, list)
     ):
@@ -219,7 +240,9 @@ def _source_policy(policy: Any) -> tuple[str, tuple[str, ...]]:
         # Platform binding IDs have one source owner. Multi-Product fan-out needs
         # a Catalog mapping that carries one owner binding per Product.
         if len(source_map) != 1:
-            raise WorkloadPackageRuntimeError("one Plugin binding cannot have multiple Product owners")
+            raise WorkloadPackageRuntimeError(
+                "one Plugin binding cannot have multiple Product owners"
+            )
         return next(iter(source_map.values())), tuple(sorted(source_map.values()))
     if policy.get("mode") == "standaloneOperator":
         source_id = policy.get("sourceId")
@@ -234,7 +257,11 @@ def _catalog_identity(
 ) -> tuple[int, dict[str, dict[str, Any]]]:
     """Validate the complete trusted activity-source catalog readback."""
 
-    if not isinstance(catalog, Mapping) or set(catalog) != {"schema_version", "generation", "sources"}:
+    if not isinstance(catalog, Mapping) or set(catalog) != {
+        "schema_version",
+        "generation",
+        "sources",
+    }:
         raise WorkloadPackageRuntimeError("Runtime activity catalog has an unsupported shape")
     generation = catalog.get("generation")
     rows = catalog.get("sources")
@@ -245,9 +272,7 @@ def _catalog_identity(
         or not isinstance(rows, list)
     ):
         raise WorkloadPackageRuntimeError("Runtime activity catalog identity is invalid")
-    if generation < 1 and not (
-        allow_uninitialized and generation == 0 and not rows
-    ):
+    if generation < 1 and not (allow_uninitialized and generation == 0 and not rows):
         raise WorkloadPackageRuntimeError("Runtime activity catalog generation is invalid")
     sources: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -309,7 +334,10 @@ def _validate_broker_scopes(scopes: Any) -> None:
             or _PACKAGE_ID.fullmatch(package_id) is None
             or not isinstance(installations, list)
             or not installations
-            or any(not isinstance(item, str) or _INSTALLATION_ID.fullmatch(item) is None for item in installations)
+            or any(
+                not isinstance(item, str) or _INSTALLATION_ID.fullmatch(item) is None
+                for item in installations
+            )
             or installations != sorted(set(installations))
             or operations != list(BROKER_OPERATIONS)
         ):
@@ -322,7 +350,11 @@ def _validate_broker_scopes(scopes: Any) -> None:
 def _runtime_policy(policy: Any) -> dict[str, Any]:
     """Validate a generic Runtime source policy while preserving owner scopes."""
 
-    if not isinstance(policy, Mapping) or set(policy) != {"schema_version", "generation", "sources"}:
+    if not isinstance(policy, Mapping) or set(policy) != {
+        "schema_version",
+        "generation",
+        "sources",
+    }:
         raise WorkloadPackageRuntimeError("Package Runtime source policy schema is invalid")
     generation = policy.get("generation")
     rows = policy.get("sources")
@@ -384,7 +416,10 @@ def _runtime_policy(policy: Any) -> dict[str, Any]:
                 or not isinstance(package_id, str)
                 or _PACKAGE_ID.fullmatch(package_id) is None
                 or not isinstance(installations, list)
-                or any(not isinstance(item, str) or _INSTALLATION_ID.fullmatch(item) is None for item in installations)
+                or any(
+                    not isinstance(item, str) or _INSTALLATION_ID.fullmatch(item) is None
+                    for item in installations
+                )
                 or installations != sorted(set(installations))
                 or not isinstance(operations, list)
                 or any(item not in RUNTIME_OPERATIONS for item in operations)
@@ -419,7 +454,9 @@ def _runtime_policy(policy: Any) -> dict[str, Any]:
     return {"schema_version": 1, "generation": generation, "sources": normalized_sources}
 
 
-def _broker_projection(runtime_sources: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _broker_projection(
+    runtime_sources: Sequence[Mapping[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
     """Project runtime operation scopes into the Broker's admitted mutations."""
 
     result: dict[str, list[dict[str, Any]]] = {}
@@ -510,7 +547,9 @@ def candidate_from_workload_rows(
     archive_digest = _require_digest(staged_row.get("archiveDigest"), "staged.archiveDigest")
     outer_digest = staged_row.get("digest")
     if outer_digest is not None and outer_digest != archive_digest:
-        raise WorkloadPackageRuntimeError("Catalog archive digest differs from staged archive identity")
+        raise WorkloadPackageRuntimeError(
+            "Catalog archive digest differs from staged archive identity"
+        )
     staged_identity = staged_row.get("stagedIdentity")
     assets = staged_identity.get("assetPaths") if isinstance(staged_identity, Mapping) else None
     if not isinstance(assets, Mapping):
@@ -552,7 +591,9 @@ def install_workload_package(
 
     _require_root()
     candidate = candidate_from_workload_rows(selected_row, staged_row)
-    _validate_phase_identity(staged_row, request_id, maintenance, candidate.component_id, candidate.artifact_digest)
+    _validate_phase_identity(
+        staged_row, request_id, maintenance, candidate.component_id, candidate.artifact_digest
+    )
     bootstrap = _bootstrap_module()
     root = staging_root or bootstrap.PACKAGE_BOOTSTRAP_STAGE_ROOT
     try:
@@ -571,7 +612,9 @@ def install_workload_package(
     except WorkloadPackageRuntimeError:
         raise
     except Exception as error:
-        raise WorkloadPackageRuntimeError("Platform offline package install did not complete") from error
+        raise WorkloadPackageRuntimeError(
+            "Platform offline package install did not complete"
+        ) from error
 
 
 def uninstall_workload_package(
@@ -605,7 +648,9 @@ def uninstall_workload_package(
         "dependencies",
         "installed_at_unix_ms",
     }:
-        raise WorkloadPackageRuntimeError("Package Runtime uninstall requires the exact UDS InstallationRecord")
+        raise WorkloadPackageRuntimeError(
+            "Package Runtime uninstall requires the exact UDS InstallationRecord"
+        )
     _validate_installation_record_identity(
         {
             "packageId": installation.get("package_id"),
@@ -643,7 +688,9 @@ def uninstall_workload_package(
     except WorkloadPackageRuntimeError:
         raise
     except Exception as error:
-        raise WorkloadPackageRuntimeError("Platform offline package uninstall did not complete") from error
+        raise WorkloadPackageRuntimeError(
+            "Platform offline package uninstall did not complete"
+        ) from error
     return {"installation": result["installation"], "already_absent": result["already_absent"]}
 
 
@@ -674,7 +721,9 @@ def _validate_phase_identity(
         _require_digest(maintenance.get("plan_digest"), "maintenance.plan_digest")
         _require_digest(artifact_digest, "package artifact digest")
     except WorkloadPackageRuntimeError:
-        raise WorkloadPackageRuntimeError("PACKAGE_ONLY hold identity differs from package") from None
+        raise WorkloadPackageRuntimeError(
+            "PACKAGE_ONLY hold identity differs from package"
+        ) from None
     digest_map = maintenance.get("component_artifact_digests")
     if (
         maintenance.get("target_kind") != "PACKAGE_ONLY"
@@ -777,7 +826,9 @@ def build_workload_source_update(
             if supplied is not None:
                 parsed = _source_principal(supplied, source_id)
                 if parsed["uid"] != principal["uid"] or parsed["gid"] != principal["gid"]:
-                    raise WorkloadPackageRuntimeError("Source principal differs from trusted catalog")
+                    raise WorkloadPackageRuntimeError(
+                        "Source principal differs from trusted catalog"
+                    )
                 principal["tokenPath"] = parsed["tokenPath"]
         else:
             parsed = _source_principal(supplied, source_id)
@@ -792,27 +843,39 @@ def build_workload_source_update(
         old_policy = None
         previous_digest = None
         if current_sources:
-            raise WorkloadPackageRuntimeError("Existing Runtime sources require their policy readback")
+            raise WorkloadPackageRuntimeError(
+                "Existing Runtime sources require their policy readback"
+            )
     else:
         old_policy = _runtime_policy(runtime_policy)
         previous_digest = _runtime_policy_digest(old_policy)
         if old_policy["generation"] != generation:
-            raise WorkloadPackageRuntimeError("Runtime policy and activity catalog generations differ")
+            raise WorkloadPackageRuntimeError(
+                "Runtime policy and activity catalog generations differ"
+            )
         if {row["source_id"] for row in old_policy["sources"]} != set(current_sources):
-            raise WorkloadPackageRuntimeError("Runtime policy source set differs from activity catalog")
+            raise WorkloadPackageRuntimeError(
+                "Runtime policy source set differs from activity catalog"
+            )
         for policy_source in old_policy["sources"]:
             current = current_sources[policy_source["source_id"]]
             if any(
                 policy_source[field] != current[field]
                 for field in ("uid", "gid", "source_token_sha256")
             ):
-                raise WorkloadPackageRuntimeError("Runtime source trust differs from activity catalog")
+                raise WorkloadPackageRuntimeError(
+                    "Runtime source trust differs from activity catalog"
+                )
         if _broker_projection(old_policy["sources"]) != {
             source_id: row["binding_scopes"] for source_id, row in current_sources.items()
         }:
-            raise WorkloadPackageRuntimeError("Runtime policy binding scopes differ from activity catalog")
+            raise WorkloadPackageRuntimeError(
+                "Runtime policy binding scopes differ from activity catalog"
+            )
 
-    runtime_by_source: dict[str, dict[str, dict[str, Any]]] = {source_id: {} for source_id in expected_ids}
+    runtime_by_source: dict[str, dict[str, dict[str, Any]]] = {
+        source_id: {} for source_id in expected_ids
+    }
     if old_policy is not None:
         for source in old_policy["sources"]:
             runtime_by_source[source["source_id"]] = {
@@ -845,7 +908,9 @@ def build_workload_source_update(
         if existing_scope is not None and existing_scope["package_id"] != package_id:
             raise WorkloadPackageRuntimeError("Owner binding is assigned to another package")
         if existing_runtime is not None and existing_runtime["package_id"] != package_id:
-            raise WorkloadPackageRuntimeError("Runtime owner binding is assigned to another package")
+            raise WorkloadPackageRuntimeError(
+                "Runtime owner binding is assigned to another package"
+            )
         if component_id in remove_ids:
             digest = row.get("packageArtifactDigest", row.get("artifactDigest"))
             component_artifact_digests[component_id] = _require_digest(
@@ -886,7 +951,9 @@ def build_workload_source_update(
         for binding_id in bindings:
             for other_source_id, other_bindings in scope_by_source.items():
                 if other_source_id != source_id and binding_id in other_bindings:
-                    raise WorkloadPackageRuntimeError("Binding ID is already owned by another source")
+                    raise WorkloadPackageRuntimeError(
+                        "Binding ID is already owned by another source"
+                    )
     # Preserve every non-target Broker scope's exact identity and runtime ops.
     desired_scopes = {
         source_id: sorted(bindings.values(), key=lambda item: item["binding_id"])
@@ -914,7 +981,10 @@ def build_workload_source_update(
     source_arguments = tuple(
         argument
         for source_id in sorted(expected_ids)
-        for argument in ("--source", f"{source_id}={principals[source_id]['uid']}:{principals[source_id]['gid']}")
+        for argument in (
+            "--source",
+            f"{source_id}={principals[source_id]['uid']}:{principals[source_id]['gid']}",
+        )
     )
     source_identity = {
         source_id: {
@@ -937,7 +1007,9 @@ def build_workload_source_update(
         )
         required_hold_component_ids = product_component_ids or tuple(sorted(row_map))
         if not required_hold_component_ids:
-            raise WorkloadPackageRuntimeError("New source registration has no held component identity")
+            raise WorkloadPackageRuntimeError(
+                "New source registration has no held component identity"
+            )
     return WorkloadSourceUpdate(
         source_arguments=source_arguments,
         binding_scopes=desired_scopes,
@@ -970,14 +1042,21 @@ def apply_workload_source_update(
     _require_request_id(request_id)
     hold = _validate_policy_update_hold(maintenance)
     if expected_policy_digest != update.previous_policy_digest:
-        raise WorkloadPackageRuntimeError("Expected policy digest differs from the projected prior policy")
+        raise WorkloadPackageRuntimeError(
+            "Expected policy digest differs from the projected prior policy"
+        )
     activity_catalog_path = Path(activity_catalog_path)
     policy_path = Path(policy_path)
     token_directory = Path(token_directory)
-    if any(not path.is_absolute() for path in (activity_catalog_path, policy_path, token_directory)):
+    if any(
+        not path.is_absolute() for path in (activity_catalog_path, policy_path, token_directory)
+    ):
         raise WorkloadPackageRuntimeError("Package Runtime update paths must be absolute")
     hold_digests = hold["component_artifact_digests"]
-    if any(hold_digests.get(component_id) != digest for component_id, digest in update.component_artifact_digests.items()):
+    if any(
+        hold_digests.get(component_id) != digest
+        for component_id, digest in update.component_artifact_digests.items()
+    ):
         raise WorkloadPackageRuntimeError("Source update package digests are outside the held plan")
     if any(component_id not in hold_digests for component_id in update.required_hold_component_ids):
         raise WorkloadPackageRuntimeError("New source identity is outside the held plan")
@@ -993,7 +1072,9 @@ def apply_workload_source_update(
         current_catalog, allow_uninitialized=True
     )
     if current_generation != update.expected_generation - (1 if update.changed else 0):
-        raise WorkloadPackageRuntimeError("Runtime activity catalog changed after source projection")
+        raise WorkloadPackageRuntimeError(
+            "Runtime activity catalog changed after source projection"
+        )
     current_policy_bytes = _read_policy_bytes_optional(
         policy_path,
         group_id=_runtime_group_id(),
@@ -1117,7 +1198,9 @@ def reconcile_workload_source_update(
     previous_generation = update.expected_generation - (1 if update.changed else 0)
     if previous_generation < 0 or type(update.changed) is not bool:
         raise WorkloadPackageRuntimeError("Source update prior generation is invalid")
-    if not isinstance(update.binding_scopes, Mapping) or not isinstance(update.runtime_bindings, Mapping):
+    if not isinstance(update.binding_scopes, Mapping) or not isinstance(
+        update.runtime_bindings, Mapping
+    ):
         raise WorkloadPackageRuntimeError("Source update recovery scopes are malformed")
     source_ids = set(update.source_identity)
     selected_keys = [
@@ -1137,14 +1220,17 @@ def reconcile_workload_source_update(
                 {"source_id": source_id, "bindings": bindings}
                 for source_id, bindings in update.runtime_bindings.items()
             ]
-        ) != update.binding_scopes
+        )
+        != update.binding_scopes
     ):
         raise WorkloadPackageRuntimeError("Source update recovery owner identities are incomplete")
     hold_digests = hold["component_artifact_digests"]
     if any(
         hold_digests.get(component_id) != digest
         for component_id, digest in update.component_artifact_digests.items()
-    ) or any(component_id not in hold_digests for component_id in update.required_hold_component_ids):
+    ) or any(
+        component_id not in hold_digests for component_id in update.required_hold_component_ids
+    ):
         raise WorkloadPackageRuntimeError("Source update recovery is outside the held artifact map")
     if update.previous_policy_digest is not None:
         _require_digest(update.previous_policy_digest, "prior Package Runtime policy digest")
@@ -1152,7 +1238,9 @@ def reconcile_workload_source_update(
     activity_catalog_path = Path(activity_catalog_path)
     policy_path = Path(policy_path)
     token_directory = Path(token_directory)
-    if any(not path.is_absolute() for path in (activity_catalog_path, policy_path, token_directory)):
+    if any(
+        not path.is_absolute() for path in (activity_catalog_path, policy_path, token_directory)
+    ):
         raise WorkloadPackageRuntimeError("Package Runtime recovery paths must be absolute")
     try:
         activity_catalog_path.lstat()
@@ -1160,7 +1248,9 @@ def reconcile_workload_source_update(
         if previous_generation == 0 and update.expected_generation == 1:
             current_catalog = {"schema_version": 1, "generation": 0, "sources": []}
         else:
-            raise WorkloadPackageRuntimeError("Runtime activity catalog is unavailable for recovery")
+            raise WorkloadPackageRuntimeError(
+                "Runtime activity catalog is unavailable for recovery"
+            )
     else:
         current_catalog = _read_activity_catalog(activity_catalog_path)
     generation, current_sources = _catalog_identity(current_catalog, allow_uninitialized=True)
@@ -1178,10 +1268,14 @@ def reconcile_workload_source_update(
             else None
         )
         if current_digest != update.previous_policy_digest:
-            raise WorkloadPackageRuntimeError("Package Runtime policy changed before Broker source commit")
+            raise WorkloadPackageRuntimeError(
+                "Package Runtime policy changed before Broker source commit"
+            )
         return None
     if generation != update.expected_generation or not update.changed:
-        raise WorkloadPackageRuntimeError("Runtime activity catalog advanced to an unexpected generation")
+        raise WorkloadPackageRuntimeError(
+            "Runtime activity catalog advanced to an unexpected generation"
+        )
 
     _validate_recovery_catalog(update, current_sources, token_directory)
     desired_policy = _policy_from_catalog_and_update(current_catalog, update)
@@ -1191,9 +1285,7 @@ def reconcile_workload_source_update(
         owner_id=_effective_uid(),
     )
     current_digest = (
-        "sha256:" + hashlib.sha256(policy_bytes).hexdigest()
-        if policy_bytes is not None
-        else None
+        "sha256:" + hashlib.sha256(policy_bytes).hexdigest() if policy_bytes is not None else None
     )
     if policy_bytes is not None:
         current_policy = read_runtime_source_policy_generic(policy_path)
@@ -1211,11 +1303,15 @@ def reconcile_workload_source_update(
     desired_digest = _runtime_policy_digest(desired_policy)
     if current_policy == desired_policy:
         if current_digest != desired_digest:
-            raise WorkloadPackageRuntimeError("Committed Package Runtime policy bytes are not canonical")
+            raise WorkloadPackageRuntimeError(
+                "Committed Package Runtime policy bytes are not canonical"
+            )
         new_digest = current_digest
     else:
         if current_digest != update.previous_policy_digest:
-            raise WorkloadPackageRuntimeError("Package Runtime policy changed outside the pending source update")
+            raise WorkloadPackageRuntimeError(
+                "Package Runtime policy changed outside the pending source update"
+            )
         new_digest = write_runtime_source_policy_cas(
             desired_policy,
             expected_prior_digest=update.previous_policy_digest,
@@ -1268,28 +1364,28 @@ def _validate_recovery_source_projection(
     if set(current_sources) - set(update.source_identity) or set(current_sources) != (
         set(update.source_identity) - missing_new_sources
     ):
-        raise WorkloadPackageRuntimeError("Runtime activity source set differs from recovery intent")
+        raise WorkloadPackageRuntimeError(
+            "Runtime activity source set differs from recovery intent"
+        )
     for source_id, expected in update.source_identity.items():
         actual = current_sources.get(source_id)
         if actual is None:
             continue
         if actual.get("uid") != expected.get("uid") or actual.get("gid") != expected.get("gid"):
-            raise WorkloadPackageRuntimeError("Runtime activity source principal differs from recovery intent")
+            raise WorkloadPackageRuntimeError(
+                "Runtime activity source principal differs from recovery intent"
+            )
         old_token_digest = expected.get("source_token_sha256")
         if old_token_digest is not None and actual.get("source_token_sha256") != old_token_digest:
             raise WorkloadPackageRuntimeError("Runtime activity source token identity changed")
 
-    if (
-        any(
-            not isinstance(component_id, str)
-            or hold["component_artifact_digests"].get(component_id) != digest
-            for component_id, digest in update.component_artifact_digests.items()
-        )
-        or any(
-            not isinstance(component_id, str)
-            or component_id not in hold["component_artifact_digests"]
-            for component_id in update.required_hold_component_ids
-        )
+    if any(
+        not isinstance(component_id, str)
+        or hold["component_artifact_digests"].get(component_id) != digest
+        for component_id, digest in update.component_artifact_digests.items()
+    ) or any(
+        not isinstance(component_id, str) or component_id not in hold["component_artifact_digests"]
+        for component_id in update.required_hold_component_ids
     ):
         raise WorkloadPackageRuntimeError("Source update component digest differs from held plan")
 
@@ -1302,7 +1398,9 @@ def _validate_recovery_catalog(
     """Require exact committed Broker scopes and source-token readback."""
 
     if set(current_sources) != set(update.binding_scopes):
-        raise WorkloadPackageRuntimeError("Committed Broker source set differs from recovery intent")
+        raise WorkloadPackageRuntimeError(
+            "Committed Broker source set differs from recovery intent"
+        )
     for source_id, actual in current_sources.items():
         expected = update.source_identity[source_id]
         if (
@@ -1312,8 +1410,13 @@ def _validate_recovery_catalog(
         ):
             raise WorkloadPackageRuntimeError("Committed Broker scopes differ from recovery intent")
         expected_token_digest = expected.get("source_token_sha256")
-        if expected_token_digest is not None and actual.get("source_token_sha256") != expected_token_digest:
-            raise WorkloadPackageRuntimeError("Committed Broker token identity differs from recovery intent")
+        if (
+            expected_token_digest is not None
+            and actual.get("source_token_sha256") != expected_token_digest
+        ):
+            raise WorkloadPackageRuntimeError(
+                "Committed Broker token identity differs from recovery intent"
+            )
         _verify_token_file(token_directory / f"{source_id}.token", actual["source_token_sha256"])
 
 
@@ -1398,7 +1501,9 @@ def _write_private_json(path: Path, value: Any) -> None:
         if existing != value:
             raise WorkloadPackageRuntimeError("Package Runtime retry request differs")
         return
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+    )
     try:
         os.fchown(descriptor, 0, 0)
         os.fchmod(descriptor, 0o600)
@@ -1437,7 +1542,9 @@ def _read_private_json(path: Path) -> Any:
                 raise WorkloadPackageRuntimeError("Package Runtime private request is unsafe")
             raw = stream.read(MAX_FRAME_BYTES + 1)
     except OSError as error:
-        raise WorkloadPackageRuntimeError("Package Runtime private request is unavailable") from error
+        raise WorkloadPackageRuntimeError(
+            "Package Runtime private request is unavailable"
+        ) from error
     if len(raw) > MAX_FRAME_BYTES:
         raise WorkloadPackageRuntimeError("Package Runtime private request is too large")
     try:
@@ -1458,7 +1565,10 @@ def _run_json_command(
             text=True,
             timeout=timeout,
             check=False,
-            env={"LANG": "C.UTF-8", "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+            env={
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            },
             cwd="/",
         )
     except (OSError, subprocess.TimeoutExpired) as error:
@@ -1480,7 +1590,9 @@ def _read_owned_json(path: Path, *, group_id: int | None = None) -> tuple[dict[s
 
     try:
         before = path.lstat()
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        )
         with os.fdopen(descriptor, "rb") as stream:
             opened = os.fstat(stream.fileno())
             if (
@@ -1494,10 +1606,14 @@ def _read_owned_json(path: Path, *, group_id: int | None = None) -> tuple[dict[s
                 or opened.st_dev != before.st_dev
                 or opened.st_ino != before.st_ino
             ):
-                raise WorkloadPackageRuntimeError("Protected Package Runtime file metadata is unsafe")
+                raise WorkloadPackageRuntimeError(
+                    "Protected Package Runtime file metadata is unsafe"
+                )
             raw = stream.read(MAX_FILE_BYTES + 1)
     except OSError as error:
-        raise WorkloadPackageRuntimeError("Protected Package Runtime file is unavailable") from error
+        raise WorkloadPackageRuntimeError(
+            "Protected Package Runtime file is unavailable"
+        ) from error
     if len(raw) > MAX_FILE_BYTES:
         raise WorkloadPackageRuntimeError("Protected Package Runtime file is too large")
     try:
@@ -1537,7 +1653,9 @@ def _validate_catalog_update_readback(
         or type(command_result.get("generation")) is not int
         or not isinstance(command_result.get("sources"), list)
     ):
-        raise WorkloadPackageRuntimeError("Runtime activity catalog response differs from the held update")
+        raise WorkloadPackageRuntimeError(
+            "Runtime activity catalog response differs from the held update"
+        )
     result_rows = command_result["sources"]
     if len(result_rows) != len(sources):
         raise WorkloadPackageRuntimeError("Runtime activity catalog source receipt is incomplete")
@@ -1547,7 +1665,10 @@ def _validate_catalog_update_readback(
             actual["uid"] != expected["uid"]
             or actual["gid"] != expected["gid"]
             or actual["binding_scopes"] != update.binding_scopes[source_id]
-            or (expected["source_token_sha256"] is not None and actual["source_token_sha256"] != expected["source_token_sha256"])
+            or (
+                expected["source_token_sha256"] is not None
+                and actual["source_token_sha256"] != expected["source_token_sha256"]
+            )
             or not isinstance(receipt, Mapping)
             or set(receipt) != {"source_id", "token_file", "binding_scope_count"}
             or receipt.get("source_id") != source_id
@@ -1566,7 +1687,9 @@ def _verify_token_file(path: Path, expected_sha256: str) -> None:
     expected = _require_digest(expected_sha256, "source_token_sha256", typed=False)
     try:
         before = path.lstat()
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        )
         with os.fdopen(descriptor, "rb") as stream:
             opened = os.fstat(stream.fileno())
             if (
@@ -1625,7 +1748,9 @@ def _policy_from_catalog_and_update(
     return policy
 
 
-def _validate_installation_record_identity(row: Mapping[str, Any], record: Mapping[str, Any]) -> None:
+def _validate_installation_record_identity(
+    row: Mapping[str, Any], record: Mapping[str, Any]
+) -> None:
     """Check the real Platform InstallationRecord before owner-scope mutation."""
 
     fields = {
@@ -1660,10 +1785,14 @@ def _validate_installation_record_identity(row: Mapping[str, Any], record: Mappi
             for field in ("artifact_digest", "archive_digest")
         )
     ):
-        raise WorkloadPackageRuntimeError("Platform InstallationRecord differs from selected package")
+        raise WorkloadPackageRuntimeError(
+            "Platform InstallationRecord differs from selected package"
+        )
     artifact = row.get("packageArtifactDigest")
     if artifact is not None and record["artifact_digest"] != artifact:
-        raise WorkloadPackageRuntimeError("Platform aggregate artifact digest differs from selected package")
+        raise WorkloadPackageRuntimeError(
+            "Platform aggregate artifact digest differs from selected package"
+        )
     verification = record.get("verification")
     dependencies = record.get("dependencies")
     if (
@@ -1724,17 +1853,27 @@ def _validate_installation_record_identity(row: Mapping[str, Any], record: Mappi
     if (
         not isinstance(capabilities, list)
         or capabilities != sorted(set(capabilities))
-        or any(not isinstance(value, str) or _PACKAGE_ID.fullmatch(value) is None for value in capabilities)
+        or any(
+            not isinstance(value, str) or _PACKAGE_ID.fullmatch(value) is None
+            for value in capabilities
+        )
     ):
         raise WorkloadPackageRuntimeError("Platform InstallationRecord capabilities are invalid")
     capability = row.get("capabilityId")
     if capability is not None and capabilities != [capability]:
-        raise WorkloadPackageRuntimeError("Platform InstallationRecord capability differs from selected package")
-    derived = "installation-" + hashlib.sha256(
-        f"{record['package_id']}\0{record['package_version']}\0{record['artifact_digest']}".encode()
-    ).hexdigest()[:32]
+        raise WorkloadPackageRuntimeError(
+            "Platform InstallationRecord capability differs from selected package"
+        )
+    derived = (
+        "installation-"
+        + hashlib.sha256(
+            f"{record['package_id']}\0{record['package_version']}\0{record['artifact_digest']}".encode()
+        ).hexdigest()[:32]
+    )
     if record["installation_id"] != derived:
-        raise WorkloadPackageRuntimeError("Platform InstallationId is not derived from its identity")
+        raise WorkloadPackageRuntimeError(
+            "Platform InstallationId is not derived from its identity"
+        )
 
 
 def _validate_runtime_policy_against_catalog(
@@ -1750,11 +1889,10 @@ def _validate_runtime_policy_against_catalog(
         raise WorkloadPackageRuntimeError("Runtime source policy is not at the catalog generation")
     for source in normalized["sources"]:
         current = sources[source["source_id"]]
-        if any(
-            source[field] != current[field]
-            for field in ("uid", "gid", "source_token_sha256")
-        ):
-            raise WorkloadPackageRuntimeError("Runtime source policy principal differs from Broker catalog")
+        if any(source[field] != current[field] for field in ("uid", "gid", "source_token_sha256")):
+            raise WorkloadPackageRuntimeError(
+                "Runtime source policy principal differs from Broker catalog"
+            )
     projected = _broker_projection(normalized["sources"])
     if projected != {source_id: row["binding_scopes"] for source_id, row in sources.items()}:
         raise WorkloadPackageRuntimeError("Runtime source policy scopes differ from Broker catalog")
@@ -1778,7 +1916,9 @@ def _validate_owner_call(
     """Validate exact source, owner, operation, and installation allowlists."""
 
     if operation not in SOURCE_OPERATIONS:
-        raise WorkloadPackageRuntimeError("Package Runtime operation is not in the signed source policy")
+        raise WorkloadPackageRuntimeError(
+            "Package Runtime operation is not in the signed source policy"
+        )
     if (
         _SOURCE_ID.fullmatch(source_id) is None
         or type(uid) is not int
@@ -1809,7 +1949,9 @@ def _validate_owner_call(
         or policy_source["uid"] != uid
         or policy_source["gid"] != gid
     ):
-        raise WorkloadPackageRuntimeError("Package Runtime caller UID/GID differs from registered source")
+        raise WorkloadPackageRuntimeError(
+            "Package Runtime caller UID/GID differs from registered source"
+        )
     policy_binding = next(
         (row for row in policy_source["bindings"] if row["binding_id"] == binding_id), None
     )
@@ -1823,10 +1965,15 @@ def _validate_owner_call(
     if (
         not requested_ids
         or requested_ids != sorted(set(requested_ids))
-        or any(not isinstance(item, str) or _INSTALLATION_ID.fullmatch(item) is None for item in requested_ids)
+        or any(
+            not isinstance(item, str) or _INSTALLATION_ID.fullmatch(item) is None
+            for item in requested_ids
+        )
         or not set(requested_ids).issubset(policy_binding["installation_ids"])
     ):
-        raise WorkloadPackageRuntimeError("Package Runtime installation IDs exceed the owner policy")
+        raise WorkloadPackageRuntimeError(
+            "Package Runtime installation IDs exceed the owner policy"
+        )
     scope = next(
         (row for row in activity_source["binding_scopes"] if row["binding_id"] == binding_id), None
     )
@@ -1835,17 +1982,23 @@ def _validate_owner_call(
         or scope["package_id"] != package_id
         or not set(requested_ids).issubset(scope["installation_ids"])
     ):
-        raise WorkloadPackageRuntimeError("Broker binding scope differs from the Runtime owner policy")
+        raise WorkloadPackageRuntimeError(
+            "Broker binding scope differs from the Runtime owner policy"
+        )
     try:
         account = pwd.getpwuid(uid)
         group = grp.getgrgid(gid)
     except KeyError as error:
-        raise WorkloadPackageRuntimeError("Registered Package Runtime account is unavailable") from error
+        raise WorkloadPackageRuntimeError(
+            "Registered Package Runtime account is unavailable"
+        ) from error
     if account.pw_uid != uid or group.gr_gid != gid:
         raise WorkloadPackageRuntimeError("Registered Package Runtime account identity changed")
     token_path = principal["tokenPath"]
     if token_path.name != f"{source_id}.token":
-        raise WorkloadPackageRuntimeError("Source token path does not match the registered source ID")
+        raise WorkloadPackageRuntimeError(
+            "Source token path does not match the registered source ID"
+        )
     _verify_token_file(token_path, activity_source["source_token_sha256"])
     return policy_source, policy_binding, token_path
 
@@ -1868,7 +2021,10 @@ def run_package_binding_operation(
     source_principals: Mapping[str, Mapping[str, Any]],
     persist_intent: Callable[[str, Mapping[str, Any]], None] | None = None,
     persist_outcome: Callable[[Mapping[str, Any] | None, Mapping[str, Any]], None] | None = None,
-    persist_reconcile: Callable[[Mapping[str, Any] | None, Mapping[str, Any], Mapping[str, Any]], None] | None = None,
+    persist_reconcile: Callable[
+        [Mapping[str, Any] | None, Mapping[str, Any], Mapping[str, Any]], None
+    ]
+    | None = None,
     socket_path: Path = DEFAULT_PACKAGE_RUNTIME_SOCKET,
     maintenance_socket_path: Path = DEFAULT_MAINTENANCE_SOCKET,
     timeout: float = 30.0,
@@ -1899,17 +2055,32 @@ def run_package_binding_operation(
     )
     principal = _source_principal(source_principals[source_id], source_id)
     if Path(token_path) != principal["tokenPath"]:
-        raise WorkloadPackageRuntimeError("SDK token path differs from the registered source principal")
+        raise WorkloadPackageRuntimeError(
+            "SDK token path differs from the registered source principal"
+        )
     if operation in ("activate", "recover_binding", "deactivate"):
-        if not all(callable(callback) for callback in (persist_intent, persist_outcome, persist_reconcile)):
-            raise WorkloadPackageRuntimeError("Durable owner callbacks are required for binding mutations")
+        if not all(
+            callable(callback) for callback in (persist_intent, persist_outcome, persist_reconcile)
+        ):
+            raise WorkloadPackageRuntimeError(
+                "Durable owner callbacks are required for binding mutations"
+            )
         if len(installation_ids) != 1:
-            raise WorkloadPackageRuntimeError("One exact installation ID is required per binding mutation")
+            raise WorkloadPackageRuntimeError(
+                "One exact installation ID is required per binding mutation"
+            )
     elif persist_intent is not None or persist_outcome is not None or persist_reconcile is not None:
-        raise WorkloadPackageRuntimeError("Read-only SDK operations do not accept mutation callbacks")
+        raise WorkloadPackageRuntimeError(
+            "Read-only SDK operations do not accept mutation callbacks"
+        )
     python_path = Path(sdk_python)
     _validate_sdk_python(python_path)
-    if not socket_path.is_absolute() or not maintenance_socket_path.is_absolute() or timeout <= 0 or timeout > 120:
+    if (
+        not socket_path.is_absolute()
+        or not maintenance_socket_path.is_absolute()
+        or timeout <= 0
+        or timeout > 120
+    ):
         raise WorkloadPackageRuntimeError("Package Runtime SDK endpoint or timeout is invalid")
     try:
         user = pwd.getpwuid(uid)
@@ -1973,7 +2144,9 @@ def run_package_binding_operation(
         parent_channel.close()
         child_channel.close()
         os.close(token_fd)
-        raise WorkloadPackageRuntimeError("Source-owned Package Runtime SDK could not start") from error
+        raise WorkloadPackageRuntimeError(
+            "Source-owned Package Runtime SDK could not start"
+        ) from error
     child_channel.close()
     os.close(token_fd)
     buffered = bytearray()
@@ -1987,7 +2160,9 @@ def run_package_binding_operation(
             if time.monotonic() >= deadline:
                 child.kill()
                 raise WorkloadPackageRuntimeError("Source-owned Package Runtime SDK timed out")
-            ready, _, _ = select.select([parent_channel], [], [], min(0.1, deadline - time.monotonic()))
+            ready, _, _ = select.select(
+                [parent_channel], [], [], min(0.1, deadline - time.monotonic())
+            )
             if ready:
                 chunk = parent_channel.recv(MAX_IPC_BYTES - len(buffered) + 1)
                 if not chunk:
@@ -1995,7 +2170,9 @@ def run_package_binding_operation(
                 buffered.extend(chunk)
                 if len(buffered) > MAX_IPC_BYTES:
                     child.kill()
-                    raise WorkloadPackageRuntimeError("Source-owned SDK callback frame is too large")
+                    raise WorkloadPackageRuntimeError(
+                        "Source-owned SDK callback frame is too large"
+                    )
                 while b"\n" in buffered:
                     line, _, remainder = buffered.partition(b"\n")
                     buffered[:] = remainder
@@ -2010,13 +2187,17 @@ def run_package_binding_operation(
                             or message.get("egid") != gid
                             or message.get("groups") != []
                         ):
-                            raise WorkloadPackageRuntimeError("SDK peer credentials differ from registered source")
+                            raise WorkloadPackageRuntimeError(
+                                "SDK peer credentials differ from registered source"
+                            )
                         _verify_process_identity(child.pid, uid=uid, gid=gid)
                         identity_checked = True
                         parent_channel.sendall(b'{"ok":true}\n')
                     elif kind == "callback":
                         if not identity_checked:
-                            raise WorkloadPackageRuntimeError("SDK callback arrived before peer identity proof")
+                            raise WorkloadPackageRuntimeError(
+                                "SDK callback arrived before peer identity proof"
+                            )
                         _dispatch_durable_callback(
                             message,
                             expected_request_id=request_id,
@@ -2033,20 +2214,36 @@ def run_package_binding_operation(
                         parent_channel.sendall(b'{"ok":true}\n')
                     elif kind == "read_result":
                         value = message.get("value")
-                        if not identity_checked or got_read_result or (value is not None and not isinstance(value, dict)):
-                            raise WorkloadPackageRuntimeError("SDK returned duplicate or invalid readback")
+                        if (
+                            not identity_checked
+                            or got_read_result
+                            or (value is not None and not isinstance(value, dict))
+                        ):
+                            raise WorkloadPackageRuntimeError(
+                                "SDK returned duplicate or invalid readback"
+                            )
                         read_result = value
                         got_read_result = True
                         parent_channel.sendall(b'{"ok":true}\n')
                     elif kind == "summary":
-                        if not identity_checked or summary is not None or not isinstance(message.get("value"), dict):
-                            raise WorkloadPackageRuntimeError("SDK returned duplicate or invalid summary")
+                        if (
+                            not identity_checked
+                            or summary is not None
+                            or not isinstance(message.get("value"), dict)
+                        ):
+                            raise WorkloadPackageRuntimeError(
+                                "SDK returned duplicate or invalid summary"
+                            )
                         summary = message["value"]
                         parent_channel.sendall(b'{"ok":true}\n')
                     elif kind == "error":
-                        raise WorkloadPackageRuntimeError("Source-owned Package Runtime SDK operation failed")
+                        raise WorkloadPackageRuntimeError(
+                            "Source-owned Package Runtime SDK operation failed"
+                        )
                     else:
-                        raise WorkloadPackageRuntimeError("Source-owned SDK callback type is unsupported")
+                        raise WorkloadPackageRuntimeError(
+                            "Source-owned SDK callback type is unsupported"
+                        )
             if child.poll() is not None:
                 # Drain any final frame before leaving; the child may have closed after it.
                 ready, _, _ = select.select([parent_channel], [], [], 0)
@@ -2071,11 +2268,17 @@ def run_package_binding_operation(
         ):
             raise WorkloadPackageRuntimeError("Source-owned SDK result is not successful")
         if operation == "get_installation":
-            if not got_read_result or (read_result is not None and not isinstance(read_result, dict)):
-                raise WorkloadPackageRuntimeError("Package Runtime installation readback is missing")
+            if not got_read_result or (
+                read_result is not None and not isinstance(read_result, dict)
+            ):
+                raise WorkloadPackageRuntimeError(
+                    "Package Runtime installation readback is missing"
+                )
             if read_result is not None:
                 if read_result.get("installation_id") != installation_ids[0]:
-                    raise WorkloadPackageRuntimeError("Package Runtime returned another installation")
+                    raise WorkloadPackageRuntimeError(
+                        "Package Runtime returned another installation"
+                    )
                 _validate_installation_record_identity(
                     {
                         "packageId": read_result.get("package_id"),
@@ -2089,8 +2292,13 @@ def run_package_binding_operation(
             if read_result is None:
                 return {"operation": operation, "requestId": request_id, "status": None}
             sanitized = _safe_runtime_status(read_result)
-            if sanitized["binding_id"] != binding_id or sanitized["installation_id"] not in installation_ids:
-                raise WorkloadPackageRuntimeError("Package Runtime status exceeds the requested binding scope")
+            if (
+                sanitized["binding_id"] != binding_id
+                or sanitized["installation_id"] not in installation_ids
+            ):
+                raise WorkloadPackageRuntimeError(
+                    "Package Runtime status exceeds the requested binding scope"
+                )
             return {
                 "operation": operation,
                 "requestId": request_id,
@@ -2109,7 +2317,9 @@ def run_package_binding_operation(
         if child.poll() is None:
             child.kill()
         child.wait()
-        raise WorkloadPackageRuntimeError("Source-owned Package Runtime SDK bridge failed") from error
+        raise WorkloadPackageRuntimeError(
+            "Source-owned Package Runtime SDK bridge failed"
+        ) from error
     except Exception as error:
         if child.poll() is None:
             child.kill()
@@ -2172,7 +2382,9 @@ def _validate_binding_operation_receipt(
             "operation": operation,
         }
     ):
-        raise WorkloadPackageRuntimeError("SDK binding-operation receipt differs from the requested scope")
+        raise WorkloadPackageRuntimeError(
+            "SDK binding-operation receipt differs from the requested scope"
+        )
 
 
 def _binding_receipt_identity(receipt: Mapping[str, Any]) -> dict[str, Any]:
@@ -2234,7 +2446,9 @@ def _verify_process_identity(pid: int, *, uid: int, gid: int) -> None:
     try:
         status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
     except (OSError, UnicodeError) as error:
-        raise WorkloadPackageRuntimeError("SDK child process credentials cannot be verified") from error
+        raise WorkloadPackageRuntimeError(
+            "SDK child process credentials cannot be verified"
+        ) from error
     fields: dict[str, list[str]] = {}
     for line in status.splitlines():
         name, separator, value = line.partition(":")
@@ -2247,7 +2461,9 @@ def _verify_process_identity(pid: int, *, uid: int, gid: int) -> None:
     except (KeyError, ValueError) as error:
         raise WorkloadPackageRuntimeError("SDK child process credentials are malformed") from error
     if process_uids != [uid] * 4 or process_gids != [gid] * 4 or supplementary_groups:
-        raise WorkloadPackageRuntimeError("SDK child process is not isolated to its registered source")
+        raise WorkloadPackageRuntimeError(
+            "SDK child process is not isolated to its registered source"
+        )
 
 
 def _dispatch_durable_callback(
@@ -2276,7 +2492,9 @@ def _dispatch_durable_callback(
         except Exception:  # noqa: BLE001 - redact arbitrary parent journal failures before SDK ack.
             raise WorkloadPackageRuntimeError("Parent journal callback failed") from None
         if result is not None:
-            raise WorkloadPackageRuntimeError("Parent journal callback did not complete synchronously")
+            raise WorkloadPackageRuntimeError(
+                "Parent journal callback did not complete synchronously"
+            )
 
     event = payload.get("event")
     if event == "intent" and callable(persist_intent):
@@ -2313,8 +2531,13 @@ def _dispatch_durable_callback(
             operation=expected_scope_operation,
         )
         safe_status = _safe_runtime_status(status)
-        if safe_status["binding_id"] != binding_id or safe_status["installation_id"] != installation_id:
-            raise WorkloadPackageRuntimeError("SDK operation status differs from its admitted scope")
+        if (
+            safe_status["binding_id"] != binding_id
+            or safe_status["installation_id"] != installation_id
+        ):
+            raise WorkloadPackageRuntimeError(
+                "SDK operation status differs from its admitted scope"
+            )
         persist(persist_outcome, safe_status, _binding_receipt_identity(receipt))
     elif event == "reconcile" and callable(persist_reconcile):
         status = payload.get("status")
@@ -2337,7 +2560,9 @@ def _dispatch_durable_callback(
             operation="recover" if operation == "recover_binding" else operation,
         )
         if installation.get("installation_id") != installation_id:
-            raise WorkloadPackageRuntimeError("SDK reconciliation installation differs from its scope")
+            raise WorkloadPackageRuntimeError(
+                "SDK reconciliation installation differs from its scope"
+            )
         _validate_installation_record_identity(
             {
                 "packageId": package_id,
@@ -2348,8 +2573,13 @@ def _dispatch_durable_callback(
         )
         if status is not None:
             safe_status = _safe_runtime_status(status)
-            if safe_status["binding_id"] != binding_id or safe_status["installation_id"] != installation_id:
-                raise WorkloadPackageRuntimeError("SDK reconciliation status differs from its scope")
+            if (
+                safe_status["binding_id"] != binding_id
+                or safe_status["installation_id"] != installation_id
+            ):
+                raise WorkloadPackageRuntimeError(
+                    "SDK reconciliation status differs from its scope"
+                )
         persist(
             persist_reconcile,
             _safe_runtime_status(status) if status is not None else None,
@@ -2413,7 +2643,9 @@ def _validate_sdk_path_components(path: Path, *, allow_final_symlink: bool) -> N
         is_final = index == len(path.parts[1:]) - 1
         if stat.S_ISLNK(info.st_mode):
             if not (is_final and allow_final_symlink and info.st_uid == 0):
-                raise WorkloadPackageRuntimeError("Attested SDK Python path contains an unsafe symlink")
+                raise WorkloadPackageRuntimeError(
+                    "Attested SDK Python path contains an unsafe symlink"
+                )
             continue
         if not is_final and not stat.S_ISDIR(info.st_mode):
             raise WorkloadPackageRuntimeError("Attested SDK Python path has a non-directory parent")
@@ -2466,18 +2698,15 @@ def _create_token_memfd(token: str, *, uid: int | None = None, gid: int | None =
         os.fchmod(descriptor, 0o400)
         os.lseek(descriptor, 0, os.SEEK_SET)
         os.set_inheritable(descriptor, True)
-        seals = (
-            _fcntl.F_SEAL_SEAL
-            | _fcntl.F_SEAL_SHRINK
-            | _fcntl.F_SEAL_GROW
-            | _fcntl.F_SEAL_WRITE
-        )
+        seals = _fcntl.F_SEAL_SEAL | _fcntl.F_SEAL_SHRINK | _fcntl.F_SEAL_GROW | _fcntl.F_SEAL_WRITE
         _fcntl.fcntl(descriptor, _fcntl.F_ADD_SEALS, seals)
         return descriptor
     except OSError as error:
         if "descriptor" in locals():
             os.close(descriptor)
-        raise WorkloadPackageRuntimeError("Activity token could not be placed in a sealed descriptor") from error
+        raise WorkloadPackageRuntimeError(
+            "Activity token could not be placed in a sealed descriptor"
+        ) from error
 
 
 def _safe_runtime_status(status: Mapping[str, Any]) -> dict[str, Any]:
@@ -2503,7 +2732,8 @@ def _safe_runtime_status(status: Mapping[str, Any]) -> dict[str, Any]:
         or status["generation"] < 1
         or status.get("state") not in {"RUNNING", "STOPPED", "FAILED"}
         or any(
-            value is not None and (not isinstance(value, str) or not value or any(ord(ch) < 32 for ch in value))
+            value is not None
+            and (not isinstance(value, str) or not value or any(ord(ch) < 32 for ch in value))
             for value in (
                 status.get("failure_code"),
                 status.get("failure_message"),
@@ -2562,14 +2792,23 @@ def _validate_installation_record_identity_for_hint(
         if not isinstance(hint.get(field), str) or _TYPED_SHA256.fullmatch(hint[field]) is None:
             raise WorkloadPackageRuntimeError("Package Runtime installation hint digest is invalid")
     hinted_artifact_digest = hint.get("packageArtifactDigest", hint.get("artifactDigest"))
-    if not isinstance(hinted_artifact_digest, str) or _TYPED_SHA256.fullmatch(hinted_artifact_digest) is None:
-        raise WorkloadPackageRuntimeError("Package Runtime installation hint artifact digest is invalid")
+    if (
+        not isinstance(hinted_artifact_digest, str)
+        or _TYPED_SHA256.fullmatch(hinted_artifact_digest) is None
+    ):
+        raise WorkloadPackageRuntimeError(
+            "Package Runtime installation hint artifact digest is invalid"
+        )
     for field in ("releaseId", "manifestUri", "targetId"):
         if not isinstance(hint.get(field), str) or not hint[field]:
-            raise WorkloadPackageRuntimeError("Package Runtime installation hint provenance is invalid")
+            raise WorkloadPackageRuntimeError(
+                "Package Runtime installation hint provenance is invalid"
+            )
     for field in ("indexIdentity", "publisherIdentity", "attestationRef"):
         if not isinstance(hint.get(field), Mapping) or not hint[field]:
-            raise WorkloadPackageRuntimeError("Package Runtime installation hint provenance is incomplete")
+            raise WorkloadPackageRuntimeError(
+                "Package Runtime installation hint provenance is incomplete"
+            )
     verification = record.get("verification")
     dependencies = record.get("dependencies")
     if not isinstance(verification, Mapping) or not isinstance(dependencies, Mapping):
@@ -2599,7 +2838,9 @@ def _validate_installation_record_identity_for_hint(
         "dependencyLockDigest": verification.get("dependency_lock_digest"),
     }
     if hint.get("installed") is not True or expected != actual:
-        raise WorkloadPackageRuntimeError("Local plugin receipt differs from authenticated Package Runtime")
+        raise WorkloadPackageRuntimeError(
+            "Local plugin receipt differs from authenticated Package Runtime"
+        )
     _validate_installation_record_identity(
         {
             "packageId": hint["packageId"],
@@ -2700,10 +2941,14 @@ def read_workload_package_inventory(
         hint = installation_hints.get(component_id)
         if source is None:
             if isinstance(hint, Mapping) and hint.get("installed") is True:
-                raise WorkloadPackageRuntimeError("Installed Package Runtime owner source is not registered")
+                raise WorkloadPackageRuntimeError(
+                    "Installed Package Runtime owner source is not registered"
+                )
             continue
         binding_id = row["bindingId"]
-        binding = next((item for item in source["bindings"] if item["binding_id"] == binding_id), None)
+        binding = next(
+            (item for item in source["bindings"] if item["binding_id"] == binding_id), None
+        )
         if (
             binding is None
             or binding["package_id"] != row["packageId"]
@@ -2712,10 +2957,15 @@ def read_workload_package_inventory(
             or hint.get("packageId") != row["packageId"]
         ):
             if isinstance(hint, Mapping) and hint.get("installed") is True:
-                raise WorkloadPackageRuntimeError("Installed Package Runtime owner binding is not registered")
+                raise WorkloadPackageRuntimeError(
+                    "Installed Package Runtime owner binding is not registered"
+                )
             continue
         installation_id = hint.get("installationId")
-        if not isinstance(installation_id, str) or installation_id not in binding["installation_ids"]:
+        if (
+            not isinstance(installation_id, str)
+            or installation_id not in binding["installation_ids"]
+        ):
             continue
         principal = _source_principal(source_principals.get(source_id), source_id)
         result = run_package_binding_operation(
@@ -2786,7 +3036,9 @@ def read_workload_package_inventory(
                 failure_code = status.get("failure_code")
                 candidate_id = status.get("installation_id")
                 if candidate_id not in binding["installation_ids"]:
-                    raise WorkloadPackageRuntimeError("Runtime status installation exceeds owner scope")
+                    raise WorkloadPackageRuntimeError(
+                        "Runtime status installation exceeds owner scope"
+                    )
                 if state == "RUNNING":
                     active_id = candidate_id
             source_bindings.append(
@@ -2810,7 +3062,9 @@ def read_workload_package_inventory(
 def _inventory_request_id(component_or_binding_id: str, action: str) -> str:
     """Derive a unique safe read ID without logging source credentials."""
 
-    digest = hashlib.sha256(f"{component_or_binding_id}\0{action}\0{os.urandom(16).hex()}".encode()).hexdigest()[:32]
+    digest = hashlib.sha256(
+        f"{component_or_binding_id}\0{action}\0{os.urandom(16).hex()}".encode()
+    ).hexdigest()[:32]
     return f"cyrene-workload-inventory-{digest}"
 
 
@@ -2860,7 +3114,9 @@ def write_runtime_source_policy_cas(
             raise WorkloadPackageRuntimeError("Package Runtime policy CAS lock is unsafe")
         fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
         old_bytes = _read_policy_bytes_optional(target, group_id=group_id, owner_id=owner_id)
-        old_digest = "sha256:" + hashlib.sha256(old_bytes).hexdigest() if old_bytes is not None else None
+        old_digest = (
+            "sha256:" + hashlib.sha256(old_bytes).hexdigest() if old_bytes is not None else None
+        )
         if old_digest != expected_prior_digest:
             raise WorkloadPackageRuntimeError("Package Runtime policy CAS expected digest is stale")
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
@@ -2875,9 +3131,13 @@ def write_runtime_source_policy_cas(
                 os.fsync(stream.fileno())
             # Recheck under the lock immediately before the atomic replacement.
             latest = _read_policy_bytes_optional(target, group_id=group_id, owner_id=owner_id)
-            latest_digest = "sha256:" + hashlib.sha256(latest).hexdigest() if latest is not None else None
+            latest_digest = (
+                "sha256:" + hashlib.sha256(latest).hexdigest() if latest is not None else None
+            )
             if latest_digest != expected_prior_digest:
-                raise WorkloadPackageRuntimeError("Package Runtime policy CAS lost a concurrent update")
+                raise WorkloadPackageRuntimeError(
+                    "Package Runtime policy CAS lost a concurrent update"
+                )
             os.replace(temporary_path, target)
             replaced = True
             directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -2923,16 +3183,18 @@ def _validate_policy_parent(path: Path, owner_id: int) -> None:
         try:
             info = current.lstat()
         except OSError as error:
-            raise WorkloadPackageRuntimeError("Package Runtime policy directory is unavailable") from error
+            raise WorkloadPackageRuntimeError(
+                "Package Runtime policy directory is unavailable"
+            ) from error
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise WorkloadPackageRuntimeError("Package Runtime policy directory is unsafe")
         if info.st_uid != owner_id or stat.S_IMODE(info.st_mode) & 0o022:
-            raise WorkloadPackageRuntimeError("Package Runtime policy directory is not root-controlled")
+            raise WorkloadPackageRuntimeError(
+                "Package Runtime policy directory is not root-controlled"
+            )
 
 
-def _read_policy_bytes_optional(
-    path: Path, *, group_id: int, owner_id: int
-) -> bytes | None:
+def _read_policy_bytes_optional(path: Path, *, group_id: int, owner_id: int) -> bytes | None:
     """Read current policy bytes safely, or return None only when absent."""
 
     try:
@@ -2940,7 +3202,9 @@ def _read_policy_bytes_optional(
     except FileNotFoundError:
         return None
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        )
         with os.fdopen(descriptor, "rb") as stream:
             opened = os.fstat(stream.fileno())
             if (
@@ -2963,15 +3227,15 @@ def _read_policy_bytes_optional(
     return raw
 
 
-def _restore_policy_bytes(
-    path: Path, old: bytes | None, *, owner_id: int, group_id: int
-) -> None:
+def _restore_policy_bytes(path: Path, old: bytes | None, *, owner_id: int, group_id: int) -> None:
     """Restore the prior atomic policy value after a failed readback check."""
 
     if old is None:
         path.unlink(missing_ok=True)
     else:
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.restore.", dir=path.parent)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.restore.", dir=path.parent
+        )
         temporary = Path(temporary_name)
         try:
             os.fchmod(descriptor, 0o440)
@@ -2997,7 +3261,7 @@ def _file_digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-_SDK_DRIVER_PROGRAM = r'''import json, os, socket, sys
+_SDK_DRIVER_PROGRAM = r"""import json, os, socket, sys
 from cyrene_runtime_maintenance import PackageRuntimeClient, PackageRuntimeError
 
 channel_fd = int(sys.argv[1])
@@ -3143,7 +3407,7 @@ except Exception as error:
         code = "PACKAGE_RUNTIME_OPERATION_FAILED"
     print(json.dumps({"ok": False, "kind": "error", "value": {"code": code}}, separators=(",", ":")))
     raise SystemExit(1)
-'''
+"""
 
 
 __all__ = [

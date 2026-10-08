@@ -989,9 +989,7 @@ def test_workload_install_request_binds_catalog_component_not_dotted_package(
     descriptor_path = Path(
         "/var/lib/cyrene-updates/plugin-package-bootstrap/request/descriptor.json"
     )
-    archive_path = Path(
-        "/var/lib/cyrene-updates/plugin-package-bootstrap/request/archive.zip"
-    )
+    archive_path = Path("/var/lib/cyrene-updates/plugin-package-bootstrap/request/archive.zip")
     request = bootstrap.build_workload_offline_install_input(
         candidate,
         request_id="cyrene-workload-package-" + "b" * 32,
@@ -1025,9 +1023,7 @@ def test_workload_install_receipt_preserves_distinct_artifact_and_archive_digest
     descriptor_path = Path(
         "/var/lib/cyrene-updates/plugin-package-bootstrap/request/descriptor.json"
     )
-    archive_path = Path(
-        "/var/lib/cyrene-updates/plugin-package-bootstrap/request/archive.zip"
-    )
+    archive_path = Path("/var/lib/cyrene-updates/plugin-package-bootstrap/request/archive.zip")
     request = bootstrap.build_workload_offline_install_input(
         candidate,
         request_id="cyrene-workload-package-" + "d" * 32,
@@ -1035,9 +1031,12 @@ def test_workload_install_receipt_preserves_distinct_artifact_and_archive_digest
         descriptor_path=descriptor_path,
         archive_path=archive_path,
     )
-    installation_id = "installation-" + hashlib.sha256(
-        f"{candidate.package_id}\0{candidate.package_version}\0{candidate.artifact_digest}".encode()
-    ).hexdigest()[:32]
+    installation_id = (
+        "installation-"
+        + hashlib.sha256(
+            f"{candidate.package_id}\0{candidate.package_version}\0{candidate.artifact_digest}".encode()
+        ).hexdigest()[:32]
+    )
     installation = {
         "record_version": 1,
         "installation_id": installation_id,

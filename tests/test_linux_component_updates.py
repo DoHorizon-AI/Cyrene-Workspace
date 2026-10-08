@@ -146,14 +146,16 @@ def test_workload_catalyst_token_projection_never_journals_bearer(
     assert written[str(updates.DEFAULT_CATALYST_AUTH_ENVIRONMENT)] == (
         f"CYRENE_DATA_TOOLS_TOKEN={token}\n".encode()
     )
-    assert written[str(updates.DEFAULT_STUDIO_CONTROL_ENVIRONMENT)] == (
-        "STUDIO_CATALYST_URL=http://127.0.0.1:8004\n"
-        f"STUDIO_CATALYST_API_TOKEN_FILE={updates.DEFAULT_CATALYST_API_TOKEN}\n"
-    ).encode()
+    assert (
+        written[str(updates.DEFAULT_STUDIO_CONTROL_ENVIRONMENT)]
+        == (
+            "STUDIO_CATALYST_URL=http://127.0.0.1:8004\n"
+            f"STUDIO_CATALYST_API_TOKEN_FILE={updates.DEFAULT_CATALYST_API_TOKEN}\n"
+        ).encode()
+    )
     assert transaction["catalystAuth"] == identity
     assert all(
-        item["kind"] != "catalyst-api-token"
-        for item in transaction.get("managedConfigFiles", [])
+        item["kind"] != "catalyst-api-token" for item in transaction.get("managedConfigFiles", [])
     )
     assert token not in json.dumps(transaction)
     assert token not in journal_path.read_text(encoding="utf-8")
@@ -356,7 +358,9 @@ def test_workload_sdk_prepare_journals_prior_before_activation_and_resumes_readb
         "planDigest": plan_digest,
     }
     staged = {"status": "staged", "stagedIdentity": staged_identity}
-    prior = _sdk_identity(_sdk_selected_identity(version="0.0.9"), source_plan_id="plan-" + "0" * 32)
+    prior = _sdk_identity(
+        _sdk_selected_identity(version="0.0.9"), source_plan_id="plan-" + "0" * 32
+    )
     prepared = _sdk_identity(selected)
     transaction_path = updater._private_state_directory("transactions") / f"{plan_id}.json"
     transaction = {"planId": plan_id, "planDigest": plan_digest, "phase": "applying"}
@@ -438,7 +442,9 @@ def test_source_update_intent_reconcile_returns_committed_result_without_reproje
         "sourceIdentities": [],
         "bindings": [],
     }
-    source_identity = {"cyrene-catalyst": {"uid": 12001, "gid": 12002, "source_token_sha256": "e" * 64}}
+    source_identity = {
+        "cyrene-catalyst": {"uid": 12001, "gid": 12002, "source_token_sha256": "e" * 64}
+    }
     intent = {
         "schemaVersion": 1,
         "phase": phase,
@@ -477,13 +483,17 @@ def test_source_update_intent_reconcile_returns_committed_result_without_reproje
         WorkloadSourceUpdate = SourceUpdate
 
         @staticmethod
-        def reconcile_workload_source_update(update: SourceUpdate, **kwargs: object) -> dict[str, object]:
+        def reconcile_workload_source_update(
+            update: SourceUpdate, **kwargs: object
+        ) -> dict[str, object]:
             captured["reconcile"] = kwargs
             assert captured["update"]["expected_generation"] == 6
             return result
 
     monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: RuntimeHelper)
-    monkeypatch.setattr(updater, "_workload_hold_echo", lambda _transaction: {"transaction_id": "held"})
+    monkeypatch.setattr(
+        updater, "_workload_hold_echo", lambda _transaction: {"transaction_id": "held"}
+    )
     generation_writes: list[int] = []
     monkeypatch.setattr(
         updater,
@@ -603,8 +613,12 @@ def test_legacy_source_update_intent_persists_success_history_map(
         lambda _workload_id: ({"generation": 5}, {}, {}, RuntimeHelper),
     )
     monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: RuntimeHelper)
-    monkeypatch.setattr(updater, "_workload_hold_echo", lambda _transaction: {"transaction_id": "held"})
-    monkeypatch.setattr(updater, "_write_workload_activity_generation", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        updater, "_workload_hold_echo", lambda _transaction: {"transaction_id": "held"}
+    )
+    monkeypatch.setattr(
+        updater, "_write_workload_activity_generation", lambda *_args, **_kwargs: None
+    )
 
     applied = updater._update_workload_source_policy(
         transaction,

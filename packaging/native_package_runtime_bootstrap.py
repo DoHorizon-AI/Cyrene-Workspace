@@ -1124,7 +1124,9 @@ def build_workload_offline_install_input(
         or type(maintenance.get("expected_catalog_generation")) is not int
         or maintenance["expected_catalog_generation"] < 1
     ):
-        raise PackageRuntimeBootstrapError("Package Runtime maintenance hold differs from candidate")
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime maintenance hold differs from candidate"
+        )
     for value in (
         candidate.artifact_digest,
         candidate.archive_digest,
@@ -1186,7 +1188,12 @@ def stage_workload_offline_install_request(
     archive_path = request_directory / "archive.zip"
     request_path = request_directory / "request.json"
     source_rows = (
-        (candidate.descriptor_path, descriptor_path, candidate.descriptor_digest, MAX_DESCRIPTOR_BYTES),
+        (
+            candidate.descriptor_path,
+            descriptor_path,
+            candidate.descriptor_digest,
+            MAX_DESCRIPTOR_BYTES,
+        ),
         (candidate.archive_path, archive_path, candidate.archive_digest, MAX_RELEASE_ASSET_BYTES),
     )
     for source, destination, digest, limit in source_rows:
@@ -1240,7 +1247,9 @@ def validate_workload_installation_record(
         "installed_at_unix_ms",
     }
     if not isinstance(record, dict) or set(record) != expected_fields:
-        raise PackageRuntimeBootstrapError("Package Runtime workload installation receipt is malformed")
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime workload installation receipt is malformed"
+        )
     verification = record.get("verification")
     dependencies = record.get("dependencies")
     if not isinstance(verification, dict) or set(verification) != {
@@ -1252,7 +1261,9 @@ def validate_workload_installation_record(
         "manifest_digest",
         "dependency_lock_digest",
     }:
-        raise PackageRuntimeBootstrapError("Package Runtime workload verification receipt is incomplete")
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime workload verification receipt is incomplete"
+        )
     if not isinstance(dependencies, dict) or set(dependencies) != {
         "preparer",
         "prepared_at_unix_ms",
@@ -1260,10 +1271,15 @@ def validate_workload_installation_record(
         "runtime_digest",
         "runtime_executable",
     }:
-        raise PackageRuntimeBootstrapError("Package Runtime workload dependency receipt is incomplete")
-    expected_installation = "installation-" + hashlib.sha256(
-        f"{candidate.package_id}\0{candidate.package_version}\0{candidate.artifact_digest}".encode()
-    ).hexdigest()[:32]
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime workload dependency receipt is incomplete"
+        )
+    expected_installation = (
+        "installation-"
+        + hashlib.sha256(
+            f"{candidate.package_id}\0{candidate.package_version}\0{candidate.artifact_digest}".encode()
+        ).hexdigest()[:32]
+    )
     if (
         type(record.get("record_version")) is not int
         or record["record_version"] != 1
@@ -1286,7 +1302,9 @@ def validate_workload_installation_record(
         or not isinstance(dependencies.get("runtime_executable"), str)
         or not Path(dependencies["runtime_executable"]).is_absolute()
     ):
-        raise PackageRuntimeBootstrapError("Package Runtime workload receipt differs from signed bytes")
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime workload receipt differs from signed bytes"
+        )
     return record
 
 
@@ -1317,8 +1335,16 @@ def run_workload_offline_install(
         ):
             _safe_source_bytes(request_directory / filename, digest, limit)
     except (OSError, PackageRuntimeBootstrapError) as error:
-        raise PackageRuntimeBootstrapError("Package Runtime staged workload request is unsafe") from error
-    argv = [str(command), "--root", str(PACKAGE_RUNTIME_STATE_ROOT), "--dependency-preparer", str(PACKAGE_PREPARER_COMMAND)]
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime staged workload request is unsafe"
+        ) from error
+    argv = [
+        str(command),
+        "--root",
+        str(PACKAGE_RUNTIME_STATE_ROOT),
+        "--dependency-preparer",
+        str(PACKAGE_PREPARER_COMMAND),
+    ]
     for argument in PACKAGE_PREPARER_ARGS:
         argv.extend(["--dependency-preparer-arg", argument])
     argv.extend(["--bootstrap-install-offline", "--bootstrap-input-file", str(request_path)])
@@ -1329,17 +1355,24 @@ def run_workload_offline_install(
             text=True,
             timeout=1800,
             check=False,
-            env={"LANG": "C.UTF-8", "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+            env={
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            },
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise PackageRuntimeBootstrapError("Package Runtime offline install failed to run") from error
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime offline install failed to run"
+        ) from error
     lines = completed.stdout.splitlines()
     if completed.returncode != 0 or len(lines) != 1:
         raise PackageRuntimeBootstrapError("Package Runtime offline install did not complete")
     try:
         response = json.loads(lines[0], object_pairs_hook=_unique_object)
     except (json.JSONDecodeError, PackageRuntimeBootstrapError) as error:
-        raise PackageRuntimeBootstrapError("Package Runtime install receipt is malformed") from error
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime install receipt is malformed"
+        ) from error
     return validate_workload_offline_install_result(candidate, request, response)
 
 
@@ -1382,13 +1415,16 @@ def validate_workload_offline_install_result(
         or result.get("component_id") != candidate.component_id
         or result.get("artifact_digest") != candidate.artifact_digest
         or result.get("expected_gate_generation") != maintenance.get("expected_gate_generation")
-        or result.get("expected_catalog_generation") != maintenance.get("expected_catalog_generation")
+        or result.get("expected_catalog_generation")
+        != maintenance.get("expected_catalog_generation")
         or result.get("gate_generation") != maintenance.get("expected_gate_generation")
         or result.get("catalog_generation") != maintenance.get("expected_catalog_generation")
         or request.get("candidate", {}).get("component_id") != candidate.component_id
         or request.get("candidate", {}).get("package_id") != candidate.package_id
     ):
-        raise PackageRuntimeBootstrapError("Package Runtime install receipt differs from its held request")
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime install receipt differs from its held request"
+        )
     return validate_workload_installation_record(candidate, result.get("installation"))
 
 
@@ -1449,7 +1485,8 @@ def build_workload_offline_uninstall_input(
         or not isinstance(installation.get("installation_id"), str)
         or INSTALLATION_ID.fullmatch(installation["installation_id"]) is None
         or not isinstance(installation.get("package_id"), str)
-        or re.fullmatch(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,7}", installation["package_id"]) is None
+        or re.fullmatch(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,7}", installation["package_id"])
+        is None
         or not isinstance(installation.get("package_version"), str)
         or PACKAGE_VERSION_PATTERN.fullmatch(installation["package_version"]) is None
         or any(
@@ -1464,7 +1501,9 @@ def build_workload_offline_uninstall_input(
             )
         )
     ):
-        raise PackageRuntimeBootstrapError("Package Runtime uninstall identity differs from held plan")
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime uninstall identity differs from held plan"
+        )
     return {
         "schema_version": 1,
         "request_id": request_id,
@@ -1526,7 +1565,13 @@ def run_workload_offline_uninstall(
         "sha256:" + hashlib.sha256(content).hexdigest(),
         MAX_BOOTSTRAP_INPUT_BYTES,
     )
-    argv = [str(command), "--root", str(PACKAGE_RUNTIME_STATE_ROOT), "--dependency-preparer", str(PACKAGE_PREPARER_COMMAND)]
+    argv = [
+        str(command),
+        "--root",
+        str(PACKAGE_RUNTIME_STATE_ROOT),
+        "--dependency-preparer",
+        str(PACKAGE_PREPARER_COMMAND),
+    ]
     for argument in PACKAGE_PREPARER_ARGS:
         argv.extend(["--dependency-preparer-arg", argument])
     argv.extend(["--bootstrap-uninstall-offline", "--bootstrap-input-file", str(request_path)])
@@ -1537,21 +1582,30 @@ def run_workload_offline_uninstall(
             text=True,
             timeout=1800,
             check=False,
-            env={"LANG": "C.UTF-8", "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"},
+            env={
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            },
         )
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise PackageRuntimeBootstrapError("Package Runtime offline uninstall failed to run") from error
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime offline uninstall failed to run"
+        ) from error
     lines = completed.stdout.splitlines()
     if completed.returncode != 0 or len(lines) != 1:
         raise PackageRuntimeBootstrapError("Package Runtime offline uninstall did not complete")
     try:
         response = json.loads(lines[0], object_pairs_hook=_unique_object)
     except (json.JSONDecodeError, PackageRuntimeBootstrapError) as error:
-        raise PackageRuntimeBootstrapError("Package Runtime uninstall receipt is malformed") from error
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime uninstall receipt is malformed"
+        ) from error
     return validate_workload_offline_uninstall_result(request, response)
 
 
-def validate_workload_offline_uninstall_result(request: dict[str, Any], response: Any) -> dict[str, Any]:
+def validate_workload_offline_uninstall_result(
+    request: dict[str, Any], response: Any
+) -> dict[str, Any]:
     """Require Platform's secret-free uninstall receipt to echo every held field."""
 
     result_fields = {
@@ -1589,13 +1643,16 @@ def validate_workload_offline_uninstall_result(request: dict[str, Any], response
         or result.get("component_id") != installation.get("component_id")
         or result.get("artifact_digest") != installation.get("artifact_digest")
         or result.get("expected_gate_generation") != maintenance.get("expected_gate_generation")
-        or result.get("expected_catalog_generation") != maintenance.get("expected_catalog_generation")
+        or result.get("expected_catalog_generation")
+        != maintenance.get("expected_catalog_generation")
         or result.get("gate_generation") != maintenance.get("expected_gate_generation")
         or result.get("catalog_generation") != maintenance.get("expected_catalog_generation")
         or result.get("installation") != installation
         or type(result.get("already_absent")) is not bool
     ):
-        raise PackageRuntimeBootstrapError("Package Runtime uninstall receipt differs from held identity")
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime uninstall receipt differs from held identity"
+        )
     return result
 
 

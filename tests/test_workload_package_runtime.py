@@ -52,14 +52,14 @@ def _source_policy(*, standalone: bool = False) -> dict[str, Any]:
     return {
         "mode": "actualProduct",
         "productComponentIds": ["cyrene-catalyst"],
-        "productSources": [
-            {"componentId": "cyrene-catalyst", "sourceId": "cyrene-catalyst"}
-        ],
+        "productSources": [{"componentId": "cyrene-catalyst", "sourceId": "cyrene-catalyst"}],
         "operations": list(runtime.SOURCE_OPERATIONS),
     }
 
 
-def _package_row(*, standalone: bool = False, binding_id: str = "plugin-a-catalyst") -> dict[str, Any]:
+def _package_row(
+    *, standalone: bool = False, binding_id: str = "plugin-a-catalyst"
+) -> dict[str, Any]:
     return {
         "componentId": "cyrene-tools-plugin-a",
         "packageId": "org.example.plugin-a",
@@ -80,9 +80,11 @@ def _installation_record(
 ) -> dict[str, Any]:
     artifact_digest = artifact_digest or _digest(f"artifact-{version}")
     archive_digest = archive_digest or _digest(f"archive-{version}")
-    installation_id = installation_id or "installation-" + hashlib.sha256(
-        f"{package_id}\0{version}\0{artifact_digest}".encode()
-    ).hexdigest()[:32]
+    installation_id = (
+        installation_id
+        or "installation-"
+        + hashlib.sha256(f"{package_id}\0{version}\0{artifact_digest}".encode()).hexdigest()[:32]
+    )
     verification = {
         "verifier": "workspace-offline-package-verifier-v1",
         "verified_at_unix_ms": 100,
@@ -122,7 +124,9 @@ def _broker_scope(binding_id: str, package_id: str, installation_ids: list[str])
     }
 
 
-def _runtime_binding(binding_id: str, package_id: str, installation_ids: list[str]) -> dict[str, Any]:
+def _runtime_binding(
+    binding_id: str, package_id: str, installation_ids: list[str]
+) -> dict[str, Any]:
     return {
         "binding_id": binding_id,
         "package_id": package_id,
@@ -135,9 +139,7 @@ def _principal(source_id: str, *, uid: int, gid: int, token_path: Path) -> dict[
     return {"uid": uid, "gid": gid, "tokenPath": token_path}
 
 
-def _activity_catalog(
-    rows: list[dict[str, Any]], *, generation: int = 5
-) -> dict[str, Any]:
+def _activity_catalog(rows: list[dict[str, Any]], *, generation: int = 5) -> dict[str, Any]:
     return {"schema_version": 1, "generation": generation, "sources": rows}
 
 
@@ -196,7 +198,9 @@ def test_source_update_registers_product_with_empty_initial_catalog() -> None:
         installation_records={},
         activity_catalog={"schema_version": 1, "generation": 0, "sources": []},
         source_principals={
-            source_id: _principal(source_id, uid=12001, gid=12002, token_path=Path("/tokens/catalyst.token"))
+            source_id: _principal(
+                source_id, uid=12001, gid=12002, token_path=Path("/tokens/catalyst.token")
+            )
         },
     )
 
@@ -243,20 +247,30 @@ def test_source_update_retains_existing_installation_and_other_owner_scopes() ->
                 "uid": 12001,
                 "gid": 12002,
                 "source_token_sha256": _raw_digest("product-token"),
-                "bindings": [_runtime_binding(old_binding_id, row["packageId"], [prior["installation_id"]])],
+                "bindings": [
+                    _runtime_binding(old_binding_id, row["packageId"], [prior["installation_id"]])
+                ],
             },
             {
                 "source_id": other_id,
                 "uid": 12003,
                 "gid": 12004,
                 "source_token_sha256": _raw_digest("other-token"),
-                "bindings": [_runtime_binding(other_binding_id, "org.example.other", ["installation-" + "b" * 32])],
+                "bindings": [
+                    _runtime_binding(
+                        other_binding_id, "org.example.other", ["installation-" + "b" * 32]
+                    )
+                ],
             },
         ]
     )
     principals = {
-        product_id: _principal(product_id, uid=12001, gid=12002, token_path=Path("/tokens/product.token")),
-        other_id: _principal(other_id, uid=12003, gid=12004, token_path=Path("/tokens/other.token")),
+        product_id: _principal(
+            product_id, uid=12001, gid=12002, token_path=Path("/tokens/product.token")
+        ),
+        other_id: _principal(
+            other_id, uid=12003, gid=12004, token_path=Path("/tokens/other.token")
+        ),
     }
 
     update = runtime.build_workload_source_update(
@@ -294,7 +308,9 @@ def test_source_update_rejects_binding_owned_by_another_source() -> None:
         "uid": 12003,
         "gid": 12004,
         "source_token_sha256": _raw_digest("external-token"),
-        "binding_scopes": [_broker_scope("shared-binding", row["packageId"], [record["installation_id"]])],
+        "binding_scopes": [
+            _broker_scope("shared-binding", row["packageId"], [record["installation_id"]])
+        ],
     }
     policy = _runtime_policy(
         [
@@ -310,7 +326,11 @@ def test_source_update_rejects_binding_owned_by_another_source() -> None:
                 "uid": 12003,
                 "gid": 12004,
                 "source_token_sha256": _raw_digest("external-token"),
-                "bindings": [_runtime_binding("shared-binding", row["packageId"], [record["installation_id"]])],
+                "bindings": [
+                    _runtime_binding(
+                        "shared-binding", row["packageId"], [record["installation_id"]]
+                    )
+                ],
             },
         ]
     )
@@ -321,8 +341,12 @@ def test_source_update_rejects_binding_owned_by_another_source() -> None:
             installation_records={row["componentId"]: record},
             activity_catalog=_activity_catalog([first_source, second_source]),
             source_principals={
-                "cyrene-catalyst": _principal("cyrene-catalyst", uid=12001, gid=12002, token_path=Path("/tokens/a")),
-                "external-owner": _principal("external-owner", uid=12003, gid=12004, token_path=Path("/tokens/b")),
+                "cyrene-catalyst": _principal(
+                    "cyrene-catalyst", uid=12001, gid=12002, token_path=Path("/tokens/a")
+                ),
+                "external-owner": _principal(
+                    "external-owner", uid=12003, gid=12004, token_path=Path("/tokens/b")
+                ),
             },
             runtime_policy=policy,
         )
@@ -332,7 +356,9 @@ def test_package_hold_binds_component_to_aggregate_digest_and_rejects_core_hold(
     artifact_digest = _digest("package-aggregate")
     stage = {"stagedIdentity": {"planId": "plan-" + "a" * 32, "planDigest": _digest("parent-plan")}}
     hold = _maintenance(artifact_digest=artifact_digest)
-    runtime._validate_phase_identity(stage, "cyrene-install-request-1", hold, "cyrene-tools-plugin-a", artifact_digest)
+    runtime._validate_phase_identity(
+        stage, "cyrene-install-request-1", hold, "cyrene-tools-plugin-a", artifact_digest
+    )
 
     with pytest.raises(runtime.WorkloadPackageRuntimeError, match="PACKAGE_ONLY"):
         runtime._validate_phase_identity(
@@ -357,7 +383,9 @@ def test_source_policy_hold_accepts_core_registration_target() -> None:
     assert runtime._validate_policy_update_hold(hold)["target_kind"] == "CORE_RUNTIME"
 
 
-def test_apply_source_update_commits_gen_zero_catalog_and_matching_policy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_source_update_commits_gen_zero_catalog_and_matching_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source_id = "cyrene-catalyst"
     source_uid, source_gid = 12001, 12002
     token_dir = tmp_path / "tokens"
@@ -372,7 +400,12 @@ def test_apply_source_update_commits_gen_zero_catalog_and_matching_policy(tmp_pa
         installation_records={},
         activity_catalog={"schema_version": 1, "generation": 0, "sources": []},
         source_principals={
-            source_id: _principal(source_id, uid=source_uid, gid=source_gid, token_path=token_dir / f"{source_id}.token")
+            source_id: _principal(
+                source_id,
+                uid=source_uid,
+                gid=source_gid,
+                token_path=token_dir / f"{source_id}.token",
+            )
         },
     )
     monkeypatch.setattr(runtime, "_require_root", lambda: None)
@@ -443,7 +476,9 @@ def test_apply_source_update_commits_gen_zero_catalog_and_matching_policy(tmp_pa
 
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     assert result["catalogGeneration"] == result["policyGeneration"] == 1
-    assert result["sourceIdentities"] == [{"sourceId": source_id, "uid": source_uid, "gid": source_gid}]
+    assert result["sourceIdentities"] == [
+        {"sourceId": source_id, "uid": source_uid, "gid": source_gid}
+    ]
     assert policy["generation"] == 1
     assert policy["sources"][0]["source_token_sha256"] == source_digest
     assert source_token not in json.dumps(result)
@@ -539,14 +574,20 @@ def test_source_update_rejects_policy_race_before_broker_mutation(
     monkeypatch.setattr(runtime, "_maintenance_group_id", lambda: os.getgid())
     monkeypatch.setattr(runtime, "_runtime_group_id", lambda: os.getgid())
     monkeypatch.setattr(runtime, "_validate_policy_parent", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(runtime, "_read_policy_bytes_optional", lambda *_args, **_kwargs: b"raced-policy")
+    monkeypatch.setattr(
+        runtime, "_read_policy_bytes_optional", lambda *_args, **_kwargs: b"raced-policy"
+    )
     monkeypatch.setattr(
         runtime,
         "_run_json_command",
-        lambda *_args, **_kwargs: pytest.fail("stale policy must be detected before broker mutation"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "stale policy must be detected before broker mutation"
+        ),
     )
 
-    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="changed after source projection"):
+    with pytest.raises(
+        runtime.WorkloadPackageRuntimeError, match="changed after source projection"
+    ):
         runtime.apply_workload_source_update(
             update,
             maintenance=_maintenance("cyrene-catalyst"),
@@ -715,13 +756,13 @@ def test_reconcile_source_update_refuses_unrelated_runtime_policy_change(
         [
             {
                 **old_runtime_source,
-                        "bindings": [
-                            _runtime_binding(
-                                "plugin-a-standalone",
-                                "org.example.plugin-a",
-                                [_installation_record(version="1.2.4")["installation_id"]],
-                            )
-                        ],
+                "bindings": [
+                    _runtime_binding(
+                        "plugin-a-standalone",
+                        "org.example.plugin-a",
+                        [_installation_record(version="1.2.4")["installation_id"]],
+                    )
+                ],
             }
         ],
         generation=5,
@@ -741,7 +782,9 @@ def test_reconcile_source_update_refuses_unrelated_runtime_policy_change(
         lambda *_args, **_kwargs: pytest.fail("an unrelated policy must never be overwritten"),
     )
 
-    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="outside the pending source update"):
+    with pytest.raises(
+        runtime.WorkloadPackageRuntimeError, match="outside the pending source update"
+    ):
         runtime.reconcile_workload_source_update(
             update,
             maintenance=_maintenance(row["componentId"], record["artifact_digest"]),
@@ -766,11 +809,15 @@ def test_policy_cas_serializes_competing_writers_and_rejects_stale_digest(
     monkeypatch.setattr(runtime, "_require_root", lambda: None)
     monkeypatch.setattr(runtime, "_runtime_group_id", lambda: os.getgid())
     monkeypatch.setattr(runtime, "_validate_policy_parent", lambda _path, _owner: None)
-    digest = runtime.write_runtime_source_policy_cas(first, expected_prior_digest=None, policy_path=path)
+    digest = runtime.write_runtime_source_policy_cas(
+        first, expected_prior_digest=None, policy_path=path
+    )
     barrier = threading.Barrier(2)
     policies = []
     for binding_id in ("candidate-binding-a", "candidate-binding-b"):
-        binding = _runtime_binding(binding_id, "org.example.plugin", ["installation-" + binding_id[-1] * 32])
+        binding = _runtime_binding(
+            binding_id, "org.example.plugin", ["installation-" + binding_id[-1] * 32]
+        )
         policies.append(_runtime_policy([{**source, "bindings": [binding]}], generation=2))
 
     def update(policy: dict[str, Any]) -> str:
@@ -874,19 +921,25 @@ def test_inventory_returns_full_record_and_all_owner_binding_readback(
                 "uid": 12001,
                 "gid": 12002,
                 "source_token_sha256": _raw_digest("product-token"),
-                "bindings": [_runtime_binding(product_binding_id, row["packageId"], [installation_id])],
+                "bindings": [
+                    _runtime_binding(product_binding_id, row["packageId"], [installation_id])
+                ],
             },
             {
                 "source_id": standalone_id,
                 "uid": 12003,
                 "gid": 12004,
                 "source_token_sha256": _raw_digest("standalone-token"),
-                "bindings": [_runtime_binding(row["bindingId"], row["packageId"], [installation_id])],
+                "bindings": [
+                    _runtime_binding(row["bindingId"], row["packageId"], [installation_id])
+                ],
             },
         ]
     )
     principals = {
-        product_id: _principal(product_id, uid=12001, gid=12002, token_path=tmp_path / "product.token"),
+        product_id: _principal(
+            product_id, uid=12001, gid=12002, token_path=tmp_path / "product.token"
+        ),
         standalone_id: _principal(
             standalone_id,
             uid=12003,
@@ -927,7 +980,9 @@ def test_inventory_returns_full_record_and_all_owner_binding_readback(
     assert inventory["installationRecords"][row["componentId"]] == record
     assert inventory["components"][row["componentId"]]["installationId"] == installation_id
     assert len(inventory["sourceBindings"]) == 2
-    active_owner = next(item for item in inventory["sourceBindings"] if item["sourceId"] == product_id)
+    active_owner = next(
+        item for item in inventory["sourceBindings"] if item["sourceId"] == product_id
+    )
     assert active_owner["activeInstallationId"] == installation_id
 
 
@@ -988,15 +1043,15 @@ def test_sdk_callback_bridge_requires_journal_ack_before_completion(
             }
         ]
     )
-    principals = {
-        source_id: _principal(source_id, uid=uid, gid=gid, token_path=token_path)
-    }
+    principals = {source_id: _principal(source_id, uid=uid, gid=gid, token_path=token_path)}
     monkeypatch.setattr(runtime, "_require_root", lambda: None)
     monkeypatch.setattr(runtime, "_validate_owner_call", lambda **_kwargs: None)
     monkeypatch.setattr(runtime, "_validate_sdk_python", lambda _path: None)
     monkeypatch.setattr(runtime, "_read_token", lambda *_args: "source-token")
     create_memfd = runtime._create_token_memfd
-    monkeypatch.setattr(runtime, "_create_token_memfd", lambda token, **_kwargs: create_memfd(token))
+    monkeypatch.setattr(
+        runtime, "_create_token_memfd", lambda token, **_kwargs: create_memfd(token)
+    )
     monkeypatch.setattr(runtime, "_verify_process_identity", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("pwd.getpwuid", lambda _uid: SimpleNamespace(pw_uid=uid))
     monkeypatch.setattr("grp.getgrgid", lambda _gid: SimpleNamespace(gr_gid=gid))
@@ -1004,7 +1059,7 @@ def test_sdk_callback_bridge_requires_journal_ack_before_completion(
 
     def process_factory(original_argv: list[str], **kwargs: Any) -> subprocess.Popen[bytes]:
         driver_request = json.loads(original_argv[-1])
-        fake_driver = r'''import json, os, socket, sys
+        fake_driver = r"""import json, os, socket, sys
 channel = socket.socket(fileno=int(sys.argv[1]))
 request = json.loads(sys.argv[2])
 def send(value):
@@ -1027,7 +1082,7 @@ else:
     summary = {"bindingId":request["binding_id"],"installationId":request["installation_ids"][0],"generation":4,"state":"RUNNING","failureCode":None,"reconciled":False}
 send({"kind":"summary","value":summary})
 print(json.dumps({"ok":True,"kind":"complete","value":{"requestId":request["request_id"]}},separators=(",", ":")))
-'''
+"""
         fake_kwargs = dict(kwargs)
         fake_kwargs.pop("preexec_fn", None)
         fake_kwargs.pop("stdin", None)
@@ -1117,7 +1172,9 @@ print(json.dumps({"ok":True,"kind":"complete","value":{"requestId":request["requ
         runtime_policy=policy,
         source_principals=principals,
         persist_intent=persist_intent,
-        persist_outcome=lambda *_args: pytest.fail("recovery must not persist a second mutation outcome"),
+        persist_outcome=lambda *_args: pytest.fail(
+            "recovery must not persist a second mutation outcome"
+        ),
         persist_reconcile=lambda *args: reconciliations.append(args),
         process_factory=process_factory,
     )
@@ -1193,7 +1250,9 @@ def test_source_token_memfd_is_sealed_before_sdk_handoff() -> None:
         os.close(descriptor)
 
 
-def test_uninstall_uses_exact_udS_installation_record_and_hold(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_uninstall_uses_exact_udS_installation_record_and_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     record = _installation_record()
     component_id = "cyrene-tools-plugin-a"
     hold = _maintenance(component_id, record["artifact_digest"])
@@ -1242,7 +1301,9 @@ def test_uninstall_uses_exact_udS_installation_record_and_hold(tmp_path: Path, m
         )
 
     monkeypatch.setattr(bootstrap, "run_workload_offline_uninstall", referenced)
-    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="offline package uninstall did not complete"):
+    with pytest.raises(
+        runtime.WorkloadPackageRuntimeError, match="offline package uninstall did not complete"
+    ):
         runtime.uninstall_workload_package(
             record,
             component_id=component_id,

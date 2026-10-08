@@ -2510,7 +2510,10 @@ def cmd_workload(args: argparse.Namespace) -> int:
     if os.geteuid() != 0:
         helper = Path("/usr/libexec/cyrene-component-update-helper")
         if helper.is_symlink() or not helper.is_file() or not os.access(helper, os.X_OK):
-            print("ERROR: the installed root workload helper is unavailable; install the official Cyrene Ubuntu package.", file=sys.stderr)
+            print(
+                "ERROR: the installed root workload helper is unavailable; install the official Cyrene Ubuntu package.",
+                file=sys.stderr,
+            )
             return 2
         pkexec = shutil.which("pkexec")
         if pkexec is None:
@@ -2552,7 +2555,10 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
             print("ERROR: workload ID must be catalyst, echo, or plugins.", file=sys.stderr)
             return 2
     elif action == "uninstall":
-        if not isinstance(workload_id, str) or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", workload_id) is None:
+        if (
+            not isinstance(workload_id, str)
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", workload_id) is None
+        ):
             print("ERROR: uninstall needs one exact component ID.", file=sys.stderr)
             return 2
         requested_owner = getattr(args, "workload_owner", None)
@@ -2604,7 +2610,10 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
             return None
         if not isinstance(response, dict) or response.get("ok") is not True:
             error = response.get("error", {}) if isinstance(response, dict) else {}
-            print(f"ERROR: workload {operation}: {error.get('message', 'request failed')}", file=sys.stderr)
+            print(
+                f"ERROR: workload {operation}: {error.get('message', 'request failed')}",
+                file=sys.stderr,
+            )
             return None
         return response
 
@@ -2612,7 +2621,7 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
     selections = (
         {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}}
         if action == "install"
-        else {"includeComponentIds": [getattr(args, "workload_id")], "excludeComponentIds": [], "choices": {}}
+        else {"includeComponentIds": [args.workload_id], "excludeComponentIds": [], "choices": {}}
     )
     check_fields: dict[str, Any] = {
         "targetId": target,
@@ -2626,7 +2635,10 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
         return 1
     resolution = checked["result"].get("resolution", {})
     if checked["result"].get("status") != "ready":
-        print(json.dumps(checked["result"].get("blockers", []), ensure_ascii=False, indent=2), file=sys.stderr)
+        print(
+            json.dumps(checked["result"].get("blockers", []), ensure_ascii=False, indent=2),
+            file=sys.stderr,
+        )
         return 1
     workload_id = checked["result"].get("workloadId")
     if workload_id not in {"catalyst", "echo", "plugins"}:
@@ -2652,7 +2664,10 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
         return 1
     if not getattr(args, "yes", False):
         if not sys.stdin.isatty():
-            print("ERROR: interactive confirmation is required; rerun with --yes to confirm this plan.", file=sys.stderr)
+            print(
+                "ERROR: interactive confirmation is required; rerun with --yes to confirm this plan.",
+                file=sys.stderr,
+            )
             return 2
         answer = input(f"Apply {action} plan {plan_id} ({plan_digest})? [y/N] ").strip().lower()
         if answer != "y":

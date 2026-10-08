@@ -4354,7 +4354,9 @@ class ComponentUpdater:
                     "available": False,
                     "clientUrl": "http://127.0.0.1:8100/",
                     "serviceUnit": "cyrene-workspace-web.service",
-                    "blockers": [{"code": "WORKLOAD_WEB_HOST_READBACK_REQUIRED", "message": str(error)[:500]}],
+                    "blockers": [
+                        {"code": "WORKLOAD_WEB_HOST_READBACK_REQUIRED", "message": str(error)[:500]}
+                    ],
                 }
         return {
             "status": "ready",
@@ -6262,7 +6264,9 @@ class ComponentUpdater:
             or staged_identity.get("planId") != plan_id
             or staged_identity.get("planDigest") != plan_digest
         ):
-            raise UpdateError("INVALID_STAGE", "Operator SDK stage is not bound to this workload plan.")
+            raise UpdateError(
+                "INVALID_STAGE", "Operator SDK stage is not bound to this workload plan."
+            )
 
         intent = transaction.get("sdkPrepareIntent")
         if intent is None:
@@ -6294,7 +6298,9 @@ class ComponentUpdater:
             or intent.get("selectedIdentity") != selected
             or intent.get("stagedIdentity") != staged_identity
         ):
-            raise UpdateError("INVALID_TRANSACTION", "Operator SDK prepare intent differs from this plan.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Operator SDK prepare intent differs from this plan."
+            )
 
         prior = intent.get("priorIdentity")
         if prior is not None and not isinstance(prior, dict):
@@ -6315,14 +6321,14 @@ class ComponentUpdater:
 
         sdk_component = {**selected, "verification": {"identityAttested": True}}
         try:
-            sdk_module.prepare_workload_sdk_environment(
-                sdk_component, staged_identity
-            )
+            sdk_module.prepare_workload_sdk_environment(sdk_component, staged_identity)
             current = sdk_module.read_workload_sdk_environment()
             if not self._workload_sdk_matches_selected(selected, current):
                 raise RuntimeError("active SDK readback differs from the selected signed identity")
         except Exception as error:
-            transaction["recoveryError"] = "Operator SDK preparation did not reach a verified active identity."
+            transaction["recoveryError"] = (
+                "Operator SDK preparation did not reach a verified active identity."
+            )
             _atomic_json(transaction_path, transaction)
             raise UpdateError(
                 "WORKLOAD_SDK_INSTALL_FAILED",
@@ -6438,7 +6444,9 @@ class ComponentUpdater:
 
         token = transaction.get("maintenanceToken")
         if not isinstance(token, str) or len(token) < 32:
-            raise UpdateError("PENDING_MAINTENANCE", "The workload maintenance hold is unavailable.")
+            raise UpdateError(
+                "PENDING_MAINTENANCE", "The workload maintenance hold is unavailable."
+            )
         return {
             "transaction_id": _maintenance_request_id(transaction),
             "maintenance_token": token,
@@ -6497,7 +6505,11 @@ class ComponentUpdater:
             raise UpdateError("INVALID_TRANSACTION", "Workload hold journal is malformed.")
         request_id = _maintenance_request_id(transaction)
         prior = holds.get(phase)
-        if isinstance(prior, dict) and prior.get("requestId") == request_id and prior.get("status") == "ended":
+        if (
+            isinstance(prior, dict)
+            and prior.get("requestId") == request_id
+            and prior.get("status") == "ended"
+        ):
             raise UpdateError(
                 "TRANSACTION_PHASE_REPLAY",
                 "A completed maintenance subphase cannot reuse its request ID.",
@@ -6538,8 +6550,14 @@ class ComponentUpdater:
 
         phase = transaction.get("maintenancePhase")
         holds = transaction.get("maintenanceHolds")
-        if not isinstance(phase, str) or not isinstance(holds, dict) or not isinstance(holds.get(phase), dict):
-            raise UpdateError("INVALID_TRANSACTION", "Workload hold journal omits its phase identity.")
+        if (
+            not isinstance(phase, str)
+            or not isinstance(holds, dict)
+            or not isinstance(holds.get(phase), dict)
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload hold journal omits its phase identity."
+            )
         hold = holds[phase]
         hold["status"] = "end_pending"
         hold["outcome"] = outcome
@@ -6565,7 +6583,9 @@ class ComponentUpdater:
             try:
                 safe_event = json.loads(json.dumps(dict(event), allow_nan=False))
             except (TypeError, ValueError) as error:
-                raise UpdateError("INVALID_TRANSACTION", "A workload callback is not JSON-safe.") from error
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "A workload callback is not JSON-safe."
+                ) from error
             events = transaction.setdefault(key, [])
             if not isinstance(events, list):
                 raise UpdateError("INVALID_TRANSACTION", "Workload callback journal is malformed.")
@@ -6580,7 +6600,9 @@ class ComponentUpdater:
         """Atomically project the committed broker generation to Product units."""
 
         if type(generation) is not int or generation < 1:
-            raise UpdateError("CATALOG_GENERATION_MISMATCH", "Activity catalog generation is invalid.")
+            raise UpdateError(
+                "CATALOG_GENERATION_MISMATCH", "Activity catalog generation is invalid."
+            )
         path = DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT
         expected = f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={generation}\n".encode("ascii")
         previous = (
@@ -6609,10 +6631,15 @@ class ComponentUpdater:
                     or info.st_ino != before.st_ino
                     or info.st_size > 4096
                 ):
-                    raise UpdateError("PRODUCT_ENVIRONMENT_UNKNOWN", "Product activity generation file is unsafe.")
+                    raise UpdateError(
+                        "PRODUCT_ENVIRONMENT_UNKNOWN", "Product activity generation file is unsafe."
+                    )
                 current = os.read(descriptor, 4097)
             except OSError as error:
-                raise UpdateError("PRODUCT_ENVIRONMENT_UNKNOWN", "Product activity generation file is unavailable.") from error
+                raise UpdateError(
+                    "PRODUCT_ENVIRONMENT_UNKNOWN",
+                    "Product activity generation file is unavailable.",
+                ) from error
             finally:
                 if descriptor is not None:
                     os.close(descriptor)
@@ -6643,7 +6670,9 @@ class ComponentUpdater:
             os.replace(temporary, path)
             self._fsync_directory(path.parent)
         except OSError as error:
-            raise UpdateError("PRODUCT_ENVIRONMENT_UNKNOWN", "Product activity generation cannot be updated.") from error
+            raise UpdateError(
+                "PRODUCT_ENVIRONMENT_UNKNOWN", "Product activity generation cannot be updated."
+            ) from error
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -6665,7 +6694,9 @@ class ComponentUpdater:
         )
         policy = workload.get("sourcePolicy") if isinstance(workload, dict) else None
         if not isinstance(policy, dict):
-            raise UpdateError("SOURCE_POLICY_INVALID", "Signed workload sourcePolicy is unavailable.")
+            raise UpdateError(
+                "SOURCE_POLICY_INVALID", "Signed workload sourcePolicy is unavailable."
+            )
         activity_catalog, _activity_sources = self._activity_catalog()
         principals = self._workload_source_principals(policy, activity_catalog)
         runtime_policy: dict[str, Any] | None = None
@@ -6737,10 +6768,7 @@ class ComponentUpdater:
             )
             prior_generation = activity_catalog["generation"]
             request_id = (
-                "cyrene-wsource-"
-                + phase
-                + "-"
-                + transaction["planId"].removeprefix("plan-")
+                "cyrene-wsource-" + phase + "-" + transaction["planId"].removeprefix("plan-")
             )
             intent_value = {
                 "schemaVersion": 1,
@@ -6786,7 +6814,9 @@ class ComponentUpdater:
             else:
                 source_intents = transaction.setdefault("sourceUpdateIntents", {})
                 if not isinstance(source_intents, dict):
-                    raise UpdateError("INVALID_TRANSACTION", "Workload source-update history is malformed.")
+                    raise UpdateError(
+                        "INVALID_TRANSACTION", "Workload source-update history is malformed."
+                    )
                 source_intents[phase] = intent_value
                 transaction["sourceUpdateIntent"] = intent_value
                 _atomic_json(transaction_path, transaction)
@@ -6822,7 +6852,9 @@ class ComponentUpdater:
         transaction["sourceUpdate"] = update_result
         source_updates = transaction.setdefault("sourceUpdates", {})
         if not isinstance(source_updates, dict):
-            raise UpdateError("INVALID_TRANSACTION", "Workload source-update receipts are malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload source-update receipts are malformed."
+            )
         source_updates[phase] = update_result
         transaction["activityCatalogGeneration"] = generation
         source_intents = transaction.setdefault("sourceUpdateIntents", {})
@@ -6862,11 +6894,12 @@ class ComponentUpdater:
         if intent.get("committed") is True and isinstance(intent.get("result"), dict):
             self._workload_hold_echo(transaction)
             result = intent["result"]
-            if (
-                result.get("catalogGeneration") != intent.get("expectedCatalogGeneration")
-                or result.get("policyGeneration") != intent.get("expectedCatalogGeneration")
-            ):
-                raise UpdateError("INVALID_TRANSACTION", "Committed source-update receipt is inconsistent.")
+            if result.get("catalogGeneration") != intent.get(
+                "expectedCatalogGeneration"
+            ) or result.get("policyGeneration") != intent.get("expectedCatalogGeneration"):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Committed source-update receipt is inconsistent."
+                )
             return result
         if (
             intent.get("parentPlanId") != transaction.get("planId")
@@ -6881,7 +6914,10 @@ class ComponentUpdater:
             or not isinstance(intent.get("requiredHoldComponentIds"), list)
         ):
             raise UpdateError("INVALID_TRANSACTION", "Workload source-update intent is malformed.")
-        if not isinstance(transaction.get("maintenanceToken"), str) or not transaction["maintenanceToken"]:
+        if (
+            not isinstance(transaction.get("maintenanceToken"), str)
+            or not transaction["maintenanceToken"]
+        ):
             return None
         self._workload_hold_echo(transaction)
         helper = self._load_workload_package_runtime()
@@ -6894,7 +6930,9 @@ class ComponentUpdater:
             or previous_generation < 0
             or expected_generation != previous_generation + (1 if intent["changed"] else 0)
         ):
-            raise UpdateError("INVALID_TRANSACTION", "Workload source-update generation is malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload source-update generation is malformed."
+            )
         update = helper.WorkloadSourceUpdate(
             source_arguments=tuple(intent["sourceArguments"]),
             binding_scopes=intent["bindingScopes"],
@@ -6937,7 +6975,9 @@ class ComponentUpdater:
         transaction["sourceUpdate"] = update_result
         source_updates = transaction.setdefault("sourceUpdates", {})
         if not isinstance(source_updates, dict):
-            raise UpdateError("INVALID_TRANSACTION", "Workload source-update receipts are malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload source-update receipts are malformed."
+            )
         source_updates[phase] = update_result
         transaction["activityCatalogGeneration"] = generation
         intent["committed"] = True
@@ -6956,9 +6996,7 @@ class ComponentUpdater:
     ) -> list[dict[str, Any]]:
         """Resolve only selected signed Product/service units for this workload."""
 
-        component_ids = {
-            row.get("componentId") for row in rows if isinstance(row, dict)
-        }
+        component_ids = {row.get("componentId") for row in rows if isinstance(row, dict)}
         if source_policy.get("mode") == "actualProduct":
             component_ids.update(source_policy.get("productComponentIds", []))
         candidate_by_id = {
@@ -7144,7 +7182,9 @@ class ComponentUpdater:
                     )
                 existing_paths.append((path, payload))
             destination = Path(self.systemd_unit_dirs[0]) / unit
-            current = next((payload for path, payload in existing_paths if path == destination), None)
+            current = next(
+                (payload for path, payload in existing_paths if path == destination), None
+            )
             if current == candidate_bytes:
                 continue
             if current is not None and (prior_bytes is None or current != prior_bytes):
@@ -7153,14 +7193,22 @@ class ComponentUpdater:
                 )
             self._verify_root_path_chain(destination.parent)
             destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-            prior_info = destination.lstat() if destination.exists() or destination.is_symlink() else None
+            prior_info = (
+                destination.lstat() if destination.exists() or destination.is_symlink() else None
+            )
             changes.append(
                 {
                     "path": str(destination),
-                    "priorBytes": base64.b64encode(current).decode("ascii") if current is not None else None,
-                    "priorMode": stat.S_IMODE(prior_info.st_mode) if prior_info is not None else None,
+                    "priorBytes": base64.b64encode(current).decode("ascii")
+                    if current is not None
+                    else None,
+                    "priorMode": stat.S_IMODE(prior_info.st_mode)
+                    if prior_info is not None
+                    else None,
                     "priorDigest": (
-                        "sha256:" + hashlib.sha256(current).hexdigest() if current is not None else None
+                        "sha256:" + hashlib.sha256(current).hexdigest()
+                        if current is not None
+                        else None
                     ),
                     "writtenDigest": candidate_digest,
                 }
@@ -7183,7 +7231,9 @@ class ComponentUpdater:
                 os.replace(temporary, destination)
                 self._fsync_directory(destination.parent)
             except OSError as error:
-                raise UpdateError("SERVICE_UNIT_INSTALL_FAILED", f"Cannot install signed {unit}.") from error
+                raise UpdateError(
+                    "SERVICE_UNIT_INSTALL_FAILED", f"Cannot install signed {unit}."
+                ) from error
             finally:
                 if descriptor is not None:
                     os.close(descriptor)
@@ -7208,7 +7258,9 @@ class ComponentUpdater:
         except FileNotFoundError:
             return None
         except OSError as error:
-            raise UpdateError(error_code, "A Catalyst authentication file cannot be inspected.") from error
+            raise UpdateError(
+                error_code, "A Catalyst authentication file cannot be inspected."
+            ) from error
         try:
             self._verify_root_path_chain(path.parent)
             descriptor = os.open(
@@ -7226,17 +7278,23 @@ class ComponentUpdater:
                     or info.st_size > maximum_bytes
                     or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
                 ):
-                    raise UpdateError(error_code, "A Catalyst authentication file has unsafe ownership or mode.")
+                    raise UpdateError(
+                        error_code, "A Catalyst authentication file has unsafe ownership or mode."
+                    )
                 content = os.read(descriptor, maximum_bytes + 1)
                 if len(content) > maximum_bytes:
-                    raise UpdateError(error_code, "A Catalyst authentication file exceeds its size limit.")
+                    raise UpdateError(
+                        error_code, "A Catalyst authentication file exceeds its size limit."
+                    )
                 return content
             finally:
                 os.close(descriptor)
         except UpdateError:
             raise
         except OSError as error:
-            raise UpdateError(error_code, "A Catalyst authentication file cannot be read safely.") from error
+            raise UpdateError(
+                error_code, "A Catalyst authentication file cannot be read safely."
+            ) from error
 
     @staticmethod
     def _validate_workload_api_token(value: str) -> str:
@@ -7245,9 +7303,14 @@ class ComponentUpdater:
         try:
             encoded = value.encode("ascii")
         except UnicodeEncodeError as error:
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst API token is not printable ASCII.") from error
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst API token is not printable ASCII."
+            ) from error
         if len(encoded) < 32 or any(byte < 33 or byte > 126 for byte in encoded):
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst API token is not a valid high-entropy value.")
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Catalyst API token is not a valid high-entropy value.",
+            )
         return value
 
     @staticmethod
@@ -7259,19 +7322,32 @@ class ComponentUpdater:
         try:
             lines = content.decode("ascii").splitlines()
         except UnicodeDecodeError as error:
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file is not ASCII.") from error
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file is not ASCII."
+            ) from error
         if len(lines) > maximum_lines:
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file has too many entries.")
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Catalyst environment file has too many entries.",
+            )
         result: dict[str, str] = {}
         for line in lines:
             if not line or "=" not in line:
-                raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file syntax is invalid.")
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Catalyst environment file syntax is invalid.",
+                )
             key, value = line.split("=", 1)
             if key not in expected_keys or key in result or not value or value != value.strip():
-                raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file fields are invalid.")
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Catalyst environment file fields are invalid.",
+                )
             result[key] = value
         if set(result) != expected_keys:
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file is incomplete.")
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file is incomplete."
+            )
         return result
 
     def _check_workload_catalyst_auth_conflicts(self, group_id: int) -> None:
@@ -7302,9 +7378,7 @@ class ComponentUpdater:
                 )
 
         expected_dropin = (
-            "[Service]\nEnvironmentFile="
-            + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT)
-            + "\n"
+            "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
         ).encode("ascii")
         known_dropin_dirs = (
             Path("/etc/systemd/system/cyrene-catalyst.service.d"),
@@ -7365,8 +7439,7 @@ class ComponentUpdater:
                         "An unmanaged Catalyst unit drop-in cannot be inspected safely.",
                     ) from error
                 if any(
-                    line.strip().partition("=")[0].strip()
-                    in {"Environment", "EnvironmentFile"}
+                    line.strip().partition("=")[0].strip() in {"Environment", "EnvironmentFile"}
                     for line in lines
                     if line.strip() and not line.lstrip().startswith("#")
                 ):
@@ -7384,7 +7457,10 @@ class ComponentUpdater:
             group_id = grp.getgrnam("cyrene").gr_gid
             user_id = pwd.getpwnam("cyrene").pw_uid
         except KeyError as error:
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "The cyrene service identity is unavailable.") from error
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "The cyrene service identity is unavailable.",
+            ) from error
         self._check_workload_catalyst_auth_conflicts(group_id)
         protected_modes = {(0, group_id, 0o640), (user_id, group_id, 0o600)}
         token_paths: list[Path] = [DEFAULT_CATALYST_API_TOKEN]
@@ -7400,14 +7476,20 @@ class ComponentUpdater:
                 maximum_lines=2,
             )
             if control["STUDIO_CATALYST_URL"] != CATALYST_API_ORIGIN:
-                raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Existing Studio Control points at a different Catalyst origin.")
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Existing Studio Control points at a different Catalyst origin.",
+                )
             configured_path = Path(control["STUDIO_CATALYST_API_TOKEN_FILE"])
             if (
                 not configured_path.is_absolute()
                 or ".." in configured_path.parts
                 or configured_path.parent != Path("/etc/cyrene/secrets")
             ):
-                raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Existing Studio Control token path is outside the protected secret directory.")
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Existing Studio Control token path is outside the protected secret directory.",
+                )
             token_paths.insert(0, configured_path)
 
         configured_values: list[str] = []
@@ -7426,7 +7508,10 @@ class ComponentUpdater:
                 try:
                     value = token_bytes.rstrip(b"\r\n").decode("ascii")
                 except UnicodeDecodeError as error:
-                    raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst API token file is not ASCII.") from error
+                    raise UpdateError(
+                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                        "Catalyst API token file is not ASCII.",
+                    ) from error
                 configured_values.append(self._validate_workload_api_token(value))
 
         auth_bytes = self._read_workload_protected_file(
@@ -7440,13 +7525,20 @@ class ComponentUpdater:
                 expected_keys={"CYRENE_DATA_TOOLS_TOKEN"},
                 maximum_lines=1,
             )
-            configured_values.append(self._validate_workload_api_token(auth["CYRENE_DATA_TOOLS_TOKEN"]))
+            configured_values.append(
+                self._validate_workload_api_token(auth["CYRENE_DATA_TOOLS_TOKEN"])
+            )
 
         explicit_token = os.environ.get("CYRENE_DATA_TOOLS_TOKEN")
         if explicit_token:
             configured_values.append(self._validate_workload_api_token(explicit_token))
-        if configured_values and any(value != configured_values[0] for value in configured_values[1:]):
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "Existing Catalyst bearer sources disagree; refusing to rotate or overwrite them.")
+        if configured_values and any(
+            value != configured_values[0] for value in configured_values[1:]
+        ):
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Existing Catalyst bearer sources disagree; refusing to rotate or overwrite them.",
+            )
         if configured_values:
             return configured_values[0], selected_token_path, group_id
         if not generate:
@@ -7462,7 +7554,10 @@ class ComponentUpdater:
         token, token_path, group_id = selected
         token_bytes = self._read_workload_protected_file(
             token_path,
-            allowed_identities={(0, group_id, 0o640), (pwd.getpwnam("cyrene").pw_uid, group_id, 0o600)},
+            allowed_identities={
+                (0, group_id, 0o640),
+                (pwd.getpwnam("cyrene").pw_uid, group_id, 0o600),
+            },
             maximum_bytes=4096,
         )
         if token_bytes is None or token_bytes.rstrip(b"\r\n").decode("ascii") != token:
@@ -7506,22 +7601,21 @@ class ComponentUpdater:
         if dropin is None:
             return False
         expected_dropin = (
-            "[Service]\nEnvironmentFile="
-            + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT)
-            + "\n"
+            "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
         ).encode("ascii")
         return dropin == expected_dropin
 
-    def _ensure_workload_config_directory(
-        self, path: Path, *, group_id: int, mode: int
-    ) -> None:
+    def _ensure_workload_config_directory(self, path: Path, *, group_id: int, mode: int) -> None:
         """Create one fixed root-owned configuration directory with exact access."""
 
         if path.exists() or path.is_symlink():
             try:
                 info = path.lstat()
             except OSError as error:
-                raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "A managed configuration directory cannot be inspected.") from error
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "A managed configuration directory cannot be inspected.",
+                ) from error
             self._verify_root_path_chain(path.parent)
             if (
                 stat.S_ISLNK(info.st_mode)
@@ -7530,7 +7624,10 @@ class ComponentUpdater:
                 or info.st_gid != group_id
                 or stat.S_IMODE(info.st_mode) != mode
             ):
-                raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "A managed configuration directory has unexpected ownership or mode.")
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "A managed configuration directory has unexpected ownership or mode.",
+                )
             return
         self._verify_root_path_chain(path.parent)
         try:
@@ -7539,7 +7636,10 @@ class ComponentUpdater:
             os.chmod(path, mode)
             self._fsync_directory(path.parent)
         except OSError as error:
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "A managed configuration directory cannot be created.") from error
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "A managed configuration directory cannot be created.",
+            ) from error
 
     def _write_workload_managed_config(
         self,
@@ -7566,7 +7666,9 @@ class ComponentUpdater:
         digest = "sha256:" + hashlib.sha256(content).hexdigest()
         changes = transaction.setdefault("managedConfigFiles", [])
         if not isinstance(changes, list):
-            raise UpdateError("INVALID_TRANSACTION", "Managed configuration rollback journal is malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Managed configuration rollback journal is malformed."
+            )
         entry = next(
             (item for item in changes if isinstance(item, dict) and item.get("path") == str(path)),
             None,
@@ -7574,19 +7676,24 @@ class ComponentUpdater:
         if existing is not None:
             current_digest = "sha256:" + hashlib.sha256(existing).hexdigest()
             if current_digest != digest:
-                raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "An existing managed authentication file differs from this workload identity.")
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "An existing managed authentication file differs from this workload identity.",
+                )
             if entry is not None and entry.get("writtenDigest") != digest:
-                raise UpdateError("INVALID_TRANSACTION", "Managed configuration retry changed its digest.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Managed configuration retry changed its digest."
+                )
             return digest
         if entry is not None and entry.get("writtenDigest") != digest:
-            raise UpdateError("INVALID_TRANSACTION", "Managed configuration retry changed its digest.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Managed configuration retry changed its digest."
+            )
         if path.parent == DEFAULT_CATALYST_API_TOKEN.parent:
             parent_group, parent_mode = group_id, 0o750
         else:
             parent_group, parent_mode = 0, 0o755
-        self._ensure_workload_config_directory(
-            path.parent, group_id=parent_group, mode=parent_mode
-        )
+        self._ensure_workload_config_directory(path.parent, group_id=parent_group, mode=parent_mode)
         is_bearer_file = entry_kind == "catalyst-api-token"
         if entry is None and not is_bearer_file:
             entry = {
@@ -7617,7 +7724,10 @@ class ComponentUpdater:
             os.replace(temporary, path)
             self._fsync_directory(path.parent)
         except OSError as error:
-            raise UpdateError("CATALYST_AUTH_CONFIGURATION_CONFLICT", "A managed authentication file cannot be written.") from error
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "A managed authentication file cannot be written.",
+            ) from error
         finally:
             if descriptor is not None:
                 os.close(descriptor)
@@ -7641,9 +7751,7 @@ class ComponentUpdater:
             f"STUDIO_CATALYST_API_TOKEN_FILE={token_path}\n"
         ).encode("ascii")
         dropin_content = (
-            "[Service]\nEnvironmentFile="
-            + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT)
-            + "\n"
+            "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
         ).encode("ascii")
         self._ensure_workload_config_directory(token_path.parent, group_id=group_id, mode=0o750)
         token_digest = self._write_workload_managed_config(
@@ -7704,32 +7812,50 @@ class ComponentUpdater:
         changed = False
         changes = transaction.get("managedConfigFiles", [])
         if not isinstance(changes, list):
-            raise UpdateError("INVALID_TRANSACTION", "Managed configuration rollback journal is malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Managed configuration rollback journal is malformed."
+            )
         for entry in reversed(changes):
             if not isinstance(entry, dict) or entry.get("kind") == "catalyst-api-token":
                 continue
             path_text = entry.get("path")
             if not isinstance(path_text, str):
-                raise UpdateError("INVALID_TRANSACTION", "Managed configuration rollback path is malformed.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Managed configuration rollback path is malformed."
+                )
             path = Path(path_text)
             if path not in {
                 DEFAULT_CATALYST_AUTH_ENVIRONMENT,
                 DEFAULT_STUDIO_CONTROL_ENVIRONMENT,
                 DEFAULT_CATALYST_AUTH_DROPIN,
             }:
-                raise UpdateError("INVALID_TRANSACTION", "Managed configuration rollback path is outside its fixed allowlist.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Managed configuration rollback path is outside its fixed allowlist.",
+                )
             try:
                 info = path.lstat()
                 content = path.read_bytes()
             except FileNotFoundError:
                 continue
             except OSError as error:
-                raise UpdateError("ROLLBACK_CONFLICT", "Managed authentication configuration cannot be read during rollback.") from error
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT",
+                    "Managed authentication configuration cannot be read during rollback.",
+                ) from error
             current = "sha256:" + hashlib.sha256(content).hexdigest()
             if current == entry.get("priorDigest"):
                 continue
-            if current != entry.get("writtenDigest") or stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
-                raise UpdateError("ROLLBACK_CONFLICT", "Managed authentication configuration changed outside this transaction.")
+            if (
+                current != entry.get("writtenDigest")
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0
+                or info.st_nlink != 1
+            ):
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT",
+                    "Managed authentication configuration changed outside this transaction.",
+                )
             path.unlink()
             self._fsync_directory(path.parent)
             changed = True
@@ -7778,12 +7904,18 @@ class ComponentUpdater:
                 current = None
                 info = None
             except OSError as error:
-                raise UpdateError("ROLLBACK_CONFLICT", "Cannot read the current systemd unit.") from error
-            digest = "sha256:" + hashlib.sha256(current).hexdigest() if current is not None else None
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT", "Cannot read the current systemd unit."
+                ) from error
+            digest = (
+                "sha256:" + hashlib.sha256(current).hexdigest() if current is not None else None
+            )
             if digest == entry.get("priorDigest"):
                 continue
             if digest != entry.get("writtenDigest"):
-                raise UpdateError("ROLLBACK_CONFLICT", "Systemd unit changed outside this transaction.")
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT", "Systemd unit changed outside this transaction."
+                )
             prior = entry.get("priorBytes")
             if prior is None:
                 if info is not None and (stat.S_ISLNK(info.st_mode) or info.st_uid != 0):
@@ -7794,7 +7926,9 @@ class ComponentUpdater:
                 try:
                     prior_bytes = base64.b64decode(prior, validate=True)
                 except (ValueError, TypeError) as error:
-                    raise UpdateError("INVALID_TRANSACTION", "Unit rollback bytes are malformed.") from error
+                    raise UpdateError(
+                        "INVALID_TRANSACTION", "Unit rollback bytes are malformed."
+                    ) from error
                 expected_prior = entry.get("priorDigest")
                 if "sha256:" + hashlib.sha256(prior_bytes).hexdigest() != expected_prior:
                     raise UpdateError("INVALID_TRANSACTION", "Unit rollback digest differs.")
@@ -7816,7 +7950,9 @@ class ComponentUpdater:
                     os.replace(temporary, path)
                     self._fsync_directory(path.parent)
                 except OSError as error:
-                    raise UpdateError("ROLLBACK_FAILED", "Cannot restore the prior systemd unit.") from error
+                    raise UpdateError(
+                        "ROLLBACK_FAILED", "Cannot restore the prior systemd unit."
+                    ) from error
                 finally:
                     if descriptor is not None:
                         os.close(descriptor)
@@ -7849,24 +7985,22 @@ class ComponentUpdater:
                 self._set_workload_unit(unit, "stop")
             return state
         if operation not in {"start", "restart"}:
-            raise UpdateError("INVALID_TRANSACTION", "Package Runtime service operation is invalid.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package Runtime service operation is invalid."
+            )
         state = self._package_product_unit_state(unit)
         if state != "active" or operation == "restart":
             self._set_workload_unit(unit, operation, wait_active=True)
         return state
 
-    def _workload_inventory_before_daemon_stop(
-        self, workload_id: str
-    ) -> dict[str, Any] | None:
+    def _workload_inventory_before_daemon_stop(self, workload_id: str) -> dict[str, Any] | None:
         """Read all live owners immediately before taking down Package Runtime."""
 
         if self._package_product_unit_state(WORKLOAD_PACKAGE_RUNTIME_UNIT) == "inactive":
             return None
         component_ids = tuple(
             sorted(
-                self._load_workload_resolver().potential_component_ids(
-                    self.catalog, workload_id
-                )
+                self._load_workload_resolver().potential_component_ids(self.catalog, workload_id)
             )
         )
         inventory = self._read_workload_package_inventory(workload_id, component_ids)
@@ -7877,11 +8011,11 @@ class ComponentUpdater:
                 "Package Runtime owner inventory is malformed before daemon stop.",
                 retryable=True,
             )
-        active = [row for row in bindings if isinstance(row, dict) and row.get("state") == "RUNNING"]
+        active = [
+            row for row in bindings if isinstance(row, dict) and row.get("state") == "RUNNING"
+        ]
         if active:
-            owners = sorted(
-                f"{row.get('sourceId')}:{row.get('bindingId')}" for row in active
-            )
+            owners = sorted(f"{row.get('sourceId')}:{row.get('bindingId')}" for row in active)
             raise UpdateError(
                 "COMPONENT_IN_USE",
                 "An authenticated Package Runtime owner is active before offline maintenance: "
@@ -7907,7 +8041,9 @@ class ComponentUpdater:
 
         source_policy = component.get("sourcePolicy")
         if not isinstance(source_policy, dict):
-            raise UpdateError("SOURCE_POLICY_INVALID", "Selected package has no signed source policy.")
+            raise UpdateError(
+                "SOURCE_POLICY_INVALID", "Selected package has no signed source policy."
+            )
         source_id = (
             source_policy.get("sourceId")
             if source_policy.get("mode") == "standaloneOperator"
@@ -7935,13 +8071,19 @@ class ComponentUpdater:
             or type(principal.get("gid")) is not int
             or not isinstance(principal.get("tokenPath"), Path)
         ):
-            raise UpdateError("SOURCE_BINDING_INVALID", "Selected package owner identity is incomplete.")
+            raise UpdateError(
+                "SOURCE_BINDING_INVALID", "Selected package owner identity is incomplete."
+            )
         sdk_environment = transaction.get("sdkEnvironment")
         if not isinstance(sdk_environment, dict):
-            raise UpdateError("WORKLOAD_SDK_UNAVAILABLE", "The installed operator SDK is unavailable.")
+            raise UpdateError(
+                "WORKLOAD_SDK_UNAVAILABLE", "The installed operator SDK is unavailable."
+            )
         sdk_python = sdk_environment.get("pythonPath")
         if not isinstance(sdk_python, str) or not Path(sdk_python).is_absolute():
-            raise UpdateError("WORKLOAD_SDK_UNAVAILABLE", "The operator SDK interpreter receipt is invalid.")
+            raise UpdateError(
+                "WORKLOAD_SDK_UNAVAILABLE", "The operator SDK interpreter receipt is invalid."
+            )
         request_id = (
             "cyrene-wop-"
             + transaction["planId"].removeprefix("plan-")
@@ -7958,14 +8100,24 @@ class ComponentUpdater:
 
         def persist_intent(operation_request_id: str, scope: Mapping[str, Any]) -> None:
             if operation_request_id != request_id or not isinstance(scope, Mapping):
-                raise UpdateError("INVALID_TRANSACTION", "Package Runtime mutation intent is mismatched.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime mutation intent is mismatched."
+                )
             identity = {"requestId": request_id, "scope": dict(scope), "operation": operation}
             existing = next(
-                (row for row in binding_ops if isinstance(row, dict) and row.get("requestId") == request_id),
+                (
+                    row
+                    for row in binding_ops
+                    if isinstance(row, dict) and row.get("requestId") == request_id
+                ),
                 None,
             )
-            if existing is not None and any(existing.get(key) != value for key, value in identity.items()):
-                raise UpdateError("INVALID_TRANSACTION", "Package Runtime retry changed its owner scope.")
+            if existing is not None and any(
+                existing.get(key) != value for key, value in identity.items()
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime retry changed its owner scope."
+                )
             if existing is None:
                 binding_ops.append({**identity, "state": "intent"})
             _atomic_json(transaction_path, transaction)
@@ -7989,16 +8141,24 @@ class ComponentUpdater:
             if not isinstance(receipt, Mapping) or receipt.get("request_id") != request_id:
                 raise UpdateError("INVALID_TRANSACTION", "Package Runtime receipt is mismatched.")
             existing = next(
-                (row for row in binding_ops if isinstance(row, dict) and row.get("requestId") == request_id),
+                (
+                    row
+                    for row in binding_ops
+                    if isinstance(row, dict) and row.get("requestId") == request_id
+                ),
                 None,
             )
             if existing is None:
-                raise UpdateError("INVALID_TRANSACTION", "Package Runtime outcome has no durable intent.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime outcome has no durable intent."
+                )
             existing.update(
                 {
                     "state": state,
                     "status": dict(status) if isinstance(status, Mapping) else None,
-                    "installation": dict(installation) if isinstance(installation, Mapping) else None,
+                    "installation": dict(installation)
+                    if isinstance(installation, Mapping)
+                    else None,
                     "receipt": dict(receipt),
                     "updatedAt": int(time.time()),
                 }
@@ -8034,7 +8194,9 @@ class ComponentUpdater:
                 retryable=True,
             ) from error
         if not isinstance(result, dict) or result.get("requestId") != request_id:
-            raise UpdateError("PACKAGE_RUNTIME_OPERATION_FAILED", "Package Runtime receipt is malformed.")
+            raise UpdateError(
+                "PACKAGE_RUNTIME_OPERATION_FAILED", "Package Runtime receipt is malformed."
+            )
         return result
 
     def _write_workload_package_runtime_receipt(
@@ -8117,7 +8279,10 @@ class ComponentUpdater:
             return
         receipt = self._read_workload_package_runtime_receipt(component_id)
         if receipt is not None and receipt.get("installationId") != installation_id:
-            raise UpdateError("UNINSTALL_CONFLICT", "A different Package Runtime identity replaced the selected installation.")
+            raise UpdateError(
+                "UNINSTALL_CONFLICT",
+                "A different Package Runtime identity replaced the selected installation.",
+            )
         if path.is_symlink():
             raise UpdateError("UNSAFE_STATE", "Package Runtime receipt became a symbolic link.")
         path.unlink(missing_ok=True)
@@ -8133,7 +8298,11 @@ class ComponentUpdater:
             or not transaction.get("maintenanceToken")
             or transaction.get("offlineUninstallIntent") is not True
         ):
-            raise UpdateError("PENDING_MAINTENANCE", "Package uninstall recovery journal is incomplete.", retryable=True)
+            raise UpdateError(
+                "PENDING_MAINTENANCE",
+                "Package uninstall recovery journal is incomplete.",
+                retryable=True,
+            )
         component_id = transaction.get("componentId")
         row = transaction.get("selectedRow")
         installation = transaction.get("installation")
@@ -8143,10 +8312,10 @@ class ComponentUpdater:
             or not isinstance(installation, dict)
             or not _valid_digest(installation.get("artifact_digest"))
         ):
-            raise UpdateError("INVALID_TRANSACTION", "Package uninstall recovery identity is malformed.")
-        fresh_inventory = self._workload_inventory_before_daemon_stop(
-            transaction["workloadId"]
-        )
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package uninstall recovery identity is malformed."
+            )
+        fresh_inventory = self._workload_inventory_before_daemon_stop(transaction["workloadId"])
         if fresh_inventory is not None:
             current = fresh_inventory.get("installationRecords", {}).get(component_id)
             installation = transaction["installation"]
@@ -8184,13 +8353,19 @@ class ComponentUpdater:
                     runner=self.runner,
                 )
             except Exception as error:
-                raise UpdateError("PACKAGE_UNINSTALL_FAILED", "Platform offline uninstall recovery did not complete.", retryable=True) from error
+                raise UpdateError(
+                    "PACKAGE_UNINSTALL_FAILED",
+                    "Platform offline uninstall recovery did not complete.",
+                    retryable=True,
+                ) from error
             transaction["offlineUninstallResult"] = uninstall_result
             _atomic_json(transaction_path, transaction)
         source_policy = transaction.get("sourcePolicy")
         digest = installation.get("artifact_digest")
         if not isinstance(source_policy, dict) or not _valid_digest(digest):
-            raise UpdateError("INVALID_TRANSACTION", "Package uninstall source update identity is malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package uninstall source update identity is malformed."
+            )
         self._update_workload_source_policy(
             transaction,
             transaction_path,
@@ -8204,9 +8379,7 @@ class ComponentUpdater:
         self._workload_runtime_daemon("start", wait_active=True)
         transaction["packageRuntimeStarted"] = True
         _atomic_json(transaction_path, transaction)
-        self._clear_workload_package_runtime_receipt(
-            component_id, installation["installation_id"]
-        )
+        self._clear_workload_package_runtime_receipt(component_id, installation["installation_id"])
 
     @staticmethod
     def _workload_policy_source_id(source_policy: Mapping[str, Any]) -> str | None:
@@ -8278,10 +8451,14 @@ class ComponentUpdater:
         selected_sources: set[str] = set()
         for row in plugin_rows:
             policy = row.get("sourcePolicy")
-            source_id = self._workload_policy_source_id(policy) if isinstance(policy, dict) else None
+            source_id = (
+                self._workload_policy_source_id(policy) if isinstance(policy, dict) else None
+            )
             binding_id = row.get("bindingId")
             if not isinstance(source_id, str) or not isinstance(binding_id, str):
-                raise UpdateError("SOURCE_BINDING_INVALID", "Selected plugin owner mapping is invalid.")
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID", "Selected plugin owner mapping is invalid."
+                )
             selected[(source_id, binding_id)] = row
             selected_sources.add(source_id)
 
@@ -8315,9 +8492,8 @@ class ComponentUpdater:
             owner = selected.get((source_id, binding_id))
             if owner is not None:
                 selected_active.append((binding, owner))
-            elif (
-                block_foreign_for_daemon
-                or (block_foreign_for_products and source_id in product_source_ids)
+            elif block_foreign_for_daemon or (
+                block_foreign_for_products and source_id in product_source_ids
             ):
                 foreign_active.append(binding)
         if foreign_active:
@@ -8333,7 +8509,9 @@ class ComponentUpdater:
         if selected_active:
             sdk_environment = transaction.get("sdkEnvironment")
             if not isinstance(sdk_environment, dict):
-                raise UpdateError("WORKLOAD_SDK_UNAVAILABLE", "The verified operator SDK is unavailable.")
+                raise UpdateError(
+                    "WORKLOAD_SDK_UNAVAILABLE", "The verified operator SDK is unavailable."
+                )
             activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
                 transaction["workloadId"]
             )
@@ -8357,9 +8535,13 @@ class ComponentUpdater:
                 # daemon stop or offline installation.
                 package_inventory = self._read_workload_package_inventory(
                     transaction["workloadId"],
-                    tuple(sorted(self._load_workload_resolver().potential_component_ids(
-                        self.catalog, transaction["workloadId"]
-                    ))),
+                    tuple(
+                        sorted(
+                            self._load_workload_resolver().potential_component_ids(
+                                self.catalog, transaction["workloadId"]
+                            )
+                        )
+                    ),
                 )
                 still_running = any(
                     isinstance(row, dict)
@@ -8395,7 +8577,11 @@ class ComponentUpdater:
                 package_digest = staged.get("packageArtifactDigest")
                 if package_digest is None and isinstance(installed, dict):
                     identity = installed.get(component_id)
-                    package_digest = identity.get("packageArtifactDigest") if isinstance(identity, dict) else None
+                    package_digest = (
+                        identity.get("packageArtifactDigest")
+                        if isinstance(identity, dict)
+                        else None
+                    )
                 if not _valid_digest(package_digest):
                     raise UpdateError(
                         "PACKAGE_DESCRIPTOR_MISMATCH",
@@ -8424,10 +8610,12 @@ class ComponentUpdater:
             or not isinstance(transaction.get("selectedPluginRows"), list)
             or not isinstance(transaction.get("stagedComponents"), list)
         ):
-            raise UpdateError("PENDING_MAINTENANCE", "Package-only recovery journal is incomplete.", retryable=True)
-        fresh_inventory = self._workload_inventory_before_daemon_stop(
-            transaction["workloadId"]
-        )
+            raise UpdateError(
+                "PENDING_MAINTENANCE",
+                "Package-only recovery journal is incomplete.",
+                retryable=True,
+            )
+        fresh_inventory = self._workload_inventory_before_daemon_stop(transaction["workloadId"])
         if fresh_inventory is not None:
             installation_records = fresh_inventory.get("installationRecords", {})
             if isinstance(installation_records, dict):
@@ -8448,17 +8636,25 @@ class ComponentUpdater:
         }
         installation_records = transaction.setdefault("packageInstallations", {})
         if not isinstance(installation_records, dict):
-            raise UpdateError("INVALID_TRANSACTION", "Package install recovery records are malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package install recovery records are malformed."
+            )
         helper = self._load_workload_package_runtime()
         maintenance = self._workload_hold_echo(transaction)
         for row in selected_rows:
             if not isinstance(row, dict):
-                raise UpdateError("INVALID_TRANSACTION", "Selected package recovery row is malformed.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Selected package recovery row is malformed."
+                )
             component_id = row.get("componentId")
             staged = staged_by_id.get(component_id) if isinstance(component_id, str) else None
             if not isinstance(component_id, str) or not isinstance(staged, dict):
-                raise UpdateError("INVALID_TRANSACTION", "Package recovery stage identity is missing.")
-            if staged.get("status") == "current" and isinstance(installation_records.get(component_id), dict):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package recovery stage identity is missing."
+                )
+            if staged.get("status") == "current" and isinstance(
+                installation_records.get(component_id), dict
+            ):
                 continue
             request_id = (
                 "cyrene-wpkg-"
@@ -8475,13 +8671,22 @@ class ComponentUpdater:
                     runner=self.runner,
                 )
             except Exception as error:
-                raise UpdateError("PACKAGE_INSTALL_FAILED", f"Platform package recovery did not complete for {component_id}.", retryable=True) from error
+                raise UpdateError(
+                    "PACKAGE_INSTALL_FAILED",
+                    f"Platform package recovery did not complete for {component_id}.",
+                    retryable=True,
+                ) from error
             identity = self._write_workload_package_runtime_receipt(row, staged, record)
             installation_records[component_id] = record
             transaction.setdefault("packageIdentities", {})[component_id] = identity
             _atomic_json(transaction_path, transaction)
         source_rows = [
-            {**row, "packageArtifactDigest": staged_by_id[row["componentId"]].get("packageArtifactDigest")}
+            {
+                **row,
+                "packageArtifactDigest": staged_by_id[row["componentId"]].get(
+                    "packageArtifactDigest"
+                ),
+            }
             for row in selected_rows
         ]
         self._update_workload_source_policy(
@@ -8517,7 +8722,11 @@ class ComponentUpdater:
                 or prior_transaction.get("planDigest") != plan_digest
                 or prior_transaction.get("workloadId") != workload_id
             ):
-                raise UpdateError("PENDING_MAINTENANCE", "A different transaction occupies this workload plan.", retryable=True)
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "A different transaction occupies this workload plan.",
+                    retryable=True,
+                )
             if prior_transaction.get("phase") == "succeeded":
                 return prior_transaction["result"]
             holds = prior_transaction.get("maintenanceHolds", {})
@@ -8540,14 +8749,20 @@ class ComponentUpdater:
             workload_id, target_id, stored.get("selections"), action="install"
         )
         if (
-            resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest
-        ) and isinstance(prior_transaction, dict) and isinstance(prior_transaction.get("resolution"), dict):
+            (resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest)
+            and isinstance(prior_transaction, dict)
+            and isinstance(prior_transaction.get("resolution"), dict)
+        ):
             resolution = prior_transaction["resolution"]
             if resolution.get("planDigest") != plan_digest or resolution.get("status") != "ready":
-                raise UpdateError("INVALID_TRANSACTION", "Durable workload plan identity is malformed.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Durable workload plan identity is malformed."
+                )
         elif resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest:
             raise UpdateError(
-                "PLAN_CHANGED", "The installed workload resolution changed; check and stage again.", retryable=True
+                "PLAN_CHANGED",
+                "The installed workload resolution changed; check and stage again.",
+                retryable=True,
             )
         rows = resolution.get("selectedComponents")
         staged_rows = stored.get("stagedComponents")
@@ -8561,9 +8776,13 @@ class ComponentUpdater:
         if len(staged_by_id) != len(staged_rows) or set(staged_by_id) != {
             row.get("componentId") for row in rows if isinstance(row, dict)
         }:
-            raise UpdateError("INVALID_STAGE", "The staged workload component set differs from the signed plan.")
+            raise UpdateError(
+                "INVALID_STAGE", "The staged workload component set differs from the signed plan."
+            )
         if not _running_as_root():
-            raise UpdateError("PRIVILEGE_REQUIRED", "Applying a workload requires the root-owned update helper.")
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED", "Applying a workload requires the root-owned update helper."
+            )
 
         plugin_rows: list[dict[str, Any]] = []
         native_components: list[dict[str, Any]] = []
@@ -8588,7 +8807,9 @@ class ComponentUpdater:
             candidate = candidates.get(component_id)
             identity = staged.get("stagedIdentity")
             if candidate is None or not isinstance(identity, dict):
-                raise UpdateError("INVALID_STAGE", f"Signed staged identity is missing for {component_id}.")
+                raise UpdateError(
+                    "INVALID_STAGE", f"Signed staged identity is missing for {component_id}."
+                )
             item = {
                 "componentId": component_id,
                 "version": candidate.manifest["version"],
@@ -8614,7 +8835,9 @@ class ComponentUpdater:
                     "native-binary",
                     "python-bundle",
                 }:
-                    raise UpdateError("WORKLOAD_ARTIFACT_UNAVAILABLE", f"No native supervisor for {component_id}.")
+                    raise UpdateError(
+                        "WORKLOAD_ARTIFACT_UNAVAILABLE", f"No native supervisor for {component_id}."
+                    )
                 native_components.append(item)
             else:
                 raise UpdateError(
@@ -8635,23 +8858,38 @@ class ComponentUpdater:
                 or transaction.get("workloadId") != workload_id
                 or transaction.get("componentArtifactDigests") != component_artifact_digests
             ):
-                raise UpdateError("PENDING_MAINTENANCE", "A different transaction occupies this workload plan.", retryable=True)
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "A different transaction occupies this workload plan.",
+                    retryable=True,
+                )
             if transaction.get("phase") == "succeeded":
                 return transaction["result"]
             if transaction.get("phase") == "rolled_back":
-                raise UpdateError("APPLY_ROLLED_BACK", transaction.get("rollbackMessage", "Workload apply rolled back."))
+                raise UpdateError(
+                    "APPLY_ROLLED_BACK",
+                    transaction.get("rollbackMessage", "Workload apply rolled back."),
+                )
         else:
             transaction = None
 
         sdk_module = self._load_workload_sdk_environment()
 
         workload_host = next(
-            (item for item in self.catalog.get("workloads", []) if isinstance(item, dict) and item.get("workloadId") == workload_id),
+            (
+                item
+                for item in self.catalog.get("workloads", [])
+                if isinstance(item, dict) and item.get("workloadId") == workload_id
+            ),
             None,
         )
-        source_policy = workload_host.get("sourcePolicy") if isinstance(workload_host, dict) else None
+        source_policy = (
+            workload_host.get("sourcePolicy") if isinstance(workload_host, dict) else None
+        )
         if not isinstance(source_policy, dict):
-            raise UpdateError("SOURCE_POLICY_INVALID", "Signed workload sourcePolicy is unavailable.")
+            raise UpdateError(
+                "SOURCE_POLICY_INVALID", "Signed workload sourcePolicy is unavailable."
+            )
         service_units = self._workload_service_units(rows, source_policy, native_components)
         transaction = transaction or {
             "schemaVersion": 2,
@@ -8675,7 +8913,9 @@ class ComponentUpdater:
             "sourcePolicy": source_policy,
             "requiresRestart": bool(service_units),
             "previous": self._capture_active_versions(native_components),
-            "previousWeb": [self._capture_workload_web_identity(item["componentId"]) for item in web_components],
+            "previousWeb": [
+                self._capture_workload_web_identity(item["componentId"]) for item in web_components
+            ],
             "maintenanceHolds": {},
             "bindingOperations": [],
             "packageInstallations": {},
@@ -8695,7 +8935,9 @@ class ComponentUpdater:
                 transaction["packageInstallations"].setdefault(component_id, record)
         transaction["components"] = native_components
         transaction["webComponents"] = web_components
-        transaction["previous"] = transaction.get("previous") or self._capture_active_versions(native_components)
+        transaction["previous"] = transaction.get("previous") or self._capture_active_versions(
+            native_components
+        )
         transaction["previousWeb"] = transaction.get("previousWeb") or [
             self._capture_workload_web_identity(item["componentId"]) for item in web_components
         ]
@@ -8720,18 +8962,24 @@ class ComponentUpdater:
                 try:
                     transaction["webHostPrerequisite"] = web_host.prepare_host_prerequisites(
                         install_authorized=True,
-                        durable_callback=self._journal_callback(transaction, transaction_path, "hostEvents"),
+                        durable_callback=self._journal_callback(
+                            transaction, transaction_path, "hostEvents"
+                        ),
                         runner=self.runner,
                     )
-                    transaction["webHostPriorState"] = web_host.capture_web_host_state(runner=self.runner)
+                    transaction["webHostPriorState"] = web_host.capture_web_host_state(
+                        runner=self.runner
+                    )
                     transaction["webHostApplied"] = False
                     _atomic_json(transaction_path, transaction)
                 except Exception as error:
-                    raise UpdateError("WORKLOAD_WEB_HOST_UNAVAILABLE", "The local Web host prerequisite could not be prepared.", retryable=True) from error
+                    raise UpdateError(
+                        "WORKLOAD_WEB_HOST_UNAVAILABLE",
+                        "The local Web host prerequisite could not be prepared.",
+                        retryable=True,
+                    ) from error
 
-        selected_ids = {
-            row.get("componentId") for row in rows if isinstance(row, dict)
-        }
+        selected_ids = {row.get("componentId") for row in rows if isinstance(row, dict)}
         catalyst_auth_selected = {
             CATALYST_COMPONENT_ID,
             STUDIO_CONTROL_COMPONENT_ID,
@@ -8760,8 +9008,12 @@ class ComponentUpdater:
             for row in source_policy.get("productSources", [])
             if isinstance(row, dict) and isinstance(row.get("sourceId"), str)
         }
-        source_registration_needed = source_policy.get("mode") == "actualProduct" and not declared_product_sources.issubset(source_ids)
-        catalyst_auth_needed = catalyst_auth_selected and not self._workload_catalyst_auth_is_configured()
+        source_registration_needed = source_policy.get(
+            "mode"
+        ) == "actualProduct" and not declared_product_sources.issubset(source_ids)
+        catalyst_auth_needed = (
+            catalyst_auth_selected and not self._workload_catalyst_auth_is_configured()
+        )
         core_install_needed = (
             bool(native_components or web_components)
             or source_registration_needed
@@ -8769,15 +9021,21 @@ class ComponentUpdater:
         )
         previous_package_bindings = transaction.setdefault("previousPackageBindings", [])
         if not isinstance(previous_package_bindings, list):
-            raise UpdateError("INVALID_TRANSACTION", "Prior Package Runtime binding inventory is malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Prior Package Runtime binding inventory is malformed."
+            )
         if plugin_rows and not previous_package_bindings:
             source_bindings = package_inventory.get("sourceBindings", [])
             for row in plugin_rows:
                 policy = row.get("sourcePolicy")
-                source_id = self._workload_policy_source_id(policy) if isinstance(policy, dict) else None
+                source_id = (
+                    self._workload_policy_source_id(policy) if isinstance(policy, dict) else None
+                )
                 binding_id = row.get("bindingId")
                 if not isinstance(source_id, str) or not isinstance(binding_id, str):
-                    raise UpdateError("SOURCE_BINDING_INVALID", "Selected package owner mapping is invalid.")
+                    raise UpdateError(
+                        "SOURCE_BINDING_INVALID", "Selected package owner mapping is invalid."
+                    )
                 existing = next(
                     (
                         item
@@ -8794,8 +9052,12 @@ class ComponentUpdater:
                         "sourceId": source_id,
                         "bindingId": binding_id,
                         "packageId": row.get("packageId"),
-                        "state": existing.get("state", "BINDING_NOT_FOUND") if isinstance(existing, dict) else "BINDING_NOT_FOUND",
-                        "activeInstallationId": existing.get("activeInstallationId") if isinstance(existing, dict) else None,
+                        "state": existing.get("state", "BINDING_NOT_FOUND")
+                        if isinstance(existing, dict)
+                        else "BINDING_NOT_FOUND",
+                        "activeInstallationId": existing.get("activeInstallationId")
+                        if isinstance(existing, dict)
+                        else None,
                     }
                 )
             _atomic_json(transaction_path, transaction)
@@ -8819,14 +9081,22 @@ class ComponentUpdater:
                 and row.get("sourceId") in declared_product_sources
             }
             if active_product_sources:
-                raise UpdateError("COMPONENT_IN_USE", "An active Package Runtime binding prevents the Product maintenance phase.", retryable=True)
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "An active Package Runtime binding prevents the Product maintenance phase.",
+                    retryable=True,
+                )
 
-        if core_install_needed and not self._workload_phase_is_ended(transaction, "core-runtime-install") and self._ensure_workload_phase(
-            transaction,
-            transaction_path,
-            phase="core-runtime-install",
-            target_kind="CORE_RUNTIME",
-            requires_restart=bool(service_units),
+        if (
+            core_install_needed
+            and not self._workload_phase_is_ended(transaction, "core-runtime-install")
+            and self._ensure_workload_phase(
+                transaction,
+                transaction_path,
+                phase="core-runtime-install",
+                target_kind="CORE_RUNTIME",
+                requires_restart=bool(service_units),
+            )
         ):
             try:
                 prior_states = transaction.setdefault("priorServiceStates", {})
@@ -8842,20 +9112,32 @@ class ComponentUpdater:
                     current = self._active_native_pointer_identity(item["componentId"])
                     desired = _native_release_pointer_identity(item)
                     previous = next(
-                        row for row in transaction["previous"] if row["componentId"] == item["componentId"]
+                        row
+                        for row in transaction["previous"]
+                        if row["componentId"] == item["componentId"]
                     )
                     if current != desired:
                         if current != previous.get("pointerIdentity"):
-                            raise UpdateError("ACTIVE_VERSION_CHANGED", f"Active pointer changed for {item['componentId']}.", retryable=True)
-                        self._activate_transaction({
-                            **transaction,
-                            "components": [item],
-                            "previous": [previous],
-                        })
+                            raise UpdateError(
+                                "ACTIVE_VERSION_CHANGED",
+                                f"Active pointer changed for {item['componentId']}.",
+                                retryable=True,
+                            )
+                        self._activate_transaction(
+                            {
+                                **transaction,
+                                "components": [item],
+                                "previous": [previous],
+                            }
+                        )
                     elif self._read_active_receipt(item["componentId"]) is None:
                         self._write_active_receipt(item)
                 for item in web_components:
-                    prior = next(row for row in transaction["previousWeb"] if row["componentId"] == item["componentId"])
+                    prior = next(
+                        row
+                        for row in transaction["previousWeb"]
+                        if row["componentId"] == item["componentId"]
+                    )
                     current = self._capture_workload_web_identity(item["componentId"])
                     if current.get("pointerIdentity") != item["pointerIdentity"]:
                         self._activate_workload_web(item, expected_current=prior["pointerIdentity"])
@@ -8872,7 +9154,9 @@ class ComponentUpdater:
                         installation_records={},
                         phase="core-runtime-install",
                     )
-                self._end_workload_hold(transaction, transaction_path, outcome="SUCCESS", healthy=True)
+                self._end_workload_hold(
+                    transaction, transaction_path, outcome="SUCCESS", healthy=True
+                )
             except Exception as error:
                 transaction["phase"] = "applying"
                 _atomic_json(transaction_path, transaction)
@@ -8892,7 +9176,11 @@ class ComponentUpdater:
                 isinstance(row, dict) and row.get("state") == "RUNNING"
                 for row in package_inventory.get("sourceBindings", [])
             ):
-                raise UpdateError("COMPONENT_IN_USE", "The Package Runtime daemon still has an active owner binding.", retryable=True)
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "The Package Runtime daemon still has an active owner binding.",
+                    retryable=True,
+                )
             if self._ensure_workload_phase(
                 transaction,
                 transaction_path,
@@ -8926,7 +9214,11 @@ class ComponentUpdater:
                         if staged.get("status") == "current":
                             record = installation_records.get(component_id)
                             if not isinstance(record, dict):
-                                raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", f"Installed package record is missing for {component_id}.", retryable=True)
+                                raise UpdateError(
+                                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                    f"Installed package record is missing for {component_id}.",
+                                    retryable=True,
+                                )
                             continue
                         request_id = (
                             "cyrene-wpkg-"
@@ -8943,9 +9235,16 @@ class ComponentUpdater:
                                 runner=self.runner,
                             )
                         except Exception as error:
-                            raise UpdateError("PACKAGE_INSTALL_FAILED", f"Platform package install did not complete for {component_id}.", retryable=True) from error
+                            raise UpdateError(
+                                "PACKAGE_INSTALL_FAILED",
+                                f"Platform package install did not complete for {component_id}.",
+                                retryable=True,
+                            ) from error
                         if not isinstance(record, dict):
-                            raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", f"Platform install receipt is malformed for {component_id}.")
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                f"Platform install receipt is malformed for {component_id}.",
+                            )
                         identity = self._write_workload_package_runtime_receipt(row, staged, record)
                         installation_records[component_id] = record
                         transaction.setdefault("packageIdentities", {})[component_id] = identity
@@ -8954,7 +9253,9 @@ class ComponentUpdater:
                     source_rows = []
                     for row in plugin_rows:
                         staged = staged_by_id[row["componentId"]]
-                        source_rows.append({**row, "packageArtifactDigest": staged.get("packageArtifactDigest")})
+                        source_rows.append(
+                            {**row, "packageArtifactDigest": staged.get("packageArtifactDigest")}
+                        )
                     self._update_workload_source_policy(
                         transaction,
                         transaction_path,
@@ -8963,7 +9264,9 @@ class ComponentUpdater:
                         installation_records=installation_records,
                         phase="package-only",
                     )
-                    self._end_workload_hold(transaction, transaction_path, outcome="SUCCESS", healthy=True)
+                    self._end_workload_hold(
+                        transaction, transaction_path, outcome="SUCCESS", healthy=True
+                    )
                 except Exception:
                     transaction["phase"] = "applying"
                     _atomic_json(transaction_path, transaction)
@@ -8979,19 +9282,41 @@ class ComponentUpdater:
         if plugin_rows:
             package_inventory = self._read_workload_package_inventory(
                 workload_id,
-                tuple(sorted(self._load_workload_resolver().potential_component_ids(self.catalog, workload_id))),
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, workload_id
+                        )
+                    )
+                ),
             )
-            activity_catalog, runtime_policy, principals, helper = self._workload_source_state(workload_id)
+            activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                workload_id
+            )
             if runtime_policy is None:
-                raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime policy is missing after installation.", retryable=True)
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime policy is missing after installation.",
+                    retryable=True,
+                )
             installations = package_inventory.get("installationRecords", {})
             for row in plugin_rows:
                 component_id = row["componentId"]
-                record = transaction.get("packageInstallations", {}).get(component_id) if isinstance(transaction.get("packageInstallations"), dict) else None
+                record = (
+                    transaction.get("packageInstallations", {}).get(component_id)
+                    if isinstance(transaction.get("packageInstallations"), dict)
+                    else None
+                )
                 if not isinstance(record, dict) and isinstance(installations, dict):
                     record = installations.get(component_id)
-                if not isinstance(record, dict) or not isinstance(record.get("installation_id"), str):
-                    raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", f"Package installation identity is unavailable for {component_id}.", retryable=True)
+                if not isinstance(record, dict) or not isinstance(
+                    record.get("installation_id"), str
+                ):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        f"Package installation identity is unavailable for {component_id}.",
+                        retryable=True,
+                    )
                 source_id = self._workload_policy_source_id(row["sourcePolicy"])
                 existing_binding = next(
                     (
@@ -9020,16 +9345,30 @@ class ComponentUpdater:
                     source_principals=principals,
                     helper=helper,
                 )
-                activity_catalog, runtime_policy, principals, helper = self._workload_source_state(workload_id)
+                activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                    workload_id
+                )
                 if runtime_policy is None:
-                    raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime policy disappeared after activation.", retryable=True)
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Package Runtime policy disappeared after activation.",
+                        retryable=True,
+                    )
 
             package_inventory = self._read_workload_package_inventory(
                 workload_id,
-                tuple(sorted(self._load_workload_resolver().potential_component_ids(self.catalog, workload_id))),
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, workload_id
+                        )
+                    )
+                ),
             )
             active_bindings = {
-                (binding.get("sourceId"), binding.get("bindingId")): binding.get("activeInstallationId")
+                (binding.get("sourceId"), binding.get("bindingId")): binding.get(
+                    "activeInstallationId"
+                )
                 for binding in package_inventory.get("sourceBindings", [])
                 if isinstance(binding, dict)
             }
@@ -9037,13 +9376,24 @@ class ComponentUpdater:
                 source_id = self._workload_policy_source_id(row["sourcePolicy"])
                 record = transaction.get("packageInstallations", {}).get(row["componentId"])
                 if not isinstance(record, dict):
-                    record = package_inventory.get("installationRecords", {}).get(row["componentId"])
-                if not isinstance(record, dict) or active_bindings.get((source_id, row["bindingId"])) != record.get("installation_id"):
-                    raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", f"Active binding readback differs for {row['componentId']}.", retryable=True)
+                    record = package_inventory.get("installationRecords", {}).get(
+                        row["componentId"]
+                    )
+                if not isinstance(record, dict) or active_bindings.get(
+                    (source_id, row["bindingId"])
+                ) != record.get("installation_id"):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        f"Active binding readback differs for {row['componentId']}.",
+                        retryable=True,
+                    )
 
         core_activation_needed = bool(service_units) and (
             core_install_needed
-            or any(self._package_product_unit_state(service["unit"]) != "active" for service in service_units)
+            or any(
+                self._package_product_unit_state(service["unit"]) != "active"
+                for service in service_units
+            )
         )
         web_selected = any(row.get("artifactKind") == "static-web" for row in rows)
         if (core_activation_needed or web_selected) and self._ensure_workload_phase(
@@ -9057,21 +9407,31 @@ class ComponentUpdater:
                 for service in service_units:
                     unit = service["unit"]
                     state = self._package_product_unit_state(unit)
-                    self._set_workload_unit(unit, "restart" if state == "active" else "start", wait_active=True)
+                    self._set_workload_unit(
+                        unit, "restart" if state == "active" else "start", wait_active=True
+                    )
                 if CATALYST_COMPONENT_ID in selected_ids:
                     self._wait_http_health(8004, "/healthz", CATALYST_COMPONENT_ID)
                 if web_selected and web_host is not None:
                     try:
                         transaction["hostMetadata"] = web_host.apply_web_host(
                             expected_state=transaction.get("webHostPriorState"),
-                            durable_callback=self._journal_callback(transaction, transaction_path, "hostEvents"),
+                            durable_callback=self._journal_callback(
+                                transaction, transaction_path, "hostEvents"
+                            ),
                             runner=self.runner,
                         )
                         transaction["webHostApplied"] = True
                         _atomic_json(transaction_path, transaction)
                     except Exception as error:
-                        raise UpdateError("WORKLOAD_WEB_HOST_APPLY_FAILED", "The selected Client Web host did not become ready.", retryable=True) from error
-                self._end_workload_hold(transaction, transaction_path, outcome="SUCCESS", healthy=True)
+                        raise UpdateError(
+                            "WORKLOAD_WEB_HOST_APPLY_FAILED",
+                            "The selected Client Web host did not become ready.",
+                            retryable=True,
+                        ) from error
+                self._end_workload_hold(
+                    transaction, transaction_path, outcome="SUCCESS", healthy=True
+                )
             except Exception as error:
                 transaction["phase"] = "applying"
                 _atomic_json(transaction_path, transaction)
@@ -9079,7 +9439,9 @@ class ComponentUpdater:
                 raise
 
         result = {
-            "status": "activated" if (service_units or plugin_rows or web_selected) else "installed",
+            "status": "activated"
+            if (service_units or plugin_rows or web_selected)
+            else "installed",
             "action": "install",
             "planId": plan_id,
             "planDigest": plan_digest,
@@ -9616,9 +9978,13 @@ class ComponentUpdater:
                 host = self._load_workload_web_host()
                 prior_state = transaction.get("webHostPriorState")
                 host_metadata = transaction.get("hostMetadata")
-                current_digest = host_metadata.get("configDigest") if isinstance(host_metadata, dict) else None
+                current_digest = (
+                    host_metadata.get("configDigest") if isinstance(host_metadata, dict) else None
+                )
                 if not isinstance(prior_state, dict) or not _valid_digest(current_digest):
-                    raise UpdateError("INVALID_TRANSACTION", "Web host rollback identity is incomplete.")
+                    raise UpdateError(
+                        "INVALID_TRANSACTION", "Web host rollback identity is incomplete."
+                    )
                 host.rollback_web_host(
                     prior_state=prior_state,
                     expected_current_digest=current_digest,
@@ -9673,7 +10039,9 @@ class ComponentUpdater:
         previous = transaction.get("previousPackageBindings", [])
         selected_rows = transaction.get("selectedPluginRows", [])
         if not isinstance(previous, list) or not isinstance(selected_rows, list):
-            raise UpdateError("INVALID_TRANSACTION", "Package Runtime rollback identity is malformed.")
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package Runtime rollback identity is malformed."
+            )
         if not previous:
             return
         if transaction.get("maintenanceToken"):
@@ -9696,9 +10064,7 @@ class ComponentUpdater:
             if isinstance(row, dict) and isinstance(row.get("componentId"), str)
         }
         selected_owner_keys = {
-            (row.get("sourceId"), row.get("bindingId"))
-            for row in previous
-            if isinstance(row, dict)
+            (row.get("sourceId"), row.get("bindingId")) for row in previous if isinstance(row, dict)
         }
         inventory = self._read_workload_package_inventory(
             transaction["workloadId"],
@@ -9714,10 +10080,16 @@ class ComponentUpdater:
             transaction["workloadId"]
         )
         if runtime_policy is None:
-            raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime policy is unavailable for owner rollback.", retryable=True)
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Package Runtime policy is unavailable for owner rollback.",
+                retryable=True,
+            )
         for original in previous:
             if not isinstance(original, dict):
-                raise UpdateError("INVALID_TRANSACTION", "Package Runtime prior owner row is malformed.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime prior owner row is malformed."
+                )
             component_id = original.get("componentId")
             row = rows_by_id.get(component_id)
             source_id = original.get("sourceId")
@@ -9730,15 +10102,26 @@ class ComponentUpdater:
                 or not isinstance(binding_id, str)
                 or (desired_id is not None and not isinstance(desired_id, str))
             ):
-                raise UpdateError("INVALID_TRANSACTION", "Package Runtime prior owner identity is incomplete.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime prior owner identity is incomplete."
+                )
             for binding in inventory.get("sourceBindings", []):
                 if not isinstance(binding, dict):
-                    raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime owner readback is malformed.", retryable=True)
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Package Runtime owner readback is malformed.",
+                        retryable=True,
+                    )
                 if (
                     binding.get("state") == "RUNNING"
-                    and (binding.get("sourceId"), binding.get("bindingId")) not in selected_owner_keys
+                    and (binding.get("sourceId"), binding.get("bindingId"))
+                    not in selected_owner_keys
                 ):
-                    raise UpdateError("COMPONENT_IN_USE", "Another Package Runtime owner is active during rollback.", retryable=True)
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "Another Package Runtime owner is active during rollback.",
+                        retryable=True,
+                    )
             current = next(
                 (
                     binding
@@ -9785,7 +10168,11 @@ class ComponentUpdater:
                 transaction["workloadId"]
             )
             if runtime_policy is None:
-                raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime policy disappeared during owner rollback.", retryable=True)
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime policy disappeared during owner rollback.",
+                    retryable=True,
+                )
             recovered = next(
                 (
                     binding
@@ -9802,7 +10189,11 @@ class ComponentUpdater:
                 else None
             )
             if recovered_id != desired_id:
-                raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime rollback did not restore the prior active installation.", retryable=True)
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime rollback did not restore the prior active installation.",
+                    retryable=True,
+                )
 
     def _apply_workload_uninstall_locked(
         self, stored: dict[str, Any], confirmation: dict[str, Any]
@@ -9824,7 +10215,11 @@ class ComponentUpdater:
                 or transaction.get("planDigest") != plan_digest
                 or transaction.get("workloadId") != workload_id
             ):
-                raise UpdateError("PENDING_MAINTENANCE", "A different transaction occupies this uninstall plan.", retryable=True)
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "A different transaction occupies this uninstall plan.",
+                    retryable=True,
+                )
             if transaction.get("phase") == "succeeded":
                 return transaction["result"]
             uninstall_hold = transaction.get("maintenanceHolds", {}).get("core-runtime-uninstall")
@@ -9853,7 +10248,12 @@ class ComponentUpdater:
             rows = [transaction.get("selectedRow")]
             staged_rows = [transaction.get("stagedRow")]
             resolution = transaction["resolution"]
-        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(staged_rows, list) or len(staged_rows) != 1:
+        if (
+            not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(staged_rows, list)
+            or len(staged_rows) != 1
+        ):
             # An offline uninstall can complete immediately before a crash. In
             # that narrow case continue only from the exact durable owner identity
             # and component row that was written before the first mutation.
@@ -9864,24 +10264,44 @@ class ComponentUpdater:
                 or not isinstance(transaction.get("installation"), dict)
                 or transaction.get("offlineUninstallIntent") is not True
             ):
-                raise UpdateError("PLAN_CHANGED", "The exact installed workload identity is unavailable for uninstall.", retryable=True)
+                raise UpdateError(
+                    "PLAN_CHANGED",
+                    "The exact installed workload identity is unavailable for uninstall.",
+                    retryable=True,
+                )
             rows = [transaction["selectedRow"]]
             staged_rows = [transaction["stagedRow"]]
             resolution = transaction["resolution"]
         row = rows[0]
         staged = staged_rows[0]
-        if not isinstance(row, dict) or not isinstance(staged, dict) or row.get("componentId") != staged.get("componentId"):
-            raise UpdateError("INVALID_STAGE", "The selected uninstall identity differs from its staged plan.")
+        if (
+            not isinstance(row, dict)
+            or not isinstance(staged, dict)
+            or row.get("componentId") != staged.get("componentId")
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "The selected uninstall identity differs from its staged plan."
+            )
         if resolution.get("status") != "ready" and not (
             transaction is not None and transaction.get("offlineUninstallIntent") is True
         ):
-            raise UpdateError("WORKLOAD_UNINSTALL_BLOCKED", "The installed component is in use or its owner identity cannot be verified.", retryable=True)
+            raise UpdateError(
+                "WORKLOAD_UNINSTALL_BLOCKED",
+                "The installed component is in use or its owner identity cannot be verified.",
+                retryable=True,
+            )
         if not _running_as_root():
-            raise UpdateError("PRIVILEGE_REQUIRED", "Applying a workload uninstall requires the root-owned update helper.")
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED",
+                "Applying a workload uninstall requires the root-owned update helper.",
+            )
 
         component_id = row.get("componentId")
         artifact_kind = row.get("artifactKind")
-        if not isinstance(component_id, str) or artifact_kind not in {"plugin-package", "static-web"}:
+        if not isinstance(component_id, str) or artifact_kind not in {
+            "plugin-package",
+            "static-web",
+        }:
             raise UpdateError(
                 "WORKLOAD_UNINSTALL_UNAVAILABLE",
                 "This component kind has no registered owner-specific uninstall adapter.",
@@ -9895,7 +10315,11 @@ class ComponentUpdater:
             source_id: str | None = None
             if artifact_kind == "plugin-package":
                 if not isinstance(package_identity, dict):
-                    raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Uninstall has no authenticated installation identity.", retryable=True)
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Uninstall has no authenticated installation identity.",
+                        retryable=True,
+                    )
                 installation_id = row.get("installationId")
                 records = package_inventory.get("installationRecords", {})
                 installation = records.get(component_id) if isinstance(records, dict) else None
@@ -9907,14 +10331,22 @@ class ComponentUpdater:
                     or installation.get("package_version") != row.get("version")
                     or installation.get("archive_digest") != row.get("digest")
                 ):
-                    raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Fresh Package Runtime readback differs from the selected uninstall identity.", retryable=True)
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Fresh Package Runtime readback differs from the selected uninstall identity.",
+                        retryable=True,
+                    )
                 component_digest = installation.get("artifact_digest")
                 row = {**row, "packageArtifactDigest": component_digest}
                 source_id = self._workload_policy_source_id(row.get("sourcePolicy", {}))
                 if not _valid_digest(component_digest) or not isinstance(source_id, str):
-                    raise UpdateError("SOURCE_BINDING_INVALID", "Uninstall package owner mapping is incomplete.")
+                    raise UpdateError(
+                        "SOURCE_BINDING_INVALID", "Uninstall package owner mapping is incomplete."
+                    )
             if not _valid_digest(component_digest):
-                raise UpdateError("INVALID_STAGE", "Uninstall digest is missing from the selected identity.")
+                raise UpdateError(
+                    "INVALID_STAGE", "Uninstall digest is missing from the selected identity."
+                )
             transaction = {
                 "schemaVersion": 2,
                 "transactionKind": "workload-assembly.v1",
@@ -9945,41 +10377,73 @@ class ComponentUpdater:
             component_digest = transaction.get("componentArtifactDigests", {}).get(component_id)
             installation = transaction.get("installation")
             if component_digest is None:
-                raise UpdateError("INVALID_TRANSACTION", "Uninstall transaction omits its component digest.")
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Uninstall transaction omits its component digest."
+                )
 
         if artifact_kind == "plugin-package":
             assert isinstance(installation, dict)
             source_policy = row.get("sourcePolicy")
             if not isinstance(source_policy, dict):
-                raise UpdateError("SOURCE_POLICY_INVALID", "Uninstall package has no signed owner policy.")
+                raise UpdateError(
+                    "SOURCE_POLICY_INVALID", "Uninstall package has no signed owner policy."
+                )
             package_inventory = self._read_workload_package_inventory(
                 workload_id,
-                tuple(sorted(self._load_workload_resolver().potential_component_ids(self.catalog, workload_id))),
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, workload_id
+                        )
+                    )
+                ),
             )
             source_id = self._workload_policy_source_id(source_policy)
             binding_id = row.get("bindingId")
             installation_id = row.get("installationId") or installation.get("installation_id")
-            if not isinstance(source_id, str) or not isinstance(binding_id, str) or not isinstance(installation_id, str):
-                raise UpdateError("SOURCE_BINDING_INVALID", "Uninstall owner identity is incomplete.")
+            if (
+                not isinstance(source_id, str)
+                or not isinstance(binding_id, str)
+                or not isinstance(installation_id, str)
+            ):
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID", "Uninstall owner identity is incomplete."
+                )
             for binding in package_inventory.get("sourceBindings", []):
                 if not isinstance(binding, dict):
-                    raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Runtime binding inventory is malformed.")
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Runtime binding inventory is malformed.",
+                    )
                 if (
                     binding.get("sourceId") == source_id
                     and binding.get("bindingId") == binding_id
                     and binding.get("activeInstallationId") not in {None, installation_id}
                     and binding.get("state") == "RUNNING"
                 ):
-                    raise UpdateError("COMPONENT_IN_USE", "A different release is active under this owner binding; uninstall was not applied.", retryable=True)
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "A different release is active under this owner binding; uninstall was not applied.",
+                        retryable=True,
+                    )
                 if (
-                    binding.get("sourceId") != source_id
-                    or binding.get("bindingId") != binding_id
-                ) and binding.get("packageId") == row.get("packageId") and installation_id in binding.get("installationIds", []):
-                    raise UpdateError("COMPONENT_IN_USE", "Another Package Runtime owner references this installation.", retryable=True)
+                    (binding.get("sourceId") != source_id or binding.get("bindingId") != binding_id)
+                    and binding.get("packageId") == row.get("packageId")
+                    and installation_id in binding.get("installationIds", [])
+                ):
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "Another Package Runtime owner references this installation.",
+                        retryable=True,
+                    )
                 if binding.get("state") == "RUNNING" and not (
                     binding.get("sourceId") == source_id and binding.get("bindingId") == binding_id
                 ):
-                    raise UpdateError("COMPONENT_IN_USE", "Another active Package Runtime owner prevents offline uninstall.", retryable=True)
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "Another active Package Runtime owner prevents offline uninstall.",
+                        retryable=True,
+                    )
             target_binding = next(
                 (
                     binding
@@ -9992,10 +10456,20 @@ class ComponentUpdater:
             )
             if isinstance(target_binding, dict) and target_binding.get("state") == "RUNNING":
                 if target_binding.get("activeInstallationId") != installation_id:
-                    raise UpdateError("COMPONENT_IN_USE", "A different installation is active under this binding.", retryable=True)
-                activity_catalog, runtime_policy, principals, helper = self._workload_source_state(workload_id)
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "A different installation is active under this binding.",
+                        retryable=True,
+                    )
+                activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                    workload_id
+                )
                 if runtime_policy is None:
-                    raise UpdateError("PACKAGE_RUNTIME_READBACK_REQUIRED", "Uninstall owner policy is unavailable.", retryable=True)
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Uninstall owner policy is unavailable.",
+                        retryable=True,
+                    )
                 self._workload_binding_operation(
                     transaction,
                     transaction_path,
@@ -10009,13 +10483,23 @@ class ComponentUpdater:
                 )
                 package_inventory = self._read_workload_package_inventory(
                     workload_id,
-                    tuple(sorted(self._load_workload_resolver().potential_component_ids(self.catalog, workload_id))),
+                    tuple(
+                        sorted(
+                            self._load_workload_resolver().potential_component_ids(
+                                self.catalog, workload_id
+                            )
+                        )
+                    ),
                 )
             if any(
                 isinstance(binding, dict) and binding.get("state") == "RUNNING"
                 for binding in package_inventory.get("sourceBindings", [])
             ):
-                raise UpdateError("COMPONENT_IN_USE", "A Package Runtime owner remains active; offline uninstall was not started.", retryable=True)
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "A Package Runtime owner remains active; offline uninstall was not started.",
+                    retryable=True,
+                )
             if not self._workload_phase_is_ended(transaction, "core-runtime-uninstall"):
                 if self._ensure_workload_phase(
                     transaction,
@@ -10033,13 +10517,9 @@ class ComponentUpdater:
                     )
                     transaction["offlineUninstallRequestId"] = request_id
                     _atomic_json(transaction_path, transaction)
-                    fresh_inventory = self._workload_inventory_before_daemon_stop(
-                        workload_id
-                    )
+                    fresh_inventory = self._workload_inventory_before_daemon_stop(workload_id)
                     if fresh_inventory is not None:
-                        current = fresh_inventory.get("installationRecords", {}).get(
-                            component_id
-                        )
+                        current = fresh_inventory.get("installationRecords", {}).get(component_id)
                         identity_fields = (
                             "installation_id",
                             "package_id",
@@ -10070,7 +10550,11 @@ class ComponentUpdater:
                             runner=self.runner,
                         )
                     except Exception as error:
-                        raise UpdateError("PACKAGE_UNINSTALL_FAILED", "Platform offline package removal did not complete.", retryable=True) from error
+                        raise UpdateError(
+                            "PACKAGE_UNINSTALL_FAILED",
+                            "Platform offline package removal did not complete.",
+                            retryable=True,
+                        ) from error
                     transaction["offlineUninstallResult"] = uninstall_result
                     _atomic_json(transaction_path, transaction)
                     remove_row = {**row, "packageArtifactDigest": component_digest}
@@ -10083,7 +10567,9 @@ class ComponentUpdater:
                         phase="core-runtime-uninstall",
                         remove_component_ids=(component_id,),
                     )
-                    self._end_workload_hold(transaction, transaction_path, outcome="SUCCESS", healthy=True)
+                    self._end_workload_hold(
+                        transaction, transaction_path, outcome="SUCCESS", healthy=True
+                    )
                 if transaction.get("packageRuntimePriorState", "active") != "inactive":
                     self._workload_runtime_daemon("start", wait_active=True)
                 transaction["packageRuntimeStarted"] = True
@@ -10098,7 +10584,13 @@ class ComponentUpdater:
                 component_result["alreadyAbsent"] = True
             latest_inventory = self._read_workload_package_inventory(
                 workload_id,
-                tuple(sorted(self._load_workload_resolver().potential_component_ids(self.catalog, workload_id))),
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, workload_id
+                        )
+                    )
+                ),
             )
             result = {
                 "status": "uninstalled",
@@ -10116,13 +10608,21 @@ class ComponentUpdater:
             web_host = self._load_workload_web_host()
             expected_identity = row.get("installedIdentity")
             if not isinstance(expected_identity, dict):
-                raise UpdateError("INVALID_INSTALLED_RELEASE", "Static Web uninstall identity is incomplete.")
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "Static Web uninstall identity is incomplete."
+                )
             expected_digest = row.get("digest")
             if not _valid_digest(expected_digest):
-                raise UpdateError("INVALID_INSTALLED_RELEASE", "Static Web uninstall digest is invalid.")
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "Static Web uninstall digest is invalid."
+                )
             if transaction is None:
-                raise UpdateError("INVALID_TRANSACTION", "Static Web uninstall transaction was not created.")
-            if not self._workload_phase_is_ended(transaction, "core-runtime-uninstall") and self._ensure_workload_phase(
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Static Web uninstall transaction was not created."
+                )
+            if not self._workload_phase_is_ended(
+                transaction, "core-runtime-uninstall"
+            ) and self._ensure_workload_phase(
                 transaction,
                 transaction_path,
                 phase="core-runtime-uninstall",
@@ -10134,21 +10634,33 @@ class ComponentUpdater:
                 _atomic_json(transaction_path, transaction)
                 web_host.remove_web_host(
                     expected_state=prior_state,
-                    durable_callback=self._journal_callback(transaction, transaction_path, "hostEvents"),
+                    durable_callback=self._journal_callback(
+                        transaction, transaction_path, "hostEvents"
+                    ),
                     runner=self.runner,
                 )
                 current = self._capture_workload_web_identity(component_id)
                 pointer_identity = expected_identity.get("pointerIdentity")
                 if current.get("pointerIdentity") not in {pointer_identity, None}:
-                    raise UpdateError("UNINSTALL_CONFLICT", "Static Web current pointer changed outside this plan.")
+                    raise UpdateError(
+                        "UNINSTALL_CONFLICT",
+                        "Static Web current pointer changed outside this plan.",
+                    )
                 current_path = DEFAULT_WORKLOAD_WEB_ROOT / component_id / "current"
                 if current_path.exists() or current_path.is_symlink():
-                    if not current_path.is_symlink() or not current_path.readlink().as_posix().startswith("releases/"):
-                        raise UpdateError("UNINSTALL_CONFLICT", "Static Web current pointer is unsafe.")
+                    if (
+                        not current_path.is_symlink()
+                        or not current_path.readlink().as_posix().startswith("releases/")
+                    ):
+                        raise UpdateError(
+                            "UNINSTALL_CONFLICT", "Static Web current pointer is unsafe."
+                        )
                     current_path.unlink()
                     self._fsync_directory(current_path.parent)
                 self._clear_active_receipt(component_id)
-                self._end_workload_hold(transaction, transaction_path, outcome="SUCCESS", healthy=True)
+                self._end_workload_hold(
+                    transaction, transaction_path, outcome="SUCCESS", healthy=True
+                )
             result = {
                 "status": "uninstalled",
                 "action": "uninstall",
