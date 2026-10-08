@@ -48,7 +48,7 @@ def test_catalog_validates_against_catalog_and_manifest_schemas() -> None:
         CATALOG_PATH.read_bytes(), WORKSPACE_ROOT / "governance"
     )
 
-    assert validated["generation"] == 12
+    assert validated["generation"] == 13
 
 
 def test_generation9_schema_requires_the_ubuntu22_target_for_each_product() -> None:
@@ -109,7 +109,7 @@ def test_ubuntu22_python_target_is_supported_only_by_the_five_products() -> None
     components = _component_map(catalog)
     targets = {target["id"]: target for target in catalog["targets"]}
 
-    assert catalog["generation"] == 12
+    assert catalog["generation"] == 13
     assert targets[TARGET_ID] == {
         "id": TARGET_ID,
         "target": {
@@ -124,6 +124,18 @@ def test_ubuntu22_python_target_is_supported_only_by_the_five_products() -> None
         "hostSupport": "supported",
     }
     assert "linux-ubuntu-24.04-x86_64-python-3.12" in targets
+    assert targets["linux-ubuntu-24.04-x86_64-oci"] == {
+        "id": "linux-ubuntu-24.04-x86_64-oci",
+        "target": {
+            "os": "linux",
+            "osVersion": "24.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "runtime": "oci",
+        },
+        "hostSupport": "supported",
+    }
 
     for component_id, component in components.items():
         rows = [row for row in component["targets"] if row["targetId"] == TARGET_ID]
@@ -172,7 +184,17 @@ def test_existing_python_oci_core_targets_and_sdk_locks_are_preserved() -> None:
     }
 
     echo_rows = components["cyrene-echo"]["targets"]
-    assert not any(row["targetId"] == TARGET_ID for row in echo_rows)
+    assert {
+        row["targetId"]: row
+        for row in echo_rows
+        if row["targetId"] == "linux-ubuntu-24.04-x86_64-oci"
+    } == {
+        "linux-ubuntu-24.04-x86_64-oci": {
+            "targetId": "linux-ubuntu-24.04-x86_64-oci",
+            "artifactKind": "oci-image",
+            "support": "supported",
+        }
+    }
     assert (
         next(
             row for row in echo_rows if row["targetId"] == "linux-ubuntu-24.04-x86_64-python-3.12"

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cyrene.dev/schemas/component-release-manifest-v2.schema.json",
   "title": "Cyrene Component Release Manifest v2",
-  "description": "A strict v2 component release envelope. protocolVersion pins wire compatibility; contentDigest equals the immutable artifact payload SHA-256 (artifact.sha256 for archives or artifact.digest for OCI). manifestDigest uses the v1 canonical JSON algorithm and omits manifestDigest itself.",
+  "description": "A strict v2 component release envelope. protocolVersion pins wire compatibility; contentDigest equals the immutable artifact payload SHA-256 (artifact.sha256 for archives, artifact.archive.sha256 for plugin packages, or artifact.digest for OCI). manifestDigest uses the v1 canonical JSON algorithm and omits manifestDigest itself.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -59,6 +59,12 @@
         },
         {
           "$ref": "#/$defs/dataBundleArtifact"
+        },
+        {
+          "$ref": "#/$defs/pluginPackageArtifact"
+        },
+        {
+          "$ref": "#/$defs/staticWebArtifact"
         }
       ]
     },
@@ -184,6 +190,62 @@
       },
       "additionalProperties": {
         "$ref": "#/$defs/digest"
+      }
+    },
+    "assetReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "sha256",
+        "sizeBytes"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "sbomAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uri",
+        "sha256",
+        "sizeBytes",
+        "format",
+        "specVersion"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "format": {
+          "const": "cyclonedx-json"
+        },
+        "specVersion": {
+          "const": "1.6"
+        }
       }
     },
     "nativeBinaryArtifact": {
@@ -654,6 +716,169 @@
         },
         "files": {
           "$ref": "#/$defs/files"
+        }
+      }
+    },
+    "pluginPackageArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "packageId",
+        "capabilityId",
+        "interfaceVersion",
+        "archive",
+        "descriptor",
+        "requirementsLock",
+        "preparerWheels",
+        "packageReleaseMetadata"
+      ],
+      "properties": {
+        "kind": {
+          "const": "plugin-package"
+        },
+        "packageId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){1,7}$",
+          "description": "Exact dotted identity from the Plugin manifest; never derive this value from componentId."
+        },
+        "capabilityId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){1,7}$"
+        },
+        "interfaceVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+        },
+        "archive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "format",
+            "uri",
+            "sha256",
+            "sizeBytes",
+            "files",
+            "maxEntries",
+            "maxUncompressedBytes"
+          ],
+          "properties": {
+            "format": {
+              "const": "zip"
+            },
+            "uri": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://"
+            },
+            "sha256": {
+              "$ref": "#/$defs/digest"
+            },
+            "sizeBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "files": {
+              "$ref": "#/$defs/files"
+            },
+            "maxEntries": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100000
+            },
+            "maxUncompressedBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967296
+            }
+          }
+        },
+        "descriptor": {
+          "$ref": "#/$defs/assetReference"
+        },
+        "requirementsLock": {
+          "$ref": "#/$defs/assetReference"
+        },
+        "preparerWheels": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/assetReference"
+          },
+          "uniqueItems": true
+        },
+        "packageReleaseMetadata": {
+          "$ref": "#/$defs/assetReference"
+        },
+        "sbom": {
+          "$ref": "#/$defs/sbomAsset"
+        }
+      }
+    },
+    "staticWebArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "format",
+        "uri",
+        "sha256",
+        "sizeBytes",
+        "files",
+        "maxEntries",
+        "maxUncompressedBytes",
+        "entrypoint"
+      ],
+      "properties": {
+        "kind": {
+          "const": "static-web"
+        },
+        "format": {
+          "enum": [
+            "tar.gz",
+            "tar.zst",
+            "zip"
+          ]
+        },
+        "uri": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "files": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/files"
+            },
+            {
+              "required": [
+                "index.html"
+              ]
+            }
+          ]
+        },
+        "maxEntries": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "maxUncompressedBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967296
+        },
+        "entrypoint": {
+          "const": "index.html"
         }
       }
     },

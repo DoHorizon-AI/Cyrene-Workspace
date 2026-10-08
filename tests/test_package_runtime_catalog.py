@@ -71,7 +71,7 @@ def test_package_runtime_catalog_validates_and_adds_only_supported_native_target
     maintenance = components["cyrene-runtime-maintenance"]
     kernel = components["cyrene-kernel"]
 
-    assert catalog["generation"] == 12
+    assert catalog["generation"] == 13
     assert runtime["kind"] == "native-binary"
     assert runtime["publisher"] == "DoHorizon-AI/Cyrene-Platform"
     assert runtime["artifactKinds"] == ["native-binary"]

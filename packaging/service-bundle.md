@@ -202,19 +202,26 @@ the publisher's changing `governance/component-catalog-v1.json`, so catalog-only
 generation updates do not require an installer source change.
 To inspect or verify later catalog metadata, use `cyrene catalog status` and
 `cyrene catalog check --channel stable --latest` (or provide an exact
-`--release-id catalog-stable-<40-hex-source-SHA>`). Use `--channel preview`
-with `--latest` or a `catalog-preview-<40-hex-source-SHA>` tag to inspect the
-preview channel. A check verifies and reports the immutable Workspace catalog
-release but does not activate it. Explicitly run
+`--release-id catalog-stable-<40-hex-source-SHA>` or the versioned v2 form
+`catalog-v2-stable-<40-hex-source-SHA>`). Use `--channel preview` with
+`--latest` or the matching `catalog-preview-...` / `catalog-v2-preview-...` tag
+to inspect the preview channel. Latest selection prefers v2 and falls back to
+v1 while no v2 release exists. A check verifies and reports the immutable
+Workspace catalog release but does not activate it. Explicitly run
 `sudo cyrene catalog import --channel stable --release-id <exact-tag>` to
 activate a verified catalog; import requires an exact release tag and changes
 updater metadata only, without downloading or installing component releases.
 
-The Workspace catalog publisher emits `component-catalog-v1.json` and the
+The Workspace catalog publisher emits `component-catalog-v1.json` under
+`catalog-{stable|preview}-<40-hex-source-SHA>` tags, and emits
+`component-catalog-v2.json` under version-separated
+`catalog-v2-{stable|preview}-<40-hex-source-SHA>` tags. Each release contains
+only its catalog version and the matching detached attestation bundle:
+`component-catalog-v1.json.attestation.jsonl` for v1 or
+`component-catalog-v2.json.attestation.jsonl` for v2. The publisher emits the
 detached GitHub attestation bundle `component-catalog-v1.json.attestation.jsonl`
-in an immutable `catalog-{stable|preview}-<40-hex-source-SHA>` release.
-Stable provenance is limited to `main` or `release`; preview provenance is
-limited to `develop`. The updater verifies the exact Workspace workflow, source
+with the v1 asset, while v2 uses its corresponding v2 bundle. Stable provenance is limited to
+`main` or `release`; preview provenance is limited to `develop`. The updater verifies the exact Workspace workflow, source
 ref and commit, subject name, raw-byte SHA-256, release tag, and immutable
 release assets before import. Catalog schemas for v1 and v2 component manifests
 are shipped with the package and validated before activation.
@@ -281,14 +288,18 @@ model。broker journal 位于 `/var/lib/cyrene/runtime`，updater 计划和事�
 `governance/component-catalog-v1.json` 分开保存，因此仅目录 generation 更新无需改变 installer 源码。
 查看当前目录可运行
 `cyrene catalog status`；候选目录可运行 `cyrene catalog check --channel stable --latest`，
-或传入精确的 `--release-id catalog-stable-<40-hex-source-SHA>`。预览通道需显式使用
-`--channel preview` 和 `catalog-preview-<40-hex-source-SHA>`。check 会验证并报告
+或传入精确的 `--release-id catalog-stable-<40-hex-source-SHA>`，v2 使用
+`catalog-v2-stable-<40-hex-source-SHA>`。预览通道需显式使用 `--channel preview` 和
+对应的 `catalog-preview-...` 或 `catalog-v2-preview-...`。latest 优先选择 v2，尚无 v2
+release 时回退到 v1。check 会验证并报告
 Workspace 不可变目录 release，但不会切换活动目录。只有显式运行
 `sudo cyrene catalog import --channel stable --release-id <exact-tag>` 才会激活已验证目录；
 导入必须指定精确 tag，且只更新 updater metadata，不会下载或安装组件 release。
 Workspace publisher 在不可变 `catalog-{stable|preview}-<40-hex-source-SHA>` release 中发布
-`component-catalog-v1.json` 与 detached GitHub attestation bundle
-`component-catalog-v1.json.attestation.jsonl`。stable 来源仅允许 `main`/`release`，preview
+`component-catalog-v1.json` 与对应 detached GitHub attestation bundle；v2 使用独立 tag
+`catalog-v2-{stable|preview}-<40-hex-source-SHA>`，并发布 `component-catalog-v2.json` 与
+`component-catalog-v2.json.attestation.jsonl`。每个 release 仅包含对应版本的精确资产 pair。
+stable 来源仅允许 `main`/`release`，preview
 仅允许 `develop`。导入前会验证固定 Workspace workflow、source ref/commit、subject 名称、原始
 字节 SHA-256、release tag 和 immutable assets；catalog v1 与 v2 manifest schemas 随包提供并
 在激活前校验。

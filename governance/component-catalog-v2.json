@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 1,
-  "generation": 13,
+  "schemaVersion": 2,
+  "generation": 14,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -91,7 +91,7 @@
         "abi": "glibc-2.39",
         "runtime": "python:3.12"
       },
-      "hostSupport": "contract-only"
+      "hostSupport": "supported"
     },
     {
       "id": "linux-ubuntu-22.04-x86_64-systemd",
@@ -126,6 +126,31 @@
         "architecture": "x86_64",
         "abi": "glibc-2.35",
         "runtime": "python:3.12"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "linux-ubuntu-24.04-x86_64",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "linux-ubuntu-24.04-x86_64-web",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "static-web"
       },
       "hostSupport": "supported"
     },
@@ -212,6 +237,26 @@
       "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/data-bundle-release.yml",
       "releaseDiscovery": {
         "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Workspace/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "id": "official-data-tools-plugins",
+      "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "workflow": "DoHorizon-AI/Cyrene-Plugins-Official/.github/workflows/data-tools-package-release.yml",
+      "tagFormat": "component-version-source-sha",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Plugins-Official/releases?per_page=100",
+        "indexAssetName": "component-release-index-v1.json"
+      }
+    },
+    {
+      "id": "official-client-workspace-web",
+      "repository": "DoHorizon-AI/Cyrene-Client",
+      "workflow": "DoHorizon-AI/Cyrene-Client/.github/workflows/workspace-web-release.yml",
+      "tagFormat": "component-source-sha",
+      "releaseDiscovery": {
+        "apiUri": "https://api.github.com/repos/DoHorizon-AI/Cyrene-Client/releases?per_page=100",
         "indexAssetName": "component-release-index-v1.json"
       }
     }
@@ -945,7 +990,7 @@
         {
           "targetId": "linux-ubuntu-24.04-x86_64-python-3.12-library",
           "artifactKind": "python-bundle",
-          "support": "contract-only"
+          "support": "supported"
         }
       ],
       "restart": {
@@ -1059,6 +1104,219 @@
       "dependencies": [],
       "compatibilityGroup": "workspace-product-v2",
       "protocolVersion": "cyrene.workspace.product.v2"
+    },
+    {
+      "componentId": "cyrene-tools-dataset-preparation",
+      "kind": "plugin-package",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "publisherId": "official-data-tools-plugins",
+      "artifactKinds": [
+        "plugin-package"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "plugin-package",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [
+        {
+          "componentId": "cy-package-runtime",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "pluginPackage": {
+        "packageId": "cyrene.tools.dataset-preparation",
+        "capabilityId": "dataset.preparation.v1",
+        "interfaceVersion": "1"
+      },
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-tools-dataset-preparation-",
+          "stable": "stable-cyrene-tools-dataset-preparation-"
+        }
+      },
+      "protocolVersion": "cyrene.plugin.runtime.v1"
+    },
+    {
+      "componentId": "cyrene-tools-document-parsing",
+      "kind": "plugin-package",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "publisherId": "official-data-tools-plugins",
+      "artifactKinds": [
+        "plugin-package"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "plugin-package",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [
+        {
+          "componentId": "cy-package-runtime",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "pluginPackage": {
+        "packageId": "cyrene.tools.document-parsing",
+        "capabilityId": "document.parsing.v1",
+        "interfaceVersion": "1"
+      },
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-tools-document-parsing-",
+          "stable": "stable-cyrene-tools-document-parsing-"
+        }
+      },
+      "protocolVersion": "cyrene.plugin.runtime.v1"
+    },
+    {
+      "componentId": "cyrene-tools-dataset-generation",
+      "kind": "plugin-package",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "publisherId": "official-data-tools-plugins",
+      "artifactKinds": [
+        "plugin-package"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "plugin-package",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [
+        {
+          "componentId": "cy-package-runtime",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "pluginPackage": {
+        "packageId": "cyrene.tools.dataset-generation",
+        "capabilityId": "dataset.generation.v1",
+        "interfaceVersion": "1"
+      },
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-tools-dataset-generation-",
+          "stable": "stable-cyrene-tools-dataset-generation-"
+        }
+      },
+      "protocolVersion": "cyrene.plugin.runtime.v1"
+    },
+    {
+      "componentId": "cyrene-tools-knowledge-preparation",
+      "kind": "plugin-package",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "publisherId": "official-data-tools-plugins",
+      "artifactKinds": [
+        "plugin-package"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "plugin-package",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [
+        {
+          "componentId": "cy-package-runtime",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "pluginPackage": {
+        "packageId": "cyrene.tools.knowledge-preparation",
+        "capabilityId": "dataset.knowledge.v1",
+        "interfaceVersion": "1"
+      },
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-tools-knowledge-preparation-",
+          "stable": "stable-cyrene-tools-knowledge-preparation-"
+        }
+      },
+      "protocolVersion": "cyrene.plugin.runtime.v1"
+    },
+    {
+      "componentId": "cyrene-evaluation-exact-match",
+      "kind": "plugin-package",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "publisherId": "official-data-tools-plugins",
+      "artifactKinds": [
+        "plugin-package"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "plugin-package",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [
+        {
+          "componentId": "cy-package-runtime",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "pluginPackage": {
+        "packageId": "cyrene.evaluation.exact-match",
+        "capabilityId": "evaluation.runner.v1",
+        "interfaceVersion": "1"
+      },
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-evaluation-exact-match-",
+          "stable": "stable-cyrene-evaluation-exact-match-"
+        }
+      },
+      "protocolVersion": "cyrene.plugin.runtime.v1"
+    },
+    {
+      "componentId": "cyrene-client-workspace-web",
+      "kind": "static-web",
+      "publisher": "DoHorizon-AI/Cyrene-Client",
+      "publisherId": "official-client-workspace-web",
+      "artifactKinds": [
+        "static-web"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-web",
+          "artifactKind": "static-web",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [],
+      "activation": "refresh",
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-client-workspace-web-",
+          "stable": "stable-cyrene-client-workspace-web-"
+        }
+      },
+      "protocolVersion": "cyrene.static-web.v1"
     }
   ],
   "compatibilityGroups": [
@@ -1211,5 +1469,230 @@
         "catalogPath": "contracts/product/v2/catalog.json"
       }
     ]
-  }
+  },
+  "workloads": [
+    {
+      "workloadId": "catalyst",
+      "hostTargets": [
+        "linux-ubuntu-24.04-x86_64"
+      ],
+      "requiredComponents": [
+        "cyrene-catalyst",
+        "cyrene-client-workspace-web",
+        "cyrene-runtime-maintenance-sdk"
+      ],
+      "recommendedComponents": [
+        "cyrene-tools-dataset-preparation",
+        "cyrene-tools-document-parsing",
+        "cyrene-tools-dataset-generation",
+        "cyrene-tools-knowledge-preparation"
+      ],
+      "optionalComponents": [],
+      "choiceGroups": [],
+      "conflicts": [],
+      "targetPreferences": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12-library"
+        },
+        {
+          "componentId": "cyrene-catalyst",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-client-workspace-web",
+          "targetId": "linux-ubuntu-24.04-x86_64-web"
+        },
+        {
+          "componentId": "cyrene-tools-dataset-generation",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-tools-dataset-preparation",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-tools-document-parsing",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-tools-knowledge-preparation",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        }
+      ],
+      "sourcePolicy": {
+        "mode": "actualProduct",
+        "productComponentIds": [
+          "cyrene-catalyst"
+        ],
+        "productSources": [
+          {
+            "componentId": "cyrene-catalyst",
+            "sourceId": "cyrene-catalyst"
+          }
+        ],
+        "operations": [
+          "activate",
+          "recover_binding",
+          "deactivate",
+          "runtime_status",
+          "get_installation"
+        ]
+      },
+      "bindings": [
+        {
+          "componentId": "cyrene-tools-dataset-generation",
+          "bindingId": "catalog-binding-actual-product-cyrene-catalyst-cyrene-tools-dataset-generation"
+        },
+        {
+          "componentId": "cyrene-tools-dataset-preparation",
+          "bindingId": "catalog-binding-actual-product-cyrene-catalyst-cyrene-tools-dataset-preparation"
+        },
+        {
+          "componentId": "cyrene-tools-document-parsing",
+          "bindingId": "catalog-binding-actual-product-cyrene-catalyst-cyrene-tools-document-parsing"
+        },
+        {
+          "componentId": "cyrene-tools-knowledge-preparation",
+          "bindingId": "catalog-binding-actual-product-cyrene-catalyst-cyrene-tools-knowledge-preparation"
+        }
+      ]
+    },
+    {
+      "workloadId": "echo",
+      "hostTargets": [
+        "linux-ubuntu-24.04-x86_64"
+      ],
+      "requiredComponents": [
+        "cyrene-echo",
+        "cyrene-runtime-maintenance-sdk"
+      ],
+      "recommendedComponents": [
+        "cyrene-evaluation-exact-match"
+      ],
+      "optionalComponents": [],
+      "choiceGroups": [],
+      "conflicts": [],
+      "targetPreferences": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12-library"
+        },
+        {
+          "componentId": "cyrene-echo",
+          "targetId": "linux-ubuntu-24.04-x86_64-oci"
+        },
+        {
+          "componentId": "cyrene-evaluation-exact-match",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        }
+      ],
+      "sourcePolicy": {
+        "mode": "actualProduct",
+        "productComponentIds": [
+          "cyrene-echo"
+        ],
+        "productSources": [
+          {
+            "componentId": "cyrene-echo",
+            "sourceId": "cyrene-echo"
+          }
+        ],
+        "operations": [
+          "activate",
+          "recover_binding",
+          "deactivate",
+          "runtime_status",
+          "get_installation"
+        ]
+      },
+      "bindings": [
+        {
+          "componentId": "cyrene-evaluation-exact-match",
+          "bindingId": "catalog-binding-actual-product-cyrene-echo-cyrene-evaluation-exact-match"
+        }
+      ]
+    },
+    {
+      "workloadId": "plugins",
+      "hostTargets": [
+        "linux-ubuntu-24.04-x86_64"
+      ],
+      "requiredComponents": [
+        "cyrene-runtime-maintenance-sdk"
+      ],
+      "minimumExplicitOptionalSelections": 1,
+      "recommendedComponents": [],
+      "optionalComponents": [
+        "cyrene-evaluation-exact-match",
+        "cyrene-tools-dataset-generation",
+        "cyrene-tools-dataset-preparation",
+        "cyrene-tools-document-parsing",
+        "cyrene-tools-knowledge-preparation"
+      ],
+      "choiceGroups": [],
+      "conflicts": [],
+      "targetPreferences": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12-library"
+        },
+        {
+          "componentId": "cyrene-evaluation-exact-match",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-tools-dataset-generation",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-tools-dataset-preparation",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-tools-document-parsing",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-tools-knowledge-preparation",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        }
+      ],
+      "sourcePolicy": {
+        "mode": "standaloneOperator",
+        "productComponentIds": [],
+        "productSources": [],
+        "operations": [
+          "activate",
+          "recover_binding",
+          "deactivate",
+          "runtime_status",
+          "get_installation"
+        ],
+        "sourceId": "cyrene-plugin-standalone-operator"
+      },
+      "bindings": [
+        {
+          "componentId": "cyrene-evaluation-exact-match",
+          "bindingId": "catalog-binding-standalone-operator-cyrene-evaluation-exact-match"
+        },
+        {
+          "componentId": "cyrene-tools-dataset-generation",
+          "bindingId": "catalog-binding-standalone-operator-cyrene-tools-dataset-generation"
+        },
+        {
+          "componentId": "cyrene-tools-dataset-preparation",
+          "bindingId": "catalog-binding-standalone-operator-cyrene-tools-dataset-preparation"
+        },
+        {
+          "componentId": "cyrene-tools-document-parsing",
+          "bindingId": "catalog-binding-standalone-operator-cyrene-tools-document-parsing"
+        },
+        {
+          "componentId": "cyrene-tools-knowledge-preparation",
+          "bindingId": "catalog-binding-standalone-operator-cyrene-tools-knowledge-preparation"
+        }
+      ]
+    }
+  ]
 }

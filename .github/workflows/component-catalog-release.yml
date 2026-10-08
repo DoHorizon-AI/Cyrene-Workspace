@@ -1,6 +1,17 @@
 name: Immutable component catalog release
 
 on:
+  pull_request:
+    branches: [develop, main, release]
+    paths:
+      - governance/**
+      - packaging/workload_resolver.py
+      - tests/test_workload_resolver.py
+      - tests/test_catalog_release_v2_history.py
+      - tests/test_catalog_release_discovery.py
+      - packaging/catalog_metadata.py
+      - packaging/fetch_component_catalog.py
+      - .github/workflows/component-catalog-release.yml
   push:
     branches: [develop, main, release]
     paths:
@@ -23,8 +34,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  source-checks:
+    name: Validate workload catalog and immutable history gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned validation tools
+        run: python -m pip install "pytest==9.1.1" "ruff==0.16.5" "jsonschema==4.26.0" "referencing==0.37.0"
+      - name: Check workload resolver and publication regression tests
+        run: |
+          ruff check packaging/workload_resolver.py tests/test_workload_resolver.py tests/test_catalog_release_v2_history.py tests/test_catalog_release_discovery.py
+          ruff format --check packaging/workload_resolver.py tests/test_workload_resolver.py tests/test_catalog_release_v2_history.py tests/test_catalog_release_discovery.py
+          python -m pytest -q tests/test_workload_resolver.py tests/test_catalog_release_v2_history.py tests/test_catalog_release_discovery.py
+
   publish:
     name: Validate and publish the source catalog
+    needs: source-checks
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -49,7 +80,7 @@ jobs:
 
       - name: Prove repository immutable releases are enabled
         env:
-          CYRENE_IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.CYRENE_IMMUTABLE_RELEASES_READ_TOKEN }}
+          CYRENE_IMMUTABLE_RELEASES_READ_TOKEN: ${{ secrets.CYRENE_IMMUTABLE_RELEASES_READ_TOKEN || secrets.CYRENE_CROSS_REPO_TOKEN }}
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -153,7 +184,7 @@ jobs:
           esac
 
           mkdir -p "$PUBLISH_DIR"
-          cp -- governance/component-catalog-v1.json "$PUBLISH_DIR/$RAW_ASSET"
+          cp -- "governance/$RAW_ASSET" "$PUBLISH_DIR/$RAW_ASSET"
           python - <<'PY'
           import hashlib
           import json
@@ -165,7 +196,7 @@ jobs:
           from referencing import Registry, Resource
 
           governance = Path("governance")
-          raw_source = governance / "component-catalog-v1.json"
+          raw_source = governance / os.environ["RAW_ASSET"]
           raw_asset = Path(os.environ["PUBLISH_DIR"]) / os.environ["RAW_ASSET"]
 
           def no_duplicate_keys(pairs):
@@ -186,6 +217,7 @@ jobs:
 
           catalog = json.loads(asset_bytes.decode("utf-8"), object_pairs_hook=no_duplicate_keys)
           schemas = [
+              read_json(governance / "component-catalog-v2.schema.json"),
               read_json(governance / "component-catalog-v1.schema.json"),
               read_json(governance / "component-release-manifest-v1.schema.json"),
               read_json(governance / "component-release-manifest-v2.schema.json"),
@@ -196,7 +228,7 @@ jobs:
               registry = registry.with_resource(schema["$id"], Resource.from_contents(schema))
 
           validator = Draft202012Validator(
-              schemas[0],
+              next(schema for schema in schemas if schema["$id"].rsplit("/", 1)[-1] == os.environ["RAW_ASSET"].replace(".json", ".schema.json")),
               registry=registry,
               format_checker=Draft202012Validator.FORMAT_CHECKER,
           )
@@ -323,8 +355,20 @@ jobs:
                   failures.append(f"{source_ref}: {result.stderr.strip()}")
               raise RuntimeError("detached catalog attestation did not verify for an allowed source ref: " + " | ".join(failures))
 
+          def catalog_asset_names(release):
+              # Retain and verify v1 history during v2 publication; never mutate it.
+              # 升级目录协议时仍验证旧发行物，不覆盖或重新签名。
+              names = {asset.get("name") for asset in release.get("assets", [])}
+              for version in (2, 1):
+                  historical_raw = f"component-catalog-v{version}.json"
+                  historical_bundle = f"{historical_raw}.attestation.jsonl"
+                  if names == {historical_raw, historical_bundle}:
+                      return historical_raw, historical_bundle
+              raise RuntimeError("catalog release must contain exactly one supported catalog and its attestation")
+
           def check_release_metadata(release, tag, channel_name):
-              expected_assets = {raw_name, bundle_name}
+              selected_raw, selected_bundle = catalog_asset_names(release)
+              expected_assets = {selected_raw, selected_bundle}
               release_assets = release.get("assets", [])
               asset_names = {asset.get("name") for asset in release_assets}
               if release.get("tag_name") != tag:
@@ -337,6 +381,7 @@ jobs:
                   raise RuntimeError(f"catalog release {tag} assets must be exactly {sorted(expected_assets)}")
               if any(asset.get("state") != "uploaded" for asset in release_assets):
                   raise RuntimeError(f"catalog release {tag} has an asset that is not uploaded")
+              return selected_raw, selected_bundle
 
           with open(os.path.join(os.environ["RUNNER_TEMP"], "catalog-releases.json"), encoding="utf-8") as source:
               pages = json.load(source)
@@ -351,15 +396,15 @@ jobs:
           processed = {}
 
           def inspect_release(release, tag, channel_name, source_sha):
-              check_release_metadata(release, tag, channel_name)
+              selected_raw, selected_bundle = check_release_metadata(release, tag, channel_name)
               with tempfile.TemporaryDirectory(prefix="component-catalog-history-") as temporary:
                   subprocess.run(
                       ["gh", "release", "download", tag, "--repo", repository,
-                       "--dir", temporary, "--pattern", raw_name, "--pattern", bundle_name],
+                       "--dir", temporary, "--pattern", selected_raw, "--pattern", selected_bundle],
                       check=True,
                   )
-                  raw_path = Path(temporary) / raw_name
-                  bundle_path = Path(temporary) / bundle_name
+                  raw_path = Path(temporary) / selected_raw
+                  bundle_path = Path(temporary) / selected_bundle
                   if not raw_path.is_file() or not bundle_path.is_file():
                       raise RuntimeError(f"immutable catalog release {tag} is missing a required asset")
                   raw_bytes = raw_path.read_bytes()
