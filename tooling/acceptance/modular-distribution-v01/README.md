@@ -15,7 +15,7 @@ Workspace、Product、Platform、Plugins 或 Client 源码。工作流输入的 
 Run `.github/workflows/modular-distribution-acceptance.yml` with:
 
 - `native_release_id`: the exact official `native-installer-preview-<40 lowercase hex>` tag.
-- `release_pins_json`: a JSON document matching `release-pins-v1.schema.json`. It must pin the same native tag, Workspace source SHA and workflow, Ubuntu 24.04 amd64 DEB asset digest/size, v2 catalog release identity/digest, Catalyst catalog digest, and exact release identities for Catalyst, Node 24 Client Control, the Client Web host, Runtime Maintenance SDK, and all four Platform-supervised data plugins. The schema also accepts an optional exact Echo OCI, Runtime SDK, and `cyrene-evaluation-exact-match` identity set; the current driver refuses Echo pins before native installation until Workspace publishes the supported OCI install/evaluate/uninstall path. The workflow rejects incomplete Catalyst pins before native installation. It verifies the attested source receipt before install, then reads back dpkg state and the DEB-installed catalogs, active v2 binding, and static stage-only package contract; it does not expect a per-host native transaction receipt.
+- `release_pins_json`: a JSON document matching `release-pins-v1.schema.json`. It must pin the same native tag, Workspace source SHA and workflow, Ubuntu 24.04 amd64 DEB asset digest/size, v2 catalog release identity/digest, Catalyst catalog digest, and exact release identities for Catalyst, Node 24 Client Control, the Client Web host, Runtime Maintenance SDK, and all four Platform-supervised data plugins. Optional `workloads.plugins` pins contain exactly the official `cyrene-evaluation-exact-match` and Runtime SDK identities. They enable an independent stage-only offline retry if Catalyst's isolated stage is fully cache-backed and do not depend on Echo OCI. Optional Echo pins remain separate and are rejected before native installation until Workspace publishes the supported OCI install/evaluate/uninstall path. The workflow rejects incomplete Catalyst pins before native installation. It verifies the attested source receipt before install, then reads back dpkg state and the DEB-installed catalogs, active v2 binding, and static stage-only package contract; it does not expect a per-host native transaction receipt.
 
 This workflow always runs the pinned Catalyst core, a non-mutating resolver
 check that proves a required component cannot be omitted, and a read-only
@@ -34,9 +34,15 @@ a retryable `NETWORK_ERROR`, verifies that no selected component became active,
 retries the same `planId`/`planDigest` online, then repeats stage and compares the
 staged identities. If the isolated stage succeeds from already available content,
 the ledger records cache-backed idempotence and leaves failure recovery `NOT_RUN`;
-it never reports a cached success as failure recovery. A separately pinned
-exact-match plugin can become the fallback exercise once Echo installation is
-supported.
+it never reports a cached success as failure recovery. When exact `workloads.plugins`
+pins are supplied, the driver checks a standalone plan selecting only
+`cyrene-evaluation-exact-match` and its required Runtime SDK, then stages it in an
+isolated namespace. A retryable network failure must leave installed identities
+unchanged; the same plan is retried online and staged again for identity stability.
+The fallback never applies the plan and does not require Echo OCI. If this plugin
+stage is cache-backed too, the ledger records that fact and keeps failure recovery
+`NOT_RUN`. If `workloads.plugins` pins are absent, the fallback is also `NOT_RUN`
+with the missing exact identities recorded as the reason.
 
 Echo exact-match/evaluate/uninstall and whole-VM reboot recovery remain explicit
 `NOT_RUN` gates until their safe execution contracts and exact pins are supplied.
@@ -70,7 +76,8 @@ or token bytes.
 隔离的 CLI 子进程中执行；不会改变宿主网络、更新器 Unix socket
 或已安装数据。验收要求失败为可重试的 `NETWORK_ERROR`、selected component 未激活，再用同一个 `planId` 和
 `planDigest` 在线重试并重复 stage 比对身份。如果离线 stage 因本地已有内容而成功，ledger 只记录缓存幂等性，恢复
-失败仍为 `NOT_RUN`，不会把缓存成功称作故障恢复。Echo 安装就绪后可用其精确 pin 的 exact-match 插件做备用断网用例。
+失败仍为 `NOT_RUN`，不会把缓存成功称作故障恢复。如果 Catalyst 离线 stage 命中缓存且提供了 `workloads.plugins` 精确 pins，驱动会独立检查仅含 `cyrene-evaluation-exact-match` 与所需 Runtime SDK 的计划，在隔离子进程中 stage；遇到可重试网络错误后，验证已安装身份未改变，并用同一 plan 在线重试和重复 stage。该 fallback 不 apply，也不依赖 Echo OCI。如果此插件包也命中缓存，仍记为 `NOT_RUN` 并记录缓存结果。
+没有提供 `workloads.plugins` pins 时，fallback 会记录缺少 exact identity，不会把 Echo OCI 是否可安装当作前置条件。
 
 Echo exact-match/evaluate/uninstall、整机重启和中断 installer transaction 恢复仍保持显式 `NOT_RUN`。当前 installer
 没有正式 deferred-transaction fault-injection/resume API，验收不会编辑 maintenance journal；已有 Catalyst systemd
@@ -155,7 +162,9 @@ Catalyst 已安装验收模块当前由活动 immutable service bundle 提供；
 The workflow is deliberately strict: it fails when an expected API or installer
 operation is not implemented. Dispatch requires the exact native tag, v2 catalog
 binding, and exact Catalyst, Platform-supervised Plugin, Runtime SDK, and Client
-release pins. Optional Echo identities are schema-validated but are rejected before
+release pins. Optional standalone `workloads.plugins` identities are exact-match
+plus Runtime SDK pins for the independent stage-only offline retry. Optional Echo
+identities are schema-validated but are rejected before
 native installation until the signed OCI installer path and installed evaluator
 contract are executable. Additional Echo, interrupted-transaction, and whole-host
 reboot gates remain required for a full-distribution pass. Do not substitute the earlier first-product
@@ -163,7 +172,8 @@ cohort receipt, a source checkout, a privileged container, or a different native
 tag to make a phase pass.
 
 工作流遇到未实现的 API 或安装操作会严格失败。必须等 exact native tag、v2 catalog binding、Catalyst、四个受监管插件、
-Runtime SDK 和 Client 的官方发布 pins 都准备好后，才能运行验收。可选 Echo pins 必须精确包含官方 OCI Product、Runtime
+Runtime SDK 和 Client 的官方发布 pins 都准备好后，才能运行验收。可选 `workloads.plugins` pins 精确包含 exact-match
+plugin 与 Runtime SDK，用于独立 stage/retry fallback，不会 apply。可选 Echo pins 必须精确包含官方 OCI Product、Runtime
 SDK 和 exact-match plugin；当前驱动会在任何 native 安装前拒绝这些 pins，直到签名 OCI 安装及已安装评估/卸载流程具备
 可执行契约。完整发行验收仍要求 Echo、事务中断恢复和整机重启 gate。
 不得用旧 first-product cohort receipt、源码 checkout、privileged 容器或其他 native tag 来替代并制造 PASS。

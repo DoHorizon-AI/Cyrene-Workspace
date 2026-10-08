@@ -346,7 +346,7 @@ jobs:
               require(type(catalog["generation"]) is int and catalog["generation"] > 0, "catalog generation pin is invalid")
               workloads = value["workloads"]
               require(isinstance(workloads, dict) and "catalyst" in workloads, "Catalyst workload pins are required")
-              require(set(workloads) in ({"catalyst"}, {"catalyst", "echo"}), "workload pins may contain Catalyst and optional Echo only")
+              require(set(workloads) <= {"catalyst", "plugins", "echo"}, "workload pins contain an unsupported workload")
               for workload_id, workload in workloads.items():
                   required_workload_fields = {"workloadId", "targetId", "catalogDigest", "selectedComponents"}
                   if workload_id == "catalyst":
@@ -394,6 +394,21 @@ jobs:
                           require(
                               echo_rows[component_id].get("targetId") == target_id,
                               f"Echo pin target differs for {component_id}",
+                          )
+                  if workload_id == "plugins":
+                      plugin_targets = {
+                          "cyrene-evaluation-exact-match": "linux-ubuntu-24.04-x86_64-python-3.12",
+                          "cyrene-runtime-maintenance-sdk": "linux-ubuntu-24.04-x86_64-python-3.12-library",
+                      }
+                      plugin_rows = {row["componentId"]: row for row in rows}
+                      require(
+                          set(plugin_rows) == set(plugin_targets),
+                          "standalone plugins pins must contain only exact-match and the required Runtime SDK identities",
+                      )
+                      for component_id, target_id in plugin_targets.items():
+                          require(
+                              plugin_rows[component_id].get("targetId") == target_id,
+                              f"standalone plugins pin target differs for {component_id}",
                           )
                   for row in rows:
                       required_component_fields = {
@@ -870,9 +885,14 @@ jobs:
               require(staged.get("planId") == checked["planId"], f"{context} changed the checked plan ID")
               require(staged.get("planDigest") == checked["planDigest"], f"{context} changed the checked plan digest")
               require(staged.get("catalogDigest") == workload["catalogDigest"], f"{context} changed the pinned catalog")
-              require(staged.get("workloadId") == "catalyst" and staged.get("targetId") == workload["targetId"], f"{context} changed the workload target")
+              require(staged.get("workloadId") == workload["workloadId"] and staged.get("targetId") == workload["targetId"], f"{context} changed the workload target")
               require(staged.get("action") == "install", f"{context} changed the checked action")
-              assert_selected_components(staged.get("components"), workload["selectedComponents"], context)
+              staged_rows = staged.get("components")
+              assert_selected_components(staged_rows, workload["selectedComponents"], context)
+              require(
+                  all(row.get("status") in {"staged", "current"} for row in staged_rows),
+                  f"{context} has a component outside the staged/current states",
+              )
 
           def version_conflict_readonly_check(checked: dict[str, Any], workload: dict[str, Any]) -> dict[str, Any]:
               """Confirm the exact signed resolution has no version-conflict blocker before staging."""
@@ -945,13 +965,7 @@ jobs:
                       "repeatStageStatus": repeated["status"],
                       "repeatStageStable": True,
                       "selectedComponentIds": [row["componentId"] for row in workload["selectedComponents"]],
-                      "offlineFailureFallback": {
-                          "componentId": "cyrene-evaluation-exact-match",
-                          "status": "NOT_RUN",
-                          "reason": "the exact-match standalone workload needs the pending official Echo OCI installation contract",
-                      },
                   }
-                  write_json(root() / "evidence" / "offline-stage-retry.json", safe_evidence)
                   return {**safe_evidence, "stagedResult": cached}
               error = failed.get("error")
               require(isinstance(error, dict), "network-isolated stage returned no structured error")
@@ -982,14 +996,202 @@ jobs:
                   "repeatStageStable": True,
                   "selectedComponentIds": [row["componentId"] for row in workload["selectedComponents"]],
               }
-              write_json(root() / "evidence" / "offline-stage-retry.json", safe_evidence)
               return {**safe_evidence, "stagedResult": resumed}
+
+          def plugin_status_snapshot(workload: dict[str, Any], context: str) -> dict[str, Any]:
+              """Read only the exact standalone plugin identities and omit unrelated host state."""
+              inventory = workload_request("status", workloadId="plugins")
+              require(inventory.get("status") == "ready", f"{context} plugin inventory is not ready")
+              require(inventory.get("catalogDigest") == workload["catalogDigest"], f"{context} plugin catalog digest differs from pins")
+              expected = {row["componentId"]: row for row in workload["selectedComponents"]}
+              rows = {
+                  row.get("componentId"): row
+                  for row in inventory.get("components", [])
+                  if isinstance(row, dict) and row.get("componentId") in expected
+              }
+              require(set(rows) == set(expected), f"{context} plugin status omits a pinned component")
+              stable_fields = (
+                  "componentId", "installed", "version", "releaseId", "targetId",
+                  "manifestDigest", "manifestAssetDigest", "digest", "installationId",
+              )
+              projection = []
+              for component_id in sorted(expected):
+                  row = rows[component_id]
+                  require(type(row.get("installed")) is bool, f"{context} {component_id} installed status is malformed")
+                  verification = row.get("verification")
+                  require(isinstance(verification, dict) and type(verification.get("identityAttested")) is bool, f"{context} {component_id} identity verification is malformed")
+                  if row["installed"]:
+                      require(verification["identityAttested"] is True, f"{context} {component_id} is active without attested identity")
+                      for identity_field in (
+                          "version", "releaseId", "targetId", "manifestDigest",
+                          "manifestAssetDigest", "digest",
+                      ):
+                          require(row.get(identity_field) == expected[component_id][identity_field], f"{context} {component_id} {identity_field} differs from the exact pin")
+                  else:
+                      require(verification["identityAttested"] is False, f"{context} {component_id} is inactive but reports an attested identity")
+                  projection.append({
+                      **{key: row.get(key) for key in stable_fields},
+                      "identityAttested": verification["identityAttested"],
+                  })
+              return {
+                  "catalogDigest": inventory["catalogDigest"],
+                  "components": projection,
+              }
+
+          def exact_match_plugins_offline_retry() -> dict[str, Any]:
+              """Use a signed standalone plugins plan as the independent cache-miss fallback."""
+              workload = pins()["workloads"].get("plugins")
+              if not isinstance(workload, dict):
+                  return {
+                      "outcome": "fallback-pins-unavailable",
+                      "status": "NOT_RUN",
+                      "reason": "root did not supply exact standalone exact-match and Runtime SDK release identity pins",
+                      "selectedComponentIds": [],
+                  }
+              expected_rows = workload["selectedComponents"]
+              plugin_id = "cyrene-evaluation-exact-match"
+              require(plugin_id in {row["componentId"] for row in expected_rows}, "standalone plugins pins omit exact-match")
+              checked = workload_request(
+                  "check",
+                  preserve_read_token=True,
+                  workloadId="plugins",
+                  targetId=workload["targetId"],
+                  action="install",
+                  selections={
+                      "includeComponentIds": [plugin_id],
+                      "excludeComponentIds": [],
+                      "choices": {},
+                  },
+              )
+              require(checked.get("status") == "ready", f"standalone exact-match check is not ready: {checked.get('blockers')}")
+              require(checked.get("workloadId") == "plugins" and checked.get("targetId") == workload["targetId"], "standalone exact-match check workload/target identity differs")
+              require(checked.get("catalogDigest") == workload["catalogDigest"], "standalone exact-match check catalog digest differs from pins")
+              require(checked.get("action") == "install", "standalone exact-match check action is not install")
+              assert_selected_components(checked.get("components"), expected_rows, "standalone exact-match check")
+              resolution = checked.get("resolution")
+              require(isinstance(resolution, dict), "standalone exact-match check has no resolver resolution")
+              require(resolution.get("catalogDigest") == workload["catalogDigest"], "standalone exact-match resolution catalog digest differs")
+              assert_selected_components(resolution.get("selectedComponents"), expected_rows, "standalone exact-match resolution")
+              require(re.fullmatch(r"plan-[0-9a-f]{32}", str(checked.get("planId", ""))) is not None, "standalone exact-match plan ID is malformed")
+              require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(checked.get("planDigest", ""))) is not None, "standalone exact-match plan digest is malformed")
+              plan_identity = {
+                  "workloadId": "plugins",
+                  "targetId": workload["targetId"],
+                  "catalogDigest": workload["catalogDigest"],
+                  "planId": checked["planId"],
+                  "planDigest": checked["planDigest"],
+                  "selectedComponentIds": [row["componentId"] for row in expected_rows],
+                  "applied": False,
+              }
+              write_json(root() / "evidence" / "exact-match-plugins-checked-plan.json", {
+                  **plan_identity,
+                  "selectedComponents": expected_rows,
+              })
+              baseline = plugin_status_snapshot(workload, "before isolated exact-match stage")
+              fields = {
+                  "workloadId": "plugins",
+                  "targetId": workload["targetId"],
+                  "action": "install",
+                  "planId": checked["planId"],
+                  "planDigest": checked["planDigest"],
+              }
+              isolated = workload_request(
+                  "stage",
+                  preserve_read_token=True,
+                  network_isolated=True,
+                  allow_error=True,
+                  **fields,
+              )
+              if isolated.get("ok") is True:
+                  cached = isolated.get("result")
+                  assert_staged_plan(cached, workload, checked, "network-isolated exact-match cached stage")
+                  after_stage = plugin_status_snapshot(workload, "after isolated exact-match cached stage")
+                  require(after_stage == baseline, "network-isolated exact-match stage changed installed component status")
+                  repeated = workload_request("stage", preserve_read_token=True, **fields)
+                  assert_staged_plan(repeated, workload, checked, "same-plan exact-match cached stage repeat")
+                  require(cached["components"] == repeated["components"], "same-plan cached exact-match stage repeat changed staged identities")
+                  final_status = plugin_status_snapshot(workload, "after exact-match cached stage repeat")
+                  require(final_status == baseline, "exact-match stage repeat changed installed component status")
+                  stage_states = [
+                      {"componentId": row["componentId"], "status": row["status"]}
+                      for row in cached["components"]
+                  ]
+                  exact_match_state = next(
+                      row["status"] for row in stage_states if row["componentId"] == plugin_id
+                  )
+                  outcome = (
+                      "cached-stage-no-failure"
+                      if exact_match_state == "staged"
+                      else "already-current-no-failure"
+                  )
+                  evidence = {
+                      **plan_identity,
+                      "outcome": outcome,
+                      "status": "NOT_RUN",
+                      "reason": (
+                          "the isolated exact-match plugin archive stage succeeded from already available content; no network failure was exercised"
+                          if outcome == "cached-stage-no-failure"
+                          else "the exact-match component was already current; no network failure was exercised"
+                      ),
+                      "networkNamespace": "isolated-child-process",
+                      "installedStatusBefore": baseline,
+                      "installedStatusAfter": final_status,
+                      "repeatStageStable": True,
+                      "stageComponentIds": [row["componentId"] for row in cached["components"]],
+                      "stageComponentStates": stage_states,
+                  }
+                  write_json(root() / "evidence" / "exact-match-plugins-offline-stage.json", evidence)
+                  return evidence
+              error = isolated.get("error")
+              require(isinstance(error, dict), "network-isolated exact-match stage returned no structured error")
+              require(error.get("code") == "NETWORK_ERROR", f"network-isolated exact-match stage returned unexpected code: {error.get('code')}")
+              require(error.get("retryable") is True, "network-isolated exact-match stage failure was not retryable")
+              after_failure = plugin_status_snapshot(workload, "after isolated exact-match stage failure")
+              require(after_failure == baseline, "rejected isolated exact-match stage changed installed component status")
+              resumed = workload_request("stage", preserve_read_token=True, **fields)
+              assert_staged_plan(resumed, workload, checked, "same-plan exact-match stage retry")
+              repeated = workload_request("stage", preserve_read_token=True, **fields)
+              assert_staged_plan(repeated, workload, checked, "same-plan repeated exact-match stage")
+              require(resumed["components"] == repeated["components"], "same-plan repeated exact-match stage changed staged component identities")
+              final_status = plugin_status_snapshot(workload, "after exact-match same-plan stage retry")
+              require(final_status == baseline, "exact-match stage retry changed installed component status")
+              evidence = {
+                  **plan_identity,
+                  "outcome": "network-failure-recovered",
+                  "status": "PASS",
+                  "failure": {
+                      "operation": "stage",
+                      "code": error["code"],
+                      "retryable": error["retryable"],
+                      "networkNamespace": "isolated-child-process",
+                  },
+                  "installedStatusBefore": baseline,
+                  "installedStatusAfterFailure": after_failure,
+                  "installedStatusAfterRetry": final_status,
+                  "retryStatus": resumed["status"],
+                  "repeatStageStatus": repeated["status"],
+                  "repeatStageStable": True,
+                  "stageComponentIds": [row["componentId"] for row in resumed["components"]],
+                  "stageComponentStates": [
+                      {"componentId": row["componentId"], "status": row["status"]}
+                      for row in resumed["components"]
+                  ],
+              }
+              write_json(root() / "evidence" / "exact-match-plugins-offline-stage.json", evidence)
+              return evidence
 
           def record_offline_stage_outcome(workload: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
               """Persist offline-stage evidence without calling a warm cache a recovered failure."""
               try:
                   evidence = offline_stage_retry(workload, checked)
-              except Exception as error:  # noqa: BLE001 - preserve the phase-specific failure record.
+                  if evidence["outcome"] == "network-failure-recovered":
+                      evidence["offlineFailureFallback"] = {
+                          "status": "NOT_NEEDED",
+                          "reason": "the required Catalyst isolated-stage failure was recovered directly",
+                      }
+                  else:
+                      evidence["offlineFailureFallback"] = exact_match_plugins_offline_retry()
+              except Exception as error:
                   record("offline_retry_gate", "FAIL", f"{type(error).__name__}: {error}")
                   print(f"FAIL offline_retry_gate: {error}", file=sys.stderr)
                   raise
@@ -997,8 +1199,21 @@ jobs:
                   record("offline_retry_gate", "PASS", "isolated stage failure resumed and repeated with the same plan", {key: value for key, value in evidence.items() if key != "stagedResult"})
                   print("PASS offline_retry_gate")
               else:
-                  record("offline_retry_gate", "NOT_RUN", "stage succeeded in the isolated namespace from already available content; failure recovery was not exercised, and the separate exact-match fallback awaits the official Echo installation contract", {key: value for key, value in evidence.items() if key != "stagedResult"})
-                  print("NOT_RUN offline_retry_gate: isolated stage used already available content")
+                  fallback = evidence["offlineFailureFallback"]
+                  if fallback.get("outcome") == "network-failure-recovered":
+                      record("offline_retry_gate", "PASS", "Catalyst stage was cache-backed; the independent exact-match plugins plan exercised isolated failure and same-plan recovery", {key: value for key, value in evidence.items() if key != "stagedResult"})
+                      print("PASS offline_retry_gate via standalone exact-match plugin")
+                  else:
+                      reason = (
+                          "Catalyst stage succeeded from cached content and the standalone exact-match plugin stage was also cache-backed"
+                          if fallback.get("outcome") == "cached-stage-no-failure"
+                          else "Catalyst stage succeeded from cached content and the standalone exact-match component was already current"
+                          if fallback.get("outcome") == "already-current-no-failure"
+                          else "Catalyst stage succeeded from cached content and exact standalone exact-match release pins were not supplied"
+                      )
+                      record("offline_retry_gate", "NOT_RUN", reason, {key: value for key, value in evidence.items() if key != "stagedResult"})
+                      print(f"NOT_RUN offline_retry_gate: {reason}")
+              write_json(root() / "evidence" / "offline-stage-retry.json", {key: value for key, value in evidence.items() if key != "stagedResult"})
               return evidence
 
           def assert_installed_components(actual_rows: Any, expected_rows: Any, context: str) -> None:
@@ -1720,8 +1935,8 @@ jobs:
               receipt = next((row for row in receipt_rows if row.get("componentId") == "cyrene-catalyst"), None)
               require(isinstance(receipt, dict), "Catalyst immutable installation receipt was not read back")
               require(receipt.get("bundleIdentity") == manifest.get("artifact_digest"), "Catalyst active receipt bundle identity differs from the installed service bundle")
-              require(receipt.get("pointerIdentity") == version, "Catalyst active receipt pointer identity differs from the service active release")
-              require(Path(str(receipt.get("releasePath"))).resolve(strict=True) == release.resolve(strict=True), "Catalyst active receipt release path differs from the installed service bundle")
+              require(receipt.get("pointerIdentity") == value.get("version"), "Catalyst active receipt pointer identity differs from the service active release")
+              require(Path(str(receipt.get("releasePath"))).resolve(strict=True) == Path(str(value.get("activePath"))).resolve(strict=True), "Catalyst active receipt release path differs from the installed service bundle")
               expected_source_repository = "https://github.com/" + catalyst_pin["publisherIdentity"]["repository"]
               require(expected_source_repository == manifest.get("source_repository"), "active Catalyst source repository differs from resolver pins")
               require(manifest.get("source_commit") == catalyst_pin["attestationRef"]["sourceCommit"], "active Catalyst source commit differs from resolver pins")

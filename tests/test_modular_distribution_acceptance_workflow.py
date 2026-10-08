@@ -148,6 +148,27 @@ def _valid_pins() -> dict[str, object]:
     }
 
 
+def _with_exact_match_plugins(pins: dict[str, object]) -> dict[str, object]:
+    """Add standalone exact-match and required SDK identity pins to the fixture."""
+    catalyst = pins["workloads"]["catalyst"]
+    rows = {row["componentId"]: row for row in catalyst["selectedComponents"]}
+    exact_match = json.loads(json.dumps(rows["cyrene-tools-dataset-generation"]))
+    exact_match.update(
+        componentId="cyrene-evaluation-exact-match",
+        targetId="linux-ubuntu-24.04-x86_64-python-3.12",
+    )
+    pins["workloads"]["plugins"] = {
+        "workloadId": "plugins",
+        "targetId": "linux-ubuntu-24.04-x86_64",
+        "catalogDigest": catalyst["catalogDigest"],
+        "selectedComponents": [
+            rows["cyrene-runtime-maintenance-sdk"],
+            exact_match,
+        ],
+    }
+    return pins
+
+
 def _load_driver_module(tmp_path: Path, name: str) -> object:
     """Load the workflow-local driver after compiling its embedded Python source."""
     _, driver_path = _workflow_driver(tmp_path)
@@ -346,6 +367,26 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
     with pytest.raises(RuntimeError, match="exact-match plugin identities"):
         module.validate_pin_shape(missing_exact_match)
 
+    plugins_pins = _with_exact_match_plugins(_valid_pins())
+    jsonschema.Draft202012Validator(schema).validate(plugins_pins)
+    module.validate_pin_shape(plugins_pins)
+
+    wrong_plugin_target = json.loads(json.dumps(plugins_pins))
+    wrong_plugin_target["workloads"]["plugins"]["selectedComponents"][0]["targetId"] = (
+        "linux-ubuntu-24.04-x86_64"
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(wrong_plugin_target)
+    with pytest.raises(RuntimeError, match="standalone plugins pin target"):
+        module.validate_pin_shape(wrong_plugin_target)
+
+    extra_plugin = json.loads(json.dumps(plugins_pins))
+    extra_plugin["workloads"]["plugins"]["selectedComponents"].append(
+        extra_plugin["workloads"]["catalyst"]["selectedComponents"][0]
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(extra_plugin)
+
     pins.pop("workloads")
     pins["workloads"] = {"catalyst": _valid_pins()["workloads"]["catalyst"]}
     pins["catalog"]["sha256"] = "0" * 64
@@ -380,6 +421,28 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
         jsonschema.Draft202012Validator(schema).validate(wrong_control_target)
     with pytest.raises(RuntimeError, match="Ubuntu 24.04 Node 24 target"):
         module.validate_pin_shape(wrong_control_target)
+
+
+def test_standalone_plugins_pins_are_accepted_without_echo_install_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exact-match fallback pins do not enter Echo's unrelated OCI lifecycle gate."""
+    acceptance_root = tmp_path / "plugins-dispatch"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    pins = _with_exact_match_plugins(_valid_pins())
+    monkeypatch.setenv("NATIVE_RELEASE_ID", pins["nativeInstaller"]["releaseId"])
+    monkeypatch.setenv("RELEASE_PINS_JSON", json.dumps(pins))
+    module = _load_driver_module(tmp_path, "acceptance_driver_plugins_pins")
+    monkeypatch.setattr(module, "runner_identity", lambda: {"testOnly": True})
+
+    module.init()
+
+    ledger = json.loads((acceptance_root / "phase-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["phases"]["release_pins_validation"]["status"] == "PASS"
+    assert ledger["phases"]["echo_exact_match_evaluate_uninstall"]["status"] == "NOT_RUN"
+    saved = json.loads((acceptance_root / "release-pins-v1.json").read_text(encoding="utf-8"))
+    assert "plugins" in saved["workloads"]
+    assert "echo" not in saved["workloads"]
 
 
 def test_catalyst_binding_gate_matches_catalog_package_and_active_uds_identity(
@@ -747,7 +810,9 @@ def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
     evidence_root.mkdir()
     monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
     module = _load_driver_module(tmp_path, "acceptance_driver_cached_stage")
-    workload = _valid_pins()["workloads"]["catalyst"]
+    pins = _valid_pins()
+    module.write_json(evidence_root / "release-pins-v1.json", pins)
+    workload = pins["workloads"]["catalyst"]
     checked = {"planId": "plan-" + "3" * 32, "planDigest": "sha256:" + "4" * 64}
     staged_result = {
         "status": "staged",
@@ -784,10 +849,238 @@ def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
 
     assert result["outcome"] == "cached-stage-no-failure"
     assert result["repeatStageStable"] is True
-    assert result["offlineFailureFallback"]["componentId"] == "cyrene-evaluation-exact-match"
+    assert result["offlineFailureFallback"]["status"] == "NOT_RUN"
+    assert result["offlineFailureFallback"]["outcome"] == "fallback-pins-unavailable"
+    assert module.ledger()["phases"]["offline_retry_gate"]["status"] == "NOT_RUN"
+    assert "cached content" in module.ledger()["phases"]["offline_retry_gate"]["reason"]
+
+
+def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plugins fallback retries the same signed plan without Echo or mutation."""
+    evidence_root = tmp_path / "acceptance"
+    evidence_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_exact_match_fallback")
+    pins = _with_exact_match_plugins(_valid_pins())
+    module.write_json(evidence_root / "release-pins-v1.json", pins)
+    catalyst = pins["workloads"]["catalyst"]
+    plugins = pins["workloads"]["plugins"]
+    catalyst_check = {
+        "planId": "plan-" + "3" * 32,
+        "planDigest": "sha256:" + "4" * 64,
+    }
+    plugin_check = {
+        "status": "ready",
+        "workloadId": "plugins",
+        "targetId": plugins["targetId"],
+        "action": "install",
+        "catalogDigest": plugins["catalogDigest"],
+        "planId": "plan-" + "5" * 32,
+        "planDigest": "sha256:" + "6" * 64,
+        "components": plugins["selectedComponents"],
+        "resolution": {
+            "catalogDigest": plugins["catalogDigest"],
+            "selectedComponents": plugins["selectedComponents"],
+        },
+    }
+    plugin_staged = {
+        "status": "staged",
+        "planId": plugin_check["planId"],
+        "planDigest": plugin_check["planDigest"],
+        "catalogDigest": plugins["catalogDigest"],
+        "workloadId": "plugins",
+        "targetId": plugins["targetId"],
+        "action": "install",
+        "components": [{**row, "status": "staged"} for row in plugins["selectedComponents"]],
+    }
+    catalyst_staged = {
+        "status": "staged",
+        "planId": catalyst_check["planId"],
+        "planDigest": catalyst_check["planDigest"],
+        "catalogDigest": catalyst["catalogDigest"],
+        "workloadId": "catalyst",
+        "targetId": catalyst["targetId"],
+        "action": "install",
+        "components": [{**row, "status": "staged"} for row in catalyst["selectedComponents"]],
+    }
+    plugin_status = {
+        "status": "ready",
+        "catalogDigest": plugins["catalogDigest"],
+        "components": [
+            {
+                "componentId": row["componentId"],
+                "installed": False,
+                "version": None,
+                "releaseId": None,
+                "targetId": None,
+                "manifestDigest": None,
+                "manifestAssetDigest": None,
+                "digest": None,
+                "installationId": None,
+                "verification": {"identityAttested": False},
+            }
+            for row in plugins["selectedComponents"]
+        ],
+    }
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        calls.append((operation, fields))
+        workload_id = fields.get("workloadId")
+        if operation == "check":
+            assert workload_id == "plugins"
+            assert fields["selections"] == {
+                "includeComponentIds": ["cyrene-evaluation-exact-match"],
+                "excludeComponentIds": [],
+                "choices": {},
+            }
+            return plugin_check
+        if operation == "status":
+            if workload_id == "plugins":
+                return plugin_status
+            assert workload_id == "catalyst"
+            return {
+                "status": "ready",
+                "components": [
+                    {"componentId": row["componentId"], "installed": False}
+                    for row in catalyst["selectedComponents"]
+                ],
+            }
+        assert operation == "stage"
+        if workload_id == "catalyst":
+            if fields.get("network_isolated") is True:
+                return {"ok": True, "result": catalyst_staged}
+            return catalyst_staged
+        if fields.get("network_isolated") is True:
+            return {
+                "protocolVersion": module.WORKLOAD_PROTOCOL,
+                "ok": False,
+                "operation": "stage",
+                "error": {"code": "NETWORK_ERROR", "retryable": True},
+            }
+        return plugin_staged
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    result = module.record_offline_stage_outcome(catalyst, catalyst_check)
+
+    assert result["outcome"] == "cached-stage-no-failure"
+    assert result["offlineFailureFallback"]["outcome"] == "network-failure-recovered"
+    assert result["offlineFailureFallback"]["status"] == "PASS"
+    assert result["offlineFailureFallback"]["applied"] is False
+    assert module.ledger()["phases"]["offline_retry_gate"]["status"] == "PASS"
+    plugin_stages = [
+        fields
+        for operation, fields in calls
+        if operation == "stage" and fields.get("workloadId") == "plugins"
+    ]
+    assert [fields.get("network_isolated", False) for fields in plugin_stages] == [
+        True,
+        False,
+        False,
+    ]
+    assert all(
+        fields["planId"] == plugin_check["planId"]
+        and fields["planDigest"] == plugin_check["planDigest"]
+        and fields["action"] == "install"
+        for fields in plugin_stages
+    )
+    assert not any(operation == "apply" for operation, _ in calls)
+    fallback_evidence = json.loads(
+        (evidence_root / "evidence" / "exact-match-plugins-offline-stage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    serialized = json.dumps(fallback_evidence)
+    assert "cyrene-echo" not in serialized
+    assert fallback_evidence["failure"] == {
+        "operation": "stage",
+        "code": "NETWORK_ERROR",
+        "retryable": True,
+        "networkNamespace": "isolated-child-process",
+    }
+
+
+def test_exact_match_plugin_fallback_reports_cache_without_claiming_failure_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second warm cache remains NOT_RUN even when standalone pins are supplied."""
+    evidence_root = tmp_path / "acceptance"
+    evidence_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_exact_match_cached")
+    pins = _with_exact_match_plugins(_valid_pins())
+    module.write_json(evidence_root / "release-pins-v1.json", pins)
+    catalyst = pins["workloads"]["catalyst"]
+    plugins = pins["workloads"]["plugins"]
+    catalyst_checked = {"planId": "plan-" + "3" * 32, "planDigest": "sha256:" + "4" * 64}
+    plugin_checked = {
+        "status": "ready",
+        "workloadId": "plugins",
+        "targetId": plugins["targetId"],
+        "action": "install",
+        "catalogDigest": plugins["catalogDigest"],
+        "planId": "plan-" + "5" * 32,
+        "planDigest": "sha256:" + "6" * 64,
+        "components": plugins["selectedComponents"],
+        "resolution": {
+            "catalogDigest": plugins["catalogDigest"],
+            "selectedComponents": plugins["selectedComponents"],
+        },
+    }
+    staged_by_id = {}
+    for workload_id, workload, checked in (
+        ("catalyst", catalyst, catalyst_checked),
+        ("plugins", plugins, plugin_checked),
+    ):
+        staged_by_id[workload_id] = {
+            "status": "staged",
+            "planId": checked["planId"],
+            "planDigest": checked["planDigest"],
+            "catalogDigest": workload["catalogDigest"],
+            "workloadId": workload_id,
+            "targetId": workload["targetId"],
+            "action": "install",
+            "components": [{**row, "status": "staged"} for row in workload["selectedComponents"]],
+        }
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        workload_id = fields.get("workloadId")
+        if operation == "check":
+            assert workload_id == "plugins"
+            return plugin_checked
+        if operation == "status":
+            workload = plugins if workload_id == "plugins" else catalyst
+            return {
+                "status": "ready",
+                "catalogDigest": workload["catalogDigest"],
+                "components": [
+                    {
+                        "componentId": row["componentId"],
+                        "installed": False,
+                        "version": None,
+                        "releaseId": None,
+                        "targetId": None,
+                        "manifestDigest": None,
+                        "manifestAssetDigest": None,
+                        "digest": None,
+                        "installationId": None,
+                        "verification": {"identityAttested": False},
+                    }
+                    for row in workload["selectedComponents"]
+                ],
+            }
+        assert operation == "stage"
+        result = staged_by_id[str(workload_id)]
+        return {"ok": True, "result": result} if fields.get("network_isolated") else result
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    result = module.record_offline_stage_outcome(catalyst, catalyst_checked)
+
+    assert result["offlineFailureFallback"]["outcome"] == "cached-stage-no-failure"
     assert result["offlineFailureFallback"]["status"] == "NOT_RUN"
     assert module.ledger()["phases"]["offline_retry_gate"]["status"] == "NOT_RUN"
-    assert "already available content" in module.ledger()["phases"]["offline_retry_gate"]["reason"]
 
 
 def test_version_conflict_gate_is_a_read_only_assertion_on_the_exact_plan(
