@@ -7,12 +7,13 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
@@ -45,6 +46,422 @@ def _dispatch_inputs(module: ModuleType) -> dict[str, object]:
             for index, product in enumerate(module.PRODUCTS, start=1)
         },
     }
+
+
+def _dispatch_inputs_v2(module: ModuleType) -> dict[str, object]:
+    return {
+        "schemaVersion": 2,
+        "nativeProfiles": list(module.PROFILE_IDS),
+        "workspaceCatalogs": {
+            "baselineV1": {
+                "releaseId": "catalog-preview-" + "a" * 40,
+                "sha256": module.FROZEN_CATALOG_V1_SHA256,
+            },
+            "activeV2": {
+                "releaseId": "catalog-v2-preview-" + "b" * 40,
+                "sha256": "c" * 64,
+            },
+        },
+        "platformReleaseId": "preview-" + "d" * 40,
+        "productReleaseIds": {
+            product: "preview-" + f"{index:x}" * 40
+            for index, product in enumerate(module.PRODUCTS, start=1)
+        },
+    }
+
+
+def _write_catalog_release_files(
+    tmp_path: Path,
+    module: ModuleType,
+    *,
+    schema_version: int,
+    generation: object,
+    source_commit: str,
+    source_ref: str = "refs/heads/develop",
+    metadata_generation: object | None = None,
+) -> tuple[Path, Path, Path, dict[str, str]]:
+    """Create exact catalog bytes, source metadata, and an attestation fixture."""
+
+    asset_name = f"component-catalog-v{schema_version}.json"
+    tag_prefix = "catalog-v2-" if schema_version == 2 else "catalog-"
+    channel = "preview" if source_ref.endswith("develop") else "stable"
+    release_id = f"{tag_prefix}{channel}-{source_commit}"
+    catalog_path = tmp_path / asset_name
+    catalog_bytes = (
+        json.dumps({"schemaVersion": schema_version, "generation": generation}, sort_keys=True)
+        + "\n"
+    ).encode("utf-8")
+    catalog_path.write_bytes(catalog_bytes)
+    digest = hashlib.sha256(catalog_bytes).hexdigest()
+    metadata_path = tmp_path / f"catalog-v{schema_version}-release.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": schema_version,
+                "repository": module.REPOSITORY,
+                "workflow": module.CATALOG_WORKFLOW,
+                "channel": channel,
+                "releaseId": release_id,
+                "sourceCommit": source_commit,
+                "sourceRef": source_ref,
+                "catalogSha256": f"sha256:{digest}",
+                "generation": generation if metadata_generation is None else metadata_generation,
+            }
+        ),
+        encoding="utf-8",
+    )
+    attestation_path = tmp_path / f"catalog-v{schema_version}.attestation.jsonl"
+    attestation_path.write_text("verified fixture bundle", encoding="utf-8")
+    return (
+        catalog_path,
+        metadata_path,
+        attestation_path,
+        {
+            "releaseId": release_id,
+            "sha256": digest,
+        },
+    )
+
+
+def _minimal_v2_source_receipt(
+    module: ModuleType, active_generation: object
+) -> tuple[dict[str, object], dict[str, str]]:
+    """Build a source-bound v2 receipt for generation-floor contract tests."""
+
+    baseline = {
+        "repository": module.REPOSITORY,
+        "workflow": module.CATALOG_WORKFLOW,
+        "releaseId": "catalog-preview-" + "a" * 40,
+        "source": {"ref": "refs/heads/develop", "commit": "a" * 40},
+        "assetName": "component-catalog-v1.json",
+        "sha256": module.FROZEN_CATALOG_V1_SHA256,
+        "attestationBundleSha256": "b" * 64,
+        "generation": 13,
+    }
+    active = {
+        "repository": module.REPOSITORY,
+        "workflow": module.CATALOG_WORKFLOW,
+        "releaseId": "catalog-v2-preview-" + "c" * 40,
+        "source": {"ref": "refs/heads/develop", "commit": "c" * 40},
+        "assetName": "component-catalog-v2.json",
+        "sha256": "d" * 64,
+        "attestationBundleSha256": "e" * 64,
+        "generation": active_generation,
+    }
+    source = {
+        "repository": module.REPOSITORY,
+        "ref": "refs/heads/develop",
+        "commit": "9" * 40,
+        "workflow": f"{module.REPOSITORY}/{module.WORKFLOW_PATH}",
+    }
+    python_lock = WORKSPACE_ROOT / "packaging/python-runtime.lock.json"
+    release_lock = WORKSPACE_ROOT / "release-lock.json"
+    receipt = {
+        "schemaVersion": 2,
+        "workspaceSource": source,
+        "releaseInputs": {
+            "nativeProfiles": list(module.PROFILE_IDS),
+            "workspaceCatalog": {
+                key: value for key, value in baseline.items() if key != "generation"
+            },
+            "workspaceCatalogs": {"baselineV1": baseline, "activeV2": active},
+            "platformReleaseId": "preview-" + "f" * 40,
+            "productReleaseIds": {},
+        },
+        "verifiedTuples": [],
+        "pythonRuntimeLock": {
+            "path": "packaging/python-runtime.lock.json",
+            "sha256": hashlib.sha256(python_lock.read_bytes()).hexdigest(),
+            "document": json.loads(python_lock.read_text(encoding="utf-8")),
+        },
+        "workspaceReleaseLock": {
+            "path": "release-lock.json",
+            "sha256": hashlib.sha256(release_lock.read_bytes()).hexdigest(),
+            "document": json.loads(release_lock.read_text(encoding="utf-8")),
+        },
+    }
+    return receipt, source
+
+
+def test_v2_dispatch_inputs_pin_frozen_v1_and_exact_active_v2_catalogs(tmp_path: Path) -> None:
+    module = _module()
+    inputs = _dispatch_inputs_v2(module)
+    path = tmp_path / "inputs.json"
+    path.write_text(json.dumps(inputs), encoding="utf-8")
+
+    assert module._read_dispatch_inputs(path, "refs/heads/develop", "e" * 40) == inputs
+
+    bad_inputs = json.loads(json.dumps(inputs))
+    bad_inputs["workspaceCatalogs"]["baselineV1"]["sha256"] = "0" * 64
+    path.write_text(json.dumps(bad_inputs), encoding="utf-8")
+    with pytest.raises(module.ReleaseError, match="frozen generation-13"):
+        module._read_dispatch_inputs(path, "refs/heads/develop", "e" * 40)
+
+    bad_inputs = json.loads(json.dumps(inputs))
+    bad_inputs["workspaceCatalogs"]["activeV2"]["releaseId"] = "catalog-preview-" + "b" * 40
+    path.write_text(json.dumps(bad_inputs), encoding="utf-8")
+    with pytest.raises(module.ReleaseError, match="same-channel v2 tag"):
+        module._read_dispatch_inputs(path, "refs/heads/develop", "e" * 40)
+
+    bad_inputs = json.loads(json.dumps(inputs))
+    bad_inputs["schemaVersion"] = True
+    path.write_text(json.dumps(bad_inputs), encoding="utf-8")
+    with pytest.raises(module.ReleaseError, match="schemaVersion 1 or 2"):
+        module._read_dispatch_inputs(path, "refs/heads/develop", "e" * 40)
+
+
+def test_catalog_tag_identity_distinguishes_v1_v2_and_channel() -> None:
+    module = _module()
+    assert module._catalog_tag_identity("catalog-preview-" + "a" * 40) == (1, "preview", "a" * 40)
+    assert module._catalog_tag_identity("catalog-v2-stable-" + "b" * 40) == (2, "stable", "b" * 40)
+    assert module._catalog_tag_identity("catalog-v2-latest") is None
+
+
+def test_verified_catalog_metadata_rejects_boolean_schema_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    catalog_path = tmp_path / "component-catalog-v1.json"
+    catalog_path.write_text('{"schemaVersion":1,"generation":13}\n', encoding="utf-8")
+    digest = hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+    metadata_path = tmp_path / "catalog-release.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": True,
+                "repository": module.REPOSITORY,
+                "workflow": module.CATALOG_WORKFLOW,
+                "channel": "preview",
+                "releaseId": "catalog-preview-" + "a" * 40,
+                "sourceCommit": "a" * 40,
+                "sourceRef": "refs/heads/develop",
+                "catalogSha256": f"sha256:{digest}",
+            }
+        ),
+        encoding="utf-8",
+    )
+    attestation_path = tmp_path / "catalog.attestation.jsonl"
+    attestation_path.write_text("bundle", encoding="utf-8")
+    monkeypatch.setattr(module, "_run_attestation_verify", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(module.ReleaseError, match="metadata or bytes differ"):
+        module._verify_catalog_input(
+            catalog_path,
+            metadata_path,
+            attestation_path,
+            {"releaseId": "catalog-preview-" + "a" * 40, "sha256": digest},
+            expected_schema=1,
+            expected_generation=13,
+            channel="preview",
+        )
+
+
+@pytest.mark.parametrize(
+    ("active_generation", "accepted"),
+    [(14, True), (15, True), (12, False), (True, False), ("15", False)],
+)
+def test_record_inputs_binds_the_actual_active_catalog_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    active_generation: object,
+    accepted: bool,
+) -> None:
+    module = _module()
+    baseline_path = tmp_path / "component-catalog-v1.json"
+    baseline_path.write_bytes(
+        (WORKSPACE_ROOT / "governance/component-catalog-v1.json").read_bytes()
+    )
+    baseline_digest = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
+    baseline_metadata_path = tmp_path / "baseline-release.json"
+    baseline_metadata_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "repository": module.REPOSITORY,
+                "workflow": module.CATALOG_WORKFLOW,
+                "channel": "preview",
+                "releaseId": "catalog-preview-" + "a" * 40,
+                "sourceCommit": "a" * 40,
+                "sourceRef": "refs/heads/develop",
+                "catalogSha256": f"sha256:{baseline_digest}",
+                "generation": 13,
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_attestation = tmp_path / "baseline.attestation.jsonl"
+    baseline_attestation.write_text("baseline bundle", encoding="utf-8")
+    active_path, active_metadata_path, active_attestation, active_locator = (
+        _write_catalog_release_files(
+            tmp_path,
+            module,
+            schema_version=2,
+            generation=active_generation,
+            source_commit="b" * 40,
+        )
+    )
+    catalog_locators = {
+        "baselineV1": {
+            "releaseId": "catalog-preview-" + "a" * 40,
+            "sha256": baseline_digest,
+        },
+        "activeV2": active_locator,
+    }
+    dispatch_inputs = {
+        "schemaVersion": 2,
+        "nativeProfiles": list(module.PROFILE_IDS),
+        "workspaceCatalogs": catalog_locators,
+        "platformReleaseId": "preview-" + "c" * 40,
+        "productReleaseIds": {product: "preview-" + "d" * 40 for product in module.PRODUCTS},
+    }
+    dispatch_path = tmp_path / "inputs.json"
+    dispatch_path.write_text(json.dumps(dispatch_inputs), encoding="utf-8")
+    request_keys = [
+        f"product/{product}/{profile}"
+        for product in module.PRODUCTS
+        for profile in ("22.04", "24.04")
+    ]
+    requests = [SimpleNamespace(key=key) for key in request_keys]
+    monkeypatch.setattr(module, "_component_requests", lambda _inputs: requests)
+    monkeypatch.setattr(module, "PLATFORM_CORE_COMPONENTS", ())
+    monkeypatch.setattr(
+        module,
+        "_verified_component_record",
+        lambda request, *_args: {"key": request.key, "source": {"commit": "e" * 40}},
+    )
+    monkeypatch.setattr(module, "_run_attestation_verify", lambda *_args, **_kwargs: None)
+    python_lock = tmp_path / "python-runtime-lock.json"
+    release_lock = tmp_path / "release-lock.json"
+    python_lock.write_text("{}", encoding="utf-8")
+    release_lock.write_text("{}", encoding="utf-8")
+    output = tmp_path / "native-source-receipt-v2.json"
+    arguments = SimpleNamespace(
+        inputs=dispatch_path,
+        source_ref="refs/heads/develop",
+        source_commit="e" * 40,
+        catalog=baseline_path,
+        catalog_metadata=baseline_metadata_path,
+        catalog_attestation=baseline_attestation,
+        active_catalog_v2=active_path,
+        active_catalog_v2_metadata=active_metadata_path,
+        active_catalog_v2_attestation=active_attestation,
+        fetch_report=[f"{key}=unused" for key in request_keys],
+        component_attestation=[f"{key}=unused" for key in request_keys],
+        python_runtime_lock=python_lock,
+        release_lock=release_lock,
+        output=output,
+    )
+
+    if not accepted:
+        with pytest.raises(module.ReleaseError):
+            module._record_inputs(arguments)
+        return
+
+    assert module._record_inputs(arguments) == 0
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    evidence = receipt["releaseInputs"]["workspaceCatalogs"]["activeV2"]
+    assert evidence["generation"] == active_generation
+    assert evidence["sha256"] == active_locator["sha256"]
+    assert evidence["source"] == {"ref": "refs/heads/develop", "commit": "b" * 40}
+
+
+def test_verified_catalog_metadata_generation_must_match_exact_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    catalog_path, metadata_path, attestation_path, locator = _write_catalog_release_files(
+        tmp_path,
+        module,
+        schema_version=2,
+        generation=15,
+        source_commit="f" * 40,
+        metadata_generation=14,
+    )
+    monkeypatch.setattr(module, "_run_attestation_verify", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(module.ReleaseError, match="metadata or bytes differ"):
+        module._verify_catalog_input(
+            catalog_path,
+            metadata_path,
+            attestation_path,
+            locator,
+            expected_schema=2,
+            expected_generation=None,
+            channel="preview",
+        )
+
+
+@pytest.mark.parametrize(
+    ("bad_field", "bad_value", "message"),
+    [
+        ("baselineDigest", None, "frozen generation-13 digest"),
+        ("activeGeneration", 12, "activeV2 catalog identity"),
+        ("activeGeneration", 13, "activeV2 catalog identity"),
+        ("activeGeneration", True, "activeV2 catalog identity"),
+        ("activeGeneration", "15", "activeV2 catalog identity"),
+    ],
+)
+def test_v2_source_receipt_rejects_catalog_identity_drift(
+    bad_field: str, bad_value: object, message: str
+) -> None:
+    module = _module()
+    baseline = {
+        "repository": module.REPOSITORY,
+        "workflow": module.CATALOG_WORKFLOW,
+        "releaseId": "catalog-preview-" + "a" * 40,
+        "source": {"ref": "refs/heads/develop", "commit": "a" * 40},
+        "assetName": "component-catalog-v1.json",
+        "sha256": module.FROZEN_CATALOG_V1_SHA256,
+        "attestationBundleSha256": "b" * 64,
+        "generation": 13,
+    }
+    active = {
+        "repository": module.REPOSITORY,
+        "workflow": module.CATALOG_WORKFLOW,
+        "releaseId": "catalog-v2-preview-" + "c" * 40,
+        "source": {"ref": "refs/heads/develop", "commit": "c" * 40},
+        "assetName": "component-catalog-v2.json",
+        "sha256": "d" * 64,
+        "attestationBundleSha256": "e" * 64,
+        "generation": 14,
+    }
+    if bad_field == "baselineDigest":
+        baseline["sha256"] = "0" * 64
+    else:
+        active["generation"] = bad_value
+    receipt = {
+        "schemaVersion": 2,
+        "releaseInputs": {
+            "nativeProfiles": list(module.PROFILE_IDS),
+            "workspaceCatalog": {
+                key: value for key, value in baseline.items() if key != "generation"
+            },
+            "workspaceCatalogs": {"baselineV1": baseline, "activeV2": active},
+            "platformReleaseId": "preview-" + "f" * 40,
+            "productReleaseIds": {product: "preview-" + "1" * 40 for product in module.PRODUCTS},
+        },
+    }
+    source = {
+        "repository": module.REPOSITORY,
+        "ref": "refs/heads/develop",
+        "commit": "9" * 40,
+        "workflow": f"{module.REPOSITORY}/{module.WORKFLOW_PATH}",
+    }
+
+    with pytest.raises(module.ReleaseError, match=message):
+        module._validate_source_receipt(receipt, source, require_safe_initialization=False)
+
+
+@pytest.mark.parametrize("active_generation", [14, 15])
+def test_v2_source_receipt_accepts_minimum_and_newer_exact_generations(
+    monkeypatch: pytest.MonkeyPatch, active_generation: int
+) -> None:
+    module = _module()
+    monkeypatch.setattr(module, "PRODUCTS", {})
+    monkeypatch.setattr(module, "_component_requests", lambda _inputs: [])
+    receipt, source = _minimal_v2_source_receipt(module, active_generation)
+
+    module._validate_source_receipt(receipt, source, require_safe_initialization=False)
 
 
 @pytest.mark.parametrize("schema_version", [1, 2])
@@ -118,6 +535,28 @@ def test_release_manifest_projects_fixed_source_identity_from_receipt_shape() ->
         == manifest["source"]
     )
     module._validate_release_manifest_version(manifest, receipt)
+
+
+def test_v2_release_manifest_requires_matching_v2_receipt_and_catalog_table() -> None:
+    module = _module()
+    manifest, receipt = _release_manifest_identity_fixture(module)
+    manifest["schemaVersion"] = 2
+    manifest["workspaceCatalogs"] = {"baselineV1": {}, "activeV2": {}}
+    receipt["schemaVersion"] = 2
+
+    assert (
+        module._validate_release_manifest_identity(
+            manifest,
+            receipt,
+            module.REPOSITORY,
+            "refs/heads/develop",
+            "a" * 40,
+        )
+        == manifest["source"]
+    )
+    receipt["schemaVersion"] = 1
+    with pytest.raises(module.ReleaseError, match="fixed repository/workflow/source"):
+        module._validate_release_manifest_identity(manifest, receipt, module.REPOSITORY)
 
 
 def _replace_manifest_ref_with_main(manifest: dict[str, object]) -> None:
@@ -513,6 +952,7 @@ def test_release_workflow_stages_platform_fetcher_schemas_with_catalog() -> None
 
     catalog_script = catalog_step["run"]
     for schema in (
+        "component-catalog-v2.schema.json",
         "component-release-manifest-v1.schema.json",
         "component-release-manifest-v2.schema.json",
         "component-release-index-v1.schema.json",
@@ -521,7 +961,9 @@ def test_release_workflow_stages_platform_fetcher_schemas_with_catalog() -> None
     assert (
         'cp "governance/$schema" "$RUNNER_TEMP/native-installer-inputs/$schema"' in catalog_script
     )
-    assert "native-installer-inputs/component-catalog-v1.json" in fetch_step["env"]["CATALOG_PATH"]
+    assert fetch_step["env"]["CATALOG_PATH"] == "${{ steps.catalog.outputs.active_catalog_path }}"
+    assert "workspaceCatalogs" in catalog_script
+    assert "component-catalog-v2.json" in catalog_script
 
 
 def _write_catalog_binding_inputs(
@@ -584,6 +1026,93 @@ def test_production_catalog_binding_embeds_exact_selected_catalog_pin(
     helper = module._bootstrap_catalog_binding_module()
     assert (
         helper.load_bootstrap_catalog_binding(binding_path, catalog_path, require_root=False)
+        == binding
+    )
+
+
+@pytest.mark.parametrize("active_generation", [14, 15])
+def test_v2_production_binding_selects_active_catalog_and_keeps_frozen_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, active_generation: int
+) -> None:
+    module = _module()
+    baseline_path = tmp_path / "component-catalog-v1.json"
+    baseline_path.write_bytes(
+        (WORKSPACE_ROOT / "governance/component-catalog-v1.json").read_bytes()
+    )
+    active_path = tmp_path / "component-catalog-v2.json"
+    active_bytes = (
+        json.dumps({"schemaVersion": 2, "generation": active_generation}, sort_keys=True) + "\n"
+    ).encode()
+    active_path.write_bytes(active_bytes)
+    baseline_evidence = {
+        "repository": module.REPOSITORY,
+        "workflow": module.CATALOG_WORKFLOW,
+        "releaseId": "catalog-stable-" + "a" * 40,
+        "source": {"ref": "refs/heads/main", "commit": "a" * 40},
+        "assetName": "component-catalog-v1.json",
+        "sha256": module.FROZEN_CATALOG_V1_SHA256,
+        "attestationBundleSha256": "b" * 64,
+        "generation": 13,
+    }
+    active_evidence = {
+        "repository": module.REPOSITORY,
+        "workflow": module.CATALOG_WORKFLOW,
+        "releaseId": "catalog-v2-stable-" + "c" * 40,
+        "source": {"ref": "refs/heads/main", "commit": "c" * 40},
+        "assetName": "component-catalog-v2.json",
+        "sha256": hashlib.sha256(active_bytes).hexdigest(),
+        "attestationBundleSha256": "d" * 64,
+        "generation": active_generation,
+    }
+    receipt_path = tmp_path / "native-installer-source-receipt-v2.json"
+    source = {
+        "repository": module.REPOSITORY,
+        "ref": "refs/heads/main",
+        "commit": "e" * 40,
+        "workflow": f"{module.REPOSITORY}/{module.WORKFLOW_PATH}",
+    }
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "workspaceSource": source,
+                "releaseInputs": {
+                    "workspaceCatalog": {
+                        key: value
+                        for key, value in baseline_evidence.items()
+                        if key != "generation"
+                    },
+                    "workspaceCatalogs": {
+                        "baselineV1": baseline_evidence,
+                        "activeV2": active_evidence,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "_validate_source_receipt", lambda *_args, **_kwargs: None)
+    binding_path = tmp_path / module.BOOTSTRAP_CATALOG_BINDING_PATH.rsplit("/", 1)[-1]
+    arguments = argparse.Namespace(
+        catalog=baseline_path,
+        active_catalog_v2=active_path,
+        source_receipt=receipt_path,
+        development_source_build=False,
+        source_ref="refs/heads/main",
+        source_commit="e" * 40,
+        output=binding_path,
+    )
+
+    assert module._prepare_bootstrap_catalog_binding(arguments) == 0
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    assert binding == {
+        "schemaVersion": 1,
+        "catalog": {key: value for key, value in active_evidence.items() if key != "generation"}
+        | {"generation": active_generation},
+    }
+    helper = module._bootstrap_catalog_binding_module()
+    assert (
+        helper.load_bootstrap_catalog_binding(binding_path, active_path, require_root=False)
         == binding
     )
 
@@ -673,11 +1202,82 @@ def test_release_workflow_and_builder_pass_the_verified_selected_catalog() -> No
 
     assert '--bootstrap-catalog "$INPUT_ROOT/component-catalog-v1.json"' in build_step["run"]
     assert (
-        '--source-receipt "$INPUT_ROOT/native-installer-source-receipt-v1.json"'
+        '--source-receipt "$INPUT_ROOT/native-installer-source-receipt-v${schema_version}.json"'
+        in build_step["run"]
+    )
+    assert (
+        'build_args+=(--bootstrap-catalog-v2 "$INPUT_ROOT/component-catalog-v2.json")'
         in build_step["run"]
     )
     assert 'cp "${SELECTED_BOOTSTRAP_CATALOG}"' in build_script
+    assert '"${STAGE_DIR}/usr/share/cyrene/component-catalog-v2.json"' in build_script
+    assert '"${STAGE_DIR}/usr/lib/cyrene/scripts/workload_resolver.py"' in build_script
+    for packaged_helper in (
+        "workload_package_runtime.py",
+        "workload_sdk_environment.py",
+        "workload_web_host.py",
+        "cyrene-workspace-web.nginx.conf.template",
+        "cyrene-workspace-web.service.template",
+    ):
+        assert (WORKSPACE_ROOT / "packaging" / packaged_helper).is_file()
+        assert f'"${{STAGE_DIR}}/usr/lib/cyrene/scripts/{packaged_helper}"' in build_script
+        assert (
+            f'chmod 644 "${{STAGE_DIR}}/usr/lib/cyrene/scripts/{packaged_helper}"' in build_script
+        )
     assert '--catalog "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"' in build_script
+
+
+def test_studio_control_data_directory_is_safe_and_preserves_existing_data(
+    tmp_path: Path,
+) -> None:
+    build_script = (WORKSPACE_ROOT / "packaging/build-deb.sh").read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^ensure_fresh_service_directory\(\) \{\n.*?^\}", build_script)
+    assert function is not None
+    existing = tmp_path / "studio-control"
+    existing.mkdir()
+    marker = existing / "user-data.json"
+    marker.write_text('{"retained":true}\n', encoding="utf-8")
+    shell = function.group(0) + '\nensure_fresh_service_directory "$1"\n'
+
+    accepted = subprocess.run(
+        ["sh", "-c", shell, "ensure-directory-test", str(existing)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0
+    assert marker.read_text(encoding="utf-8") == '{"retained":true}\n'
+
+    link = tmp_path / "studio-control-link"
+    link.symlink_to(existing, target_is_directory=True)
+    rejected_link = subprocess.run(
+        ["sh", "-c", shell, "ensure-directory-test", str(link)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected_link.returncode != 0
+    assert "is a symlink" in rejected_link.stderr
+
+    regular_file = tmp_path / "studio-control-file"
+    regular_file.write_text("preserve", encoding="utf-8")
+    rejected_file = subprocess.run(
+        ["sh", "-c", shell, "ensure-directory-test", str(regular_file)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected_file.returncode != 0
+    assert "not a directory" in rejected_file.stderr
+
+    start = build_script.index("STUDIO_CONTROL_DIR=/var/lib/cyrene/studio-control")
+    end = build_script.index("# Provision only the dedicated broker state directory.", start)
+    block = build_script[start:end]
+    assert 'ensure_fresh_service_directory "${STUDIO_CONTROL_DIR}"' in block
+    assert 'install -d -o cyrene -g cyrene -m 750 "$path"' in build_script
+    assert 'STUDIO_CONTROL_META="$(stat -c \'%u:%g:%a\' -- "${STUDIO_CONTROL_DIR}")"' in block
+    assert '"${STUDIO_CONTROL_UID}:${STUDIO_CONTROL_GID}:750"' in block
+    assert "rm -" not in block
 
 
 def test_release_workflow_scopes_github_token_to_locked_python_prepare() -> None:
@@ -847,7 +1447,11 @@ def test_failed_draft_create_does_not_poll_by_tag(
 
 
 def _write_package_fixture(
-    tmp_path: Path, module: ModuleType
+    tmp_path: Path,
+    module: ModuleType,
+    *,
+    include_v2_catalog: bool = False,
+    active_v2_generation: int = 14,
 ) -> tuple[Path, dict[str, object], Path]:
     profile = module.PROFILE_IDS[0]
     target = {
@@ -871,8 +1475,15 @@ def _write_package_fixture(
     catalog_path.parent.mkdir(parents=True, exist_ok=True)
     catalog_generation = 12
     catalog_bytes = (
-        json.dumps({"schemaVersion": 1, "generation": catalog_generation}, sort_keys=True) + "\n"
-    ).encode()
+        (WORKSPACE_ROOT / "governance/component-catalog-v1.json").read_bytes()
+        if include_v2_catalog
+        else (
+            json.dumps({"schemaVersion": 1, "generation": catalog_generation}, sort_keys=True)
+            + "\n"
+        ).encode()
+    )
+    if include_v2_catalog:
+        catalog_generation = 13
     catalog_path.write_bytes(catalog_bytes)
     catalog_evidence = {
         "repository": module.REPOSITORY,
@@ -883,9 +1494,33 @@ def _write_package_fixture(
         "sha256": hashlib.sha256(catalog_bytes).hexdigest(),
         "attestationBundleSha256": hashlib.sha256(b"catalog-attestation").hexdigest(),
     }
+    catalog_v2_evidence = None
+    if include_v2_catalog:
+        catalog_v2_path = package_root / module.BOOTSTRAP_CATALOG_V2_PATH
+        catalog_v2_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_v2_bytes = (
+            json.dumps({"schemaVersion": 2, "generation": active_v2_generation}, sort_keys=True)
+            + "\n"
+        ).encode()
+        catalog_v2_path.write_bytes(catalog_v2_bytes)
+        catalog_v2_evidence = {
+            "repository": module.REPOSITORY,
+            "workflow": module.CATALOG_WORKFLOW,
+            "releaseId": "catalog-v2-stable-" + "f" * 40,
+            "source": {"ref": "refs/heads/main", "commit": "f" * 40},
+            "assetName": "component-catalog-v2.json",
+            "sha256": hashlib.sha256(catalog_v2_bytes).hexdigest(),
+            "attestationBundleSha256": hashlib.sha256(b"catalog-v2-attestation").hexdigest(),
+            "generation": active_v2_generation,
+        }
     catalog_binding = {
         "schemaVersion": 1,
-        "catalog": {**catalog_evidence, "generation": catalog_generation},
+        "catalog": (
+            {key: value for key, value in catalog_v2_evidence.items() if key != "generation"}
+            | {"generation": active_v2_generation}
+            if include_v2_catalog
+            else {**catalog_evidence, "generation": catalog_generation}
+        ),
     }
     binding_path = package_root / module.BOOTSTRAP_CATALOG_BINDING_PATH
     binding_path.write_text(
@@ -1173,10 +1808,16 @@ def _write_package_fixture(
         check=False,
     )
     assert result.returncode == 0, result.stderr
+    receipt_release_inputs = {"workspaceCatalog": catalog_evidence}
+    if include_v2_catalog:
+        receipt_release_inputs["workspaceCatalogs"] = {
+            "baselineV1": {**catalog_evidence, "generation": 13},
+            "activeV2": catalog_v2_evidence,
+        }
     receipt = {
-        "schemaVersion": 1,
+        "schemaVersion": 2 if include_v2_catalog else 1,
         "verifiedTuples": receipt_tuples,
-        "releaseInputs": {"workspaceCatalog": catalog_evidence},
+        "releaseInputs": receipt_release_inputs,
         "pythonRuntimeLock": {
             "path": "packaging/python-runtime.lock.json",
             "sha256": runtime_lock_sha,
@@ -1222,6 +1863,62 @@ def test_offline_deb_proof_checks_actual_marker_scripts_and_published_bytes(tmp_
     assert proof["workspaceCatalogSha256"] == receipt["releaseInputs"]["workspaceCatalog"]["sha256"]
     assert proof["workspaceCatalogGeneration"] == 12
     assert len(proof["bootstrapCatalogBindingSha256"]) == 64
+
+
+@pytest.mark.parametrize("active_generation", [14, 15])
+def test_offline_deb_proof_binds_generation13_baseline_and_active_v2_catalog(
+    tmp_path: Path, active_generation: int
+) -> None:
+    if shutil.which("dpkg-deb") is None:
+        pytest.skip("dpkg-deb is required for the DEB payload proof test")
+    module = _module()
+    deb_path, receipt, package_root = _write_package_fixture(
+        tmp_path,
+        module,
+        include_v2_catalog=True,
+        active_v2_generation=active_generation,
+    )
+
+    proof = module._inspect_deb_initialization(
+        deb_path,
+        module.PROFILE_IDS[0],
+        receipt,
+        verify_attestations=False,
+        gh_executable="gh",
+    )
+
+    assert receipt["schemaVersion"] == 2
+    assert proof["workspaceCatalogSha256"] == module.FROZEN_CATALOG_V1_SHA256
+    assert proof["workspaceCatalogGeneration"] == module.FROZEN_CATALOG_V1_GENERATION
+    assert proof["workspaceCatalogV2Path"] == f"/{module.BOOTSTRAP_CATALOG_V2_PATH}"
+    assert proof["workspaceCatalogV2Generation"] == active_generation
+    assert (
+        proof["workspaceCatalogV2Sha256"]
+        == receipt["releaseInputs"]["workspaceCatalogs"]["activeV2"]["sha256"]
+    )
+
+    active_catalog_path = package_root / module.BOOTSTRAP_CATALOG_V2_PATH
+    substituted_generation = active_generation + 1
+    active_catalog_path.write_text(
+        json.dumps({"schemaVersion": 2, "generation": substituted_generation}) + "\n",
+        encoding="utf-8",
+    )
+    repacked_path = tmp_path / "substituted-active-catalog.deb"
+    result = subprocess.run(
+        ["dpkg-deb", "--build", "--root-owner-group", str(package_root), str(repacked_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    with pytest.raises(module.ReleaseError, match="active Workspace catalog bytes"):
+        module._inspect_deb_initialization(
+            repacked_path,
+            module.PROFILE_IDS[0],
+            receipt,
+            verify_attestations=False,
+            gh_executable="gh",
+        )
 
 
 @pytest.mark.parametrize("substitution", ["catalog", "binding"])

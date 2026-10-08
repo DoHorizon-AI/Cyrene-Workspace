@@ -1,0 +1,35 @@
+[Unit]
+Description=Cyrene Workspace static web preview
+After=network.target
+
+[Service]
+Type=simple
+User=cyrene
+Group=cyrene
+RuntimeDirectory=cyrene-workspace-web
+RuntimeDirectoryMode=0750
+UMask=0077
+ExecStartPre=/usr/sbin/nginx -t -q -c /etc/cyrene/workloads/web/nginx.conf
+ExecStart=/usr/sbin/nginx -c /etc/cyrene/workloads/web/nginx.conf -g "daemon off;"
+ExecReload=/usr/bin/kill -HUP $MAINPID
+KillSignal=SIGQUIT
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/run/cyrene-workspace-web
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -71,7 +71,7 @@ PRODUCTS = {
 SHA1_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 CHANNEL_TAG_PATTERN = re.compile(r"(stable|preview)-([0-9a-f]{40})\Z")
-CATALOG_TAG_PATTERN = re.compile(r"catalog-(stable|preview)-([0-9a-f]{40})\Z")
+CATALOG_TAG_PATTERN = re.compile(r"catalog-(v2-)?(stable|preview)-([0-9a-f]{40})\Z")
 ASSET_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,199}\Z")
 IMMUTABLE_SETTINGS_READ_TOKEN = "CYRENE_IMMUTABLE_RELEASES_READ_TOKEN"
 RELEASE_API_BASE = f"https://api.github.com/repos/{REPOSITORY}"
@@ -83,11 +83,22 @@ RELEASE_SUBJECT_NAMES = (
     "release-lock.json",
     "SHA256SUMS",
 )
+RELEASE_SUBJECT_NAMES_V2 = (
+    "native-installer-release-v2.json",
+    "native-installer-source-receipt-v2.json",
+    "python-runtime.lock.json",
+    "release-lock.json",
+    "SHA256SUMS",
+)
 SERVICE_ARTIFACT_INDEX_PATH = "usr/share/cyrene/service-artifacts/index.json"
 INSTALL_CONTRACT_PATH = "usr/share/cyrene/native-install-contract-v1.json"
 BOOTSTRAP_CATALOG_PATH = "usr/share/cyrene/component-catalog-v1.json"
+BOOTSTRAP_CATALOG_V2_PATH = "usr/share/cyrene/component-catalog-v2.json"
 BOOTSTRAP_CATALOG_BINDING_PATH = "usr/share/cyrene/bootstrap-catalog-binding-v1.json"
 BOOTSTRAP_CATALOG_BINDING_LOADER_PATH = "usr/lib/cyrene/scripts/bootstrap_catalog_binding.py"
+FROZEN_CATALOG_V1_GENERATION = 13
+FROZEN_CATALOG_V1_SHA256 = "79866ed32c4393e5bbbd3e36144ae080f316e9bf2695a0768bdbbfa98bf76247"
+MINIMUM_ACTIVE_CATALOG_V2_GENERATION = 14
 INSTALL_CONTRACT_POLICY = {
     "schemaVersion": 1,
     "initializationMode": "stage-only",
@@ -253,6 +264,25 @@ def _release_source(release_id: str, channel: str, label: str) -> str:
     return match.group(2)
 
 
+def _catalog_tag_identity(release_id: str) -> tuple[int, str, str] | None:
+    """Return the catalog schema, channel, and source SHA encoded by an exact tag."""
+
+    match = CATALOG_TAG_PATTERN.fullmatch(release_id) if isinstance(release_id, str) else None
+    if match is None:
+        return None
+    return (2 if match.group(1) else 1, match.group(2), match.group(3))
+
+
+def _require_active_catalog_v2_generation(generation: Any, label: str) -> int:
+    """Reject v2 catalog rollback while returning the exact signed generation."""
+
+    if type(generation) is not int or generation < MINIMUM_ACTIVE_CATALOG_V2_GENERATION:
+        raise ReleaseError(
+            f"{label} must be an integer generation at least {MINIMUM_ACTIVE_CATALOG_V2_GENERATION}"
+        )
+    return generation
+
+
 def _read_dispatch_inputs(path: Path, source_ref: str, source_commit: str) -> dict[str, Any]:
     """Validate exact manual-dispatch locators, rejecting latest or partial inputs."""
 
@@ -260,28 +290,61 @@ def _read_dispatch_inputs(path: Path, source_ref: str, source_commit: str) -> di
         raise ReleaseError("source commit must be a full lowercase 40-character Git SHA")
     channel = _source_channel(source_ref)
     value = _read_json_object(path, "release locator input")
+    schema_version = value.get("schemaVersion")
     expected_keys = {
         "schemaVersion",
         "nativeProfiles",
-        "workspaceCatalog",
         "platformReleaseId",
         "productReleaseIds",
+        "workspaceCatalog" if schema_version == 1 else "workspaceCatalogs",
     }
-    if set(value) != expected_keys or value.get("schemaVersion") != 1:
-        raise ReleaseError("release locator input must match schemaVersion 1 exactly")
+    if (
+        set(value) != expected_keys
+        or type(schema_version) is not int
+        or schema_version not in {1, 2}
+    ):
+        raise ReleaseError("release locator input must match schemaVersion 1 or 2 exactly")
     profiles = value.get("nativeProfiles")
     if not isinstance(profiles, list) or tuple(profiles) != PROFILE_IDS:
         raise ReleaseError("nativeProfiles must select Ubuntu 22.04 and 24.04 in canonical order")
-    catalog = value.get("workspaceCatalog")
-    if not isinstance(catalog, dict) or set(catalog) != {"releaseId", "sha256"}:
-        raise ReleaseError("workspaceCatalog must contain only releaseId and raw SHA-256")
-    catalog_match = CATALOG_TAG_PATTERN.fullmatch(catalog.get("releaseId", ""))
-    if catalog_match is None or catalog_match.group(1) != channel:
-        raise ReleaseError("workspaceCatalog.releaseId must be an exact same-channel catalog tag")
-    if not isinstance(catalog.get("sha256"), str) or not SHA256_PATTERN.fullmatch(
-        catalog["sha256"]
-    ):
-        raise ReleaseError("workspaceCatalog.sha256 must be a full lowercase raw SHA-256")
+    if schema_version == 1:
+        catalog = value.get("workspaceCatalog")
+        if not isinstance(catalog, dict) or set(catalog) != {"releaseId", "sha256"}:
+            raise ReleaseError("workspaceCatalog must contain only releaseId and raw SHA-256")
+        identity = _catalog_tag_identity(catalog.get("releaseId", ""))
+        if identity is None or identity[0] != 1 or identity[1] != channel:
+            raise ReleaseError("workspaceCatalog.releaseId must be an exact same-channel v1 tag")
+        if not isinstance(catalog.get("sha256"), str) or not SHA256_PATTERN.fullmatch(
+            catalog["sha256"]
+        ):
+            raise ReleaseError("workspaceCatalog.sha256 must be a full lowercase raw SHA-256")
+    else:
+        catalogs = value.get("workspaceCatalogs")
+        if not isinstance(catalogs, dict) or set(catalogs) != {"baselineV1", "activeV2"}:
+            raise ReleaseError(
+                "workspaceCatalogs must select exact baselineV1 and activeV2 locators"
+            )
+        for key, expected_schema in (("baselineV1", 1), ("activeV2", 2)):
+            catalog = catalogs[key]
+            if not isinstance(catalog, dict) or set(catalog) != {"releaseId", "sha256"}:
+                raise ReleaseError(
+                    f"workspaceCatalogs.{key} must contain releaseId and raw SHA-256"
+                )
+            identity = _catalog_tag_identity(catalog.get("releaseId", ""))
+            if identity is None or identity[0] != expected_schema or identity[1] != channel:
+                raise ReleaseError(
+                    f"workspaceCatalogs.{key}.releaseId must be an exact same-channel v{expected_schema} tag"
+                )
+            if not isinstance(catalog.get("sha256"), str) or not SHA256_PATTERN.fullmatch(
+                catalog["sha256"]
+            ):
+                raise ReleaseError(
+                    f"workspaceCatalogs.{key}.sha256 must be a full lowercase raw SHA-256"
+                )
+        if catalogs["baselineV1"]["sha256"] != FROZEN_CATALOG_V1_SHA256:
+            raise ReleaseError(
+                "workspaceCatalogs.baselineV1 must use the frozen generation-13 catalog digest"
+            )
     _release_source(value.get("platformReleaseId"), channel, "platformReleaseId")
     products = value.get("productReleaseIds")
     if not isinstance(products, dict) or set(products) != set(PRODUCTS):
@@ -289,6 +352,15 @@ def _read_dispatch_inputs(path: Path, source_ref: str, source_commit: str) -> di
     for product, release_id in products.items():
         _release_source(release_id, channel, f"productReleaseIds.{product}")
     return value
+
+
+def _catalog_locator(inputs: dict[str, Any], key: str = "active") -> dict[str, str]:
+    """Return the selected v1 or v2 catalog locator from validated dispatch inputs."""
+
+    if inputs["schemaVersion"] == 1:
+        return inputs["workspaceCatalog"]
+    catalog_key = "baselineV1" if key == "baseline" else "activeV2"
+    return inputs["workspaceCatalogs"][catalog_key]
 
 
 def _component_requests(inputs: dict[str, Any]) -> tuple[ComponentRequest, ...]:
@@ -1524,6 +1596,7 @@ def _inspect_deb_initialization(
         original_root = extraction / "usr/share/cyrene/verified-service-artifacts" / profile_id
         original_index_path = original_root / "index.json"
         catalog_path = extraction / BOOTSTRAP_CATALOG_PATH
+        catalog_v2_path = extraction / BOOTSTRAP_CATALOG_V2_PATH
         binding_path = extraction / BOOTSTRAP_CATALOG_BINDING_PATH
         loader_path = extraction / BOOTSTRAP_CATALOG_BINDING_LOADER_PATH
         _require_file(marker_path, f"DEB install contract marker for {profile_id}")
@@ -1555,21 +1628,82 @@ def _inspect_deb_initialization(
         catalog_document = _read_json_object(catalog_path, "DEB selected Workspace catalog")
         catalog_generation = catalog_document.get("generation")
         if (
-            catalog_document.get("schemaVersion") != 1
+            type(catalog_document.get("schemaVersion")) is not int
+            or catalog_document.get("schemaVersion") != 1
             or type(catalog_generation) is not int
             or catalog_generation < 1
         ):
             raise ReleaseError("DEB selected Workspace catalog schema or generation is invalid")
+        bound_catalog_path = catalog_path
+        bound_catalog_evidence = catalog_evidence
+        bound_catalog_generation = catalog_generation
+        active_catalog_proof: dict[str, Any] | None = None
+        if type(receipt.get("schemaVersion")) is int and receipt.get("schemaVersion") == 2:
+            catalog_evidence_rows = release_inputs.get("workspaceCatalogs")
+            if not isinstance(catalog_evidence_rows, dict):
+                raise ReleaseError(
+                    "v2 source receipt has no exact active Workspace catalog evidence"
+                )
+            baseline_v1 = catalog_evidence_rows.get("baselineV1")
+            active_v2 = catalog_evidence_rows.get("activeV2")
+            if (
+                not isinstance(baseline_v1, dict)
+                or not isinstance(active_v2, dict)
+                or baseline_v1.get("generation") != catalog_generation
+                or any(
+                    baseline_v1.get(key) != catalog_evidence.get(key) for key in catalog_evidence
+                )
+                or active_v2.get("assetName") != "component-catalog-v2.json"
+                or _require_active_catalog_v2_generation(
+                    active_v2.get("generation"), "activeV2 catalog evidence generation"
+                )
+                != active_v2.get("generation")
+            ):
+                raise ReleaseError(
+                    "DEB baseline/active Workspace catalog bytes differ from the source receipt"
+                )
+            _require_file(catalog_v2_path, "DEB active Workspace catalog")
+            if _sha256(catalog_v2_path) != active_v2.get("sha256"):
+                raise ReleaseError(
+                    "DEB active Workspace catalog bytes differ from the source receipt"
+                )
+            active_catalog_document = _read_json_object(
+                catalog_v2_path, "DEB active Workspace catalog"
+            )
+            if (
+                type(active_catalog_document.get("schemaVersion")) is not int
+                or active_catalog_document.get("schemaVersion") != 2
+                or _require_active_catalog_v2_generation(
+                    active_catalog_document.get("generation"), "DEB active Workspace catalog"
+                )
+                != active_v2.get("generation")
+            ):
+                raise ReleaseError("DEB active Workspace catalog schema or generation is invalid")
+            bound_catalog_path = catalog_v2_path
+            bound_catalog_evidence = {
+                key: value for key, value in active_v2.items() if key != "generation"
+            }
+            bound_catalog_generation = active_v2["generation"]
+            active_catalog_proof = {
+                "workspaceCatalogV2Path": f"/{BOOTSTRAP_CATALOG_V2_PATH}",
+                "workspaceCatalogV2Sha256": _sha256(catalog_v2_path),
+                "workspaceCatalogV2Generation": active_v2["generation"],
+            }
+        elif catalog_v2_path.exists():
+            raise ReleaseError("a v1 source receipt cannot package an active v2 Workspace catalog")
         expected_binding = {
             "schemaVersion": 1,
-            "catalog": {**catalog_evidence, "generation": catalog_generation},
+            "catalog": {
+                **bound_catalog_evidence,
+                "generation": bound_catalog_generation,
+            },
         }
         binding_document = _read_json_object(binding_path, "DEB selected catalog binding")
         if binding_document != expected_binding:
             raise ReleaseError("DEB catalog binding differs from the exact selected source receipt")
         try:
             _bootstrap_catalog_binding_module().load_bootstrap_catalog_binding(
-                binding_path, catalog_path, require_root=False
+                binding_path, bound_catalog_path, require_root=False
             )
         except (OSError, ValueError) as error:
             raise ReleaseError(f"DEB selected catalog binding is invalid: {error}") from error
@@ -1657,7 +1791,7 @@ def _inspect_deb_initialization(
             )
         _validate_deb_private_runtime(extraction, deb_path, receipt)
         _validate_packaged_stage_only_behavior(extraction, profile_id)
-        return {
+        proof = {
             "targetId": profile_id,
             "debSha256": _sha256(deb_path),
             "markerPath": f"/{INSTALL_CONTRACT_PATH}",
@@ -1688,6 +1822,9 @@ def _inspect_deb_initialization(
                 "pinnedPrivateRuntime": "passed",
             },
         }
+        if active_catalog_proof is not None:
+            proof.update(active_catalog_proof)
+        return proof
 
 
 def _marker_service_summary(row: dict[str, Any]) -> dict[str, Any]:
@@ -1776,45 +1913,147 @@ def _marker_services_from_index(
     return result
 
 
+def _verify_catalog_input(
+    catalog_path: Path,
+    metadata_path: Path,
+    attestation_path: Path | None,
+    locator: dict[str, str],
+    *,
+    expected_schema: int,
+    expected_generation: int | None,
+    channel: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Verify one exact catalog release, schema/generation, metadata, and detached attestation."""
+
+    catalog = _read_json_object(catalog_path, f"verified Workspace v{expected_schema} catalog")
+    metadata = _read_json_object(
+        metadata_path, f"verified Workspace v{expected_schema} catalog metadata"
+    )
+    identity = _catalog_tag_identity(locator["releaseId"])
+    if identity is None or identity[0] != expected_schema or identity[1] != channel:
+        raise ReleaseError(
+            "selected Workspace catalog tag does not match its expected schema/channel"
+        )
+    _, _, source_commit = identity
+    if (
+        type(metadata.get("schemaVersion")) is not int
+        or metadata.get("schemaVersion") != expected_schema
+        or metadata.get("repository") != REPOSITORY
+        or metadata.get("workflow") != CATALOG_WORKFLOW
+        or metadata.get("channel") != channel
+        or metadata.get("releaseId") != locator["releaseId"]
+        or metadata.get("sourceCommit") != source_commit
+        or metadata.get("sourceRef") not in CHANNEL_REFS[channel]
+        or metadata.get("catalogSha256") != f"sha256:{locator['sha256']}"
+        or _sha256(catalog_path) != locator["sha256"]
+        or type(catalog.get("schemaVersion")) is not int
+        or catalog.get("schemaVersion") != expected_schema
+        or type(catalog.get("generation")) is not int
+        or catalog.get("generation") < 1
+        or type(metadata.get("generation")) is not int
+        or metadata.get("generation") != catalog.get("generation")
+        or (expected_generation is not None and catalog.get("generation") != expected_generation)
+    ):
+        raise ReleaseError(
+            f"verified Workspace v{expected_schema} catalog metadata or bytes differ from the exact locator"
+        )
+    if attestation_path is None:
+        raise ReleaseError("verified Workspace catalog detached attestation bundle is required")
+    _require_file(attestation_path, f"verified Workspace v{expected_schema} catalog attestation")
+    _run_attestation_verify(
+        catalog_path,
+        attestation_path,
+        repository=REPOSITORY,
+        workflow=CATALOG_WORKFLOW,
+        source_ref=metadata["sourceRef"],
+        source_commit=source_commit,
+        gh_executable=os.environ.get("GH_EXECUTABLE", "gh"),
+        label=f"Workspace v{expected_schema} component catalog",
+    )
+    return catalog, metadata
+
+
+def _catalog_evidence(
+    catalog_path: Path,
+    attestation_path: Path,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the exact eight-field evidence shape used by native source receipts."""
+
+    identity = _catalog_tag_identity(metadata["releaseId"])
+    assert identity is not None
+    return {
+        "repository": metadata["repository"],
+        "workflow": metadata["workflow"],
+        "releaseId": metadata["releaseId"],
+        "source": {"ref": metadata["sourceRef"], "commit": identity[2]},
+        "assetName": catalog_path.name,
+        "sha256": _sha256(catalog_path),
+        "attestationBundleSha256": _sha256(attestation_path),
+        "generation": _read_json_object(catalog_path, "Workspace catalog")["generation"],
+    }
+
+
 def _record_inputs(arguments: argparse.Namespace) -> int:
     """Write a source receipt from actual catalog metadata and official fetch reports."""
 
     inputs = _read_dispatch_inputs(arguments.inputs, arguments.source_ref, arguments.source_commit)
-    catalog = _read_json_object(arguments.catalog, "verified Workspace catalog")
-    catalog_metadata = _read_json_object(arguments.catalog_metadata, "verified catalog metadata")
     channel = _source_channel(arguments.source_ref)
-    catalog_match = CATALOG_TAG_PATTERN.fullmatch(inputs["workspaceCatalog"]["releaseId"])
-    assert catalog_match is not None
-    catalog_commit = catalog_match.group(2)
-    if (
-        catalog_metadata.get("schemaVersion") != 1
-        or catalog_metadata.get("repository") != REPOSITORY
-        or catalog_metadata.get("workflow") != CATALOG_WORKFLOW
-        or catalog_metadata.get("channel") != channel
-        or catalog_metadata.get("releaseId") != inputs["workspaceCatalog"]["releaseId"]
-        or catalog_metadata.get("sourceCommit") != catalog_commit
-        or catalog_metadata.get("sourceRef") not in CHANNEL_REFS[channel]
-        or catalog_metadata.get("catalogSha256") != f"sha256:{inputs['workspaceCatalog']['sha256']}"
-        or _sha256(arguments.catalog) != inputs["workspaceCatalog"]["sha256"]
-    ):
-        raise ReleaseError(
-            "verified catalog metadata does not match the exact user-selected release"
-        )
-    if arguments.catalog_attestation is None:
-        raise ReleaseError("verified Workspace catalog detached attestation bundle is required")
-    _require_file(arguments.catalog_attestation, "verified Workspace catalog attestation")
-    _run_attestation_verify(
+    baseline_locator = _catalog_locator(inputs, "baseline")
+    baseline_catalog, baseline_metadata = _verify_catalog_input(
         arguments.catalog,
+        arguments.catalog_metadata,
         arguments.catalog_attestation,
-        repository=REPOSITORY,
-        workflow=CATALOG_WORKFLOW,
-        source_ref=catalog_metadata["sourceRef"],
-        source_commit=catalog_commit,
-        gh_executable=os.environ.get("GH_EXECUTABLE", "gh"),
-        label="Workspace component catalog",
+        baseline_locator,
+        expected_schema=1,
+        expected_generation=(
+            FROZEN_CATALOG_V1_GENERATION if inputs["schemaVersion"] == 2 else None
+        ),
+        channel=channel,
     )
-    if catalog.get("schemaVersion") != 1:
-        raise ReleaseError("verified catalog has an unsupported schema version")
+    baseline_evidence = _catalog_evidence(
+        arguments.catalog, arguments.catalog_attestation, baseline_metadata
+    )
+    if inputs["schemaVersion"] == 2:
+        if (
+            arguments.active_catalog_v2 is None
+            or arguments.active_catalog_v2_metadata is None
+            or arguments.active_catalog_v2_attestation is None
+        ):
+            raise ReleaseError("schemaVersion 2 requires the exact signed active v2 catalog inputs")
+        active_locator = _catalog_locator(inputs, "active")
+        active_catalog, active_metadata = _verify_catalog_input(
+            arguments.active_catalog_v2,
+            arguments.active_catalog_v2_metadata,
+            arguments.active_catalog_v2_attestation,
+            active_locator,
+            expected_schema=2,
+            expected_generation=None,
+            channel=channel,
+        )
+        active_generation = _require_active_catalog_v2_generation(
+            active_catalog.get("generation"), "selected active v2 catalog"
+        )
+        active_evidence = _catalog_evidence(
+            arguments.active_catalog_v2, arguments.active_catalog_v2_attestation, active_metadata
+        )
+        if active_evidence.get("generation") != active_generation:
+            raise ReleaseError("active v2 catalog evidence generation differs from its exact bytes")
+    else:
+        if any(
+            item is not None
+            for item in (
+                arguments.active_catalog_v2,
+                arguments.active_catalog_v2_metadata,
+                arguments.active_catalog_v2_attestation,
+            )
+        ):
+            raise ReleaseError("schemaVersion 1 does not accept v2 Workspace catalog inputs")
+        active_catalog, active_metadata, active_evidence = (
+            baseline_catalog,
+            baseline_metadata,
+            baseline_evidence,
+        )
 
     reports: dict[str, Path] = {}
     attestations: dict[str, Path] = {}
@@ -1843,7 +2082,7 @@ def _record_inputs(arguments: argparse.Namespace) -> int:
             request,
             reports[request.key],
             attestations[request.key],
-            catalog,
+            active_catalog,
             channel,
         )
         for request in requests
@@ -1862,7 +2101,7 @@ def _record_inputs(arguments: argparse.Namespace) -> int:
             raise ReleaseError(f"Platform {component} target tuples do not share one source commit")
 
     receipt = {
-        "schemaVersion": 1,
+        "schemaVersion": inputs["schemaVersion"],
         "workspaceSource": {
             "repository": REPOSITORY,
             "ref": arguments.source_ref,
@@ -1872,17 +2111,7 @@ def _record_inputs(arguments: argparse.Namespace) -> int:
         "releaseInputs": {
             "nativeProfiles": inputs["nativeProfiles"],
             "workspaceCatalog": {
-                "repository": catalog_metadata["repository"],
-                "workflow": catalog_metadata["workflow"],
-                "releaseId": catalog_metadata["releaseId"],
-                "source": {"ref": catalog_metadata["sourceRef"], "commit": catalog_commit},
-                "assetName": "component-catalog-v1.json",
-                "sha256": inputs["workspaceCatalog"]["sha256"],
-                "attestationBundleSha256": (
-                    _sha256(arguments.catalog_attestation)
-                    if arguments.catalog_attestation is not None
-                    else None
-                ),
+                key: value for key, value in baseline_evidence.items() if key != "generation"
             },
             "platformReleaseId": inputs["platformReleaseId"],
             "productReleaseIds": inputs["productReleaseIds"],
@@ -1899,6 +2128,11 @@ def _record_inputs(arguments: argparse.Namespace) -> int:
             "document": _read_json_object(arguments.release_lock, "Workspace release lock"),
         },
     }
+    if inputs["schemaVersion"] == 2:
+        receipt["releaseInputs"]["workspaceCatalogs"] = {
+            "baselineV1": baseline_evidence,
+            "activeV2": active_evidence,
+        }
     _write_json(arguments.output, receipt)
     print(f"Wrote source receipt for {len(tuples)} verified component target tuples")
     return 0
@@ -1908,6 +2142,129 @@ def _validate_source_receipt(
     receipt: dict[str, Any], source: dict[str, Any], *, require_safe_initialization: bool = True
 ) -> None:
     """Validate all offline locator and component tuple bindings in the signed receipt."""
+
+    if type(receipt.get("schemaVersion")) is int and receipt.get("schemaVersion") == 2:
+        release_inputs = receipt.get("releaseInputs")
+        catalogs = (
+            release_inputs.get("workspaceCatalogs") if isinstance(release_inputs, dict) else None
+        )
+        if (
+            not isinstance(release_inputs, dict)
+            or set(release_inputs)
+            != {
+                "nativeProfiles",
+                "workspaceCatalog",
+                "workspaceCatalogs",
+                "platformReleaseId",
+                "productReleaseIds",
+            }
+            or not isinstance(catalogs, dict)
+            or set(catalogs) != {"baselineV1", "activeV2"}
+        ):
+            raise ReleaseError("v2 source receipt must bind baselineV1 and activeV2 catalogs")
+        channel = _source_channel(str(source.get("ref", "")))
+        expected = {
+            "baselineV1": (1, "component-catalog-v1.json"),
+            "activeV2": (2, "component-catalog-v2.json"),
+        }
+        for key, (schema_version, asset_name) in expected.items():
+            evidence = catalogs[key]
+            generation = evidence.get("generation") if isinstance(evidence, dict) else None
+            if key == "baselineV1":
+                generation_valid = (
+                    type(generation) is int and generation == FROZEN_CATALOG_V1_GENERATION
+                )
+            else:
+                generation_valid = (
+                    type(generation) is int and generation >= MINIMUM_ACTIVE_CATALOG_V2_GENERATION
+                )
+            if not isinstance(evidence, dict) or set(evidence) != {
+                "repository",
+                "workflow",
+                "releaseId",
+                "source",
+                "assetName",
+                "sha256",
+                "attestationBundleSha256",
+                "generation",
+            }:
+                raise ReleaseError(f"v2 source receipt {key} catalog evidence is malformed")
+            identity = _catalog_tag_identity(str(evidence.get("releaseId", "")))
+            catalog_source = evidence.get("source")
+            if (
+                evidence.get("repository") != REPOSITORY
+                or evidence.get("workflow") != CATALOG_WORKFLOW
+                or evidence.get("assetName") != asset_name
+                or identity is None
+                or identity[0] != schema_version
+                or identity[1] != channel
+                or not isinstance(catalog_source, dict)
+                or catalog_source != {"ref": catalog_source.get("ref"), "commit": identity[2]}
+                or catalog_source.get("ref") not in CHANNEL_REFS[channel]
+                or not generation_valid
+                or not SHA256_PATTERN.fullmatch(str(evidence.get("sha256", "")))
+                or not SHA256_PATTERN.fullmatch(str(evidence.get("attestationBundleSha256", "")))
+            ):
+                raise ReleaseError(f"v2 source receipt {key} catalog identity is invalid")
+        baseline = catalogs["baselineV1"]
+        active = catalogs["activeV2"]
+        if baseline.get("sha256") != FROZEN_CATALOG_V1_SHA256:
+            raise ReleaseError(
+                "v2 source receipt baseline catalog digest is not the frozen generation-13 digest"
+            )
+        legacy_catalog = {key: value for key, value in baseline.items() if key != "generation"}
+        if release_inputs.get("workspaceCatalog") != legacy_catalog:
+            raise ReleaseError(
+                "v2 source receipt legacy catalog projection differs from baselineV1"
+            )
+        normalized = dict(receipt)
+        normalized["schemaVersion"] = 1
+        normalized_inputs = dict(release_inputs)
+        normalized_inputs.pop("workspaceCatalogs")
+        normalized["releaseInputs"] = normalized_inputs
+        safe_initialization = receipt.get("safeInitialization")
+        if isinstance(safe_initialization, dict) and isinstance(
+            safe_initialization.get("targets"), list
+        ):
+            normalized_safe = dict(safe_initialization)
+            normalized_safe["targets"] = [
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key
+                    not in {
+                        "workspaceCatalogV2Path",
+                        "workspaceCatalogV2Sha256",
+                        "workspaceCatalogV2Generation",
+                    }
+                }
+                if isinstance(row, dict)
+                else row
+                for row in safe_initialization["targets"]
+            ]
+            normalized["safeInitialization"] = normalized_safe
+        _validate_source_receipt(
+            normalized, source, require_safe_initialization=require_safe_initialization
+        )
+        if require_safe_initialization:
+            targets = (
+                safe_initialization.get("targets")
+                if isinstance(safe_initialization, dict)
+                else None
+            )
+            if not isinstance(targets, list):
+                raise ReleaseError("v2 source receipt has no stage-only target evidence")
+            for row in targets:
+                if (
+                    not isinstance(row, dict)
+                    or row.get("workspaceCatalogV2Path") != f"/{BOOTSTRAP_CATALOG_V2_PATH}"
+                    or row.get("workspaceCatalogV2Sha256") != active["sha256"]
+                    or row.get("workspaceCatalogV2Generation") != active["generation"]
+                ):
+                    raise ReleaseError(
+                        "v2 source receipt active catalog target evidence is invalid"
+                    )
+        return
 
     expected_top_keys = {
         "schemaVersion",
@@ -1923,6 +2280,7 @@ def _validate_source_receipt(
         not expected_top_keys.issubset(actual_top_keys)
         or not actual_top_keys.issubset(allowed_top_keys)
         or (require_safe_initialization and "safeInitialization" not in actual_top_keys)
+        or type(receipt.get("schemaVersion")) is not int
         or receipt.get("schemaVersion") != 1
     ):
         raise ReleaseError("source receipt fields do not match the approved schema version")
@@ -1951,15 +2309,16 @@ def _validate_source_receipt(
     }:
         raise ReleaseError("source receipt catalog evidence fields are malformed")
     catalog_source = catalog.get("source")
-    catalog_match = CATALOG_TAG_PATTERN.fullmatch(str(catalog.get("releaseId", "")))
+    catalog_identity = _catalog_tag_identity(str(catalog.get("releaseId", "")))
     if (
         catalog.get("repository") != REPOSITORY
         or catalog.get("workflow") != CATALOG_WORKFLOW
         or catalog.get("assetName") != "component-catalog-v1.json"
-        or catalog_match is None
-        or catalog_match.group(1) != channel
+        or catalog_identity is None
+        or catalog_identity[0] != 1
+        or catalog_identity[1] != channel
         or not isinstance(catalog_source, dict)
-        or catalog_source.get("commit") != catalog_match.group(2)
+        or catalog_source.get("commit") != catalog_identity[2]
         or catalog_source.get("ref") not in CHANNEL_REFS[channel]
         or not SHA256_PATTERN.fullmatch(str(catalog.get("sha256", "")))
         or not SHA256_PATTERN.fullmatch(str(catalog.get("attestationBundleSha256", "")))
@@ -2292,25 +2651,33 @@ def _validate_release_manifest_identity(
     """Validate the fixed repository, workflow, and source identity envelope."""
 
     source = manifest.get("source")
+    schema_version = manifest.get("schemaVersion")
+    expected_keys = {
+        "schemaVersion",
+        "repository",
+        "releaseId",
+        "version",
+        "channel",
+        "source",
+        "workflow",
+        "run",
+        "targets",
+        "sourceReceipt",
+        "workspaceCatalog",
+        "pythonRuntimeLock",
+        "workspaceReleaseLock",
+        "checksumAsset",
+    }
+    if schema_version == 2:
+        expected_keys.add("workspaceCatalogs")
     if (
-        set(manifest)
-        != {
-            "schemaVersion",
-            "repository",
-            "releaseId",
-            "version",
-            "channel",
-            "source",
-            "workflow",
-            "run",
-            "targets",
-            "sourceReceipt",
-            "workspaceCatalog",
-            "pythonRuntimeLock",
-            "workspaceReleaseLock",
-            "checksumAsset",
-        }
-        or manifest.get("schemaVersion") != 1
+        set(manifest) != expected_keys
+        or type(schema_version) is not int
+        or schema_version not in {1, 2}
+        or (
+            receipt.get("schemaVersion") is not None
+            and receipt.get("schemaVersion") != schema_version
+        )
         or manifest.get("repository") != expected_repository
         or manifest.get("workflow") != f"{expected_repository}/{WORKFLOW_PATH}"
         or not isinstance(source, dict)
@@ -2338,6 +2705,8 @@ def _validate_release_manifest_identity(
         raise ReleaseError("source receipt source identity differs from the release manifest")
     if manifest.get("channel") != _source_channel(source["ref"]):
         raise ReleaseError("release manifest channel differs from its source ref")
+    if schema_version == 2 and not isinstance(manifest.get("workspaceCatalogs"), dict):
+        raise ReleaseError("v2 release manifest has no versioned Workspace catalog assets")
     return source
 
 
@@ -2354,16 +2723,19 @@ def _validate_release_directory_membership(
     root: Path,
     expected_asset_names: set[str],
     expected_subject_names: set[str],
-    catalog_bundle_name: str,
+    catalog_bundle_name: str | set[str],
     checksums_name: str,
 ) -> None:
     """Require the release directory to contain only its exact immutable assets."""
 
+    catalog_bundle_names = (
+        {catalog_bundle_name} if isinstance(catalog_bundle_name, str) else catalog_bundle_name
+    )
     expected_directory_names = (
         set(expected_asset_names)
         | {checksums_name}
         | {f"{name}.attestation.jsonl" for name in expected_subject_names}
-        | {catalog_bundle_name}
+        | catalog_bundle_names
     )
     actual_directory_names = set()
     for path in root.iterdir():
@@ -2386,9 +2758,12 @@ def _assemble(arguments: argparse.Namespace) -> int:
     if arguments.release_id != expected_tag:
         raise ReleaseError("release ID must bind the exact Workspace channel and source commit")
     source_receipt = _read_json_object(arguments.source_receipt, "source receipt")
+    receipt_version = source_receipt.get("schemaVersion")
+    if receipt_version not in {1, 2}:
+        raise ReleaseError("source receipt must use schemaVersion 1 or 2")
     source = source_receipt.get("workspaceSource")
     if (
-        source_receipt.get("schemaVersion") != 1
+        source_receipt.get("schemaVersion") != receipt_version
         or not isinstance(source, dict)
         or source.get("repository") != REPOSITORY
         or source.get("ref") != arguments.source_ref
@@ -2396,7 +2771,8 @@ def _assemble(arguments: argparse.Namespace) -> int:
         or source.get("workflow") != f"{REPOSITORY}/{WORKFLOW_PATH}"
     ):
         raise ReleaseError("source receipt is not bound to this exact Workspace workflow run")
-    if arguments.source_receipt.name != "native-installer-source-receipt-v1.json":
+    receipt_name = f"native-installer-source-receipt-v{receipt_version}.json"
+    if arguments.source_receipt.name != receipt_name:
         raise ReleaseError("source receipt file must use its canonical release asset name")
     _validate_source_receipt(source_receipt, source, require_safe_initialization=False)
     if arguments.version != _release_version_from_lock(
@@ -2477,40 +2853,59 @@ def _assemble(arguments: argparse.Namespace) -> int:
         "sha256": _sha256(release_lock_destination),
         "sizeBytes": release_lock_destination.stat().st_size,
     }
-    catalog_path = arguments.catalog
-    catalog_attestation_path = arguments.catalog_attestation
-    _require_file(catalog_path, "verified Workspace catalog release asset")
-    _require_file(catalog_attestation_path, "verified Workspace catalog attestation bundle")
-    catalog_evidence = source_receipt["releaseInputs"]["workspaceCatalog"]
-    if (
-        catalog_path.name != catalog_evidence["assetName"]
-        or _sha256(catalog_path) != catalog_evidence["sha256"]
-        or _sha256(catalog_attestation_path) != catalog_evidence["attestationBundleSha256"]
-    ):
-        raise ReleaseError(
-            "Workspace catalog bytes differ from the selected immutable source receipt"
+    catalog_inputs = [("baselineV1", arguments.catalog, arguments.catalog_attestation)]
+    if receipt_version == 2:
+        if arguments.active_catalog_v2 is None or arguments.active_catalog_v2_attestation is None:
+            raise ReleaseError("v2 release assembly requires active catalog and attestation inputs")
+        catalog_inputs.append(
+            ("activeV2", arguments.active_catalog_v2, arguments.active_catalog_v2_attestation)
         )
-    _run_attestation_verify(
-        catalog_path,
-        catalog_attestation_path,
-        repository=REPOSITORY,
-        workflow=CATALOG_WORKFLOW,
-        source_ref=catalog_evidence["source"]["ref"],
-        source_commit=catalog_evidence["source"]["commit"],
-        gh_executable=arguments.gh_executable,
-        label="Workspace catalog release asset",
-    )
-    catalog_destination = output / catalog_path.name
-    catalog_destination.write_bytes(catalog_path.read_bytes())
-    catalog_bundle_destination = output / f"{catalog_path.name}.attestation.jsonl"
-    catalog_bundle_destination.write_bytes(catalog_attestation_path.read_bytes())
-    catalog_asset = {
-        "assetName": catalog_destination.name,
-        "sha256": _sha256(catalog_destination),
-        "sizeBytes": catalog_destination.stat().st_size,
-        "attestationAssetName": catalog_bundle_destination.name,
-        "attestationSha256": _sha256(catalog_bundle_destination),
-    }
+    elif (
+        arguments.active_catalog_v2 is not None
+        or arguments.active_catalog_v2_attestation is not None
+    ):
+        raise ReleaseError("v1 release assembly does not accept an active v2 catalog")
+    catalog_assets: dict[str, dict[str, Any]] = {}
+    for catalog_key, catalog_path, catalog_attestation_path in catalog_inputs:
+        _require_file(catalog_path, f"verified Workspace {catalog_key} catalog release asset")
+        _require_file(
+            catalog_attestation_path,
+            f"verified Workspace {catalog_key} catalog attestation bundle",
+        )
+        catalog_evidence = (
+            source_receipt["releaseInputs"]["workspaceCatalog"]
+            if catalog_key == "baselineV1"
+            else source_receipt["releaseInputs"]["workspaceCatalogs"]["activeV2"]
+        )
+        if (
+            catalog_path.name != catalog_evidence["assetName"]
+            or _sha256(catalog_path) != catalog_evidence["sha256"]
+            or _sha256(catalog_attestation_path) != catalog_evidence["attestationBundleSha256"]
+        ):
+            raise ReleaseError(
+                f"Workspace {catalog_key} catalog bytes differ from the selected immutable source receipt"
+            )
+        _run_attestation_verify(
+            catalog_path,
+            catalog_attestation_path,
+            repository=REPOSITORY,
+            workflow=CATALOG_WORKFLOW,
+            source_ref=catalog_evidence["source"]["ref"],
+            source_commit=catalog_evidence["source"]["commit"],
+            gh_executable=arguments.gh_executable,
+            label=f"Workspace {catalog_key} catalog release asset",
+        )
+        catalog_destination = output / catalog_path.name
+        catalog_destination.write_bytes(catalog_path.read_bytes())
+        catalog_bundle_destination = output / f"{catalog_path.name}.attestation.jsonl"
+        catalog_bundle_destination.write_bytes(catalog_attestation_path.read_bytes())
+        catalog_assets[catalog_key] = {
+            "assetName": catalog_destination.name,
+            "sha256": _sha256(catalog_destination),
+            "sizeBytes": catalog_destination.stat().st_size,
+            "attestationAssetName": catalog_bundle_destination.name,
+            "attestationSha256": _sha256(catalog_bundle_destination),
+        }
     receipt_bytes = (
         json.dumps(source_receipt, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
     ).encode("utf-8")
@@ -2521,7 +2916,7 @@ def _assemble(arguments: argparse.Namespace) -> int:
         "sizeBytes": len(receipt_bytes),
     }
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": receipt_version,
         "repository": REPOSITORY,
         "releaseId": arguments.release_id,
         "version": arguments.version,
@@ -2531,16 +2926,18 @@ def _assemble(arguments: argparse.Namespace) -> int:
         "run": {"id": arguments.run_id, "attempt": arguments.run_attempt},
         "targets": deb_assets,
         "sourceReceipt": receipt_asset,
-        "workspaceCatalog": catalog_asset,
+        "workspaceCatalog": catalog_assets["baselineV1"],
         "pythonRuntimeLock": lock_asset,
         "workspaceReleaseLock": release_lock_asset,
         "checksumAsset": "SHA256SUMS",
     }
-    manifest_path = output / "native-installer-release-v1.json"
+    if receipt_version == 2:
+        manifest["workspaceCatalogs"] = catalog_assets
+    manifest_path = output / f"native-installer-release-v{receipt_version}.json"
     _write_json(manifest_path, manifest)
     checksums = [(output / asset["assetName"]).name for asset in deb_assets] + [
         arguments.source_receipt.name,
-        catalog_destination.name,
+        *(asset["assetName"] for asset in catalog_assets.values()),
         lock_destination.name,
         release_lock_destination.name,
         manifest_path.name,
@@ -2591,8 +2988,20 @@ def verify_release_directory(
     """
 
     root = directory.resolve()
-    manifest_path = root / "native-installer-release-v1.json"
-    receipt_path = root / "native-installer-source-receipt-v1.json"
+    v1_manifest = root / "native-installer-release-v1.json"
+    v1_receipt = root / "native-installer-source-receipt-v1.json"
+    v2_manifest = root / "native-installer-release-v2.json"
+    v2_receipt = root / "native-installer-source-receipt-v2.json"
+    if (
+        v1_manifest.is_file() == v2_manifest.is_file()
+        or v1_receipt.is_file() == v2_receipt.is_file()
+    ):
+        raise ReleaseError(
+            "release directory must contain exactly one matching v1 or v2 manifest/receipt pair"
+        )
+    manifest_path, receipt_path = (
+        (v2_manifest, v2_receipt) if v2_manifest.is_file() else (v1_manifest, v1_receipt)
+    )
     checksums_path = root / "SHA256SUMS"
     for path, label in (
         (manifest_path, "release manifest"),
@@ -2638,7 +3047,9 @@ def verify_release_directory(
         raise ReleaseError(
             "release manifest target profile set is not exactly Ubuntu 22.04 and 24.04"
         )
-    expected_subjects = set(RELEASE_SUBJECT_NAMES)
+    expected_subjects = set(
+        RELEASE_SUBJECT_NAMES_V2 if manifest.get("schemaVersion") == 2 else RELEASE_SUBJECT_NAMES
+    )
     expected_asset_hashes: dict[str, str] = {}
     for target_id, asset_name in expected_targets.items():
         target = targets_by_id[target_id]
@@ -2679,44 +3090,98 @@ def verify_release_directory(
         raise ReleaseError("release manifest source receipt/checksum asset metadata is invalid")
     expected_asset_hashes[receipt_path.name] = _sha256(receipt_path)
     expected_asset_hashes[manifest_path.name] = _sha256(manifest_path)
-    catalog_metadata = manifest.get("workspaceCatalog")
-    catalog_receipt = receipt["releaseInputs"]["workspaceCatalog"]
-    if (
-        not isinstance(catalog_metadata, dict)
-        or set(catalog_metadata)
-        != {"assetName", "sha256", "sizeBytes", "attestationAssetName", "attestationSha256"}
-        or catalog_metadata.get("assetName") != catalog_receipt["assetName"]
-        or catalog_metadata.get("attestationAssetName")
-        != f"{catalog_metadata.get('assetName')}.attestation.jsonl"
-    ):
-        raise ReleaseError("release manifest Workspace catalog metadata is malformed")
-    catalog_path = root / catalog_metadata["assetName"]
-    catalog_bundle_path = root / catalog_metadata["attestationAssetName"]
-    _require_file(catalog_path, "Workspace catalog release asset")
-    _require_file(catalog_bundle_path, "Workspace catalog detached attestation bundle")
-    if (
-        _sha256(catalog_path) != catalog_receipt["sha256"]
-        or catalog_metadata.get("sha256") != _sha256(catalog_path)
-        or catalog_metadata.get("sizeBytes") != catalog_path.stat().st_size
-        or _sha256(catalog_bundle_path) != catalog_receipt["attestationBundleSha256"]
-        or catalog_metadata.get("attestationSha256") != _sha256(catalog_bundle_path)
-    ):
-        raise ReleaseError(
-            "Workspace catalog bytes or attestation bundle differ from source receipt"
+    if manifest.get("schemaVersion") == 2:
+        manifest_catalogs = manifest.get("workspaceCatalogs")
+        receipt_catalogs = receipt["releaseInputs"].get("workspaceCatalogs")
+        if (
+            not isinstance(manifest_catalogs, dict)
+            or set(manifest_catalogs) != {"baselineV1", "activeV2"}
+            or not isinstance(receipt_catalogs, dict)
+            or set(receipt_catalogs) != {"baselineV1", "activeV2"}
+            or manifest.get("workspaceCatalog") != manifest_catalogs["baselineV1"]
+        ):
+            raise ReleaseError(
+                "v2 release manifest must bind both catalogs and its v1 compatibility projection"
+            )
+        catalogs_to_verify = (
+            ("baselineV1", manifest_catalogs["baselineV1"], receipt_catalogs["baselineV1"]),
+            ("activeV2", manifest_catalogs["activeV2"], receipt_catalogs["activeV2"]),
         )
-    catalog_source = catalog_receipt["source"]
-    if verify_attestations:
-        _run_attestation_verify(
-            catalog_path,
-            catalog_bundle_path,
-            repository=REPOSITORY,
-            workflow=CATALOG_WORKFLOW,
-            source_ref=catalog_source["ref"],
-            source_commit=catalog_source["commit"],
-            gh_executable=gh_executable,
-            label="offline Workspace catalog",
+    else:
+        catalogs_to_verify = (
+            (
+                "baselineV1",
+                manifest.get("workspaceCatalog"),
+                receipt["releaseInputs"]["workspaceCatalog"],
+            ),
         )
-    expected_asset_hashes[catalog_path.name] = _sha256(catalog_path)
+    catalog_bundle_names: set[str] = set()
+    for catalog_key, catalog_metadata, catalog_receipt in catalogs_to_verify:
+        if (
+            not isinstance(catalog_metadata, dict)
+            or set(catalog_metadata)
+            != {"assetName", "sha256", "sizeBytes", "attestationAssetName", "attestationSha256"}
+            or catalog_metadata.get("assetName") != catalog_receipt.get("assetName")
+            or catalog_metadata.get("attestationAssetName")
+            != f"{catalog_metadata.get('assetName')}.attestation.jsonl"
+        ):
+            raise ReleaseError(f"release manifest {catalog_key} catalog metadata is malformed")
+        catalog_path = root / catalog_metadata["assetName"]
+        catalog_bundle_path = root / catalog_metadata["attestationAssetName"]
+        _require_file(catalog_path, f"Workspace {catalog_key} catalog release asset")
+        _require_file(catalog_bundle_path, f"Workspace {catalog_key} catalog attestation bundle")
+        if (
+            _sha256(catalog_path) != catalog_receipt["sha256"]
+            or catalog_metadata.get("sha256") != _sha256(catalog_path)
+            or catalog_metadata.get("sizeBytes") != catalog_path.stat().st_size
+            or _sha256(catalog_bundle_path) != catalog_receipt["attestationBundleSha256"]
+            or catalog_metadata.get("attestationSha256") != _sha256(catalog_bundle_path)
+        ):
+            raise ReleaseError(
+                f"Workspace {catalog_key} catalog bytes or attestation bundle differ from source receipt"
+            )
+        catalog_document = _read_json_object(catalog_path, f"Workspace {catalog_key} catalog")
+        expected_schema = 1 if catalog_key == "baselineV1" else 2
+        receipt_generation = catalog_receipt.get("generation")
+        if manifest.get("schemaVersion") == 1:
+            receipt_generation = catalog_document.get("generation")
+            generation_valid = type(receipt_generation) is int and receipt_generation >= 1
+        elif catalog_key == "baselineV1":
+            generation_valid = (
+                type(receipt_generation) is int
+                and receipt_generation == FROZEN_CATALOG_V1_GENERATION
+            )
+        else:
+            try:
+                _require_active_catalog_v2_generation(
+                    receipt_generation, "release directory activeV2 receipt"
+                )
+            except ReleaseError:
+                generation_valid = False
+            else:
+                generation_valid = True
+        if (
+            type(catalog_document.get("schemaVersion")) is not int
+            or catalog_document.get("schemaVersion") != expected_schema
+            or type(catalog_document.get("generation")) is not int
+            or not generation_valid
+            or catalog_document.get("generation") != receipt_generation
+        ):
+            raise ReleaseError(f"Workspace {catalog_key} catalog schema or generation is invalid")
+        catalog_source = catalog_receipt["source"]
+        if verify_attestations:
+            _run_attestation_verify(
+                catalog_path,
+                catalog_bundle_path,
+                repository=REPOSITORY,
+                workflow=CATALOG_WORKFLOW,
+                source_ref=catalog_source["ref"],
+                source_commit=catalog_source["commit"],
+                gh_executable=gh_executable,
+                label=f"offline Workspace {catalog_key} catalog",
+            )
+        expected_asset_hashes[catalog_path.name] = _sha256(catalog_path)
+        catalog_bundle_names.add(catalog_bundle_path.name)
     lock_metadata = manifest.get("pythonRuntimeLock")
     if (
         not isinstance(lock_metadata, dict)
@@ -2801,7 +3266,7 @@ def verify_release_directory(
         root,
         set(expected_asset_hashes),
         expected_subjects,
-        catalog_bundle_path.name,
+        catalog_bundle_names,
         checksums_path.name,
     )
     return manifest
@@ -3118,12 +3583,18 @@ def _validate_inputs_command(arguments: argparse.Namespace) -> int:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
         channel = _source_channel(arguments.source_ref)
-        catalog_match = CATALOG_TAG_PATTERN.fullmatch(result["workspaceCatalog"]["releaseId"])
-        assert catalog_match is not None
+        catalog_schema = result["schemaVersion"]
         with Path(output_path).open("a", encoding="utf-8") as output:
             output.write(f"channel={channel}\n")
-            output.write(f"catalog_release_id={result['workspaceCatalog']['releaseId']}\n")
-            output.write(f"catalog_sha256={result['workspaceCatalog']['sha256']}\n")
+            output.write(f"schema_version={catalog_schema}\n")
+            if catalog_schema == 1:
+                output.write(f"catalog_release_id={result['workspaceCatalog']['releaseId']}\n")
+                output.write(f"catalog_sha256={result['workspaceCatalog']['sha256']}\n")
+            else:
+                for name, key in (("baseline_v1", "baselineV1"), ("active_v2", "activeV2")):
+                    locator = result["workspaceCatalogs"][key]
+                    output.write(f"{name}_release_id={locator['releaseId']}\n")
+                    output.write(f"{name}_sha256={locator['sha256']}\n")
             output.write(f"platform_release_id={result['platformReleaseId']}\n")
             output.write(
                 f"platform_source_commit={_release_source(result['platformReleaseId'], channel, 'platformReleaseId')}\n"
@@ -3200,7 +3671,12 @@ def _prepare_bootstrap_catalog_binding(arguments: argparse.Namespace) -> int:
         raise ReleaseError("selected bootstrap catalog file must use its canonical asset name")
     catalog = _read_json_object(catalog_path, "selected bootstrap Workspace catalog")
     generation = catalog.get("generation")
-    if catalog.get("schemaVersion") != 1 or type(generation) is not int or generation < 1:
+    if (
+        type(catalog.get("schemaVersion")) is not int
+        or catalog.get("schemaVersion") != 1
+        or type(generation) is not int
+        or generation < 1
+    ):
         raise ReleaseError("selected bootstrap catalog schema or generation is invalid")
 
     source_catalog_digest: str | None = None
@@ -3224,7 +3700,8 @@ def _prepare_bootstrap_catalog_binding(arguments: argparse.Namespace) -> int:
         if receipt_path is None:
             raise ReleaseError("production catalog binding requires a verified source receipt")
         _require_file(receipt_path, "verified native installer source receipt")
-        if receipt_path.name != "native-installer-source-receipt-v1.json":
+        receipt_version = 2 if receipt_path.name == "native-installer-source-receipt-v2.json" else 1
+        if receipt_path.name != f"native-installer-source-receipt-v{receipt_version}.json":
             raise ReleaseError("source receipt file must use its canonical release asset name")
         receipt = _read_json_object(receipt_path, "verified native installer source receipt")
         source = receipt.get("workspaceSource")
@@ -3249,11 +3726,56 @@ def _prepare_bootstrap_catalog_binding(arguments: argparse.Namespace) -> int:
             or _sha256(catalog_path) != evidence["sha256"]
         ):
             raise ReleaseError(
-                "selected bootstrap catalog bytes differ from the exact verified source receipt"
+                "baseline bootstrap catalog bytes differ from the exact verified source receipt"
             )
+        binding_catalog_path = catalog_path
+        binding_evidence = evidence
+        binding_generation = generation
+        if receipt_version == 2:
+            if receipt.get("schemaVersion") != 2:
+                raise ReleaseError("v2 source receipt filename does not contain schemaVersion 2")
+            if (
+                generation != FROZEN_CATALOG_V1_GENERATION
+                or _sha256(catalog_path) != FROZEN_CATALOG_V1_SHA256
+            ):
+                raise ReleaseError("v2 package baseline must be the frozen generation-13 catalog")
+            active_catalog_path = getattr(arguments, "active_catalog_v2", None)
+            if active_catalog_path is None:
+                raise ReleaseError(
+                    "v2 catalog binding requires the active --active-catalog-v2 file"
+                )
+            _require_file(active_catalog_path, "selected active v2 bootstrap catalog")
+            if active_catalog_path.name != "component-catalog-v2.json":
+                raise ReleaseError("active v2 bootstrap catalog must use its canonical asset name")
+            active_catalog = _read_json_object(active_catalog_path, "selected active v2 catalog")
+            active_generation = active_catalog.get("generation")
+            catalogs = receipt["releaseInputs"].get("workspaceCatalogs")
+            active_evidence = catalogs.get("activeV2") if isinstance(catalogs, dict) else None
+            if (
+                type(active_catalog.get("schemaVersion")) is not int
+                or active_catalog.get("schemaVersion") != 2
+                or type(active_generation) is not int
+                or active_generation < MINIMUM_ACTIVE_CATALOG_V2_GENERATION
+                or not isinstance(active_evidence, dict)
+                or active_evidence.get("assetName") != active_catalog_path.name
+                or active_evidence.get("generation") != active_generation
+                or _sha256(active_catalog_path) != active_evidence.get("sha256")
+            ):
+                raise ReleaseError(
+                    "active v2 catalog bytes differ from the exact verified source receipt"
+                )
+            binding_catalog_path = active_catalog_path
+            binding_evidence = {
+                key: value for key, value in active_evidence.items() if key != "generation"
+            }
+            binding_generation = active_generation
+        elif receipt.get("schemaVersion") != 1:
+            raise ReleaseError("v1 source receipt filename does not contain schemaVersion 1")
+        elif getattr(arguments, "active_catalog_v2", None) is not None:
+            raise ReleaseError("v1 source receipt cannot bind an active v2 catalog")
         binding = {
             "schemaVersion": 1,
-            "catalog": {**evidence, "generation": generation},
+            "catalog": {**binding_evidence, "generation": binding_generation},
         }
 
     helper = _bootstrap_catalog_binding_module()
@@ -3263,7 +3785,7 @@ def _prepare_bootstrap_catalog_binding(arguments: argparse.Namespace) -> int:
     _write_json(arguments.output, binding)
     helper.load_bootstrap_catalog_binding(
         arguments.output,
-        catalog_path,
+        binding_catalog_path if not arguments.development_source_build else catalog_path,
         require_root=False,
         source_catalog_digest=source_catalog_digest,
     )
@@ -3413,6 +3935,7 @@ def _parser() -> argparse.ArgumentParser:
 
     catalog_binding = commands.add_parser("prepare-bootstrap-catalog-binding")
     catalog_binding.add_argument("--catalog", type=Path, required=True)
+    catalog_binding.add_argument("--active-catalog-v2", type=Path)
     catalog_binding.add_argument("--output", type=Path, required=True)
     binding_mode = catalog_binding.add_mutually_exclusive_group(required=True)
     binding_mode.add_argument("--source-receipt", type=Path)
@@ -3428,6 +3951,9 @@ def _parser() -> argparse.ArgumentParser:
     receipt.add_argument("--catalog", type=Path, required=True)
     receipt.add_argument("--catalog-metadata", type=Path, required=True)
     receipt.add_argument("--catalog-attestation", type=Path, required=True)
+    receipt.add_argument("--active-catalog-v2", type=Path)
+    receipt.add_argument("--active-catalog-v2-metadata", type=Path)
+    receipt.add_argument("--active-catalog-v2-attestation", type=Path)
     receipt.add_argument("--python-runtime-lock", type=Path, required=True)
     receipt.add_argument("--release-lock", type=Path, required=True)
     receipt.add_argument("--fetch-report", action="append", default=[], metavar="KEY=PATH")
@@ -3455,6 +3981,8 @@ def _parser() -> argparse.ArgumentParser:
     assemble.add_argument("--source-receipt", type=Path, required=True)
     assemble.add_argument("--catalog", type=Path, required=True)
     assemble.add_argument("--catalog-attestation", type=Path, required=True)
+    assemble.add_argument("--active-catalog-v2", type=Path)
+    assemble.add_argument("--active-catalog-v2-attestation", type=Path)
     assemble.add_argument("--python-runtime-lock", type=Path, required=True)
     assemble.add_argument("--release-lock", type=Path, required=True)
     assemble.add_argument("--version", required=True)

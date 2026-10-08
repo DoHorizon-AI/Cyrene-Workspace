@@ -11,11 +11,13 @@ import base64
 import fcntl
 import grp
 import hashlib
+import importlib.util
 import json
 import os
 import platform
 import pwd
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -29,13 +31,21 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from collections.abc import Callable
+import zipfile
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 PROTOCOL_VERSION = "cyrene.component-updates.helper.v1"
+WORKLOAD_PROTOCOL_VERSION = "cyrene.workload-plan.v1"
+WORKLOAD_HOST_TARGET = "linux-ubuntu-24.04-x86_64"
+WORKLOAD_IDS = frozenset({"catalyst", "echo", "plugins"})
+WORKLOAD_SDK_COMPONENT_ID = "cyrene-runtime-maintenance-sdk"
+WORKLOAD_SDK_TARGET_ID = "linux-ubuntu-24.04-x86_64-python-3.12-library"
+WORKLOAD_WEB_COMPONENT_ID = "cyrene-client-workspace-web"
+WORKLOAD_PACKAGE_RUNTIME_UNIT = "cyrene-package-runtime.service"
 PRODUCT_CONTRACT_ATTESTATION_WORKFLOW = "/.github/workflows/product-contract.yml"
 PRODUCT_POLICY_ATTESTATION_WORKFLOW = "/.github/workflows/product-policy-release.yml"
 COMPONENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -59,13 +69,17 @@ MAX_RELEASE_ASSET_BYTES = 2_000_000_000
 MAX_ATTESTATION_RESPONSE_BYTES = 16_000_000
 MAX_ATTESTATION_BUNDLE_BYTES = 2_000_000
 INSTALLED_CATALOG = Path("/usr/share/cyrene/component-catalog-v1.json")
+INSTALLED_CATALOG_V2 = Path("/usr/share/cyrene/component-catalog-v2.json")
+INSTALLED_CATALOG_PATHS = frozenset({INSTALLED_CATALOG, INSTALLED_CATALOG_V2})
 INSTALLED_BOOTSTRAP_CATALOG_BINDING = Path("/usr/share/cyrene/bootstrap-catalog-binding-v1.json")
 INSTALLED_HELPER_DIRECTORY = Path("/usr/lib/cyrene/scripts")
 ACTIVE_CATALOG_ROOT = Path("/usr/share/cyrene/component-catalogs")
 ACTIVE_CATALOG_POINTER = Path("/usr/share/cyrene/component-catalog-state.json")
 CATALOG_SCHEMA_ROOT = Path("/usr/share/cyrene/catalog-schemas")
 DEFAULT_CATALOG = (
-    INSTALLED_CATALOG
+    INSTALLED_CATALOG_V2
+    if INSTALLED_CATALOG_V2.is_file()
+    else INSTALLED_CATALOG
     if INSTALLED_CATALOG.is_file()
     else Path(__file__).resolve().with_name("component-catalog-bootstrap-v1.json")
 )
@@ -76,10 +90,23 @@ BROKER_BOOTSTRAP_JOURNAL = "native-first-bootstrap/runtime-maintenance-first-ins
 DEFAULT_INSTALL_ROOT = Path("/usr/lib/cyrene")
 DEFAULT_STATE_ROOT = Path("/var/lib/cyrene-updates")
 DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
+DEFAULT_WORKLOAD_WEB_ROOT = Path("/var/lib/cyrene/workloads/web")
 DEFAULT_RELEASE_LOCK = Path("/usr/lib/cyrene/release-lock.json")
 DEFAULT_PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
 DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
 DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT = Path("/etc/cyrene/runtime-activity-sources.env")
+DEFAULT_PACKAGE_RUNTIME_POLICY = Path("/etc/cyrene/runtime-package-sources.json")
+DEFAULT_ACTIVITY_TOKEN_DIRECTORY = Path("/etc/cyrene/runtime-activity-source-tokens")
+DEFAULT_CATALYST_API_TOKEN = Path("/etc/cyrene/secrets/catalyst-api-token")
+DEFAULT_CATALYST_AUTH_ENVIRONMENT = Path("/etc/cyrene/catalyst-auth.env")
+DEFAULT_STUDIO_CONTROL_ENVIRONMENT = Path("/etc/cyrene/studio-control.env")
+DEFAULT_CATALYST_AUTH_DROPIN = Path(
+    "/etc/systemd/system/cyrene-catalyst.service.d/80-workload-api-token.conf"
+)
+CATALYST_SERVICE_UNIT = "cyrene-catalyst.service"
+STUDIO_CONTROL_COMPONENT_ID = "cyrene-client-workspace-control"
+CATALYST_COMPONENT_ID = "cyrene-catalyst"
+CATALYST_API_ORIGIN = "http://127.0.0.1:8004"
 CONTROL_ADMISSION_ROOT = Path("/var/lib/cyrene-control-host/deployment-admission")
 CONTROL_ADMISSION_PROFILE = Path("/etc/cyrene/workspace-admission.env")
 CONTROL_ADMISSION_DROPINS = {
@@ -150,6 +177,9 @@ class Candidate:
     manifest_bytes: bytes | None = None
     release_assets: tuple[dict[str, Any], ...] = ()
     release_tag: str | None = None
+    index_asset_name: str | None = None
+    index_asset_digest: str | None = None
+    manifest_asset_digest: str | None = None
 
 
 def _jcs_string(value: str) -> str:
@@ -253,6 +283,23 @@ def _maintenance_request_id(transaction: dict[str, Any]) -> str:
     plan_id = transaction.get("planId")
     if not isinstance(plan_id, str) or PLAN_ID_PATTERN.fullmatch(plan_id) is None:
         raise UpdateError("INVALID_TRANSACTION", "Maintenance transaction has an invalid planId.")
+    if transaction.get("transactionKind") == "workload-assembly.v1":
+        phase = transaction.get("maintenancePhase")
+        if phase in {
+            "core-runtime-install",
+            "package-only",
+            "core-runtime-activate",
+            "core-runtime-uninstall",
+        }:
+            expected = f"cyrene-workload-{phase}-{plan_id}"
+            request_id = transaction.get("maintenanceRequestId", expected)
+            if request_id != expected:
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Workload maintenance requestId does not match its exact phase and plan.",
+                )
+            transaction["maintenanceRequestId"] = request_id
+            return request_id
     expected = "cyrene-update-" + plan_id
     request_id = transaction.get("requestId", expected)
     if request_id != expected:
@@ -680,6 +727,7 @@ class ComponentUpdater:
     def _load_installed_bootstrap_catalog_binding(self) -> dict[str, Any]:
         """Validate the fixed package binding against the fixed installed catalog."""
 
+        catalog_path = self.catalog_path
         helper_path = Path(__file__).resolve().with_name("bootstrap_catalog_binding.py")
         if helper_path.is_symlink() or not helper_path.is_file():
             raise UpdateError(
@@ -701,7 +749,7 @@ class ComponentUpdater:
             spec.loader.exec_module(module)
             binding = module.load_bootstrap_catalog_binding(
                 INSTALLED_BOOTSTRAP_CATALOG_BINDING,
-                INSTALLED_CATALOG,
+                catalog_path,
                 source_catalog_digest=TRUSTED_CATALOG_DIGEST,
             )
         except Exception as error:
@@ -731,8 +779,12 @@ class ComponentUpdater:
         allow_incomplete_catalog: bool = False,
     ) -> None:
         requested_catalog_path = Path(catalog_path)
+        installed_catalog_paths = {
+            Path(INSTALLED_CATALOG),
+            Path(INSTALLED_CATALOG_V2),
+        }
         packaged_helper = self._running_from_installed_helper()
-        if packaged_helper and requested_catalog_path != INSTALLED_CATALOG:
+        if packaged_helper and requested_catalog_path not in installed_catalog_paths:
             raise UpdateError(
                 "UNSAFE_CATALOG",
                 "The installed updater can use only its fixed bootstrap catalog path.",
@@ -769,7 +821,7 @@ class ComponentUpdater:
             raise UpdateError(
                 "UNSAFE_CATALOG", "The trusted component catalog must be a regular file."
             )
-        if self.catalog_path == INSTALLED_CATALOG and (
+        if self.catalog_path in installed_catalog_paths and (
             catalog_info.st_uid != 0 or stat.S_IMODE(catalog_info.st_mode) & 0o022
         ):
             raise UpdateError(
@@ -779,7 +831,7 @@ class ComponentUpdater:
         bootstrap_bytes = self.catalog_path.read_bytes()
         bootstrap_digest = "sha256:" + hashlib.sha256(bootstrap_bytes).hexdigest()
         self.bootstrap_catalog_binding: dict[str, Any] | None = None
-        if self.catalog_path == INSTALLED_CATALOG:
+        if self.catalog_path in installed_catalog_paths:
             # The package binding selects the official catalog release without baking a
             # release-specific digest into this helper's source bytes.
             self.bootstrap_catalog_binding = self._load_installed_bootstrap_catalog_binding()
@@ -813,6 +865,7 @@ class ComponentUpdater:
             tuple[str, ...],
             tuple[dict[str, Any], str, tuple[dict[str, Any], ...], str],
         ] = {}
+        self._index_asset_identity: dict[tuple[str, ...], tuple[str, str]] = {}
         self._readiness_cache: dict[tuple[str, bool], dict[str, Any]] = {}
         self.catalog_source: dict[str, Any] | None = None
         self.catalog_bytes = bootstrap_bytes
@@ -841,7 +894,7 @@ class ComponentUpdater:
         self.catalog = catalog_value
         if (
             isinstance(self.catalog.get("schemaVersion"), bool)
-            or self.catalog.get("schemaVersion") != 1
+            or self.catalog.get("schemaVersion") not in {1, 2}
             or not isinstance(self.catalog.get("components"), list)
         ):
             raise UpdateError(
@@ -868,6 +921,11 @@ class ComponentUpdater:
             item["repository"]: item
             for item in self.catalog.get("publishers", [])
             if isinstance(item, dict) and isinstance(item.get("repository"), str)
+        }
+        self.publisher_ids = {
+            item["id"]: item
+            for item in self.catalog.get("publishers", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
         }
 
     def _read_native_python_profiles(self) -> dict[str, dict[str, Any]]:
@@ -1506,7 +1564,13 @@ class ComponentUpdater:
             for item in self.catalog.get("publishers", [])
             if isinstance(item, dict) and isinstance(item.get("repository"), str)
         }
+        self.publisher_ids = {
+            item["id"]: item
+            for item in self.catalog.get("publishers", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
         self._index_cache.clear()
+        self._index_asset_identity.clear()
 
     def _reload_catalog_for_operation(self) -> None:
         """Re-read the protected active pointer at each check/stage/apply boundary."""
@@ -1544,7 +1608,13 @@ class ComponentUpdater:
                     for item in value.get("publishers", [])
                     if isinstance(item, dict) and isinstance(item.get("repository"), str)
                 }
+                self.publisher_ids = {
+                    item["id"]: item
+                    for item in value.get("publishers", [])
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                }
                 self._index_cache.clear()
+                self._index_asset_identity.clear()
             return
         self._refresh_active_catalog()
 
@@ -3748,6 +3818,11 @@ class ComponentUpdater:
 
     def handle(self, request: Any) -> dict[str, Any]:
         """Validate and dispatch one fixed request, returning a shared envelope."""
+        if (
+            isinstance(request, dict)
+            and request.get("protocolVersion") == WORKLOAD_PROTOCOL_VERSION
+        ):
+            return self.handle_workload(request)
         operation = request.get("operation") if isinstance(request, dict) else None
         envelope_operation = (
             operation
@@ -3959,6 +4034,6654 @@ class ComponentUpdater:
                     "retryable": False,
                 },
             }
+
+    def handle_workload(self, request: Any) -> dict[str, Any]:
+        """Serve the fixed workload plan protocol over the installed root helper."""
+
+        operation = request.get("operation") if isinstance(request, dict) else None
+        public_operation = (
+            operation
+            if isinstance(operation, str) and operation in {"status", "check", "stage", "apply"}
+            else "status"
+        )
+        try:
+            if (
+                not isinstance(request, dict)
+                or request.get("protocolVersion") != WORKLOAD_PROTOCOL_VERSION
+            ):
+                raise UpdateError("INVALID_REQUEST", "Unsupported workload plan protocol version.")
+            fields_by_operation = {
+                "status": {"protocolVersion", "operation", "workloadId"},
+                "check": {
+                    "protocolVersion",
+                    "operation",
+                    "workloadId",
+                    "targetId",
+                    "selections",
+                    "action",
+                },
+                "stage": {
+                    "protocolVersion",
+                    "operation",
+                    "workloadId",
+                    "targetId",
+                    "planId",
+                    "planDigest",
+                    "action",
+                },
+                "apply": {
+                    "protocolVersion",
+                    "operation",
+                    "workloadId",
+                    "targetId",
+                    "planId",
+                    "planDigest",
+                    "confirmation",
+                    "action",
+                },
+            }
+            if (
+                operation not in fields_by_operation
+                or set(request) - fields_by_operation[operation]
+            ):
+                raise UpdateError("INVALID_REQUEST", "The workload request has unsupported fields.")
+            if operation in {"stage", "apply"} and "action" not in request:
+                raise UpdateError(
+                    "INVALID_REQUEST", "Stage and apply must repeat the checked action."
+                )
+            self._require_authorized_process()
+            if operation == "status":
+                result = self.workload_status(request.get("workloadId"))
+            elif operation == "check":
+                action = request.get("action", "install")
+                result = self.check_workload(
+                    request.get("workloadId"),
+                    request.get("targetId"),
+                    request.get("selections", {}),
+                    action=action,
+                )
+            elif operation == "stage":
+                result = self.stage_workload(
+                    request.get("workloadId"),
+                    request.get("targetId"),
+                    request.get("planId"),
+                    request.get("planDigest"),
+                    action=request.get("action"),
+                )
+            else:
+                result = self.apply_workload(
+                    request.get("workloadId"),
+                    request.get("targetId"),
+                    request.get("planId"),
+                    request.get("planDigest"),
+                    request.get("confirmation"),
+                    action=request.get("action"),
+                )
+            return {
+                "protocolVersion": WORKLOAD_PROTOCOL_VERSION,
+                "ok": True,
+                "operation": public_operation,
+                "result": result,
+            }
+        except UpdateError as error:
+            return {
+                "protocolVersion": WORKLOAD_PROTOCOL_VERSION,
+                "ok": False,
+                "operation": public_operation,
+                "error": {"code": error.code, "message": str(error), "retryable": error.retryable},
+            }
+        except Exception as error:  # noqa: BLE001 - keep the fixed workload response shape.
+            print(f"workload plan helper internal error: {error}", file=sys.stderr)
+            return {
+                "protocolVersion": WORKLOAD_PROTOCOL_VERSION,
+                "ok": False,
+                "operation": public_operation,
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "The workload plan helper could not complete this request.",
+                    "retryable": False,
+                },
+            }
+
+    def workload_status(self, workload_id: Any = None) -> dict[str, Any]:
+        """Read local component receipts without changing the runtime or fetching releases."""
+
+        self._reload_catalog_for_operation()
+        self._ensure_state_root()
+        if workload_id is not None and workload_id not in WORKLOAD_IDS:
+            raise UpdateError("INVALID_WORKLOAD_ID", "Unknown workload ID.")
+        selected_ids = (
+            self._load_workload_resolver().potential_component_ids(self.catalog, workload_id)
+            if workload_id is not None and self.catalog.get("schemaVersion") == 2
+            else tuple(sorted(self.components))
+        )
+        package_inventory = (
+            self._read_workload_package_inventory(workload_id, selected_ids)
+            if isinstance(workload_id, str) and self.catalog.get("schemaVersion") == 2
+            else {"components": {}, "sourceBindings": []}
+        )
+        rows = []
+        host_metadata: dict[str, Any] = {}
+        for component_id in selected_ids:
+            component = self.components.get(component_id)
+            if not isinstance(component, dict):
+                continue
+            if component.get("kind") == "plugin-package":
+                identity = package_inventory.get("components", {}).get(component_id)
+                hint = self._read_workload_package_runtime_receipt(component_id)
+                if isinstance(identity, dict) and identity.get("installed") is True:
+                    rows.append(
+                        {
+                            "componentId": component_id,
+                            "installed": True,
+                            "version": identity.get("version"),
+                            "releaseId": identity.get("releaseId"),
+                            "targetId": identity.get("targetId"),
+                            "manifestDigest": identity.get("manifestDigest"),
+                            "manifestAssetDigest": identity.get("manifestAssetDigest"),
+                            "digest": identity.get("digest"),
+                            "installationId": identity.get("installationId"),
+                            "verification": {
+                                "identityAttested": (
+                                    isinstance(identity.get("verification"), dict)
+                                    and identity["verification"].get("identityAttested") is True
+                                )
+                            },
+                        }
+                    )
+                    continue
+                rows.append(
+                    {
+                        "componentId": component_id,
+                        "installed": False,
+                        "version": None,
+                        "releaseId": None,
+                        "targetId": None,
+                        "manifestDigest": None,
+                        "manifestAssetDigest": None,
+                        "digest": None,
+                        "installationId": None,
+                        "verification": {"identityAttested": False},
+                        **(
+                            {
+                                "blockers": [
+                                    {
+                                        "code": "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                        "message": "A local package hint is not confirmed by authenticated Package Runtime UDS readback.",
+                                    }
+                                ]
+                            }
+                            if hint is not None
+                            else {}
+                        ),
+                    }
+                )
+                continue
+            if component_id == WORKLOAD_SDK_COMPONENT_ID:
+                try:
+                    sdk = self._load_workload_sdk_environment()
+                    reader = getattr(sdk, "read_workload_sdk_environment", None)
+                    identity = reader() if callable(reader) else None
+                except (ImportError, OSError, RuntimeError, ValueError) as error:
+                    rows.append(
+                        {
+                            "componentId": component_id,
+                            "installed": False,
+                            "version": None,
+                            "releaseId": None,
+                            "targetId": None,
+                            "manifestDigest": None,
+                            "manifestAssetDigest": None,
+                            "digest": None,
+                            "installationId": None,
+                            "verification": {"identityAttested": False},
+                            "blockers": [
+                                {
+                                    "code": "WORKLOAD_SDK_READBACK_REQUIRED",
+                                    "message": str(error)[:500],
+                                }
+                            ],
+                        }
+                    )
+                    continue
+                if isinstance(identity, dict) and identity.get("installed") is True:
+                    rows.append(
+                        {
+                            "componentId": component_id,
+                            "installed": True,
+                            "version": identity.get("version"),
+                            "releaseId": identity.get("releaseId"),
+                            "targetId": identity.get("targetId"),
+                            "manifestDigest": identity.get("manifestDigest"),
+                            "manifestAssetDigest": identity.get("manifestAssetDigest"),
+                            "digest": identity.get("digest"),
+                            "installationId": None,
+                            "verification": identity.get(
+                                "verification", {"identityAttested": False}
+                            ),
+                        }
+                    )
+                    continue
+            try:
+                installed = (
+                    self._installed_static_web(component)
+                    if component.get("kind") == "static-web"
+                    else self._installed(component)
+                )
+            except UpdateError as error:
+                rows.append(
+                    {
+                        "componentId": component_id,
+                        "installed": False,
+                        "version": None,
+                        "releaseId": None,
+                        "targetId": None,
+                        "manifestDigest": None,
+                        "manifestAssetDigest": None,
+                        "digest": None,
+                        "installationId": None,
+                        "verification": {"identityAttested": False},
+                        "blockers": [{"code": error.code, "message": str(error)[:500]}],
+                    }
+                )
+                continue
+            receipt = (
+                self._read_active_receipt(component_id) if installed.get("active") is True else None
+            )
+            rows.append(
+                {
+                    "componentId": component_id,
+                    "installed": installed.get("active") is True,
+                    "version": (
+                        receipt.get("version")
+                        if isinstance(receipt, dict)
+                        else installed.get("activeVersion")
+                    ),
+                    "releaseId": receipt.get("releaseId") if isinstance(receipt, dict) else None,
+                    "targetId": receipt.get("targetId") if isinstance(receipt, dict) else None,
+                    "manifestDigest": (
+                        receipt.get("manifestDigest")
+                        if isinstance(receipt, dict)
+                        else installed.get("manifestDigest")
+                    ),
+                    "manifestAssetDigest": (
+                        receipt.get("manifestAssetDigest") if isinstance(receipt, dict) else None
+                    ),
+                    "digest": installed.get("artifactDigest"),
+                    "installationId": None,
+                    "verification": {
+                        "identityAttested": (
+                            receipt.get("schemaVersion") == 2
+                            if isinstance(receipt, dict)
+                            else installed.get("identityAttested") is True
+                        ),
+                    },
+                }
+            )
+        if (
+            workload_id is not None
+            and self.catalog.get("schemaVersion") == 2
+            and "cyrene-client-workspace-web" in selected_ids
+        ):
+            try:
+                receipt = self._read_active_receipt("cyrene-client-workspace-web")
+                expected_source_receipt = None
+                if isinstance(receipt, dict) and _valid_digest(receipt.get("manifestDigest")):
+                    installed_dir = self._installed_component_directory(
+                        "cyrene-client-workspace-web"
+                    )
+                    if installed_dir is not None:
+                        release_receipt_path = (
+                            installed_dir
+                            / "releases"
+                            / f"{receipt['manifestDigest'].removeprefix('sha256:')}.json"
+                        )
+                        expected_source_receipt = {
+                            "componentId": "cyrene-client-workspace-web",
+                            "releaseIdentity": receipt.get("releaseIdentity"),
+                            "sourceReceiptDigest": _file_digest(release_receipt_path),
+                        }
+                web_host = self._load_workload_web_host()
+                host_metadata["web"] = web_host.read_web_host_status(
+                    expected_source_receipt=expected_source_receipt,
+                    runner=self.runner,
+                )
+            except (ImportError, OSError, RuntimeError, ValueError) as error:
+                host_metadata["web"] = {
+                    "schemaVersion": 1,
+                    "componentId": "cyrene-client-workspace-web",
+                    "installed": False,
+                    "available": False,
+                    "clientUrl": "http://127.0.0.1:8100/",
+                    "serviceUnit": "cyrene-workspace-web.service",
+                    "blockers": [
+                        {"code": "WORKLOAD_WEB_HOST_READBACK_REQUIRED", "message": str(error)[:500]}
+                    ],
+                }
+        return {
+            "status": "ready",
+            "workloadId": workload_id,
+            "targetId": WORKLOAD_HOST_TARGET,
+            "catalogGeneration": self.catalog_generation,
+            "catalogDigest": self.catalog_digest,
+            "components": rows,
+            "sourceBindings": package_inventory.get("sourceBindings", []),
+            **({"hostMetadata": host_metadata} if host_metadata else {}),
+        }
+
+    def _workload_plan_directory(self) -> Path:
+        root = self._private_state_directory("plans") / "workloads"
+        try:
+            root.mkdir(mode=0o700, exist_ok=True)
+        except OSError as error:
+            raise UpdateError(
+                "UNSAFE_STATE", "Cannot create workload plan state directory."
+            ) from error
+        _verify_private_directory(root)
+        return root
+
+    def _require_workload_target(self, workload_id: Any, target_id: Any) -> tuple[str, str]:
+        if not isinstance(workload_id, str) or workload_id not in WORKLOAD_IDS:
+            raise UpdateError(
+                "INVALID_WORKLOAD_ID", "workloadId must be catalyst, echo, or plugins."
+            )
+        if target_id != WORKLOAD_HOST_TARGET:
+            raise UpdateError(
+                "UNSUPPORTED_TARGET",
+                "Only the catalog-pinned Ubuntu 24.04 x86_64 host target is supported.",
+            )
+        try:
+            host = platform.freedesktop_os_release()
+        except OSError as error:
+            raise UpdateError("UNSUPPORTED_TARGET", "Cannot identify this Linux host.") from error
+        if (
+            not sys.platform.startswith("linux")
+            or host.get("ID") != "ubuntu"
+            or host.get("VERSION_ID") != "24.04"
+            or platform.machine().lower() not in {"x86_64", "amd64"}
+        ):
+            raise UpdateError(
+                "UNSUPPORTED_TARGET", "Workload installation requires Ubuntu 24.04 x86_64."
+            )
+        if self.catalog.get("schemaVersion") != 2:
+            raise UpdateError(
+                "WORKLOAD_CATALOG_UNAVAILABLE",
+                "The active trusted catalog does not define workload plans.",
+            )
+        return workload_id, target_id
+
+    def _workload_target_preference(self, workload_id: str, component_id: str) -> str | None:
+        rows = [
+            row
+            for workload in self.catalog.get("workloads", [])
+            if isinstance(workload, dict) and workload.get("workloadId") == workload_id
+            for row in workload.get("targetPreferences", [])
+            if isinstance(row, dict) and row.get("componentId") == component_id
+        ]
+        if len(rows) > 1:
+            raise UpdateError(
+                "INVALID_CATALOG", f"Workload target preference is ambiguous for {component_id}."
+            )
+        return rows[0].get("targetId") if rows else None
+
+    def _installed_workload_components(
+        self, component_ids: tuple[str, ...], *, workload_id: str | None = None
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+        installed: dict[str, dict[str, Any]] = {}
+        has_plugin_rows = any(
+            isinstance(self.components.get(component_id), dict)
+            and isinstance(self.components[component_id].get("pluginPackage"), dict)
+            for component_id in component_ids
+        )
+        package_inventory = (
+            self._read_workload_package_inventory(workload_id, component_ids)
+            if workload_id is not None and has_plugin_rows
+            else {"components": {}, "installationRecords": {}, "sourceBindings": []}
+        )
+        package_identities = package_inventory.get("components", {})
+        for component_id in component_ids:
+            component = self.components.get(component_id)
+            if not isinstance(component, dict):
+                continue
+            if isinstance(component.get("pluginPackage"), dict):
+                package_identity = package_identities.get(component_id)
+                if isinstance(package_identity, dict):
+                    installed[component_id] = package_identity
+                continue
+            if component_id == WORKLOAD_SDK_COMPONENT_ID:
+                try:
+                    sdk = self._load_workload_sdk_environment()
+                    reader = getattr(sdk, "read_workload_sdk_environment", None)
+                    if callable(reader):
+                        sdk_identity = reader()
+                        if isinstance(sdk_identity, dict) and sdk_identity.get("installed") is True:
+                            installed[component_id] = sdk_identity
+                except Exception as error:
+                    raise UpdateError(
+                        "WORKLOAD_SDK_READBACK_REQUIRED",
+                        "The installed operator SDK identity cannot be read safely.",
+                        retryable=True,
+                    ) from error
+                continue
+            if component.get("kind") == "static-web":
+                observed = self._installed_static_web(component)
+            else:
+                observed = self._installed(component)
+            if observed.get("active") is True:
+                manifest = observed.get("manifest")
+                receipt = self._read_active_receipt(component_id)
+                if receipt is None and _valid_digest(observed.get("manifestDigest")):
+                    receipt = self._read_release_receipt(component_id, observed["manifestDigest"])
+                identity: dict[str, Any] = {
+                    "installed": True,
+                    "version": observed.get("activeVersion"),
+                    "digest": observed.get("artifactDigest"),
+                }
+                if isinstance(receipt, dict) and receipt.get("schemaVersion") == 2:
+                    identity.update(
+                        {
+                            "releaseId": receipt.get("releaseId"),
+                            "manifestUri": receipt.get("manifestUri"),
+                            "manifestDigest": receipt.get("manifestDigest"),
+                            "manifestAssetDigest": receipt.get("manifestAssetDigest"),
+                            "digest": receipt.get("artifactDigest"),
+                            "targetId": receipt.get("targetId"),
+                            "releaseIdentity": receipt.get("releaseIdentity"),
+                            "releasePath": receipt.get("releasePath"),
+                            "archivePath": receipt.get("archivePath"),
+                            "pointerIdentity": receipt.get("pointerIdentity"),
+                            "bundleIdentity": receipt.get("bundleIdentity"),
+                            "indexIdentity": receipt.get("indexIdentity"),
+                            "attestationRef": receipt.get("attestationRef"),
+                        }
+                    )
+                elif isinstance(manifest, dict):
+                    # V1 receipts remain useful for install idempotency, but lack the
+                    # raw release-byte hash required by the strict uninstall resolver.
+                    identity.update(
+                        {
+                            "manifestDigest": observed.get("manifestDigest"),
+                            "releaseIdentity": observed.get("releaseIdentity"),
+                            "releasePath": observed.get("releasePath"),
+                            "pointerIdentity": observed.get("pointerIdentity"),
+                            "bundleIdentity": observed.get("bundleIdentity"),
+                        }
+                    )
+                    if isinstance(manifest.get("releaseId"), str):
+                        identity["releaseId"] = manifest["releaseId"]
+                    if isinstance(manifest.get("manifestUri"), str):
+                        identity["manifestUri"] = manifest["manifestUri"]
+                installed[component_id] = identity
+        return installed, package_inventory
+
+    def _installed_static_web(self, component: dict[str, Any]) -> dict[str, Any]:
+        """Read the static-web current pointer and its matching immutable receipt."""
+
+        component_id = component.get("componentId")
+        root = DEFAULT_WORKLOAD_WEB_ROOT / str(component_id)
+        active = root / "current"
+        if not active.exists() and not active.is_symlink():
+            if self._read_active_receipt(str(component_id)) is not None:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Static-web identity receipt exists without an active {component_id} tree.",
+                )
+            return self._empty_installed()
+        info = active.lstat()
+        if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0:
+            raise UpdateError("INVALID_INSTALLED_RELEASE", "Static-web current pointer is unsafe.")
+        target = os.readlink(active)
+        match = re.fullmatch(r"releases/([A-Za-z0-9][A-Za-z0-9._-]{0,511})", target)
+        if match is None:
+            raise UpdateError("INVALID_INSTALLED_RELEASE", "Static-web current target is unsafe.")
+        release_identity = match.group(1)
+        release_root = root / "releases" / release_identity
+        if release_root.is_symlink() or not release_root.is_dir():
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", "Static-web active release is unavailable."
+            )
+        receipt = self._read_active_receipt(str(component_id))
+        if receipt is None or receipt.get("schemaVersion") != 2:
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                "Static-web active release has no complete raw-manifest receipt.",
+            )
+        manifest = receipt.get("manifest")
+        artifact = manifest.get("artifact") if isinstance(manifest, dict) else None
+        if (
+            receipt.get("pointerIdentity") != release_identity
+            or Path(str(receipt.get("releasePath"))) != release_root
+            or not isinstance(artifact, dict)
+            or artifact.get("kind") != "static-web"
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", "Static-web receipt identity differs from its pointer."
+            )
+        self._verify_static_web_tree(release_root, artifact.get("files"))
+        return {
+            "activeVersion": receipt["version"],
+            "manifest": manifest,
+            "active": True,
+            "identityAttested": True,
+            "releaseIdentity": receipt["releaseIdentity"],
+            "manifestDigest": receipt["manifestDigest"],
+            "artifactDigest": receipt["artifactDigest"],
+            "pointerIdentity": release_identity,
+            "bundleIdentity": None,
+            "releasePath": str(release_root),
+        }
+
+    def _read_workload_package_runtime_receipt(self, component_id: str) -> dict[str, Any] | None:
+        """Read a package receipt only as a hint until UDS readback authenticates it."""
+
+        directory = self._installed_component_directory(component_id)
+        if directory is None:
+            return None
+        path = directory / "package-runtime.json"
+        if not path.exists() and not path.is_symlink():
+            return None
+        receipt = _read_object(path, f"{component_id} Package Runtime installation receipt")
+        if (
+            receipt.get("schemaVersion") != 1
+            or receipt.get("componentId") != component_id
+            or receipt.get("installed") is not True
+            or not isinstance(receipt.get("packageId"), str)
+            or not isinstance(receipt.get("installationId"), str)
+            or ACTIVITY_INSTALLATION_ID_PATTERN.fullmatch(receipt["installationId"]) is None
+            or not isinstance(receipt.get("installation"), dict)
+            or not isinstance(receipt.get("releaseId"), str)
+            or not isinstance(receipt.get("targetId"), str)
+            or not _valid_digest(receipt.get("digest"))
+            or not _valid_digest(receipt.get("manifestDigest"))
+            or not _valid_digest(receipt.get("manifestAssetDigest"))
+            or not _valid_digest(receipt.get("packageArtifactDigest"))
+            or not _valid_digest(receipt.get("archiveDigest"))
+            or not _valid_digest(receipt.get("descriptorDigest"))
+            or not _valid_digest(receipt.get("dependencyLockDigest"))
+            or not isinstance(receipt.get("indexIdentity"), dict)
+            or not isinstance(receipt.get("publisherIdentity"), dict)
+            or not isinstance(receipt.get("attestationRef"), dict)
+            or receipt.get("verification") != {"identityAttested": True}
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                f"Package Runtime installation receipt is malformed for {component_id}.",
+            )
+        installation = receipt["installation"]
+        verification = installation.get("verification")
+        if (
+            installation.get("installation_id") != receipt["installationId"]
+            or installation.get("package_id") != receipt["packageId"]
+            or installation.get("package_version") != receipt.get("version")
+            or installation.get("archive_digest") != receipt.get("digest")
+            or installation.get("artifact_digest") != receipt.get("packageArtifactDigest")
+            or not isinstance(verification, dict)
+            or verification.get("archive_digest") != receipt.get("archiveDigest")
+            or verification.get("artifact_digest") != receipt.get("packageArtifactDigest")
+            or verification.get("descriptor_digest") != receipt.get("descriptorDigest")
+            or verification.get("manifest_digest") != receipt.get("manifestDigest")
+            or verification.get("dependency_lock_digest") != receipt.get("dependencyLockDigest")
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                f"Package Runtime installation hint differs from its stored receipt for {component_id}.",
+            )
+        return {
+            key: receipt[key]
+            for key in (
+                "componentId",
+                "installed",
+                "version",
+                "releaseId",
+                "manifestUri",
+                "targetId",
+                "manifestDigest",
+                "manifestAssetDigest",
+                "digest",
+                "indexIdentity",
+                "publisherIdentity",
+                "attestationRef",
+                "packageId",
+                "installationId",
+                "packageArtifactDigest",
+                "archiveDigest",
+                "descriptorDigest",
+                "dependencyLockDigest",
+                "installation",
+                "verification",
+            )
+            if key in receipt
+        }
+
+    def _load_workload_package_runtime(self) -> Any:
+        """Load the adjacent Platform package owner helper from the installed bundle."""
+
+        module_path = Path(__file__).with_name("workload_package_runtime.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError(
+                "PACKAGE_RUNTIME_UNAVAILABLE", "The workload Package Runtime helper is missing."
+            )
+        module_name = "_cyrene_workload_package_runtime"
+        existing = sys.modules.get(module_name)
+        if existing is not None:
+            return existing
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_UNAVAILABLE", "The workload Package Runtime helper cannot load."
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            sys.modules.pop(module_name, None)
+            raise UpdateError(
+                "PACKAGE_RUNTIME_UNAVAILABLE", "The workload Package Runtime helper failed to load."
+            ) from error
+        required = (
+            "candidate_from_workload_rows",
+            "install_workload_package",
+            "uninstall_workload_package",
+            "build_workload_source_update",
+            "apply_workload_source_update",
+            "run_package_binding_operation",
+            "read_workload_package_inventory",
+        )
+        if any(not callable(getattr(module, name, None)) for name in required):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_UNAVAILABLE",
+                "The workload Package Runtime helper API is incomplete.",
+            )
+        return module
+
+    def _workload_plugin_owner_rows(
+        self, workload_id: str, component_ids: tuple[str, ...]
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Build exact package owner rows only from the signed workload declaration."""
+
+        workloads = [
+            row
+            for row in self.catalog.get("workloads", [])
+            if isinstance(row, dict) and row.get("workloadId") == workload_id
+        ]
+        if len(workloads) != 1:
+            raise UpdateError(
+                "INVALID_CATALOG", "The selected workload source declaration is ambiguous."
+            )
+        workload = workloads[0]
+        bindings: dict[str, str] = {}
+        for row in workload.get("bindings", []):
+            if not isinstance(row, dict) or not isinstance(row.get("componentId"), str):
+                raise UpdateError(
+                    "INVALID_CATALOG", "The selected workload binding map is malformed."
+                )
+            component_id = row["componentId"]
+            binding_id = row.get("bindingId")
+            if (
+                component_id in bindings
+                or not isinstance(binding_id, str)
+                or ACTIVITY_SCOPE_ID_PATTERN.fullmatch(binding_id) is None
+            ):
+                raise UpdateError(
+                    "INVALID_CATALOG", "The selected workload binding map is ambiguous."
+                )
+            bindings[component_id] = binding_id
+        policy = workload.get("sourcePolicy")
+        rows: list[dict[str, Any]] = []
+        for component_id in component_ids:
+            component = self.components.get(component_id)
+            plugin = component.get("pluginPackage") if isinstance(component, dict) else None
+            if not isinstance(plugin, dict):
+                continue
+            binding_id = bindings.get(component_id)
+            package_id = plugin.get("packageId")
+            capability_id = plugin.get("capabilityId")
+            if (
+                not isinstance(binding_id, str)
+                or not isinstance(package_id, str)
+                or not isinstance(capability_id, str)
+                or not isinstance(policy, dict)
+            ):
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID",
+                    f"Catalog does not declare a complete owner binding for {component_id}.",
+                )
+            rows.append(
+                {
+                    "componentId": component_id,
+                    "artifactKind": "plugin-package",
+                    "packageId": package_id,
+                    "capabilityId": capability_id,
+                    "bindingId": binding_id,
+                    "sourcePolicy": policy,
+                }
+            )
+        return policy if isinstance(policy, dict) else None, rows
+
+    def _workload_source_principals(
+        self,
+        source_policy: dict[str, Any],
+        activity_catalog: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Resolve owner credentials from the trusted catalog and fixed token directory."""
+
+        principals: dict[str, dict[str, Any]] = {}
+        for source in activity_catalog.get("sources", []):
+            if not isinstance(source, dict):
+                raise UpdateError("GATE_UNKNOWN", "Activity source inventory is malformed.")
+            source_id = source.get("source_id")
+            if not isinstance(source_id, str):
+                raise UpdateError("GATE_UNKNOWN", "Activity source ID is malformed.")
+            principals[source_id] = {
+                "uid": source["uid"],
+                "gid": source["gid"],
+                "tokenPath": DEFAULT_ACTIVITY_TOKEN_DIRECTORY / f"{source_id}.token",
+            }
+        declared_sources: list[str] = []
+        if source_policy.get("mode") == "standaloneOperator":
+            source_id = source_policy.get("sourceId")
+            if isinstance(source_id, str):
+                declared_sources.append(source_id)
+        elif source_policy.get("mode") == "actualProduct":
+            mappings = source_policy.get("productSources")
+            if isinstance(mappings, list):
+                declared_sources.extend(
+                    row["sourceId"]
+                    for row in mappings
+                    if isinstance(row, dict) and isinstance(row.get("sourceId"), str)
+                )
+        for source_id in declared_sources:
+            if source_id in principals:
+                continue
+            try:
+                user = pwd.getpwnam("cyrene")
+                group = grp.getgrnam("cyrene")
+            except KeyError as error:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_SOURCE_UNAVAILABLE",
+                    "The official Cyrene runtime account is unavailable for the selected source.",
+                    retryable=True,
+                ) from error
+            principals[source_id] = {
+                "uid": user.pw_uid,
+                "gid": group.gr_gid,
+                "tokenPath": DEFAULT_ACTIVITY_TOKEN_DIRECTORY / f"{source_id}.token",
+            }
+        return principals
+
+    def _read_workload_package_inventory(
+        self,
+        workload_id: str,
+        component_ids: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Read plugin installs and every live binding through authenticated Package Runtime UDS."""
+
+        source_policy, plugin_rows = self._workload_plugin_owner_rows(workload_id, component_ids)
+        if not plugin_rows or source_policy is None:
+            return {"components": {}, "installationRecords": {}, "sourceBindings": []}
+        hints = {
+            row["componentId"]: hint
+            for row in plugin_rows
+            if (hint := self._read_workload_package_runtime_receipt(row["componentId"])) is not None
+        }
+        policy_exists = (
+            DEFAULT_PACKAGE_RUNTIME_POLICY.exists() or DEFAULT_PACKAGE_RUNTIME_POLICY.is_symlink()
+        )
+        catalog_exists = (
+            self.activity_catalog_path.exists() or self.activity_catalog_path.is_symlink()
+        )
+        if not policy_exists and not catalog_exists and not hints:
+            return {"components": {}, "installationRecords": {}, "sourceBindings": []}
+        if not policy_exists:
+            if hints:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "A local Package Runtime hint exists without the authenticated source policy.",
+                    retryable=True,
+                )
+            # No bindings are authorized yet; first installation may register the
+            # source under the held parent plan before creating the policy.
+            return {"components": {}, "installationRecords": {}, "sourceBindings": []}
+        activity_catalog, _source_ids = self._activity_catalog()
+        principals = self._workload_source_principals(source_policy, activity_catalog)
+        try:
+            helper = self._load_workload_package_runtime()
+            sdk_environment = self._load_workload_sdk_environment().read_workload_sdk_environment()
+            sdk_python = (
+                Path(sdk_environment["pythonPath"])
+                if isinstance(sdk_environment, dict)
+                and sdk_environment.get("installed") is True
+                and isinstance(sdk_environment.get("pythonPath"), str)
+                else None
+            )
+            if sdk_python is None or not sdk_python.is_absolute():
+                raise UpdateError(
+                    "WORKLOAD_SDK_READBACK_REQUIRED",
+                    "The installed operator SDK interpreter is not verified.",
+                    retryable=True,
+                )
+            result = helper.read_workload_package_inventory(
+                selected_rows=plugin_rows,
+                source_principals=principals,
+                sdk_python=sdk_python,
+                activity_catalog_path=self.activity_catalog_path,
+                policy_path=DEFAULT_PACKAGE_RUNTIME_POLICY,
+                token_directory=DEFAULT_ACTIVITY_TOKEN_DIRECTORY,
+                installation_hints=hints,
+            )
+        except Exception as error:
+            if isinstance(error, UpdateError):
+                raise
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Authenticated Package Runtime inventory is unavailable or inconsistent.",
+                retryable=True,
+            ) from error
+        if not isinstance(result, dict) or not isinstance(result.get("components"), dict):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Package Runtime inventory response is malformed.",
+            )
+        identities: dict[str, dict[str, Any]] = {}
+        for component_id, package_identity in result["components"].items():
+            hint = hints.get(component_id)
+            if not isinstance(hint, dict) or not isinstance(package_identity, dict):
+                continue
+            identity = dict(hint)
+            identity.update(package_identity)
+            identity["releaseId"] = hint["releaseId"]
+            identity["manifestAssetDigest"] = hint["manifestAssetDigest"]
+            identity["indexIdentity"] = hint["indexIdentity"]
+            identity["publisherIdentity"] = hint["publisherIdentity"]
+            identity["attestationRef"] = hint["attestationRef"]
+            identity["targetId"] = hint["targetId"]
+            identity["manifestUri"] = hint.get("manifestUri")
+            identity["verification"] = hint["verification"]
+            identities[component_id] = identity
+        return {
+            "components": identities,
+            "installationRecords": result.get("installationRecords", {}),
+            "sourceBindings": result.get("sourceBindings", []),
+            "sourcePrincipals": principals,
+            "sourcePolicy": source_policy,
+        }
+
+    def _build_workload_plan(
+        self,
+        workload_id: str,
+        target_id: str,
+        selections: Any,
+        *,
+        action: str = "install",
+    ) -> tuple[dict[str, Any], dict[str, Candidate], dict[str, Any]]:
+        resolver = self._load_workload_resolver()
+        potential_ids = resolver.potential_component_ids(self.catalog, workload_id)
+        if not potential_ids:
+            resolution = resolver.resolve_workload(
+                self.catalog,
+                self.catalog_digest,
+                workload_id,
+                target_id,
+                selections,
+                {},
+                {"indexes": []},
+                action=action,
+            ).to_dict()
+            return (
+                resolution,
+                {},
+                {"components": {}, "installationRecords": {}, "sourceBindings": []},
+            )
+        channel = self._resolve_channel(None)
+        candidates: dict[str, Candidate] = {}
+        if action == "install":
+            for component_id in potential_ids:
+                component = self.components.get(component_id)
+                if not isinstance(component, dict):
+                    continue
+                preferred_target = self._workload_target_preference(workload_id, component_id)
+                component_target = self._target_for(component, target_id=preferred_target)
+                if component_target is None:
+                    continue
+                try:
+                    candidates[component_id] = self._candidate(component, component_target, channel)
+                except UpdateError:
+                    # The pure resolver emits a scoped blocker only if this release is
+                    # required by the chosen workload closure.
+                    continue
+        trusted_indexes = self._trusted_release_indexes(list(candidates.values()))
+        installed, package_inventory = self._installed_workload_components(
+            potential_ids, workload_id=workload_id
+        )
+        resolution = resolver.resolve_workload(
+            self.catalog,
+            self.catalog_digest,
+            workload_id,
+            target_id,
+            selections,
+            installed,
+            trusted_indexes,
+            action=action,
+        ).to_dict()
+        return resolution, candidates, package_inventory
+
+    def check_workload(
+        self,
+        workload_id: Any,
+        target_id: Any,
+        selections: Any,
+        *,
+        action: Any = "install",
+    ) -> dict[str, Any]:
+        """Resolve the exact catalog workload and persist a digest-bound plan."""
+
+        self._reload_catalog_for_operation()
+        self._ensure_state_root()
+        if not isinstance(action, str) or action not in {"install", "uninstall"}:
+            raise UpdateError("INVALID_ACTION", "Workload action must be install or uninstall.")
+        if not isinstance(selections, dict):
+            raise UpdateError("INVALID_SELECTION", "selections must be a JSON object.")
+        if workload_id is None and action == "uninstall":
+            include_ids = selections.get("includeComponentIds")
+            if (
+                not isinstance(include_ids, list)
+                or len(include_ids) != 1
+                or not isinstance(include_ids[0], str)
+            ):
+                raise UpdateError(
+                    "INVALID_SELECTION",
+                    "Uninstall without --workload needs exactly one selected component ID.",
+                )
+            component_id = include_ids[0]
+            owner_ids = sorted(
+                workload.get("workloadId")
+                for workload in self.catalog.get("workloads", [])
+                if isinstance(workload, dict)
+                and isinstance(workload.get("workloadId"), str)
+                and (
+                    component_id in workload.get("requiredComponents", [])
+                    or component_id in workload.get("recommendedComponents", [])
+                    or component_id in workload.get("optionalComponents", [])
+                    or any(
+                        isinstance(group, dict) and component_id in group.get("componentIds", [])
+                        for group in workload.get("choiceGroups", [])
+                    )
+                )
+            )
+            if len(owner_ids) != 1:
+                owners = ", ".join(owner_ids) if owner_ids else "none"
+                raise UpdateError(
+                    "AMBIGUOUS_WORKLOAD_OWNER",
+                    f"Component {component_id} has {len(owner_ids)} direct workload owners ({owners}); pass --workload explicitly.",
+                )
+            workload_id = owner_ids[0]
+        workload_id, target_id = self._require_workload_target(workload_id, target_id)
+        resolution, candidates, _package_inventory = self._build_workload_plan(
+            workload_id, target_id, selections, action=action
+        )
+        plan_id = resolution.get("planId")
+        plan_digest = resolution.get("planDigest")
+        if (
+            not isinstance(plan_id, str)
+            or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+            or not _valid_digest(plan_digest)
+        ):
+            raise UpdateError(
+                "INVALID_RESOLUTION", "Workload resolver returned an invalid plan identity."
+            )
+        if resolution.get("status") == "ready":
+            selected_ids = {row["componentId"] for row in resolution.get("selectedComponents", [])}
+            plan = {
+                "schemaVersion": 1,
+                "planKind": WORKLOAD_PROTOCOL_VERSION,
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "catalogGeneration": self.catalog_generation,
+                "catalogDigest": self.catalog_digest,
+                "channel": self._resolve_channel(None),
+                "workloadId": workload_id,
+                "targetId": target_id,
+                "action": action,
+                "selections": selections,
+                "resolution": resolution,
+                "candidates": {
+                    component_id: {
+                        "manifestUri": candidates[component_id].manifest_uri,
+                        "manifestDigest": candidates[component_id].manifest_digest,
+                        "manifestAssetDigest": candidates[component_id].manifest_asset_digest,
+                        "artifactDigest": candidates[component_id].artifact_digest,
+                        "releaseTag": candidates[component_id].release_tag,
+                        "targetId": next(
+                            row["targetId"]
+                            for row in resolution["selectedComponents"]
+                            if row["componentId"] == component_id
+                        ),
+                    }
+                    for component_id in sorted(selected_ids)
+                    if component_id in candidates
+                },
+                "phase": "checked",
+            }
+            _atomic_json(self._workload_plan_directory() / f"{plan_id}.json", plan)
+        return {
+            "status": resolution.get("status"),
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "catalogDigest": self.catalog_digest,
+            "workloadId": workload_id,
+            "targetId": target_id,
+            "action": action,
+            "components": resolution.get("selectedComponents", []),
+            "resolution": resolution,
+            "warnings": resolution.get("warnings", []),
+            "blockers": resolution.get("blockers", []),
+        }
+
+    def stage_workload(
+        self,
+        workload_id: Any,
+        target_id: Any,
+        plan_id: Any,
+        plan_digest: Any,
+        *,
+        action: Any,
+    ) -> dict[str, Any]:
+        """Re-resolve a checked workload before delegating package materialization."""
+
+        self._require_authorized_process()
+        self._validate_plan_identity(plan_id, plan_digest)
+        workload_id, target_id = self._require_workload_target(workload_id, target_id)
+        if not isinstance(action, str) or action not in {"install", "uninstall"}:
+            raise UpdateError("INVALID_ACTION", "Workload action must be install or uninstall.")
+        directory = self._workload_plan_directory()
+        stored = _read_object(directory / f"{plan_id}.json", "checked workload plan")
+        if (
+            stored.get("planKind") != WORKLOAD_PROTOCOL_VERSION
+            or stored.get("planId") != plan_id
+            or stored.get("planDigest") != plan_digest
+            or stored.get("workloadId") != workload_id
+            or stored.get("targetId") != target_id
+            or stored.get("action") != action
+            or stored.get("catalogDigest") != self.catalog_digest
+            or stored.get("catalogGeneration") != self.catalog_generation
+            or stored.get("phase") not in {"checked", "staged"}
+        ):
+            raise UpdateError(
+                "PLAN_CHANGED",
+                "The checked workload plan is stale or belongs to another workload.",
+                retryable=True,
+            )
+        resolution, candidates, package_inventory = self._build_workload_plan(
+            workload_id, target_id, stored.get("selections"), action=action
+        )
+        if (
+            resolution.get("status") != "ready"
+            or resolution.get("planDigest") != plan_digest
+            or resolution.get("action") != action
+        ):
+            raise UpdateError(
+                "PLAN_CHANGED",
+                "Trusted workload releases changed; check again before staging.",
+                retryable=True,
+            )
+        if stored.get("phase") == "staged":
+            return {
+                "status": "staged",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "catalogDigest": self.catalog_digest,
+                "workloadId": workload_id,
+                "targetId": target_id,
+                "action": action,
+                "components": stored.get("stagedComponents", []),
+                "resolution": resolution,
+                "warnings": resolution.get("warnings", []),
+                "blockers": [],
+            }
+        stage_parent = self._private_state_directory("staged") / "workload-plans"
+        stage_parent.mkdir(mode=0o700, exist_ok=True)
+        _verify_private_directory(stage_parent)
+        stage_root = stage_parent / plan_id
+        if stage_root.exists() or stage_root.is_symlink():
+            if stage_root.is_symlink() or not stage_root.is_dir():
+                raise UpdateError("UNSAFE_STATE", "Interrupted workload staging path is unsafe.")
+            _verify_private_directory(stage_root)
+            shutil.rmtree(stage_root)
+        stage_root.mkdir(mode=0o700)
+        staged = []
+        for row in resolution.get("selectedComponents", []):
+            component_id = row["componentId"]
+            if action == "uninstall":
+                staged.append(
+                    {
+                        "componentId": component_id,
+                        "status": "planned-for-uninstall",
+                        "artifactKind": row["artifactKind"],
+                        "version": row["version"],
+                        "digest": row["digest"],
+                        "manifestDigest": row["manifestDigest"],
+                        "manifestAssetDigest": row["manifestAssetDigest"],
+                        "releaseId": row["releaseId"],
+                        "targetId": row["targetId"],
+                        "indexIdentity": row.get("indexIdentity"),
+                        "publisherIdentity": row.get("publisherIdentity"),
+                        "attestationRef": row.get("attestationRef"),
+                        "bindingId": row.get("bindingId"),
+                        "packageId": row.get("packageId"),
+                        "installationId": row["installationId"],
+                        "installedIdentity": row["installedIdentity"],
+                    }
+                )
+                continue
+            if row.get("installed") is True:
+                staged.append(
+                    {
+                        "componentId": component_id,
+                        "status": "current",
+                        "artifactKind": row["artifactKind"],
+                        "version": row["version"],
+                        "digest": row["digest"],
+                        "manifestDigest": row["manifestDigest"],
+                        "manifestAssetDigest": row["manifestAssetDigest"],
+                        "releaseId": row["releaseId"],
+                        "targetId": row["targetId"],
+                        "indexIdentity": row.get("indexIdentity"),
+                        "publisherIdentity": row.get("publisherIdentity"),
+                        "attestationRef": row.get("attestationRef"),
+                        "bindingId": row.get("bindingId"),
+                        "packageId": row.get("packageId"),
+                        "capabilityId": row.get("capabilityId"),
+                        "sourcePolicy": row.get("sourcePolicy"),
+                        "installationId": row["installationId"],
+                        "installedIdentity": row["installedIdentity"],
+                        **(
+                            {
+                                field: package_inventory["components"][component_id][field]
+                                for field in (
+                                    "packageArtifactDigest",
+                                    "archiveDigest",
+                                    "descriptorDigest",
+                                    "dependencyLockDigest",
+                                )
+                                if isinstance(package_inventory.get("components"), dict)
+                                and isinstance(
+                                    package_inventory["components"].get(component_id), dict
+                                )
+                                and field in package_inventory["components"][component_id]
+                            }
+                            if row.get("artifactKind") == "plugin-package"
+                            else {}
+                        ),
+                    }
+                )
+                continue
+            candidate = candidates.get(component_id)
+            if candidate is None:
+                raise UpdateError(
+                    "PLAN_CHANGED", f"Candidate disappeared for {component_id}.", retryable=True
+                )
+            staged.append(
+                self._stage_workload_candidate(
+                    candidate,
+                    stage_root,
+                    plan_id,
+                    plan_digest,
+                    resolution_component=row,
+                )
+            )
+        stored["phase"] = "staged"
+        stored["stagedComponents"] = staged
+        _atomic_json(directory / f"{plan_id}.json", stored)
+        return {
+            "status": "staged",
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "catalogDigest": self.catalog_digest,
+            "workloadId": workload_id,
+            "targetId": target_id,
+            "action": action,
+            "components": staged,
+            "resolution": resolution,
+            "warnings": resolution.get("warnings", []),
+            "blockers": [],
+        }
+
+    def _stage_workload_candidate(
+        self,
+        candidate: Candidate,
+        stage_root: Path,
+        plan_id: str,
+        plan_digest: str,
+        *,
+        resolution_component: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Verify every release asset and stage one product, web, or Plugin candidate."""
+
+        artifact = candidate.manifest["artifact"]
+        kind = artifact["kind"]
+        if kind == "plugin-package":
+            return self._stage_workload_plugin_package(
+                candidate,
+                stage_root,
+                plan_id,
+                plan_digest,
+                resolution_component=resolution_component,
+            )
+        if candidate.component.get("componentId") == WORKLOAD_SDK_COMPONENT_ID:
+            return self._stage_workload_sdk(
+                candidate, stage_root, plan_id, plan_digest, resolution_component
+            )
+        if kind == "static-web":
+            return self._stage_workload_static_web(
+                candidate,
+                stage_root,
+                plan_id,
+                plan_digest,
+                resolution_component=resolution_component,
+            )
+        component = self._stage_candidate(
+            candidate,
+            stage_root,
+            plan_id,
+            plan_digest,
+            workload_identity=resolution_component,
+        )
+        return {
+            "componentId": component["componentId"],
+            "status": "staged",
+            "artifactKind": kind,
+            "version": component["version"],
+            "digest": component["artifactDigest"],
+            "manifestDigest": component["manifestDigest"],
+            "manifestAssetDigest": candidate.manifest_asset_digest,
+            "releaseId": (
+                resolution_component.get("releaseId")
+                if isinstance(resolution_component, dict)
+                else candidate.manifest.get("releaseId")
+            ),
+            "targetId": (
+                resolution_component.get("targetId")
+                if isinstance(resolution_component, dict)
+                else None
+            ),
+            "indexIdentity": (
+                resolution_component.get("indexIdentity")
+                if isinstance(resolution_component, dict)
+                else None
+            ),
+            "publisherIdentity": (
+                resolution_component.get("publisherIdentity")
+                if isinstance(resolution_component, dict)
+                else None
+            ),
+            "attestationRef": (
+                resolution_component.get("attestationRef")
+                if isinstance(resolution_component, dict)
+                else None
+            ),
+            "stagedIdentity": {
+                "releasePath": component["releasePath"],
+                "archivePath": component["archivePath"],
+                "pointerIdentity": component["pointerIdentity"],
+                "bundleIdentity": component["bundleIdentity"],
+            },
+        }
+
+    def _workload_asset_bytes(
+        self, candidate: Candidate, reference: dict[str, Any], *, label: str
+    ) -> tuple[bytes, str]:
+        if candidate.release_tag is None:
+            raise UpdateError(
+                "UNTRUSTED_RELEASE_TAG", "Workload assets need an immutable release tag."
+            )
+        payload = self._get_release_asset_bytes(
+            candidate.release_assets,
+            reference.get("uri"),
+            repository=candidate.component["publisher"],
+            release_tag=candidate.release_tag,
+            expected_digest=reference.get("sha256"),
+            expected_size=reference.get("sizeBytes"),
+        )
+        publisher = self._publisher_for_component(candidate.component)
+        provenance = candidate.manifest.get("provenance", {}).get("attestation")
+        if publisher is None or not isinstance(provenance, dict):
+            raise UpdateError("UNTRUSTED_ATTESTATION", f"Missing release authority for {label}.")
+        subject_name = PurePosixPath(urllib.parse.urlsplit(reference["uri"]).path).name
+        proof = self._release_attestation_bundle(
+            payload=payload,
+            repository=publisher["repository"],
+            digest=reference["sha256"],
+            workflow=publisher["workflow"],
+            source_ref=candidate.manifest["source"]["ref"],
+            source_commit=candidate.manifest["source"]["commit"],
+            subject_name=subject_name,
+        )
+        return payload, "sha256:" + hashlib.sha256(proof).hexdigest()
+
+    def _stage_workload_sdk(
+        self,
+        candidate: Candidate,
+        stage_root: Path,
+        plan_id: str,
+        plan_digest: str,
+        resolution_component: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Verify and stage the exact official SDK wheel for the workload operator."""
+
+        artifact = candidate.manifest["artifact"]
+        if (
+            artifact.get("kind") != "python-bundle"
+            or artifact.get("format") != "tar.gz"
+            or candidate.component.get("componentId") != WORKLOAD_SDK_COMPONENT_ID
+            or not isinstance(resolution_component, dict)
+            or resolution_component.get("targetId") != WORKLOAD_SDK_TARGET_ID
+        ):
+            raise UpdateError(
+                "SDK_RELEASE_INVALID", "The Runtime Maintenance SDK target is not supported."
+            )
+        component_root = stage_root / WORKLOAD_SDK_COMPONENT_ID
+        component_root.mkdir(mode=0o700)
+        filename = PurePosixPath(urllib.parse.urlsplit(artifact["uri"]).path).name
+        if not filename or filename in {".", ".."}:
+            raise UpdateError("SDK_RELEASE_INVALID", "The SDK archive has no safe filename.")
+        archive_path = component_root / filename
+        payload, attestation_digest = self._workload_asset_bytes(
+            candidate,
+            {key: artifact[key] for key in ("uri", "sha256", "sizeBytes")},
+            label="Runtime Maintenance SDK bundle",
+        )
+        self._write_private_file(archive_path, payload)
+        bundle_path = component_root / "bundle"
+        self._extract_tar(archive_path, bundle_path, expected_files=artifact.get("files"))
+        release_path = bundle_path / "sdk-release.json"
+        try:
+            metadata = json.loads(release_path.read_bytes(), object_pairs_hook=_unique_json_object)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "SDK_RELEASE_INVALID", "SDK release metadata is invalid JSON."
+            ) from error
+        distribution = "cyrene-runtime-maintenance"
+        version = "0.1.0"
+        wheel_name = "cyrene_runtime_maintenance-0.1.0-py3-none-any.whl"
+        if (
+            not isinstance(metadata, dict)
+            or set(metadata) != {"distribution", "version", "wheel", "wheelSha256"}
+            or metadata.get("distribution") != distribution
+            or metadata.get("version") != version
+            or metadata.get("wheel") != wheel_name
+            or not _valid_digest(metadata.get("wheelSha256"))
+            or candidate.manifest.get("version") != version
+            or candidate.manifest.get("contentDigest") != candidate.artifact_digest
+            or set(artifact.get("files", {})) != {"sdk-release.json", wheel_name}
+        ):
+            raise UpdateError(
+                "SDK_RELEASE_INVALID", "SDK bundle metadata differs from the pinned component."
+            )
+        wheel_path = bundle_path / wheel_name
+        if (
+            wheel_path.is_symlink()
+            or not wheel_path.is_file()
+            or _file_digest(wheel_path) != metadata["wheelSha256"]
+        ):
+            raise UpdateError(
+                "SDK_RELEASE_INVALID", "SDK wheel digest differs from signed release metadata."
+            )
+        # The release manifest pins the wheel member separately from its wrapper metadata.
+        expected_wheel_digest = artifact["files"][wheel_name]
+        if expected_wheel_digest.removeprefix("sha256:") != metadata["wheelSha256"].removeprefix(
+            "sha256:"
+        ):
+            raise UpdateError(
+                "SDK_RELEASE_INVALID", "SDK wheel differs from the signed archive file map."
+            )
+        index_identity = resolution_component.get("indexIdentity")
+        if not isinstance(index_identity, dict):
+            raise UpdateError("SDK_RELEASE_INVALID", "SDK release has no trusted index identity.")
+        identity_fields = self._workload_receipt_fields(candidate, resolution_component)
+        return {
+            "componentId": WORKLOAD_SDK_COMPONENT_ID,
+            "status": "staged",
+            "artifactKind": "python-bundle",
+            "version": version,
+            "digest": candidate.artifact_digest,
+            "manifestDigest": candidate.manifest_digest,
+            "manifestAssetDigest": candidate.manifest_asset_digest,
+            "releaseId": identity_fields["releaseId"],
+            "targetId": identity_fields["targetId"],
+            "indexIdentity": index_identity,
+            "publisherIdentity": identity_fields["publisherIdentity"],
+            "attestationRef": identity_fields["attestationRef"],
+            "wheelDigest": metadata["wheelSha256"],
+            "attestationBundleDigest": attestation_digest,
+            "stagedIdentity": {
+                "archivePath": str(archive_path),
+                "bundlePath": str(bundle_path),
+                "wheelPath": str(wheel_path),
+                "wheelDigest": metadata["wheelSha256"],
+                "planId": plan_id,
+                "planDigest": plan_digest,
+            },
+        }
+
+    def _stage_workload_plugin_package(
+        self,
+        candidate: Candidate,
+        stage_root: Path,
+        plan_id: str,
+        plan_digest: str,
+        *,
+        resolution_component: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        artifact = candidate.manifest["artifact"]
+        component_id = candidate.component["componentId"]
+        package_id = artifact["packageId"]
+        component_root = stage_root / component_id
+        component_root.mkdir(mode=0o700)
+        references: list[tuple[str, dict[str, Any]]] = [
+            ("archive", artifact["archive"]),
+            ("descriptor", artifact["descriptor"]),
+            ("requirementsLock", artifact["requirementsLock"]),
+            ("packageReleaseMetadata", artifact["packageReleaseMetadata"]),
+        ]
+        references.extend(
+            (f"preparerWheel{index}", row) for index, row in enumerate(artifact["preparerWheels"])
+        )
+        sbom = artifact.get("sbom")
+        if sbom is not None:
+            references.append(("sbom", sbom))
+        stored_assets: dict[str, dict[str, Any]] = {}
+        payloads: dict[str, bytes] = {}
+        proof_digests: dict[str, str] = {}
+        for label, reference in references:
+            payload, proof_digest = self._workload_asset_bytes(candidate, reference, label=label)
+            filename = PurePosixPath(urllib.parse.urlsplit(reference["uri"]).path).name
+            target = component_root / filename
+            if target.exists() or target.is_symlink():
+                raise UpdateError(
+                    "UNSAFE_STAGE", f"Duplicate workload release asset basename: {filename}."
+                )
+            self._write_private_file(target, payload)
+            payloads[label] = payload
+            proof_digests[label] = proof_digest
+            stored_assets[label] = {
+                "path": str(target),
+                "uri": reference["uri"],
+                "sha256": reference["sha256"],
+                "sizeBytes": reference["sizeBytes"],
+                "attestationBundleDigest": proof_digest,
+            }
+        metadata = self._parse_plugin_package_release_metadata(
+            candidate, payloads["packageReleaseMetadata"], stored_assets
+        )
+        archive_reference = artifact["archive"]
+        archive_path = Path(stored_assets["archive"]["path"])
+        payload_root = component_root / "payload"
+        self._extract_zip(
+            archive_path,
+            payload_root,
+            expected_files=archive_reference["files"],
+            max_entries=archive_reference["maxEntries"],
+            max_member_bytes=archive_reference["maxUncompressedBytes"],
+            max_expanded_bytes=archive_reference["maxUncompressedBytes"],
+        )
+        descriptor = self._validate_workload_package_descriptor(
+            payloads["descriptor"],
+            candidate,
+            artifact,
+            payload_root,
+        )
+        self._validate_workload_package_source_policy(
+            metadata,
+            resolution_component.get("sourcePolicy")
+            if isinstance(resolution_component, dict)
+            else None,
+        )
+        binding_id = (
+            resolution_component.get("bindingId")
+            if isinstance(resolution_component, dict)
+            else None
+        )
+        source_policy = (
+            resolution_component.get("sourcePolicy")
+            if isinstance(resolution_component, dict)
+            else None
+        )
+        if (
+            not isinstance(binding_id, str)
+            or ACTIVITY_SCOPE_ID_PATTERN.fullmatch(binding_id) is None
+            or not isinstance(source_policy, dict)
+        ):
+            raise UpdateError(
+                "SOURCE_BINDING_INVALID",
+                "Plugin package staging requires the selected workload's explicit owner binding.",
+            )
+        return {
+            "componentId": component_id,
+            "status": "staged",
+            "artifactKind": "plugin-package",
+            "version": candidate.manifest["version"],
+            "digest": candidate.artifact_digest,
+            "manifestDigest": candidate.manifest_digest,
+            "manifestAssetDigest": candidate.manifest_asset_digest,
+            "packageId": package_id,
+            "capabilityId": artifact["capabilityId"],
+            "bindingId": binding_id,
+            "packageArtifactDigest": descriptor["artifactDigest"],
+            "archiveDigest": descriptor["archiveDigest"],
+            "descriptorDigest": artifact["descriptor"]["sha256"],
+            "dependencyLockDigest": descriptor["dependencyLockDigest"],
+            "packageReleaseDigest": artifact["packageReleaseMetadata"]["sha256"],
+            "sourceCommit": metadata["source"]["commit"],
+            "sourcePolicy": (
+                resolution_component.get("sourcePolicy")
+                if isinstance(resolution_component, dict)
+                else None
+            ),
+            "assetAttestations": proof_digests,
+            "stagedIdentity": {
+                "assetPaths": {key: row["path"] for key, row in stored_assets.items()},
+                "payloadPath": str(payload_root),
+                "planId": plan_id,
+                "planDigest": plan_digest,
+            },
+        }
+
+    def _validate_workload_package_descriptor(
+        self,
+        payload: bytes,
+        candidate: Candidate,
+        artifact: dict[str, Any],
+        payload_root: Path,
+    ) -> dict[str, str]:
+        """Bind the signed descriptor to the exact verified ZIP members and release."""
+
+        try:
+            descriptor = json.loads(payload, object_pairs_hook=_unique_json_object)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_PACKAGE_DESCRIPTOR", "Package descriptor is invalid JSON."
+            ) from error
+        package = descriptor.get("package") if isinstance(descriptor, dict) else None
+        capability = descriptor.get("capability") if isinstance(descriptor, dict) else None
+        implementation = descriptor.get("implementation") if isinstance(descriptor, dict) else None
+        implementation_artifact = (
+            implementation.get("artifact") if isinstance(implementation, dict) else None
+        )
+        dependencies = descriptor.get("dependencies") if isinstance(descriptor, dict) else None
+        lock = dependencies.get("lock") if isinstance(dependencies, dict) else None
+        integrity = descriptor.get("integrity") if isinstance(descriptor, dict) else None
+        if (
+            not isinstance(descriptor, dict)
+            or descriptor.get("record_type") != "package_descriptor"
+            or descriptor.get("spec_version") != "0.1"
+            or descriptor.get("publication_status") != "PUBLISHED"
+            or not isinstance(package, dict)
+            or package.get("id") != artifact.get("packageId")
+            or package.get("version") != candidate.manifest.get("version")
+            or not isinstance(capability, dict)
+            or capability.get("id") != artifact.get("capabilityId")
+            or not isinstance(implementation_artifact, dict)
+            or implementation_artifact.get("status") != "PUBLISHED"
+            or implementation_artifact.get("format") != "zip"
+            or not isinstance(lock, dict)
+            or lock.get("status") != "LOCKED"
+            or lock.get("format") != "requirements.lock"
+            or lock.get("ref") != "requirements.lock"
+            or not isinstance(integrity, dict)
+            or not _valid_digest(implementation_artifact.get("digest"))
+            or integrity.get("artifact_digest") != implementation_artifact.get("digest")
+            or not _valid_digest(integrity.get("archive_digest"))
+            or not _valid_digest(lock.get("digest"))
+        ):
+            raise UpdateError(
+                "PACKAGE_DESCRIPTOR_MISMATCH",
+                "Package descriptor identity or immutable digest fields differ from the signed release.",
+            )
+        lock_path = payload_root / "requirements.lock"
+        manifest_path = payload_root / "plugin.manifest.json"
+        if (
+            not lock_path.is_file()
+            or lock_path.is_symlink()
+            or not manifest_path.is_file()
+            or manifest_path.is_symlink()
+        ):
+            raise UpdateError(
+                "PACKAGE_CONTENT_MISMATCH", "Package ZIP is missing its root manifest or lock."
+            )
+        lock_digest = _file_digest(lock_path)
+        if lock_digest != lock["digest"] or lock_digest != artifact["requirementsLock"]["sha256"]:
+            raise UpdateError(
+                "PACKAGE_LOCK_MISMATCH",
+                "The verified ZIP lock differs from its descriptor or release.",
+            )
+        entries: list[tuple[str, bytes]] = []
+        for current, directories, files in os.walk(payload_root, followlinks=False):
+            parent = Path(current)
+            if parent.is_symlink():
+                raise UpdateError(
+                    "UNSAFE_PACKAGE_CONTENT", "Package ZIP contains a symlink directory."
+                )
+            for name in directories + files:
+                path = parent / name
+                if path.is_symlink():
+                    raise UpdateError("UNSAFE_PACKAGE_CONTENT", "Package ZIP contains a symlink.")
+                if path.is_file():
+                    entries.append((path.relative_to(payload_root).as_posix(), path.read_bytes()))
+        entries.sort(key=lambda item: item[0])
+        digest = hashlib.sha256()
+        for name, content in entries:
+            encoded_name = name.encode("utf-8")
+            digest.update(len(encoded_name).to_bytes(8, "big"))
+            digest.update(encoded_name)
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        package_artifact_digest = "sha256:" + digest.hexdigest()
+        if (
+            integrity["archive_digest"] != candidate.artifact_digest
+            or package_artifact_digest != integrity["artifact_digest"]
+        ):
+            raise UpdateError(
+                "PACKAGE_CONTENT_MISMATCH",
+                "Package Runtime descriptor digest does not match the archive bytes and members.",
+            )
+        return {
+            "artifactDigest": package_artifact_digest,
+            "archiveDigest": integrity["archive_digest"],
+            "dependencyLockDigest": lock_digest,
+        }
+
+    @staticmethod
+    def _validate_workload_package_source_policy(
+        metadata: dict[str, Any], source_policy: Any
+    ) -> None:
+        """Require package-declared Product services to match the signed Catalog owner map."""
+
+        policy = metadata.get("source_policy")
+        package = metadata.get("package")
+        if not isinstance(policy, dict) or not isinstance(package, dict):
+            raise UpdateError(
+                "PACKAGE_SOURCE_POLICY_INVALID", "Package source policy metadata is missing."
+            )
+        supported = package.get("supported_services")
+        product_sources = policy.get("supported_product_sources")
+        if (
+            policy.get("authority") != "plugin.manifest.json#supportedServices"
+            or not isinstance(supported, list)
+            or any(not isinstance(item, str) or not item for item in supported)
+            or len(set(supported)) != len(supported)
+            or not isinstance(product_sources, list)
+        ):
+            raise UpdateError(
+                "PACKAGE_SOURCE_POLICY_INVALID", "Package source policy metadata is malformed."
+            )
+        source_map: dict[str, str] = {}
+        for row in product_sources:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"service", "component_id"}
+                or not isinstance(row.get("service"), str)
+                or not isinstance(row.get("component_id"), str)
+                or row["service"] in source_map
+            ):
+                raise UpdateError(
+                    "PACKAGE_SOURCE_POLICY_INVALID", "Package Product source mapping is malformed."
+                )
+            source_map[row["service"]] = row["component_id"]
+        if set(source_map) != set(supported):
+            raise UpdateError(
+                "PACKAGE_SOURCE_POLICY_INVALID",
+                "Package supported services differ from the source map.",
+            )
+        if source_policy is None:
+            return
+        if not isinstance(source_policy, dict):
+            raise UpdateError("SOURCE_POLICY_INVALID", "Workload source policy is malformed.")
+        if source_policy.get("mode") == "actualProduct":
+            expected_products = set(source_policy.get("productComponentIds", []))
+            if set(source_map.values()) != expected_products:
+                raise UpdateError(
+                    "SOURCE_POLICY_MISMATCH",
+                    "Package-supported Products differ from the signed workload source policy.",
+                )
+
+    def _parse_plugin_package_release_metadata(
+        self,
+        candidate: Candidate,
+        payload: bytes,
+        stored_assets: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        try:
+            value = json.loads(payload, object_pairs_hook=_unique_json_object)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_PACKAGE_RELEASE", "Plugin release metadata is invalid JSON."
+            ) from error
+        artifact = candidate.manifest["artifact"]
+        source = value.get("source") if isinstance(value, dict) else None
+        package = value.get("package") if isinstance(value, dict) else None
+        policy = value.get("attestation_policy") if isinstance(value, dict) else None
+        publisher = self._publisher_for_component(candidate.component)
+        if (
+            not isinstance(value, dict)
+            or value.get("record_type") != "cyrene.plugin.package.release.v1"
+            or value.get("spec_version") != "1"
+            or not isinstance(source, dict)
+            or not isinstance(package, dict)
+            or not isinstance(policy, dict)
+            or source.get("ref") != candidate.manifest["source"].get("ref")
+            or source.get("commit") != candidate.manifest["source"].get("commit")
+            or package.get("id") != artifact.get("packageId")
+            or package.get("version") != candidate.manifest.get("version")
+            or package.get("component_id") != candidate.component["componentId"]
+            or package.get("capability") != artifact.get("capabilityId")
+            or package.get("interface_version") != artifact.get("interfaceVersion")
+            or policy.get("provider") != "github-actions"
+            or publisher is None
+            or policy.get("workflow") != publisher["workflow"]
+            or policy.get("source_commit") != candidate.manifest["source"].get("commit")
+        ):
+            raise UpdateError(
+                "PACKAGE_RELEASE_MISMATCH",
+                "Signed Package Release identity differs from its manifest.",
+            )
+        subjects = policy.get("subject_assets")
+        if not isinstance(subjects, list):
+            raise UpdateError(
+                "PACKAGE_RELEASE_MISMATCH", "Package Release subject asset list is missing."
+            )
+        expected_subjects = {
+            PurePosixPath(urllib.parse.urlsplit(row["uri"]).path).name: row["sha256"]
+            for key, row in stored_assets.items()
+            if key != "packageReleaseMetadata"
+        }
+        actual_subjects: dict[str, str] = {}
+        for subject in subjects:
+            if (
+                not isinstance(subject, dict)
+                or set(subject) != {"name", "sha256"}
+                or not isinstance(subject.get("name"), str)
+                or not _valid_digest(subject.get("sha256"))
+                or subject["name"] in actual_subjects
+            ):
+                raise UpdateError(
+                    "PACKAGE_RELEASE_MISMATCH", "Package Release subject assets are malformed."
+                )
+            actual_subjects[subject["name"]] = subject["sha256"]
+        if actual_subjects != expected_subjects:
+            raise UpdateError(
+                "PACKAGE_RELEASE_MISMATCH", "Attestation policy does not bind every package asset."
+            )
+        return value
+
+    def _stage_workload_static_web(
+        self,
+        candidate: Candidate,
+        stage_root: Path,
+        plan_id: str,
+        plan_digest: str,
+        *,
+        resolution_component: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        artifact = candidate.manifest["artifact"]
+        component_id = candidate.component["componentId"]
+        reference = {
+            "uri": artifact["uri"],
+            "sha256": artifact["sha256"],
+            "sizeBytes": artifact["sizeBytes"],
+        }
+        archive_bytes, attestation_digest = self._workload_asset_bytes(
+            candidate, reference, label="static web bundle"
+        )
+        component_root = stage_root / component_id
+        component_root.mkdir(mode=0o700)
+        archive_path = (
+            component_root / PurePosixPath(urllib.parse.urlsplit(reference["uri"]).path).name
+        )
+        self._write_private_file(archive_path, archive_bytes)
+        payload_root = component_root / "payload"
+        self._extract_static_web_archive(archive_path, payload_root, artifact)
+        release_id = candidate.manifest.get("releaseId")
+        if (
+            not isinstance(release_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", release_id) is None
+        ):
+            raise UpdateError(
+                "INVALID_MANIFEST", "Static web release ID is not a safe path segment."
+            )
+        releases = DEFAULT_WORKLOAD_WEB_ROOT / component_id / "releases"
+        self._ensure_workload_release_directory(releases)
+        identity = f"{release_id}--{candidate.manifest_digest.removeprefix('sha256:')}"
+        destination = releases / identity
+        if destination.exists() or destination.is_symlink():
+            if destination.is_symlink() or not destination.is_dir():
+                raise UpdateError(
+                    "UNSAFE_WEB_ROOT", "Existing static web release is not a directory."
+                )
+            self._verify_static_web_tree(destination, artifact["files"])
+        else:
+            temporary = releases / f".{identity}.{uuid.uuid4().hex}.tmp"
+            shutil.copytree(payload_root, temporary, symlinks=False)
+            self._set_static_web_permissions(temporary)
+            os.replace(temporary, destination)
+            self._fsync_directory(releases)
+        identity_fields = self._workload_receipt_fields(candidate, resolution_component)
+        receipt_item = {
+            "componentId": component_id,
+            "version": candidate.manifest["version"],
+            "releaseIdentity": candidate.manifest_digest,
+            "manifestDigest": candidate.manifest_digest,
+            "artifactDigest": candidate.artifact_digest,
+            "bundleIdentity": None,
+            "manifest": candidate.manifest,
+            "releasePath": str(destination),
+            "archivePath": str(archive_path),
+            "pointerIdentity": identity,
+            **identity_fields,
+        }
+        self._write_release_receipt(receipt_item)
+        return {
+            "componentId": component_id,
+            "status": "staged",
+            "artifactKind": "static-web",
+            "version": candidate.manifest["version"],
+            "digest": candidate.artifact_digest,
+            "manifestDigest": candidate.manifest_digest,
+            "manifestAssetDigest": candidate.manifest_asset_digest,
+            "releaseId": release_id,
+            "targetId": identity_fields.get("targetId"),
+            "indexIdentity": identity_fields.get("indexIdentity"),
+            "publisherIdentity": identity_fields.get("publisherIdentity"),
+            "attestationRef": identity_fields.get("attestationRef"),
+            "attestationBundleDigest": attestation_digest,
+            "stagedIdentity": {
+                "releasePath": str(destination),
+                "releaseIdentity": identity,
+                "archivePath": str(archive_path),
+                "planId": plan_id,
+                "planDigest": plan_digest,
+            },
+        }
+
+    @staticmethod
+    def _ensure_workload_release_directory(path: Path) -> None:
+        current = Path("/")
+        for part in path.parts[1:]:
+            current /= part
+            current.mkdir(mode=0o755, exist_ok=True)
+            info = current.lstat()
+            if (
+                current.is_symlink()
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or stat.S_IMODE(info.st_mode) & 0o022
+            ):
+                raise UpdateError(
+                    "UNSAFE_WEB_ROOT", "Static web release path is not root controlled."
+                )
+
+    @staticmethod
+    def _set_static_web_permissions(root: Path) -> None:
+        for current, directories, files in os.walk(root, followlinks=False):
+            directory = Path(current)
+            if directory.is_symlink():
+                raise UpdateError("UNSAFE_WEB_ROOT", "Static web payload contains a symlink.")
+            os.chown(directory, 0, 0)
+            directory.chmod(0o755)
+            for name in directories + files:
+                path = directory / name
+                if path.is_symlink():
+                    raise UpdateError("UNSAFE_WEB_ROOT", "Static web payload contains a symlink.")
+                if path.is_dir():
+                    os.chown(path, 0, 0)
+                    path.chmod(0o755)
+                elif path.is_file():
+                    os.chown(path, 0, 0)
+                    path.chmod(0o644)
+                else:
+                    raise UpdateError(
+                        "UNSAFE_WEB_ROOT", "Static web payload contains a special file."
+                    )
+
+    @staticmethod
+    def _verify_static_web_tree(root: Path, expected_files: dict[str, str]) -> None:
+        actual: dict[str, str] = {}
+        for current, directories, files in os.walk(root, followlinks=False):
+            directory = Path(current)
+            if directory.is_symlink() or directory.stat().st_uid != 0:
+                raise UpdateError("UNSAFE_WEB_ROOT", "Existing static web tree is unsafe.")
+            for name in directories + files:
+                path = directory / name
+                if path.is_symlink():
+                    raise UpdateError(
+                        "UNSAFE_WEB_ROOT", "Existing static web tree contains a symlink."
+                    )
+                if path.is_file():
+                    actual[path.relative_to(root).as_posix()] = _file_digest(path)
+        if actual != expected_files:
+            raise UpdateError(
+                "WEB_RELEASE_COLLISION", "Existing immutable static web release differs."
+            )
+
+    def _extract_static_web_archive(
+        self, archive_path: Path, destination: Path, artifact: dict[str, Any]
+    ) -> None:
+        files = artifact["files"]
+        if artifact["format"] == "zip":
+            self._extract_zip(
+                archive_path,
+                destination,
+                expected_files=files,
+                max_entries=artifact["maxEntries"],
+                max_member_bytes=artifact["maxUncompressedBytes"],
+                max_expanded_bytes=artifact["maxUncompressedBytes"],
+            )
+        elif artifact["format"] == "tar.gz":
+            self._extract_tar(
+                archive_path,
+                destination,
+                expected_files=files,
+                max_entries=artifact["maxEntries"],
+                max_member_bytes=artifact["maxUncompressedBytes"],
+                max_expanded_bytes=artifact["maxUncompressedBytes"],
+            )
+        elif artifact["format"] == "tar.zst":
+            tar_path = archive_path.with_suffix(".tar")
+            try:
+                with tar_path.open("xb") as output:
+                    result = self.runner(
+                        ["zstd", "--decompress", "--stdout", str(archive_path)],
+                        stdout=output,
+                        stderr=subprocess.PIPE,
+                        timeout=180,
+                        check=False,
+                    )
+                if (
+                    result.returncode != 0
+                    or tar_path.stat().st_size > artifact["maxUncompressedBytes"]
+                ):
+                    raise UpdateError(
+                        "INVALID_ARTIFACT", "Static web archive exceeds its expansion limit."
+                    )
+                self._extract_tar(
+                    tar_path,
+                    destination,
+                    expected_files=files,
+                    max_entries=artifact["maxEntries"],
+                    max_member_bytes=artifact["maxUncompressedBytes"],
+                    max_expanded_bytes=artifact["maxUncompressedBytes"],
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise UpdateError(
+                    "INVALID_ARTIFACT", "Cannot safely decompress static web archive."
+                ) from error
+            finally:
+                tar_path.unlink(missing_ok=True)
+        else:
+            raise UpdateError("INVALID_MANIFEST", "Unsupported static web archive format.")
+        self._set_static_web_permissions(destination)
+        self._verify_static_web_tree(destination, files)
+
+    def _extract_zip(
+        self,
+        archive: Path,
+        destination: Path,
+        *,
+        expected_files: dict[str, str],
+        max_entries: int,
+        max_member_bytes: int,
+        max_expanded_bytes: int,
+    ) -> None:
+        destination.mkdir(mode=0o700)
+        found: dict[str, str] = {}
+        total = 0
+        try:
+            with zipfile.ZipFile(archive) as source:
+                entries = source.infolist()
+                if not entries or len(entries) > max_entries:
+                    raise UpdateError(
+                        "UNSAFE_ARTIFACT", "ZIP entry count exceeds its signed limit."
+                    )
+                seen: set[str] = set()
+                for entry in entries:
+                    if entry.is_dir():
+                        continue
+                    relative = _safe_relative(entry.filename, field="ZIP entry path")
+                    name = relative.as_posix()
+                    mode = (entry.external_attr >> 16) & 0xFFFF
+                    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+                        raise UpdateError("UNSAFE_ARTIFACT", "ZIP contains a link or special file.")
+                    if name in seen or entry.file_size > max_member_bytes:
+                        raise UpdateError(
+                            "UNSAFE_ARTIFACT", "ZIP contains a duplicate or oversized entry."
+                        )
+                    seen.add(name)
+                    total += entry.file_size
+                    if total > max_expanded_bytes:
+                        raise UpdateError(
+                            "UNSAFE_ARTIFACT", "ZIP expansion exceeds its signed limit."
+                        )
+                    target = destination.joinpath(*relative.parts)
+                    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    digest = hashlib.sha256()
+                    size = 0
+                    with source.open(entry) as input_stream, target.open("xb") as output_stream:
+                        while chunk := input_stream.read(1024 * 1024):
+                            size += len(chunk)
+                            if size > entry.file_size or size > max_member_bytes:
+                                raise UpdateError(
+                                    "UNSAFE_ARTIFACT", "ZIP entry exceeded its declared size."
+                                )
+                            output_stream.write(chunk)
+                            digest.update(chunk)
+                    if size != entry.file_size:
+                        raise UpdateError(
+                            "INVALID_ARTIFACT",
+                            "ZIP entry length differs from its directory record.",
+                        )
+                    found[name] = "sha256:" + digest.hexdigest()
+        except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+            raise UpdateError(
+                "INVALID_ARTIFACT", "Cannot safely read the signed ZIP archive."
+            ) from error
+        if found != expected_files:
+            raise UpdateError(
+                "ARTIFACT_CONTENT_MISMATCH", "ZIP contents differ from the signed file map."
+            )
+
+    def apply_workload(
+        self,
+        workload_id: Any,
+        target_id: Any,
+        plan_id: Any,
+        plan_digest: Any,
+        confirmation: Any,
+        *,
+        action: Any,
+    ) -> dict[str, Any]:
+        """Apply a staged Product/Web/SDK workload through the native transaction journal."""
+
+        self._require_authorized_process()
+        with self._exclusive_update_lock():
+            return self._apply_workload_locked(
+                workload_id,
+                target_id,
+                plan_id,
+                plan_digest,
+                confirmation,
+                action=action,
+            )
+
+    def _apply_workload_locked(
+        self,
+        workload_id: Any,
+        target_id: Any,
+        plan_id: Any,
+        plan_digest: Any,
+        confirmation: Any,
+        *,
+        action: Any,
+    ) -> dict[str, Any]:
+        """Revalidate and apply one workload while holding the updater lock."""
+
+        self._validate_plan_identity(plan_id, plan_digest)
+        workload_id, target_id = self._require_workload_target(workload_id, target_id)
+        if not isinstance(action, str) or action not in {"install", "uninstall"}:
+            raise UpdateError("INVALID_ACTION", "Workload action must be install or uninstall.")
+        if (
+            not isinstance(confirmation, dict)
+            or set(confirmation) != {"planId", "planDigest", "confirmed"}
+            or confirmation.get("planId") != plan_id
+            or confirmation.get("planDigest") != plan_digest
+            or confirmation.get("confirmed") is not True
+        ):
+            raise UpdateError(
+                "CONFIRMATION_MISMATCH",
+                "Apply needs confirmation for the exact plan ID and digest.",
+            )
+        directory = self._workload_plan_directory()
+        stored = _read_object(directory / f"{plan_id}.json", "staged workload plan")
+        if (
+            stored.get("planKind") != WORKLOAD_PROTOCOL_VERSION
+            or stored.get("phase") != "staged"
+            or stored.get("planId") != plan_id
+            or stored.get("planDigest") != plan_digest
+            or stored.get("workloadId") != workload_id
+            or stored.get("targetId") != target_id
+            or stored.get("action") != action
+            or stored.get("catalogDigest") != self.catalog_digest
+            or stored.get("catalogGeneration") != self.catalog_generation
+        ):
+            raise UpdateError("PLAN_NOT_STAGED", "This exact workload plan is not staged.")
+        if action == "uninstall":
+            return self._apply_workload_uninstall_locked(stored, confirmation)
+        return self._apply_workload_install_locked(stored, confirmation)
+
+    def _load_workload_sdk_environment(self) -> Any:
+        """Load the separately owned, root-verified operator venv installer."""
+
+        module_path = Path(__file__).with_name("workload_sdk_environment.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError(
+                "WORKLOAD_SDK_UNAVAILABLE", "The workload operator SDK installer is missing."
+            )
+        module_name = "_cyrene_workload_sdk_environment"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError(
+                "WORKLOAD_SDK_UNAVAILABLE", "The workload operator SDK installer cannot load."
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            sys.modules.pop(module_name, None)
+            raise UpdateError(
+                "WORKLOAD_SDK_UNAVAILABLE", "The workload operator SDK installer failed to load."
+            ) from error
+        prepare = getattr(module, "prepare_workload_sdk_environment", None)
+        read_environment = getattr(module, "read_workload_sdk_environment", None)
+        restore = getattr(module, "restore_workload_sdk_environment", None)
+        if not callable(prepare) or not callable(read_environment) or not callable(restore):
+            raise UpdateError(
+                "WORKLOAD_SDK_UNAVAILABLE", "The workload operator SDK installer API is invalid."
+            )
+        return module
+
+    @staticmethod
+    def _workload_sdk_matches_selected(
+        selected: dict[str, Any],
+        installed: Any,
+    ) -> bool:
+        """Compare a protected SDK receipt to one exact selected Catalog row."""
+
+        if not isinstance(installed, dict) or installed.get("installed") is not True:
+            return False
+        if installed.get("verification") != {"identityAttested": True}:
+            return False
+        fields = (
+            "componentId",
+            "artifactKind",
+            "version",
+            "targetId",
+            "releaseId",
+            "manifestUri",
+            "manifestDigest",
+            "manifestAssetDigest",
+            "digest",
+            "indexIdentity",
+            "publisherIdentity",
+            "attestationRef",
+        )
+        if any(installed.get(field) != selected.get(field) for field in fields):
+            return False
+        index_identity = selected.get("indexIdentity")
+        if (
+            installed.get("artifactDigest") != selected.get("digest")
+            or installed.get("releaseIdentity") != selected.get("manifestDigest")
+            or not isinstance(index_identity, dict)
+            or installed.get("releaseTag") != index_identity.get("releaseTag")
+        ):
+            return False
+        source_identity = installed.get("sourceIdentity")
+        return (
+            isinstance(source_identity, dict)
+            and source_identity.get("artifactDigest") == selected.get("digest")
+            and source_identity.get("manifestDigest") == selected.get("manifestDigest")
+            and source_identity.get("manifestAssetDigest") == selected.get("manifestAssetDigest")
+            and source_identity.get("releaseId") == selected.get("releaseId")
+        )
+
+    def _prepare_workload_sdk_durably(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        sdk_module: Any,
+        selected: dict[str, Any],
+        staged: dict[str, Any],
+        *,
+        plan_id: str,
+        plan_digest: str,
+    ) -> dict[str, Any]:
+        """Journal SDK prior identity before venv creation or pointer activation."""
+
+        current = sdk_module.read_workload_sdk_environment()
+        if staged.get("status") == "current":
+            if not self._workload_sdk_matches_selected(selected, current):
+                raise UpdateError(
+                    "WORKLOAD_SDK_READBACK_REQUIRED",
+                    "The current operator SDK differs from the selected plan.",
+                    retryable=True,
+                )
+            transaction["sdkEnvironment"] = current
+            _atomic_json(transaction_path, transaction)
+            return current
+
+        staged_identity = staged.get("stagedIdentity")
+        if (
+            not isinstance(staged_identity, dict)
+            or staged_identity.get("planId") != plan_id
+            or staged_identity.get("planDigest") != plan_digest
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "Operator SDK stage is not bound to this workload plan."
+            )
+
+        intent = transaction.get("sdkPrepareIntent")
+        if intent is None:
+            if self._workload_sdk_matches_selected(selected, current):
+                raise UpdateError(
+                    "WORKLOAD_SDK_READBACK_REQUIRED",
+                    "The selected SDK is active without a durable prepare intent.",
+                    retryable=True,
+                )
+            intent = {
+                "schemaVersion": 1,
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "componentId": selected["componentId"],
+                "selectedIdentity": selected,
+                "stagedIdentity": staged_identity,
+                "priorIdentity": current,
+                "status": "pending",
+            }
+            transaction["sdkPrepareIntent"] = intent
+            transaction["phase"] = "operator_sdk_prepare_pending"
+            _atomic_json(transaction_path, transaction)
+        elif (
+            not isinstance(intent, dict)
+            or intent.get("schemaVersion") != 1
+            or intent.get("planId") != plan_id
+            or intent.get("planDigest") != plan_digest
+            or intent.get("componentId") != selected.get("componentId")
+            or intent.get("selectedIdentity") != selected
+            or intent.get("stagedIdentity") != staged_identity
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Operator SDK prepare intent differs from this plan."
+            )
+
+        prior = intent.get("priorIdentity")
+        if prior is not None and not isinstance(prior, dict):
+            raise UpdateError("INVALID_TRANSACTION", "Operator SDK prior identity is malformed.")
+        if current != prior:
+            if self._workload_sdk_matches_selected(selected, current):
+                transaction["sdkEnvironment"] = current
+                intent["status"] = "prepared"
+                transaction["phase"] = "applying"
+                transaction.pop("recoveryError", None)
+                _atomic_json(transaction_path, transaction)
+                return current
+            raise UpdateError(
+                "WORKLOAD_SDK_READBACK_REQUIRED",
+                "Operator SDK current differs from both the prior and selected plan identities.",
+                retryable=True,
+            )
+
+        sdk_component = {**selected, "verification": {"identityAttested": True}}
+        try:
+            sdk_module.prepare_workload_sdk_environment(sdk_component, staged_identity)
+            current = sdk_module.read_workload_sdk_environment()
+            if not self._workload_sdk_matches_selected(selected, current):
+                raise RuntimeError("active SDK readback differs from the selected signed identity")
+        except Exception as error:
+            transaction["recoveryError"] = (
+                "Operator SDK preparation did not reach a verified active identity."
+            )
+            _atomic_json(transaction_path, transaction)
+            raise UpdateError(
+                "WORKLOAD_SDK_INSTALL_FAILED",
+                "The verified operator SDK could not be prepared or read back.",
+                retryable=True,
+            ) from error
+        transaction["sdkEnvironment"] = current
+        intent["status"] = "prepared"
+        transaction["phase"] = "applying"
+        transaction.pop("recoveryError", None)
+        _atomic_json(transaction_path, transaction)
+        return current
+
+    def _restore_workload_sdk_environment(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+    ) -> None:
+        """CAS-restore the SDK pointer recorded by a durable prepare intent."""
+
+        intent = transaction.get("sdkPrepareIntent")
+        if not isinstance(intent, dict):
+            return
+        if (
+            intent.get("schemaVersion") != 1
+            or intent.get("planId") != transaction.get("planId")
+            or intent.get("planDigest") != transaction.get("planDigest")
+            or not isinstance(intent.get("selectedIdentity"), dict)
+            or intent.get("componentId") != intent["selectedIdentity"].get("componentId")
+        ):
+            raise UpdateError("INVALID_TRANSACTION", "Operator SDK rollback intent is malformed.")
+        prior = intent.get("priorIdentity")
+        if prior is not None and not isinstance(prior, dict):
+            raise UpdateError("INVALID_TRANSACTION", "Operator SDK prior identity is malformed.")
+        sdk_module = self._load_workload_sdk_environment()
+        current = sdk_module.read_workload_sdk_environment()
+        if current == prior:
+            intent["status"] = "restored"
+            transaction["sdkEnvironmentRestored"] = prior
+            _atomic_json(transaction_path, transaction)
+            return
+        if not self._workload_sdk_matches_selected(intent["selectedIdentity"], current):
+            raise UpdateError(
+                "WORKLOAD_SDK_READBACK_REQUIRED",
+                "Operator SDK current identity differs from both the plan and its prior receipt.",
+                retryable=True,
+            )
+        try:
+            restored = sdk_module.restore_workload_sdk_environment(
+                prior,
+                expected_current=current,
+            )
+        except Exception as error:
+            raise UpdateError(
+                "WORKLOAD_SDK_ROLLBACK_FAILED",
+                "Operator SDK current pointer could not be restored safely.",
+                retryable=True,
+            ) from error
+        if restored != prior:
+            raise UpdateError(
+                "WORKLOAD_SDK_READBACK_REQUIRED",
+                "Operator SDK rollback did not restore the exact prior identity.",
+                retryable=True,
+            )
+        intent["status"] = "restored"
+        transaction["sdkEnvironmentRestored"] = restored
+        _atomic_json(transaction_path, transaction)
+
+    def _load_workload_web_host(self) -> Any:
+        """Load the adjacent dedicated loopback web-host lifecycle helper."""
+
+        module_path = Path(__file__).with_name("workload_web_host.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError(
+                "WORKLOAD_WEB_HOST_UNAVAILABLE", "The workload Web host helper is missing."
+            )
+        module_name = "_cyrene_workload_web_host"
+        existing = sys.modules.get(module_name)
+        if existing is not None:
+            return existing
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError(
+                "WORKLOAD_WEB_HOST_UNAVAILABLE", "The workload Web host helper cannot load."
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            sys.modules.pop(module_name, None)
+            raise UpdateError(
+                "WORKLOAD_WEB_HOST_UNAVAILABLE", "The workload Web host helper failed to load."
+            ) from error
+        required = (
+            "prepare_host_prerequisites",
+            "check_web_host_prerequisites",
+            "capture_web_host_state",
+            "apply_web_host",
+            "rollback_web_host",
+            "remove_web_host",
+            "read_web_host_status",
+        )
+        if any(not callable(getattr(module, name, None)) for name in required):
+            raise UpdateError(
+                "WORKLOAD_WEB_HOST_UNAVAILABLE", "The workload Web host helper API is incomplete."
+            )
+        return module
+
+    @staticmethod
+    def _workload_hold_echo(transaction: dict[str, Any]) -> dict[str, Any]:
+        """Project one active workload maintenance hold for the official package helper."""
+
+        token = transaction.get("maintenanceToken")
+        if not isinstance(token, str) or len(token) < 32:
+            raise UpdateError(
+                "PENDING_MAINTENANCE", "The workload maintenance hold is unavailable."
+            )
+        return {
+            "transaction_id": _maintenance_request_id(transaction),
+            "maintenance_token": token,
+            "target_kind": transaction["targetKind"],
+            "plan_id": transaction["planId"],
+            "plan_digest": transaction["planDigest"],
+            "component_artifact_digests": dict(transaction["componentArtifactDigests"]),
+            "expected_gate_generation": transaction["expectedGateGeneration"],
+            "expected_catalog_generation": transaction["expectedCatalogGeneration"],
+        }
+
+    def _begin_workload_hold(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        phase: str,
+        target_kind: str,
+        requires_restart: bool,
+    ) -> None:
+        """Acquire one fresh hold for a resumable subphase of the parent workload plan."""
+
+        if phase not in {
+            "core-runtime-install",
+            "package-only",
+            "core-runtime-activate",
+            "core-runtime-uninstall",
+        }:
+            raise UpdateError("INVALID_TRANSACTION", "Workload maintenance phase is invalid.")
+        if target_kind not in {"CORE_RUNTIME", "PACKAGE_ONLY"}:
+            raise UpdateError("INVALID_TRANSACTION", "Workload maintenance target is invalid.")
+        transaction["maintenancePhase"] = phase
+        transaction.pop("maintenanceRequestId", None)
+        transaction["targetKind"] = target_kind
+        transaction["requiresRestart"] = requires_restart
+        activity_catalog, activity_sources = self._activity_catalog()
+        readiness = self._readiness_for(target_kind, requires_restart=requires_restart, force=True)
+        self._require_ready(readiness, target_kind)
+        if readiness.get("install_catalog_generation") != activity_catalog["generation"]:
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Activity source generation changed during workload readiness.",
+                retryable=True,
+            )
+        gate_generation = readiness.get("gate_generation")
+        if type(gate_generation) is not int or gate_generation < 1:
+            raise UpdateError(
+                "GATE_UNKNOWN", "Maintenance gate generation is unknown.", retryable=True
+            )
+        transaction["expectedGateGeneration"] = gate_generation
+        transaction["expectedCatalogGeneration"] = activity_catalog["generation"]
+        transaction["expectedActivitySources"] = activity_sources
+        transaction["phase"] = "begin_pending"
+        holds = transaction.setdefault("maintenanceHolds", {})
+        if not isinstance(holds, dict):
+            raise UpdateError("INVALID_TRANSACTION", "Workload hold journal is malformed.")
+        request_id = _maintenance_request_id(transaction)
+        prior = holds.get(phase)
+        if (
+            isinstance(prior, dict)
+            and prior.get("requestId") == request_id
+            and prior.get("status") == "ended"
+        ):
+            raise UpdateError(
+                "TRANSACTION_PHASE_REPLAY",
+                "A completed maintenance subphase cannot reuse its request ID.",
+            )
+        holds[phase] = {
+            "requestId": request_id,
+            "targetKind": target_kind,
+            "expectedGateGeneration": gate_generation,
+            "expectedCatalogGeneration": activity_catalog["generation"],
+            "componentArtifactDigests": dict(transaction["componentArtifactDigests"]),
+            "status": "begin_pending",
+        }
+        _atomic_json(transaction_path, transaction)
+        try:
+            token = self._begin_maintenance(transaction)
+        except UpdateError as error:
+            if error.maintenance_not_acquired:
+                holds[phase]["status"] = "not_acquired"
+                transaction["phase"] = "applying"
+                transaction.pop("maintenanceRequestId", None)
+                _atomic_json(transaction_path, transaction)
+            raise
+        transaction["maintenanceToken"] = token
+        transaction["phase"] = "applying"
+        holds[phase]["status"] = "active"
+        holds[phase]["acquiredAt"] = int(time.time())
+        _atomic_json(transaction_path, transaction)
+
+    def _end_workload_hold(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        outcome: str,
+        healthy: bool,
+    ) -> None:
+        """Close the current hold and persist its exact phase receipt in the parent journal."""
+
+        phase = transaction.get("maintenancePhase")
+        holds = transaction.get("maintenanceHolds")
+        if (
+            not isinstance(phase, str)
+            or not isinstance(holds, dict)
+            or not isinstance(holds.get(phase), dict)
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload hold journal omits its phase identity."
+            )
+        hold = holds[phase]
+        hold["status"] = "end_pending"
+        hold["outcome"] = outcome
+        hold["healthy"] = healthy
+        _atomic_json(transaction_path, transaction)
+        self._end_maintenance(transaction, outcome=outcome, healthy=healthy)
+        hold["status"] = "ended"
+        hold["endedAt"] = int(time.time())
+        transaction.pop("maintenanceToken", None)
+        transaction.pop("maintenanceRequestId", None)
+        transaction["phase"] = "applying"
+        _atomic_json(transaction_path, transaction)
+
+    @staticmethod
+    def _journal_callback(
+        transaction: dict[str, Any], transaction_path: Path, key: str
+    ) -> Callable[[Mapping[str, Any]], None]:
+        """Build a helper callback that durably records one root-private event."""
+
+        def persist(event: Mapping[str, Any]) -> None:
+            if not isinstance(event, Mapping):
+                raise UpdateError("INVALID_TRANSACTION", "A workload callback is malformed.")
+            try:
+                safe_event = json.loads(json.dumps(dict(event), allow_nan=False))
+            except (TypeError, ValueError) as error:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "A workload callback is not JSON-safe."
+                ) from error
+            events = transaction.setdefault(key, [])
+            if not isinstance(events, list):
+                raise UpdateError("INVALID_TRANSACTION", "Workload callback journal is malformed.")
+            events.append(safe_event)
+            _atomic_json(transaction_path, transaction)
+
+        return persist
+
+    def _write_workload_activity_generation(
+        self, generation: int, *, previous_generation: int | None
+    ) -> None:
+        """Atomically project the committed broker generation to Product units."""
+
+        if type(generation) is not int or generation < 1:
+            raise UpdateError(
+                "CATALOG_GENERATION_MISMATCH", "Activity catalog generation is invalid."
+            )
+        path = DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT
+        expected = f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={generation}\n".encode("ascii")
+        previous = (
+            f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={previous_generation}\n".encode("ascii")
+            if type(previous_generation) is int and previous_generation >= 1
+            else None
+        )
+        current: bytes | None = None
+        if path.exists() or path.is_symlink():
+            descriptor: int | None = None
+            try:
+                before = path.lstat()
+                descriptor = os.open(
+                    path,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                )
+                info = os.fstat(descriptor)
+                if (
+                    path.is_symlink()
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != 0
+                    or info.st_gid != 0
+                    or stat.S_IMODE(info.st_mode) != 0o644
+                    or info.st_nlink != 1
+                    or info.st_dev != before.st_dev
+                    or info.st_ino != before.st_ino
+                    or info.st_size > 4096
+                ):
+                    raise UpdateError(
+                        "PRODUCT_ENVIRONMENT_UNKNOWN", "Product activity generation file is unsafe."
+                    )
+                current = os.read(descriptor, 4097)
+            except OSError as error:
+                raise UpdateError(
+                    "PRODUCT_ENVIRONMENT_UNKNOWN",
+                    "Product activity generation file is unavailable.",
+                ) from error
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+        if current == expected:
+            return
+        if current != previous and not (current is None and previous_generation in {None, 0}):
+            raise UpdateError(
+                "PRODUCT_ENVIRONMENT_UNKNOWN",
+                "Product activity generation changed outside the workload transaction.",
+                retryable=True,
+            )
+        path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+        temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o644,
+            )
+            os.fchown(descriptor, 0, 0)
+            os.fchmod(descriptor, 0o644)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = None
+                stream.write(expected)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            self._fsync_directory(path.parent)
+        except OSError as error:
+            raise UpdateError(
+                "PRODUCT_ENVIRONMENT_UNKNOWN", "Product activity generation cannot be updated."
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+
+    def _workload_source_state(
+        self, workload_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, dict[str, Any]], Any]:
+        """Read the current Broker and Package Runtime owner state for one workload."""
+
+        helper = self._load_workload_package_runtime()
+        workload = next(
+            (
+                row
+                for row in self.catalog.get("workloads", [])
+                if isinstance(row, dict) and row.get("workloadId") == workload_id
+            ),
+            None,
+        )
+        policy = workload.get("sourcePolicy") if isinstance(workload, dict) else None
+        if not isinstance(policy, dict):
+            raise UpdateError(
+                "SOURCE_POLICY_INVALID", "Signed workload sourcePolicy is unavailable."
+            )
+        activity_catalog, _activity_sources = self._activity_catalog()
+        principals = self._workload_source_principals(policy, activity_catalog)
+        runtime_policy: dict[str, Any] | None = None
+        if DEFAULT_PACKAGE_RUNTIME_POLICY.exists() or DEFAULT_PACKAGE_RUNTIME_POLICY.is_symlink():
+            if DEFAULT_PACKAGE_RUNTIME_POLICY.is_symlink():
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime source policy is an unsafe symlink.",
+                    retryable=True,
+                )
+            try:
+                runtime_policy = helper.read_runtime_source_policy_generic(
+                    DEFAULT_PACKAGE_RUNTIME_POLICY
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime source policy cannot be read safely.",
+                    retryable=True,
+                ) from error
+        elif activity_catalog.get("sources"):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Activity owners exist without their authenticated Package Runtime policy.",
+                retryable=True,
+            )
+        return activity_catalog, runtime_policy, principals, helper
+
+    def _update_workload_source_policy(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        source_policy: dict[str, Any],
+        selected_rows: list[dict[str, Any]],
+        installation_records: dict[str, dict[str, Any]],
+        phase: str,
+        remove_component_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Update Broker/runtime owner scopes under the caller's current hold."""
+
+        intents = transaction.get("sourceUpdateIntents")
+        if "sourceUpdateIntents" in transaction and not isinstance(intents, dict):
+            raise UpdateError("INVALID_TRANSACTION", "Workload source-update history is malformed.")
+        intent = (
+            intents.get(phase)
+            if isinstance(intents, dict)
+            else transaction.get("sourceUpdateIntent")
+        )
+        if isinstance(intent, dict) and intent.get("phase") == phase:
+            reconciled = self._reconcile_workload_source_policy_intent(
+                transaction, transaction_path, phase=phase
+            )
+            if reconciled is not None:
+                return reconciled
+
+        activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+            transaction["workloadId"]
+        )
+        try:
+            update = helper.build_workload_source_update(
+                source_policy=source_policy,
+                selected_rows=selected_rows,
+                installation_records=installation_records,
+                activity_catalog=activity_catalog,
+                source_principals=principals,
+                runtime_policy=runtime_policy,
+                remove_component_ids=remove_component_ids,
+            )
+            prior_generation = activity_catalog["generation"]
+            request_id = (
+                "cyrene-wsource-" + phase + "-" + transaction["planId"].removeprefix("plan-")
+            )
+            intent_value = {
+                "schemaVersion": 1,
+                "phase": phase,
+                "requestId": request_id,
+                "previousCatalogGeneration": prior_generation,
+                "expectedCatalogGeneration": update.expected_generation,
+                "previousPolicyDigest": update.previous_policy_digest,
+                "bindingScopes": update.binding_scopes,
+                "sourceIdentity": update.source_identity,
+                "sourceArguments": list(update.source_arguments),
+                "runtimeBindings": update.runtime_bindings,
+                "changed": update.changed,
+                "selectedBindings": list(update.selected_binding_ids),
+                "componentArtifactDigests": update.component_artifact_digests,
+                "requiredHoldComponentIds": list(update.required_hold_component_ids),
+                "parentPlanId": transaction["planId"],
+                "parentPlanDigest": transaction["planDigest"],
+            }
+            if isinstance(intent, dict) and intent.get("phase") == phase:
+                identity_fields = (
+                    "phase",
+                    "requestId",
+                    "previousCatalogGeneration",
+                    "expectedCatalogGeneration",
+                    "previousPolicyDigest",
+                    "bindingScopes",
+                    "sourceIdentity",
+                    "sourceArguments",
+                    "runtimeBindings",
+                    "changed",
+                    "selectedBindings",
+                    "componentArtifactDigests",
+                    "requiredHoldComponentIds",
+                    "parentPlanId",
+                    "parentPlanDigest",
+                )
+                if any(intent.get(field) != intent_value.get(field) for field in identity_fields):
+                    raise UpdateError(
+                        "INVALID_TRANSACTION",
+                        "Workload source-update retry changed its durable desired state.",
+                    )
+            else:
+                source_intents = transaction.setdefault("sourceUpdateIntents", {})
+                if not isinstance(source_intents, dict):
+                    raise UpdateError(
+                        "INVALID_TRANSACTION", "Workload source-update history is malformed."
+                    )
+                source_intents[phase] = intent_value
+                transaction["sourceUpdateIntent"] = intent_value
+                _atomic_json(transaction_path, transaction)
+            update_result = helper.apply_workload_source_update(
+                update,
+                maintenance=self._workload_hold_echo(transaction),
+                request_id=request_id,
+                expected_policy_digest=update.previous_policy_digest,
+                activity_catalog_path=self.activity_catalog_path,
+                policy_path=DEFAULT_PACKAGE_RUNTIME_POLICY,
+                token_directory=DEFAULT_ACTIVITY_TOKEN_DIRECTORY,
+                runner=self.runner,
+            )
+        except Exception as error:
+            if isinstance(error, UpdateError):
+                raise
+            raise UpdateError(
+                "PACKAGE_RUNTIME_POLICY_UPDATE_FAILED",
+                "The held Broker and Package Runtime owner policy update did not complete.",
+                retryable=True,
+            ) from error
+        generation = update_result.get("catalogGeneration")
+        if type(generation) is not int or generation < 1:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Broker did not return a valid committed source generation.",
+                retryable=True,
+            )
+        self._write_workload_activity_generation(
+            generation,
+            previous_generation=prior_generation if prior_generation >= 1 else None,
+        )
+        transaction["sourceUpdate"] = update_result
+        source_updates = transaction.setdefault("sourceUpdates", {})
+        if not isinstance(source_updates, dict):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload source-update receipts are malformed."
+            )
+        source_updates[phase] = update_result
+        transaction["activityCatalogGeneration"] = generation
+        source_intents = transaction.setdefault("sourceUpdateIntents", {})
+        if not isinstance(source_intents, dict):
+            raise UpdateError("INVALID_TRANSACTION", "Workload source-update history is malformed.")
+        committed_intent = source_intents.get(phase)
+        if not isinstance(committed_intent, dict):
+            committed_intent = transaction.get("sourceUpdateIntent")
+        if not isinstance(committed_intent, dict) or committed_intent.get("phase") != phase:
+            raise UpdateError("INVALID_TRANSACTION", "Workload source-update intent disappeared.")
+        committed_intent["committed"] = True
+        committed_intent["result"] = update_result
+        source_intents[phase] = committed_intent
+        transaction["sourceUpdateIntent"] = committed_intent
+        _atomic_json(transaction_path, transaction)
+        return update_result
+
+    def _reconcile_workload_source_policy_intent(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        phase: str,
+    ) -> dict[str, Any] | None:
+        """Finish a Broker-committed policy projection from its durable intent."""
+
+        intents = transaction.get("sourceUpdateIntents")
+        if "sourceUpdateIntents" in transaction and not isinstance(intents, dict):
+            raise UpdateError("INVALID_TRANSACTION", "Workload source-update history is malformed.")
+        intent = (
+            intents.get(phase)
+            if isinstance(intents, dict)
+            else transaction.get("sourceUpdateIntent")
+        )
+        if not isinstance(intent, dict) or intent.get("phase") != phase:
+            return None
+        if intent.get("committed") is True and isinstance(intent.get("result"), dict):
+            self._workload_hold_echo(transaction)
+            result = intent["result"]
+            if result.get("catalogGeneration") != intent.get(
+                "expectedCatalogGeneration"
+            ) or result.get("policyGeneration") != intent.get("expectedCatalogGeneration"):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Committed source-update receipt is inconsistent."
+                )
+            return result
+        if (
+            intent.get("parentPlanId") != transaction.get("planId")
+            or intent.get("parentPlanDigest") != transaction.get("planDigest")
+            or not isinstance(intent.get("bindingScopes"), dict)
+            or not isinstance(intent.get("sourceIdentity"), dict)
+            or not isinstance(intent.get("sourceArguments"), list)
+            or not isinstance(intent.get("runtimeBindings"), dict)
+            or type(intent.get("changed")) is not bool
+            or not isinstance(intent.get("selectedBindings"), list)
+            or not isinstance(intent.get("componentArtifactDigests"), dict)
+            or not isinstance(intent.get("requiredHoldComponentIds"), list)
+        ):
+            raise UpdateError("INVALID_TRANSACTION", "Workload source-update intent is malformed.")
+        if (
+            not isinstance(transaction.get("maintenanceToken"), str)
+            or not transaction["maintenanceToken"]
+        ):
+            return None
+        self._workload_hold_echo(transaction)
+        helper = self._load_workload_package_runtime()
+        expected_generation = intent.get("expectedCatalogGeneration")
+        previous_generation = intent.get("previousCatalogGeneration")
+        if (
+            type(expected_generation) is not int
+            or type(previous_generation) is not int
+            or expected_generation < 1
+            or previous_generation < 0
+            or expected_generation != previous_generation + (1 if intent["changed"] else 0)
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload source-update generation is malformed."
+            )
+        update = helper.WorkloadSourceUpdate(
+            source_arguments=tuple(intent["sourceArguments"]),
+            binding_scopes=intent["bindingScopes"],
+            source_identity=intent["sourceIdentity"],
+            runtime_bindings=intent["runtimeBindings"],
+            expected_generation=expected_generation,
+            changed=intent["changed"],
+            previous_policy_digest=intent.get("previousPolicyDigest"),
+            selected_binding_ids=tuple(intent["selectedBindings"]),
+            component_artifact_digests=intent["componentArtifactDigests"],
+            required_hold_component_ids=tuple(intent["requiredHoldComponentIds"]),
+        )
+        try:
+            update_result = helper.reconcile_workload_source_update(
+                update,
+                maintenance=self._workload_hold_echo(transaction),
+                activity_catalog_path=self.activity_catalog_path,
+                policy_path=DEFAULT_PACKAGE_RUNTIME_POLICY,
+                token_directory=DEFAULT_ACTIVITY_TOKEN_DIRECTORY,
+            )
+        except Exception as error:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Broker source update cannot be reconciled against its durable intent.",
+                retryable=True,
+            ) from error
+        if update_result is None:
+            return None
+        generation = update_result.get("catalogGeneration")
+        if type(generation) is not int or generation != expected_generation:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Reconciled Broker source generation differs from the durable intent.",
+                retryable=True,
+            )
+        self._write_workload_activity_generation(
+            generation,
+            previous_generation=previous_generation if previous_generation >= 1 else None,
+        )
+        transaction["sourceUpdate"] = update_result
+        source_updates = transaction.setdefault("sourceUpdates", {})
+        if not isinstance(source_updates, dict):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload source-update receipts are malformed."
+            )
+        source_updates[phase] = update_result
+        transaction["activityCatalogGeneration"] = generation
+        intent["committed"] = True
+        intent["result"] = update_result
+        transaction["sourceUpdateIntent"] = intent
+        transaction["sourceUpdateIntents"] = transaction.setdefault("sourceUpdateIntents", {})
+        transaction["sourceUpdateIntents"][phase] = intent
+        _atomic_json(transaction_path, transaction)
+        return update_result
+
+    def _workload_service_units(
+        self,
+        rows: list[dict[str, Any]],
+        source_policy: dict[str, Any],
+        candidate_items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Resolve only selected signed Product/service units for this workload."""
+
+        component_ids = {row.get("componentId") for row in rows if isinstance(row, dict)}
+        if source_policy.get("mode") == "actualProduct":
+            component_ids.update(source_policy.get("productComponentIds", []))
+        candidate_by_id = {
+            item.get("componentId"): item
+            for item in candidate_items
+            if isinstance(item, dict) and isinstance(item.get("componentId"), str)
+        }
+        services: dict[str, dict[str, Any]] = {}
+        for component_id in sorted(value for value in component_ids if isinstance(value, str)):
+            component = self.components.get(component_id)
+            if not isinstance(component, dict):
+                continue
+            unit = component.get("systemdUnit")
+            restart = component.get("restart")
+            if not isinstance(unit, str) or not isinstance(restart, dict):
+                continue
+            if restart.get("group") not in {"core-runtime", "single-service"}:
+                continue
+            if self._catalog_matched_unit(component) != unit:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED",
+                    f"{component_id} has no catalog-matched local systemd service.",
+                    retryable=True,
+                )
+            try:
+                self._workload_signed_unit_bytes(component, candidate_by_id.get(component_id))
+            except UpdateError:
+                raise
+            except Exception as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED",
+                    f"{component_id} has no verified unit in its active or staged release.",
+                    retryable=True,
+                ) from error
+            services[unit] = {
+                "componentId": component_id,
+                "unit": unit,
+                "order": restart.get("order", 0),
+                "restartGroup": restart.get("group"),
+                "candidate": candidate_by_id.get(component_id),
+            }
+        return sorted(services.values(), key=lambda item: (item["order"], item["componentId"]))
+
+    def _workload_signed_unit_bytes(
+        self, component: dict[str, Any], candidate: dict[str, Any] | None
+    ) -> tuple[bytes, Path, str]:
+        """Read a service unit only from the exact active or staged signed release."""
+
+        component_id = component.get("componentId")
+        unit = component.get("systemdUnit")
+        if not isinstance(component_id, str) or not isinstance(unit, str):
+            raise UpdateError("SERVICE_NOT_MANAGED", "Catalog service identity is incomplete.")
+        if candidate is not None:
+            manifest = candidate.get("manifest")
+            release_path = Path(candidate.get("releasePath", ""))
+        else:
+            pointer = self._active_native_pointer_identity(component_id)
+            if pointer is None:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED",
+                    f"{component_id} has no active signed release for its service unit.",
+                )
+            release_path = self.install_root / "components" / component_id / "releases" / pointer
+            receipt = self._read_active_receipt(component_id)
+            manifest = receipt.get("manifest") if isinstance(receipt, dict) else None
+        relative = f"systemd/{unit}"
+        files = (
+            manifest.get("artifact", {}).get("files")
+            if isinstance(manifest, dict) and isinstance(manifest.get("artifact"), dict)
+            else None
+        )
+        expected_digest = files.get(relative) if isinstance(files, dict) else None
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("componentId") != component_id
+            or not _valid_digest(manifest.get("manifestDigest"))
+            or not _valid_digest(expected_digest)
+            or release_path.is_symlink()
+            or not release_path.is_dir()
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", f"{component_id} release does not attest its unit file."
+            )
+        self._validate_manifest_digest(manifest, manifest["manifestDigest"])
+        source = release_path / relative
+        try:
+            info = source.lstat()
+            payload = source.read_bytes()
+        except OSError as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", f"Signed service unit is unavailable for {component_id}."
+            ) from error
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != 0
+            or info.st_nlink != 1
+            or hashlib.sha256(payload).hexdigest() != expected_digest.removeprefix("sha256:")
+            or not self._unit_uses_component_runner(source, component_id)
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", f"Signed service unit identity differs for {component_id}."
+            )
+        if component_id == "cyrene-client-workspace-control":
+            try:
+                lines = [line.strip() for line in payload.decode("utf-8").splitlines()]
+            except UnicodeDecodeError as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Workspace Control unit is not UTF-8."
+                ) from error
+            required_lines = {
+                "User=cyrene",
+                "Group=cyrene",
+                "WorkingDirectory=/var/lib/cyrene/studio-control",
+                "Environment=STUDIO_MODE=local",
+                "Environment=STUDIO_CONTROL_HOST=127.0.0.1",
+                "Environment=STUDIO_CONTROL_PORT=5182",
+                "Environment=STUDIO_CONTROL_DATA_DIR=/var/lib/cyrene/studio-control",
+                "Environment=STUDIO_PUBLIC_ORIGINS=http://127.0.0.1:8100,http://localhost:8100",
+                "EnvironmentFile=-/etc/cyrene/studio-control.env",
+                "ExecStart=/usr/bin/cyrene component-run cyrene-client-workspace-control",
+                "ReadWritePaths=/var/lib/cyrene/studio-control",
+            }
+            if not required_lines.issubset(lines):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED",
+                    "Workspace Control unit differs from the signed local-only service contract.",
+                )
+        return payload, source, "sha256:" + hashlib.sha256(payload).hexdigest()
+
+    def _install_workload_service_units(
+        self, transaction: dict[str, Any], services: list[dict[str, Any]]
+    ) -> None:
+        """Install signed service units atomically while the exact core hold is active."""
+
+        if services and not self.systemd_unit_dirs:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "No root-controlled systemd unit directory is configured."
+            )
+        changes: list[dict[str, Any]] = transaction.setdefault("unitFileChanges", [])
+        changed = False
+        for service in services:
+            unit = service["unit"]
+            component = self.components[service["componentId"]]
+            candidate = service.get("candidate")
+            candidate_bytes, _source, candidate_digest = self._workload_signed_unit_bytes(
+                component, candidate
+            )
+            prior_pointer = self._active_native_pointer_identity(service["componentId"])
+            prior_bytes = None
+            prior_digest = None
+            if prior_pointer is not None and candidate is not None:
+                _old_bytes, _old_source, prior_digest = self._workload_signed_unit_bytes(
+                    component, None
+                )
+                prior_bytes = _old_bytes
+            existing_paths: list[tuple[Path, bytes]] = []
+            for directory in self.systemd_unit_dirs:
+                path = Path(directory) / unit
+                if not path.exists() and not path.is_symlink():
+                    continue
+                try:
+                    info = path.lstat()
+                    payload = path.read_bytes()
+                except OSError as error:
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED", f"Cannot inspect existing unit {unit}."
+                    ) from error
+                allowed_digests = {candidate_digest}
+                if prior_digest is not None:
+                    allowed_digests.add(prior_digest)
+                if (
+                    stat.S_ISLNK(info.st_mode)
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != 0
+                    or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                    or "sha256:" + hashlib.sha256(payload).hexdigest() not in allowed_digests
+                ):
+                    raise UpdateError(
+                        "SERVICE_UNIT_CONFLICT",
+                        f"Existing {unit} is not owned by its active or staged signed release.",
+                    )
+                existing_paths.append((path, payload))
+            destination = Path(self.systemd_unit_dirs[0]) / unit
+            current = next(
+                (payload for path, payload in existing_paths if path == destination), None
+            )
+            if current == candidate_bytes:
+                continue
+            if current is not None and (prior_bytes is None or current != prior_bytes):
+                raise UpdateError(
+                    "SERVICE_UNIT_CONFLICT", f"Existing {unit} changed outside the active release."
+                )
+            self._verify_root_path_chain(destination.parent)
+            destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+            prior_info = (
+                destination.lstat() if destination.exists() or destination.is_symlink() else None
+            )
+            changes.append(
+                {
+                    "path": str(destination),
+                    "priorBytes": base64.b64encode(current).decode("ascii")
+                    if current is not None
+                    else None,
+                    "priorMode": stat.S_IMODE(prior_info.st_mode)
+                    if prior_info is not None
+                    else None,
+                    "priorDigest": (
+                        "sha256:" + hashlib.sha256(current).hexdigest()
+                        if current is not None
+                        else None
+                    ),
+                    "writtenDigest": candidate_digest,
+                }
+            )
+            temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+            descriptor: int | None = None
+            try:
+                descriptor = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o644,
+                )
+                os.fchown(descriptor, 0, 0)
+                os.fchmod(descriptor, 0o644)
+                with os.fdopen(descriptor, "wb") as stream:
+                    descriptor = None
+                    stream.write(candidate_bytes)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, destination)
+                self._fsync_directory(destination.parent)
+            except OSError as error:
+                raise UpdateError(
+                    "SERVICE_UNIT_INSTALL_FAILED", f"Cannot install signed {unit}."
+                ) from error
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                temporary.unlink(missing_ok=True)
+            changed = True
+            _atomic_json(self._workload_transaction_path(transaction), transaction)
+        if changed:
+            self._daemon_reload()
+
+    def _read_workload_protected_file(
+        self,
+        path: Path,
+        *,
+        allowed_identities: set[tuple[int, int, int]],
+        maximum_bytes: int,
+        error_code: str = "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+    ) -> bytes | None:
+        """Read a bounded root-controlled file without following its final path."""
+
+        try:
+            before = path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise UpdateError(
+                error_code, "A Catalyst authentication file cannot be inspected."
+            ) from error
+        try:
+            self._verify_root_path_chain(path.parent)
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                info = os.fstat(descriptor)
+                identity = (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+                if (
+                    path.is_symlink()
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or identity not in allowed_identities
+                    or info.st_size > maximum_bytes
+                    or (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
+                ):
+                    raise UpdateError(
+                        error_code, "A Catalyst authentication file has unsafe ownership or mode."
+                    )
+                content = os.read(descriptor, maximum_bytes + 1)
+                if len(content) > maximum_bytes:
+                    raise UpdateError(
+                        error_code, "A Catalyst authentication file exceeds its size limit."
+                    )
+                return content
+            finally:
+                os.close(descriptor)
+        except UpdateError:
+            raise
+        except OSError as error:
+            raise UpdateError(
+                error_code, "A Catalyst authentication file cannot be read safely."
+            ) from error
+
+    @staticmethod
+    def _validate_workload_api_token(value: str) -> str:
+        """Validate one printable bearer without retaining it in a transaction record."""
+
+        try:
+            encoded = value.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst API token is not printable ASCII."
+            ) from error
+        if len(encoded) < 32 or any(byte < 33 or byte > 126 for byte in encoded):
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Catalyst API token is not a valid high-entropy value.",
+            )
+        return value
+
+    @staticmethod
+    def _parse_workload_environment_file(
+        content: bytes, *, expected_keys: set[str], maximum_lines: int
+    ) -> dict[str, str]:
+        """Parse the intentionally small systemd EnvironmentFile projection."""
+
+        try:
+            lines = content.decode("ascii").splitlines()
+        except UnicodeDecodeError as error:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file is not ASCII."
+            ) from error
+        if len(lines) > maximum_lines:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Catalyst environment file has too many entries.",
+            )
+        result: dict[str, str] = {}
+        for line in lines:
+            if not line or "=" not in line:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Catalyst environment file syntax is invalid.",
+                )
+            key, value = line.split("=", 1)
+            if key not in expected_keys or key in result or not value or value != value.strip():
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Catalyst environment file fields are invalid.",
+                )
+            result[key] = value
+        if set(result) != expected_keys:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT", "Catalyst environment file is incomplete."
+            )
+        return result
+
+    def _check_workload_catalyst_auth_conflicts(self, group_id: int) -> None:
+        """Reject unmanaged Catalyst bearer sources before acquiring maintenance."""
+
+        general_environment = self._read_workload_protected_file(
+            Path("/etc/cyrene/cyrene.env"),
+            allowed_identities={(0, 0, 0o644), (0, group_id, 0o640)},
+            maximum_bytes=16384,
+        )
+        if general_environment is not None:
+            try:
+                lines = general_environment.decode("utf-8").splitlines()
+            except UnicodeDecodeError as error:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "The existing Cyrene environment file cannot be inspected safely.",
+                ) from error
+            if any(
+                line.strip().startswith("CYRENE_DATA_TOOLS_TOKEN=")
+                or "CYRENE_DATA_TOOLS_TOKEN" in line
+                for line in lines
+                if line.strip() and not line.lstrip().startswith("#")
+            ):
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Catalyst bearer is configured in the world-readable general environment file; move it to a protected token file before installing.",
+                )
+
+        expected_dropin = (
+            "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
+        ).encode("ascii")
+        known_dropin_dirs = (
+            Path("/etc/systemd/system/cyrene-catalyst.service.d"),
+            Path("/run/systemd/system/cyrene-catalyst.service.d"),
+            Path("/usr/local/lib/systemd/system/cyrene-catalyst.service.d"),
+            Path("/usr/lib/systemd/system/cyrene-catalyst.service.d"),
+        )
+        for directory in known_dropin_dirs:
+            if not directory.exists() and not directory.is_symlink():
+                continue
+            try:
+                info = directory.lstat()
+                self._verify_root_path_chain(directory.parent)
+                if (
+                    stat.S_ISLNK(info.st_mode)
+                    or not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != 0
+                    or info.st_gid != 0
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                ):
+                    raise UpdateError(
+                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                        "A Catalyst unit drop-in directory has unsafe ownership or mode.",
+                    )
+                files = sorted(directory.glob("*.conf"))
+            except UpdateError:
+                raise
+            except OSError as error:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Catalyst unit drop-ins cannot be enumerated safely.",
+                ) from error
+            for path in files:
+                if path == DEFAULT_CATALYST_AUTH_DROPIN:
+                    content = self._read_workload_protected_file(
+                        path,
+                        allowed_identities={(0, 0, 0o644)},
+                        maximum_bytes=4096,
+                    )
+                    if content != expected_dropin:
+                        raise UpdateError(
+                            "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                            "The managed Catalyst authentication drop-in differs from its fixed contract.",
+                        )
+                    continue
+                content = self._read_workload_protected_file(
+                    path,
+                    allowed_identities={(0, 0, 0o600), (0, 0, 0o644)},
+                    maximum_bytes=16384,
+                )
+                if content is None:
+                    continue
+                try:
+                    lines = content.decode("utf-8").splitlines()
+                except UnicodeDecodeError as error:
+                    raise UpdateError(
+                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                        "An unmanaged Catalyst unit drop-in cannot be inspected safely.",
+                    ) from error
+                if any(
+                    line.strip().partition("=")[0].strip() in {"Environment", "EnvironmentFile"}
+                    for line in lines
+                    if line.strip() and not line.lstrip().startswith("#")
+                ):
+                    raise UpdateError(
+                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                        "An unmanaged Catalyst unit drop-in supplies environment values; refusing an ambiguous bearer configuration.",
+                    )
+
+    def _workload_catalyst_token_configuration(
+        self, *, generate: bool
+    ) -> tuple[str, Path, int] | None:
+        """Resolve one stable bearer from protected host state or generate it once."""
+
+        try:
+            group_id = grp.getgrnam("cyrene").gr_gid
+            user_id = pwd.getpwnam("cyrene").pw_uid
+        except KeyError as error:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "The cyrene service identity is unavailable.",
+            ) from error
+        self._check_workload_catalyst_auth_conflicts(group_id)
+        protected_modes = {(0, group_id, 0o640), (user_id, group_id, 0o600)}
+        token_paths: list[Path] = [DEFAULT_CATALYST_API_TOKEN]
+        control_bytes = self._read_workload_protected_file(
+            DEFAULT_STUDIO_CONTROL_ENVIRONMENT,
+            allowed_identities={(0, group_id, 0o640)},
+            maximum_bytes=4096,
+        )
+        if control_bytes is not None:
+            control = self._parse_workload_environment_file(
+                control_bytes,
+                expected_keys={"STUDIO_CATALYST_URL", "STUDIO_CATALYST_API_TOKEN_FILE"},
+                maximum_lines=2,
+            )
+            if control["STUDIO_CATALYST_URL"] != CATALYST_API_ORIGIN:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Existing Studio Control points at a different Catalyst origin.",
+                )
+            configured_path = Path(control["STUDIO_CATALYST_API_TOKEN_FILE"])
+            if (
+                not configured_path.is_absolute()
+                or ".." in configured_path.parts
+                or configured_path.parent != Path("/etc/cyrene/secrets")
+            ):
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Existing Studio Control token path is outside the protected secret directory.",
+                )
+            token_paths.insert(0, configured_path)
+
+        configured_values: list[str] = []
+        selected_token_path = token_paths[0]
+        seen_paths: set[Path] = set()
+        for token_path in token_paths:
+            if token_path in seen_paths:
+                continue
+            seen_paths.add(token_path)
+            token_bytes = self._read_workload_protected_file(
+                token_path,
+                allowed_identities=protected_modes,
+                maximum_bytes=4096,
+            )
+            if token_bytes is not None:
+                try:
+                    value = token_bytes.rstrip(b"\r\n").decode("ascii")
+                except UnicodeDecodeError as error:
+                    raise UpdateError(
+                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                        "Catalyst API token file is not ASCII.",
+                    ) from error
+                configured_values.append(self._validate_workload_api_token(value))
+
+        auth_bytes = self._read_workload_protected_file(
+            DEFAULT_CATALYST_AUTH_ENVIRONMENT,
+            allowed_identities={(0, group_id, 0o640)},
+            maximum_bytes=4096,
+        )
+        if auth_bytes is not None:
+            auth = self._parse_workload_environment_file(
+                auth_bytes,
+                expected_keys={"CYRENE_DATA_TOOLS_TOKEN"},
+                maximum_lines=1,
+            )
+            configured_values.append(
+                self._validate_workload_api_token(auth["CYRENE_DATA_TOOLS_TOKEN"])
+            )
+
+        explicit_token = os.environ.get("CYRENE_DATA_TOOLS_TOKEN")
+        if explicit_token:
+            configured_values.append(self._validate_workload_api_token(explicit_token))
+        if configured_values and any(
+            value != configured_values[0] for value in configured_values[1:]
+        ):
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Existing Catalyst bearer sources disagree; refusing to rotate or overwrite them.",
+            )
+        if configured_values:
+            return configured_values[0], selected_token_path, group_id
+        if not generate:
+            return None
+        return secrets.token_urlsafe(48), selected_token_path, group_id
+
+    def _workload_catalyst_auth_is_configured(self) -> bool:
+        """Return whether all fixed Catalyst and Control credential projections match."""
+
+        selected = self._workload_catalyst_token_configuration(generate=False)
+        if selected is None:
+            return False
+        token, token_path, group_id = selected
+        token_bytes = self._read_workload_protected_file(
+            token_path,
+            allowed_identities={
+                (0, group_id, 0o640),
+                (pwd.getpwnam("cyrene").pw_uid, group_id, 0o600),
+            },
+            maximum_bytes=4096,
+        )
+        if token_bytes is None or token_bytes.rstrip(b"\r\n").decode("ascii") != token:
+            return False
+        auth_bytes = self._read_workload_protected_file(
+            DEFAULT_CATALYST_AUTH_ENVIRONMENT,
+            allowed_identities={(0, group_id, 0o640)},
+            maximum_bytes=4096,
+        )
+        if auth_bytes is None:
+            return False
+        auth = self._parse_workload_environment_file(
+            auth_bytes,
+            expected_keys={"CYRENE_DATA_TOOLS_TOKEN"},
+            maximum_lines=1,
+        )
+        if auth["CYRENE_DATA_TOOLS_TOKEN"] != token:
+            return False
+        control_bytes = self._read_workload_protected_file(
+            DEFAULT_STUDIO_CONTROL_ENVIRONMENT,
+            allowed_identities={(0, group_id, 0o640)},
+            maximum_bytes=4096,
+        )
+        if control_bytes is None:
+            return False
+        control = self._parse_workload_environment_file(
+            control_bytes,
+            expected_keys={"STUDIO_CATALYST_URL", "STUDIO_CATALYST_API_TOKEN_FILE"},
+            maximum_lines=2,
+        )
+        if control != {
+            "STUDIO_CATALYST_URL": CATALYST_API_ORIGIN,
+            "STUDIO_CATALYST_API_TOKEN_FILE": str(token_path),
+        }:
+            return False
+        dropin = self._read_workload_protected_file(
+            DEFAULT_CATALYST_AUTH_DROPIN,
+            allowed_identities={(0, 0, 0o644)},
+            maximum_bytes=4096,
+        )
+        if dropin is None:
+            return False
+        expected_dropin = (
+            "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
+        ).encode("ascii")
+        return dropin == expected_dropin
+
+    def _ensure_workload_config_directory(self, path: Path, *, group_id: int, mode: int) -> None:
+        """Create one fixed root-owned configuration directory with exact access."""
+
+        if path.exists() or path.is_symlink():
+            try:
+                info = path.lstat()
+            except OSError as error:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "A managed configuration directory cannot be inspected.",
+                ) from error
+            self._verify_root_path_chain(path.parent)
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != 0
+                or info.st_gid != group_id
+                or stat.S_IMODE(info.st_mode) != mode
+            ):
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "A managed configuration directory has unexpected ownership or mode.",
+                )
+            return
+        self._verify_root_path_chain(path.parent)
+        try:
+            path.mkdir(mode=mode)
+            os.chown(path, 0, group_id)
+            os.chmod(path, mode)
+            self._fsync_directory(path.parent)
+        except OSError as error:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "A managed configuration directory cannot be created.",
+            ) from error
+
+    def _write_workload_managed_config(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        path: Path,
+        content: bytes,
+        group_id: int,
+        mode: int,
+        entry_kind: str,
+    ) -> str:
+        """Atomically create one exact root-managed file and journal only its digest."""
+
+        existing = self._read_workload_protected_file(
+            path,
+            allowed_identities=(
+                {(0, group_id, mode), (pwd.getpwnam("cyrene").pw_uid, group_id, 0o600)}
+                if entry_kind == "catalyst-api-token"
+                else {(0, group_id, mode)}
+            ),
+            maximum_bytes=max(4096, len(content)),
+        )
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        changes = transaction.setdefault("managedConfigFiles", [])
+        if not isinstance(changes, list):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Managed configuration rollback journal is malformed."
+            )
+        entry = next(
+            (item for item in changes if isinstance(item, dict) and item.get("path") == str(path)),
+            None,
+        )
+        if existing is not None:
+            current_digest = "sha256:" + hashlib.sha256(existing).hexdigest()
+            if current_digest != digest:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "An existing managed authentication file differs from this workload identity.",
+                )
+            if entry is not None and entry.get("writtenDigest") != digest:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Managed configuration retry changed its digest."
+                )
+            return digest
+        if entry is not None and entry.get("writtenDigest") != digest:
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Managed configuration retry changed its digest."
+            )
+        if path.parent == DEFAULT_CATALYST_API_TOKEN.parent:
+            parent_group, parent_mode = group_id, 0o750
+        else:
+            parent_group, parent_mode = 0, 0o755
+        self._ensure_workload_config_directory(path.parent, group_id=parent_group, mode=parent_mode)
+        is_bearer_file = entry_kind == "catalyst-api-token"
+        if entry is None and not is_bearer_file:
+            entry = {
+                "path": str(path),
+                "kind": entry_kind,
+                "priorDigest": None,
+                "writtenDigest": digest,
+                "mode": mode,
+                "groupId": group_id,
+            }
+            changes.append(entry)
+            _atomic_json(transaction_path, transaction)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                mode,
+            )
+            os.fchown(descriptor, 0, group_id)
+            os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = None
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            self._fsync_directory(path.parent)
+        except OSError as error:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "A managed authentication file cannot be written.",
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+        if not is_bearer_file:
+            _atomic_json(transaction_path, transaction)
+        return digest
+
+    def _project_workload_catalyst_auth(
+        self, transaction: dict[str, Any], transaction_path: Path
+    ) -> dict[str, Any]:
+        """Project one stable secret into Catalyst and Control without journaling it."""
+
+        selected = self._workload_catalyst_token_configuration(generate=True)
+        assert selected is not None
+        token, token_path, group_id = selected
+        token_content = (token + "\n").encode("ascii")
+        auth_content = f"CYRENE_DATA_TOOLS_TOKEN={token}\n".encode("ascii")
+        control_content = (
+            f"STUDIO_CATALYST_URL={CATALYST_API_ORIGIN}\n"
+            f"STUDIO_CATALYST_API_TOKEN_FILE={token_path}\n"
+        ).encode("ascii")
+        dropin_content = (
+            "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
+        ).encode("ascii")
+        self._ensure_workload_config_directory(token_path.parent, group_id=group_id, mode=0o750)
+        token_digest = self._write_workload_managed_config(
+            transaction,
+            transaction_path,
+            path=token_path,
+            content=token_content,
+            group_id=group_id,
+            mode=0o640,
+            entry_kind="catalyst-api-token",
+        )
+        auth_digest = self._write_workload_managed_config(
+            transaction,
+            transaction_path,
+            path=DEFAULT_CATALYST_AUTH_ENVIRONMENT,
+            content=auth_content,
+            group_id=group_id,
+            mode=0o640,
+            entry_kind="catalyst-auth-environment",
+        )
+        control_digest = self._write_workload_managed_config(
+            transaction,
+            transaction_path,
+            path=DEFAULT_STUDIO_CONTROL_ENVIRONMENT,
+            content=control_content,
+            group_id=group_id,
+            mode=0o640,
+            entry_kind="studio-control-environment",
+        )
+        self._ensure_workload_config_directory(
+            DEFAULT_CATALYST_AUTH_DROPIN.parent, group_id=0, mode=0o755
+        )
+        dropin_digest = self._write_workload_managed_config(
+            transaction,
+            transaction_path,
+            path=DEFAULT_CATALYST_AUTH_DROPIN,
+            content=dropin_content,
+            group_id=0,
+            mode=0o644,
+            entry_kind="catalyst-auth-dropin",
+        )
+        self._daemon_reload()
+        identity = {
+            "tokenPath": str(token_path),
+            "tokenSha256": token_digest,
+            "catalystEnvironmentDigest": auth_digest,
+            "controlEnvironmentDigest": control_digest,
+            "unitDropInDigest": dropin_digest,
+            "origin": CATALYST_API_ORIGIN,
+        }
+        transaction["catalystAuth"] = identity
+        _atomic_json(transaction_path, transaction)
+        return identity
+
+    def _restore_workload_catalyst_auth(self, transaction: dict[str, Any]) -> None:
+        """Remove only new non-token projections that still match the transaction."""
+
+        changed = False
+        changes = transaction.get("managedConfigFiles", [])
+        if not isinstance(changes, list):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Managed configuration rollback journal is malformed."
+            )
+        for entry in reversed(changes):
+            if not isinstance(entry, dict) or entry.get("kind") == "catalyst-api-token":
+                continue
+            path_text = entry.get("path")
+            if not isinstance(path_text, str):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Managed configuration rollback path is malformed."
+                )
+            path = Path(path_text)
+            if path not in {
+                DEFAULT_CATALYST_AUTH_ENVIRONMENT,
+                DEFAULT_STUDIO_CONTROL_ENVIRONMENT,
+                DEFAULT_CATALYST_AUTH_DROPIN,
+            }:
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Managed configuration rollback path is outside its fixed allowlist.",
+                )
+            try:
+                info = path.lstat()
+                content = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT",
+                    "Managed authentication configuration cannot be read during rollback.",
+                ) from error
+            current = "sha256:" + hashlib.sha256(content).hexdigest()
+            if current == entry.get("priorDigest"):
+                continue
+            if (
+                current != entry.get("writtenDigest")
+                or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != 0
+                or info.st_nlink != 1
+            ):
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT",
+                    "Managed authentication configuration changed outside this transaction.",
+                )
+            path.unlink()
+            self._fsync_directory(path.parent)
+            changed = True
+        if changed:
+            self._daemon_reload()
+
+    def _daemon_reload(self) -> None:
+        """Reload systemd unit metadata without inventing an empty unit argument."""
+
+        try:
+            completed = self.runner(
+                ["systemctl", "daemon-reload"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UpdateError("SYSTEMD_FAILED", f"Cannot reload systemd units: {error}") from error
+        if completed.returncode != 0:
+            raise UpdateError(
+                "SYSTEMD_FAILED",
+                "systemctl daemon-reload failed: "
+                + (completed.stderr.strip() or completed.stdout.strip()),
+            )
+
+    def _workload_transaction_path(self, transaction: dict[str, Any]) -> Path:
+        """Return the already-created root-private journal path for a plan."""
+
+        return self._private_state_directory("transactions") / f"{transaction['planId']}.json"
+
+    def _restore_workload_service_units(self, transaction: dict[str, Any]) -> None:
+        """Restore only unit files still matching this transaction's signed bytes."""
+
+        changed = False
+        for entry in reversed(transaction.get("unitFileChanges", [])):
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                raise UpdateError("INVALID_TRANSACTION", "Unit-file rollback journal is malformed.")
+            path = Path(entry["path"])
+            if not path.is_absolute() or path.name != Path(entry["path"]).name:
+                raise UpdateError("INVALID_TRANSACTION", "Unit-file rollback path is invalid.")
+            try:
+                info = path.lstat()
+                current = path.read_bytes()
+            except FileNotFoundError:
+                current = None
+                info = None
+            except OSError as error:
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT", "Cannot read the current systemd unit."
+                ) from error
+            digest = (
+                "sha256:" + hashlib.sha256(current).hexdigest() if current is not None else None
+            )
+            if digest == entry.get("priorDigest"):
+                continue
+            if digest != entry.get("writtenDigest"):
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT", "Systemd unit changed outside this transaction."
+                )
+            prior = entry.get("priorBytes")
+            if prior is None:
+                if info is not None and (stat.S_ISLNK(info.st_mode) or info.st_uid != 0):
+                    raise UpdateError("ROLLBACK_CONFLICT", "Systemd unit ownership changed.")
+                path.unlink(missing_ok=True)
+                self._fsync_directory(path.parent)
+            else:
+                try:
+                    prior_bytes = base64.b64decode(prior, validate=True)
+                except (ValueError, TypeError) as error:
+                    raise UpdateError(
+                        "INVALID_TRANSACTION", "Unit rollback bytes are malformed."
+                    ) from error
+                expected_prior = entry.get("priorDigest")
+                if "sha256:" + hashlib.sha256(prior_bytes).hexdigest() != expected_prior:
+                    raise UpdateError("INVALID_TRANSACTION", "Unit rollback digest differs.")
+                temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.rollback")
+                descriptor: int | None = None
+                try:
+                    descriptor = os.open(
+                        temporary,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                        0o644,
+                    )
+                    os.fchown(descriptor, 0, 0)
+                    os.fchmod(descriptor, entry.get("priorMode") or 0o644)
+                    with os.fdopen(descriptor, "wb") as stream:
+                        descriptor = None
+                        stream.write(prior_bytes)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, path)
+                    self._fsync_directory(path.parent)
+                except OSError as error:
+                    raise UpdateError(
+                        "ROLLBACK_FAILED", "Cannot restore the prior systemd unit."
+                    ) from error
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+                    temporary.unlink(missing_ok=True)
+            changed = True
+        if changed:
+            self._daemon_reload()
+
+    def _set_workload_unit(self, unit: str, operation: str, *, wait_active: bool = False) -> None:
+        """Change one already catalog-validated unit and verify the observed state."""
+
+        self._run_systemctl(operation, unit)
+        if wait_active:
+            self._wait_unit_active(unit)
+            return
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            if self._package_product_unit_state(unit) == "inactive":
+                return
+            time.sleep(1)
+        raise UpdateError("PRODUCT_QUIESCE_TIMEOUT", f"{unit} did not stop within 90 seconds.")
+
+    def _workload_runtime_daemon(self, operation: str, *, wait_active: bool = False) -> str:
+        """Stop or start the fixed shared Package Runtime daemon after owner checks."""
+
+        unit = WORKLOAD_PACKAGE_RUNTIME_UNIT
+        if operation == "stop":
+            state = self._package_product_unit_state(unit)
+            if state == "active":
+                self._set_workload_unit(unit, "stop")
+            return state
+        if operation not in {"start", "restart"}:
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package Runtime service operation is invalid."
+            )
+        state = self._package_product_unit_state(unit)
+        if state != "active" or operation == "restart":
+            self._set_workload_unit(unit, operation, wait_active=True)
+        return state
+
+    def _workload_inventory_before_daemon_stop(self, workload_id: str) -> dict[str, Any] | None:
+        """Read all live owners immediately before taking down Package Runtime."""
+
+        if self._package_product_unit_state(WORKLOAD_PACKAGE_RUNTIME_UNIT) == "inactive":
+            return None
+        component_ids = tuple(
+            sorted(
+                self._load_workload_resolver().potential_component_ids(self.catalog, workload_id)
+            )
+        )
+        inventory = self._read_workload_package_inventory(workload_id, component_ids)
+        bindings = inventory.get("sourceBindings", [])
+        if not isinstance(bindings, list):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Package Runtime owner inventory is malformed before daemon stop.",
+                retryable=True,
+            )
+        active = [
+            row for row in bindings if isinstance(row, dict) and row.get("state") == "RUNNING"
+        ]
+        if active:
+            owners = sorted(f"{row.get('sourceId')}:{row.get('bindingId')}" for row in active)
+            raise UpdateError(
+                "COMPONENT_IN_USE",
+                "An authenticated Package Runtime owner is active before offline maintenance: "
+                + ", ".join(owners),
+                retryable=True,
+            )
+        return inventory
+
+    def _workload_binding_operation(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        operation: str,
+        component: dict[str, Any],
+        installation_id: str,
+        activity_catalog: dict[str, Any],
+        runtime_policy: dict[str, Any],
+        source_principals: dict[str, dict[str, Any]],
+        helper: Any,
+    ) -> dict[str, Any]:
+        """Run an owner-scoped Package Runtime SDK mutation with fsynced callbacks."""
+
+        source_policy = component.get("sourcePolicy")
+        if not isinstance(source_policy, dict):
+            raise UpdateError(
+                "SOURCE_POLICY_INVALID", "Selected package has no signed source policy."
+            )
+        source_id = (
+            source_policy.get("sourceId")
+            if source_policy.get("mode") == "standaloneOperator"
+            else next(
+                (
+                    row.get("sourceId")
+                    for row in source_policy.get("productSources", [])
+                    if isinstance(row, dict)
+                    and row.get("componentId") in source_policy.get("productComponentIds", [])
+                ),
+                None,
+            )
+        )
+        component_id = component.get("componentId")
+        binding_id = component.get("bindingId")
+        package_id = component.get("packageId")
+        principal = source_principals.get(source_id) if isinstance(source_id, str) else None
+        if (
+            not isinstance(component_id, str)
+            or not isinstance(binding_id, str)
+            or not isinstance(package_id, str)
+            or not isinstance(source_id, str)
+            or not isinstance(principal, dict)
+            or type(principal.get("uid")) is not int
+            or type(principal.get("gid")) is not int
+            or not isinstance(principal.get("tokenPath"), Path)
+        ):
+            raise UpdateError(
+                "SOURCE_BINDING_INVALID", "Selected package owner identity is incomplete."
+            )
+        sdk_environment = transaction.get("sdkEnvironment")
+        if not isinstance(sdk_environment, dict):
+            raise UpdateError(
+                "WORKLOAD_SDK_UNAVAILABLE", "The installed operator SDK is unavailable."
+            )
+        sdk_python = sdk_environment.get("pythonPath")
+        if not isinstance(sdk_python, str) or not Path(sdk_python).is_absolute():
+            raise UpdateError(
+                "WORKLOAD_SDK_UNAVAILABLE", "The operator SDK interpreter receipt is invalid."
+            )
+        request_id = (
+            "cyrene-wop-"
+            + transaction["planId"].removeprefix("plan-")
+            + "-"
+            + operation[:3]
+            + "-"
+            + hashlib.sha256(installation_id.encode("utf-8")).hexdigest()[:8]
+            + "-"
+            + component_id
+        )
+        binding_ops = transaction.setdefault("bindingOperations", [])
+        if not isinstance(binding_ops, list):
+            raise UpdateError("INVALID_TRANSACTION", "Workload binding journal is malformed.")
+
+        def persist_intent(operation_request_id: str, scope: Mapping[str, Any]) -> None:
+            if operation_request_id != request_id or not isinstance(scope, Mapping):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime mutation intent is mismatched."
+                )
+            identity = {"requestId": request_id, "scope": dict(scope), "operation": operation}
+            existing = next(
+                (
+                    row
+                    for row in binding_ops
+                    if isinstance(row, dict) and row.get("requestId") == request_id
+                ),
+                None,
+            )
+            if existing is not None and any(
+                existing.get(key) != value for key, value in identity.items()
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime retry changed its owner scope."
+                )
+            if existing is None:
+                binding_ops.append({**identity, "state": "intent"})
+            _atomic_json(transaction_path, transaction)
+
+        def persist_outcome(status: Mapping[str, Any] | None, receipt: Mapping[str, Any]) -> None:
+            _persist_binding_result("outcome", status, None, receipt)
+
+        def persist_reconcile(
+            status: Mapping[str, Any] | None,
+            installation: Mapping[str, Any],
+            receipt: Mapping[str, Any],
+        ) -> None:
+            _persist_binding_result("reconciled", status, installation, receipt)
+
+        def _persist_binding_result(
+            state: str,
+            status: Mapping[str, Any] | None,
+            installation: Mapping[str, Any] | None,
+            receipt: Mapping[str, Any],
+        ) -> None:
+            if not isinstance(receipt, Mapping) or receipt.get("request_id") != request_id:
+                raise UpdateError("INVALID_TRANSACTION", "Package Runtime receipt is mismatched.")
+            existing = next(
+                (
+                    row
+                    for row in binding_ops
+                    if isinstance(row, dict) and row.get("requestId") == request_id
+                ),
+                None,
+            )
+            if existing is None:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime outcome has no durable intent."
+                )
+            existing.update(
+                {
+                    "state": state,
+                    "status": dict(status) if isinstance(status, Mapping) else None,
+                    "installation": dict(installation)
+                    if isinstance(installation, Mapping)
+                    else None,
+                    "receipt": dict(receipt),
+                    "updatedAt": int(time.time()),
+                }
+            )
+            _atomic_json(transaction_path, transaction)
+
+        try:
+            result = helper.run_package_binding_operation(
+                operation=operation,
+                source_id=source_id,
+                uid=principal["uid"],
+                gid=principal["gid"],
+                token_path=principal["tokenPath"],
+                binding_id=binding_id,
+                package_id=package_id,
+                installation_ids=[installation_id],
+                catalog_generation=activity_catalog["generation"],
+                request_id=request_id,
+                sdk_python=Path(sdk_python),
+                activity_catalog=activity_catalog,
+                runtime_policy=runtime_policy,
+                source_principals=source_principals,
+                persist_intent=persist_intent,
+                persist_outcome=persist_outcome,
+                persist_reconcile=persist_reconcile,
+            )
+        except Exception as error:
+            if isinstance(error, UpdateError):
+                raise
+            raise UpdateError(
+                "PACKAGE_RUNTIME_OPERATION_FAILED",
+                f"Package Runtime {operation} did not complete for {component_id}.",
+                retryable=True,
+            ) from error
+        if not isinstance(result, dict) or result.get("requestId") != request_id:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_OPERATION_FAILED", "Package Runtime receipt is malformed."
+            )
+        return result
+
+    def _write_workload_package_runtime_receipt(
+        self,
+        component: dict[str, Any],
+        staged: dict[str, Any],
+        installation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist the selected release identity plus real Platform InstallationRecord."""
+
+        component_id = component.get("componentId")
+        if (
+            not isinstance(component_id, str)
+            or installation.get("package_id") != component.get("packageId")
+            or installation.get("package_version") != component.get("version")
+            or installation.get("archive_digest") != component.get("digest")
+            or installation.get("artifact_digest") != staged.get("packageArtifactDigest")
+            or not _valid_digest(staged.get("packageArtifactDigest"))
+            or not _valid_digest(staged.get("descriptorDigest"))
+            or not _valid_digest(staged.get("dependencyLockDigest"))
+            or not _valid_digest(component.get("manifestDigest"))
+            or not _valid_digest(component.get("manifestAssetDigest"))
+            or not _valid_digest(component.get("digest"))
+        ):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Platform installation identity differs from the verified staged release.",
+            )
+        verification = installation.get("verification")
+        if (
+            not isinstance(verification, dict)
+            or verification.get("artifact_digest") != staged["packageArtifactDigest"]
+            or verification.get("archive_digest") != component["digest"]
+            or verification.get("descriptor_digest") != staged["descriptorDigest"]
+            or verification.get("manifest_digest") != component["manifestDigest"]
+            or verification.get("dependency_lock_digest") != staged["dependencyLockDigest"]
+        ):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Platform verification record differs from the verified descriptor and manifest.",
+            )
+        receipt = {
+            "schemaVersion": 1,
+            "componentId": component_id,
+            "installed": True,
+            "version": component["version"],
+            "releaseId": component["releaseId"],
+            "manifestUri": component["manifestUri"],
+            "targetId": component["targetId"],
+            "manifestDigest": component["manifestDigest"],
+            "manifestAssetDigest": component["manifestAssetDigest"],
+            "digest": component["digest"],
+            "indexIdentity": component["indexIdentity"],
+            "publisherIdentity": component["publisherIdentity"],
+            "attestationRef": component["attestationRef"],
+            "packageId": component["packageId"],
+            "installationId": installation["installation_id"],
+            "packageArtifactDigest": staged["packageArtifactDigest"],
+            "archiveDigest": component["digest"],
+            "descriptorDigest": staged["descriptorDigest"],
+            "dependencyLockDigest": staged["dependencyLockDigest"],
+            "installation": installation,
+            "verification": {"identityAttested": True},
+        }
+        directory = self._installed_component_directory(component_id, create=True)
+        assert directory is not None
+        _atomic_json(directory / "package-runtime.json", receipt)
+        return receipt
+
+    def _clear_workload_package_runtime_receipt(
+        self, component_id: str, installation_id: str
+    ) -> None:
+        """Remove only the updater hint for the exact Platform installation removed."""
+
+        directory = self._installed_component_directory(component_id)
+        if directory is None:
+            return
+        path = directory / "package-runtime.json"
+        if not path.exists() and not path.is_symlink():
+            return
+        receipt = self._read_workload_package_runtime_receipt(component_id)
+        if receipt is not None and receipt.get("installationId") != installation_id:
+            raise UpdateError(
+                "UNINSTALL_CONFLICT",
+                "A different Package Runtime identity replaced the selected installation.",
+            )
+        if path.is_symlink():
+            raise UpdateError("UNSAFE_STATE", "Package Runtime receipt became a symbolic link.")
+        path.unlink(missing_ok=True)
+        self._fsync_directory(directory)
+
+    def _resume_workload_package_uninstall_phase(
+        self, transaction: dict[str, Any], transaction_path: Path
+    ) -> None:
+        """Finish an interrupted held offline uninstall from its exact journal identity."""
+
+        if (
+            transaction.get("maintenancePhase") != "core-runtime-uninstall"
+            or not transaction.get("maintenanceToken")
+            or transaction.get("offlineUninstallIntent") is not True
+        ):
+            raise UpdateError(
+                "PENDING_MAINTENANCE",
+                "Package uninstall recovery journal is incomplete.",
+                retryable=True,
+            )
+        component_id = transaction.get("componentId")
+        row = transaction.get("selectedRow")
+        installation = transaction.get("installation")
+        if (
+            not isinstance(component_id, str)
+            or not isinstance(row, dict)
+            or not isinstance(installation, dict)
+            or not _valid_digest(installation.get("artifact_digest"))
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package uninstall recovery identity is malformed."
+            )
+        fresh_inventory = self._workload_inventory_before_daemon_stop(transaction["workloadId"])
+        if fresh_inventory is not None:
+            current = fresh_inventory.get("installationRecords", {}).get(component_id)
+            installation = transaction["installation"]
+            identity_fields = (
+                "installation_id",
+                "package_id",
+                "package_version",
+                "artifact_digest",
+                "archive_digest",
+                "descriptor_digest",
+                "manifest_digest",
+                "dependency_lock_digest",
+            )
+            if not isinstance(current, dict) or any(
+                current.get(field) != installation.get(field) for field in identity_fields
+            ):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime installation identity changed while the uninstall hold was pending.",
+                    retryable=True,
+                )
+            self._workload_runtime_daemon("stop")
+        uninstall_result = transaction.get("offlineUninstallResult")
+        if not isinstance(uninstall_result, dict):
+            helper = self._load_workload_package_runtime()
+            request_id = transaction.get("offlineUninstallRequestId")
+            if not isinstance(request_id, str):
+                raise UpdateError("INVALID_TRANSACTION", "Package uninstall request ID is missing.")
+            try:
+                uninstall_result = helper.uninstall_workload_package(
+                    installation,
+                    component_id=component_id,
+                    request_id=request_id,
+                    maintenance=self._workload_hold_echo(transaction),
+                    runner=self.runner,
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "PACKAGE_UNINSTALL_FAILED",
+                    "Platform offline uninstall recovery did not complete.",
+                    retryable=True,
+                ) from error
+            transaction["offlineUninstallResult"] = uninstall_result
+            _atomic_json(transaction_path, transaction)
+        source_policy = transaction.get("sourcePolicy")
+        digest = installation.get("artifact_digest")
+        if not isinstance(source_policy, dict) or not _valid_digest(digest):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package uninstall source update identity is malformed."
+            )
+        self._update_workload_source_policy(
+            transaction,
+            transaction_path,
+            source_policy=source_policy,
+            selected_rows=[{**row, "packageArtifactDigest": digest}],
+            installation_records={},
+            phase="core-runtime-uninstall",
+            remove_component_ids=(component_id,),
+        )
+        self._end_workload_hold(transaction, transaction_path, outcome="SUCCESS", healthy=True)
+        self._workload_runtime_daemon("start", wait_active=True)
+        transaction["packageRuntimeStarted"] = True
+        _atomic_json(transaction_path, transaction)
+        self._clear_workload_package_runtime_receipt(component_id, installation["installation_id"])
+
+    @staticmethod
+    def _workload_policy_source_id(source_policy: Mapping[str, Any]) -> str | None:
+        """Resolve the one explicitly declared source owner without deriving IDs."""
+
+        if source_policy.get("mode") == "standaloneOperator":
+            source_id = source_policy.get("sourceId")
+            return source_id if isinstance(source_id, str) else None
+        if source_policy.get("mode") == "actualProduct":
+            rows = source_policy.get("productSources")
+            if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict):
+                source_id = rows[0].get("sourceId")
+                return source_id if isinstance(source_id, str) else None
+        return None
+
+    def _workload_phase_is_ended(self, transaction: dict[str, Any], phase: str) -> bool:
+        holds = transaction.get("maintenanceHolds")
+        row = holds.get(phase) if isinstance(holds, dict) else None
+        return isinstance(row, dict) and row.get("status") == "ended"
+
+    def _ensure_workload_phase(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        phase: str,
+        target_kind: str,
+        requires_restart: bool,
+    ) -> bool:
+        """Acquire or resume one phase; return false when it already committed."""
+
+        if self._workload_phase_is_ended(transaction, phase):
+            return False
+        if transaction.get("maintenanceToken"):
+            if transaction.get("maintenancePhase") != phase:
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "A different workload maintenance phase is still held.",
+                    retryable=True,
+                )
+            return True
+        self._begin_workload_hold(
+            transaction,
+            transaction_path,
+            phase=phase,
+            target_kind=target_kind,
+            requires_restart=requires_restart,
+        )
+        return True
+
+    def _quiesce_workload_bindings(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        plugin_rows: list[dict[str, Any]],
+        package_inventory: dict[str, Any],
+        block_foreign_for_daemon: bool,
+        block_foreign_for_products: bool,
+    ) -> dict[str, Any]:
+        """Deactivate selected active package bindings and block unsafe shared owners."""
+
+        source_bindings = package_inventory.get("sourceBindings", [])
+        if not isinstance(source_bindings, list):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime owner inventory is malformed."
+            )
+        selected: dict[tuple[str, str], dict[str, Any]] = {}
+        selected_sources: set[str] = set()
+        for row in plugin_rows:
+            policy = row.get("sourcePolicy")
+            source_id = (
+                self._workload_policy_source_id(policy) if isinstance(policy, dict) else None
+            )
+            binding_id = row.get("bindingId")
+            if not isinstance(source_id, str) or not isinstance(binding_id, str):
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID", "Selected plugin owner mapping is invalid."
+                )
+            selected[(source_id, binding_id)] = row
+            selected_sources.add(source_id)
+
+        workload = next(
+            (
+                item
+                for item in self.catalog.get("workloads", [])
+                if isinstance(item, dict) and item.get("workloadId") == transaction["workloadId"]
+            ),
+            None,
+        )
+        workload_policy = workload.get("sourcePolicy") if isinstance(workload, dict) else None
+        product_source_ids: set[str] = set()
+        if isinstance(workload_policy, dict) and workload_policy.get("mode") == "actualProduct":
+            for mapping in workload_policy.get("productSources", []):
+                if isinstance(mapping, dict) and isinstance(mapping.get("sourceId"), str):
+                    product_source_ids.add(mapping["sourceId"])
+
+        foreign_active: list[dict[str, Any]] = []
+        selected_active: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for binding in source_bindings:
+            if not isinstance(binding, dict):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime binding row is malformed."
+                )
+            source_id = binding.get("sourceId")
+            binding_id = binding.get("bindingId")
+            active_id = binding.get("activeInstallationId")
+            if binding.get("state") != "RUNNING" or not isinstance(active_id, str):
+                continue
+            owner = selected.get((source_id, binding_id))
+            if owner is not None:
+                selected_active.append((binding, owner))
+            elif block_foreign_for_daemon or (
+                block_foreign_for_products and source_id in product_source_ids
+            ):
+                foreign_active.append(binding)
+        if foreign_active:
+            identifiers = sorted(
+                f"{row.get('sourceId')}:{row.get('bindingId')}" for row in foreign_active
+            )
+            raise UpdateError(
+                "COMPONENT_IN_USE",
+                "Another active Package Runtime owner prevents this workload change: "
+                + ", ".join(identifiers),
+                retryable=True,
+            )
+        if selected_active:
+            sdk_environment = transaction.get("sdkEnvironment")
+            if not isinstance(sdk_environment, dict):
+                raise UpdateError(
+                    "WORKLOAD_SDK_UNAVAILABLE", "The verified operator SDK is unavailable."
+                )
+            activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                transaction["workloadId"]
+            )
+            if runtime_policy is None:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED", "Active bindings have no runtime policy."
+                )
+            for binding, owner in selected_active:
+                self._workload_binding_operation(
+                    transaction,
+                    transaction_path,
+                    operation="deactivate",
+                    component=owner,
+                    installation_id=binding["activeInstallationId"],
+                    activity_catalog=activity_catalog,
+                    runtime_policy=runtime_policy,
+                    source_principals=principals,
+                    helper=helper,
+                )
+                # A fresh authenticated inventory is required before any shared
+                # daemon stop or offline installation.
+                package_inventory = self._read_workload_package_inventory(
+                    transaction["workloadId"],
+                    tuple(
+                        sorted(
+                            self._load_workload_resolver().potential_component_ids(
+                                self.catalog, transaction["workloadId"]
+                            )
+                        )
+                    ),
+                )
+                still_running = any(
+                    isinstance(row, dict)
+                    and row.get("sourceId") == binding.get("sourceId")
+                    and row.get("bindingId") == binding.get("bindingId")
+                    and row.get("state") == "RUNNING"
+                    for row in package_inventory.get("sourceBindings", [])
+                )
+                if still_running:
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Package Runtime did not confirm the selected binding was deactivated.",
+                        retryable=True,
+                    )
+        return package_inventory
+
+    def _workload_component_artifact_map(
+        self,
+        rows: list[dict[str, Any]],
+        staged_by_id: dict[str, dict[str, Any]],
+        package_inventory: dict[str, Any],
+    ) -> dict[str, str]:
+        """Build the immutable complete maintenance map with Package digests separated."""
+
+        result: dict[str, str] = {}
+        installed = package_inventory.get("components", {})
+        for row in rows:
+            component_id = row.get("componentId")
+            staged = staged_by_id.get(component_id) if isinstance(component_id, str) else None
+            if not isinstance(component_id, str) or not isinstance(staged, dict):
+                raise UpdateError("INVALID_STAGE", "Workload component identity is incomplete.")
+            if row.get("artifactKind") == "plugin-package":
+                package_digest = staged.get("packageArtifactDigest")
+                if package_digest is None and isinstance(installed, dict):
+                    identity = installed.get(component_id)
+                    package_digest = (
+                        identity.get("packageArtifactDigest")
+                        if isinstance(identity, dict)
+                        else None
+                    )
+                if not _valid_digest(package_digest):
+                    raise UpdateError(
+                        "PACKAGE_DESCRIPTOR_MISMATCH",
+                        f"Verified package aggregate digest is missing for {component_id}.",
+                    )
+                result[component_id] = package_digest
+            else:
+                digest = row.get("digest")
+                if not _valid_digest(digest):
+                    raise UpdateError(
+                        "INVALID_STAGE", f"Verified component digest is missing for {component_id}."
+                    )
+                result[component_id] = digest
+        if len(result) != len(rows):
+            raise UpdateError("INVALID_STAGE", "Workload digest map does not cover each component.")
+        return result
+
+    def _resume_workload_package_install_phase(
+        self, transaction: dict[str, Any], transaction_path: Path
+    ) -> None:
+        """Finish a journaled PACKAGE_ONLY install before attempting UDS readback."""
+
+        if (
+            transaction.get("maintenancePhase") != "package-only"
+            or not transaction.get("maintenanceToken")
+            or not isinstance(transaction.get("selectedPluginRows"), list)
+            or not isinstance(transaction.get("stagedComponents"), list)
+        ):
+            raise UpdateError(
+                "PENDING_MAINTENANCE",
+                "Package-only recovery journal is incomplete.",
+                retryable=True,
+            )
+        fresh_inventory = self._workload_inventory_before_daemon_stop(transaction["workloadId"])
+        if fresh_inventory is not None:
+            installation_records = fresh_inventory.get("installationRecords", {})
+            if isinstance(installation_records, dict):
+                transaction.setdefault("packageInstallations", {}).update(
+                    {
+                        component_id: record
+                        for component_id, record in installation_records.items()
+                        if isinstance(component_id, str) and isinstance(record, dict)
+                    }
+                )
+            self._workload_runtime_daemon("stop")
+            _atomic_json(transaction_path, transaction)
+        selected_rows = transaction["selectedPluginRows"]
+        staged_by_id = {
+            row.get("componentId"): row
+            for row in transaction["stagedComponents"]
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        installation_records = transaction.setdefault("packageInstallations", {})
+        if not isinstance(installation_records, dict):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package install recovery records are malformed."
+            )
+        helper = self._load_workload_package_runtime()
+        maintenance = self._workload_hold_echo(transaction)
+        for row in selected_rows:
+            if not isinstance(row, dict):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Selected package recovery row is malformed."
+                )
+            component_id = row.get("componentId")
+            staged = staged_by_id.get(component_id) if isinstance(component_id, str) else None
+            if not isinstance(component_id, str) or not isinstance(staged, dict):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package recovery stage identity is missing."
+                )
+            if staged.get("status") == "current" and isinstance(
+                installation_records.get(component_id), dict
+            ):
+                continue
+            request_id = (
+                "cyrene-wpkg-"
+                + transaction["planId"].removeprefix("plan-")
+                + "-"
+                + hashlib.sha256(component_id.encode("utf-8")).hexdigest()[:12]
+            )
+            try:
+                record = helper.install_workload_package(
+                    row,
+                    staged,
+                    request_id=request_id,
+                    maintenance=maintenance,
+                    runner=self.runner,
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "PACKAGE_INSTALL_FAILED",
+                    f"Platform package recovery did not complete for {component_id}.",
+                    retryable=True,
+                ) from error
+            identity = self._write_workload_package_runtime_receipt(row, staged, record)
+            installation_records[component_id] = record
+            transaction.setdefault("packageIdentities", {})[component_id] = identity
+            _atomic_json(transaction_path, transaction)
+        source_rows = [
+            {
+                **row,
+                "packageArtifactDigest": staged_by_id[row["componentId"]].get(
+                    "packageArtifactDigest"
+                ),
+            }
+            for row in selected_rows
+        ]
+        self._update_workload_source_policy(
+            transaction,
+            transaction_path,
+            source_policy=transaction["sourcePolicy"],
+            selected_rows=source_rows,
+            installation_records=installation_records,
+            phase="package-only",
+        )
+        self._end_workload_hold(transaction, transaction_path, outcome="SUCCESS", healthy=True)
+        self._workload_runtime_daemon("start", wait_active=True)
+        transaction["packageRuntimeStarted"] = True
+        _atomic_json(transaction_path, transaction)
+
+    def _apply_workload_install_assembled(
+        self, stored: dict[str, Any], confirmation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply one signed workload using the existing journal and separated holds."""
+
+        plan_id = stored["planId"]
+        plan_digest = stored["planDigest"]
+        workload_id = stored["workloadId"]
+        target_id = stored["targetId"]
+        transaction_path = self._private_state_directory("transactions") / f"{plan_id}.json"
+        prior_transaction = None
+        if transaction_path.exists() or transaction_path.is_symlink():
+            prior_transaction = _read_object(transaction_path, "workload transaction")
+            if (
+                prior_transaction.get("transactionKind") != "workload-assembly.v1"
+                or prior_transaction.get("action") != "install"
+                or prior_transaction.get("planId") != plan_id
+                or prior_transaction.get("planDigest") != plan_digest
+                or prior_transaction.get("workloadId") != workload_id
+            ):
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "A different transaction occupies this workload plan.",
+                    retryable=True,
+                )
+            if prior_transaction.get("phase") == "succeeded":
+                return prior_transaction["result"]
+            holds = prior_transaction.get("maintenanceHolds", {})
+            package_hold = holds.get("package-only") if isinstance(holds, dict) else None
+            if (
+                isinstance(package_hold, dict)
+                and package_hold.get("status") in {"begin_pending", "active", "end_pending"}
+                and prior_transaction.get("maintenanceToken")
+            ):
+                self._resume_workload_package_install_phase(prior_transaction, transaction_path)
+            elif (
+                isinstance(package_hold, dict)
+                and package_hold.get("status") == "ended"
+                and prior_transaction.get("packageRuntimeStarted") is not True
+            ):
+                self._workload_runtime_daemon("start", wait_active=True)
+                prior_transaction["packageRuntimeStarted"] = True
+                _atomic_json(transaction_path, prior_transaction)
+        resolution, candidates, package_inventory = self._build_workload_plan(
+            workload_id, target_id, stored.get("selections"), action="install"
+        )
+        if (
+            (resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest)
+            and isinstance(prior_transaction, dict)
+            and isinstance(prior_transaction.get("resolution"), dict)
+        ):
+            resolution = prior_transaction["resolution"]
+            if resolution.get("planDigest") != plan_digest or resolution.get("status") != "ready":
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Durable workload plan identity is malformed."
+                )
+        elif resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest:
+            raise UpdateError(
+                "PLAN_CHANGED",
+                "The installed workload resolution changed; check and stage again.",
+                retryable=True,
+            )
+        rows = resolution.get("selectedComponents")
+        staged_rows = stored.get("stagedComponents")
+        if not isinstance(rows, list) or not isinstance(staged_rows, list) or not rows:
+            raise UpdateError("INVALID_STAGE", "The staged workload component set is malformed.")
+        staged_by_id = {
+            row.get("componentId"): row
+            for row in staged_rows
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        if len(staged_by_id) != len(staged_rows) or set(staged_by_id) != {
+            row.get("componentId") for row in rows if isinstance(row, dict)
+        }:
+            raise UpdateError(
+                "INVALID_STAGE", "The staged workload component set differs from the signed plan."
+            )
+        if not _running_as_root():
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED", "Applying a workload requires the root-owned update helper."
+            )
+
+        plugin_rows: list[dict[str, Any]] = []
+        native_components: list[dict[str, Any]] = []
+        web_components: list[dict[str, Any]] = []
+        sdk_entry: tuple[dict[str, Any], dict[str, Any]] | None = None
+        for row in rows:
+            if not isinstance(row, dict):
+                raise UpdateError("INVALID_STAGE", "Resolved workload row is malformed.")
+            component_id = row["componentId"]
+            staged = staged_by_id[component_id]
+            artifact_kind = row.get("artifactKind")
+            if artifact_kind == "plugin-package":
+                owner_row = dict(row)
+                owner_row["packageArtifactDigest"] = staged.get("packageArtifactDigest")
+                plugin_rows.append(owner_row)
+                continue
+            if component_id == WORKLOAD_SDK_COMPONENT_ID:
+                sdk_entry = (row, staged)
+                continue
+            if staged.get("status") == "current":
+                continue
+            candidate = candidates.get(component_id)
+            identity = staged.get("stagedIdentity")
+            if candidate is None or not isinstance(identity, dict):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Signed staged identity is missing for {component_id}."
+                )
+            item = {
+                "componentId": component_id,
+                "version": candidate.manifest["version"],
+                "manifestDigest": candidate.manifest_digest,
+                "releaseIdentity": candidate.manifest_digest,
+                "artifactDigest": candidate.artifact_digest,
+                "restartGroup": self.components[component_id]["restart"]["group"],
+                "pointerIdentity": identity.get("pointerIdentity", identity.get("releaseIdentity")),
+                "bundleIdentity": identity.get("bundleIdentity"),
+                "manifest": candidate.manifest,
+                "releasePath": identity.get("releasePath"),
+                "archivePath": identity.get("archivePath"),
+                "verification": {"identityAttested": True},
+            }
+            item.update(self._workload_receipt_fields(candidate, row))
+            if artifact_kind == "static-web":
+                item["pointerIdentity"] = identity.get("releaseIdentity")
+                item["bundleIdentity"] = None
+                web_components.append(item)
+            elif artifact_kind in {"native-binary", "python-bundle"}:
+                component = self.components.get(component_id)
+                if not isinstance(component, dict) or component.get("kind") not in {
+                    "native-binary",
+                    "python-bundle",
+                }:
+                    raise UpdateError(
+                        "WORKLOAD_ARTIFACT_UNAVAILABLE", f"No native supervisor for {component_id}."
+                    )
+                native_components.append(item)
+            else:
+                raise UpdateError(
+                    "WORKLOAD_ARTIFACT_UNAVAILABLE",
+                    f"No installed Ubuntu supervisor is configured for {component_id} ({artifact_kind}).",
+                    retryable=True,
+                )
+
+        component_artifact_digests = self._workload_component_artifact_map(
+            rows, staged_by_id, package_inventory
+        )
+        transaction: dict[str, Any] | None = prior_transaction
+        if transaction is not None:
+            if (
+                transaction.get("transactionKind") != "workload-assembly.v1"
+                or transaction.get("planId") != plan_id
+                or transaction.get("planDigest") != plan_digest
+                or transaction.get("workloadId") != workload_id
+                or transaction.get("componentArtifactDigests") != component_artifact_digests
+            ):
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "A different transaction occupies this workload plan.",
+                    retryable=True,
+                )
+            if transaction.get("phase") == "succeeded":
+                return transaction["result"]
+            if transaction.get("phase") == "rolled_back":
+                raise UpdateError(
+                    "APPLY_ROLLED_BACK",
+                    transaction.get("rollbackMessage", "Workload apply rolled back."),
+                )
+        else:
+            transaction = None
+
+        sdk_module = self._load_workload_sdk_environment()
+
+        workload_host = next(
+            (
+                item
+                for item in self.catalog.get("workloads", [])
+                if isinstance(item, dict) and item.get("workloadId") == workload_id
+            ),
+            None,
+        )
+        source_policy = (
+            workload_host.get("sourcePolicy") if isinstance(workload_host, dict) else None
+        )
+        if not isinstance(source_policy, dict):
+            raise UpdateError(
+                "SOURCE_POLICY_INVALID", "Signed workload sourcePolicy is unavailable."
+            )
+        service_units = self._workload_service_units(rows, source_policy, native_components)
+        transaction = transaction or {
+            "schemaVersion": 2,
+            "transactionKind": "workload-assembly.v1",
+            "planId": plan_id,
+            "requestId": "cyrene-update-" + plan_id,
+            "planDigest": plan_digest,
+            "workloadId": workload_id,
+            "targetId": target_id,
+            "action": "install",
+            "catalogDigest": stored["catalogDigest"],
+            "channel": stored["channel"],
+            "componentArtifactDigests": component_artifact_digests,
+            "phase": "applying",
+            "components": native_components,
+            "webComponents": web_components,
+            "selectedComponents": rows,
+            "selectedPluginRows": plugin_rows,
+            "stagedComponents": staged_rows,
+            "resolution": resolution,
+            "sourcePolicy": source_policy,
+            "requiresRestart": bool(service_units),
+            "previous": self._capture_active_versions(native_components),
+            "previousWeb": [
+                self._capture_workload_web_identity(item["componentId"]) for item in web_components
+            ],
+            "maintenanceHolds": {},
+            "bindingOperations": [],
+            "packageInstallations": {},
+            "unitFileChanges": [],
+            "phaseStartedAt": int(time.time()),
+        }
+        if sdk_entry is None or "sdkEnvironment" not in transaction:
+            transaction["sdkEnvironment"] = None
+        transaction["selectedComponents"] = rows
+        transaction["selectedPluginRows"] = plugin_rows
+        transaction["stagedComponents"] = staged_rows
+        transaction["resolution"] = resolution
+        if not isinstance(transaction.get("packageInstallations"), dict):
+            transaction["packageInstallations"] = {}
+        for component_id, record in package_inventory.get("installationRecords", {}).items():
+            if isinstance(component_id, str) and isinstance(record, dict):
+                transaction["packageInstallations"].setdefault(component_id, record)
+        transaction["components"] = native_components
+        transaction["webComponents"] = web_components
+        transaction["previous"] = transaction.get("previous") or self._capture_active_versions(
+            native_components
+        )
+        transaction["previousWeb"] = transaction.get("previousWeb") or [
+            self._capture_workload_web_identity(item["componentId"]) for item in web_components
+        ]
+        _atomic_json(transaction_path, transaction)
+
+        if sdk_entry is not None:
+            selected_sdk, staged_sdk = sdk_entry
+            self._prepare_workload_sdk_durably(
+                transaction,
+                transaction_path,
+                sdk_module,
+                selected_sdk,
+                staged_sdk,
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+
+        web_host = None
+        if any(row.get("artifactKind") == "static-web" for row in rows):
+            web_host = self._load_workload_web_host()
+            if "webHostPrerequisite" not in transaction:
+                try:
+                    transaction["webHostPrerequisite"] = web_host.prepare_host_prerequisites(
+                        install_authorized=True,
+                        durable_callback=self._journal_callback(
+                            transaction, transaction_path, "hostEvents"
+                        ),
+                        runner=self.runner,
+                    )
+                    transaction["webHostPriorState"] = web_host.capture_web_host_state(
+                        runner=self.runner
+                    )
+                    transaction["webHostApplied"] = False
+                    _atomic_json(transaction_path, transaction)
+                except Exception as error:
+                    raise UpdateError(
+                        "WORKLOAD_WEB_HOST_UNAVAILABLE",
+                        "The local Web host prerequisite could not be prepared.",
+                        retryable=True,
+                    ) from error
+
+        selected_ids = {row.get("componentId") for row in rows if isinstance(row, dict)}
+        catalyst_auth_selected = {
+            CATALYST_COMPONENT_ID,
+            STUDIO_CONTROL_COMPONENT_ID,
+        }.issubset(selected_ids)
+        if catalyst_auth_selected:
+            # Credential and unit conflicts are a check-time host preflight. Do
+            # not discover them after APT, pointer, or maintenance changes begin.
+            self._workload_catalyst_token_configuration(generate=False)
+
+        # Fresh, authenticated owner status is the preflight before any service or
+        # daemon is stopped. Selected old bindings are deactivated by their owner;
+        # foreign active bindings are never silently stopped.
+        package_changed = any(
+            row.get("artifactKind") == "plugin-package"
+            and staged_by_id[row["componentId"]].get("status") != "current"
+            for row in rows
+        )
+        activity_catalog, _activity_source_ids = self._activity_catalog()
+        source_ids = {
+            source["source_id"]
+            for source in activity_catalog.get("sources", [])
+            if isinstance(source, dict) and isinstance(source.get("source_id"), str)
+        }
+        declared_product_sources = {
+            row.get("sourceId")
+            for row in source_policy.get("productSources", [])
+            if isinstance(row, dict) and isinstance(row.get("sourceId"), str)
+        }
+        source_registration_needed = source_policy.get(
+            "mode"
+        ) == "actualProduct" and not declared_product_sources.issubset(source_ids)
+        catalyst_auth_needed = (
+            catalyst_auth_selected and not self._workload_catalyst_auth_is_configured()
+        )
+        core_install_needed = (
+            bool(native_components or web_components)
+            or source_registration_needed
+            or catalyst_auth_needed
+        )
+        previous_package_bindings = transaction.setdefault("previousPackageBindings", [])
+        if not isinstance(previous_package_bindings, list):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Prior Package Runtime binding inventory is malformed."
+            )
+        if plugin_rows and not previous_package_bindings:
+            source_bindings = package_inventory.get("sourceBindings", [])
+            for row in plugin_rows:
+                policy = row.get("sourcePolicy")
+                source_id = (
+                    self._workload_policy_source_id(policy) if isinstance(policy, dict) else None
+                )
+                binding_id = row.get("bindingId")
+                if not isinstance(source_id, str) or not isinstance(binding_id, str):
+                    raise UpdateError(
+                        "SOURCE_BINDING_INVALID", "Selected package owner mapping is invalid."
+                    )
+                existing = next(
+                    (
+                        item
+                        for item in source_bindings
+                        if isinstance(item, dict)
+                        and item.get("sourceId") == source_id
+                        and item.get("bindingId") == binding_id
+                    ),
+                    None,
+                )
+                previous_package_bindings.append(
+                    {
+                        "componentId": row["componentId"],
+                        "sourceId": source_id,
+                        "bindingId": binding_id,
+                        "packageId": row.get("packageId"),
+                        "state": existing.get("state", "BINDING_NOT_FOUND")
+                        if isinstance(existing, dict)
+                        else "BINDING_NOT_FOUND",
+                        "activeInstallationId": existing.get("activeInstallationId")
+                        if isinstance(existing, dict)
+                        else None,
+                    }
+                )
+            _atomic_json(transaction_path, transaction)
+        if plugin_rows and (package_changed or core_install_needed):
+            package_inventory = self._quiesce_workload_bindings(
+                transaction,
+                transaction_path,
+                plugin_rows=plugin_rows,
+                package_inventory=package_inventory,
+                block_foreign_for_daemon=package_changed,
+                block_foreign_for_products=core_install_needed,
+            )
+        elif core_install_needed:
+            # Without selected package rows, still refuse to stop the Product while
+            # another package owner mapped to that Product is active.
+            active_product_sources = {
+                row.get("sourceId")
+                for row in package_inventory.get("sourceBindings", [])
+                if isinstance(row, dict)
+                and row.get("state") == "RUNNING"
+                and row.get("sourceId") in declared_product_sources
+            }
+            if active_product_sources:
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "An active Package Runtime binding prevents the Product maintenance phase.",
+                    retryable=True,
+                )
+
+        if (
+            core_install_needed
+            and not self._workload_phase_is_ended(transaction, "core-runtime-install")
+            and self._ensure_workload_phase(
+                transaction,
+                transaction_path,
+                phase="core-runtime-install",
+                target_kind="CORE_RUNTIME",
+                requires_restart=bool(service_units),
+            )
+        ):
+            try:
+                prior_states = transaction.setdefault("priorServiceStates", {})
+                for service in service_units:
+                    unit = service["unit"]
+                    state = self._package_product_unit_state(unit)
+                    prior_states.setdefault(unit, state)
+                    if state == "active":
+                        self._set_workload_unit(unit, "stop")
+                    _atomic_json(transaction_path, transaction)
+                self._install_workload_service_units(transaction, service_units)
+                for item in native_components:
+                    current = self._active_native_pointer_identity(item["componentId"])
+                    desired = _native_release_pointer_identity(item)
+                    previous = next(
+                        row
+                        for row in transaction["previous"]
+                        if row["componentId"] == item["componentId"]
+                    )
+                    if current != desired:
+                        if current != previous.get("pointerIdentity"):
+                            raise UpdateError(
+                                "ACTIVE_VERSION_CHANGED",
+                                f"Active pointer changed for {item['componentId']}.",
+                                retryable=True,
+                            )
+                        self._activate_transaction(
+                            {
+                                **transaction,
+                                "components": [item],
+                                "previous": [previous],
+                            }
+                        )
+                    elif self._read_active_receipt(item["componentId"]) is None:
+                        self._write_active_receipt(item)
+                for item in web_components:
+                    prior = next(
+                        row
+                        for row in transaction["previousWeb"]
+                        if row["componentId"] == item["componentId"]
+                    )
+                    current = self._capture_workload_web_identity(item["componentId"])
+                    if current.get("pointerIdentity") != item["pointerIdentity"]:
+                        self._activate_workload_web(item, expected_current=prior["pointerIdentity"])
+                if catalyst_auth_selected and not self._workload_catalyst_auth_is_configured():
+                    transaction["catalystAuth"] = self._project_workload_catalyst_auth(
+                        transaction, transaction_path
+                    )
+                if source_registration_needed and not plugin_rows:
+                    self._update_workload_source_policy(
+                        transaction,
+                        transaction_path,
+                        source_policy=source_policy,
+                        selected_rows=[],
+                        installation_records={},
+                        phase="core-runtime-install",
+                    )
+                self._end_workload_hold(
+                    transaction, transaction_path, outcome="SUCCESS", healthy=True
+                )
+            except Exception as error:
+                transaction["phase"] = "applying"
+                _atomic_json(transaction_path, transaction)
+                self._recover_workload_apply(transaction, transaction_path, failure=error)
+                raise
+
+        if package_changed:
+            package_inventory = self._quiesce_workload_bindings(
+                transaction,
+                transaction_path,
+                plugin_rows=plugin_rows,
+                package_inventory=package_inventory,
+                block_foreign_for_daemon=True,
+                block_foreign_for_products=False,
+            )
+            if any(
+                isinstance(row, dict) and row.get("state") == "RUNNING"
+                for row in package_inventory.get("sourceBindings", [])
+            ):
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "The Package Runtime daemon still has an active owner binding.",
+                    retryable=True,
+                )
+            if self._ensure_workload_phase(
+                transaction,
+                transaction_path,
+                phase="package-only",
+                target_kind="PACKAGE_ONLY",
+                requires_restart=False,
+            ):
+                fresh_inventory = self._workload_inventory_before_daemon_stop(workload_id)
+                if fresh_inventory is not None:
+                    package_inventory = fresh_inventory
+                    installation_records = package_inventory.get("installationRecords", {})
+                    if isinstance(installation_records, dict):
+                        transaction.setdefault("packageInstallations", {}).update(
+                            {
+                                component_id: record
+                                for component_id, record in installation_records.items()
+                                if isinstance(component_id, str) and isinstance(record, dict)
+                            }
+                        )
+                    _atomic_json(transaction_path, transaction)
+                prior_daemon_state = self._workload_runtime_daemon("stop")
+                transaction["packageRuntimePriorState"] = prior_daemon_state
+                _atomic_json(transaction_path, transaction)
+                try:
+                    helper = self._load_workload_package_runtime()
+                    maintenance = self._workload_hold_echo(transaction)
+                    installation_records = dict(package_inventory.get("installationRecords", {}))
+                    for row in plugin_rows:
+                        component_id = row["componentId"]
+                        staged = staged_by_id[component_id]
+                        if staged.get("status") == "current":
+                            record = installation_records.get(component_id)
+                            if not isinstance(record, dict):
+                                raise UpdateError(
+                                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                    f"Installed package record is missing for {component_id}.",
+                                    retryable=True,
+                                )
+                            continue
+                        request_id = (
+                            "cyrene-wpkg-"
+                            + plan_id.removeprefix("plan-")
+                            + "-"
+                            + hashlib.sha256(component_id.encode("utf-8")).hexdigest()[:12]
+                        )
+                        try:
+                            record = helper.install_workload_package(
+                                row,
+                                staged,
+                                request_id=request_id,
+                                maintenance=maintenance,
+                                runner=self.runner,
+                            )
+                        except Exception as error:
+                            raise UpdateError(
+                                "PACKAGE_INSTALL_FAILED",
+                                f"Platform package install did not complete for {component_id}.",
+                                retryable=True,
+                            ) from error
+                        if not isinstance(record, dict):
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                f"Platform install receipt is malformed for {component_id}.",
+                            )
+                        identity = self._write_workload_package_runtime_receipt(row, staged, record)
+                        installation_records[component_id] = record
+                        transaction.setdefault("packageIdentities", {})[component_id] = identity
+                        transaction.setdefault("packageInstallations", {})[component_id] = record
+                        _atomic_json(transaction_path, transaction)
+                    source_rows = []
+                    for row in plugin_rows:
+                        staged = staged_by_id[row["componentId"]]
+                        source_rows.append(
+                            {**row, "packageArtifactDigest": staged.get("packageArtifactDigest")}
+                        )
+                    self._update_workload_source_policy(
+                        transaction,
+                        transaction_path,
+                        source_policy=source_policy,
+                        selected_rows=source_rows,
+                        installation_records=installation_records,
+                        phase="package-only",
+                    )
+                    self._end_workload_hold(
+                        transaction, transaction_path, outcome="SUCCESS", healthy=True
+                    )
+                except Exception:
+                    transaction["phase"] = "applying"
+                    _atomic_json(transaction_path, transaction)
+                    raise
+            transaction["packageRuntimeStarted"] = False
+            self._workload_runtime_daemon("start", wait_active=True)
+            transaction["packageRuntimeStarted"] = True
+            _atomic_json(transaction_path, transaction)
+
+        # Activate selected plugin bindings through the non-root source identity and
+        # the normal Broker admission SDK. Each mutation's callback is already fsynced
+        # into this transaction before the SDK completes its lease.
+        if plugin_rows:
+            package_inventory = self._read_workload_package_inventory(
+                workload_id,
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, workload_id
+                        )
+                    )
+                ),
+            )
+            activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                workload_id
+            )
+            if runtime_policy is None:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime policy is missing after installation.",
+                    retryable=True,
+                )
+            installations = package_inventory.get("installationRecords", {})
+            for row in plugin_rows:
+                component_id = row["componentId"]
+                record = (
+                    transaction.get("packageInstallations", {}).get(component_id)
+                    if isinstance(transaction.get("packageInstallations"), dict)
+                    else None
+                )
+                if not isinstance(record, dict) and isinstance(installations, dict):
+                    record = installations.get(component_id)
+                if not isinstance(record, dict) or not isinstance(
+                    record.get("installation_id"), str
+                ):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        f"Package installation identity is unavailable for {component_id}.",
+                        retryable=True,
+                    )
+                source_id = self._workload_policy_source_id(row["sourcePolicy"])
+                existing_binding = next(
+                    (
+                        binding
+                        for binding in package_inventory.get("sourceBindings", [])
+                        if isinstance(binding, dict)
+                        and binding.get("sourceId") == source_id
+                        and binding.get("bindingId") == row.get("bindingId")
+                    ),
+                    None,
+                )
+                if (
+                    isinstance(existing_binding, dict)
+                    and existing_binding.get("state") == "RUNNING"
+                    and existing_binding.get("activeInstallationId") == record["installation_id"]
+                ):
+                    continue
+                self._workload_binding_operation(
+                    transaction,
+                    transaction_path,
+                    operation="activate",
+                    component=row,
+                    installation_id=record["installation_id"],
+                    activity_catalog=activity_catalog,
+                    runtime_policy=runtime_policy,
+                    source_principals=principals,
+                    helper=helper,
+                )
+                activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                    workload_id
+                )
+                if runtime_policy is None:
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Package Runtime policy disappeared after activation.",
+                        retryable=True,
+                    )
+
+            package_inventory = self._read_workload_package_inventory(
+                workload_id,
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, workload_id
+                        )
+                    )
+                ),
+            )
+            active_bindings = {
+                (binding.get("sourceId"), binding.get("bindingId")): binding.get(
+                    "activeInstallationId"
+                )
+                for binding in package_inventory.get("sourceBindings", [])
+                if isinstance(binding, dict)
+            }
+            for row in plugin_rows:
+                source_id = self._workload_policy_source_id(row["sourcePolicy"])
+                record = transaction.get("packageInstallations", {}).get(row["componentId"])
+                if not isinstance(record, dict):
+                    record = package_inventory.get("installationRecords", {}).get(
+                        row["componentId"]
+                    )
+                if not isinstance(record, dict) or active_bindings.get(
+                    (source_id, row["bindingId"])
+                ) != record.get("installation_id"):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        f"Active binding readback differs for {row['componentId']}.",
+                        retryable=True,
+                    )
+
+        core_activation_needed = bool(service_units) and (
+            core_install_needed
+            or any(
+                self._package_product_unit_state(service["unit"]) != "active"
+                for service in service_units
+            )
+        )
+        web_selected = any(row.get("artifactKind") == "static-web" for row in rows)
+        if (core_activation_needed or web_selected) and self._ensure_workload_phase(
+            transaction,
+            transaction_path,
+            phase="core-runtime-activate",
+            target_kind="CORE_RUNTIME",
+            requires_restart=bool(service_units),
+        ):
+            try:
+                for service in service_units:
+                    unit = service["unit"]
+                    state = self._package_product_unit_state(unit)
+                    self._set_workload_unit(
+                        unit, "restart" if state == "active" else "start", wait_active=True
+                    )
+                if CATALYST_COMPONENT_ID in selected_ids:
+                    self._wait_http_health(8004, "/healthz", CATALYST_COMPONENT_ID)
+                if web_selected and web_host is not None:
+                    try:
+                        transaction["hostMetadata"] = web_host.apply_web_host(
+                            expected_state=transaction.get("webHostPriorState"),
+                            durable_callback=self._journal_callback(
+                                transaction, transaction_path, "hostEvents"
+                            ),
+                            runner=self.runner,
+                        )
+                        transaction["webHostApplied"] = True
+                        _atomic_json(transaction_path, transaction)
+                    except Exception as error:
+                        raise UpdateError(
+                            "WORKLOAD_WEB_HOST_APPLY_FAILED",
+                            "The selected Client Web host did not become ready.",
+                            retryable=True,
+                        ) from error
+                self._end_workload_hold(
+                    transaction, transaction_path, outcome="SUCCESS", healthy=True
+                )
+            except Exception as error:
+                transaction["phase"] = "applying"
+                _atomic_json(transaction_path, transaction)
+                self._recover_workload_apply(transaction, transaction_path, failure=error)
+                raise
+
+        result = {
+            "status": "activated"
+            if (service_units or plugin_rows or web_selected)
+            else "installed",
+            "action": "install",
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "catalogDigest": stored["catalogDigest"],
+            "workloadId": workload_id,
+            "targetId": target_id,
+            "components": rows,
+            "resolution": resolution,
+            "sourceBindings": package_inventory.get("sourceBindings", []),
+            **(
+                {"hostMetadata": {"web": transaction.get("hostMetadata")}}
+                if isinstance(transaction.get("hostMetadata"), dict)
+                else {}
+            ),
+        }
+        transaction["result"] = result
+        transaction["phase"] = "succeeded"
+        transaction.pop("maintenanceToken", None)
+        transaction.pop("recoveryError", None)
+        _atomic_json(transaction_path, transaction)
+        stored["phase"] = "applied"
+        stored["applyResult"] = result
+        _atomic_json(self._workload_plan_directory() / f"{plan_id}.json", stored)
+        return result
+
+    def _apply_workload_install_locked(
+        self, stored: dict[str, Any], confirmation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply typed Product and static-web payloads with recoverable pointers.
+
+        Plugin Package Runtime activation is intentionally handled by its authenticated
+        owner path and is rejected here until the exact source-policy transaction is
+        available. This prevents a partial Catalyst install from masquerading as a
+        completed workload.
+        """
+
+        return self._apply_workload_install_assembled(stored, confirmation)
+
+        plan_id = stored["planId"]
+        plan_digest = stored["planDigest"]
+        workload_id = stored["workloadId"]
+        target_id = stored["targetId"]
+        resolution, candidates, _package_inventory = self._build_workload_plan(
+            workload_id, target_id, stored.get("selections"), action="install"
+        )
+        if resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest:
+            raise UpdateError(
+                "PLAN_CHANGED",
+                "The installed workload resolution changed; check and stage again.",
+                retryable=True,
+            )
+        rows = resolution.get("selectedComponents")
+        staged_rows = stored.get("stagedComponents")
+        if not isinstance(rows, list) or not isinstance(staged_rows, list):
+            raise UpdateError("INVALID_STAGE", "The staged workload component set is malformed.")
+        staged_by_id = {
+            row.get("componentId"): row
+            for row in staged_rows
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        if len(staged_by_id) != len(staged_rows):
+            raise UpdateError(
+                "INVALID_STAGE", "The staged workload contains duplicate component IDs."
+            )
+        selected_ids = {row.get("componentId") for row in rows if isinstance(row, dict)}
+        if set(staged_by_id) != selected_ids:
+            raise UpdateError(
+                "INVALID_STAGE", "The staged workload does not match the selected component set."
+            )
+        if not _running_as_root():
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED",
+                "Applying a workload requires the root-owned local update helper.",
+            )
+
+        pending_packages = [
+            component_id
+            for component_id, staged in staged_by_id.items()
+            if staged.get("artifactKind") == "plugin-package" and staged.get("status") != "current"
+        ]
+        if pending_packages:
+            raise UpdateError(
+                "PACKAGE_OWNER_PATH_UNAVAILABLE",
+                "Plugin packages are verified and staged, but their authenticated owner-source transaction is not available yet.",
+                retryable=True,
+            )
+        unsupported = [
+            component_id
+            for component_id, staged in staged_by_id.items()
+            if staged.get("status") != "current"
+            and staged.get("artifactKind") not in {"native-binary", "python-bundle", "static-web"}
+            and component_id != WORKLOAD_SDK_COMPONENT_ID
+        ]
+        if unsupported:
+            raise UpdateError(
+                "WORKLOAD_ARTIFACT_UNAVAILABLE",
+                "No installed Ubuntu workload supervisor is configured for: "
+                + ", ".join(sorted(unsupported)),
+                retryable=True,
+            )
+
+        transaction_path = self._private_state_directory("transactions") / f"{plan_id}.json"
+        if transaction_path.exists() or transaction_path.is_symlink():
+            transaction = _read_object(transaction_path, "workload transaction")
+            if (
+                transaction.get("transactionKind") != "workload-assembly.v1"
+                or transaction.get("planId") != plan_id
+                or transaction.get("planDigest") != plan_digest
+                or transaction.get("workloadId") != workload_id
+            ):
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "A different transaction occupies this workload plan.",
+                    retryable=True,
+                )
+            if transaction.get("phase") == "succeeded":
+                return transaction["result"]
+            if transaction.get("phase") == "rolled_back":
+                raise UpdateError(
+                    "APPLY_ROLLED_BACK",
+                    transaction.get(
+                        "rollbackMessage", "The previous workload attempt rolled back."
+                    ),
+                )
+            if transaction.get("phase") == "success_end_pending":
+                self._health_transaction(transaction)
+                self._end_maintenance(transaction, outcome="SUCCESS", healthy=True)
+                transaction["phase"] = "succeeded"
+                transaction.pop("maintenanceToken", None)
+                _atomic_json(transaction_path, transaction)
+                stored["phase"] = "applied"
+                stored["applyResult"] = transaction["result"]
+                _atomic_json(self._workload_plan_directory() / f"{plan_id}.json", stored)
+                return transaction["result"]
+            if transaction.get("phase") not in {"begin_pending", "applying"}:
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "The workload journal needs exact recovery before retry.",
+                    retryable=True,
+                )
+            if transaction.get("phase") == "applying":
+                self._recover_workload_apply(transaction, transaction_path)
+                raise UpdateError(
+                    "INTERRUPTED_WORKLOAD_ROLLED_BACK",
+                    "The interrupted workload transaction was restored; recheck and stage a new plan.",
+                )
+        else:
+            transaction = None
+
+        native_components: list[dict[str, Any]] = []
+        web_components: list[dict[str, Any]] = []
+        all_new: list[dict[str, Any]] = []
+        sdk_entry: tuple[dict[str, Any], dict[str, Any]] | None = None
+        for row in rows:
+            component_id = row["componentId"]
+            staged = staged_by_id[component_id]
+            if staged.get("status") == "current":
+                continue
+            candidate = candidates.get(component_id)
+            if candidate is None:
+                raise UpdateError(
+                    "PLAN_CHANGED", f"Candidate disappeared for {component_id}.", retryable=True
+                )
+            if component_id == WORKLOAD_SDK_COMPONENT_ID:
+                sdk_entry = (row, staged)
+                all_new.append(
+                    {"componentId": component_id, "artifactDigest": candidate.artifact_digest}
+                )
+                continue
+            identity = staged.get("stagedIdentity")
+            if not isinstance(identity, dict):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Staged identity is missing for {component_id}."
+                )
+            item = {
+                "componentId": component_id,
+                "version": candidate.manifest["version"],
+                "manifestDigest": candidate.manifest_digest,
+                "releaseIdentity": candidate.manifest_digest,
+                "artifactDigest": candidate.artifact_digest,
+                "restartGroup": self.components[component_id]["restart"]["group"],
+                "pointerIdentity": identity.get("pointerIdentity", identity.get("releaseIdentity")),
+                "bundleIdentity": identity.get("bundleIdentity"),
+                "manifest": candidate.manifest,
+                "releasePath": identity.get("releasePath"),
+                "archivePath": identity.get("archivePath"),
+            }
+            item.update(self._workload_receipt_fields(candidate, row))
+            if staged.get("artifactKind") == "static-web":
+                item["pointerIdentity"] = identity.get("releaseIdentity")
+                item["bundleIdentity"] = None
+                web_components.append(item)
+            else:
+                component = self.components.get(component_id)
+                if (
+                    not isinstance(component, dict)
+                    or component.get("kind") not in {"native-binary", "python-bundle"}
+                    or component.get("activation") not in (None, "systemd")
+                ):
+                    raise UpdateError(
+                        "WORKLOAD_ARTIFACT_UNAVAILABLE",
+                        f"No native Product activation is configured for {component_id}.",
+                    )
+                native_components.append(item)
+            all_new.append(
+                {"componentId": component_id, "artifactDigest": candidate.artifact_digest}
+            )
+
+        if not native_components and not web_components and sdk_entry is None:
+            active_product = any(
+                isinstance(self.components.get(row.get("componentId")), dict)
+                and self.components[row["componentId"]].get("systemdUnit")
+                for row in rows
+                if isinstance(row, dict)
+            )
+            return {
+                "status": "activated" if active_product else "installed",
+                "action": "install",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "catalogDigest": stored["catalogDigest"],
+                "workloadId": workload_id,
+                "targetId": target_id,
+                "components": rows,
+                "resolution": resolution,
+            }
+
+        if native_components:
+            self._require_managed_services(native_components)
+        target_kind = (
+            "CORE_RUNTIME"
+            if any(item["restartGroup"] == "core-runtime" for item in native_components)
+            else "PACKAGE_ONLY"
+        )
+        readiness = self._readiness_for(
+            target_kind, requires_restart=bool(native_components), force=True
+        )
+        self._require_ready(readiness, target_kind)
+        activity_catalog, activity_sources = self._activity_catalog()
+        if readiness.get("install_catalog_generation") != activity_catalog.get("generation"):
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Activity source generation changed during workload readiness.",
+                retryable=True,
+            )
+        if transaction is None:
+            transaction = {
+                "schemaVersion": 2,
+                "transactionKind": "workload-assembly.v1",
+                "planId": plan_id,
+                "requestId": "cyrene-update-" + plan_id,
+                "planDigest": plan_digest,
+                "workloadId": workload_id,
+                "targetId": target_id,
+                "action": "install",
+                "componentArtifactDigests": {
+                    row["componentId"]: row["artifactDigest"] for row in all_new
+                },
+                "phase": "begin_pending",
+                "targetKind": target_kind,
+                "channel": stored["channel"],
+                "expectedGateGeneration": readiness.get("gate_generation"),
+                "expectedCatalogGeneration": activity_catalog["generation"],
+                "expectedActivitySources": activity_sources,
+                "components": native_components,
+                "requiresRestart": bool(native_components),
+                "webComponents": web_components,
+                "previous": self._capture_active_versions(native_components),
+                "previousWeb": [
+                    self._capture_workload_web_identity(item["componentId"])
+                    for item in web_components
+                ],
+                "sdkComponent": sdk_entry[0] if sdk_entry else None,
+                "sdkStage": sdk_entry[1]["stagedIdentity"] if sdk_entry else None,
+                "resolution": resolution,
+                "phaseStartedAt": int(time.time()),
+            }
+            _atomic_json(transaction_path, transaction)
+
+        if sdk_entry is not None and "sdkEnvironment" not in transaction:
+            sdk_module = self._load_workload_sdk_environment()
+            transaction["phase"] = "operator_sdk_prepare_pending"
+            _atomic_json(transaction_path, transaction)
+            try:
+                transaction["sdkEnvironment"] = sdk_module.prepare_workload_sdk_environment(
+                    sdk_entry[0], sdk_entry[1]["stagedIdentity"]
+                )
+            except Exception as error:
+                transaction["recoveryError"] = str(error)[:500]
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "WORKLOAD_SDK_INSTALL_FAILED",
+                    "The verified operator SDK could not be prepared.",
+                    retryable=True,
+                ) from error
+            transaction["phase"] = "begin_pending"
+            _atomic_json(transaction_path, transaction)
+
+        if not transaction.get("maintenanceToken"):
+            try:
+                transaction["maintenanceToken"] = self._begin_maintenance(transaction)
+            except UpdateError as error:
+                if error.maintenance_not_acquired:
+                    self._clear_begin_pending(transaction, transaction_path)
+                raise
+        transaction["phase"] = "applying"
+        _atomic_json(transaction_path, transaction)
+        try:
+            self._activate_transaction(transaction)
+            for item in web_components:
+                previous = next(
+                    row
+                    for row in transaction["previousWeb"]
+                    if row["componentId"] == item["componentId"]
+                )
+                self._activate_workload_web(item, expected_current=previous["pointerIdentity"])
+            self._restart_transaction(transaction)
+            self._health_transaction(transaction)
+        except Exception as failure:
+            healthy, rollback_message = self._recover_workload_apply(
+                transaction, transaction_path, failure=failure
+            )
+            raise UpdateError(
+                "APPLY_ROLLED_BACK" if healthy else "ROLLBACK_UNHEALTHY",
+                f"Workload apply failed ({failure}). {rollback_message}",
+                retryable=not healthy,
+            ) from failure
+
+        result = {
+            "status": "activated" if native_components else "installed",
+            "action": "install",
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "catalogDigest": stored["catalogDigest"],
+            "workloadId": workload_id,
+            "targetId": target_id,
+            "components": rows,
+            "resolution": resolution,
+        }
+        transaction["result"] = result
+        transaction["phase"] = "success_end_pending"
+        _atomic_json(transaction_path, transaction)
+        try:
+            self._end_maintenance(transaction, outcome="SUCCESS", healthy=True)
+        except UpdateError as error:
+            transaction["recoveryError"] = str(error)
+            _atomic_json(transaction_path, transaction)
+            raise UpdateError(
+                "GATE_END_PENDING",
+                "Workload releases are healthy but maintenance completion remains pending.",
+                retryable=True,
+            ) from error
+        transaction["phase"] = "succeeded"
+        transaction.pop("maintenanceToken", None)
+        transaction.pop("recoveryError", None)
+        _atomic_json(transaction_path, transaction)
+        stored["phase"] = "applied"
+        stored["applyResult"] = result
+        _atomic_json(self._workload_plan_directory() / f"{plan_id}.json", stored)
+        return result
+
+    def _capture_workload_web_identity(self, component_id: str) -> dict[str, Any]:
+        """Capture the exact active web pointer and receipt for transaction rollback."""
+
+        installed = self._installed_static_web(self.components[component_id])
+        if installed.get("active") is not True:
+            return {
+                "componentId": component_id,
+                "version": None,
+                "releaseIdentity": None,
+                "manifestDigest": None,
+                "artifactDigest": None,
+                "pointerIdentity": None,
+                "bundleIdentity": None,
+                "identityAttested": False,
+            }
+        receipt = self._read_active_receipt(component_id)
+        if receipt is None:
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE",
+                f"Static-web active receipt is missing for {component_id}.",
+            )
+        return {
+            "componentId": component_id,
+            "version": receipt["version"],
+            "releaseIdentity": receipt["releaseIdentity"],
+            "manifestDigest": receipt["manifestDigest"],
+            "artifactDigest": receipt["artifactDigest"],
+            "pointerIdentity": receipt["pointerIdentity"],
+            "bundleIdentity": None,
+            "identityAttested": True,
+        }
+
+    def _activate_workload_web(self, item: dict[str, Any], *, expected_current: str | None) -> None:
+        """Atomically switch the active static-web release to one verified tree."""
+
+        component_id = item["componentId"]
+        component_root = DEFAULT_WORKLOAD_WEB_ROOT / component_id
+        current_path = component_root / "current"
+        if current_path.exists() or current_path.is_symlink():
+            info = current_path.lstat()
+            if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", f"Static-web pointer is unsafe for {component_id}."
+                )
+            active_target = os.readlink(current_path)
+            match = re.fullmatch(r"releases/([A-Za-z0-9][A-Za-z0-9._-]{0,511})", active_target)
+            actual_current = match.group(1) if match else None
+            if actual_current is None:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Static-web pointer target is unsafe for {component_id}.",
+                )
+        else:
+            actual_current = None
+        if actual_current != expected_current:
+            raise UpdateError(
+                "ACTIVE_VERSION_CHANGED",
+                f"Static-web active pointer changed for {component_id}.",
+                retryable=True,
+            )
+        release_identity = item.get("pointerIdentity")
+        release_path = Path(item.get("releasePath", ""))
+        expected_path = component_root / "releases" / str(release_identity)
+        if (
+            not isinstance(release_identity, str)
+            or release_path != expected_path
+            or release_path.is_symlink()
+            or not release_path.is_dir()
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", f"Static-web staged release path is unsafe for {component_id}."
+            )
+        artifact = item["manifest"].get("artifact", {})
+        self._verify_static_web_tree(release_path, artifact.get("files"))
+        temporary = component_root / f".current-{uuid.uuid4().hex}"
+        os.symlink(f"releases/{release_identity}", temporary)
+        try:
+            os.replace(temporary, current_path)
+            self._fsync_directory(component_root)
+        finally:
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
+        self._write_active_receipt(item)
+
+    def _rollback_workload_web(self, transaction: dict[str, Any]) -> None:
+        """Restore every web pointer only when it still names this transaction."""
+
+        previous_rows = {
+            row["componentId"]: row
+            for row in transaction.get("previousWeb", [])
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        for item in transaction.get("webComponents", []):
+            component_id = item["componentId"]
+            root = DEFAULT_WORKLOAD_WEB_ROOT / component_id
+            current = root / "current"
+            previous = previous_rows.get(component_id)
+            if previous is None:
+                raise UpdateError(
+                    "TRANSACTION_IDENTITY_UNKNOWN", "Workload journal omitted prior web identity."
+                )
+            actual: str | None = None
+            if current.exists() or current.is_symlink():
+                if not current.is_symlink():
+                    raise UpdateError(
+                        "ROLLBACK_CONFLICT",
+                        f"Static-web pointer is no longer a symlink for {component_id}.",
+                    )
+                target = os.readlink(current)
+                match = re.fullmatch(r"releases/([A-Za-z0-9][A-Za-z0-9._-]{0,511})", target)
+                if match is None:
+                    raise UpdateError(
+                        "ROLLBACK_CONFLICT",
+                        f"Static-web pointer is outside the transaction for {component_id}.",
+                    )
+                actual = match.group(1)
+            candidate = item["pointerIdentity"]
+            old = previous.get("pointerIdentity")
+            if actual not in {candidate, old}:
+                raise UpdateError(
+                    "ROLLBACK_CONFLICT",
+                    f"Static-web pointer changed outside the transaction for {component_id}.",
+                )
+            if old is None:
+                if actual is not None:
+                    current.unlink()
+                    self._fsync_directory(root)
+                self._clear_active_receipt(component_id)
+                continue
+            temporary = root / f".current-rollback-{uuid.uuid4().hex}"
+            os.symlink(f"releases/{old}", temporary)
+            try:
+                os.replace(temporary, current)
+                self._fsync_directory(root)
+            finally:
+                if temporary.exists() or temporary.is_symlink():
+                    temporary.unlink()
+            self._restore_active_receipt(component_id, previous)
+
+    def _recover_workload_apply(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        failure: Exception | None = None,
+    ) -> tuple[bool, str]:
+        """Rollback interrupted Product/web pointers and release their exact hold."""
+
+        messages: list[str] = []
+        healthy = True
+        try:
+            self._restore_workload_package_bindings(transaction, transaction_path)
+        except RuntimeError as error:
+            healthy = False
+            messages.append(f"Package Runtime owner rollback could not be verified: {error}")
+        try:
+            self._restore_workload_sdk_environment(transaction, transaction_path)
+        except UpdateError as error:
+            healthy = False
+            messages.append(f"Operator SDK rollback could not be verified: {error}")
+        try:
+            self._restore_workload_service_units(transaction)
+        except UpdateError as error:
+            healthy = False
+            messages.append(f"Signed service unit rollback could not be verified: {error}")
+        try:
+            self._restore_workload_catalyst_auth(transaction)
+        except UpdateError as error:
+            healthy = False
+            messages.append(f"Catalyst auth projection rollback could not be verified: {error}")
+        if transaction.get("webHostApplied") is True:
+            try:
+                host = self._load_workload_web_host()
+                prior_state = transaction.get("webHostPriorState")
+                host_metadata = transaction.get("hostMetadata")
+                current_digest = (
+                    host_metadata.get("configDigest") if isinstance(host_metadata, dict) else None
+                )
+                if not isinstance(prior_state, dict) or not _valid_digest(current_digest):
+                    raise UpdateError(
+                        "INVALID_TRANSACTION", "Web host rollback identity is incomplete."
+                    )
+                host.rollback_web_host(
+                    prior_state=prior_state,
+                    expected_current_digest=current_digest,
+                    runner=self.runner,
+                )
+            except RuntimeError as error:
+                healthy = False
+                messages.append(f"Web host rollback could not be verified: {error}")
+        if transaction.get("components"):
+            pointer_healthy, message = self._rollback_transaction(transaction)
+            healthy = healthy and pointer_healthy
+            messages.append(message)
+        try:
+            self._rollback_workload_web(transaction)
+        except UpdateError as error:
+            healthy = False
+            messages.append(f"Static-web rollback could not be verified: {error}")
+        if transaction.get("maintenanceToken"):
+            transaction["phase"] = "rollback_end_pending" if healthy else "rollback_required"
+            transaction["rollbackMessage"] = "; ".join(messages)
+            _atomic_json(transaction_path, transaction)
+            try:
+                if transaction.get("transactionKind") == "workload-assembly.v1":
+                    self._end_workload_hold(
+                        transaction,
+                        transaction_path,
+                        outcome="ROLLED_BACK" if healthy else "FAILED",
+                        healthy=healthy,
+                    )
+                else:
+                    self._end_maintenance(
+                        transaction,
+                        outcome="ROLLED_BACK" if healthy else "FAILED",
+                        healthy=healthy,
+                    )
+            except UpdateError as error:
+                healthy = False
+                messages.append(f"Maintenance completion is pending: {error}")
+        transaction["phase"] = "rolled_back" if healthy else "rollback_required"
+        transaction["rollbackMessage"] = (
+            "; ".join(messages) or "No workload pointer change required recovery."
+        )
+        transaction.pop("maintenanceToken", None)
+        _atomic_json(transaction_path, transaction)
+        return healthy, transaction["rollbackMessage"]
+
+    def _restore_workload_package_bindings(
+        self, transaction: dict[str, Any], transaction_path: Path
+    ) -> None:
+        """Restore only selected owner bindings captured before this transaction."""
+
+        previous = transaction.get("previousPackageBindings", [])
+        selected_rows = transaction.get("selectedPluginRows", [])
+        if not isinstance(previous, list) or not isinstance(selected_rows, list):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package Runtime rollback identity is malformed."
+            )
+        if not previous:
+            return
+        if transaction.get("maintenanceToken"):
+            raise UpdateError(
+                "PENDING_MAINTENANCE",
+                "Package Runtime bindings cannot be reconciled while a maintenance hold is active.",
+                retryable=True,
+            )
+        if self._package_product_unit_state(WORKLOAD_PACKAGE_RUNTIME_UNIT) != "active":
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Package Runtime must be active before owner binding recovery.",
+                retryable=True,
+            )
+        if not previous:
+            return
+        rows_by_id = {
+            row.get("componentId"): row
+            for row in selected_rows
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        selected_owner_keys = {
+            (row.get("sourceId"), row.get("bindingId")) for row in previous if isinstance(row, dict)
+        }
+        inventory = self._read_workload_package_inventory(
+            transaction["workloadId"],
+            tuple(
+                sorted(
+                    self._load_workload_resolver().potential_component_ids(
+                        self.catalog, transaction["workloadId"]
+                    )
+                )
+            ),
+        )
+        activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+            transaction["workloadId"]
+        )
+        if runtime_policy is None:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Package Runtime policy is unavailable for owner rollback.",
+                retryable=True,
+            )
+        for original in previous:
+            if not isinstance(original, dict):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime prior owner row is malformed."
+                )
+            component_id = original.get("componentId")
+            row = rows_by_id.get(component_id)
+            source_id = original.get("sourceId")
+            binding_id = original.get("bindingId")
+            desired_id = original.get("activeInstallationId")
+            if (
+                not isinstance(component_id, str)
+                or not isinstance(row, dict)
+                or not isinstance(source_id, str)
+                or not isinstance(binding_id, str)
+                or (desired_id is not None and not isinstance(desired_id, str))
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Package Runtime prior owner identity is incomplete."
+                )
+            for binding in inventory.get("sourceBindings", []):
+                if not isinstance(binding, dict):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Package Runtime owner readback is malformed.",
+                        retryable=True,
+                    )
+                if (
+                    binding.get("state") == "RUNNING"
+                    and (binding.get("sourceId"), binding.get("bindingId"))
+                    not in selected_owner_keys
+                ):
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "Another Package Runtime owner is active during rollback.",
+                        retryable=True,
+                    )
+            current = next(
+                (
+                    binding
+                    for binding in inventory.get("sourceBindings", [])
+                    if isinstance(binding, dict)
+                    and binding.get("sourceId") == source_id
+                    and binding.get("bindingId") == binding_id
+                ),
+                None,
+            )
+            current_id = (
+                current.get("activeInstallationId")
+                if isinstance(current, dict) and current.get("state") == "RUNNING"
+                else None
+            )
+            if current_id == desired_id:
+                continue
+            target_id = desired_id or current_id
+            if not isinstance(target_id, str):
+                continue
+            operation = "activate" if desired_id is not None else "deactivate"
+            self._workload_binding_operation(
+                transaction,
+                transaction_path,
+                operation=operation,
+                component=row,
+                installation_id=target_id,
+                activity_catalog=activity_catalog,
+                runtime_policy=runtime_policy,
+                source_principals=principals,
+                helper=helper,
+            )
+            inventory = self._read_workload_package_inventory(
+                transaction["workloadId"],
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, transaction["workloadId"]
+                        )
+                    )
+                ),
+            )
+            activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                transaction["workloadId"]
+            )
+            if runtime_policy is None:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime policy disappeared during owner rollback.",
+                    retryable=True,
+                )
+            recovered = next(
+                (
+                    binding
+                    for binding in inventory.get("sourceBindings", [])
+                    if isinstance(binding, dict)
+                    and binding.get("sourceId") == source_id
+                    and binding.get("bindingId") == binding_id
+                ),
+                None,
+            )
+            recovered_id = (
+                recovered.get("activeInstallationId")
+                if isinstance(recovered, dict) and recovered.get("state") == "RUNNING"
+                else None
+            )
+            if recovered_id != desired_id:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Package Runtime rollback did not restore the prior active installation.",
+                    retryable=True,
+                )
+
+    def _apply_workload_uninstall_locked(
+        self, stored: dict[str, Any], confirmation: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Remove one exact, authenticated workload component and retain user data."""
+
+        plan_id = stored["planId"]
+        plan_digest = stored["planDigest"]
+        workload_id = stored["workloadId"]
+        target_id = stored["targetId"]
+        transaction_path = self._private_state_directory("transactions") / f"{plan_id}.json"
+        transaction: dict[str, Any] | None = None
+        if transaction_path.exists() or transaction_path.is_symlink():
+            transaction = _read_object(transaction_path, "workload uninstall transaction")
+            if (
+                transaction.get("transactionKind") != "workload-assembly.v1"
+                or transaction.get("action") != "uninstall"
+                or transaction.get("planId") != plan_id
+                or transaction.get("planDigest") != plan_digest
+                or transaction.get("workloadId") != workload_id
+            ):
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "A different transaction occupies this uninstall plan.",
+                    retryable=True,
+                )
+            if transaction.get("phase") == "succeeded":
+                return transaction["result"]
+            uninstall_hold = transaction.get("maintenanceHolds", {}).get("core-runtime-uninstall")
+            if (
+                isinstance(uninstall_hold, dict)
+                and uninstall_hold.get("status") in {"begin_pending", "active", "end_pending"}
+                and transaction.get("maintenanceToken")
+                and transaction.get("offlineUninstallIntent") is True
+            ):
+                self._resume_workload_package_uninstall_phase(transaction, transaction_path)
+            elif (
+                isinstance(uninstall_hold, dict)
+                and uninstall_hold.get("status") == "ended"
+                and transaction.get("packageRuntimeStarted") is not True
+            ):
+                self._workload_runtime_daemon("start", wait_active=True)
+                transaction["packageRuntimeStarted"] = True
+                _atomic_json(transaction_path, transaction)
+
+        resolution, _candidates, package_inventory = self._build_workload_plan(
+            workload_id, target_id, stored.get("selections"), action="uninstall"
+        )
+        rows = resolution.get("selectedComponents") if isinstance(resolution, dict) else None
+        staged_rows = stored.get("stagedComponents")
+        if transaction is not None and transaction.get("offlineUninstallIntent") is True:
+            rows = [transaction.get("selectedRow")]
+            staged_rows = [transaction.get("stagedRow")]
+            resolution = transaction["resolution"]
+        if (
+            not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(staged_rows, list)
+            or len(staged_rows) != 1
+        ):
+            # An offline uninstall can complete immediately before a crash. In
+            # that narrow case continue only from the exact durable owner identity
+            # and component row that was written before the first mutation.
+            if (
+                transaction is None
+                or not isinstance(transaction.get("selectedRow"), dict)
+                or not isinstance(transaction.get("stagedRow"), dict)
+                or not isinstance(transaction.get("installation"), dict)
+                or transaction.get("offlineUninstallIntent") is not True
+            ):
+                raise UpdateError(
+                    "PLAN_CHANGED",
+                    "The exact installed workload identity is unavailable for uninstall.",
+                    retryable=True,
+                )
+            rows = [transaction["selectedRow"]]
+            staged_rows = [transaction["stagedRow"]]
+            resolution = transaction["resolution"]
+        row = rows[0]
+        staged = staged_rows[0]
+        if (
+            not isinstance(row, dict)
+            or not isinstance(staged, dict)
+            or row.get("componentId") != staged.get("componentId")
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "The selected uninstall identity differs from its staged plan."
+            )
+        if resolution.get("status") != "ready" and not (
+            transaction is not None and transaction.get("offlineUninstallIntent") is True
+        ):
+            raise UpdateError(
+                "WORKLOAD_UNINSTALL_BLOCKED",
+                "The installed component is in use or its owner identity cannot be verified.",
+                retryable=True,
+            )
+        if not _running_as_root():
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED",
+                "Applying a workload uninstall requires the root-owned update helper.",
+            )
+
+        component_id = row.get("componentId")
+        artifact_kind = row.get("artifactKind")
+        if not isinstance(component_id, str) or artifact_kind not in {
+            "plugin-package",
+            "static-web",
+        }:
+            raise UpdateError(
+                "WORKLOAD_UNINSTALL_UNAVAILABLE",
+                "This component kind has no registered owner-specific uninstall adapter.",
+                retryable=True,
+            )
+
+        if transaction is None:
+            component_digest = row.get("digest")
+            package_identity = row.get("installedIdentity")
+            installation: dict[str, Any] | None = None
+            source_id: str | None = None
+            if artifact_kind == "plugin-package":
+                if not isinstance(package_identity, dict):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Uninstall has no authenticated installation identity.",
+                        retryable=True,
+                    )
+                installation_id = row.get("installationId")
+                records = package_inventory.get("installationRecords", {})
+                installation = records.get(component_id) if isinstance(records, dict) else None
+                if (
+                    not isinstance(installation, dict)
+                    or installation.get("installation_id") != installation_id
+                    or package_identity.get("installationId") != installation_id
+                    or installation.get("package_id") != row.get("packageId")
+                    or installation.get("package_version") != row.get("version")
+                    or installation.get("archive_digest") != row.get("digest")
+                ):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Fresh Package Runtime readback differs from the selected uninstall identity.",
+                        retryable=True,
+                    )
+                component_digest = installation.get("artifact_digest")
+                row = {**row, "packageArtifactDigest": component_digest}
+                source_id = self._workload_policy_source_id(row.get("sourcePolicy", {}))
+                if not _valid_digest(component_digest) or not isinstance(source_id, str):
+                    raise UpdateError(
+                        "SOURCE_BINDING_INVALID", "Uninstall package owner mapping is incomplete."
+                    )
+            if not _valid_digest(component_digest):
+                raise UpdateError(
+                    "INVALID_STAGE", "Uninstall digest is missing from the selected identity."
+                )
+            transaction = {
+                "schemaVersion": 2,
+                "transactionKind": "workload-assembly.v1",
+                "planId": plan_id,
+                "requestId": "cyrene-update-" + plan_id,
+                "planDigest": plan_digest,
+                "catalogDigest": stored["catalogDigest"],
+                "workloadId": workload_id,
+                "targetId": target_id,
+                "action": "uninstall",
+                "channel": stored["channel"],
+                "componentArtifactDigests": {component_id: component_digest},
+                "selectedComponents": [row],
+                "selectedRow": row,
+                "stagedRow": staged,
+                "installation": installation,
+                "sourceId": source_id,
+                "sourcePolicy": row.get("sourcePolicy"),
+                "componentId": component_id,
+                "resolution": resolution,
+                "maintenanceHolds": {},
+                "bindingOperations": [],
+                "phase": "applying",
+                "phaseStartedAt": int(time.time()),
+            }
+            _atomic_json(transaction_path, transaction)
+        else:
+            component_digest = transaction.get("componentArtifactDigests", {}).get(component_id)
+            installation = transaction.get("installation")
+            if component_digest is None:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Uninstall transaction omits its component digest."
+                )
+
+        if artifact_kind == "plugin-package":
+            assert isinstance(installation, dict)
+            source_policy = row.get("sourcePolicy")
+            if not isinstance(source_policy, dict):
+                raise UpdateError(
+                    "SOURCE_POLICY_INVALID", "Uninstall package has no signed owner policy."
+                )
+            package_inventory = self._read_workload_package_inventory(
+                workload_id,
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, workload_id
+                        )
+                    )
+                ),
+            )
+            source_id = self._workload_policy_source_id(source_policy)
+            binding_id = row.get("bindingId")
+            installation_id = row.get("installationId") or installation.get("installation_id")
+            if (
+                not isinstance(source_id, str)
+                or not isinstance(binding_id, str)
+                or not isinstance(installation_id, str)
+            ):
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID", "Uninstall owner identity is incomplete."
+                )
+            for binding in package_inventory.get("sourceBindings", []):
+                if not isinstance(binding, dict):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Runtime binding inventory is malformed.",
+                    )
+                if (
+                    binding.get("sourceId") == source_id
+                    and binding.get("bindingId") == binding_id
+                    and binding.get("activeInstallationId") not in {None, installation_id}
+                    and binding.get("state") == "RUNNING"
+                ):
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "A different release is active under this owner binding; uninstall was not applied.",
+                        retryable=True,
+                    )
+                if (
+                    (binding.get("sourceId") != source_id or binding.get("bindingId") != binding_id)
+                    and binding.get("packageId") == row.get("packageId")
+                    and installation_id in binding.get("installationIds", [])
+                ):
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "Another Package Runtime owner references this installation.",
+                        retryable=True,
+                    )
+                if binding.get("state") == "RUNNING" and not (
+                    binding.get("sourceId") == source_id and binding.get("bindingId") == binding_id
+                ):
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "Another active Package Runtime owner prevents offline uninstall.",
+                        retryable=True,
+                    )
+            target_binding = next(
+                (
+                    binding
+                    for binding in package_inventory.get("sourceBindings", [])
+                    if isinstance(binding, dict)
+                    and binding.get("sourceId") == source_id
+                    and binding.get("bindingId") == binding_id
+                ),
+                None,
+            )
+            if isinstance(target_binding, dict) and target_binding.get("state") == "RUNNING":
+                if target_binding.get("activeInstallationId") != installation_id:
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "A different installation is active under this binding.",
+                        retryable=True,
+                    )
+                activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                    workload_id
+                )
+                if runtime_policy is None:
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Uninstall owner policy is unavailable.",
+                        retryable=True,
+                    )
+                self._workload_binding_operation(
+                    transaction,
+                    transaction_path,
+                    operation="deactivate",
+                    component=row,
+                    installation_id=installation_id,
+                    activity_catalog=activity_catalog,
+                    runtime_policy=runtime_policy,
+                    source_principals=principals,
+                    helper=helper,
+                )
+                package_inventory = self._read_workload_package_inventory(
+                    workload_id,
+                    tuple(
+                        sorted(
+                            self._load_workload_resolver().potential_component_ids(
+                                self.catalog, workload_id
+                            )
+                        )
+                    ),
+                )
+            if any(
+                isinstance(binding, dict) and binding.get("state") == "RUNNING"
+                for binding in package_inventory.get("sourceBindings", [])
+            ):
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "A Package Runtime owner remains active; offline uninstall was not started.",
+                    retryable=True,
+                )
+            if not self._workload_phase_is_ended(transaction, "core-runtime-uninstall"):
+                if self._ensure_workload_phase(
+                    transaction,
+                    transaction_path,
+                    phase="core-runtime-uninstall",
+                    target_kind="PACKAGE_ONLY",
+                    requires_restart=False,
+                ):
+                    transaction["offlineUninstallIntent"] = True
+                    request_id = (
+                        "cyrene-wpu-"
+                        + plan_id.removeprefix("plan-")
+                        + "-"
+                        + hashlib.sha256(component_id.encode("utf-8")).hexdigest()[:12]
+                    )
+                    transaction["offlineUninstallRequestId"] = request_id
+                    _atomic_json(transaction_path, transaction)
+                    fresh_inventory = self._workload_inventory_before_daemon_stop(workload_id)
+                    if fresh_inventory is not None:
+                        current = fresh_inventory.get("installationRecords", {}).get(component_id)
+                        identity_fields = (
+                            "installation_id",
+                            "package_id",
+                            "package_version",
+                            "artifact_digest",
+                            "archive_digest",
+                            "descriptor_digest",
+                            "manifest_digest",
+                            "dependency_lock_digest",
+                        )
+                        if not isinstance(current, dict) or any(
+                            current.get(field) != installation.get(field)
+                            for field in identity_fields
+                        ):
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                "Package Runtime installation changed after the uninstall hold began.",
+                                retryable=True,
+                            )
+                    self._workload_runtime_daemon("stop")
+                    helper = self._load_workload_package_runtime()
+                    try:
+                        uninstall_result = helper.uninstall_workload_package(
+                            installation,
+                            component_id=component_id,
+                            request_id=request_id,
+                            maintenance=self._workload_hold_echo(transaction),
+                            runner=self.runner,
+                        )
+                    except Exception as error:
+                        raise UpdateError(
+                            "PACKAGE_UNINSTALL_FAILED",
+                            "Platform offline package removal did not complete.",
+                            retryable=True,
+                        ) from error
+                    transaction["offlineUninstallResult"] = uninstall_result
+                    _atomic_json(transaction_path, transaction)
+                    remove_row = {**row, "packageArtifactDigest": component_digest}
+                    self._update_workload_source_policy(
+                        transaction,
+                        transaction_path,
+                        source_policy=source_policy,
+                        selected_rows=[remove_row],
+                        installation_records={},
+                        phase="core-runtime-uninstall",
+                        remove_component_ids=(component_id,),
+                    )
+                    self._end_workload_hold(
+                        transaction, transaction_path, outcome="SUCCESS", healthy=True
+                    )
+                if transaction.get("packageRuntimePriorState", "active") != "inactive":
+                    self._workload_runtime_daemon("start", wait_active=True)
+                transaction["packageRuntimeStarted"] = True
+                _atomic_json(transaction_path, transaction)
+                self._clear_workload_package_runtime_receipt(component_id, installation_id)
+            already_absent = bool(
+                isinstance(transaction.get("offlineUninstallResult"), dict)
+                and transaction["offlineUninstallResult"].get("already_absent") is True
+            )
+            component_result = dict(row)
+            if already_absent:
+                component_result["alreadyAbsent"] = True
+            latest_inventory = self._read_workload_package_inventory(
+                workload_id,
+                tuple(
+                    sorted(
+                        self._load_workload_resolver().potential_component_ids(
+                            self.catalog, workload_id
+                        )
+                    )
+                ),
+            )
+            result = {
+                "status": "uninstalled",
+                "action": "uninstall",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "catalogDigest": stored["catalogDigest"],
+                "workloadId": workload_id,
+                "targetId": target_id,
+                "components": [component_result],
+                "resolution": resolution,
+                "sourceBindings": latest_inventory.get("sourceBindings", []),
+            }
+        else:
+            web_host = self._load_workload_web_host()
+            expected_identity = row.get("installedIdentity")
+            if not isinstance(expected_identity, dict):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "Static Web uninstall identity is incomplete."
+                )
+            expected_digest = row.get("digest")
+            if not _valid_digest(expected_digest):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE", "Static Web uninstall digest is invalid."
+                )
+            if transaction is None:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Static Web uninstall transaction was not created."
+                )
+            if not self._workload_phase_is_ended(
+                transaction, "core-runtime-uninstall"
+            ) and self._ensure_workload_phase(
+                transaction,
+                transaction_path,
+                phase="core-runtime-uninstall",
+                target_kind="CORE_RUNTIME",
+                requires_restart=True,
+            ):
+                prior_state = web_host.capture_web_host_state(runner=self.runner)
+                transaction["webHostPriorState"] = prior_state
+                _atomic_json(transaction_path, transaction)
+                web_host.remove_web_host(
+                    expected_state=prior_state,
+                    durable_callback=self._journal_callback(
+                        transaction, transaction_path, "hostEvents"
+                    ),
+                    runner=self.runner,
+                )
+                current = self._capture_workload_web_identity(component_id)
+                pointer_identity = expected_identity.get("pointerIdentity")
+                if current.get("pointerIdentity") not in {pointer_identity, None}:
+                    raise UpdateError(
+                        "UNINSTALL_CONFLICT",
+                        "Static Web current pointer changed outside this plan.",
+                    )
+                current_path = DEFAULT_WORKLOAD_WEB_ROOT / component_id / "current"
+                if current_path.exists() or current_path.is_symlink():
+                    if (
+                        not current_path.is_symlink()
+                        or not current_path.readlink().as_posix().startswith("releases/")
+                    ):
+                        raise UpdateError(
+                            "UNINSTALL_CONFLICT", "Static Web current pointer is unsafe."
+                        )
+                    current_path.unlink()
+                    self._fsync_directory(current_path.parent)
+                self._clear_active_receipt(component_id)
+                self._end_workload_hold(
+                    transaction, transaction_path, outcome="SUCCESS", healthy=True
+                )
+            result = {
+                "status": "uninstalled",
+                "action": "uninstall",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "catalogDigest": stored["catalogDigest"],
+                "workloadId": workload_id,
+                "targetId": target_id,
+                "components": [dict(row)],
+                "resolution": resolution,
+                "hostMetadata": {"web": web_host.read_web_host_status(runner=self.runner)},
+            }
+
+        transaction["result"] = result
+        transaction["phase"] = "succeeded"
+        transaction.pop("maintenanceToken", None)
+        _atomic_json(transaction_path, transaction)
+        stored["phase"] = "applied"
+        stored["applyResult"] = result
+        _atomic_json(self._workload_plan_directory() / f"{plan_id}.json", stored)
+        return result
 
     def status(self) -> dict[str, Any]:
         """Read installed versions and live gate readiness without changing services."""
@@ -4892,7 +11615,9 @@ class ComponentUpdater:
     def _host_components(self) -> list[dict[str, Any]]:
         return sorted(self.components.values(), key=lambda item: item["componentId"])
 
-    def _target_for(self, component: dict[str, Any]) -> dict[str, Any] | None:
+    def _target_for(
+        self, component: dict[str, Any], *, target_id: str | None = None
+    ) -> dict[str, Any] | None:
         try:
             host = platform.freedesktop_os_release()
         except OSError:
@@ -4911,6 +11636,8 @@ class ComponentUpdater:
         host_abi = f"{libc_name}-{libc_version}" if libc_name and libc_version else None
         host_version = host.get("VERSION_ID")
         for entry in component.get("targets", []):
+            if target_id is not None and entry.get("targetId") != target_id:
+                continue
             target = self.targets.get(entry.get("targetId"))
             if target is None or entry.get("support") != "supported":
                 continue
@@ -4934,10 +11661,16 @@ class ComponentUpdater:
             if spec.get("abi") is not None and spec.get("abi") != host_abi:
                 continue
             if entry.get("artifactKind") == "python-bundle":
-                profile_id = entry.get("targetId")
+                profile_id = (
+                    "linux-ubuntu-24.04-x86_64-python-3.12"
+                    if component.get("componentId") == WORKLOAD_SDK_COMPONENT_ID
+                    and entry.get("targetId") == WORKLOAD_SDK_TARGET_ID
+                    else entry.get("targetId")
+                )
                 profile = self.native_python_profiles.get(profile_id)
                 if (
-                    profile is None
+                    spec.get("runtime") != "python:3.12"
+                    or profile is None
                     or any(profile.get(key) != spec.get(key) for key in NATIVE_PYTHON_TARGET_FIELDS)
                     or profile.get("osVersion") != host_version
                     or not self._private_python_runtime_ready(profile)
@@ -4945,6 +11678,18 @@ class ComponentUpdater:
                     continue
             if entry.get("artifactKind") == "native-binary" and spec.get("runtime") != "systemd":
                 continue
+            if entry.get("artifactKind") == "static-web" and spec.get("runtime") != "static-web":
+                continue
+            if entry.get("artifactKind") == "plugin-package":
+                profile = self.native_python_profiles.get(entry.get("targetId"))
+                if (
+                    spec.get("runtime") != "python:3.12"
+                    or profile is None
+                    or any(profile.get(key) != spec.get(key) for key in NATIVE_PYTHON_TARGET_FIELDS)
+                    or profile.get("osVersion") != host_version
+                    or not self._private_python_runtime_ready(profile)
+                ):
+                    continue
             if (
                 entry.get("artifactKind") == "data-bundle"
                 and spec.get("runtime") != "cyrene-authority-data"
@@ -5416,10 +12161,24 @@ class ComponentUpdater:
             "bundleIdentity",
             "manifest",
         }
+        version = receipt.get("schemaVersion")
+        workload_fields = {
+            "releaseId",
+            "targetId",
+            "manifestAssetDigest",
+            "manifestUri",
+            "releaseTag",
+            "indexIdentity",
+            "publisherIdentity",
+            "attestationRef",
+            "releasePath",
+            "archivePath",
+            "pointerIdentity",
+        }
         manifest = receipt.get("manifest")
         if (
-            set(receipt) != required
-            or receipt.get("schemaVersion") != 1
+            set(receipt) != (required if version == 1 else required | workload_fields)
+            or version not in {1, 2}
             or receipt.get("componentId") != component_id
             or receipt.get("releaseIdentity") != release_identity
             or receipt.get("manifestDigest") != release_identity
@@ -5432,6 +12191,45 @@ class ComponentUpdater:
                 "INVALID_INSTALLED_RELEASE",
                 f"Installed release receipt is malformed for {component_id}.",
             )
+        if version == 2:
+            manifest_uri = receipt.get("manifestUri")
+            parsed_manifest_uri = (
+                urllib.parse.urlsplit(manifest_uri) if isinstance(manifest_uri, str) else None
+            )
+            if (
+                not isinstance(receipt.get("releaseId"), str)
+                or not receipt["releaseId"]
+                or not isinstance(receipt.get("targetId"), str)
+                or not receipt["targetId"]
+                or not _valid_digest(receipt.get("manifestAssetDigest"))
+                or parsed_manifest_uri is None
+                or parsed_manifest_uri.scheme != "https"
+                or not parsed_manifest_uri.netloc
+                or not isinstance(receipt.get("releaseTag"), str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", receipt["releaseTag"]) is None
+                or not isinstance(receipt.get("indexIdentity"), dict)
+                or not isinstance(receipt.get("publisherIdentity"), dict)
+                or receipt.get("attestationRef") is not None
+                and not isinstance(receipt.get("attestationRef"), dict)
+                or any(
+                    not isinstance(receipt.get(field), str)
+                    or not Path(receipt[field]).is_absolute()
+                    for field in ("releasePath", "archivePath")
+                )
+                or not isinstance(receipt.get("pointerIdentity"), str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", receipt["pointerIdentity"])
+                is None
+            ):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Installed workload release evidence is incomplete for {component_id}.",
+                )
+            expected_release_id = manifest.get("releaseId", receipt.get("releaseTag"))
+            if receipt.get("releaseId") != expected_release_id:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Installed release tag differs from its manifest for {component_id}.",
+                )
         self._validate_manifest_digest(manifest, release_identity)
         if (
             manifest.get("componentId") != component_id
@@ -5497,14 +12295,63 @@ class ComponentUpdater:
             "bundleIdentity": item["bundleIdentity"],
             "manifest": manifest,
         }
+        workload_fields = (
+            "releaseId",
+            "targetId",
+            "manifestAssetDigest",
+            "manifestUri",
+            "releaseTag",
+            "indexIdentity",
+            "publisherIdentity",
+            "attestationRef",
+            "releasePath",
+            "archivePath",
+            "pointerIdentity",
+        )
+        if any(field in item for field in workload_fields):
+            if any(field not in item for field in workload_fields):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Cannot persist incomplete workload release evidence for {component_id}.",
+                )
+            receipt.update({field: item[field] for field in workload_fields})
+            receipt["schemaVersion"] = 2
+            if not _valid_digest(receipt.get("manifestAssetDigest")):
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Cannot persist an invalid raw manifest digest for {component_id}.",
+                )
+            if not isinstance(receipt.get("targetId"), str) or not receipt["targetId"]:
+                raise UpdateError(
+                    "INVALID_INSTALLED_RELEASE",
+                    f"Cannot persist a missing target identity for {component_id}.",
+                )
         path = releases / (item["manifestDigest"].removeprefix("sha256:") + ".json")
         if path.exists() or path.is_symlink():
             existing = _read_object(path, f"{component_id} verified release receipt")
             if existing != receipt:
-                raise UpdateError(
-                    "RELEASE_RECEIPT_COLLISION",
-                    f"Verified receipt identity collision for {component_id}.",
+                base_fields = (
+                    "componentId",
+                    "releaseIdentity",
+                    "manifestDigest",
+                    "artifactDigest",
+                    "version",
+                    "bundleIdentity",
+                    "manifest",
                 )
+                if any(existing.get(field) != receipt.get(field) for field in base_fields):
+                    raise UpdateError(
+                        "RELEASE_RECEIPT_COLLISION",
+                        f"Verified receipt identity collision for {component_id}.",
+                    )
+                if existing.get("schemaVersion") == 2 and receipt.get("schemaVersion") == 1:
+                    return
+                if existing.get("schemaVersion") != 1 or receipt.get("schemaVersion") != 2:
+                    raise UpdateError(
+                        "RELEASE_RECEIPT_COLLISION",
+                        f"Verified release evidence changed for {component_id}.",
+                    )
+                _atomic_json(path, receipt)
             return
         _atomic_json(path, receipt)
 
@@ -6644,10 +13491,10 @@ class ComponentUpdater:
                 retryable=True,
             )
         sources = catalog.get("sources")
-        if not isinstance(sources, list) or not sources:
+        if not isinstance(sources, list):
             raise UpdateError(
                 "GATE_UNKNOWN",
-                "No installed Product activity sources are trusted; the updater will not assume the runtime is idle.",
+                "Runtime activity source catalog has no sources array; the updater will not assume the runtime is idle.",
                 retryable=True,
             )
         ids: list[str] = []
@@ -7407,6 +14254,7 @@ class ComponentUpdater:
                 "INVALID_RELEASE_INDEX", "The component release index is not valid UTF-8 JSON."
             ) from error
         self._validate_index(index, publisher, channel, selected_release, component)
+        index_asset_digest = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
         self._release_attestation_bundle(
             payload=index_bytes,
             repository=publisher["repository"],
@@ -7418,6 +14266,10 @@ class ComponentUpdater:
         )
         result = (index, index_uri, release_assets, selected_release["tag_name"])
         self._index_cache[key] = result
+        self._index_asset_identity[key] = (
+            publisher["releaseDiscovery"]["indexAssetName"],
+            index_asset_digest,
+        )
         return result
 
     def _release_asset_metadata(
@@ -7678,13 +14530,54 @@ class ComponentUpdater:
                 "UNTRUSTED_SOURCE",
                 "The release index source is outside the trusted repository/ref pins.",
             )
-        prefix = self._component_release_tag_prefix(component, channel) or (
-            "preview-" if channel == "preview" else "stable-"
-        )
-        if release.get("tag_name") != prefix + source["commit"]:
+        releases = index.get("releases")
+        if not isinstance(releases, list):
+            raise UpdateError("INVALID_RELEASE_INDEX", "The release index has no release list.")
+        tag_format = publisher.get("tagFormat", "source-sha")
+        if tag_format == "source-sha":
+            prefix = self._component_release_tag_prefix(component, channel) or f"{channel}-"
+            expected_tag = prefix + source["commit"]
+        elif tag_format == "component-source-sha":
+            prefix = f"{channel}-{component['componentId']}-"
+            if self._component_release_tag_prefix(component, channel) not in {None, prefix}:
+                raise UpdateError(
+                    "INVALID_CATALOG",
+                    "The component release prefix differs from the publisher tag format.",
+                )
+            expected_tag = prefix + source["commit"]
+        elif tag_format == "component-version-source-sha":
+            prefix = f"{channel}-{component['componentId']}-"
+            if self._component_release_tag_prefix(component, channel) not in {None, prefix}:
+                raise UpdateError(
+                    "INVALID_CATALOG",
+                    "The component release prefix differs from the publisher tag format.",
+                )
+            versions = {
+                row.get("version")
+                for row in releases
+                if isinstance(row, dict) and row.get("componentId") == component["componentId"]
+            }
+            if len(versions) != 1:
+                raise UpdateError(
+                    "INVALID_RELEASE_INDEX",
+                    "A versioned publisher index must contain one exact component version.",
+                )
+            version = next(iter(versions))
+            if not isinstance(version, str) or SEMVER3_PATTERN.fullmatch(version) is None:
+                raise UpdateError(
+                    "INVALID_RELEASE_INDEX",
+                    "A versioned publisher index contains an invalid component version.",
+                )
+            expected_tag = f"{prefix}{version}-{source['commit']}"
+        else:
+            raise UpdateError(
+                "INVALID_CATALOG",
+                f"Unsupported publisher tag format {tag_format!r}.",
+            )
+        if release.get("tag_name") != expected_tag:
             raise UpdateError(
                 "UNTRUSTED_RELEASE_TAG",
-                "The immutable release tag does not match the source commit.",
+                "The immutable release tag does not match the exact catalog publisher format and source.",
             )
         run = attestation.get("run") if isinstance(attestation, dict) else None
         if (
@@ -7707,8 +14600,6 @@ class ComponentUpdater:
                 "UNTRUSTED_WORKFLOW",
                 "The index attestation identity differs from the trusted publisher workflow.",
             )
-        if not isinstance(index.get("releases"), list):
-            raise UpdateError("INVALID_RELEASE_INDEX", "The release index has no release list.")
         if not isinstance(index.get("compatibilityGroups", []), list):
             raise UpdateError(
                 "INVALID_RELEASE_INDEX", "The release index compatibilityGroups field is invalid."
@@ -7742,6 +14633,24 @@ class ComponentUpdater:
             )
         return prefix
 
+    def _publisher_for_component(self, component: dict[str, Any]) -> dict[str, Any] | None:
+        """Resolve a legacy repository key or an explicit v2 publisher identity.
+
+        V2 catalogs pin publisher IDs so two workflows in one repository cannot
+        inherit each other's signing authority. Legacy v1 components continue to
+        resolve by repository.
+        中文：v2通过publisherId隔离同仓库的发布工作流；v1继续使用仓库身份。
+        """
+
+        publisher_id = component.get("publisherId")
+        if publisher_id is not None:
+            publisher = self.publisher_ids.get(publisher_id)
+            if publisher is None or publisher.get("repository") != component.get("publisher"):
+                return None
+            return publisher
+        repository = component.get("publisher")
+        return self.publishers.get(repository) if isinstance(repository, str) else None
+
     def _candidate(
         self,
         component: dict[str, Any],
@@ -7750,7 +14659,7 @@ class ComponentUpdater:
         *,
         release_id: str | None = None,
     ) -> Candidate:
-        publisher = self.publishers.get(component["publisher"])
+        publisher = self._publisher_for_component(component)
         if publisher is None:
             raise UpdateError(
                 "INVALID_CATALOG",
@@ -7759,6 +14668,19 @@ class ComponentUpdater:
         index, index_uri, release_assets, release_tag = self._channel_releases(
             publisher, channel, component, release_id=release_id
         )
+        component_prefix = self._component_release_tag_prefix(component, channel)
+        index_key = (
+            publisher["repository"],
+            channel,
+            component["componentId"] if component_prefix else "",
+            release_id or "latest",
+        )
+        index_asset_identity = self._index_asset_identity.get(index_key)
+        if index_asset_identity is None:
+            raise UpdateError(
+                "INVALID_RELEASE_INDEX",
+                "The verified release index has no retained byte identity.",
+            )
         entries = [
             item
             for item in index.get("releases", [])
@@ -7786,8 +14708,30 @@ class ComponentUpdater:
                 "INVALID_MANIFEST", f"Manifest for {component['componentId']} is invalid JSON."
             ) from error
         self._validate_manifest(manifest, entry, component, target, publisher, channel, index)
+        manifest_asset_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        if manifest.get("schemaVersion") == 2:
+            manifest_name = PurePosixPath(urllib.parse.urlsplit(entry["manifestUri"]).path).name
+            self._release_attestation_bundle(
+                payload=manifest_bytes,
+                repository=publisher["repository"],
+                digest=manifest_asset_digest,
+                workflow=publisher["workflow"],
+                source_ref=manifest["source"]["ref"],
+                source_commit=manifest["source"]["commit"],
+                subject_name=manifest_name,
+            )
         artifact = manifest["artifact"]
-        artifact_digest = artifact.get("digest", artifact.get("sha256"))
+        artifact_digest = (
+            artifact.get("archive", {}).get("sha256")
+            if artifact.get("kind") == "plugin-package"
+            and isinstance(artifact.get("archive"), dict)
+            else artifact.get("digest", artifact.get("sha256"))
+        )
+        if not _valid_digest(artifact_digest):
+            raise UpdateError(
+                "INVALID_MANIFEST",
+                f"Artifact digest is invalid for {component['componentId']}.",
+            )
         return Candidate(
             component,
             manifest,
@@ -7799,7 +14743,135 @@ class ComponentUpdater:
             manifest_bytes,
             release_assets,
             release_tag,
+            index_asset_identity[0],
+            index_asset_identity[1],
+            manifest_asset_digest,
         )
+
+    def _load_workload_resolver(self) -> Any:
+        """Load the packaged pure resolver without accepting a substituted path."""
+
+        module_path = Path(__file__).with_name("workload_resolver.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError("WORKLOAD_RESOLVER_MISSING", "The workload resolver is unavailable.")
+        import importlib.util
+
+        module_name = "_cyrene_workload_resolver"
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            raise UpdateError("WORKLOAD_RESOLVER_MISSING", "The workload resolver cannot load.")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as error:
+            sys.modules.pop(module_name, None)
+            raise UpdateError(
+                "WORKLOAD_RESOLVER_INVALID", "The workload resolver failed."
+            ) from error
+        if not callable(getattr(module, "resolve_workload", None)) or not callable(
+            getattr(module, "potential_component_ids", None)
+        ):
+            raise UpdateError("WORKLOAD_RESOLVER_INVALID", "The workload resolver API is invalid.")
+        return module
+
+    def _trusted_release_indexes(self, candidates: list[Candidate]) -> dict[str, Any]:
+        """Project only already-attested release indexes and manifests for resolution.
+
+        This projection carries both the raw index asset digest and its canonical
+        index digest. It does not create trust: every candidate has already passed
+        the updater's catalog, publisher, source, index, manifest, and attestation
+        checks before it is included.
+        中文：仅把已通过更新器验签的index/manifest投影给解析器，不在此处新建信任。
+        """
+
+        indexes: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for candidate in candidates:
+            publisher = self._publisher_for_component(candidate.component)
+            index_source = candidate.index.get("source")
+            index_attestation = candidate.index.get("provenance", {}).get("attestation")
+            manifest_source = candidate.manifest.get("source")
+            manifest_attestation = candidate.manifest.get("provenance", {}).get("attestation")
+            if (
+                publisher is None
+                or candidate.release_tag is None
+                or not isinstance(candidate.index_asset_name, str)
+                or not _valid_digest(candidate.index_asset_digest)
+                or not isinstance(index_source, dict)
+                or not isinstance(index_attestation, dict)
+                or not isinstance(manifest_source, dict)
+                or not isinstance(manifest_attestation, dict)
+            ):
+                raise UpdateError(
+                    "UNTRUSTED_RELEASE_INDEX",
+                    f"Verified source identity is incomplete for {candidate.component.get('componentId')!r}.",
+                )
+            repository = publisher["repository"]
+            workflow = publisher["workflow"]
+            key = (repository, candidate.index_uri, candidate.release_tag)
+            index_attestation_ref = {
+                "repository": repository,
+                "workflow": workflow,
+                "sourceCommit": index_source["commit"],
+                "sourceRef": index_source["ref"],
+                "subjectName": index_attestation["subjectName"],
+                "subjectDigest": candidate.index_asset_digest,
+            }
+            manifest_attestation_ref = {
+                "repository": repository,
+                "workflow": workflow,
+                "sourceCommit": manifest_source["commit"],
+                "sourceRef": manifest_source["ref"],
+                "subjectName": manifest_attestation["subjectName"],
+                "subjectDigest": candidate.manifest_asset_digest,
+            }
+            identity = indexes.get(key)
+            if identity is None:
+                identity = {
+                    "repository": repository,
+                    "assetName": candidate.index_asset_name,
+                    "assetUri": candidate.index_uri,
+                    "assetDigest": candidate.index_asset_digest,
+                    "indexDigest": candidate.index.get("indexDigest"),
+                    "channel": candidate.manifest.get("channel"),
+                    "releaseTag": candidate.release_tag,
+                    "source": dict(index_source),
+                    "attestationRef": index_attestation_ref,
+                    "index": candidate.index,
+                    "manifests": [],
+                }
+                indexes[key] = identity
+            elif (
+                identity["assetDigest"] != candidate.index_asset_digest
+                or identity["indexDigest"] != candidate.index.get("indexDigest")
+                or identity["source"] != index_source
+            ):
+                raise UpdateError(
+                    "UNTRUSTED_RELEASE_INDEX",
+                    "Candidates grouped under one release index disagree on its verified identity.",
+                )
+            identity["manifests"].append(
+                {
+                    "componentId": candidate.component["componentId"],
+                    "version": candidate.manifest["version"],
+                    "target": candidate.manifest["target"],
+                    "manifestUri": candidate.manifest_uri,
+                    "manifestDigest": candidate.manifest_digest,
+                    "manifestAssetDigest": candidate.manifest_asset_digest,
+                    "artifactDigest": candidate.artifact_digest,
+                    "manifest": candidate.manifest,
+                    "releaseTag": candidate.release_tag,
+                    "attestationRef": manifest_attestation_ref,
+                }
+            )
+        normalized = []
+        for identity in indexes.values():
+            identity["manifests"].sort(key=lambda item: (item["componentId"], item["target"]))
+            normalized.append(identity)
+        normalized.sort(
+            key=lambda item: (item["repository"], item["assetName"], item["releaseTag"])
+        )
+        return {"indexes": normalized}
 
     def _validate_manifest(
         self,
@@ -7834,7 +14906,11 @@ class ComponentUpdater:
         allowed = required | {"health", "compatibility"}
         if schema_version == 2:
             required |= {"protocolVersion", "contentDigest"}
-            allowed |= {"protocolVersion", "contentDigest", "dataBundle"}
+            allowed |= {
+                "protocolVersion",
+                "contentDigest",
+                "dataBundle",
+            }
         if (
             not isinstance(manifest, dict)
             or set(manifest) - allowed
@@ -7923,6 +14999,12 @@ class ComponentUpdater:
                 if isinstance(artifact_descriptor, dict)
                 else None
             )
+            if (
+                isinstance(artifact_descriptor, dict)
+                and artifact_descriptor.get("kind") == "plugin-package"
+                and isinstance(artifact_descriptor.get("archive"), dict)
+            ):
+                artifact_content_digest = artifact_descriptor["archive"].get("sha256")
             content_digest = manifest.get("contentDigest")
             if not _valid_digest(content_digest) or content_digest != artifact_content_digest:
                 raise UpdateError(
@@ -8032,12 +15114,20 @@ class ComponentUpdater:
             raise UpdateError(
                 "UNSUPPORTED_TARGET", "Linux native updater does not recreate OCI containers."
             )
+        plugin_package = artifact.get("kind") == "plugin-package"
+        archive = artifact.get("archive") if plugin_package else None
+        artifact_sha256 = (
+            archive.get("sha256") if isinstance(archive, dict) else artifact.get("sha256")
+        )
+        artifact_size = (
+            archive.get("sizeBytes") if isinstance(archive, dict) else artifact.get("sizeBytes")
+        )
         if (
-            not _valid_digest(artifact.get("sha256"))
-            or not isinstance(artifact.get("sizeBytes"), int)
-            or isinstance(artifact.get("sizeBytes"), bool)
-            or artifact["sizeBytes"] < 1
-            or artifact["sizeBytes"] > MAX_SAFE_INTEGER
+            not _valid_digest(artifact_sha256)
+            or not isinstance(artifact_size, int)
+            or isinstance(artifact_size, bool)
+            or artifact_size < 1
+            or artifact_size > MAX_SAFE_INTEGER
         ):
             raise UpdateError(
                 "INVALID_MANIFEST",
@@ -8054,16 +15144,30 @@ class ComponentUpdater:
                     f"Native artifact payload map is invalid for {component['componentId']}.",
                 )
             _native_executable_files(artifact)
-        elif artifact["kind"] in {"python-bundle", "data-bundle"}:
+        elif artifact["kind"] in {"python-bundle", "data-bundle", "static-web"}:
             if (
                 artifact.get("format") not in {"tar.gz", "tar.zst", "zip"}
                 or not isinstance(artifact.get("files"), dict)
                 or not artifact["files"]
                 or (artifact["kind"] == "data-bundle" and schema_version != 2)
+                or (artifact["kind"] == "static-web" and artifact.get("entrypoint") != "index.html")
+                or (
+                    artifact["kind"] == "static-web"
+                    and ("index.html" not in artifact["files"] or schema_version != 2)
+                )
+                or (
+                    artifact["kind"] == "static-web"
+                    and (
+                        type(artifact.get("maxEntries")) is not int
+                        or not 1 <= artifact["maxEntries"] <= 100_000
+                        or type(artifact.get("maxUncompressedBytes")) is not int
+                        or not 1 <= artifact["maxUncompressedBytes"] <= 4_294_967_296
+                    )
+                )
             ):
                 raise UpdateError(
                     "INVALID_MANIFEST",
-                    f"Python bundle payload map is invalid for {component['componentId']}.",
+                    f"Bundle payload map is invalid for {component['componentId']}.",
                 )
             for name, file_digest in artifact["files"].items():
                 _safe_relative(name, field="artifact.files path")
@@ -8072,7 +15176,68 @@ class ComponentUpdater:
                         "INVALID_MANIFEST",
                         f"Python bundle file digest is invalid for {component['componentId']}.",
                     )
+        elif plugin_package:
+            if schema_version != 2 or not isinstance(archive, dict):
+                raise UpdateError(
+                    "INVALID_MANIFEST",
+                    f"Plugin package archive metadata is invalid for {component['componentId']}.",
+                )
+            if (
+                archive.get("format") != "zip"
+                or not isinstance(archive.get("files"), dict)
+                or not archive["files"]
+                or type(archive.get("maxEntries")) is not int
+                or not 1 <= archive["maxEntries"] <= 100_000
+                or type(archive.get("maxUncompressedBytes")) is not int
+                or not 1 <= archive["maxUncompressedBytes"] <= 4_294_967_296
+                or not isinstance(artifact.get("packageId"), str)
+                or not re.fullmatch(
+                    r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,7}", artifact["packageId"]
+                )
+                or not isinstance(artifact.get("capabilityId"), str)
+                or not re.fullmatch(
+                    r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,7}", artifact["capabilityId"]
+                )
+                or not isinstance(artifact.get("interfaceVersion"), str)
+                or VERSION_PATTERN.fullmatch(artifact["interfaceVersion"]) is None
+                or not isinstance(artifact.get("preparerWheels"), list)
+                or not artifact["preparerWheels"]
+            ):
+                raise UpdateError(
+                    "INVALID_MANIFEST",
+                    f"Plugin package contract is invalid for {component['componentId']}.",
+                )
+            asset_references = [
+                artifact.get("descriptor"),
+                artifact.get("requirementsLock"),
+                artifact.get("packageReleaseMetadata"),
+                *artifact["preparerWheels"],
+            ]
+            for reference in asset_references:
+                if (
+                    not isinstance(reference, dict)
+                    or set(reference) != {"uri", "sha256", "sizeBytes"}
+                    or not isinstance(reference.get("uri"), str)
+                    or not _valid_digest(reference.get("sha256"))
+                    or type(reference.get("sizeBytes")) is not int
+                    or not 1 <= reference["sizeBytes"] <= MAX_SAFE_INTEGER
+                ):
+                    raise UpdateError(
+                        "INVALID_MANIFEST",
+                        f"Plugin package asset reference is invalid for {component['componentId']}.",
+                    )
+                self._require_github_asset_uri(reference["uri"], publisher["repository"])
+            self._require_github_asset_uri(archive.get("uri"), publisher["repository"])
+            for name, file_digest in archive["files"].items():
+                _safe_relative(name, field="plugin package archive.files path")
+                if not _valid_digest(file_digest):
+                    raise UpdateError(
+                        "INVALID_MANIFEST",
+                        f"Plugin archive file digest is invalid for {component['componentId']}.",
+                    )
         artifact_uri = artifact.get("uri")
+        if plugin_package:
+            artifact_uri = archive.get("uri") if isinstance(archive, dict) else None
         if not isinstance(artifact_uri, str):
             raise UpdateError(
                 "INVALID_MANIFEST",
@@ -9381,6 +16546,8 @@ class ComponentUpdater:
         plan_root: Path,
         plan_id: str | None = None,
         plan_digest: str | None = None,
+        *,
+        workload_identity: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         manifest = candidate.manifest
         artifact = manifest["artifact"]
@@ -9529,6 +16696,7 @@ class ComponentUpdater:
             "releasePath": str(installed_path),
             "archivePath": str(archive_path),
         }
+        item.update(self._workload_receipt_fields(candidate, workload_identity))
         if artifact["kind"] == "data-bundle":
             item["dataBundle"] = {
                 "artifactId": artifact["sha256"],
@@ -9537,6 +16705,27 @@ class ComponentUpdater:
             }
         self._write_release_receipt(item)
         return item
+
+    @staticmethod
+    def _workload_receipt_fields(
+        candidate: Candidate, resolution_component: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Project verified Catalog and release identities into durable local receipts."""
+
+        if resolution_component is None:
+            return {}
+        return {
+            "releaseId": resolution_component.get(
+                "releaseId", candidate.manifest.get("releaseId", candidate.release_tag)
+            ),
+            "targetId": resolution_component.get("targetId"),
+            "manifestAssetDigest": candidate.manifest_asset_digest,
+            "manifestUri": candidate.manifest_uri,
+            "releaseTag": candidate.release_tag,
+            "indexIdentity": resolution_component.get("indexIdentity"),
+            "publisherIdentity": resolution_component.get("publisherIdentity"),
+            "attestationRef": resolution_component.get("attestationRef"),
+        }
 
     def _extract_data_bundle_archive(
         self, archive: Path, destination: Path, artifact: dict[str, Any]
@@ -11009,7 +18198,7 @@ class ComponentUpdater:
         params = {
             "request_id": request_id,
             "target_kind": transaction["targetKind"],
-            "requires_restart": True,
+            "requires_restart": transaction.get("requiresRestart", True) is True,
             "expected_catalog_generation": transaction["expectedCatalogGeneration"],
             "expected_activity_sources": transaction["expectedActivitySources"],
             "expected_gate_generation": transaction["expectedGateGeneration"],
@@ -11118,6 +18307,28 @@ class ComponentUpdater:
                 "The updater journal changed while a maintenance request was refused.",
                 retryable=True,
             )
+        if transaction.get("transactionKind") == "workload-assembly.v1" and transaction.get(
+            "maintenancePhase"
+        ) in {
+            "core-runtime-install",
+            "package-only",
+            "core-runtime-activate",
+            "core-runtime-uninstall",
+        }:
+            phase = transaction["maintenancePhase"]
+            holds = transaction.setdefault("maintenanceHolds", {})
+            if not isinstance(holds, dict):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Workload maintenance hold journal is malformed."
+                )
+            holds[phase] = {
+                "requestId": _maintenance_request_id(transaction),
+                "status": "not_acquired",
+            }
+            transaction["phase"] = "begin_pending"
+            transaction.pop("maintenanceToken", None)
+            _atomic_json(transaction_path, transaction)
+            return
         transaction_path.unlink()
         self._fsync_directory(transaction_path.parent)
 
@@ -11126,7 +18337,20 @@ class ComponentUpdater:
         if not isinstance(token, str):
             token = self._begin_maintenance(transaction)
         transaction_id = _maintenance_request_id(transaction)
-        request_id = f"cyrene-update-end-{transaction['planId']}-{outcome.lower()}"
+        if transaction.get("transactionKind") == "workload-assembly.v1" and transaction.get(
+            "maintenancePhase"
+        ) in {
+            "core-runtime-install",
+            "package-only",
+            "core-runtime-activate",
+            "core-runtime-uninstall",
+        }:
+            request_id = (
+                f"cyrene-workload-end-{transaction['maintenancePhase']}-"
+                f"{transaction['planId']}-{outcome.lower()}"
+            )
+        else:
+            request_id = f"cyrene-update-end-{transaction['planId']}-{outcome.lower()}"
         result = self._broker_request(
             "EndMaintenance",
             {

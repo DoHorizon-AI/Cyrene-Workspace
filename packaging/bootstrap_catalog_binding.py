@@ -19,14 +19,17 @@ from typing import Any
 REPOSITORY = "DoHorizon-AI/Cyrene-Workspace"
 CATALOG_WORKFLOW = f"{REPOSITORY}/.github/workflows/component-catalog-release.yml"
 CATALOG_ASSET_NAME = "component-catalog-v1.json"
+CATALOG_V2_ASSET_NAME = "component-catalog-v2.json"
 BINDING_ASSET_NAME = "bootstrap-catalog-binding-v1.json"
 INSTALLED_CATALOG_PATH = Path("/usr/share/cyrene") / CATALOG_ASSET_NAME
+INSTALLED_CATALOG_V2_PATH = Path("/usr/share/cyrene") / CATALOG_V2_ASSET_NAME
+INSTALLED_CATALOG_PATHS = frozenset({INSTALLED_CATALOG_PATH, INSTALLED_CATALOG_V2_PATH})
 INSTALLED_BINDING_PATH = Path("/usr/share/cyrene") / BINDING_ASSET_NAME
 DEVELOPMENT_PROVENANCE = "development-source-pin"
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _TYPED_SHA256_PATTERN = re.compile(r"sha256:([0-9a-f]{64})\Z")
-_CATALOG_TAG_PATTERN = re.compile(r"catalog-(stable|preview)-([0-9a-f]{40})\Z")
+_CATALOG_TAG_PATTERN = re.compile(r"catalog-(v2-)?(stable|preview)-([0-9a-f]{40})\Z")
 _SIGNED_CATALOG_KEYS = {
     "repository",
     "workflow",
@@ -136,21 +139,25 @@ def _read_regular_file(path: Path, label: str, *, require_root: bool) -> bytes:
         os.close(descriptor)
 
 
-def _catalog_generation(catalog: dict[str, Any]) -> int:
-    """Return the positive integer generation from a v1 catalog document."""
+def _catalog_generation(catalog: dict[str, Any], asset_name: str) -> int:
+    """Return the generation after binding schemaVersion to its immutable asset name."""
 
     generation = catalog.get("generation")
+    expected_version = 2 if asset_name == CATALOG_V2_ASSET_NAME else 1
     if (
         type(catalog.get("schemaVersion")) is not int
-        or catalog.get("schemaVersion") != 1
+        or catalog.get("schemaVersion") != expected_version
+        or asset_name not in {CATALOG_ASSET_NAME, CATALOG_V2_ASSET_NAME}
         or type(generation) is not int
         or generation < 1
     ):
-        raise BootstrapCatalogBindingError("catalog schema or generation is invalid")
+        raise BootstrapCatalogBindingError("catalog asset, schema, or generation is invalid")
     return generation
 
 
-def _validate_signed_binding(document: dict[str, Any], generation: int, digest: str) -> None:
+def _validate_signed_binding(
+    document: dict[str, Any], generation: int, digest: str, asset_name: str
+) -> None:
     """Validate the immutable Workspace release identity and catalog byte pin."""
 
     if (
@@ -166,7 +173,8 @@ def _validate_signed_binding(document: dict[str, Any], generation: int, digest: 
     match = _CATALOG_TAG_PATTERN.fullmatch(str(catalog.get("releaseId", "")))
     if match is None:
         raise BootstrapCatalogBindingError("catalog releaseId must be an exact channel-pinned tag")
-    channel, release_commit = match.groups()
+    catalog_version, channel, release_commit = match.groups()
+    expected_asset = CATALOG_V2_ASSET_NAME if catalog_version else CATALOG_ASSET_NAME
     allowed_refs = (
         {"refs/heads/develop"}
         if channel == "preview"
@@ -175,7 +183,8 @@ def _validate_signed_binding(document: dict[str, Any], generation: int, digest: 
     if (
         catalog.get("repository") != REPOSITORY
         or catalog.get("workflow") != CATALOG_WORKFLOW
-        or catalog.get("assetName") != CATALOG_ASSET_NAME
+        or catalog.get("assetName") != expected_asset
+        or asset_name != expected_asset
         or not isinstance(source, dict)
         or set(source) != {"ref", "commit"}
         or source.get("commit") != release_commit
@@ -198,6 +207,7 @@ def _validate_development_binding(
     generation: int,
     digest: str,
     source_catalog_digest: str | None,
+    asset_name: str,
 ) -> None:
     """Require the explicit development pin to match source-compiled authority."""
 
@@ -218,7 +228,7 @@ def _validate_development_binding(
     )
     if (
         source_pin is None
-        or catalog.get("assetName") != CATALOG_ASSET_NAME
+        or catalog.get("assetName") != asset_name
         or catalog.get("sha256") != source_pin.group(1)
         or catalog.get("sha256") != digest
         or type(catalog.get("generation")) is not int
@@ -253,7 +263,7 @@ def load_bootstrap_catalog_binding(
     catalog_path = Path(catalog_path)
     if require_root and (
         Path(os.path.abspath(binding_path)) != INSTALLED_BINDING_PATH
-        or Path(os.path.abspath(catalog_path)) != INSTALLED_CATALOG_PATH
+        or Path(os.path.abspath(catalog_path)) not in INSTALLED_CATALOG_PATHS
     ):
         raise BootstrapCatalogBindingError(
             "catalog binding paths are not the fixed installed paths"
@@ -262,10 +272,14 @@ def load_bootstrap_catalog_binding(
     catalog, catalog_bytes = _read_object(
         catalog_path, "bootstrap component catalog", require_root=require_root
     )
-    generation = _catalog_generation(catalog)
+    if catalog_path.name not in {CATALOG_ASSET_NAME, CATALOG_V2_ASSET_NAME}:
+        raise BootstrapCatalogBindingError("bootstrap catalog path has an unsupported asset name")
+    generation = _catalog_generation(catalog, catalog_path.name)
     digest = hashlib.sha256(catalog_bytes).hexdigest()
     if binding.get("provenance") == DEVELOPMENT_PROVENANCE:
-        _validate_development_binding(binding, generation, digest, source_catalog_digest)
+        _validate_development_binding(
+            binding, generation, digest, source_catalog_digest, catalog_path.name
+        )
     else:
-        _validate_signed_binding(binding, generation, digest)
+        _validate_signed_binding(binding, generation, digest, catalog_path.name)
     return binding

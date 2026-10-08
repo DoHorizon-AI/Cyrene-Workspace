@@ -2496,6 +2496,198 @@ def cmd_update(args: argparse.Namespace) -> int:
     return module.run_json_stdio(updater)
 
 
+def cmd_workload(args: argparse.Namespace) -> int:
+    """Run the fixed workload API or an interactive install/uninstall flow."""
+
+    if getattr(args, "workload_action", None) in {"install", "uninstall"}:
+        return cmd_workload_lifecycle(args)
+    if not getattr(args, "json", False):
+        print(
+            "ERROR: use `cyrene workload install <catalyst|echo|plugins>`, `cyrene workload uninstall <component-id>`, or `cyrene workload --json`.",
+            file=sys.stderr,
+        )
+        return 2
+    if os.geteuid() != 0:
+        helper = Path("/usr/libexec/cyrene-component-update-helper")
+        if helper.is_symlink() or not helper.is_file() or not os.access(helper, os.X_OK):
+            print(
+                "ERROR: the installed root workload helper is unavailable; install the official Cyrene Ubuntu package.",
+                file=sys.stderr,
+            )
+            return 2
+        pkexec = shutil.which("pkexec")
+        if pkexec is None:
+            print("ERROR: PolicyKit is required for workload installation.", file=sys.stderr)
+            return 2
+        os.execv(pkexec, [pkexec, str(helper), "workload"])
+        return 2
+    try:
+        module = _load_component_updates_module()
+        updater = module.ComponentUpdater()
+    except Exception as error:  # noqa: BLE001 - keep the protocol envelope stable.
+        print(
+            json.dumps(
+                {
+                    "protocolVersion": "cyrene.workload-plan.v1",
+                    "ok": False,
+                    "operation": "status",
+                    "error": {
+                        "code": "HELPER_UNAVAILABLE",
+                        "message": f"The trusted workload helper is unavailable: {error}",
+                        "retryable": True,
+                    },
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        return 0
+    return module.run_json_stdio(updater)
+
+
+def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
+    """Check, stage, and confirm one workload action using the installed helper."""
+
+    action = getattr(args, "workload_action", None)
+    workload_id = getattr(args, "workload_id", None)
+    if action == "install":
+        if workload_id not in {"catalyst", "echo", "plugins"}:
+            print("ERROR: workload ID must be catalyst, echo, or plugins.", file=sys.stderr)
+            return 2
+    elif action == "uninstall":
+        if (
+            not isinstance(workload_id, str)
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", workload_id) is None
+        ):
+            print("ERROR: uninstall needs one exact component ID.", file=sys.stderr)
+            return 2
+        requested_owner = getattr(args, "workload_owner", None)
+        if requested_owner not in {None, "catalyst", "echo", "plugins"}:
+            print("ERROR: workload owner must be catalyst, echo, or plugins.", file=sys.stderr)
+            return 2
+        if requested_owner is not None:
+            workload_id = requested_owner
+    else:
+        return 2
+    if os.geteuid() == 0:
+        helper = Path("/usr/bin/cyrene")
+        invoke = [str(helper), "workload", "--json"]
+    else:
+        helper = Path("/usr/libexec/cyrene-component-update-helper")
+        pkexec = shutil.which("pkexec")
+        if helper.is_symlink() or not helper.is_file() or pkexec is None:
+            print("ERROR: the installed PolicyKit workload helper is unavailable.", file=sys.stderr)
+            return 2
+        invoke = [pkexec, str(helper), "workload"]
+
+    def request(operation: str, **fields: Any) -> dict[str, Any] | None:
+        payload = {
+            "protocolVersion": "cyrene.workload-plan.v1",
+            "operation": operation,
+            **fields,
+        }
+        try:
+            completed = subprocess.run(
+                invoke,
+                input=json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"ERROR: workload {operation} helper failed: {error}", file=sys.stderr)
+            return None
+        lines = completed.stdout.splitlines()
+        if completed.returncode != 0 or len(lines) != 1:
+            detail = completed.stderr.strip() or "the helper did not return one JSON response"
+            print(f"ERROR: workload {operation} failed: {detail}", file=sys.stderr)
+            return None
+        try:
+            response = json.loads(lines[0])
+        except json.JSONDecodeError:
+            print(f"ERROR: workload {operation} returned invalid JSON.", file=sys.stderr)
+            return None
+        if not isinstance(response, dict) or response.get("ok") is not True:
+            error = response.get("error", {}) if isinstance(response, dict) else {}
+            print(
+                f"ERROR: workload {operation}: {error.get('message', 'request failed')}",
+                file=sys.stderr,
+            )
+            return None
+        return response
+
+    target = "linux-ubuntu-24.04-x86_64"
+    selections = (
+        {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}}
+        if action == "install"
+        else {"includeComponentIds": [args.workload_id], "excludeComponentIds": [], "choices": {}}
+    )
+    check_fields: dict[str, Any] = {
+        "targetId": target,
+        "action": action,
+        "selections": selections,
+    }
+    if workload_id is not None:
+        check_fields["workloadId"] = workload_id
+    checked = request("check", **check_fields)
+    if checked is None:
+        return 1
+    resolution = checked["result"].get("resolution", {})
+    if checked["result"].get("status") != "ready":
+        print(
+            json.dumps(checked["result"].get("blockers", []), ensure_ascii=False, indent=2),
+            file=sys.stderr,
+        )
+        return 1
+    workload_id = checked["result"].get("workloadId")
+    if workload_id not in {"catalyst", "echo", "plugins"}:
+        print("ERROR: the checked plan omitted its workload owner.", file=sys.stderr)
+        return 1
+    plan_id = checked["result"].get("planId")
+    plan_digest = checked["result"].get("planDigest")
+    print(
+        f"Workload {workload_id} {action}: "
+        f"{len(resolution.get('selectedComponents', []))} component(s)"
+    )
+    for component in resolution.get("selectedComponents", []):
+        print(f"  {component['componentId']} {component['version']} {component['digest']}")
+    staged = request(
+        "stage",
+        workloadId=workload_id,
+        targetId=target,
+        planId=plan_id,
+        planDigest=plan_digest,
+        action=action,
+    )
+    if staged is None:
+        return 1
+    if not getattr(args, "yes", False):
+        if not sys.stdin.isatty():
+            print(
+                "ERROR: interactive confirmation is required; rerun with --yes to confirm this plan.",
+                file=sys.stderr,
+            )
+            return 2
+        answer = input(f"Apply {action} plan {plan_id} ({plan_digest})? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Workload plan staged; apply was not requested.")
+            return 0
+    applied = request(
+        "apply",
+        workloadId=workload_id,
+        targetId=target,
+        planId=plan_id,
+        planDigest=plan_digest,
+        confirmation={"planId": plan_id, "planDigest": plan_digest, "confirmed": True},
+        action=action,
+    )
+    if applied is None:
+        return 1
+    print(json.dumps(applied["result"], ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_placement_peer_evidence(args: argparse.Namespace) -> int:
     """Serve one fixed, read-only host-placement challenge to the pinned peer."""
 
@@ -3087,6 +3279,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use the fixed single-line JSON stdin/stdout helper protocol",
     )
     update_parser.set_defaults(func=cmd_update)
+
+    workload_parser = subparsers.add_parser(
+        "workload",
+        help="Install or manage a trusted Catalyst, Echo, or Plugins workload",
+    )
+    workload_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Use the fixed workload plan JSON stdin/stdout protocol",
+    )
+    workload_parser.add_argument(
+        "workload_action",
+        nargs="?",
+        choices=("install", "uninstall"),
+        help="Run the guided workload install or uninstall flow",
+    )
+    workload_parser.add_argument(
+        "workload_id",
+        nargs="?",
+        help="Workload ID for install, or exact component ID for uninstall",
+    )
+    workload_parser.add_argument(
+        "--workload",
+        dest="workload_owner",
+        choices=("catalyst", "echo", "plugins"),
+        help="Explicit workload owner when uninstall ownership is ambiguous",
+    )
+    workload_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Confirm the exact digest-bound plan after it is displayed",
+    )
+    workload_parser.set_defaults(func=cmd_workload)
 
     catalog_parser = subparsers.add_parser(
         "catalog", help="Inspect, verify, or explicitly activate trusted component metadata"

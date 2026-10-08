@@ -1,0 +1,1151 @@
+"""Static contract checks for the source-free modular clean-host workflow."""
+
+from __future__ import annotations
+
+import ast
+import hashlib
+import importlib.util
+import json
+import re
+import subprocess
+import textwrap
+from pathlib import Path
+
+import jsonschema
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github/workflows/modular-distribution-acceptance.yml"
+PINS_SCHEMA = ROOT / "tooling/acceptance/modular-distribution-v01/release-pins-v1.schema.json"
+
+
+def _workflow_driver(tmp_path: Path) -> tuple[dict[str, object], str]:
+    """Parse workflow YAML and extract the runner-local driver without executing it."""
+    source = WORKFLOW.read_text(encoding="utf-8")
+    document = yaml.safe_load(source)
+    job = document["jobs"]["clean-host-acceptance"]
+    init_step = job["steps"][0]
+    match = re.search(
+        r'cat > "\$ACCEPTANCE_ROOT/acceptance_driver\.py" <<\'PY\'\n(.*?)\nPY\npython3',
+        init_step["run"],
+        re.DOTALL,
+    )
+    assert match is not None
+    driver = match.group(1)
+    compile(driver, "acceptance_driver.py", "exec")
+    parsed_driver = ast.parse(driver)
+    for node in ast.walk(parsed_driver):
+        if not isinstance(node, ast.Assign) or not any(
+            isinstance(target, ast.Name) and target.id == "code" for target in node.targets
+        ):
+            continue
+        value = node.value
+        if (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Attribute)
+            and value.func.attr == "dedent"
+            and value.args
+            and isinstance(value.args[0], ast.Constant)
+            and isinstance(value.args[0].value, str)
+        ):
+            compile(textwrap.dedent(value.args[0].value), "acceptance-helper.py", "exec")
+    driver_path = tmp_path / "acceptance_driver.py"
+    driver_path.write_text(driver, encoding="utf-8")
+    return document, str(driver_path)
+
+
+def _valid_pins() -> dict[str, object]:
+    """Build a complete synthetic identity set; digests are shape fixtures only."""
+    native_sha = "1" * 40
+    catalog_source = "2" * 40
+    product_source = "3" * 40
+    catalog_sha = "b" * 64
+    repository = "DoHorizon-AI/Cyrene-Catalyst"
+    component_release = f"preview-{product_source}"
+
+    def component(component_id: str, target_id: str) -> dict[str, object]:
+        """Create one synthetic pinned release row for local contract tests."""
+        return {
+            "componentId": component_id,
+            "targetId": target_id,
+            "version": "1.0.0",
+            "releaseId": component_release,
+            "manifestDigest": "sha256:" + "c" * 64,
+            "manifestAssetDigest": "sha256:" + "d" * 64,
+            "digest": "sha256:" + "e" * 64,
+            "publisherIdentity": {
+                "repository": repository,
+                "workflow": repository + "/.github/workflows/component-release.yml",
+            },
+            "indexIdentity": {
+                "repository": repository,
+                "assetName": "component-release-index-v1.json",
+                "assetDigest": "sha256:" + "f" * 64,
+                "indexDigest": "sha256:" + "a" * 64,
+                "releaseTag": component_release,
+            },
+            "attestationRef": {
+                "repository": repository,
+                "workflow": repository + "/.github/workflows/component-release.yml",
+                "sourceCommit": product_source,
+                "subjectDigest": "sha256:" + "d" * 64,
+            },
+        }
+
+    selected_components = [
+        component("cyrene-catalyst", "linux-ubuntu-24.04-x86_64-python-3.12"),
+        component("cyrene-client-workspace-control", "linux-ubuntu-24.04-x86_64-node-24"),
+        component("cyrene-client-workspace-web", "linux-ubuntu-24.04-x86_64-web"),
+        component(
+            "cyrene-runtime-maintenance-sdk", "linux-ubuntu-24.04-x86_64-python-3.12-library"
+        ),
+        component("cyrene-tools-dataset-generation", "linux-ubuntu-24.04-x86_64-python-3.12"),
+        component("cyrene-tools-dataset-preparation", "linux-ubuntu-24.04-x86_64-python-3.12"),
+        component("cyrene-tools-document-parsing", "linux-ubuntu-24.04-x86_64-python-3.12"),
+        component("cyrene-tools-knowledge-preparation", "linux-ubuntu-24.04-x86_64-python-3.12"),
+    ]
+    return {
+        "schemaVersion": 1,
+        "nativeInstaller": {
+            "releaseId": f"native-installer-preview-{native_sha}",
+            "sourceRepository": "DoHorizon-AI/Cyrene-Workspace",
+            "sourceRef": "refs/heads/develop",
+            "sourceCommit": native_sha,
+            "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/native-installer-release.yml",
+            "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+            "debAssetName": "cyrene_1.0.0_ubuntu-24.04_amd64.deb",
+            "debSha256": "4" * 64,
+            "debSizeBytes": 4096,
+        },
+        "catalog": {
+            "releaseId": f"catalog-v2-preview-{catalog_source}",
+            "repository": "DoHorizon-AI/Cyrene-Workspace",
+            "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml",
+            "sourceRef": "refs/heads/develop",
+            "sourceCommit": catalog_source,
+            "assetName": "component-catalog-v2.json",
+            "sha256": catalog_sha,
+            "sizeBytes": 8192,
+            "attestationAssetName": "component-catalog-v2.json.attestation.jsonl",
+            "attestationSha256": "5" * 64,
+            "schemaVersion": 2,
+            "generation": 15,
+        },
+        "workloads": {
+            "catalyst": {
+                "workloadId": "catalyst",
+                "targetId": "linux-ubuntu-24.04-x86_64",
+                "catalogDigest": "sha256:" + catalog_sha,
+                "service": {
+                    "unit": "cyrene-catalyst.service",
+                    "baseUrl": "http://127.0.0.1:8004",
+                    "healthPath": "/healthz",
+                },
+                "selectedComponents": selected_components,
+            }
+        },
+    }
+
+
+def _with_exact_match_plugins(pins: dict[str, object]) -> dict[str, object]:
+    """Add standalone exact-match and required SDK identity pins to the fixture."""
+    catalyst = pins["workloads"]["catalyst"]
+    rows = {row["componentId"]: row for row in catalyst["selectedComponents"]}
+    exact_match = json.loads(json.dumps(rows["cyrene-tools-dataset-generation"]))
+    exact_match.update(
+        componentId="cyrene-evaluation-exact-match",
+        targetId="linux-ubuntu-24.04-x86_64-python-3.12",
+    )
+    pins["workloads"]["plugins"] = {
+        "workloadId": "plugins",
+        "targetId": "linux-ubuntu-24.04-x86_64",
+        "catalogDigest": catalyst["catalogDigest"],
+        "selectedComponents": [
+            rows["cyrene-runtime-maintenance-sdk"],
+            exact_match,
+        ],
+    }
+    return pins
+
+
+def _load_driver_module(tmp_path: Path, name: str) -> object:
+    """Load the workflow-local driver after compiling its embedded Python source."""
+    _, driver_path = _workflow_driver(tmp_path)
+    spec = importlib.util.spec_from_file_location(name, driver_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _verified_catalyst_catalog() -> dict[str, object]:
+    """Build the minimal signed-catalog shape consumed by binding readback tests."""
+    plugin_components = {
+        "cyrene-tools-dataset-generation": "cyrene.tools.dataset-generation",
+        "cyrene-tools-dataset-preparation": "cyrene.tools.dataset-preparation",
+        "cyrene-tools-document-parsing": "cyrene.tools.document-parsing",
+        "cyrene-tools-knowledge-preparation": "cyrene.tools.knowledge-preparation",
+    }
+    return {
+        "schemaVersion": 2,
+        "generation": 15,
+        "components": [
+            {"componentId": component_id, "pluginPackage": {"packageId": package_id}}
+            for component_id, package_id in plugin_components.items()
+        ],
+        "workloads": [
+            {
+                "workloadId": "catalyst",
+                "sourcePolicy": {
+                    "mode": "actualProduct",
+                    "productSources": [
+                        {"componentId": "cyrene-catalyst", "sourceId": "cyrene-catalyst"}
+                    ],
+                    "operations": [
+                        "activate",
+                        "recover_binding",
+                        "deactivate",
+                        "runtime_status",
+                        "get_installation",
+                    ],
+                },
+                "bindings": [
+                    {
+                        "componentId": component_id,
+                        "bindingId": f"catalog-binding-actual-product-cyrene-catalyst-{component_id}",
+                    }
+                    for component_id in plugin_components
+                ],
+            }
+        ],
+    }
+
+
+def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: Path) -> None:
+    """The fresh host consumes official release assets, not repository source."""
+    document, _ = _workflow_driver(tmp_path)
+    source = WORKFLOW.read_text(encoding="utf-8")
+    assert "actions/checkout@" not in source
+    assert "git clone" not in source
+    assert document["jobs"]["clean-host-acceptance"]["runs-on"] == "ubuntu-24.04"
+    assert document["jobs"]["clean-host-acceptance"]["permissions"] == {
+        "contents": "read",
+        "attestations": "read",
+    }
+    assert '[[ "$GITHUB_REF" == "refs/heads/develop" ]]' in source
+    assert '"workflowSha": os.environ.get("GITHUB_WORKFLOW_SHA")' in source
+    assert '"native-installer-release-v2.json"' in source
+    assert '"native-installer-source-receipt-v2.json"' in source
+    assert '"native_static_binding_readback"' in source
+    assert '"catalyst_active_receipt_readback"' in source
+    assert '"catalyst_runtime_source_activation"' in source
+    assert "retain_output=False" in source
+    assert "raw Product output was withheld" in source
+    assert '"/var/lib/cyrene/runtime/activity-sources.json"' in source
+    assert '"/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"' in source
+    assert '"/etc/cyrene/runtime-activity-source-tokens"' in source
+    assert '"tokenHashMatchesCatalog":True' in source
+    assert '"bindingScopeCount":len(verified_bindings)' in source
+    assert 'phase("client_static_web_http", client_web_http)' in source
+    assert '"http://127.0.0.1:8100/"' in source
+    assert '"http://127.0.0.1:5182/health/ready"' in source
+    assert '"/api/v1/auth/session"' in source
+    assert 'status.get("hostMetadata", {}).get("web")' in source
+    assert '"csrfTokenStored": False' in source
+    assert '"sessionCommandPosted": False' in source
+    assert '"/api/v1/catalyst/datasets"' in source
+    assert '"/api/v1/datasets"' in source
+    assert '"client_release_integration",' in source
+    assert '"offline_retry_gate"' in source
+    assert 'command.extend(["/usr/bin/unshare", "--net"])' in source
+    assert 'error.get("code") == "NETWORK_ERROR"' in source
+    assert '"same-plan repeated stage"' in source
+    assert '"/etc/cyrene/studio-control.env"' in source
+    assert '"STUDIO_CATALYST_API_TOKEN_FILE"' in source
+    assert "STUDIO_PUBLIC_ORIGINS=" in source
+    assert "native active-pointer proof" in source
+    assert 'receipt.get("bundleIdentity") == manifest.get("artifact_digest")' in source
+    assert 'Path(str(receipt.get("releasePath"))).resolve(strict=True)' in source
+    assert '"client_static_web_http"' in source
+    assert 'Path("/var/lib/cyrene-updates")' in source
+    assert '".workload-sdk-install.json"' in source
+    assert '"staticWeb"' in source
+    acceptance_readme = (ROOT / "tooling/acceptance/modular-distribution-v01/README.md").read_text(
+        encoding="utf-8"
+    )
+    assert "required HTTP gate" in acceptance_readme
+    assert "all four Catalog-owned plugin bindings" in acceptance_readme
+    assert '"/usr/share/cyrene/bootstrap-catalog-binding-v1.json"' in source
+    assert '"/usr/share/cyrene/component-catalog-v1.json"' in source
+    assert '"/usr/share/cyrene/component-catalog-v2.json"' in source
+    assert '"/usr/share/cyrene/native-install-contract-v1.json"' in source
+    assert '"workspaceCatalogs"' in source
+    assert '"activeV2"' in source
+    assert '"installedReceipt"' not in source
+    schema = json.loads(PINS_SCHEMA.read_text(encoding="utf-8"))
+    assert "installedReceipt" not in schema["properties"]["nativeInstaller"]["properties"]
+    assert "native_install_receipt_readback" not in source
+    assert (
+        '"gh", "api", f"repos/{catalog_pin[\'repository\']}/releases/tags/{catalog_pin[\'releaseId\']}"'
+        in source
+    )
+    assert '"--cert-oidc-issuer", "https://token.actions.githubusercontent.com"' in source
+    assert "Runnable Catalyst core" in source
+
+
+def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins must match the schema and fail closed before any native mutation."""
+    schema = json.loads(PINS_SCHEMA.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+    pins = _valid_pins()
+    jsonschema.Draft202012Validator(schema).validate(pins)
+    _, driver_path = _workflow_driver(tmp_path)
+    monkeypatch.setenv("NATIVE_RELEASE_ID", pins["nativeInstaller"]["releaseId"])
+    spec = importlib.util.spec_from_file_location("acceptance_driver", driver_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.validate_pin_shape(pins)
+
+    catalyst_rows = {
+        row["componentId"]: row for row in pins["workloads"]["catalyst"]["selectedComponents"]
+    }
+    echo_product = dict(catalyst_rows["cyrene-catalyst"])
+    echo_product.update(componentId="cyrene-echo", targetId="linux-ubuntu-24.04-x86_64-oci")
+    exact_match = dict(catalyst_rows["cyrene-tools-dataset-generation"])
+    exact_match.update(
+        componentId="cyrene-evaluation-exact-match",
+        targetId="linux-ubuntu-24.04-x86_64-python-3.12",
+    )
+    pins["workloads"]["echo"] = {
+        "workloadId": "echo",
+        "targetId": "linux-ubuntu-24.04-x86_64",
+        "catalogDigest": "sha256:" + "b" * 64,
+        "selectedComponents": [
+            echo_product,
+            catalyst_rows["cyrene-runtime-maintenance-sdk"],
+            exact_match,
+        ],
+    }
+    jsonschema.Draft202012Validator(schema).validate(pins)
+    module.validate_pin_shape(pins)
+
+    acceptance_root = tmp_path / "echo-dispatch"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("RELEASE_PINS_JSON", json.dumps(pins))
+    with pytest.raises(RuntimeError, match="cannot execute the installed Echo lifecycle"):
+        module.init()
+    ledger = json.loads((acceptance_root / "phase-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["phases"]["echo_exact_match_evaluate_uninstall"]["status"] == "FAIL"
+    assert ledger["phases"]["runner_identity"]["status"] == "NOT_RUN"
+
+    wrong_echo_workload_id = json.loads(json.dumps(pins))
+    wrong_echo_workload_id["workloads"]["catalyst"]["workloadId"] = "echo"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(wrong_echo_workload_id)
+
+    echo_with_service = json.loads(json.dumps(pins))
+    echo_with_service["workloads"]["echo"]["service"] = {
+        "unit": "cyrene-echo.service",
+        "baseUrl": "http://127.0.0.1:8094",
+        "healthPath": "/healthz",
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(echo_with_service)
+
+    missing_exact_match = json.loads(json.dumps(pins))
+    missing_exact_match["workloads"]["echo"]["selectedComponents"] = [
+        row
+        for row in missing_exact_match["workloads"]["echo"]["selectedComponents"]
+        if row["componentId"] != "cyrene-evaluation-exact-match"
+    ]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(missing_exact_match)
+    with pytest.raises(RuntimeError, match="exact-match plugin identities"):
+        module.validate_pin_shape(missing_exact_match)
+
+    plugins_pins = _with_exact_match_plugins(_valid_pins())
+    jsonschema.Draft202012Validator(schema).validate(plugins_pins)
+    module.validate_pin_shape(plugins_pins)
+
+    wrong_plugin_target = json.loads(json.dumps(plugins_pins))
+    wrong_plugin_target["workloads"]["plugins"]["selectedComponents"][0]["targetId"] = (
+        "linux-ubuntu-24.04-x86_64"
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(wrong_plugin_target)
+    with pytest.raises(RuntimeError, match="standalone plugins pin target"):
+        module.validate_pin_shape(wrong_plugin_target)
+
+    extra_plugin = json.loads(json.dumps(plugins_pins))
+    extra_plugin["workloads"]["plugins"]["selectedComponents"].append(
+        extra_plugin["workloads"]["catalyst"]["selectedComponents"][0]
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(extra_plugin)
+
+    pins.pop("workloads")
+    pins["workloads"] = {"catalyst": _valid_pins()["workloads"]["catalyst"]}
+    pins["catalog"]["sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="catalog digest pin differs"):
+        module.validate_pin_shape(pins)
+
+    unsafe_pins = _valid_pins()
+    unsafe_pins["workloads"]["catalyst"]["selectedComponents"][0]["version"] = "../outside"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(unsafe_pins)
+    with pytest.raises(RuntimeError, match="safe immutable path segment"):
+        module.validate_pin_shape(unsafe_pins)
+
+    missing_control = _valid_pins()
+    missing_control["workloads"]["catalyst"]["selectedComponents"] = [
+        row
+        for row in missing_control["workloads"]["catalyst"]["selectedComponents"]
+        if row["componentId"] != "cyrene-client-workspace-control"
+    ]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(missing_control)
+    with pytest.raises(RuntimeError, match="Node 24 Client Control"):
+        module.validate_pin_shape(missing_control)
+
+    wrong_control_target = _valid_pins()
+    next(
+        row
+        for row in wrong_control_target["workloads"]["catalyst"]["selectedComponents"]
+        if row["componentId"] == "cyrene-client-workspace-control"
+    )["targetId"] = "linux-ubuntu-24.04-x86_64"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(wrong_control_target)
+    with pytest.raises(RuntimeError, match="Ubuntu 24.04 Node 24 target"):
+        module.validate_pin_shape(wrong_control_target)
+
+
+def test_standalone_plugins_pins_are_accepted_without_echo_install_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exact-match fallback pins do not enter Echo's unrelated OCI lifecycle gate."""
+    acceptance_root = tmp_path / "plugins-dispatch"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    pins = _with_exact_match_plugins(_valid_pins())
+    monkeypatch.setenv("NATIVE_RELEASE_ID", pins["nativeInstaller"]["releaseId"])
+    monkeypatch.setenv("RELEASE_PINS_JSON", json.dumps(pins))
+    module = _load_driver_module(tmp_path, "acceptance_driver_plugins_pins")
+    monkeypatch.setattr(module, "runner_identity", lambda: {"testOnly": True})
+
+    module.init()
+
+    ledger = json.loads((acceptance_root / "phase-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["phases"]["release_pins_validation"]["status"] == "PASS"
+    assert ledger["phases"]["echo_exact_match_evaluate_uninstall"]["status"] == "NOT_RUN"
+    saved = json.loads((acceptance_root / "release-pins-v1.json").read_text(encoding="utf-8"))
+    assert "plugins" in saved["workloads"]
+    assert "echo" not in saved["workloads"]
+
+
+def test_catalyst_binding_gate_matches_catalog_package_and_active_uds_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Selected Catalog bindings must match Platform UDS active installation readback."""
+    acceptance_root = tmp_path / "acceptance"
+    (acceptance_root / "downloads").mkdir(parents=True)
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_bindings")
+    pins = _valid_pins()
+    catalog = _verified_catalyst_catalog()
+    catalog_bytes = json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode()
+    catalog_pin = pins["catalog"]
+    catalog_pin["sha256"] = hashlib.sha256(catalog_bytes).hexdigest()
+    catalog_pin["sizeBytes"] = len(catalog_bytes)
+    pins["workloads"]["catalyst"]["catalogDigest"] = "sha256:" + catalog_pin["sha256"]
+    module.write_json(acceptance_root / "release-pins-v1.json", pins)
+    (acceptance_root / "downloads" / catalog_pin["assetName"]).write_bytes(catalog_bytes)
+
+    expected = module.expected_catalyst_bindings(
+        pins["workloads"]["catalyst"]["selectedComponents"]
+    )
+    assert len(expected) == 4
+    assert {row["packageId"] for row in expected} == {
+        "cyrene.tools.dataset-generation",
+        "cyrene.tools.dataset-preparation",
+        "cyrene.tools.document-parsing",
+        "cyrene.tools.knowledge-preparation",
+    }
+    observed = [
+        {
+            **row,
+            "installationIds": [f"installation-{index:032x}"],
+            "activeInstallationId": f"installation-{index:032x}",
+            "state": "RUNNING",
+            "failureCode": None,
+        }
+        for index, row in enumerate(expected, start=1)
+    ]
+    verified = module.assert_catalyst_source_bindings(observed, expected, "synthetic UDS readback")
+    assert all(row["state"] == "RUNNING" for row in verified)
+    with pytest.raises(RuntimeError, match="sourceBindings differ"):
+        module.assert_catalyst_source_bindings(observed[:-1], expected, "synthetic UDS readback")
+    with pytest.raises(RuntimeError, match="not running"):
+        module.assert_catalyst_source_bindings(
+            [{**observed[0], "state": "STOPPED"}, *observed[1:]],
+            expected,
+            "synthetic UDS readback",
+        )
+
+
+def test_client_web_http_gate_checks_live_contract_without_saving_session_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The installed host gate compares live routes to receipts and withholds CSRF material."""
+    acceptance_root = tmp_path / "acceptance"
+    evidence_dir = acceptance_root / "evidence"
+    evidence_dir.mkdir(parents=True)
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_web")
+    pins = _valid_pins()
+    module.write_json(acceptance_root / "release-pins-v1.json", pins)
+    index = b"<!doctype html><title>Client workspace</title>\n"
+    index_digest = "sha256:" + hashlib.sha256(index).hexdigest()
+    source_digest = "sha256:" + "a" * 64
+    active_digest = "sha256:" + "b" * 64
+    metadata = {
+        "schemaVersion": 1,
+        "componentId": "cyrene-client-workspace-web",
+        "version": "1.0.0",
+        "releaseIdentity": next(
+            row["manifestDigest"]
+            for row in pins["workloads"]["catalyst"]["selectedComponents"]
+            if row["componentId"] == "cyrene-client-workspace-web"
+        ),
+        "sourceReceiptDigest": source_digest,
+        "activeReceiptDigest": active_digest,
+        "documentRoot": "/var/lib/cyrene/workloads/web/cyrene-client-workspace-web/current",
+        "clientUrl": "http://127.0.0.1:8100/",
+        "listenerAddress": "127.0.0.1",
+        "listenerPort": 8100,
+        "configPath": "/etc/cyrene/workloads/web/nginx.conf",
+        "configDigest": "sha256:" + "c" * 64,
+        "unitPath": "/etc/systemd/system/cyrene-workspace-web.service",
+        "unitDigest": "sha256:" + "d" * 64,
+        "serviceUnit": "cyrene-workspace-web.service",
+        "serviceState": "active",
+        "serviceEnabled": True,
+        "nginxVersion": "nginx/1.26.0",
+        "installed": True,
+        "available": True,
+        "probes": {
+            "root": {"status": 200, "indexDigest": index_digest},
+            "health": {"status": 200, "bodyStatus": "ok"},
+            "controlReady": {"status": 200, "bodyStatus": "ready"},
+            "localSession": {
+                "status": 200,
+                "authenticated": True,
+                "state": "AUTHENTICATED",
+                "refreshable": False,
+            },
+        },
+    }
+    receipt = {
+        "components": [
+            {
+                "componentId": "cyrene-client-workspace-web",
+                "immutableReceiptSha256": source_digest.removeprefix("sha256:"),
+                "activeReceiptSha256": active_digest.removeprefix("sha256:"),
+                "staticWeb": {"indexDigest": index_digest},
+            }
+        ]
+    }
+    module.write_json(evidence_dir / "installed-workload-receipt-identities.json", receipt)
+    monkeypatch.setattr(
+        module,
+        "workload_request",
+        lambda operation, **_fields: {
+            "status": "ready",
+            "catalogDigest": pins["workloads"]["catalyst"]["catalogDigest"],
+            "hostMetadata": {"web": metadata},
+        },
+    )
+    token = "0123456789abcdef" * 4
+    session = {
+        "authenticated": True,
+        "state": "AUTHENTICATED",
+        "sessionId": "local",
+        "expiresAt": None,
+        "refreshExpiresAt": None,
+        "refreshable": False,
+        "csrfToken": token,
+        "refreshed": False,
+    }
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    def fake_loopback(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
+        requests.append((url, headers))
+        if url == "http://127.0.0.1:8100/":
+            return 200, {}, index
+        if url == "http://127.0.0.1:8100/healthz":
+            return 200, {}, b'{"status":"ok"}'
+        if url == "http://127.0.0.1:5182/health/ready":
+            return 200, {}, b'{"status":"ready"}'
+        if url == "http://127.0.0.1:8100/api/v1/auth/session":
+            return 200, {}, json.dumps(session).encode()
+        raise AssertionError(f"unexpected network request: {url}")
+
+    monkeypatch.setattr(module, "request_loopback", fake_loopback)
+    result = module.client_web_http()
+    assert [url for url, _headers in requests] == [
+        "http://127.0.0.1:8100/",
+        "http://127.0.0.1:8100/healthz",
+        "http://127.0.0.1:5182/health/ready",
+        "http://127.0.0.1:8100/api/v1/auth/session",
+    ]
+    assert all(headers.get("X-Studio-Control-Token") is None for _url, headers in requests)
+    assert result["httpRoot"]["sha256"] == index_digest
+    assert result["csrfTokenStored"] is False
+    evidence_text = (evidence_dir / "client-web-http-acceptance.json").read_text()
+    assert token not in evidence_text
+
+    receipt["components"][0]["staticWeb"]["indexDigest"] = "sha256:" + "f" * 64
+    module.write_json(evidence_dir / "installed-workload-receipt-identities.json", receipt)
+    with pytest.raises(RuntimeError, match="HTTP root bytes differ"):
+        module.client_web_http()
+
+
+def test_catalyst_proxy_comparison_checks_status_and_json_shape_without_records(
+    tmp_path: Path,
+) -> None:
+    """The Client proxy must match the Catalyst read schema without exporting rows."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_proxy")
+    direct = json.dumps([{"id": "direct-private-row", "label": "Direct record"}]).encode()
+    proxy = json.dumps([{"id": "proxy-private-row", "label": "Proxy record"}]).encode()
+
+    result = module.compare_catalyst_read_responses(200, direct, 200, proxy)
+    serialized = json.dumps(result)
+    assert result["jsonSchemaMatches"] is True
+    assert result["recordsStored"] is False
+    assert "direct-private-row" not in serialized
+    assert "proxy-private-row" not in serialized
+    assert result["direct"]["bodySha256"] != result["proxy"]["bodySha256"]
+
+    mismatched = json.dumps([{"id": "proxy-private-row", "title": "Proxy record"}]).encode()
+    with pytest.raises(RuntimeError, match="response schema differs"):
+        module.compare_catalyst_read_responses(200, direct, 200, mismatched)
+    with pytest.raises(RuntimeError, match="returned HTTP 503"):
+        module.compare_catalyst_read_responses(200, direct, 503, mismatched)
+
+
+def test_workload_attestation_token_is_preserved_only_for_explicit_resolution_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read-only GitHub credentials are scoped to verified workload resolution."""
+    _, driver_path = _workflow_driver(tmp_path)
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(tmp_path / "acceptance"))
+    monkeypatch.setenv("GH_TOKEN", "synthetic-read-only-token")
+    spec = importlib.util.spec_from_file_location("acceptance_driver_token", driver_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], *, input_text: str, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        request = json.loads(input_text)
+        commands.append(command)
+        envelope = {
+            "protocolVersion": module.WORKLOAD_PROTOCOL,
+            "operation": request["operation"],
+            "ok": True,
+            "result": {"status": "ready"},
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(envelope) + "\n", "")
+
+    monkeypatch.setattr(module, "run", fake_run)
+    module.workload_request("check", preserve_read_token=True, workloadId="catalyst")
+    module.workload_request("apply", workloadId="catalyst")
+
+    assert "--preserve-env=GH_TOKEN" in commands[0]
+    assert "--preserve-env=GH_TOKEN" not in commands[1]
+    assert "synthetic-read-only-token" not in " ".join(commands[0] + commands[1])
+
+
+def test_network_isolated_workload_failure_uses_fixed_cli_and_sanitized_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One stage subprocess can lose network without changing host connectivity or exposing errors."""
+    evidence_root = tmp_path / "acceptance"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    monkeypatch.setenv("GH_TOKEN", "synthetic-read-only-token")
+    module = _load_driver_module(tmp_path, "acceptance_driver_network_isolation")
+    commands: list[list[str]] = []
+    retained_output: list[object] = []
+    request_line = '{"protocolVersion":"cyrene.workload-plan.v1","operation":"stage"}'
+    failure = {
+        "protocolVersion": module.WORKLOAD_PROTOCOL,
+        "operation": "stage",
+        "ok": False,
+        "error": {
+            "code": "NETWORK_ERROR",
+            "message": "private detail synthetic-read-only-token",
+            "retryable": True,
+        },
+    }
+
+    def fake_run(
+        command: list[str], *, input_text: str, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        retained_output.append(kwargs.get("retain_output"))
+        assert input_text.strip() == request_line
+        return subprocess.CompletedProcess(command, 0, json.dumps(failure) + "\n", "")
+
+    monkeypatch.setattr(module, "run", fake_run)
+    response = module.workload_request(
+        "stage",
+        preserve_read_token=True,
+        network_isolated=True,
+        allow_error=True,
+    )
+
+    assert response == failure
+    assert retained_output == [False]
+    assert commands[0][:6] == [
+        "sudo",
+        "-n",
+        "--preserve-env=GH_TOKEN",
+        "/usr/bin/unshare",
+        "--net",
+        "/usr/bin/cyrene",
+    ]
+    evidence = json.loads(
+        (evidence_root / "evidence" / "workload-stage-01.json").read_text(encoding="utf-8")
+    )
+    serialized = json.dumps(evidence)
+    assert evidence["response"]["error"] == {"code": "NETWORK_ERROR", "retryable": True}
+    assert "message" not in evidence["response"]["error"]
+    assert "synthetic-read-only-token" not in serialized
+
+
+def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Transient offline rejection must preserve one exact plan for same-plan retry."""
+    evidence_root = tmp_path / "acceptance"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_offline_retry")
+    pins = _valid_pins()
+    workload = pins["workloads"]["catalyst"]
+    checked = {
+        "planId": "plan-" + "1" * 32,
+        "planDigest": "sha256:" + "2" * 64,
+    }
+    selected = workload["selectedComponents"]
+    staged_rows = [{**row, "status": "staged"} for row in selected]
+    staged_result = {
+        "status": "staged",
+        "planId": checked["planId"],
+        "planDigest": checked["planDigest"],
+        "catalogDigest": workload["catalogDigest"],
+        "workloadId": "catalyst",
+        "targetId": workload["targetId"],
+        "action": "install",
+        "components": staged_rows,
+    }
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        calls.append((operation, fields))
+        if operation == "stage" and fields.get("network_isolated") is True:
+            return {
+                "protocolVersion": module.WORKLOAD_PROTOCOL,
+                "ok": False,
+                "operation": "stage",
+                "error": {"code": "NETWORK_ERROR", "retryable": True},
+            }
+        if operation == "status":
+            return {
+                "status": "ready",
+                "components": [
+                    {"componentId": row["componentId"], "installed": False} for row in selected
+                ],
+            }
+        assert operation == "stage"
+        return staged_result
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    evidence = module.offline_stage_retry(workload, checked)
+
+    stage_calls = [(operation, fields) for operation, fields in calls if operation == "stage"]
+    assert len(stage_calls) == 3
+    assert stage_calls[0][1]["network_isolated"] is True
+    assert stage_calls[0][1]["allow_error"] is True
+    assert all(
+        fields["planId"] == checked["planId"]
+        and fields["planDigest"] == checked["planDigest"]
+        and fields["action"] == "install"
+        for _, fields in stage_calls
+    )
+    assert [fields.get("network_isolated", False) for _, fields in stage_calls] == [
+        True,
+        False,
+        False,
+    ]
+    assert evidence["activeSelectedComponentsAfterFailure"] == []
+    assert evidence["failure"] == {
+        "operation": "stage",
+        "code": "NETWORK_ERROR",
+        "retryable": True,
+        "networkNamespace": "isolated-child-process",
+    }
+    assert evidence["repeatStageStable"] is True
+    assert evidence["stagedResult"] == staged_result
+
+
+def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm offline stage is useful cache evidence but does not prove failure recovery."""
+    evidence_root = tmp_path / "acceptance"
+    evidence_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_cached_stage")
+    pins = _valid_pins()
+    module.write_json(evidence_root / "release-pins-v1.json", pins)
+    workload = pins["workloads"]["catalyst"]
+    checked = {"planId": "plan-" + "3" * 32, "planDigest": "sha256:" + "4" * 64}
+    staged_result = {
+        "status": "staged",
+        "planId": checked["planId"],
+        "planDigest": checked["planDigest"],
+        "catalogDigest": workload["catalogDigest"],
+        "workloadId": "catalyst",
+        "targetId": workload["targetId"],
+        "action": "install",
+        "components": [{**row, "status": "staged"} for row in workload["selectedComponents"]],
+    }
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        if operation == "status":
+            return {
+                "status": "ready",
+                "components": [
+                    {"componentId": row["componentId"], "installed": False}
+                    for row in workload["selectedComponents"]
+                ],
+            }
+        assert operation == "stage"
+        if fields.get("network_isolated") is True:
+            return {
+                "protocolVersion": module.WORKLOAD_PROTOCOL,
+                "operation": "stage",
+                "ok": True,
+                "result": staged_result,
+            }
+        return staged_result
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    result = module.record_offline_stage_outcome(workload, checked)
+
+    assert result["outcome"] == "cached-stage-no-failure"
+    assert result["repeatStageStable"] is True
+    assert result["offlineFailureFallback"]["status"] == "NOT_RUN"
+    assert result["offlineFailureFallback"]["outcome"] == "fallback-pins-unavailable"
+    assert module.ledger()["phases"]["offline_retry_gate"]["status"] == "NOT_RUN"
+    assert "cached content" in module.ledger()["phases"]["offline_retry_gate"]["reason"]
+
+
+def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plugins fallback retries the same signed plan without Echo or mutation."""
+    evidence_root = tmp_path / "acceptance"
+    evidence_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_exact_match_fallback")
+    pins = _with_exact_match_plugins(_valid_pins())
+    module.write_json(evidence_root / "release-pins-v1.json", pins)
+    catalyst = pins["workloads"]["catalyst"]
+    plugins = pins["workloads"]["plugins"]
+    catalyst_check = {
+        "planId": "plan-" + "3" * 32,
+        "planDigest": "sha256:" + "4" * 64,
+    }
+    plugin_check = {
+        "status": "ready",
+        "workloadId": "plugins",
+        "targetId": plugins["targetId"],
+        "action": "install",
+        "catalogDigest": plugins["catalogDigest"],
+        "planId": "plan-" + "5" * 32,
+        "planDigest": "sha256:" + "6" * 64,
+        "components": plugins["selectedComponents"],
+        "resolution": {
+            "catalogDigest": plugins["catalogDigest"],
+            "selectedComponents": plugins["selectedComponents"],
+        },
+    }
+    plugin_staged = {
+        "status": "staged",
+        "planId": plugin_check["planId"],
+        "planDigest": plugin_check["planDigest"],
+        "catalogDigest": plugins["catalogDigest"],
+        "workloadId": "plugins",
+        "targetId": plugins["targetId"],
+        "action": "install",
+        "components": [{**row, "status": "staged"} for row in plugins["selectedComponents"]],
+    }
+    catalyst_staged = {
+        "status": "staged",
+        "planId": catalyst_check["planId"],
+        "planDigest": catalyst_check["planDigest"],
+        "catalogDigest": catalyst["catalogDigest"],
+        "workloadId": "catalyst",
+        "targetId": catalyst["targetId"],
+        "action": "install",
+        "components": [{**row, "status": "staged"} for row in catalyst["selectedComponents"]],
+    }
+    plugin_status = {
+        "status": "ready",
+        "catalogDigest": plugins["catalogDigest"],
+        "components": [
+            {
+                "componentId": row["componentId"],
+                "installed": False,
+                "version": None,
+                "releaseId": None,
+                "targetId": None,
+                "manifestDigest": None,
+                "manifestAssetDigest": None,
+                "digest": None,
+                "installationId": None,
+                "verification": {"identityAttested": False},
+            }
+            for row in plugins["selectedComponents"]
+        ],
+    }
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        calls.append((operation, fields))
+        workload_id = fields.get("workloadId")
+        if operation == "check":
+            assert workload_id == "plugins"
+            assert fields["selections"] == {
+                "includeComponentIds": ["cyrene-evaluation-exact-match"],
+                "excludeComponentIds": [],
+                "choices": {},
+            }
+            return plugin_check
+        if operation == "status":
+            if workload_id == "plugins":
+                return plugin_status
+            assert workload_id == "catalyst"
+            return {
+                "status": "ready",
+                "components": [
+                    {"componentId": row["componentId"], "installed": False}
+                    for row in catalyst["selectedComponents"]
+                ],
+            }
+        assert operation == "stage"
+        if workload_id == "catalyst":
+            if fields.get("network_isolated") is True:
+                return {"ok": True, "result": catalyst_staged}
+            return catalyst_staged
+        if fields.get("network_isolated") is True:
+            return {
+                "protocolVersion": module.WORKLOAD_PROTOCOL,
+                "ok": False,
+                "operation": "stage",
+                "error": {"code": "NETWORK_ERROR", "retryable": True},
+            }
+        return plugin_staged
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    result = module.record_offline_stage_outcome(catalyst, catalyst_check)
+
+    assert result["outcome"] == "cached-stage-no-failure"
+    assert result["offlineFailureFallback"]["outcome"] == "network-failure-recovered"
+    assert result["offlineFailureFallback"]["status"] == "PASS"
+    assert result["offlineFailureFallback"]["applied"] is False
+    assert module.ledger()["phases"]["offline_retry_gate"]["status"] == "PASS"
+    plugin_stages = [
+        fields
+        for operation, fields in calls
+        if operation == "stage" and fields.get("workloadId") == "plugins"
+    ]
+    assert [fields.get("network_isolated", False) for fields in plugin_stages] == [
+        True,
+        False,
+        False,
+    ]
+    assert all(
+        fields["planId"] == plugin_check["planId"]
+        and fields["planDigest"] == plugin_check["planDigest"]
+        and fields["action"] == "install"
+        for fields in plugin_stages
+    )
+    assert not any(operation == "apply" for operation, _ in calls)
+    fallback_evidence = json.loads(
+        (evidence_root / "evidence" / "exact-match-plugins-offline-stage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    serialized = json.dumps(fallback_evidence)
+    assert "cyrene-echo" not in serialized
+    assert fallback_evidence["failure"] == {
+        "operation": "stage",
+        "code": "NETWORK_ERROR",
+        "retryable": True,
+        "networkNamespace": "isolated-child-process",
+    }
+
+
+def test_exact_match_plugin_fallback_reports_cache_without_claiming_failure_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second warm cache remains NOT_RUN even when standalone pins are supplied."""
+    evidence_root = tmp_path / "acceptance"
+    evidence_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_exact_match_cached")
+    pins = _with_exact_match_plugins(_valid_pins())
+    module.write_json(evidence_root / "release-pins-v1.json", pins)
+    catalyst = pins["workloads"]["catalyst"]
+    plugins = pins["workloads"]["plugins"]
+    catalyst_checked = {"planId": "plan-" + "3" * 32, "planDigest": "sha256:" + "4" * 64}
+    plugin_checked = {
+        "status": "ready",
+        "workloadId": "plugins",
+        "targetId": plugins["targetId"],
+        "action": "install",
+        "catalogDigest": plugins["catalogDigest"],
+        "planId": "plan-" + "5" * 32,
+        "planDigest": "sha256:" + "6" * 64,
+        "components": plugins["selectedComponents"],
+        "resolution": {
+            "catalogDigest": plugins["catalogDigest"],
+            "selectedComponents": plugins["selectedComponents"],
+        },
+    }
+    staged_by_id = {}
+    for workload_id, workload, checked in (
+        ("catalyst", catalyst, catalyst_checked),
+        ("plugins", plugins, plugin_checked),
+    ):
+        staged_by_id[workload_id] = {
+            "status": "staged",
+            "planId": checked["planId"],
+            "planDigest": checked["planDigest"],
+            "catalogDigest": workload["catalogDigest"],
+            "workloadId": workload_id,
+            "targetId": workload["targetId"],
+            "action": "install",
+            "components": [{**row, "status": "staged"} for row in workload["selectedComponents"]],
+        }
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        workload_id = fields.get("workloadId")
+        if operation == "check":
+            assert workload_id == "plugins"
+            return plugin_checked
+        if operation == "status":
+            workload = plugins if workload_id == "plugins" else catalyst
+            return {
+                "status": "ready",
+                "catalogDigest": workload["catalogDigest"],
+                "components": [
+                    {
+                        "componentId": row["componentId"],
+                        "installed": False,
+                        "version": None,
+                        "releaseId": None,
+                        "targetId": None,
+                        "manifestDigest": None,
+                        "manifestAssetDigest": None,
+                        "digest": None,
+                        "installationId": None,
+                        "verification": {"identityAttested": False},
+                    }
+                    for row in workload["selectedComponents"]
+                ],
+            }
+        assert operation == "stage"
+        result = staged_by_id[str(workload_id)]
+        return {"ok": True, "result": result} if fields.get("network_isolated") else result
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    result = module.record_offline_stage_outcome(catalyst, catalyst_checked)
+
+    assert result["offlineFailureFallback"]["outcome"] == "cached-stage-no-failure"
+    assert result["offlineFailureFallback"]["status"] == "NOT_RUN"
+    assert module.ledger()["phases"]["offline_retry_gate"]["status"] == "NOT_RUN"
+
+
+def test_version_conflict_gate_is_a_read_only_assertion_on_the_exact_plan(
+    tmp_path: Path,
+) -> None:
+    """The intended release plan must be free of resolver version conflicts before staging."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_version_conflict")
+    workload = _valid_pins()["workloads"]["catalyst"]
+    checked = {
+        "status": "ready",
+        "planId": "plan-" + "5" * 32,
+        "planDigest": "sha256:" + "6" * 64,
+        "blockers": [],
+        "resolution": {"blockers": []},
+    }
+    result = module.version_conflict_readonly_check(checked, workload)
+    assert result["versionConflictBlockerCount"] == 0
+    assert result["mutatingRequestsSent"] == 0
+
+    checked["resolution"]["blockers"] = [{"code": "VERSION_CONFLICT"}]
+    with pytest.raises(RuntimeError, match="VERSION_CONFLICT blocker"):
+        module.version_conflict_readonly_check(checked, workload)
+
+
+def test_finalizer_fails_when_required_core_gates_are_not_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preflight-only or skipped core run cannot leave the workflow green."""
+    _, driver_path = _workflow_driver(tmp_path)
+    acceptance_root = tmp_path / "acceptance"
+    acceptance_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
+    spec = importlib.util.spec_from_file_location("acceptance_driver_finalize", driver_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.write_json(
+        acceptance_root / "phase-ledger.json",
+        {
+            "schemaVersion": 1,
+            "phases": {
+                name: {
+                    "status": "NOT_RUN",
+                    "reason": "synthetic skipped gate",
+                    "recordedAtUtc": "2026-01-01T00:00:00+00:00",
+                    "evidence": None,
+                }
+                for name in module.PHASES
+            },
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="required Catalyst core gates did not all pass"):
+        module.finalize()
+
+    ledger = json.loads((acceptance_root / "phase-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["requiredCorePass"] is False
+    assert "native_static_binding_readback" in ledger["requiredCoreFailures"]
+    assert "version_conflict_gate" in ledger["requiredCoreFailures"]
+    assert "client_static_web_http" in ledger["requiredCoreFailures"]
+    assert "client_release_integration" in ledger["requiredCoreFailures"]
+    assert ledger["fullDistributionAcceptance"] == "INCOMPLETE"
+    assert ledger["phase2Acceptance"] == "INCOMPLETE"
+    assert "offline_retry_gate" in ledger["phase2IncompletePhases"]
+    assert (
+        "installer_interrupted_transaction_recovery" in ledger["fullDistributionIncompletePhases"]
+    )

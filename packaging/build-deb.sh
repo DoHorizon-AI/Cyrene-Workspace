@@ -15,6 +15,7 @@ TARGET_PROFILE=""
 SERVICE_WHEELHOUSE="${CYRENE_SERVICE_WHEELHOUSE:-${SCRIPT_DIR}/service-wheelhouse}"
 VERIFIED_SERVICE_ARTIFACTS=""
 SELECTED_BOOTSTRAP_CATALOG=""
+SELECTED_BOOTSTRAP_CATALOG_V2=""
 NATIVE_SOURCE_RECEIPT=""
 PYTHON_RUNTIME_ARCHIVE=""
 UV_EXECUTABLE=""
@@ -40,7 +41,9 @@ Options:
   --verified-service-artifacts <dir>
                         Index plus original Product tar/manifest/attestation release assets
   --bootstrap-catalog <file>
-                        Exact selected, attested Workspace catalog for production builds
+                        Exact baseline v1 Workspace catalog for production builds
+  --bootstrap-catalog-v2 <file>
+                        Exact active v2 Workspace catalog for v2 production builds
   --source-receipt <file>
                         Exact verifier-derived source receipt for production builds
   SOURCE_REF and SOURCE_COMMIT environment variables
@@ -85,6 +88,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --bootstrap-catalog)
             SELECTED_BOOTSTRAP_CATALOG="$2"
+            shift 2
+            ;;
+        --bootstrap-catalog-v2)
+            SELECTED_BOOTSTRAP_CATALOG_V2="$2"
             shift 2
             ;;
         --source-receipt)
@@ -132,7 +139,7 @@ if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" && "${DEVELOPMENT_SOURCE_BUILD}" -eq 1 
 fi
 if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
     if [[ -z "${SELECTED_BOOTSTRAP_CATALOG}" || -z "${NATIVE_SOURCE_RECEIPT}" ]]; then
-        echo "ERROR: production assembly requires the exact selected --bootstrap-catalog and --source-receipt." >&2
+        echo "ERROR: production assembly requires the exact baseline --bootstrap-catalog and --source-receipt." >&2
         exit 2
     fi
     if [[ -L "${SELECTED_BOOTSTRAP_CATALOG}" || ! -f "${SELECTED_BOOTSTRAP_CATALOG}" \
@@ -140,11 +147,16 @@ if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
         echo "ERROR: selected catalog and source receipt must be regular non-symlink files." >&2
         exit 2
     fi
+    if [[ -n "${SELECTED_BOOTSTRAP_CATALOG_V2}" \
+        && ( -L "${SELECTED_BOOTSTRAP_CATALOG_V2}" || ! -f "${SELECTED_BOOTSTRAP_CATALOG_V2}" ) ]]; then
+        echo "ERROR: selected active v2 catalog must be a regular non-symlink file." >&2
+        exit 2
+    fi
     if [[ -z "${SOURCE_REF}" || ! "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
         echo "ERROR: production assembly requires exact SOURCE_REF and full-SHA SOURCE_COMMIT." >&2
         exit 2
     fi
-elif [[ -n "${SELECTED_BOOTSTRAP_CATALOG}" || -n "${NATIVE_SOURCE_RECEIPT}" ]]; then
+elif [[ -n "${SELECTED_BOOTSTRAP_CATALOG}" || -n "${SELECTED_BOOTSTRAP_CATALOG_V2}" || -n "${NATIVE_SOURCE_RECEIPT}" ]]; then
     echo "ERROR: --bootstrap-catalog and --source-receipt are production-only inputs." >&2
     exit 2
 fi
@@ -299,8 +311,22 @@ cp "${SCRIPT_DIR}/component_updates.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/com
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
 cp "${SCRIPT_DIR}/component_placement.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_placement.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_placement.py"
+cp "${SCRIPT_DIR}/workload_resolver.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_resolver.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_resolver.py"
 cp "${SCRIPT_DIR}/native_package_runtime_bootstrap.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"
+cp "${SCRIPT_DIR}/workload_package_runtime.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_package_runtime.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_package_runtime.py"
+cp "${SCRIPT_DIR}/workload_sdk_environment.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_sdk_environment.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_sdk_environment.py"
+cp "${SCRIPT_DIR}/workload_web_host.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_web_host.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_web_host.py"
+cp "${SCRIPT_DIR}/cyrene-workspace-web.nginx.conf.template" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.nginx.conf.template"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.nginx.conf.template"
+cp "${SCRIPT_DIR}/cyrene-workspace-web.service.template" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.service.template"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.service.template"
 cp "${SCRIPT_DIR}/native_product_package_environment.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/native_product_package_environment.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_product_package_environment.py"
 cp "${SCRIPT_DIR}/catalog_metadata.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
@@ -336,6 +362,14 @@ CATALOG_BINDING_ARGS=(
     --catalog "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"
     --output "${STAGE_DIR}/usr/share/cyrene/bootstrap-catalog-binding-v1.json"
 )
+if [[ -n "${SELECTED_BOOTSTRAP_CATALOG_V2}" ]]; then
+    cp "${SELECTED_BOOTSTRAP_CATALOG_V2}" \
+        "${STAGE_DIR}/usr/share/cyrene/component-catalog-v2.json"
+    chmod 644 "${STAGE_DIR}/usr/share/cyrene/component-catalog-v2.json"
+    CATALOG_BINDING_ARGS+=(
+        --active-catalog-v2 "${STAGE_DIR}/usr/share/cyrene/component-catalog-v2.json"
+    )
+fi
 if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
     CATALOG_BINDING_ARGS+=(
         --source-receipt "${NATIVE_SOURCE_RECEIPT}"
@@ -351,6 +385,10 @@ chmod 644 "${STAGE_DIR}/usr/share/cyrene/bootstrap-catalog-binding-v1.json"
 mkdir -p "${STAGE_DIR}/usr/share/cyrene/catalog-schemas"
 cp "${WORKSPACE_ROOT}/governance/component-catalog-v1.schema.json" \
     "${STAGE_DIR}/usr/share/cyrene/catalog-schemas/component-catalog-v1.schema.json"
+if [[ -f "${WORKSPACE_ROOT}/governance/component-catalog-v2.schema.json" ]]; then
+    cp "${WORKSPACE_ROOT}/governance/component-catalog-v2.schema.json" \
+        "${STAGE_DIR}/usr/share/cyrene/catalog-schemas/component-catalog-v2.schema.json"
+fi
 cp "${WORKSPACE_ROOT}/governance/component-release-manifest-v1.schema.json" \
     "${STAGE_DIR}/usr/share/cyrene/catalog-schemas/component-release-manifest-v1.schema.json"
 cp "${WORKSPACE_ROOT}/governance/component-release-manifest-v2.schema.json" \
@@ -622,6 +660,35 @@ ensure_fresh_service_directory() {
 }
 ensure_fresh_service_directory /var/lib/cyrene
 ensure_fresh_service_directory /var/log/cyrene
+
+# Studio Control owns user-visible workload state. Create only a missing
+# directory and preserve existing files; unsafe path types or ownership fail
+# closed before any service can consume it.
+STUDIO_CONTROL_DIR=/var/lib/cyrene/studio-control
+ensure_fresh_service_directory "${STUDIO_CONTROL_DIR}"
+STUDIO_CONTROL_UID="$(id -u cyrene)"
+STUDIO_CONTROL_GID="$(getent group cyrene | cut -d: -f3)"
+case "${STUDIO_CONTROL_UID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene account or primary group has no valid numeric identity." >&2
+        exit 1
+        ;;
+esac
+case "${STUDIO_CONTROL_GID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene account or primary group has no valid numeric identity." >&2
+        exit 1
+        ;;
+esac
+if [ "${STUDIO_CONTROL_UID}" = "0" ] || [ "${STUDIO_CONTROL_GID}" = "0" ]; then
+    echo "ERROR: Studio Control data cannot be owned by root." >&2
+    exit 1
+fi
+STUDIO_CONTROL_META="$(stat -c '%u:%g:%a' -- "${STUDIO_CONTROL_DIR}")"
+if [ "${STUDIO_CONTROL_META}" != "${STUDIO_CONTROL_UID}:${STUDIO_CONTROL_GID}:750" ]; then
+    echo "ERROR: Refusing to repair existing Studio Control data directory (${STUDIO_CONTROL_DIR}: ${STUDIO_CONTROL_META})." >&2
+    exit 1
+fi
 
 # Provision only the dedicated broker state directory. Existing state is
 # validated without repair so package upgrades cannot rewrite broker metadata.

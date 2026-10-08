@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       release_inputs_json:
-        description: Exact catalog, Platform, and five Product immutable release locators (schemaVersion 1)
+        description: Exact Platform/Product and Workspace catalog immutable locators (schemaVersion 1 or 2)
         required: true
         type: string
 
@@ -93,30 +93,57 @@ jobs:
       - name: Install exact Platform release helper dependencies
         run: python -m pip install --disable-pip-version-check -r platform-source/tooling/release/requirements.txt
       - name: Fetch the explicitly selected Workspace catalog
+        id: catalog
         run: |
           set -euo pipefail
           python scripts/native_installer_release.py validate-inputs \
             --inputs "$RUNNER_TEMP/native-installer-release-inputs.json" \
             --source-ref "$SOURCE_REF" --source-commit "$SOURCE_COMMIT" \
             --output "$RUNNER_TEMP/native-installer-inputs/validated-locators.json"
-          CATALOG_RELEASE_ID="$(python - "$RUNNER_TEMP/native-installer-inputs/validated-locators.json" <<'PY'
+          INPUT_ROOT="$RUNNER_TEMP/native-installer-inputs"
+          LOCATORS="$INPUT_ROOT/validated-locators.json"
+          fetch_catalog() {
+            local key="$1" asset="$2"
+            local release_id expected_sha
+            release_id="$(python - "$LOCATORS" "$key" <<'PY'
           import json, sys
-          print(json.load(open(sys.argv[1], encoding="utf-8"))["workspaceCatalog"]["releaseId"])
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          key = sys.argv[2]
+          locator = value["workspaceCatalog"] if value["schemaVersion"] == 1 else value["workspaceCatalogs"][key]
+          print(locator["releaseId"])
           PY
           )"
-          python packaging/fetch_component_catalog.py \
-            --release-id "$CATALOG_RELEASE_ID" \
-            --output "$RUNNER_TEMP/native-installer-inputs/component-catalog-v1.json" \
-            --metadata-output "$RUNNER_TEMP/native-installer-inputs/component-catalog-release.json" \
-            --attestation-output "$RUNNER_TEMP/native-installer-inputs/component-catalog-v1.json.attestation.jsonl" \
-            --schema-root governance
-          CATALOG_SHA256="$(python - "$RUNNER_TEMP/native-installer-inputs/validated-locators.json" <<'PY'
+            expected_sha="$(python - "$LOCATORS" "$key" <<'PY'
           import json, sys
-          print(json.load(open(sys.argv[1], encoding="utf-8"))["workspaceCatalog"]["sha256"])
+          value = json.load(open(sys.argv[1], encoding="utf-8"))
+          key = sys.argv[2]
+          locator = value["workspaceCatalog"] if value["schemaVersion"] == 1 else value["workspaceCatalogs"][key]
+          print(locator["sha256"])
           PY
           )"
-          test "$(sha256sum "$RUNNER_TEMP/native-installer-inputs/component-catalog-v1.json" | cut -d ' ' -f 1)" = "$CATALOG_SHA256"
+            python packaging/fetch_component_catalog.py \
+              --release-id "$release_id" \
+              --output "$INPUT_ROOT/$asset" \
+              --metadata-output "$INPUT_ROOT/$asset.release.json" \
+              --attestation-output "$INPUT_ROOT/$asset.attestation.jsonl" \
+              --schema-root governance
+            test "$(sha256sum "$INPUT_ROOT/$asset" | cut -d ' ' -f 1)" = "$expected_sha"
+          }
+          schema_version="$(python - "$LOCATORS" <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["schemaVersion"])
+          PY
+          )"
+          fetch_catalog baselineV1 component-catalog-v1.json
+          if [[ "$schema_version" == 1 ]]; then
+            active_catalog="$INPUT_ROOT/component-catalog-v1.json"
+          else
+            fetch_catalog activeV2 component-catalog-v2.json
+            active_catalog="$INPUT_ROOT/component-catalog-v2.json"
+          fi
+          printf 'active_catalog_path=%s\n' "$active_catalog" >> "$GITHUB_OUTPUT"
           for schema in \
+            component-catalog-v2.schema.json \
             component-release-manifest-v1.schema.json \
             component-release-manifest-v2.schema.json \
             component-release-index-v1.schema.json; do
@@ -124,7 +151,7 @@ jobs:
           done
       - name: Fetch every exact catalog-authorized component tuple
         env:
-          CATALOG_PATH: ${{ runner.temp }}/native-installer-inputs/component-catalog-v1.json
+          CATALOG_PATH: ${{ steps.catalog.outputs.active_catalog_path }}
           FETCH_PLAN: ${{ runner.temp }}/native-installer-inputs/fetch-plan.json
           INPUT_ROOT: ${{ runner.temp }}/native-installer-inputs
           PLATFORM_FETCHER: ${{ github.workspace }}/platform-source/tooling/release/fetch_component.py
@@ -174,16 +201,32 @@ jobs:
                                row["releaseId"], row["sourceCommit"], plan["channel"])))
           PY
           )
+          schema_version="$(python - "$RUNNER_TEMP/native-installer-release-inputs.json" <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["schemaVersion"])
+          PY
+          )"
+          receipt_name="native-installer-source-receipt-v${schema_version}.json"
+          record_args=(
+            --inputs "$RUNNER_TEMP/native-installer-release-inputs.json"
+            --source-ref "$SOURCE_REF" --source-commit "$SOURCE_COMMIT"
+            --catalog "$INPUT_ROOT/component-catalog-v1.json"
+            --catalog-metadata "$INPUT_ROOT/component-catalog-v1.json.release.json"
+            --catalog-attestation "$INPUT_ROOT/component-catalog-v1.json.attestation.jsonl"
+            --python-runtime-lock packaging/python-runtime.lock.json
+            --release-lock release-lock.json
+            "${report_args[@]}" "${attestation_args[@]}"
+            --output "$INPUT_ROOT/$receipt_name"
+          )
+          if [[ "$schema_version" == 2 ]]; then
+            record_args+=(
+              --active-catalog-v2 "$INPUT_ROOT/component-catalog-v2.json"
+              --active-catalog-v2-metadata "$INPUT_ROOT/component-catalog-v2.json.release.json"
+              --active-catalog-v2-attestation "$INPUT_ROOT/component-catalog-v2.json.attestation.jsonl"
+            )
+          fi
           python scripts/native_installer_release.py record-inputs \
-            --inputs "$RUNNER_TEMP/native-installer-release-inputs.json" \
-            --source-ref "$SOURCE_REF" --source-commit "$SOURCE_COMMIT" \
-            --catalog "$INPUT_ROOT/component-catalog-v1.json" \
-            --catalog-metadata "$INPUT_ROOT/component-catalog-release.json" \
-            --catalog-attestation "$INPUT_ROOT/component-catalog-v1.json.attestation.jsonl" \
-            --python-runtime-lock packaging/python-runtime.lock.json \
-            --release-lock release-lock.json \
-            "${report_args[@]}" "${attestation_args[@]}" \
-            --output "$INPUT_ROOT/native-installer-source-receipt-v1.json"
+            "${record_args[@]}"
           for profile in \
             linux-ubuntu-22.04-x86_64-python-3.12 \
             linux-ubuntu-24.04-x86_64-python-3.12; do
@@ -206,8 +249,8 @@ jobs:
             done
             python scripts/native_installer_release.py stage-service-artifacts \
               --profile "$profile" \
-              --source-receipt "$INPUT_ROOT/native-installer-source-receipt-v1.json" \
-              --catalog "$INPUT_ROOT/component-catalog-v1.json" \
+              --source-receipt "$INPUT_ROOT/$receipt_name" \
+              --catalog "$CATALOG_PATH" \
               "${service_args[@]}" \
               --output "$INPUT_ROOT/verified-service-artifacts/$profile"
           done
@@ -313,14 +356,24 @@ jobs:
           )"
           output="$RUNNER_TEMP/native-deb-output"
           mkdir -p "$output"
-          packaging/build-deb.sh \
-            --version "$version" --output "$output" --arch amd64 \
-            --target-profile "$TARGET_PROFILE" \
-            --python-runtime-archive "$archive" \
-            --uv-executable "$uv" \
-            --bootstrap-catalog "$INPUT_ROOT/component-catalog-v1.json" \
-            --source-receipt "$INPUT_ROOT/native-installer-source-receipt-v1.json" \
+          schema_version="$(python - "$INPUT_ROOT/validated-locators.json" <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["schemaVersion"])
+          PY
+          )"
+          build_args=(
+            --version "$version" --output "$output" --arch amd64
+            --target-profile "$TARGET_PROFILE"
+            --python-runtime-archive "$archive"
+            --uv-executable "$uv"
+            --bootstrap-catalog "$INPUT_ROOT/component-catalog-v1.json"
+            --source-receipt "$INPUT_ROOT/native-installer-source-receipt-v${schema_version}.json"
             --verified-service-artifacts "$INPUT_ROOT/verified-service-artifacts/$TARGET_PROFILE"
+          )
+          if [[ "$schema_version" == 2 ]]; then
+            build_args+=(--bootstrap-catalog-v2 "$INPUT_ROOT/component-catalog-v2.json")
+          fi
+          packaging/build-deb.sh "${build_args[@]}"
           mapfile -t packages < <(find "$output" -maxdepth 1 -type f -name '*.deb' -print)
           test "${#packages[@]}" -eq 1
           mkdir -p "$RUNNER_TEMP/native-deb-result"
@@ -380,6 +433,11 @@ jobs:
           deb24=("$RUNNER_TEMP/native-release/ubuntu-24.04"/*.deb)
           test "${#deb22[@]}" -eq 1
           test "${#deb24[@]}" -eq 1
+          schema_version="$(python - "$inputs/validated-locators.json" <<'PY'
+          import json, sys
+          print(json.load(open(sys.argv[1], encoding="utf-8"))["schemaVersion"])
+          PY
+          )"
           channel=stable
           [[ "$SOURCE_REF" == refs/heads/develop ]] && channel=preview
           version="$(python - release-lock.json <<'PY'
@@ -390,10 +448,10 @@ jobs:
           print(name.removeprefix("cyrene-"))
           PY
           )"
-          python scripts/native_installer_release.py assemble \
+          assemble_args=(
             --release-id "native-installer-$channel-$SOURCE_COMMIT" \
             --source-ref "$SOURCE_REF" --source-commit "$SOURCE_COMMIT" \
-            --source-receipt "$inputs/native-installer-source-receipt-v1.json" \
+            --source-receipt "$inputs/native-installer-source-receipt-v${schema_version}.json" \
             --catalog "$inputs/component-catalog-v1.json" \
             --catalog-attestation "$inputs/component-catalog-v1.json.attestation.jsonl" \
             --python-runtime-lock packaging/python-runtime.lock.json \
@@ -401,18 +459,28 @@ jobs:
             --version "$version" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --deb-22 "${deb22[0]}" --deb-24 "${deb24[0]}" \
             --output "$RUNNER_TEMP/native-release/publish"
+          )
+          if [[ "$schema_version" == 2 ]]; then
+            assemble_args+=(
+              --active-catalog-v2 "$inputs/component-catalog-v2.json"
+              --active-catalog-v2-attestation "$inputs/component-catalog-v2.json.attestation.jsonl"
+            )
+          fi
+          python scripts/native_installer_release.py assemble "${assemble_args[@]}"
       - name: Create SLSA attestations for every Workspace release subject
         run: |
           set -euo pipefail
           release_dir="$RUNNER_TEMP/native-release/publish"
           (
             cd "$release_dir"
-            sha256sum \
-              SHA256SUMS \
-              native-installer-release-v1.json \
-              native-installer-source-receipt-v1.json \
-              python-runtime.lock.json release-lock.json \
-              cyrene_*.deb > "$release_dir/.native-release-subjects.sha256"
+            manifest="native-installer-release-v1.json"
+            receipt="native-installer-source-receipt-v1.json"
+            if [[ -f native-installer-release-v2.json ]]; then
+              manifest="native-installer-release-v2.json"
+              receipt="native-installer-source-receipt-v2.json"
+            fi
+            subjects=(SHA256SUMS "$manifest" "$receipt" python-runtime.lock.json release-lock.json cyrene_*.deb)
+            sha256sum "${subjects[@]}" > "$release_dir/.native-release-subjects.sha256"
           )
       - uses: actions/attest@v4
         with:
@@ -423,9 +491,11 @@ jobs:
           release_dir="$RUNNER_TEMP/native-release/publish"
           rm -f "$release_dir/.native-release-subjects.sha256"
           cd "$release_dir"
-          for subject in \
-            SHA256SUMS native-installer-release-v1.json native-installer-source-receipt-v1.json \
-            python-runtime.lock.json release-lock.json cyrene_*.deb; do
+          subjects=(SHA256SUMS native-installer-release-v1.json native-installer-source-receipt-v1.json python-runtime.lock.json release-lock.json cyrene_*.deb)
+          if [[ -f native-installer-release-v2.json ]]; then
+            subjects=(SHA256SUMS native-installer-release-v2.json native-installer-source-receipt-v2.json python-runtime.lock.json release-lock.json cyrene_*.deb)
+          fi
+          for subject in "${subjects[@]}"; do
             [[ -f "$subject" ]] || continue
             digest="sha256:$(sha256sum "$subject" | cut -d ' ' -f 1)"
             gh attestation download "$subject" --repo "$GITHUB_REPOSITORY" --predicate-type "$PREDICATE_TYPE"

@@ -66,6 +66,7 @@ PACKAGE_PREPARER_ARGS = (
     "--python",
     "/opt/cyrene/python/3.12.14/bin/python3.12",
 )
+PACKAGE_RUNTIME_COMMAND = Path("/usr/bin/cy-package-runtime")
 PACKAGE_POLICY_SCHEMA_VERSION = 1
 PACKAGE_RUNTIME_GROUP = "cyrene"
 PACKAGE_POLICY_OPERATIONS = (
@@ -83,6 +84,7 @@ PACKAGE_RUNTIME_OPERATIONS = (
 RAW_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 TYPED_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 INSTALLATION_ID = re.compile(r"installation-[0-9a-f]{32}\Z")
+PACKAGE_VERSION_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 MAX_RELEASE_ASSET_BYTES = 128 * 1024 * 1024
 MAX_POLICY_BYTES = 1024 * 1024
 MAX_BOOTSTRAP_INPUT_BYTES = 64 * 1024
@@ -127,6 +129,30 @@ class VerifiedPackageCandidate:
     archive_path: Path
     dependency_lock_path: Path
     preparer_wheel_path: Path
+
+
+@dataclass(frozen=True)
+class WorkloadPackageCandidate:
+    """Exact generic package identity selected by a verified workload plan.
+
+    The legacy fixed-package bootstrap keeps ``VerifiedPackageCandidate`` and its
+    stricter Yield-only policy. Workload installs use this independent shape so
+    a Catalog component ID can authorize a different dotted PackageId.
+    中文：通用工作负载包保留 Catalog 组件 ID 与包运行时 PackageId 的双重身份。
+    """
+
+    component_id: str
+    package_id: str
+    package_version: str
+    capability: str
+    interface_version: str
+    artifact_digest: str
+    archive_digest: str
+    descriptor_digest: str
+    manifest_digest: str
+    dependency_lock_digest: str
+    descriptor_path: Path
+    archive_path: Path
 
 
 @dataclass(frozen=True)
@@ -1036,6 +1062,598 @@ def build_offline_install_input(
             "dependency_lock_digest": candidate.dependency_lock_digest,
         },
     }
+
+
+def build_workload_offline_install_input(
+    candidate: WorkloadPackageCandidate,
+    *,
+    request_id: str,
+    maintenance: Any,
+    descriptor_path: Path,
+    archive_path: Path,
+) -> dict[str, Any]:
+    """Build the Platform request for one Catalog-selected plugin package.
+
+    Unlike ``build_offline_install_input``, the hold digest map is keyed by the
+    Catalog component ID and the Platform artifact digest remains distinct from
+    the ZIP archive digest. 中文：按 Catalog componentId 绑定 maintenance hold。
+    """
+
+    if not isinstance(candidate, WorkloadPackageCandidate):
+        raise PackageRuntimeBootstrapError("Workload package candidate is invalid")
+    if not isinstance(maintenance, dict) or set(maintenance) != {
+        "transaction_id",
+        "maintenance_token",
+        "target_kind",
+        "plan_id",
+        "plan_digest",
+        "component_artifact_digests",
+        "expected_gate_generation",
+        "expected_catalog_generation",
+    }:
+        raise PackageRuntimeBootstrapError("Package Runtime maintenance hold is malformed")
+    digest_map = maintenance.get("component_artifact_digests")
+    if (
+        not isinstance(request_id, str)
+        or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", request_id) is None
+        or not isinstance(descriptor_path, Path)
+        or not descriptor_path.is_absolute()
+        or not isinstance(archive_path, Path)
+        or not archive_path.is_absolute()
+        or not isinstance(maintenance.get("transaction_id"), str)
+        or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", maintenance["transaction_id"]) is None
+        or not isinstance(maintenance.get("maintenance_token"), str)
+        or not maintenance["maintenance_token"]
+        or maintenance.get("target_kind") != "PACKAGE_ONLY"
+        or not isinstance(maintenance.get("plan_id"), str)
+        or re.fullmatch(r"plan-[0-9a-f]{32}", maintenance["plan_id"]) is None
+        or not isinstance(maintenance.get("plan_digest"), str)
+        or TYPED_SHA256.fullmatch(maintenance["plan_digest"]) is None
+        or not isinstance(digest_map, dict)
+        or digest_map.get(candidate.component_id) != candidate.artifact_digest
+        or not digest_map
+        or any(
+            not isinstance(key, str)
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", key) is None
+            or not isinstance(value, str)
+            or TYPED_SHA256.fullmatch(value) is None
+            for key, value in digest_map.items()
+        )
+        or type(maintenance.get("expected_gate_generation")) is not int
+        or maintenance["expected_gate_generation"] < 1
+        or type(maintenance.get("expected_catalog_generation")) is not int
+        or maintenance["expected_catalog_generation"] < 1
+    ):
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime maintenance hold differs from candidate"
+        )
+    for value in (
+        candidate.artifact_digest,
+        candidate.archive_digest,
+        candidate.descriptor_digest,
+        candidate.manifest_digest,
+        candidate.dependency_lock_digest,
+    ):
+        if not isinstance(value, str) or TYPED_SHA256.fullmatch(value) is None:
+            raise PackageRuntimeBootstrapError("Workload package digest is invalid")
+    if (
+        re.fullmatch(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,7}", candidate.package_id) is None
+        or re.fullmatch(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,7}", candidate.capability) is None
+        or PACKAGE_VERSION_PATTERN.fullmatch(candidate.package_version) is None
+        or not candidate.component_id
+        or not descriptor_path.name == "descriptor.json"
+        or not archive_path.name == "archive.zip"
+    ):
+        raise PackageRuntimeBootstrapError("Workload package identity is malformed")
+    return {
+        "schema_version": 1,
+        "request_id": request_id,
+        "maintenance": dict(maintenance),
+        "candidate": {
+            "descriptor_path": str(descriptor_path),
+            "archive_path": str(archive_path),
+            "component_id": candidate.component_id,
+            "package_id": candidate.package_id,
+            "package_version": candidate.package_version,
+            "artifact_digest": candidate.artifact_digest,
+            "archive_digest": candidate.archive_digest,
+            "descriptor_digest": candidate.descriptor_digest,
+            "manifest_digest": candidate.manifest_digest,
+            "dependency_lock_digest": candidate.dependency_lock_digest,
+        },
+    }
+
+
+def stage_workload_offline_install_request(
+    candidate: WorkloadPackageCandidate,
+    *,
+    request_id: str,
+    maintenance: Any,
+    staging_root: Path = PACKAGE_BOOTSTRAP_STAGE_ROOT,
+) -> tuple[Path, Path, dict[str, Any]]:
+    """Copy signed descriptor/archive bytes into a recoverable root-only request.
+
+    Existing exact request bytes are accepted on retry; mismatched bytes or
+    identities are never replaced. 中文：重试仅复用完全相同的私有请求和资产。
+    """
+
+    if _effective_uid() != 0 or not staging_root.is_absolute():
+        raise PackageRuntimeBootstrapError("Package Runtime bootstrap staging requires root")
+    if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", request_id) is None:
+        raise PackageRuntimeBootstrapError("Package Runtime request ID is unsafe")
+    _ensure_root_directory(staging_root, 0o700)
+    request_directory = staging_root / request_id
+    _ensure_root_directory(request_directory, 0o700, parent=staging_root)
+    descriptor_path = request_directory / "descriptor.json"
+    archive_path = request_directory / "archive.zip"
+    request_path = request_directory / "request.json"
+    source_rows = (
+        (
+            candidate.descriptor_path,
+            descriptor_path,
+            candidate.descriptor_digest,
+            MAX_DESCRIPTOR_BYTES,
+        ),
+        (candidate.archive_path, archive_path, candidate.archive_digest, MAX_RELEASE_ASSET_BYTES),
+    )
+    for source, destination, digest, limit in source_rows:
+        contents = _safe_source_bytes(source, digest, limit)
+        if destination.exists() or destination.is_symlink():
+            existing = _safe_source_bytes(destination, digest, limit)
+            if existing != contents:
+                raise PackageRuntimeBootstrapError("Package Runtime retry asset differs")
+        else:
+            _write_root_file(destination, contents, 0o600)
+    request = build_workload_offline_install_input(
+        candidate,
+        request_id=request_id,
+        maintenance=maintenance,
+        descriptor_path=descriptor_path,
+        archive_path=archive_path,
+    )
+    serialized = _canonical_json(request)
+    if len(serialized) > MAX_BOOTSTRAP_INPUT_BYTES:
+        raise PackageRuntimeBootstrapError("Package Runtime bootstrap request is too large")
+    if request_path.exists() or request_path.is_symlink():
+        existing = _safe_source_bytes(
+            request_path,
+            "sha256:" + hashlib.sha256(serialized).hexdigest(),
+            MAX_BOOTSTRAP_INPUT_BYTES,
+        )
+        if existing != serialized:
+            raise PackageRuntimeBootstrapError("Package Runtime retry request differs")
+    else:
+        _write_root_file(request_path, serialized, 0o600)
+    return request_directory, request_path, request
+
+
+def validate_workload_installation_record(
+    candidate: WorkloadPackageCandidate,
+    record: Any,
+) -> dict[str, Any]:
+    """Validate the Platform's complete Package Runtime receipt for a workload."""
+
+    expected_fields = {
+        "record_version",
+        "installation_id",
+        "package_id",
+        "package_version",
+        "artifact_digest",
+        "archive_digest",
+        "capabilities",
+        "state",
+        "verification",
+        "dependencies",
+        "installed_at_unix_ms",
+    }
+    if not isinstance(record, dict) or set(record) != expected_fields:
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime workload installation receipt is malformed"
+        )
+    verification = record.get("verification")
+    dependencies = record.get("dependencies")
+    if not isinstance(verification, dict) or set(verification) != {
+        "verifier",
+        "verified_at_unix_ms",
+        "artifact_digest",
+        "archive_digest",
+        "descriptor_digest",
+        "manifest_digest",
+        "dependency_lock_digest",
+    }:
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime workload verification receipt is incomplete"
+        )
+    if not isinstance(dependencies, dict) or set(dependencies) != {
+        "preparer",
+        "prepared_at_unix_ms",
+        "lock_digest",
+        "runtime_digest",
+        "runtime_executable",
+    }:
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime workload dependency receipt is incomplete"
+        )
+    expected_installation = (
+        "installation-"
+        + hashlib.sha256(
+            f"{candidate.package_id}\0{candidate.package_version}\0{candidate.artifact_digest}".encode()
+        ).hexdigest()[:32]
+    )
+    if (
+        type(record.get("record_version")) is not int
+        or record["record_version"] != 1
+        or record.get("installation_id") != expected_installation
+        or INSTALLATION_ID.fullmatch(str(record.get("installation_id"))) is None
+        or record.get("package_id") != candidate.package_id
+        or record.get("package_version") != candidate.package_version
+        or record.get("artifact_digest") != candidate.artifact_digest
+        or record.get("archive_digest") != candidate.archive_digest
+        or record.get("capabilities") != [candidate.capability]
+        or record.get("state") != "INSTALLED"
+        or type(record.get("installed_at_unix_ms")) is not int
+        or record["installed_at_unix_ms"] < 1
+        or verification.get("artifact_digest") != candidate.artifact_digest
+        or verification.get("archive_digest") != candidate.archive_digest
+        or verification.get("descriptor_digest") != candidate.descriptor_digest
+        or verification.get("manifest_digest") != candidate.manifest_digest
+        or verification.get("dependency_lock_digest") != candidate.dependency_lock_digest
+        or dependencies.get("lock_digest") != candidate.dependency_lock_digest
+        or not isinstance(dependencies.get("runtime_executable"), str)
+        or not Path(dependencies["runtime_executable"]).is_absolute()
+    ):
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime workload receipt differs from signed bytes"
+        )
+    return record
+
+
+def run_workload_offline_install(
+    candidate: WorkloadPackageCandidate,
+    request: dict[str, Any],
+    *,
+    command: Path = PACKAGE_RUNTIME_COMMAND,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    """Install one generic package using Platform's fixed root-only CLI."""
+
+    request_id = request.get("request_id")
+    request_directory = PACKAGE_BOOTSTRAP_STAGE_ROOT / str(request_id)
+    request_path = request_directory / "request.json"
+    request_bytes = _canonical_json(request)
+    try:
+        stored = _safe_source_bytes(
+            request_path,
+            "sha256:" + hashlib.sha256(request_bytes).hexdigest(),
+            MAX_BOOTSTRAP_INPUT_BYTES,
+        )
+        if stored != request_bytes:
+            raise PackageRuntimeBootstrapError("Package Runtime staged request changed")
+        for filename, digest, limit in (
+            ("descriptor.json", candidate.descriptor_digest, MAX_DESCRIPTOR_BYTES),
+            ("archive.zip", candidate.archive_digest, MAX_RELEASE_ASSET_BYTES),
+        ):
+            _safe_source_bytes(request_directory / filename, digest, limit)
+    except (OSError, PackageRuntimeBootstrapError) as error:
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime staged workload request is unsafe"
+        ) from error
+    argv = [
+        str(command),
+        "--root",
+        str(PACKAGE_RUNTIME_STATE_ROOT),
+        "--dependency-preparer",
+        str(PACKAGE_PREPARER_COMMAND),
+    ]
+    for argument in PACKAGE_PREPARER_ARGS:
+        argv.extend(["--dependency-preparer-arg", argument])
+    argv.extend(["--bootstrap-install-offline", "--bootstrap-input-file", str(request_path)])
+    try:
+        completed = runner(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+            env={
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            },
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime offline install failed to run"
+        ) from error
+    lines = completed.stdout.splitlines()
+    if completed.returncode != 0 or len(lines) != 1:
+        raise PackageRuntimeBootstrapError("Package Runtime offline install did not complete")
+    try:
+        response = json.loads(lines[0], object_pairs_hook=_unique_object)
+    except (json.JSONDecodeError, PackageRuntimeBootstrapError) as error:
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime install receipt is malformed"
+        ) from error
+    return validate_workload_offline_install_result(candidate, request, response)
+
+
+def validate_workload_offline_install_result(
+    candidate: WorkloadPackageCandidate,
+    request: dict[str, Any],
+    response: Any,
+) -> dict[str, Any]:
+    """Require the exact Platform hold echo and independently validate its record."""
+
+    result_fields = {
+        "transaction_id",
+        "target_kind",
+        "plan_id",
+        "plan_digest",
+        "component_artifact_digests",
+        "component_id",
+        "artifact_digest",
+        "expected_gate_generation",
+        "expected_catalog_generation",
+        "gate_generation",
+        "catalog_generation",
+        "installation",
+    }
+    result = response.get("result") if isinstance(response, dict) else None
+    maintenance = request.get("maintenance")
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"request_id", "ok", "result"}
+        or response.get("request_id") != request.get("request_id")
+        or response.get("ok") is not True
+        or not isinstance(result, dict)
+        or set(result) != result_fields
+        or not isinstance(maintenance, dict)
+        or result.get("transaction_id") != maintenance.get("transaction_id")
+        or result.get("target_kind") != "PACKAGE_ONLY"
+        or result.get("plan_id") != maintenance.get("plan_id")
+        or result.get("plan_digest") != maintenance.get("plan_digest")
+        or result.get("component_artifact_digests") != maintenance.get("component_artifact_digests")
+        or result.get("component_id") != candidate.component_id
+        or result.get("artifact_digest") != candidate.artifact_digest
+        or result.get("expected_gate_generation") != maintenance.get("expected_gate_generation")
+        or result.get("expected_catalog_generation")
+        != maintenance.get("expected_catalog_generation")
+        or result.get("gate_generation") != maintenance.get("expected_gate_generation")
+        or result.get("catalog_generation") != maintenance.get("expected_catalog_generation")
+        or request.get("candidate", {}).get("component_id") != candidate.component_id
+        or request.get("candidate", {}).get("package_id") != candidate.package_id
+    ):
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime install receipt differs from its held request"
+        )
+    return validate_workload_installation_record(candidate, result.get("installation"))
+
+
+def build_workload_offline_uninstall_input(
+    *,
+    request_id: str,
+    maintenance: Any,
+    installation: Any,
+) -> dict[str, Any]:
+    """Build an exact held uninstall request from an authenticated UDS record."""
+
+    if not isinstance(maintenance, dict) or set(maintenance) != {
+        "transaction_id",
+        "maintenance_token",
+        "target_kind",
+        "plan_id",
+        "plan_digest",
+        "component_artifact_digests",
+        "expected_gate_generation",
+        "expected_catalog_generation",
+    }:
+        raise PackageRuntimeBootstrapError("Package Runtime maintenance hold is malformed")
+    required = {
+        "component_id",
+        "installation_id",
+        "package_id",
+        "package_version",
+        "artifact_digest",
+        "archive_digest",
+        "descriptor_digest",
+        "manifest_digest",
+        "dependency_lock_digest",
+    }
+    if not isinstance(installation, dict) or set(installation) != required:
+        raise PackageRuntimeBootstrapError("Package Runtime uninstall identity is malformed")
+    component_id = installation.get("component_id")
+    digest_map = maintenance.get("component_artifact_digests")
+    if (
+        not isinstance(request_id, str)
+        or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", request_id) is None
+        or maintenance.get("target_kind") != "PACKAGE_ONLY"
+        or not isinstance(maintenance.get("transaction_id"), str)
+        or re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", maintenance["transaction_id"]) is None
+        or not isinstance(maintenance.get("maintenance_token"), str)
+        or not maintenance["maintenance_token"]
+        or not isinstance(maintenance.get("plan_id"), str)
+        or re.fullmatch(r"plan-[0-9a-f]{32}", maintenance["plan_id"]) is None
+        or not isinstance(maintenance.get("plan_digest"), str)
+        or TYPED_SHA256.fullmatch(maintenance["plan_digest"]) is None
+        or not isinstance(digest_map, dict)
+        or digest_map.get(component_id) != installation.get("artifact_digest")
+        or type(maintenance.get("expected_gate_generation")) is not int
+        or maintenance["expected_gate_generation"] < 1
+        or type(maintenance.get("expected_catalog_generation")) is not int
+        or maintenance["expected_catalog_generation"] < 1
+        or not isinstance(component_id, str)
+        or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", component_id) is None
+        or not isinstance(installation.get("installation_id"), str)
+        or INSTALLATION_ID.fullmatch(installation["installation_id"]) is None
+        or not isinstance(installation.get("package_id"), str)
+        or re.fullmatch(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){1,7}", installation["package_id"])
+        is None
+        or not isinstance(installation.get("package_version"), str)
+        or PACKAGE_VERSION_PATTERN.fullmatch(installation["package_version"]) is None
+        or any(
+            not isinstance(installation.get(field), str)
+            or TYPED_SHA256.fullmatch(installation[field]) is None
+            for field in (
+                "artifact_digest",
+                "archive_digest",
+                "descriptor_digest",
+                "manifest_digest",
+                "dependency_lock_digest",
+            )
+        )
+    ):
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime uninstall identity differs from held plan"
+        )
+    return {
+        "schema_version": 1,
+        "request_id": request_id,
+        "maintenance": dict(maintenance),
+        "installation": dict(installation),
+    }
+
+
+def stage_workload_offline_uninstall_request(
+    *,
+    request_id: str,
+    maintenance: Any,
+    installation: Any,
+    staging_root: Path = PACKAGE_BOOTSTRAP_STAGE_ROOT,
+) -> tuple[Path, Path, dict[str, Any]]:
+    """Write one root-private uninstall request without package payload files."""
+
+    if _effective_uid() != 0 or not staging_root.is_absolute():
+        raise PackageRuntimeBootstrapError("Package Runtime bootstrap staging requires root")
+    _ensure_root_directory(staging_root, 0o700)
+    request_directory = staging_root / request_id
+    _ensure_root_directory(request_directory, 0o700, parent=staging_root)
+    request = build_workload_offline_uninstall_input(
+        request_id=request_id,
+        maintenance=maintenance,
+        installation=installation,
+    )
+    content = _canonical_json(request)
+    if len(content) > MAX_BOOTSTRAP_INPUT_BYTES:
+        raise PackageRuntimeBootstrapError("Package Runtime uninstall request is too large")
+    request_path = request_directory / "request.json"
+    if request_path.exists() or request_path.is_symlink():
+        existing = _safe_source_bytes(
+            request_path,
+            "sha256:" + hashlib.sha256(content).hexdigest(),
+            MAX_BOOTSTRAP_INPUT_BYTES,
+        )
+        if existing != content:
+            raise PackageRuntimeBootstrapError("Package Runtime uninstall retry identity differs")
+    else:
+        _write_root_file(request_path, content, 0o600)
+    return request_directory, request_path, request
+
+
+def run_workload_offline_uninstall(
+    request: dict[str, Any],
+    *,
+    command: Path = PACKAGE_RUNTIME_COMMAND,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    """Remove one exact unreferenced installation through Platform's held CLI."""
+
+    request_id = request.get("request_id")
+    request_directory = PACKAGE_BOOTSTRAP_STAGE_ROOT / str(request_id)
+    request_path = request_directory / "request.json"
+    content = _canonical_json(request)
+    _safe_source_bytes(
+        request_path,
+        "sha256:" + hashlib.sha256(content).hexdigest(),
+        MAX_BOOTSTRAP_INPUT_BYTES,
+    )
+    argv = [
+        str(command),
+        "--root",
+        str(PACKAGE_RUNTIME_STATE_ROOT),
+        "--dependency-preparer",
+        str(PACKAGE_PREPARER_COMMAND),
+    ]
+    for argument in PACKAGE_PREPARER_ARGS:
+        argv.extend(["--dependency-preparer-arg", argument])
+    argv.extend(["--bootstrap-uninstall-offline", "--bootstrap-input-file", str(request_path)])
+    try:
+        completed = runner(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+            env={
+                "LANG": "C.UTF-8",
+                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            },
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime offline uninstall failed to run"
+        ) from error
+    lines = completed.stdout.splitlines()
+    if completed.returncode != 0 or len(lines) != 1:
+        raise PackageRuntimeBootstrapError("Package Runtime offline uninstall did not complete")
+    try:
+        response = json.loads(lines[0], object_pairs_hook=_unique_object)
+    except (json.JSONDecodeError, PackageRuntimeBootstrapError) as error:
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime uninstall receipt is malformed"
+        ) from error
+    return validate_workload_offline_uninstall_result(request, response)
+
+
+def validate_workload_offline_uninstall_result(
+    request: dict[str, Any], response: Any
+) -> dict[str, Any]:
+    """Require Platform's secret-free uninstall receipt to echo every held field."""
+
+    result_fields = {
+        "transaction_id",
+        "target_kind",
+        "plan_id",
+        "plan_digest",
+        "component_artifact_digests",
+        "component_id",
+        "artifact_digest",
+        "expected_gate_generation",
+        "expected_catalog_generation",
+        "gate_generation",
+        "catalog_generation",
+        "installation",
+        "already_absent",
+    }
+    result = response.get("result") if isinstance(response, dict) else None
+    maintenance = request.get("maintenance")
+    installation = request.get("installation")
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"request_id", "ok", "result"}
+        or response.get("request_id") != request.get("request_id")
+        or response.get("ok") is not True
+        or not isinstance(result, dict)
+        or set(result) != result_fields
+        or not isinstance(maintenance, dict)
+        or not isinstance(installation, dict)
+        or result.get("transaction_id") != maintenance.get("transaction_id")
+        or result.get("target_kind") != "PACKAGE_ONLY"
+        or result.get("plan_id") != maintenance.get("plan_id")
+        or result.get("plan_digest") != maintenance.get("plan_digest")
+        or result.get("component_artifact_digests") != maintenance.get("component_artifact_digests")
+        or result.get("component_id") != installation.get("component_id")
+        or result.get("artifact_digest") != installation.get("artifact_digest")
+        or result.get("expected_gate_generation") != maintenance.get("expected_gate_generation")
+        or result.get("expected_catalog_generation")
+        != maintenance.get("expected_catalog_generation")
+        or result.get("gate_generation") != maintenance.get("expected_gate_generation")
+        or result.get("catalog_generation") != maintenance.get("expected_catalog_generation")
+        or result.get("installation") != installation
+        or type(result.get("already_absent")) is not bool
+    ):
+        raise PackageRuntimeBootstrapError(
+            "Package Runtime uninstall receipt differs from held identity"
+        )
+    return result
 
 
 def _safe_source_bytes(path: Path, expected_digest: str, limit: int) -> bytes:
