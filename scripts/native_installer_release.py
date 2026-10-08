@@ -98,7 +98,7 @@ BOOTSTRAP_CATALOG_BINDING_PATH = "usr/share/cyrene/bootstrap-catalog-binding-v1.
 BOOTSTRAP_CATALOG_BINDING_LOADER_PATH = "usr/lib/cyrene/scripts/bootstrap_catalog_binding.py"
 FROZEN_CATALOG_V1_GENERATION = 13
 FROZEN_CATALOG_V1_SHA256 = "79866ed32c4393e5bbbd3e36144ae080f316e9bf2695a0768bdbbfa98bf76247"
-ACTIVE_CATALOG_V2_GENERATION = 14
+MINIMUM_ACTIVE_CATALOG_V2_GENERATION = 14
 INSTALL_CONTRACT_POLICY = {
     "schemaVersion": 1,
     "initializationMode": "stage-only",
@@ -271,6 +271,16 @@ def _catalog_tag_identity(release_id: str) -> tuple[int, str, str] | None:
     if match is None:
         return None
     return (2 if match.group(1) else 1, match.group(2), match.group(3))
+
+
+def _require_active_catalog_v2_generation(generation: Any, label: str) -> int:
+    """Reject v2 catalog rollback while returning the exact signed generation."""
+
+    if type(generation) is not int or generation < MINIMUM_ACTIVE_CATALOG_V2_GENERATION:
+        raise ReleaseError(
+            f"{label} must be an integer generation at least {MINIMUM_ACTIVE_CATALOG_V2_GENERATION}"
+        )
+    return generation
 
 
 def _read_dispatch_inputs(path: Path, source_ref: str, source_commit: str) -> dict[str, Any]:
@@ -1644,7 +1654,10 @@ def _inspect_deb_initialization(
                     baseline_v1.get(key) != catalog_evidence.get(key) for key in catalog_evidence
                 )
                 or active_v2.get("assetName") != "component-catalog-v2.json"
-                or active_v2.get("generation") != ACTIVE_CATALOG_V2_GENERATION
+                or _require_active_catalog_v2_generation(
+                    active_v2.get("generation"), "activeV2 catalog evidence generation"
+                )
+                != active_v2.get("generation")
             ):
                 raise ReleaseError(
                     "DEB baseline/active Workspace catalog bytes differ from the source receipt"
@@ -1660,18 +1673,21 @@ def _inspect_deb_initialization(
             if (
                 type(active_catalog_document.get("schemaVersion")) is not int
                 or active_catalog_document.get("schemaVersion") != 2
-                or active_catalog_document.get("generation") != ACTIVE_CATALOG_V2_GENERATION
+                or _require_active_catalog_v2_generation(
+                    active_catalog_document.get("generation"), "DEB active Workspace catalog"
+                )
+                != active_v2.get("generation")
             ):
                 raise ReleaseError("DEB active Workspace catalog schema or generation is invalid")
             bound_catalog_path = catalog_v2_path
             bound_catalog_evidence = {
                 key: value for key, value in active_v2.items() if key != "generation"
             }
-            bound_catalog_generation = ACTIVE_CATALOG_V2_GENERATION
+            bound_catalog_generation = active_v2["generation"]
             active_catalog_proof = {
                 "workspaceCatalogV2Path": f"/{BOOTSTRAP_CATALOG_V2_PATH}",
                 "workspaceCatalogV2Sha256": _sha256(catalog_v2_path),
-                "workspaceCatalogV2Generation": ACTIVE_CATALOG_V2_GENERATION,
+                "workspaceCatalogV2Generation": active_v2["generation"],
             }
         elif catalog_v2_path.exists():
             raise ReleaseError("a v1 source receipt cannot package an active v2 Workspace catalog")
@@ -1934,6 +1950,8 @@ def _verify_catalog_input(
         or catalog.get("schemaVersion") != expected_schema
         or type(catalog.get("generation")) is not int
         or catalog.get("generation") < 1
+        or type(metadata.get("generation")) is not int
+        or metadata.get("generation") != catalog.get("generation")
         or (expected_generation is not None and catalog.get("generation") != expected_generation)
     ):
         raise ReleaseError(
@@ -2010,12 +2028,17 @@ def _record_inputs(arguments: argparse.Namespace) -> int:
             arguments.active_catalog_v2_attestation,
             active_locator,
             expected_schema=2,
-            expected_generation=ACTIVE_CATALOG_V2_GENERATION,
+            expected_generation=None,
             channel=channel,
+        )
+        active_generation = _require_active_catalog_v2_generation(
+            active_catalog.get("generation"), "selected active v2 catalog"
         )
         active_evidence = _catalog_evidence(
             arguments.active_catalog_v2, arguments.active_catalog_v2_attestation, active_metadata
         )
+        if active_evidence.get("generation") != active_generation:
+            raise ReleaseError("active v2 catalog evidence generation differs from its exact bytes")
     else:
         if any(
             item is not None
@@ -2141,11 +2164,20 @@ def _validate_source_receipt(
             raise ReleaseError("v2 source receipt must bind baselineV1 and activeV2 catalogs")
         channel = _source_channel(str(source.get("ref", "")))
         expected = {
-            "baselineV1": (1, "component-catalog-v1.json", FROZEN_CATALOG_V1_GENERATION),
-            "activeV2": (2, "component-catalog-v2.json", ACTIVE_CATALOG_V2_GENERATION),
+            "baselineV1": (1, "component-catalog-v1.json"),
+            "activeV2": (2, "component-catalog-v2.json"),
         }
-        for key, (schema_version, asset_name, generation) in expected.items():
+        for key, (schema_version, asset_name) in expected.items():
             evidence = catalogs[key]
+            generation = evidence.get("generation") if isinstance(evidence, dict) else None
+            if key == "baselineV1":
+                generation_valid = (
+                    type(generation) is int and generation == FROZEN_CATALOG_V1_GENERATION
+                )
+            else:
+                generation_valid = (
+                    type(generation) is int and generation >= MINIMUM_ACTIVE_CATALOG_V2_GENERATION
+                )
             if not isinstance(evidence, dict) or set(evidence) != {
                 "repository",
                 "workflow",
@@ -2169,8 +2201,7 @@ def _validate_source_receipt(
                 or not isinstance(catalog_source, dict)
                 or catalog_source != {"ref": catalog_source.get("ref"), "commit": identity[2]}
                 or catalog_source.get("ref") not in CHANNEL_REFS[channel]
-                or type(evidence.get("generation")) is not int
-                or evidence.get("generation") != generation
+                or not generation_valid
                 or not SHA256_PATTERN.fullmatch(str(evidence.get("sha256", "")))
                 or not SHA256_PATTERN.fullmatch(str(evidence.get("attestationBundleSha256", "")))
             ):
@@ -2228,7 +2259,7 @@ def _validate_source_receipt(
                     not isinstance(row, dict)
                     or row.get("workspaceCatalogV2Path") != f"/{BOOTSTRAP_CATALOG_V2_PATH}"
                     or row.get("workspaceCatalogV2Sha256") != active["sha256"]
-                    or row.get("workspaceCatalogV2Generation") != ACTIVE_CATALOG_V2_GENERATION
+                    or row.get("workspaceCatalogV2Generation") != active["generation"]
                 ):
                     raise ReleaseError(
                         "v2 source receipt active catalog target evidence is invalid"
@@ -3110,14 +3141,31 @@ def verify_release_directory(
                 f"Workspace {catalog_key} catalog bytes or attestation bundle differ from source receipt"
             )
         catalog_document = _read_json_object(catalog_path, f"Workspace {catalog_key} catalog")
-        expected_schema, expected_generation = (1, 13) if catalog_key == "baselineV1" else (2, 14)
+        expected_schema = 1 if catalog_key == "baselineV1" else 2
+        receipt_generation = catalog_receipt.get("generation")
         if manifest.get("schemaVersion") == 1:
-            expected_generation = catalog_document.get("generation")
+            receipt_generation = catalog_document.get("generation")
+            generation_valid = type(receipt_generation) is int and receipt_generation >= 1
+        elif catalog_key == "baselineV1":
+            generation_valid = (
+                type(receipt_generation) is int
+                and receipt_generation == FROZEN_CATALOG_V1_GENERATION
+            )
+        else:
+            try:
+                _require_active_catalog_v2_generation(
+                    receipt_generation, "release directory activeV2 receipt"
+                )
+            except ReleaseError:
+                generation_valid = False
+            else:
+                generation_valid = True
         if (
             type(catalog_document.get("schemaVersion")) is not int
             or catalog_document.get("schemaVersion") != expected_schema
             or type(catalog_document.get("generation")) is not int
-            or catalog_document.get("generation") != expected_generation
+            or not generation_valid
+            or catalog_document.get("generation") != receipt_generation
         ):
             raise ReleaseError(f"Workspace {catalog_key} catalog schema or generation is invalid")
         catalog_source = catalog_receipt["source"]
@@ -3707,7 +3755,7 @@ def _prepare_bootstrap_catalog_binding(arguments: argparse.Namespace) -> int:
                 type(active_catalog.get("schemaVersion")) is not int
                 or active_catalog.get("schemaVersion") != 2
                 or type(active_generation) is not int
-                or active_generation != ACTIVE_CATALOG_V2_GENERATION
+                or active_generation < MINIMUM_ACTIVE_CATALOG_V2_GENERATION
                 or not isinstance(active_evidence, dict)
                 or active_evidence.get("assetName") != active_catalog_path.name
                 or active_evidence.get("generation") != active_generation
