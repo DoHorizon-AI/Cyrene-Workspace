@@ -1,0 +1,35 @@
+name: Task hygiene safeguards
+
+on:
+  push:
+    branches: [develop, main, release]
+    paths:
+      - scripts/task_hygiene.py
+      - tests/test_task_hygiene.py
+      - .github/workflows/task-hygiene.yml
+  pull_request:
+    branches: [develop, main, release]
+    paths:
+      - scripts/task_hygiene.py
+      - tests/test_task_hygiene.py
+      - .github/workflows/task-hygiene.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  safeguards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install pinned verification tools
+        run: python -m pip install pytest==9.1.1 ruff==0.16.5
+      - name: Check cleanup code and real-Git regressions
+        run: |
+          ruff check scripts/task_hygiene.py tests/test_task_hygiene.py
+          ruff format --check scripts/task_hygiene.py tests/test_task_hygiene.py
+          pytest -q tests/test_task_hygiene.py

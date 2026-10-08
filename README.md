@@ -111,6 +111,10 @@ Use canonical repository names (or clean 1:1 convenience aliases like `platform`
 # Safely remove clean task worktree
 .\agent-worktree.ps1 remove -Role idea-spring
 ```
+
+Delivery includes remote merge verification and cleanup of temporary worktrees and task branches. Follow [AGENTS.md](AGENTS.md) and the [task lifecycle](docs/TASK_LIFECYCLE.md); use `scripts/task_hygiene.py` for a guarded plan/apply pass. Record unfinished or running work rather than deleting it by age.
+
+中文：交付须包含合并回读和工作区/任务分支清理。按上述规范运行安全脚本，明确记录未完成和运行占用的工作，不按日期直接删除。
 ---
 <!-- Chinese Translation / 中文翻译 -->
 
