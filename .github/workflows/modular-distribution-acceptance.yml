@@ -111,6 +111,7 @@ jobs:
               "catalyst_installed_acceptance_producer",
               "catalyst_independent_bundle_consumer",
               "catalyst_service_restart_recovery",
+              "installer_interrupted_transaction_recovery",
               "host_reboot_recovery",
               "missing_selection_gate",
               "version_conflict_gate",
@@ -288,12 +289,20 @@ jobs:
               phase("release_pins_validation", lambda: (
                   validate_pin_shape(load_json(pins_path)) or {"schemaVersion": 1, "status": "valid"}
               ))
+              if "echo" in load_json(pins_path)["workloads"]:
+                  record(
+                      "echo_exact_match_evaluate_uninstall",
+                      "FAIL",
+                      "optional Echo pins are not executable until the signed OCI installer, installed evaluator, and safe uninstall contracts are integrated",
+                  )
+                  raise RuntimeError("Echo pins are schema-valid but this workflow revision cannot execute the installed Echo lifecycle")
               phase("runner_identity", runner_identity)
               record("host_reboot_recovery", "NOT_RUN", "the disposable GitHub-hosted VM is not rebooted by this job")
-              record("version_conflict_gate", "NOT_RUN", "requires a published, pinned conflict fixture or resolver test contract")
-              record("offline_retry_gate", "NOT_RUN", "no isolated, reversible network-failure control is published")
+              record("version_conflict_gate", "NOT_RUN", "runs against the read-only exact Catalyst resolution before staging")
+              record("offline_retry_gate", "NOT_RUN", "runs after the exact workload plan is checked using a network-isolated stage subprocess")
+              record("installer_interrupted_transaction_recovery", "NOT_RUN", "no official deferred-transaction fault-injection and resume contract is published; acceptance never edits installer journals")
               record("client_static_web_http", "NOT_RUN", "runs after the selected static-Web release has been installed and its exact host receipt is available")
-              record("echo_exact_match_evaluate_uninstall", "NOT_RUN", "optional Echo trial is not enabled by this workflow revision")
+              record("echo_exact_match_evaluate_uninstall", "NOT_RUN", "no exact Echo OCI, Runtime SDK, and exact-match plugin pins are supplied")
               record("plugins_platform_supervision", "NOT_RUN", "runs after exact Package Runtime policy and Platform UDS binding readback")
               record("client_release_integration", "NOT_RUN", "Client publication/integration gate is not yet supplied")
 
@@ -337,7 +346,7 @@ jobs:
               require(type(catalog["generation"]) is int and catalog["generation"] > 0, "catalog generation pin is invalid")
               workloads = value["workloads"]
               require(isinstance(workloads, dict) and "catalyst" in workloads, "Catalyst workload pins are required")
-              require(set(workloads) == {"catalyst"}, "this workflow revision accepts only Catalyst workload pins")
+              require(set(workloads) in ({"catalyst"}, {"catalyst", "echo"}), "workload pins may contain Catalyst and optional Echo only")
               for workload_id, workload in workloads.items():
                   required_workload_fields = {"workloadId", "targetId", "catalogDigest", "selectedComponents"}
                   if workload_id == "catalyst":
@@ -370,6 +379,22 @@ jobs:
                           control_pin.get("targetId") == "linux-ubuntu-24.04-x86_64-node-24",
                           "Client Control pin must use the Ubuntu 24.04 Node 24 target",
                       )
+                  if workload_id == "echo":
+                      echo_targets = {
+                          "cyrene-echo": "linux-ubuntu-24.04-x86_64-oci",
+                          "cyrene-runtime-maintenance-sdk": "linux-ubuntu-24.04-x86_64-python-3.12-library",
+                          "cyrene-evaluation-exact-match": "linux-ubuntu-24.04-x86_64-python-3.12",
+                      }
+                      echo_rows = {row["componentId"]: row for row in rows}
+                      require(
+                          set(echo_targets) <= set(echo_rows),
+                          "optional Echo pins must include the OCI Product, Runtime SDK, and exact-match plugin identities",
+                      )
+                      for component_id, target_id in echo_targets.items():
+                          require(
+                              echo_rows[component_id].get("targetId") == target_id,
+                              f"Echo pin target differs for {component_id}",
+                          )
                   for row in rows:
                       required_component_fields = {
                           "componentId", "targetId", "version", "releaseId", "manifestDigest",
@@ -765,9 +790,14 @@ jobs:
               return projection
 
           def workload_request(
-              operation: str, *, preserve_read_token: bool = False, **fields: Any
+              operation: str,
+              *,
+              preserve_read_token: bool = False,
+              network_isolated: bool = False,
+              allow_error: bool = False,
+              **fields: Any,
           ) -> dict[str, Any]:
-              """Call the fixed installed JSONL API as root and preserve exact envelopes."""
+              """Call the fixed installed JSONL API, optionally isolating one child process."""
               global WORKLOAD_REQUEST_SEQUENCE
               WORKLOAD_REQUEST_SEQUENCE += 1
               request = {"protocolVersion": WORKLOAD_PROTOCOL, "operation": operation, **fields}
@@ -775,19 +805,39 @@ jobs:
               if preserve_read_token:
                   require(bool(os.environ.get("GH_TOKEN")), "read-only GH_TOKEN is unavailable for signed release resolution")
                   command.append("--preserve-env=GH_TOKEN")
+              if network_isolated:
+                  # A fresh Linux network namespace makes this one root command unable to
+                  # reach GitHub while leaving the host network and Unix sockets untouched.
+                  command.extend(["/usr/bin/unshare", "--net"])
               command.extend(["/usr/bin/cyrene", "workload", "--json"])
               completed = run(
                   command,
                   label=f"workload-{operation}-{WORKLOAD_REQUEST_SEQUENCE:02d}",
                   timeout=1800,
                   input_text=json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n",
+                  retain_output=not network_isolated,
               )
               lines = completed.stdout.splitlines()
               require(len(lines) == 1, f"workload {operation} must return exactly one JSONL envelope")
               response = json.loads(lines[0])
               require(response.get("protocolVersion") == WORKLOAD_PROTOCOL and response.get("operation") == operation, f"workload {operation} envelope identity differs")
               path = root() / "evidence" / f"workload-{operation}-{WORKLOAD_REQUEST_SEQUENCE:02d}.json"
-              write_json(path, {"request": request, "response": response})
+              evidence_response = response
+              if network_isolated and response.get("ok") is False:
+                  error = response.get("error")
+                  require(isinstance(error, dict), "isolated workload request returned no error object")
+                  evidence_response = {
+                      "protocolVersion": response["protocolVersion"],
+                      "ok": False,
+                      "operation": response["operation"],
+                      "error": {
+                          "code": error.get("code"),
+                          "retryable": error.get("retryable"),
+                      },
+                  }
+              write_json(path, {"request": request, "response": evidence_response})
+              if allow_error:
+                  return response
               require(response.get("ok") is True, f"workload {operation} failed: {response.get('error')}")
               return response["result"]
 
@@ -812,6 +862,144 @@ jobs:
               require(set(actual) == set(expected), f"{context} selected component set differs from root pins")
               for component_id, pin in expected.items():
                   compare_nested(actual[component_id], pin, f"{context}.{component_id}")
+
+          def assert_staged_plan(staged: Any, workload: dict[str, Any], checked: dict[str, Any], context: str) -> None:
+              """Require a staged response to preserve the checked plan and exact pinned set."""
+              require(isinstance(staged, dict), f"{context} returned no staged result")
+              require(staged.get("status") == "staged", f"{context} did not reach staged state")
+              require(staged.get("planId") == checked["planId"], f"{context} changed the checked plan ID")
+              require(staged.get("planDigest") == checked["planDigest"], f"{context} changed the checked plan digest")
+              require(staged.get("catalogDigest") == workload["catalogDigest"], f"{context} changed the pinned catalog")
+              require(staged.get("workloadId") == "catalyst" and staged.get("targetId") == workload["targetId"], f"{context} changed the workload target")
+              require(staged.get("action") == "install", f"{context} changed the checked action")
+              assert_selected_components(staged.get("components"), workload["selectedComponents"], context)
+
+          def version_conflict_readonly_check(checked: dict[str, Any], workload: dict[str, Any]) -> dict[str, Any]:
+              """Confirm the exact signed resolution has no version-conflict blocker before staging."""
+              require(checked.get("status") == "ready", "read-only version-conflict check needs a ready exact plan")
+              resolution = checked.get("resolution")
+              require(isinstance(resolution, dict), "read-only version-conflict check has no resolver result")
+              top_blockers = checked.get("blockers", [])
+              resolver_blockers = resolution.get("blockers", [])
+              require(isinstance(top_blockers, list) and isinstance(resolver_blockers, list), "read-only version-conflict blocker lists are malformed")
+              blocker_rows = [
+                  row
+                  for source in (top_blockers, resolver_blockers)
+                  for row in source
+                  if isinstance(row, dict)
+              ]
+              conflict_rows = [row for row in blocker_rows if row.get("code") == "VERSION_CONFLICT"]
+              require(not conflict_rows, "exact Catalyst resolver plan contains a VERSION_CONFLICT blocker")
+              return {
+                  "planId": checked.get("planId"),
+                  "planDigest": checked.get("planDigest"),
+                  "catalogDigest": workload["catalogDigest"],
+                  "selectedComponentIds": [row["componentId"] for row in workload["selectedComponents"]],
+                  "versionConflictBlockerCount": 0,
+                  "mutatingRequestsSent": 0,
+                  "scope": "read-only exact selected workload resolution",
+              }
+
+          def offline_stage_retry(workload: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+              """Isolate stage networking, then prove same-plan retry or report a warm-cache result."""
+              fields = {
+                  "workloadId": "catalyst",
+                  "targetId": workload["targetId"],
+                  "action": "install",
+                  "planId": checked["planId"],
+                  "planDigest": checked["planDigest"],
+              }
+              failed = workload_request(
+                  "stage",
+                  preserve_read_token=True,
+                  network_isolated=True,
+                  allow_error=True,
+                  **fields,
+              )
+              def active_selected_components() -> list[str]:
+                  inventory = workload_request("status", workloadId="catalyst")
+                  require(inventory.get("status") == "ready", "workload inventory failed after isolated stage attempt")
+                  expected_ids = {item["componentId"] for item in workload["selectedComponents"]}
+                  return sorted(
+                      row.get("componentId")
+                      for row in inventory.get("components", [])
+                      if isinstance(row, dict)
+                      and row.get("componentId") in expected_ids
+                      and row.get("installed") is True
+                  )
+              if failed.get("ok") is True:
+                  cached = failed.get("result")
+                  assert_staged_plan(cached, workload, checked, "network-isolated cached stage")
+                  active_ids = active_selected_components()
+                  require(not active_ids, f"network-isolated stage activated selected components: {active_ids}")
+                  repeated = workload_request("stage", preserve_read_token=True, **fields)
+                  assert_staged_plan(repeated, workload, checked, "same-plan cached stage repeat")
+                  require(cached["components"] == repeated["components"], "cached same-plan stage repeat changed staged component identities")
+                  safe_evidence = {
+                      "outcome": "cached-stage-no-failure",
+                      "networkNamespace": "isolated-child-process",
+                      "planId": checked["planId"],
+                      "planDigest": checked["planDigest"],
+                      "activeSelectedComponentsAfterStage": active_ids,
+                      "offlineStageStatus": cached["status"],
+                      "repeatStageStatus": repeated["status"],
+                      "repeatStageStable": True,
+                      "selectedComponentIds": [row["componentId"] for row in workload["selectedComponents"]],
+                      "offlineFailureFallback": {
+                          "componentId": "cyrene-evaluation-exact-match",
+                          "status": "NOT_RUN",
+                          "reason": "the exact-match standalone workload needs the pending official Echo OCI installation contract",
+                      },
+                  }
+                  write_json(root() / "evidence" / "offline-stage-retry.json", safe_evidence)
+                  return {**safe_evidence, "stagedResult": cached}
+              error = failed.get("error")
+              require(isinstance(error, dict), "network-isolated stage returned no structured error")
+              require(error.get("code") == "NETWORK_ERROR", f"network-isolated stage returned unexpected code: {error.get('code')}")
+              require(error.get("retryable") is True, "network-isolated stage failure was not marked retryable")
+
+              active_ids = active_selected_components()
+              require(not active_ids, f"a rejected offline stage activated selected components: {active_ids}")
+
+              resumed = workload_request("stage", preserve_read_token=True, **fields)
+              assert_staged_plan(resumed, workload, checked, "same-plan stage retry")
+              repeated = workload_request("stage", preserve_read_token=True, **fields)
+              assert_staged_plan(repeated, workload, checked, "same-plan repeated stage")
+              require(resumed["components"] == repeated["components"], "same-plan repeated stage changed staged component identities")
+              safe_evidence = {
+                  "outcome": "network-failure-recovered",
+                  "failure": {
+                      "operation": "stage",
+                      "code": error["code"],
+                      "retryable": error["retryable"],
+                      "networkNamespace": "isolated-child-process",
+                  },
+                  "planId": checked["planId"],
+                  "planDigest": checked["planDigest"],
+                  "activeSelectedComponentsAfterFailure": active_ids,
+                  "retryStatus": resumed["status"],
+                  "repeatStageStatus": repeated["status"],
+                  "repeatStageStable": True,
+                  "selectedComponentIds": [row["componentId"] for row in workload["selectedComponents"]],
+              }
+              write_json(root() / "evidence" / "offline-stage-retry.json", safe_evidence)
+              return {**safe_evidence, "stagedResult": resumed}
+
+          def record_offline_stage_outcome(workload: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+              """Persist offline-stage evidence without calling a warm cache a recovered failure."""
+              try:
+                  evidence = offline_stage_retry(workload, checked)
+              except Exception as error:  # noqa: BLE001 - preserve the phase-specific failure record.
+                  record("offline_retry_gate", "FAIL", f"{type(error).__name__}: {error}")
+                  print(f"FAIL offline_retry_gate: {error}", file=sys.stderr)
+                  raise
+              if evidence["outcome"] == "network-failure-recovered":
+                  record("offline_retry_gate", "PASS", "isolated stage failure resumed and repeated with the same plan", {key: value for key, value in evidence.items() if key != "stagedResult"})
+                  print("PASS offline_retry_gate")
+              else:
+                  record("offline_retry_gate", "NOT_RUN", "stage succeeded in the isolated namespace from already available content; failure recovery was not exercised, and the separate exact-match fallback awaits the official Echo installation contract", {key: value for key, value in evidence.items() if key != "stagedResult"})
+                  print("NOT_RUN offline_retry_gate: isolated stage used already available content")
+              return evidence
 
           def assert_installed_components(actual_rows: Any, expected_rows: Any, context: str) -> None:
               """Compare receipt-backed installed identities using stable status fields."""
@@ -1204,19 +1392,21 @@ jobs:
                   write_json(root() / "evidence" / "catalyst-checked-plan.json", checked)
                   return {"selectedComponents": workload["selectedComponents"], "planId": checked["planId"], "planDigest": checked["planDigest"]}
               phase("catalyst_exact_plan_pins", exact_plan)
-              def stage_gate() -> dict[str, Any]:
-                  staged = workload_request(
-                      "stage", preserve_read_token=True,
-                      workloadId="catalyst", targetId=workload["targetId"],
-                      action="install", planId=checked["planId"], planDigest=checked["planDigest"],
-                  )
-                  require(staged.get("status") == "staged", f"Catalyst plan was not staged: {staged.get('status')}")
-                  require(staged.get("planId") == checked["planId"] and staged.get("planDigest") == checked["planDigest"], "Catalyst stage changed the checked plan identity")
-                  require(staged.get("catalogDigest") == workload["catalogDigest"], "Catalyst stage catalog digest differs")
-                  require(staged.get("action") == "install", "Catalyst stage action differs from the checked plan")
-                  assert_selected_components(staged.get("components"), workload["selectedComponents"], "Catalyst stage result")
-                  return staged
-              staged = phase("catalyst_workload_stage", stage_gate)
+              phase(
+                  "version_conflict_gate",
+                  lambda: version_conflict_readonly_check(checked, workload),
+              )
+              offline_retry = record_offline_stage_outcome(workload, checked)
+              staged = phase(
+                  "catalyst_workload_stage",
+                  lambda: (
+                      assert_staged_plan(
+                          offline_retry["stagedResult"], workload, checked,
+                          "Catalyst stage after isolated network attempt",
+                      )
+                      or offline_retry["stagedResult"]
+                  ),
+              )
 
               def apply_gate() -> dict[str, Any]:
                   applied = workload_request(
@@ -2049,7 +2239,8 @@ jobs:
                   "runner_identity", "native_release_metadata", "native_release_provenance",
                   "catalog_provenance", "release_asset_integrity", "native_deb_install",
                   "native_static_binding_readback", "fresh_workload_inventory",
-                  "catalyst_workload_check", "catalyst_exact_plan_pins", "catalyst_workload_stage",
+                  "catalyst_workload_check", "catalyst_exact_plan_pins", "version_conflict_gate",
+                  "catalyst_workload_stage",
                   "catalyst_workload_apply", "catalyst_runtime_source_activation",
                   "plugins_platform_supervision",
                   "catalyst_active_receipt_readback",
@@ -2067,8 +2258,21 @@ jobs:
               ]
               value["wholeHostAcceptance"] = "NOT_RUN"
               value["wholeHostAcceptanceReason"] = "whole-VM reboot recovery is not exercised on a disposable hosted runner"
+              phase2_required = (
+                  "version_conflict_gate",
+                  "offline_retry_gate",
+                  "installer_interrupted_transaction_recovery",
+                  "host_reboot_recovery",
+                  "echo_exact_match_evaluate_uninstall",
+              )
+              value["phase2RequiredPhases"] = list(phase2_required)
+              value["phase2IncompletePhases"] = [
+                  name for name in phase2_required if phases[name]["status"] != "PASS"
+              ]
+              value["phase2Acceptance"] = "INCOMPLETE" if value["phase2IncompletePhases"] else "PASS"
               full_distribution_required = (
                   *required,
+                  "installer_interrupted_transaction_recovery",
                   "host_reboot_recovery",
                   "version_conflict_gate",
                   "offline_retry_gate",
@@ -2076,6 +2280,11 @@ jobs:
                   "plugins_platform_supervision",
                   "client_release_integration",
               )
+              full_distribution_required = tuple(dict.fromkeys(full_distribution_required))
+              value["fullDistributionRequiredPhases"] = list(full_distribution_required)
+              value["fullDistributionIncompletePhases"] = [
+                  name for name in full_distribution_required if phases[name]["status"] != "PASS"
+              ]
               value["fullDistributionAcceptance"] = "INCOMPLETE" if any(
                   phases[name]["status"] != "PASS" for name in full_distribution_required
               ) else "PASS"
@@ -2084,7 +2293,8 @@ jobs:
               Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(
                   "# Modular distribution acceptance\n\n"
                   f"- Runnable Catalyst core: {'PASS' if value['requiredCorePass'] else 'INCOMPLETE'}\n"
-                  f"- Full distribution / host reboot acceptance: {value['fullDistributionAcceptance']}\n"
+                  f"- Phase 2 safety, reliability, and optional workloads: {value['phase2Acceptance']}\n"
+                  f"- Full distribution acceptance: {value['fullDistributionAcceptance']}\n"
                   "- See phase-ledger.json for each PASS, FAIL, and NOT_RUN phase.\n",
                   encoding="utf-8",
               )

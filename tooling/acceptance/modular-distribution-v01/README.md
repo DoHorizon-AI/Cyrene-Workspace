@@ -15,18 +15,35 @@ Workspace、Product、Platform、Plugins 或 Client 源码。工作流输入的 
 Run `.github/workflows/modular-distribution-acceptance.yml` with:
 
 - `native_release_id`: the exact official `native-installer-preview-<40 lowercase hex>` tag.
-- `release_pins_json`: a JSON document matching `release-pins-v1.schema.json`. It must pin the same native tag, Workspace source SHA and workflow, Ubuntu 24.04 amd64 DEB asset digest/size, v2 catalog release identity/digest, Catalyst catalog digest, and exact release identities for Catalyst, Node 24 Client Control, the Client Web host, Runtime Maintenance SDK, and all four Platform-supervised data plugins. The workflow rejects incomplete Catalyst pins before native installation. It verifies the attested source receipt before install, then reads back dpkg state and the DEB-installed catalogs, active v2 binding, and static stage-only package contract; it does not expect a per-host native transaction receipt.
+- `release_pins_json`: a JSON document matching `release-pins-v1.schema.json`. It must pin the same native tag, Workspace source SHA and workflow, Ubuntu 24.04 amd64 DEB asset digest/size, v2 catalog release identity/digest, Catalyst catalog digest, and exact release identities for Catalyst, Node 24 Client Control, the Client Web host, Runtime Maintenance SDK, and all four Platform-supervised data plugins. The schema also accepts an optional exact Echo OCI, Runtime SDK, and `cyrene-evaluation-exact-match` identity set; the current driver refuses Echo pins before native installation until Workspace publishes the supported OCI install/evaluate/uninstall path. The workflow rejects incomplete Catalyst pins before native installation. It verifies the attested source receipt before install, then reads back dpkg state and the DEB-installed catalogs, active v2 binding, and static stage-only package contract; it does not expect a per-host native transaction receipt.
 
-This workflow always runs the pinned Catalyst core and a non-mutating resolver
-check that proves a required component cannot be omitted. The Catalyst plan must
-select all four Catalog-owned plugin bindings. Acceptance compares Catalog
+This workflow always runs the pinned Catalyst core, a non-mutating resolver
+check that proves a required component cannot be omitted, and a read-only
+version-conflict inspection of the exact signed Catalyst resolution. The latter
+confirms the intended plan has no `VERSION_CONFLICT` blocker; it does not claim to
+exercise rejection of a conflicting Catalog fixture. The Catalyst plan must select
+all four Catalog-owned plugin bindings. Acceptance compares Catalog
 binding identities, Package Runtime source policy, ActivitySource Broker scopes,
 and authenticated Platform UDS readback, including each active installation ID.
 The exact Node 24 Control release, root-owned active pointer/receipt, systemd
 unit, local auth session, and Catalyst read proxy are required core gates.
-Version-conflict and offline-retry injection, Echo exact-match/evaluate/uninstall,
-and whole-VM reboot recovery remain explicit `NOT_RUN` gates until their safe
-execution contracts and exact pins are supplied. Platform-supervised activation
+An isolated stage retry is exercised with the installed CLI in a temporary Linux
+network namespace. Only that stage child process loses network access; the host
+network, updater Unix sockets, and installed data are unchanged. The driver requires
+a retryable `NETWORK_ERROR`, verifies that no selected component became active,
+retries the same `planId`/`planDigest` online, then repeats stage and compares the
+staged identities. If the isolated stage succeeds from already available content,
+the ledger records cache-backed idempotence and leaves failure recovery `NOT_RUN`;
+it never reports a cached success as failure recovery. A separately pinned
+exact-match plugin can become the fallback exercise once Echo installation is
+supported.
+
+Echo exact-match/evaluate/uninstall and whole-VM reboot recovery remain explicit
+`NOT_RUN` gates until their safe execution contracts and exact pins are supplied.
+Interrupted installer-transaction recovery also remains `NOT_RUN`: the current
+installer does not publish a deferred-transaction fault-injection/resume API, and
+acceptance never edits maintenance journals. The existing Catalyst systemd restart
+test covers service startup recovery only. Platform-supervised activation
 of all four selected Plugins is a required core gate, not an optional phase.
 They remain visible in the phase ledger and keep full-distribution acceptance
 incomplete; they are not inferred from container or source-checkout evidence.
@@ -48,10 +65,17 @@ protected token-file reference, and verifies the signed unit's fixed
 `STUDIO_PUBLIC_ORIGINS`. The probe never returns either token-file path contents
 or token bytes.
 
-该工作流始终运行带精确 pins 的 Catalyst core，并进行只读 resolver 检查，验证必需组件不能被排除。pins 必须包含 Catalyst、Node 24 Client Control、Client Web、Runtime SDK 和全部四个由 Platform 监管的数据插件。版本冲突与
-断网重试注入、Echo exact-match/evaluate/uninstall、整机重启恢复，在安全
-执行契约与精确 pins 提供前都保持显式 `NOT_RUN`。这些阶段会显示在 phase ledger 中，并使 full-distribution
-acceptance 保持不完整；不会从容器或源码 checkout 证据推断通过。
+该工作流始终运行带精确 pins 的 Catalyst core，并进行只读 resolver 检查，验证必需组件不能被排除及准确计划没有
+`VERSION_CONFLICT` blocker。此检查不声称测试了冲突配置的拒绝行为。离线 stage 重试只在一个 Linux network namespace
+隔离的 CLI 子进程中执行；不会改变宿主网络、更新器 Unix socket
+或已安装数据。验收要求失败为可重试的 `NETWORK_ERROR`、selected component 未激活，再用同一个 `planId` 和
+`planDigest` 在线重试并重复 stage 比对身份。如果离线 stage 因本地已有内容而成功，ledger 只记录缓存幂等性，恢复
+失败仍为 `NOT_RUN`，不会把缓存成功称作故障恢复。Echo 安装就绪后可用其精确 pin 的 exact-match 插件做备用断网用例。
+
+Echo exact-match/evaluate/uninstall、整机重启和中断 installer transaction 恢复仍保持显式 `NOT_RUN`。当前 installer
+没有正式 deferred-transaction fault-injection/resume API，验收不会编辑 maintenance journal；已有 Catalyst systemd
+restart 只证明服务启动恢复，不冒充安装事务回滚。相关阶段会显示在 phase ledger 中，不会从容器或源码 checkout
+证据推断通过。
 
 验收还会通过 root-only probe 读取已安装的 `/etc/cyrene/studio-control.env`，要求 Catalyst loopback URL 与 pins 一致，token 文件引用受保护，并确认签名 unit 固定 `STUDIO_PUBLIC_ORIGINS`。证据不包含环境文件值、token 路径内容或 token 字节。
 
@@ -84,17 +108,31 @@ contents. Raw Catalyst producer/consumer stdout and stderr are withheld; only th
 byte counts and SHA-256 values are recorded. `GH_TOKEN` is scoped to release download, attestation verification,
 and the installed resolver's check/stage requests. It has read-only repository
 and attestation permissions; apply, repeat-install, and Product invocations run
-without that token.
+without that token. The isolated network-failure attempt withholds raw stdout/stderr
+and persists only the error code and retryable flag.
 
 `GH_TOKEN` 仅授予仓库与 attestation 只读权限，用于发布物下载、验签以及已安装 resolver 的 check/stage；apply、重复安装与 Product 调用不会继承该 token。
 
-Each phase is recorded as `PASS`, `FAIL`, or `NOT_RUN` with a reason. A failed
-precondition stops later mutations; the finalizer records all unreached phases as
+Each phase is recorded as `PASS`, `FAIL`, or `NOT_RUN` with a reason. The
+ledger reports the Catalyst required core and Phase 2 safety/reliability/optional gates
+separately, including their own incomplete-phase lists. The
+`version_conflict_gate` is a read-only no-conflict assertion over the exact
+selected plan. `offline_retry_gate` is a recovered-failure pass only when the
+isolated stage returns retryable `NETWORK_ERROR` and the same plan later stages
+successfully. A cached isolated-stage success is recorded separately and cannot
+make that recovery gate pass. `installer_interrupted_transaction_recovery` stays
+`NOT_RUN` until the installer exposes a supported host-fault/recovery contract.
+A failed precondition stops later mutations; the finalizer records all unreached phases as
 `NOT_RUN`. Missing commands, receipts, signed assets, service activation, or API
 capabilities are failures for the required phase and cannot produce an overall
 acceptance pass. Whole-VM reboot recovery is `NOT_RUN` on a disposable hosted runner;
 the tested systemd service restart is recorded separately and is not presented as
 a whole-host reboot.
+
+`version_conflict_gate` 只读取已签名精确计划并断言没有 `VERSION_CONFLICT` blocker，不伪称拒绝测试。
+`offline_retry_gate` 只有在隔离 stage 返回可重试 `NETWORK_ERROR`、相同计划在线恢复并重复 stage 身份一致时才为 `PASS`；
+缓存导致的隔离成功会单独记录，不会让恢复 gate 通过。`installer_interrupted_transaction_recovery` 在正式宿主故障与恢复
+接口发布前保持 `NOT_RUN`。phase ledger 单独汇总 Catalyst 必需 core 与 Phase 2 safety/reliability/optional gates 及其未通过阶段。
 
 每阶段记录 `PASS`、`FAIL` 或 `NOT_RUN` 及原因。前置条件失败会阻止后续变更；收尾器会将未到达阶段记为
 `NOT_RUN`。缺少命令、receipt、签名发布物、服务激活或 API capability 会使对应必需阶段失败，不能形成总体验收
@@ -117,11 +155,15 @@ Catalyst 已安装验收模块当前由活动 immutable service bundle 提供；
 The workflow is deliberately strict: it fails when an expected API or installer
 operation is not implemented. Dispatch requires the exact native tag, v2 catalog
 binding, and exact Catalyst, Platform-supervised Plugin, Runtime SDK, and Client
-release pins. Additional Echo/reliability and whole-host reboot gates remain
-required for a full-distribution pass. Do not substitute the earlier first-product
+release pins. Optional Echo identities are schema-validated but are rejected before
+native installation until the signed OCI installer path and installed evaluator
+contract are executable. Additional Echo, interrupted-transaction, and whole-host
+reboot gates remain required for a full-distribution pass. Do not substitute the earlier first-product
 cohort receipt, a source checkout, a privileged container, or a different native
 tag to make a phase pass.
 
 工作流遇到未实现的 API 或安装操作会严格失败。必须等 exact native tag、v2 catalog binding、Catalyst、四个受监管插件、
-Runtime SDK 和 Client 的官方发布 pins 都准备好后，才能运行验收。完整发行验收还要求 Echo/reliability 与整机重启 gate。
+Runtime SDK 和 Client 的官方发布 pins 都准备好后，才能运行验收。可选 Echo pins 必须精确包含官方 OCI Product、Runtime
+SDK 和 exact-match plugin；当前驱动会在任何 native 安装前拒绝这些 pins，直到签名 OCI 安装及已安装评估/卸载流程具备
+可执行契约。完整发行验收仍要求 Echo、事务中断恢复和整机重启 gate。
 不得用旧 first-product cohort receipt、源码 checkout、privileged 容器或其他 native tag 来替代并制造 PASS。

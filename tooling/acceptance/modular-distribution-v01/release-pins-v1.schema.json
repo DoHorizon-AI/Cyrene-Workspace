@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cyrene.dev/schemas/modular-distribution-v01/release-pins-v1.schema.json",
   "title": "Cyrene modular distribution clean-host release pins",
-  "description": "Expected official identities for one fresh-host acceptance run. These values assert installer and resolver results; they do not select or replace runtime authority.",
+  "description": "Expected official identities for one fresh-host acceptance run. Catalyst is required; an exact Echo OCI, Runtime SDK, and exact-match plugin set may be added when the official installer contract is available. These values assert results and do not select or replace runtime authority.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "nativeInstaller", "catalog", "workloads"],
@@ -91,6 +91,7 @@
               "type": "object",
               "required": ["service"],
               "properties": {
+                "workloadId": { "const": "catalyst" },
                 "selectedComponents": {
                   "minItems": 8,
                   "allOf": [
@@ -107,6 +108,27 @@
               }
             }
           ]
+        },
+        "echo": {
+          "allOf": [
+            { "$ref": "#/$defs/workload" },
+            {
+              "type": "object",
+              "not": { "required": ["service"] },
+              "properties": {
+                "workloadId": { "const": "echo" },
+                "selectedComponents": {
+                  "minItems": 3,
+                  "allOf": [
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-echo" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-oci" } }, "required": ["componentId", "targetId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-runtime-maintenance-sdk" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-python-3.12-library" } }, "required": ["componentId", "targetId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-evaluation-exact-match" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-python-3.12" } }, "required": ["componentId", "targetId"] } }
+                  ]
+                }
+              },
+              "required": ["workloadId", "selectedComponents"]
+            }
+          ]
         }
       }
     }
@@ -119,7 +141,7 @@
       "additionalProperties": false,
       "required": ["workloadId", "targetId", "catalogDigest", "selectedComponents"],
       "properties": {
-        "workloadId": { "const": "catalyst" },
+        "workloadId": { "enum": ["catalyst", "echo"] },
         "targetId": { "const": "linux-ubuntu-24.04-x86_64" },
         "catalogDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "service": {

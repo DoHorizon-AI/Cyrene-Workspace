@@ -236,6 +236,10 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     assert '"/api/v1/catalyst/datasets"' in source
     assert '"/api/v1/datasets"' in source
     assert '"client_release_integration",' in source
+    assert '"offline_retry_gate"' in source
+    assert 'command.extend(["/usr/bin/unshare", "--net"])' in source
+    assert 'error.get("code") == "NETWORK_ERROR"' in source
+    assert '"same-plan repeated stage"' in source
     assert '"/etc/cyrene/studio-control.env"' in source
     assert '"STUDIO_CATALYST_API_TOKEN_FILE"' in source
     assert "STUDIO_PUBLIC_ORIGINS=" in source
@@ -285,16 +289,62 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
     spec.loader.exec_module(module)
     module.validate_pin_shape(pins)
 
+    catalyst_rows = {
+        row["componentId"]: row for row in pins["workloads"]["catalyst"]["selectedComponents"]
+    }
+    echo_product = dict(catalyst_rows["cyrene-catalyst"])
+    echo_product.update(componentId="cyrene-echo", targetId="linux-ubuntu-24.04-x86_64-oci")
+    exact_match = dict(catalyst_rows["cyrene-tools-dataset-generation"])
+    exact_match.update(
+        componentId="cyrene-evaluation-exact-match",
+        targetId="linux-ubuntu-24.04-x86_64-python-3.12",
+    )
     pins["workloads"]["echo"] = {
         "workloadId": "echo",
         "targetId": "linux-ubuntu-24.04-x86_64",
         "catalogDigest": "sha256:" + "b" * 64,
-        "selectedComponents": pins["workloads"]["catalyst"]["selectedComponents"],
+        "selectedComponents": [
+            echo_product,
+            catalyst_rows["cyrene-runtime-maintenance-sdk"],
+            exact_match,
+        ],
+    }
+    jsonschema.Draft202012Validator(schema).validate(pins)
+    module.validate_pin_shape(pins)
+
+    acceptance_root = tmp_path / "echo-dispatch"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("RELEASE_PINS_JSON", json.dumps(pins))
+    with pytest.raises(RuntimeError, match="cannot execute the installed Echo lifecycle"):
+        module.init()
+    ledger = json.loads((acceptance_root / "phase-ledger.json").read_text(encoding="utf-8"))
+    assert ledger["phases"]["echo_exact_match_evaluate_uninstall"]["status"] == "FAIL"
+    assert ledger["phases"]["runner_identity"]["status"] == "NOT_RUN"
+
+    wrong_echo_workload_id = json.loads(json.dumps(pins))
+    wrong_echo_workload_id["workloads"]["catalyst"]["workloadId"] = "echo"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(wrong_echo_workload_id)
+
+    echo_with_service = json.loads(json.dumps(pins))
+    echo_with_service["workloads"]["echo"]["service"] = {
+        "unit": "cyrene-echo.service",
+        "baseUrl": "http://127.0.0.1:8094",
+        "healthPath": "/healthz",
     }
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.Draft202012Validator(schema).validate(pins)
-    with pytest.raises(RuntimeError, match="only Catalyst workload pins"):
-        module.validate_pin_shape(pins)
+        jsonschema.Draft202012Validator(schema).validate(echo_with_service)
+
+    missing_exact_match = json.loads(json.dumps(pins))
+    missing_exact_match["workloads"]["echo"]["selectedComponents"] = [
+        row
+        for row in missing_exact_match["workloads"]["echo"]["selectedComponents"]
+        if row["componentId"] != "cyrene-evaluation-exact-match"
+    ]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(missing_exact_match)
+    with pytest.raises(RuntimeError, match="exact-match plugin identities"):
+        module.validate_pin_shape(missing_exact_match)
 
     pins.pop("workloads")
     pins["workloads"] = {"catalyst": _valid_pins()["workloads"]["catalyst"]}
@@ -557,6 +607,211 @@ def test_workload_attestation_token_is_preserved_only_for_explicit_resolution_ca
     assert "synthetic-read-only-token" not in " ".join(commands[0] + commands[1])
 
 
+def test_network_isolated_workload_failure_uses_fixed_cli_and_sanitized_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One stage subprocess can lose network without changing host connectivity or exposing errors."""
+    evidence_root = tmp_path / "acceptance"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    monkeypatch.setenv("GH_TOKEN", "synthetic-read-only-token")
+    module = _load_driver_module(tmp_path, "acceptance_driver_network_isolation")
+    commands: list[list[str]] = []
+    retained_output: list[object] = []
+    request_line = '{"protocolVersion":"cyrene.workload-plan.v1","operation":"stage"}'
+    failure = {
+        "protocolVersion": module.WORKLOAD_PROTOCOL,
+        "operation": "stage",
+        "ok": False,
+        "error": {
+            "code": "NETWORK_ERROR",
+            "message": "private detail synthetic-read-only-token",
+            "retryable": True,
+        },
+    }
+
+    def fake_run(
+        command: list[str], *, input_text: str, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        retained_output.append(kwargs.get("retain_output"))
+        assert input_text.strip() == request_line
+        return subprocess.CompletedProcess(command, 0, json.dumps(failure) + "\n", "")
+
+    monkeypatch.setattr(module, "run", fake_run)
+    response = module.workload_request(
+        "stage",
+        preserve_read_token=True,
+        network_isolated=True,
+        allow_error=True,
+    )
+
+    assert response == failure
+    assert retained_output == [False]
+    assert commands[0][:6] == [
+        "sudo",
+        "-n",
+        "--preserve-env=GH_TOKEN",
+        "/usr/bin/unshare",
+        "--net",
+        "/usr/bin/cyrene",
+    ]
+    evidence = json.loads(
+        (evidence_root / "evidence" / "workload-stage-01.json").read_text(encoding="utf-8")
+    )
+    serialized = json.dumps(evidence)
+    assert evidence["response"]["error"] == {"code": "NETWORK_ERROR", "retryable": True}
+    assert "message" not in evidence["response"]["error"]
+    assert "synthetic-read-only-token" not in serialized
+
+
+def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Transient offline rejection must preserve one exact plan for same-plan retry."""
+    evidence_root = tmp_path / "acceptance"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_offline_retry")
+    pins = _valid_pins()
+    workload = pins["workloads"]["catalyst"]
+    checked = {
+        "planId": "plan-" + "1" * 32,
+        "planDigest": "sha256:" + "2" * 64,
+    }
+    selected = workload["selectedComponents"]
+    staged_rows = [{**row, "status": "staged"} for row in selected]
+    staged_result = {
+        "status": "staged",
+        "planId": checked["planId"],
+        "planDigest": checked["planDigest"],
+        "catalogDigest": workload["catalogDigest"],
+        "workloadId": "catalyst",
+        "targetId": workload["targetId"],
+        "action": "install",
+        "components": staged_rows,
+    }
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        calls.append((operation, fields))
+        if operation == "stage" and fields.get("network_isolated") is True:
+            return {
+                "protocolVersion": module.WORKLOAD_PROTOCOL,
+                "ok": False,
+                "operation": "stage",
+                "error": {"code": "NETWORK_ERROR", "retryable": True},
+            }
+        if operation == "status":
+            return {
+                "status": "ready",
+                "components": [
+                    {"componentId": row["componentId"], "installed": False} for row in selected
+                ],
+            }
+        assert operation == "stage"
+        return staged_result
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    evidence = module.offline_stage_retry(workload, checked)
+
+    stage_calls = [(operation, fields) for operation, fields in calls if operation == "stage"]
+    assert len(stage_calls) == 3
+    assert stage_calls[0][1]["network_isolated"] is True
+    assert stage_calls[0][1]["allow_error"] is True
+    assert all(
+        fields["planId"] == checked["planId"]
+        and fields["planDigest"] == checked["planDigest"]
+        and fields["action"] == "install"
+        for _, fields in stage_calls
+    )
+    assert [fields.get("network_isolated", False) for _, fields in stage_calls] == [
+        True,
+        False,
+        False,
+    ]
+    assert evidence["activeSelectedComponentsAfterFailure"] == []
+    assert evidence["failure"] == {
+        "operation": "stage",
+        "code": "NETWORK_ERROR",
+        "retryable": True,
+        "networkNamespace": "isolated-child-process",
+    }
+    assert evidence["repeatStageStable"] is True
+    assert evidence["stagedResult"] == staged_result
+
+
+def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm offline stage is useful cache evidence but does not prove failure recovery."""
+    evidence_root = tmp_path / "acceptance"
+    evidence_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_cached_stage")
+    workload = _valid_pins()["workloads"]["catalyst"]
+    checked = {"planId": "plan-" + "3" * 32, "planDigest": "sha256:" + "4" * 64}
+    staged_result = {
+        "status": "staged",
+        "planId": checked["planId"],
+        "planDigest": checked["planDigest"],
+        "catalogDigest": workload["catalogDigest"],
+        "workloadId": "catalyst",
+        "targetId": workload["targetId"],
+        "action": "install",
+        "components": [{**row, "status": "staged"} for row in workload["selectedComponents"]],
+    }
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        if operation == "status":
+            return {
+                "status": "ready",
+                "components": [
+                    {"componentId": row["componentId"], "installed": False}
+                    for row in workload["selectedComponents"]
+                ],
+            }
+        assert operation == "stage"
+        if fields.get("network_isolated") is True:
+            return {
+                "protocolVersion": module.WORKLOAD_PROTOCOL,
+                "operation": "stage",
+                "ok": True,
+                "result": staged_result,
+            }
+        return staged_result
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    result = module.record_offline_stage_outcome(workload, checked)
+
+    assert result["outcome"] == "cached-stage-no-failure"
+    assert result["repeatStageStable"] is True
+    assert result["offlineFailureFallback"]["componentId"] == "cyrene-evaluation-exact-match"
+    assert result["offlineFailureFallback"]["status"] == "NOT_RUN"
+    assert module.ledger()["phases"]["offline_retry_gate"]["status"] == "NOT_RUN"
+    assert "already available content" in module.ledger()["phases"]["offline_retry_gate"]["reason"]
+
+
+def test_version_conflict_gate_is_a_read_only_assertion_on_the_exact_plan(
+    tmp_path: Path,
+) -> None:
+    """The intended release plan must be free of resolver version conflicts before staging."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_version_conflict")
+    workload = _valid_pins()["workloads"]["catalyst"]
+    checked = {
+        "status": "ready",
+        "planId": "plan-" + "5" * 32,
+        "planDigest": "sha256:" + "6" * 64,
+        "blockers": [],
+        "resolution": {"blockers": []},
+    }
+    result = module.version_conflict_readonly_check(checked, workload)
+    assert result["versionConflictBlockerCount"] == 0
+    assert result["mutatingRequestsSent"] == 0
+
+    checked["resolution"]["blockers"] = [{"code": "VERSION_CONFLICT"}]
+    with pytest.raises(RuntimeError, match="VERSION_CONFLICT blocker"):
+        module.version_conflict_readonly_check(checked, workload)
+
+
 def test_finalizer_fails_when_required_core_gates_are_not_passed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -592,5 +847,12 @@ def test_finalizer_fails_when_required_core_gates_are_not_passed(
     ledger = json.loads((acceptance_root / "phase-ledger.json").read_text(encoding="utf-8"))
     assert ledger["requiredCorePass"] is False
     assert "native_static_binding_readback" in ledger["requiredCoreFailures"]
+    assert "version_conflict_gate" in ledger["requiredCoreFailures"]
     assert "client_static_web_http" in ledger["requiredCoreFailures"]
     assert "client_release_integration" in ledger["requiredCoreFailures"]
+    assert ledger["fullDistributionAcceptance"] == "INCOMPLETE"
+    assert ledger["phase2Acceptance"] == "INCOMPLETE"
+    assert "offline_retry_gate" in ledger["phase2IncompletePhases"]
+    assert (
+        "installer_interrupted_transaction_recovery" in ledger["fullDistributionIncompletePhases"]
+    )
