@@ -2628,6 +2628,9 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
         "action": action,
         "selections": selections,
     }
+    requested_channel = getattr(args, "channel", None)
+    if requested_channel is not None:
+        check_fields["channel"] = requested_channel
     if workload_id is not None:
         check_fields["workloadId"] = workload_id
     checked = request("check", **check_fields)
@@ -2646,8 +2649,12 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
         return 1
     plan_id = checked["result"].get("planId")
     plan_digest = checked["result"].get("planDigest")
+    channel = checked["result"].get("channel")
+    if channel not in {"stable", "preview"}:
+        print("ERROR: the checked plan omitted its verified release channel.", file=sys.stderr)
+        return 1
     print(
-        f"Workload {workload_id} {action}: "
+        f"Workload {workload_id} {action} ({channel}): "
         f"{len(resolution.get('selectedComponents', []))} component(s)"
     )
     for component in resolution.get("selectedComponents", []):
@@ -2659,6 +2666,7 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
         planId=plan_id,
         planDigest=plan_digest,
         action=action,
+        channel=channel,
     )
     if staged is None:
         return 1
@@ -2681,6 +2689,7 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
         planDigest=plan_digest,
         confirmation={"planId": plan_id, "planDigest": plan_digest, "confirmed": True},
         action=action,
+        channel=channel,
     )
     if applied is None:
         return 1
@@ -3305,6 +3314,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="workload_owner",
         choices=("catalyst", "echo", "plugins"),
         help="Explicit workload owner when uninstall ownership is ambiguous",
+    )
+    workload_parser.add_argument(
+        "--channel",
+        choices=("stable", "preview"),
+        help="Release channel; omitted uses the active trusted catalog default",
     )
     workload_parser.add_argument(
         "--yes",

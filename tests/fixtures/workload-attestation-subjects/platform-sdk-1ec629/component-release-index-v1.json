@@ -1,0 +1,582 @@
+{
+  "schemaVersion": 1,
+  "repository": "DoHorizon-AI/Cyrene-Platform",
+  "channel": "preview",
+  "generatedAt": "2026-10-08T22:26:55Z",
+  "source": {
+    "repository": "https://github.com/DoHorizon-AI/Cyrene-Platform",
+    "ref": "refs/heads/develop",
+    "commit": "1ec629e55195fa803651fb23d1c50d04696a94a8"
+  },
+  "provenance": {
+    "attestation": {
+      "kind": "github-artifact-attestation",
+      "subjectName": "component-release-index-v1.json",
+      "repository": "DoHorizon-AI/Cyrene-Platform",
+      "workflow": "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml",
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "run": {
+        "id": "37849780192",
+        "attempt": 1,
+        "url": "https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/37849780192/attempts/1"
+      }
+    }
+  },
+  "releases": [
+    {
+      "componentId": "cy-node-agent",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-node-agent-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:f8b07d6fa0450a32f09dc7bdfba3e250dff8e2052a72d4daad98f8fec8c0028c"
+    },
+    {
+      "componentId": "cy-node-agent",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-node-agent-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:0d4d46d57f373991a56e549ca02fcfb9045c614d1e0e3c1dba0d8ee39c111d95"
+    },
+    {
+      "componentId": "cy-package-runtime",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-package-runtime-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:d35e5fa2184e775c34ec30ad8e924efb7b8f53d996b05105493478ff8a923921"
+    },
+    {
+      "componentId": "cy-package-runtime",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-package-runtime-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:b3e6afeda81ce58c68c32c75dd2a34d044619337fb23eaf8bb8353cc036167b4"
+    },
+    {
+      "componentId": "cy-runtime-agent",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-runtime-agent-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:7d1874437fed4b5705d1f2effdb2184edd7d5a2e67afb4c7643ce4ac32dc9846"
+    },
+    {
+      "componentId": "cy-runtime-agent",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-runtime-agent-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:ddc15f88edbad3d38fb0ac76703a25c4bc403168f291fe5f27215340880d66e5"
+    },
+    {
+      "componentId": "cy-workspace-authority-host",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-workspace-authority-host-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:d5d25402356d2a58a210cc7a4f50290498563200848fd50f95af39b7ac73f0be"
+    },
+    {
+      "componentId": "cy-workspace-authority-host",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-workspace-authority-host-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:19c09a15fdbc444ac452e1f497e84ae761c6a0f1ffe75f9bcf74016fcfe2944a"
+    },
+    {
+      "componentId": "cy-workspace-authority-host",
+      "version": "0.1.0",
+      "target": {
+        "os": "windows",
+        "osVersion": "10.0",
+        "architecture": "x86_64",
+        "runtime": "docker-desktop:linux"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-workspace-authority-host-windows-x86-64-docker-desktop-linux.manifest.json",
+      "manifestDigest": "sha256:99af498dca2579fe9964cf7c4e542dac847aaa0cf780ecc9a002b851007fb52e"
+    },
+    {
+      "componentId": "cy-workspace-web-bff",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-workspace-web-bff-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:79bc3a119b2ec313a346c90559759f9969562185e213a38eea9d47eeb0b29ab8"
+    },
+    {
+      "componentId": "cy-workspace-web-bff",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-workspace-web-bff-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:81c0b3399b3621b25ea02023f463881fc63c1dc05dba77bdf726048d630064ee"
+    },
+    {
+      "componentId": "cy-workspace-web-bff",
+      "version": "0.1.0",
+      "target": {
+        "os": "windows",
+        "osVersion": "10.0",
+        "architecture": "x86_64",
+        "runtime": "docker-desktop:linux"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cy-workspace-web-bff-windows-x86-64-docker-desktop-linux.manifest.json",
+      "manifestDigest": "sha256:e97fe0b7b2fec70824c65c07695485b4199e5be990507b3dc4942aaf550fef5f"
+    },
+    {
+      "componentId": "cyrene-kernel",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-kernel-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:1afe322b50e7db55e769bbfeae272aceaa3dbdf478aa19a53338b0fd2364f813"
+    },
+    {
+      "componentId": "cyrene-kernel",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-kernel-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:977caabe1b53bb2821cf984c867f48d7f1a4a26cd32044e5806732995ec9c85f"
+    },
+    {
+      "componentId": "cyrene-linux-sys-adapter",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-linux-sys-adapter-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:a4bd33f751790fc142cbbf219058d72d827e33a165a23bdfb2878ea50599675f"
+    },
+    {
+      "componentId": "cyrene-linux-sys-adapter",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-linux-sys-adapter-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:a73a30ec06285cb4f0dcc893702d989d4b18dce665e5e021a2895f87cd9fe8bf"
+    },
+    {
+      "componentId": "cyrene-nvidia-adapter",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-nvidia-adapter-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:1501b479c42ba9b38bffce87b3ffc9a889063631defe4634f569854a2b365358"
+    },
+    {
+      "componentId": "cyrene-nvidia-adapter",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-nvidia-adapter-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:44240dc90ff597c2dd34e1168b1e13938d480f4b96b2e0fbc8642acabfe5d0ce"
+    },
+    {
+      "componentId": "cyrene-runtime-maintenance",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-runtime-maintenance-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:eb644ce9944ff780ab4fad2b1aeac135e82508e315bb6463da131893fe236a23"
+    },
+    {
+      "componentId": "cyrene-runtime-maintenance",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-runtime-maintenance-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:d3eea018ef788a5592636e6c417d5046884d26c340fc293a3cf52303e182fa6b"
+    },
+    {
+      "componentId": "cyrene-runtime-maintenance-sdk",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "python:3.12"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-runtime-maintenance-sdk-linux-ubuntu-24-04-x86-64-glibc-2-39-python-3-12.manifest.json",
+      "manifestDigest": "sha256:fe04da79a0925be23d3d168d9dc5c4e3214eb1ab322ec8ce7cddc8dd6828eb36"
+    },
+    {
+      "componentId": "cyrene-runtime-maintenance",
+      "version": "0.1.0",
+      "target": {
+        "os": "windows",
+        "osVersion": "10.0",
+        "architecture": "x86_64",
+        "runtime": "docker-desktop:linux"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-runtime-maintenance-windows-x86-64-docker-desktop-linux.manifest.json",
+      "manifestDigest": "sha256:bd8388145d9501d333069a5a0b35b0015f07fdfd96814f3901a9b6bdef8eea78"
+    },
+    {
+      "componentId": "cyrene-sandboxd",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-sandboxd-linux-ubuntu-22-04-x86-64-glibc-2-35-systemd.manifest.json",
+      "manifestDigest": "sha256:488af76101b7751869fbaa80cb7242eebabd2990b4c1b3212d8b6968ec3f63c4"
+    },
+    {
+      "componentId": "cyrene-sandboxd",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "systemd"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-sandboxd-linux-ubuntu-24-04-x86-64-glibc-2-39-systemd.manifest.json",
+      "manifestDigest": "sha256:d0a65f2872145618bcdf3299f9e6cbeb0623ee1d0280e6ae1a4dd88e08913889"
+    }
+  ],
+  "compatibilityGroups": [
+    {
+      "groupId": "package-runtime-native-v1",
+      "groupVersion": "2",
+      "contractApiVersion": "0.1.0",
+      "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+      "contractLock": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "commit": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
+        "path": "governance/package-runtime-protocols-v1.lock.json",
+        "sha256": "sha256:fcfb13fe19fa2db8055c318c903f00e4f65a1d2e4c33700e44b08e694612a267"
+      },
+      "members": [
+        {
+          "componentId": "cy-package-runtime",
+          "target": {
+            "os": "linux",
+            "osVersion": "22.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "22.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.35",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:d35e5fa2184e775c34ec30ad8e924efb7b8f53d996b05105493478ff8a923921"
+        },
+        {
+          "componentId": "cy-package-runtime",
+          "target": {
+            "os": "linux",
+            "osVersion": "24.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.39",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:b3e6afeda81ce58c68c32c75dd2a34d044619337fb23eaf8bb8353cc036167b4"
+        },
+        {
+          "componentId": "cyrene-kernel",
+          "target": {
+            "os": "linux",
+            "osVersion": "22.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "22.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.35",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:1afe322b50e7db55e769bbfeae272aceaa3dbdf478aa19a53338b0fd2364f813"
+        },
+        {
+          "componentId": "cyrene-kernel",
+          "target": {
+            "os": "linux",
+            "osVersion": "24.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.39",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:977caabe1b53bb2821cf984c867f48d7f1a4a26cd32044e5806732995ec9c85f"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "target": {
+            "os": "linux",
+            "osVersion": "22.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "22.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.35",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:eb644ce9944ff780ab4fad2b1aeac135e82508e315bb6463da131893fe236a23"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "target": {
+            "os": "linux",
+            "osVersion": "24.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.39",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:d3eea018ef788a5592636e6c417d5046884d26c340fc293a3cf52303e182fa6b"
+        },
+        {
+          "componentId": "cyrene-runtime-maintenance",
+          "target": {
+            "os": "windows",
+            "osVersion": "10.0",
+            "architecture": "x86_64",
+            "runtime": "docker-desktop:linux"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:bd8388145d9501d333069a5a0b35b0015f07fdfd96814f3901a9b6bdef8eea78"
+        }
+      ]
+    },
+    {
+      "groupId": "workspace-product-v2",
+      "groupVersion": "2",
+      "contractApiVersion": "0.1.0",
+      "wireApiVersion": "cyrene.workspace.product.v2",
+      "contractLock": {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "commit": "c7dea28958a97ccab3a9cc3199faf0ac5819a2a5",
+        "path": "governance/workspace-connection-protocols-v2.lock.json",
+        "sha256": "sha256:00fd59fb76d7144b6e1b554feadf035328b216231e0a323178836abf2b8bdd5a"
+      },
+      "members": [
+        {
+          "componentId": "cy-workspace-authority-host",
+          "target": {
+            "os": "linux",
+            "osVersion": "22.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "22.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.35",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:d5d25402356d2a58a210cc7a4f50290498563200848fd50f95af39b7ac73f0be"
+        },
+        {
+          "componentId": "cy-workspace-authority-host",
+          "target": {
+            "os": "linux",
+            "osVersion": "24.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.39",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:19c09a15fdbc444ac452e1f497e84ae761c6a0f1ffe75f9bcf74016fcfe2944a"
+        },
+        {
+          "componentId": "cy-workspace-authority-host",
+          "target": {
+            "os": "windows",
+            "osVersion": "10.0",
+            "architecture": "x86_64",
+            "runtime": "docker-desktop:linux"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:99af498dca2579fe9964cf7c4e542dac847aaa0cf780ecc9a002b851007fb52e"
+        },
+        {
+          "componentId": "cy-workspace-web-bff",
+          "target": {
+            "os": "linux",
+            "osVersion": "22.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "22.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.35",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:79bc3a119b2ec313a346c90559759f9969562185e213a38eea9d47eeb0b29ab8"
+        },
+        {
+          "componentId": "cy-workspace-web-bff",
+          "target": {
+            "os": "linux",
+            "osVersion": "24.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.39",
+            "runtime": "systemd"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:81c0b3399b3621b25ea02023f463881fc63c1dc05dba77bdf726048d630064ee"
+        },
+        {
+          "componentId": "cy-workspace-web-bff",
+          "target": {
+            "os": "windows",
+            "osVersion": "10.0",
+            "architecture": "x86_64",
+            "runtime": "docker-desktop:linux"
+          },
+          "version": "0.1.0",
+          "manifestDigest": "sha256:e97fe0b7b2fec70824c65c07695485b4199e5be990507b3dc4942aaf550fef5f"
+        }
+      ]
+    }
+  ],
+  "indexDigest": "sha256:a9aaa94b3808216be040edae1a03b694ececbe0a171fc3ee90650ce99b467df4"
+}

@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "preview-d5a920078077bdbaa76e7117ad83f69cbfa1c614",
+  "componentId": "cyrene-echo",
+  "version": "0.1.0",
+  "channel": "preview",
+  "target": {
+    "os": "linux",
+    "osVersion": "24.04",
+    "distribution": "ubuntu",
+    "distributionVersion": "24.04",
+    "architecture": "x86_64",
+    "runtime": "oci"
+  },
+  "artifact": {
+    "kind": "oci-image",
+    "repository": "ghcr.io/dohorizon-ai/cyrene-echo",
+    "digest": "sha256:aa4c70c15e9907c81874333fae0cb64b0444d9ab3d4a27c6f2dee7a20c7b5d4c",
+    "platform": {
+      "os": "linux",
+      "architecture": "amd64"
+    }
+  },
+  "dependencies": [
+    {
+      "componentId": "cyrene-runtime-maintenance",
+      "versionRange": ">=0.1.0, <0.2.0"
+    },
+    {
+      "componentId": "cyrene-runtime-maintenance-sdk",
+      "versionRange": "=0.1.0"
+    }
+  ],
+  "restart": {
+    "group": "single-service"
+  },
+  "source": {
+    "repository": "https://github.com/DoHorizon-AI/Cyrene-Echo",
+    "ref": "refs/heads/develop",
+    "commit": "d5a920078077bdbaa76e7117ad83f69cbfa1c614"
+  },
+  "provenance": {
+    "attestation": {
+      "kind": "github-artifact-attestation",
+      "subjectName": "ghcr.io/dohorizon-ai/cyrene-echo",
+      "repository": "DoHorizon-AI/Cyrene-Echo",
+      "workflow": "DoHorizon-AI/Cyrene-Echo/.github/workflows/component-release.yml",
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "run": {
+        "id": "37847558267",
+        "attempt": 2,
+        "url": "https://github.com/DoHorizon-AI/Cyrene-Echo/actions/runs/37847558267/attempts/2"
+      }
+    }
+  },
+  "manifestDigest": "sha256:42aa2d24fcb3451868bff301816b4a954656006c8cd226824fab774e27d3678e"
+}

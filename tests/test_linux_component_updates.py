@@ -106,6 +106,83 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
     )
 
 
+def test_verified_release_index_separates_manifest_bytes_from_archive_attestation() -> None:
+    fixture_root = (
+        WORKSPACE_ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "catalyst-4ad950"
+    )
+    index_bytes = (fixture_root / "component-release-index-v1.json").read_bytes()
+    manifest_bytes = (fixture_root / "catalyst-ubuntu24-manifest.json").read_bytes()
+    index = json.loads(index_bytes)
+    manifest = json.loads(manifest_bytes)
+    artifact = manifest["artifact"]
+    component = next(
+        row
+        for row in json.loads(
+            (WORKSPACE_ROOT / "governance" / "component-catalog-v2.json").read_text(
+                encoding="utf-8"
+            )
+        )["components"]
+        if row["componentId"] == manifest["componentId"]
+    )
+    artifact_digest = artifact["sha256"]
+    manifest_asset_digest = "sha256:" + updates.hashlib.sha256(manifest_bytes).hexdigest()
+    index_asset_digest = "sha256:" + updates.hashlib.sha256(index_bytes).hexdigest()
+    candidate = updates.Candidate(
+        component=component,
+        manifest=manifest,
+        manifest_digest=manifest["manifestDigest"],
+        artifact_digest=artifact_digest,
+        manifest_uri=next(
+            row["manifestUri"]
+            for row in index["releases"]
+            if row["componentId"] == manifest["componentId"]
+            and row["manifestDigest"] == manifest["manifestDigest"]
+        ),
+        index=index,
+        index_uri=(
+            "https://github.com/DoHorizon-AI/Cyrene-Catalyst/releases/download/"
+            f"{manifest['releaseId']}/component-release-index-v1.json"
+        ),
+        release_tag=manifest["releaseId"],
+        index_asset_name="component-release-index-v1.json",
+        index_asset_digest=index_asset_digest,
+        manifest_asset_digest=manifest_asset_digest,
+    )
+    updater = SimpleNamespace(
+        _publisher_for_component=lambda _component: {
+            "repository": "DoHorizon-AI/Cyrene-Catalyst",
+            "workflow": "DoHorizon-AI/Cyrene-Catalyst/.github/workflows/component-release.yml",
+        }
+    )
+
+    trusted = updates.ComponentUpdater._trusted_release_indexes(updater, [candidate])
+    release = trusted["indexes"][0]["manifests"][0]
+
+    assert release["manifestAssetDigest"] == manifest_asset_digest
+    assert release["manifestDigest"] == manifest["manifestDigest"]
+    assert release["attestationRef"]["subjectName"] == artifact["uri"].rsplit("/", 1)[-1]
+    assert release["attestationRef"]["subjectDigest"] == artifact_digest
+    assert "manifestAssetAttestationRef" not in release
+    assert release["attestationRef"]["subjectDigest"] not in {
+        release["manifestAssetDigest"],
+        release["manifestDigest"],
+    }
+
+    v2_candidate = updates.Candidate(
+        **{
+            **candidate.__dict__,
+            "manifest": {**manifest, "schemaVersion": 2},
+        }
+    )
+    v2_trusted = updates.ComponentUpdater._trusted_release_indexes(updater, [v2_candidate])
+    v2_release = v2_trusted["indexes"][0]["manifests"][0]
+    assert (
+        v2_release["manifestAssetAttestationRef"]["subjectName"]
+        == (candidate.manifest_uri.rsplit("/", 1)[-1])
+    )
+    assert v2_release["manifestAssetAttestationRef"]["subjectDigest"] == manifest_asset_digest
+
+
 def test_workload_catalyst_token_projection_never_journals_bearer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -923,19 +1000,21 @@ def test_index_release_tag_rejects_unversioned_plugin_tag_and_mixed_versions(
         )
 
 
-def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_apply() -> None:
+def test_workload_protocol_defaults_check_action_and_repeats_action_and_channel() -> None:
     updater = object.__new__(updates.ComponentUpdater)
     updater._require_authorized_process = lambda: None
-    calls: list[tuple[str, str | None]] = []
-    updater.check_workload = lambda workload_id, target_id, selections, *, action: (
-        calls.append(("check", action)) or {"status": "ready"}
+    calls: list[tuple[str, str | None, str | None]] = []
+    updater.check_workload = lambda workload_id, target_id, selections, *, action, channel: (
+        calls.append(("check", action, channel)) or {"status": "ready"}
     )
-    updater.stage_workload = lambda workload_id, target_id, plan_id, plan_digest, *, action: (
-        calls.append(("stage", action)) or {"status": "staged"}
+    updater.stage_workload = (
+        lambda workload_id, target_id, plan_id, plan_digest, *, action, channel: (
+            calls.append(("stage", action, channel)) or {"status": "staged"}
+        )
     )
     updater.apply_workload = (
-        lambda workload_id, target_id, plan_id, plan_digest, confirmation, *, action: (
-            calls.append(("apply", action)) or {"status": "installed"}
+        lambda workload_id, target_id, plan_id, plan_digest, confirmation, *, action, channel: (
+            calls.append(("apply", action, channel)) or {"status": "installed"}
         )
     )
 
@@ -955,6 +1034,7 @@ def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_app
         {
             **common,
             "operation": "check",
+            "channel": "preview",
             "action": "uninstall",
             "selections": {
                 "includeComponentIds": ["cyrene-tools-dataset-preparation"],
@@ -967,6 +1047,7 @@ def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_app
         {
             **common,
             "operation": "stage",
+            "channel": "preview",
             "action": "uninstall",
             "planId": "plan-example",
             "planDigest": "sha256:" + "a" * 64,
@@ -976,6 +1057,7 @@ def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_app
         {
             **common,
             "operation": "apply",
+            "channel": "preview",
             "action": "uninstall",
             "planId": "plan-example",
             "planDigest": "sha256:" + "a" * 64,
@@ -991,10 +1073,10 @@ def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_app
     assert uninstall_check["ok"] is True
     assert stage["ok"] is True and apply["ok"] is True
     assert calls == [
-        ("check", "install"),
-        ("check", "uninstall"),
-        ("stage", "uninstall"),
-        ("apply", "uninstall"),
+        ("check", "install", None),
+        ("check", "uninstall", "preview"),
+        ("stage", "uninstall", "preview"),
+        ("apply", "uninstall", "preview"),
     ]
 
 
@@ -1013,6 +1095,62 @@ def test_workload_protocol_rejects_stage_without_repeated_action() -> None:
 
     assert response["ok"] is False
     assert response["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_workload_protocol_rejects_stage_without_repeated_channel() -> None:
+    updater = object.__new__(updates.ComponentUpdater)
+    response = updater.handle_workload(
+        {
+            "protocolVersion": updates.WORKLOAD_PROTOCOL_VERSION,
+            "operation": "stage",
+            "workloadId": "catalyst",
+            "targetId": updates.WORKLOAD_HOST_TARGET,
+            "planId": "plan-example",
+            "planDigest": "sha256:" + "a" * 64,
+            "action": "install",
+        }
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_blocked_workload_check_echoes_digest_bound_channel() -> None:
+    updater = object.__new__(updates.ComponentUpdater)
+    updater.catalog = {"defaultChannel": "stable", "channels": {"stable": {}, "preview": {}}}
+    updater.catalog_digest = "sha256:" + "b" * 64
+    updater.catalog_generation = 15
+    updater._reload_catalog_for_operation = lambda: None
+    updater._ensure_state_root = lambda: None
+    updater._require_workload_target = lambda workload_id, target_id: (workload_id, target_id)
+    plan_digest = "sha256:" + "a" * 64
+    resolution = {
+        "status": "blocked",
+        "planId": "plan-" + "a" * 32,
+        "planDigest": plan_digest,
+        "action": "install",
+        "channel": "preview",
+        "planDigestMaterial": {"channel": "preview"},
+        "selectedComponents": [],
+        "warnings": [],
+        "blockers": [{"code": "MISSING_RELEASE"}],
+    }
+    updater._build_workload_plan = lambda *args, **kwargs: (
+        resolution,
+        {},
+        {"components": {}, "installationRecords": {}, "sourceBindings": []},
+    )
+
+    result = updater.check_workload(
+        "catalyst",
+        updates.WORKLOAD_HOST_TARGET,
+        {},
+        channel="preview",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["channel"] == result["resolution"]["channel"] == "preview"
+    assert result["resolution"]["planDigestMaterial"]["channel"] == "preview"
 
 
 @pytest.mark.parametrize(

@@ -35,6 +35,7 @@ REPOSITORY = "DoHorizon-AI/Cyrene-Workspace"
 WORKFLOW_PATH = ".github/workflows/native-installer-release.yml"
 PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 CATALOG_WORKFLOW = f"{REPOSITORY}/.github/workflows/component-catalog-release.yml"
+VERIFIED_CATALOG_METADATA_SCHEMA_VERSION = 1
 COMPONENT_WORKFLOW = ".github/workflows/component-release.yml"
 CHANNEL_REFS = {
     "preview": {"refs/heads/develop"},
@@ -1937,7 +1938,9 @@ def _verify_catalog_input(
     _, _, source_commit = identity
     if (
         type(metadata.get("schemaVersion")) is not int
-        or metadata.get("schemaVersion") != expected_schema
+        or metadata.get("schemaVersion") != VERIFIED_CATALOG_METADATA_SCHEMA_VERSION
+        or type(metadata.get("catalogSchemaVersion")) is not int
+        or metadata.get("catalogSchemaVersion") != expected_schema
         or metadata.get("repository") != REPOSITORY
         or metadata.get("workflow") != CATALOG_WORKFLOW
         or metadata.get("channel") != channel

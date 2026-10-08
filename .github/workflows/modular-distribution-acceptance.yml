@@ -497,13 +497,14 @@ jobs:
               require(isinstance(workloads, dict) and "catalyst" in workloads, "Catalyst workload pins are required")
               require(set(workloads) <= {"catalyst", "plugins", "echo"}, "workload pins contain an unsupported workload")
               for workload_id, workload in workloads.items():
-                  required_workload_fields = {"workloadId", "targetId", "catalogDigest", "selectedComponents"}
+                  required_workload_fields = {"workloadId", "targetId", "catalogDigest", "channel", "selectedComponents"}
                   if workload_id == "catalyst":
                       required_workload_fields.add("service")
                   require(isinstance(workload, dict) and set(workload) == required_workload_fields, f"{workload_id} workload pin shape differs from schema")
                   require(workload.get("workloadId") == workload_id, f"{workload_id} workload ID pin differs")
                   require(workload.get("targetId") == HOST_TARGET, f"{workload_id} workload target pin differs")
                   require(workload.get("catalogDigest") == "sha256:" + catalog["sha256"], f"{workload_id} catalog digest pin differs from signed catalog bytes")
+                  require(workload.get("channel") == "preview", f"{workload_id} acceptance must explicitly pin the signed preview channel")
                   rows = workload.get("selectedComponents")
                   require(isinstance(rows, list) and rows, f"{workload_id} has no selected component identity pins")
                   component_ids = [row.get("componentId") for row in rows if isinstance(row, dict)]
@@ -573,7 +574,8 @@ jobs:
                       require(isinstance(publisher, dict) and {"repository", "workflow"} <= set(publisher) <= {"id", "repository", "workflow", "tagFormat"}, f"{workload_id} {row['componentId']} publisher pin is malformed")
                       index = row["indexIdentity"]
                       index_fields = {"publisherIdentity", "repository", "assetName", "assetUri", "assetDigest", "indexDigest", "channel", "releaseTag"}
-                      require(isinstance(index, dict) and {"repository", "assetName", "assetDigest", "indexDigest", "releaseTag"} <= set(index) <= index_fields, f"{workload_id} {row['componentId']} index pin is malformed")
+                      require(isinstance(index, dict) and {"repository", "assetName", "assetDigest", "indexDigest", "channel", "releaseTag"} <= set(index) <= index_fields, f"{workload_id} {row['componentId']} index pin is malformed")
+                      require(index.get("channel") == workload["channel"], f"{workload_id} {row['componentId']} index channel differs from the workload plan channel")
                       require(index["assetName"] == "component-release-index-v1.json", f"{workload_id} {row['componentId']} index asset is not canonical")
                       for digest_field in ("assetDigest", "indexDigest"):
                           require(re.fullmatch(r"sha256:[0-9a-f]{64}", index[digest_field]) is not None, f"{workload_id} {row['componentId']} has malformed index {digest_field}")
@@ -1035,6 +1037,7 @@ jobs:
               require(staged.get("planDigest") == checked["planDigest"], f"{context} changed the checked plan digest")
               require(staged.get("catalogDigest") == workload["catalogDigest"], f"{context} changed the pinned catalog")
               require(staged.get("workloadId") == workload["workloadId"] and staged.get("targetId") == workload["targetId"], f"{context} changed the workload target")
+              require(staged.get("channel") == checked["channel"] == workload["channel"], f"{context} changed the checked release channel")
               require(staged.get("action") == "install", f"{context} changed the checked action")
               staged_rows = staged.get("components")
               assert_selected_components(staged_rows, workload["selectedComponents"], context)
@@ -1074,6 +1077,7 @@ jobs:
               fields = {
                   "workloadId": "catalyst",
                   "targetId": workload["targetId"],
+                  "channel": workload["channel"],
                   "action": "install",
                   "planId": checked["planId"],
                   "planDigest": checked["planDigest"],
@@ -1205,6 +1209,7 @@ jobs:
                   preserve_read_token=True,
                   workloadId="plugins",
                   targetId=workload["targetId"],
+                  channel=workload["channel"],
                   action="install",
                   selections={
                       "includeComponentIds": [plugin_id],
@@ -1215,17 +1220,21 @@ jobs:
               require(checked.get("status") == "ready", f"standalone exact-match check is not ready: {checked.get('blockers')}")
               require(checked.get("workloadId") == "plugins" and checked.get("targetId") == workload["targetId"], "standalone exact-match check workload/target identity differs")
               require(checked.get("catalogDigest") == workload["catalogDigest"], "standalone exact-match check catalog digest differs from pins")
+              require(checked.get("channel") == workload["channel"] == "preview", "standalone exact-match check did not bind the pinned preview channel")
               require(checked.get("action") == "install", "standalone exact-match check action is not install")
               assert_selected_components(checked.get("components"), expected_rows, "standalone exact-match check")
               resolution = checked.get("resolution")
               require(isinstance(resolution, dict), "standalone exact-match check has no resolver resolution")
               require(resolution.get("catalogDigest") == workload["catalogDigest"], "standalone exact-match resolution catalog digest differs")
+              require(resolution.get("channel") == workload["channel"], "standalone exact-match resolution channel differs from pins")
+              require(resolution.get("planDigestMaterial", {}).get("channel") == workload["channel"], "standalone exact-match plan digest material is not bound to the pinned channel")
               assert_selected_components(resolution.get("selectedComponents"), expected_rows, "standalone exact-match resolution")
               require(re.fullmatch(r"plan-[0-9a-f]{32}", str(checked.get("planId", ""))) is not None, "standalone exact-match plan ID is malformed")
               require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(checked.get("planDigest", ""))) is not None, "standalone exact-match plan digest is malformed")
               plan_identity = {
                   "workloadId": "plugins",
                   "targetId": workload["targetId"],
+                  "channel": workload["channel"],
                   "catalogDigest": workload["catalogDigest"],
                   "planId": checked["planId"],
                   "planDigest": checked["planDigest"],
@@ -1240,6 +1249,7 @@ jobs:
               fields = {
                   "workloadId": "plugins",
                   "targetId": workload["targetId"],
+                  "channel": workload["channel"],
                   "action": "install",
                   "planId": checked["planId"],
                   "planDigest": checked["planDigest"],
@@ -1737,11 +1747,13 @@ jobs:
                   checked = workload_request(
                       "check", preserve_read_token=True,
                       workloadId="catalyst", targetId=workload["targetId"],
+                      channel=workload["channel"],
                       action="install", selections=selection,
                   )
                   require(checked.get("status") == "ready", f"Catalyst workload check is not ready: {checked.get('blockers')}")
                   require(checked.get("workloadId") == "catalyst" and checked.get("targetId") == workload["targetId"], "Catalyst check workload/target identity differs")
                   require(checked.get("catalogDigest") == workload["catalogDigest"], "Catalyst check catalog digest differs from root pins")
+                  require(checked.get("channel") == workload["channel"] == "preview", "Catalyst check did not bind the pinned preview channel")
                   require(checked.get("action") == "install", "Catalyst check action is not install")
                   return checked
               checked = phase("catalyst_workload_check", check_gate)
@@ -1750,11 +1762,13 @@ jobs:
                   resolution = checked.get("resolution")
                   require(isinstance(resolution, dict), "Catalyst check has no resolver resolution")
                   require(resolution.get("catalogDigest") == workload["catalogDigest"], "Catalyst resolution catalog digest differs")
+                  require(resolution.get("channel") == workload["channel"], "Catalyst resolution channel differs from pins")
+                  require(resolution.get("planDigestMaterial", {}).get("channel") == workload["channel"], "Catalyst plan digest material is not bound to the pinned channel")
                   assert_selected_components(resolution.get("selectedComponents"), workload["selectedComponents"], "Catalyst resolver resolution")
                   require(re.fullmatch(r"plan-[0-9a-f]{32}", str(checked.get("planId", ""))) is not None, "Catalyst plan ID is malformed")
                   require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(checked.get("planDigest", ""))) is not None, "Catalyst plan digest is malformed")
                   write_json(root() / "evidence" / "catalyst-checked-plan.json", checked)
-                  return {"selectedComponents": workload["selectedComponents"], "planId": checked["planId"], "planDigest": checked["planDigest"]}
+                  return {"channel": workload["channel"], "selectedComponents": workload["selectedComponents"], "planId": checked["planId"], "planDigest": checked["planDigest"]}
               phase("catalyst_exact_plan_pins", exact_plan)
               phase(
                   "version_conflict_gate",
@@ -1775,11 +1789,13 @@ jobs:
               def apply_gate() -> dict[str, Any]:
                   applied = workload_request(
                       "apply", workloadId="catalyst", targetId=workload["targetId"],
+                      channel=workload["channel"],
                       action="install", planId=checked["planId"], planDigest=checked["planDigest"],
                       confirmation={"planId": checked["planId"], "planDigest": checked["planDigest"], "confirmed": True},
                   )
                   require(applied.get("status") in {"installed", "activated"}, f"Catalyst apply did not report an install/activation result: {applied.get('status')}")
                   require(applied.get("action") == "install", "Catalyst apply returned an action other than install")
+                  require(applied.get("channel") == checked["channel"] == workload["channel"], "Catalyst apply did not preserve the checked release channel")
                   require(applied.get("workloadId") == "catalyst" and applied.get("targetId") == workload["targetId"], "Catalyst apply returned a different workload or target")
                   require(applied.get("planId") == checked["planId"], "Catalyst apply returned a different or missing plan ID")
                   require(applied.get("planDigest") == checked["planDigest"], "Catalyst apply returned a different or missing plan digest")
@@ -1815,14 +1831,14 @@ jobs:
               phase("catalyst_installed_status_readback", readback)
 
               def repeat_install() -> dict[str, Any]:
-                  command = run(["sudo", "-n", "cyrene", "workload", "install", "catalyst", "--yes"], label="public-catalyst-repeat-install", timeout=1800)
+                  command = run(["sudo", "-n", "cyrene", "workload", "install", "catalyst", "--channel", workload["channel"], "--yes"], label="public-catalyst-repeat-install", timeout=1800)
                   after = workload_request("status", workloadId="catalyst")
                   require(after.get("catalogDigest") == workload["catalogDigest"], "repeat install changed the active catalog identity")
                   assert_installed_components(after.get("components", []), workload["selectedComponents"], "Catalyst repeated install readback")
                   receipt_after = active_receipt_readback(workload["selectedComponents"], staged.get("components"))
                   receipt_before = load_json(root() / "evidence" / "installed-workload-receipt-identities.json")
                   require(receipt_after == receipt_before, "repeated install changed active or immutable receipt identities")
-                  return {"publicCommand": "sudo cyrene workload install catalyst --yes", "stdoutBytes": len(command.stdout.encode("utf-8")), "catalogDigest": after["catalogDigest"], "componentCount": len(after["components"]), "receiptIdentitiesUnchanged": True}
+                  return {"publicCommand": f"sudo cyrene workload install catalyst --channel {workload['channel']} --yes", "channel": workload["channel"], "stdoutBytes": len(command.stdout.encode("utf-8")), "catalogDigest": after["catalogDigest"], "componentCount": len(after["components"]), "receiptIdentitiesUnchanged": True}
               phase("catalyst_public_repeat_install", repeat_install)
               phase("client_static_web_http", client_web_http)
               phase("client_release_integration", client_release_integration)
@@ -2025,6 +2041,7 @@ jobs:
                   "check",
                   workloadId="catalyst",
                   targetId=workload["targetId"],
+                  channel=workload["channel"],
                   action="install",
                   selections={
                       "includeComponentIds": [],
@@ -2038,10 +2055,16 @@ jobs:
                   if isinstance(row, dict)
               }
               require(blocked.get("status") == "blocked", "excluding a required Catalyst component did not block the plan")
+              require(blocked.get("channel") == workload["channel"], "required omission check changed the explicit preview channel")
+              blocked_resolution = blocked.get("resolution")
+              require(isinstance(blocked_resolution, dict), "required omission check returned no blocked resolver resolution")
+              require(blocked_resolution.get("channel") == workload["channel"], "required omission resolver changed the explicit preview channel")
+              require(blocked_resolution.get("planDigestMaterial", {}).get("channel") == workload["channel"], "required omission digest material is not bound to the explicit preview channel")
               require("REQUIRED_COMPONENT_UNSELECTABLE" in blocker_codes, f"required omission returned unexpected blockers: {sorted(blocker_codes)}")
               require(not blocked.get("components"), "blocked omission unexpectedly selected install components")
               return {
                   "excludedRequiredComponent": required,
+                  "channel": workload["channel"],
                   "status": blocked["status"],
                   "blockerCodes": sorted(blocker_codes),
                   "workloadRequests": 1,
