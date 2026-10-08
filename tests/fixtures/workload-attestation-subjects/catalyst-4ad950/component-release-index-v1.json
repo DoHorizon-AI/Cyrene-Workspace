@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "repository": "DoHorizon-AI/Cyrene-Catalyst",
+  "channel": "preview",
+  "generatedAt": "2026-10-08T22:41:40Z",
+  "source": {
+    "repository": "https://github.com/DoHorizon-AI/Cyrene-Catalyst",
+    "ref": "refs/heads/develop",
+    "commit": "4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b"
+  },
+  "provenance": {
+    "attestation": {
+      "kind": "github-artifact-attestation",
+      "subjectName": "component-release-index-v1.json",
+      "repository": "DoHorizon-AI/Cyrene-Catalyst",
+      "workflow": "DoHorizon-AI/Cyrene-Catalyst/.github/workflows/component-release.yml",
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "run": {
+        "id": "37854680774",
+        "attempt": 1,
+        "url": "https://github.com/DoHorizon-AI/Cyrene-Catalyst/actions/runs/37854680774/attempts/1"
+      }
+    }
+  },
+  "releases": [
+    {
+      "componentId": "cyrene-catalyst",
+      "version": "e27c627afe0bf4fe6738794d8591973082d12ee1ce583c18a76f09ade30de87b",
+      "target": {
+        "os": "linux",
+        "osVersion": "22.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "22.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.35",
+        "runtime": "python:3.12"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Catalyst/releases/download/preview-4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b/cyrene-catalyst-linux-ubuntu-22-04-x86-64-glibc-2-35-python-3-12.manifest.json",
+      "manifestDigest": "sha256:f3aabacff861081f46ed25ab543c75e5839b814c3707b79c8f793db2a95029be"
+    },
+    {
+      "componentId": "cyrene-catalyst",
+      "version": "cdbc66391cb43eee2c66248f1dfd07f2cf2cd09db4e079374bd24415f4b4b1ba",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "python:3.12"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Catalyst/releases/download/preview-4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b/cyrene-catalyst-linux-ubuntu-24-04-x86-64-glibc-2-39-python-3-12.manifest.json",
+      "manifestDigest": "sha256:47e5a723f59ab2ba90e6a7f75a33a1db3566228b04301af0b4e1f56525e520e4"
+    },
+    {
+      "componentId": "cyrene-catalyst",
+      "version": "cdbc66391cb43eee2c66248f1dfd07f2cf2cd09db4e079374bd24415f4b4b1ba",
+      "target": {
+        "os": "windows",
+        "osVersion": "10.0",
+        "architecture": "x86_64",
+        "runtime": "docker-desktop:linux"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Catalyst/releases/download/preview-4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b/cyrene-catalyst-windows-x86-64-docker-desktop-linux.manifest.json",
+      "manifestDigest": "sha256:44274e43d031342093e70ce540c6215b44f11f04a5b23ad6b85f2756557c5cf2"
+    }
+  ],
+  "compatibilityGroups": [],
+  "indexDigest": "sha256:95be28db3ae50ca00872f64cd9877891293ede775f29732dae4180ba46ba2e87"
+}

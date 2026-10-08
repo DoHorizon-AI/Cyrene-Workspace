@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "repository": "DoHorizon-AI/Cyrene-Echo",
+  "channel": "preview",
+  "generatedAt": "2026-10-08T22:31:25Z",
+  "source": {
+    "repository": "https://github.com/DoHorizon-AI/Cyrene-Echo",
+    "ref": "refs/heads/develop",
+    "commit": "d5a920078077bdbaa76e7117ad83f69cbfa1c614"
+  },
+  "provenance": {
+    "attestation": {
+      "kind": "github-artifact-attestation",
+      "subjectName": "component-release-index-v1.json",
+      "repository": "DoHorizon-AI/Cyrene-Echo",
+      "workflow": "DoHorizon-AI/Cyrene-Echo/.github/workflows/component-release.yml",
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "run": {
+        "id": "37847558267",
+        "attempt": 2,
+        "url": "https://github.com/DoHorizon-AI/Cyrene-Echo/actions/runs/37847558267/attempts/2"
+      }
+    }
+  },
+  "releases": [
+    {
+      "componentId": "cyrene-echo",
+      "version": "0.1.0",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "runtime": "oci"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Echo/releases/download/preview-d5a920078077bdbaa76e7117ad83f69cbfa1c614/cyrene-echo-linux-ubuntu-24-04-x86-64-oci.manifest.json",
+      "manifestDigest": "sha256:42aa2d24fcb3451868bff301816b4a954656006c8cd226824fab774e27d3678e"
+    },
+    {
+      "componentId": "cyrene-echo",
+      "version": "0.1.0",
+      "target": {
+        "os": "windows",
+        "osVersion": "10.0",
+        "architecture": "x86_64",
+        "runtime": "docker-desktop:linux"
+      },
+      "manifestUri": "https://github.com/DoHorizon-AI/Cyrene-Echo/releases/download/preview-d5a920078077bdbaa76e7117ad83f69cbfa1c614/cyrene-echo-windows-x86-64-docker-desktop-linux.manifest.json",
+      "manifestDigest": "sha256:d918b98511fdc5646927d677eb76ac94fcbb9616b1bc1bda4eb51a2dc77298a6"
+    }
+  ],
+  "compatibilityGroups": [],
+  "indexDigest": "sha256:a4bed1c5afa2eea2667e95a483f8ff0ad1f97d009b65b09b20a9e87529ab8ca3"
+}

@@ -17,7 +17,9 @@ import re
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
+from urllib.parse import urlsplit
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERSION_RE = re.compile(
@@ -40,6 +42,47 @@ def _canonical_bytes(value: Any) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _jcs_bytes(value: Any) -> bytes:
+    """Encode the integer/string-only release JSON subset with JCS key order."""
+
+    def encode(item: Any) -> str:
+        if item is None:
+            return "null"
+        if item is True:
+            return "true"
+        if item is False:
+            return "false"
+        if isinstance(item, str):
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in item):
+                raise ValueError("JCS strings cannot contain unpaired surrogates")
+            return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(item, int):
+            return str(item)
+        if isinstance(item, float):
+            raise TypeError("Release JSON does not permit floating-point values")
+        if isinstance(item, list):
+            return "[" + ",".join(encode(value) for value in item) + "]"
+        if isinstance(item, dict):
+            if any(not isinstance(key, str) for key in item):
+                raise ValueError("JCS object keys must be strings")
+            keys = sorted(item, key=lambda key: key.encode("utf-16be"))
+            return "{" + ",".join(encode(key) + ":" + encode(item[key]) for key in keys) + "}"
+        raise ValueError("Release JSON contains a value outside the JCS subset")
+
+    return encode(value).encode("utf-8")
+
+
+def _self_excluding_jcs_digest(value: Mapping[str, Any], field: str) -> str | None:
+    """Recompute a release record's JCS digest without its self-reference."""
+
+    material = dict(value)
+    material.pop(field, None)
+    try:
+        return "sha256:" + hashlib.sha256(_jcs_bytes(material)).hexdigest()
+    except (TypeError, ValueError):
+        return None
 
 
 def _sorted_unique_strings(value: Any, *, field: str) -> list[str]:
@@ -438,15 +481,24 @@ def _candidate_rows(
         ):
             continue
         if (
-            envelope.get("assetName") != "component-release-index-v1.json"
-            or not _valid_digest(envelope.get("assetDigest"))
-            or not _valid_digest(envelope.get("indexDigest"))
-            or envelope.get("indexDigest") != index.get("indexDigest")
-            or envelope.get("repository") != repository
+            envelope.get("repository") != repository
             or index.get("repository") != repository
             or envelope.get("channel") != expected_channel
             or index.get("channel") != envelope.get("channel")
         ):
+            continue
+        if (
+            envelope.get("assetName") != "component-release-index-v1.json"
+            or not _valid_digest(envelope.get("assetDigest"))
+            or not _valid_digest(envelope.get("indexDigest"))
+            or envelope.get("indexDigest") != index.get("indexDigest")
+            or _self_excluding_jcs_digest(index, "indexDigest") != envelope.get("indexDigest")
+            or _release_asset_basename(
+                envelope.get("assetUri"), repository, envelope.get("releaseTag")
+            )
+            != envelope.get("assetName")
+        ):
+            malformed_binding = True
             continue
         source = envelope.get("source")
         if (
@@ -454,15 +506,27 @@ def _candidate_rows(
             or not _source_repository_matches(source.get("repository"), repository)
             or not isinstance(source.get("ref"), str)
             or not isinstance(source.get("commit"), str)
+            or index.get("source") != source
         ):
             malformed_binding = True
             continue
         index_attestation = envelope.get("attestationRef")
+        index_provenance = index.get("provenance")
+        declared_index_attestation = (
+            index_provenance.get("attestation") if isinstance(index_provenance, Mapping) else None
+        )
         if (
             not _attestation_matches(index_attestation, repository, workflow)
             or index_attestation.get("subjectName") != envelope.get("assetName")
             or index_attestation.get("subjectDigest") != envelope.get("assetDigest")
             or index_attestation.get("sourceCommit") != source.get("commit")
+            or index_attestation.get("sourceRef") != source.get("ref")
+            or not isinstance(declared_index_attestation, Mapping)
+            or declared_index_attestation.get("kind") != "github-artifact-attestation"
+            or declared_index_attestation.get("repository") != repository
+            or declared_index_attestation.get("workflow") != workflow
+            or declared_index_attestation.get("predicateType") != "https://slsa.dev/provenance/v1"
+            or declared_index_attestation.get("subjectName") != envelope.get("assetName")
         ):
             malformed_binding = True
             continue
@@ -489,8 +553,12 @@ def _candidate_rows(
                 or not isinstance(version, str)
                 or not _valid_digest(manifest_digest)
                 or not isinstance(manifest_uri, str)
+                or _release_asset_basename(manifest_uri, repository, envelope.get("releaseTag"))
+                is None
                 or manifest.get("componentId") != component_id
                 or manifest.get("version") != version
+                or manifest.get("channel") != envelope.get("channel")
+                or manifest.get("releaseId") != envelope.get("releaseTag")
                 or manifest.get("manifestDigest") != manifest_digest
             ):
                 continue
@@ -528,6 +596,19 @@ def _candidate_rows(
             if expected_artifact_kind is not None and artifact_kind != expected_artifact_kind:
                 malformed_binding = True
                 continue
+            if artifact_kind != "oci-image":
+                artifact_uri = (
+                    artifact.get("archive", {}).get("uri")
+                    if artifact_kind == "plugin-package"
+                    and isinstance(artifact.get("archive"), Mapping)
+                    else artifact.get("uri")
+                )
+                if (
+                    _release_asset_basename(artifact_uri, repository, envelope.get("releaseTag"))
+                    is None
+                ):
+                    malformed_binding = True
+                    continue
             content_digest = _manifest_content_digest(manifest, artifact)
             artifact_digest = wrapped.get("artifactDigest")
             if (
@@ -540,21 +621,50 @@ def _candidate_rows(
             if not _manifest_matches_catalog(component, manifest, artifact):
                 malformed_binding = True
                 continue
-            attestation = wrapped.get("attestationRef", index_attestation)
-            if (
-                not _attestation_matches(attestation, repository, workflow)
-                or attestation.get("subjectName") != manifest_uri.rsplit("/", 1)[-1]
-                or attestation.get("subjectDigest") != manifest_asset_digest
-            ):
+            if _self_excluding_jcs_digest(manifest, "manifestDigest") != manifest_digest:
                 malformed_binding = True
                 continue
+            attestation = wrapped.get("attestationRef", index_attestation)
             source = manifest.get("source")
             source_commit = source.get("commit") if isinstance(source, Mapping) else None
+            source_ref = source.get("ref") if isinstance(source, Mapping) else None
+            manifest_provenance = manifest.get("provenance")
+            declared_manifest_attestation = (
+                manifest_provenance.get("attestation")
+                if isinstance(manifest_provenance, Mapping)
+                else None
+            )
+            artifact_subject_name = _manifest_attestation_subject_name(artifact)
+            manifest_asset_attestation = wrapped.get("manifestAssetAttestationRef")
+            manifest_uri_asset_name = _release_asset_basename(
+                manifest_uri, repository, envelope.get("releaseTag")
+            )
+            raw_manifest_attestation_valid = manifest.get("schemaVersion") != 2 or (
+                _attestation_matches(manifest_asset_attestation, repository, workflow)
+                and manifest_asset_attestation.get("sourceCommit") == source_commit
+                and manifest_asset_attestation.get("sourceRef") == source_ref
+                and manifest_asset_attestation.get("subjectName") == manifest_uri_asset_name
+                and manifest_asset_attestation.get("subjectDigest") == manifest_asset_digest
+            )
             if (
                 not isinstance(source, Mapping)
                 or not _source_repository_matches(source.get("repository"), repository)
-                or not isinstance(source_commit, str)
+                or source_commit != envelope.get("source", {}).get("commit")
+                or source_ref != envelope.get("source", {}).get("ref")
+                or not _attestation_matches(attestation, repository, workflow)
                 or attestation.get("sourceCommit") != source_commit
+                or attestation.get("sourceRef") != source_ref
+                or attestation.get("subjectName") != artifact_subject_name
+                or attestation.get("subjectDigest") != content_digest
+                or not isinstance(declared_manifest_attestation, Mapping)
+                or declared_manifest_attestation.get("kind") != "github-artifact-attestation"
+                or declared_manifest_attestation.get("repository") != repository
+                or declared_manifest_attestation.get("workflow") != workflow
+                or declared_manifest_attestation.get("predicateType")
+                != "https://slsa.dev/provenance/v1"
+                or declared_manifest_attestation.get("subjectName") != artifact_subject_name
+                or declared_manifest_attestation.get("run") != declared_index_attestation.get("run")
+                or not raw_manifest_attestation_valid
             ):
                 malformed_binding = True
                 continue
@@ -649,15 +759,60 @@ def _match_index_release(
 
 
 def _manifest_content_digest(manifest: Mapping[str, Any], artifact: Mapping[str, Any]) -> Any:
-    if artifact.get("kind") == "plugin-package":
+    if artifact.get("kind") == "oci-image":
+        artifact_digest = artifact.get("digest")
+    elif artifact.get("kind") == "plugin-package":
         archive = artifact.get("archive")
         artifact_digest = archive.get("sha256") if isinstance(archive, Mapping) else None
     else:
-        artifact_digest = artifact.get("sha256", artifact.get("digest"))
+        artifact_digest = artifact.get("sha256")
     content_digest = manifest.get("contentDigest")
     if content_digest is not None and content_digest != artifact_digest:
         return None
     return artifact_digest
+
+
+def _manifest_attestation_subject_name(artifact: Mapping[str, Any]) -> str | None:
+    """Resolve the publisher-attested payload subject, separate from manifest bytes."""
+
+    kind = artifact.get("kind")
+    if kind == "oci-image":
+        subject = artifact.get("repository")
+        return subject if isinstance(subject, str) and subject else None
+    payload = artifact.get("archive") if kind == "plugin-package" else artifact
+    uri = payload.get("uri") if isinstance(payload, Mapping) else None
+    if not isinstance(uri, str):
+        return None
+    subject_name = PurePosixPath(uri.split("?", 1)[0]).name
+    return subject_name if subject_name not in {"", ".", ".."} else None
+
+
+def _release_asset_basename(uri: Any, repository: str, release_tag: Any) -> str | None:
+    """Accept only one asset path beneath the exact immutable GitHub release tag."""
+
+    if not isinstance(uri, str) or not isinstance(release_tag, str) or not release_tag:
+        return None
+    try:
+        parts = urlsplit(uri)
+        port = parts.port
+    except ValueError:
+        return None
+    prefix = f"/{repository}/releases/download/{release_tag}/"
+    if (
+        parts.scheme != "https"
+        or parts.hostname != "github.com"
+        or parts.username is not None
+        or parts.password is not None
+        or port is not None
+        or parts.query
+        or parts.fragment
+        or not parts.path.startswith(prefix)
+    ):
+        return None
+    asset_name = parts.path[len(prefix) :]
+    if not asset_name or "/" in asset_name or asset_name in {".", ".."}:
+        return None
+    return asset_name
 
 
 def _package_identity(
@@ -687,12 +842,14 @@ def _manifest_matches_catalog(
         return False
     expected_dependencies = component.get("dependencies")
     manifest_dependencies = manifest.get("dependencies")
-    if (
-        isinstance(expected_dependencies, list)
-        and isinstance(manifest_dependencies, list)
-        and expected_dependencies != manifest_dependencies
-    ):
-        return False
+    if isinstance(expected_dependencies, list) and isinstance(manifest_dependencies, list):
+        try:
+            expected_rows = sorted(_jcs_bytes(row) for row in expected_dependencies)
+            manifest_rows = sorted(_jcs_bytes(row) for row in manifest_dependencies)
+        except (TypeError, ValueError):
+            return False
+        if expected_rows != manifest_rows:
+            return False
     mapping = component.get("pluginPackage")
     if isinstance(mapping, Mapping):
         return (

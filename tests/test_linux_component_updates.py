@@ -106,6 +106,83 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
     )
 
 
+def test_verified_release_index_separates_manifest_bytes_from_archive_attestation() -> None:
+    fixture_root = (
+        WORKSPACE_ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "catalyst-4ad950"
+    )
+    index_bytes = (fixture_root / "component-release-index-v1.json").read_bytes()
+    manifest_bytes = (fixture_root / "catalyst-ubuntu24-manifest.json").read_bytes()
+    index = json.loads(index_bytes)
+    manifest = json.loads(manifest_bytes)
+    artifact = manifest["artifact"]
+    component = next(
+        row
+        for row in json.loads(
+            (WORKSPACE_ROOT / "governance" / "component-catalog-v2.json").read_text(
+                encoding="utf-8"
+            )
+        )["components"]
+        if row["componentId"] == manifest["componentId"]
+    )
+    artifact_digest = artifact["sha256"]
+    manifest_asset_digest = "sha256:" + updates.hashlib.sha256(manifest_bytes).hexdigest()
+    index_asset_digest = "sha256:" + updates.hashlib.sha256(index_bytes).hexdigest()
+    candidate = updates.Candidate(
+        component=component,
+        manifest=manifest,
+        manifest_digest=manifest["manifestDigest"],
+        artifact_digest=artifact_digest,
+        manifest_uri=next(
+            row["manifestUri"]
+            for row in index["releases"]
+            if row["componentId"] == manifest["componentId"]
+            and row["manifestDigest"] == manifest["manifestDigest"]
+        ),
+        index=index,
+        index_uri=(
+            "https://github.com/DoHorizon-AI/Cyrene-Catalyst/releases/download/"
+            f"{manifest['releaseId']}/component-release-index-v1.json"
+        ),
+        release_tag=manifest["releaseId"],
+        index_asset_name="component-release-index-v1.json",
+        index_asset_digest=index_asset_digest,
+        manifest_asset_digest=manifest_asset_digest,
+    )
+    updater = SimpleNamespace(
+        _publisher_for_component=lambda _component: {
+            "repository": "DoHorizon-AI/Cyrene-Catalyst",
+            "workflow": "DoHorizon-AI/Cyrene-Catalyst/.github/workflows/component-release.yml",
+        }
+    )
+
+    trusted = updates.ComponentUpdater._trusted_release_indexes(updater, [candidate])
+    release = trusted["indexes"][0]["manifests"][0]
+
+    assert release["manifestAssetDigest"] == manifest_asset_digest
+    assert release["manifestDigest"] == manifest["manifestDigest"]
+    assert release["attestationRef"]["subjectName"] == artifact["uri"].rsplit("/", 1)[-1]
+    assert release["attestationRef"]["subjectDigest"] == artifact_digest
+    assert "manifestAssetAttestationRef" not in release
+    assert release["attestationRef"]["subjectDigest"] not in {
+        release["manifestAssetDigest"],
+        release["manifestDigest"],
+    }
+
+    v2_candidate = updates.Candidate(
+        **{
+            **candidate.__dict__,
+            "manifest": {**manifest, "schemaVersion": 2},
+        }
+    )
+    v2_trusted = updates.ComponentUpdater._trusted_release_indexes(updater, [v2_candidate])
+    v2_release = v2_trusted["indexes"][0]["manifests"][0]
+    assert (
+        v2_release["manifestAssetAttestationRef"]["subjectName"]
+        == (candidate.manifest_uri.rsplit("/", 1)[-1])
+    )
+    assert v2_release["manifestAssetAttestationRef"]["subjectDigest"] == manifest_asset_digest
+
+
 def test_workload_catalyst_token_projection_never_journals_bearer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
