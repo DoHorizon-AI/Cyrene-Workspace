@@ -15,7 +15,7 @@ Workspace、Product、Platform、Plugins 或 Client 源码。工作流输入的 
 Run `.github/workflows/modular-distribution-acceptance.yml` with:
 
 - `native_release_id`: the exact official `native-installer-preview-<40 lowercase hex>` tag.
-- `release_pins_json`: a JSON document matching `release-pins-v1.schema.json`. It must pin the same native tag, Workspace source SHA and workflow, Ubuntu 24.04 amd64 DEB asset digest/size, v2 catalog release identity/digest, Catalyst catalog digest, and exact release identities for Catalyst, Node 24 Client Control, the Client Web host, Runtime Maintenance SDK, and all four Platform-supervised data plugins. Optional `workloads.plugins` pins contain exactly the official `cyrene-evaluation-exact-match` and Runtime SDK identities. They enable an independent stage-only offline retry if Catalyst's isolated stage is fully cache-backed and do not depend on Echo OCI. Optional Echo pins remain separate and are rejected before native installation until Workspace publishes the supported OCI install/evaluate/uninstall path. The workflow rejects incomplete Catalyst pins before native installation. It verifies the attested source receipt before install, then reads back dpkg state and the DEB-installed catalogs, active v2 binding, and static stage-only package contract; it does not expect a per-host native transaction receipt.
+- `release_pins_json`: a JSON document matching `release-pins-v1.schema.json`. Each workload pin must state `channel: "preview"`, and each component's index identity must name that same signed channel. It must pin the same native tag, Workspace source SHA and workflow, Ubuntu 24.04 amd64 DEB asset digest/size, v2 catalog release identity/digest, Catalyst catalog digest, and exact release identities for Catalyst, Node 24 Client Control, the Client Web host, Runtime Maintenance SDK, and all four Platform-supervised data plugins. Optional `workloads.plugins` pins contain exactly the official `cyrene-evaluation-exact-match` and Runtime SDK identities. They enable an independent stage-only offline retry if Catalyst's isolated stage is fully cache-backed and do not depend on Echo OCI. Optional Echo pins remain separate and are rejected before native installation until Workspace publishes the supported OCI install/evaluate/uninstall path. The workflow rejects incomplete Catalyst pins before native installation. It verifies the attested source receipt before install, then reads back dpkg state and the DEB-installed catalogs, active v2 binding, and static stage-only package contract; it does not expect a per-host native transaction receipt.
 
 The disposable runner must use GitHub CLI `gh` version 2.102.0 or newer for strict attestation verification. Before installing Cyrene, the driver records the initial CLI version; when the runner image is older, it reads GitHub's official release API and requires immutable `cli/cli` tag `v2.102.0` at commit `fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd`. It downloads the official amd64 DEB and checksum list, verifies their API asset digest/size, checksum-list SHA-256, exact DEB SHA-256, package version, and architecture, then installs that local verified DEB. The provision record captures the old/new versions and release asset identity. The workflow does not modify a developer's shared WSL CLI. Detached release and catalog attestations are still checked with exact signer, source ref, source SHA, predicate, and OIDC issuer constraints.
 
@@ -29,6 +29,22 @@ exercise rejection of a conflicting Catalog fixture. The Catalyst plan must sele
 all four Catalog-owned plugin bindings. Acceptance compares Catalog
 binding identities, Package Runtime source policy, ActivitySource Broker scopes,
 and authenticated Platform UDS readback, including each active installation ID.
+The signed Catalog 15's default channel is `stable`, so this preview acceptance
+explicitly requests `channel: "preview"` for the Catalyst and standalone plugin
+checks. The workflow verifies `check.channel`, `resolution.channel`, and
+`resolution.planDigestMaterial.channel`, then repeats the same channel on each
+`stage` and `apply` request and checks their readbacks. Its public idempotence
+command is `sudo cyrene workload install catalyst --channel preview --yes`.
+Generic CLI installs that omit `--channel` continue to use the installed signed
+Catalog's default. The pins require every selected release index to identify the
+same preview channel.
+
+签名 Catalog 15 的默认 channel 是 `stable`，因此此 preview 验收会在 Catalyst 和独立插件的
+check 请求中显式传入 `channel: "preview"`。工作流核对 `check.channel`、`resolution.channel` 和
+`resolution.planDigestMaterial.channel`，并在每次 `stage`、`apply` 请求中重复同一 channel，再验证响应。
+幂等安装使用公开命令 `sudo cyrene workload install catalyst --channel preview --yes`。普通 CLI 命令省略
+`--channel` 时仍按已安装签名 Catalog 的默认值运行。pins 要求每个所选 release index 都绑定同一个 preview channel。
+
 The exact Node 24 Control release, root-owned active pointer/receipt, systemd
 unit, local auth session, and Catalyst read proxy are required core gates.
 An isolated stage retry is exercised with the installed CLI in a temporary Linux
@@ -160,7 +176,7 @@ The required Catalyst path is:
 2. Read back dpkg status, the root-owned baseline and active catalogs, the installed signed v2 binding through the DEB-installed binding validator, and the stage-only package contract. Query the fixed workload status API. Check the exact Catalyst plan against pins; stage and apply only that digest-bound plan; read back each root-owned active and immutable workload receipt through the installed manifest validator. Verify the Client static-Web current pointer, release tree, and manifest-pinned file hashes.
 3. Read back the ActivitySource catalog, Package Runtime source policy, exact Catalyst `cyrene` UID/GID, selected binding scopes, root-only token mode and hash match without exporting the token, shared catalog generation, and the running systemd process' loaded source/generation/socket identity. Compare each selected binding/package/installation ID with authenticated Platform UDS readback and require its active installation to be `RUNNING`. Require the Product's loaded port to match the pinned loopback URL. The workflow does not perform `init-catalog`; these scopes must be created by the installed workload transaction.
 4. Validate the installed Catalyst immutable bundle with the installed Workspace service-bundle validator and compare its active/immutable receipt release path, pointer and bundle identities plus signed Product source/target/digests with resolver pins. Check `/healthz`, then run the installed `cyrene_catalyst.external_acceptance` module and independently verify its ZIP with `cyrene_catalyst_consumer.training_bundle` from the same active bundle. No source checkout or development venv may supply modules or fixtures.
-5. Verify the installed Web host metadata and live HTTP routes against the exact Client receipt; restart `cyrene-catalyst.service`, wait for systemd and HTTP recovery, then repeat the public `sudo cyrene workload install catalyst --yes` command to prove idempotence and read back the same exact installed identities.
+5. Verify the installed Web host metadata and live HTTP routes against the exact Client receipt; restart `cyrene-catalyst.service`, wait for systemd and HTTP recovery, then repeat the public `sudo cyrene workload install catalyst --channel preview --yes` command to prove idempotence and read back the same exact installed identities.
 6. Submit a resolver check that excludes one required Catalyst component; require the expected blocked response and prove that no staging or apply request was sent.
 
 Catalyst 已安装验收模块当前由活动 immutable service bundle 提供；runner 使用固定私有解释器
