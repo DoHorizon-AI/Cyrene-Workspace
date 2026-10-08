@@ -233,7 +233,9 @@ def _release_envelopes(
         if artifact["kind"] == "plugin-package":
             package = component["pluginPackage"]
             asset_name = f"{component_id}-payload.zip"
-            asset_uri = f"https://github.com/{REPOSITORY}/releases/download/{release_id}/{asset_name}"
+            asset_uri = (
+                f"https://github.com/{REPOSITORY}/releases/download/{release_id}/{asset_name}"
+            )
             artifact = {
                 "kind": "plugin-package",
                 "packageId": package["packageId"],
@@ -277,9 +279,7 @@ def _release_envelopes(
         }
         manifest_digest = _jcs_digest(manifest, "manifestDigest")
         manifest["manifestDigest"] = manifest_digest
-        manifest_bytes = json.dumps(
-            manifest, ensure_ascii=False, separators=(",", ":")
-        ).encode()
+        manifest_bytes = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode()
         manifest_asset_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
         manifest_uri = (
             f"https://github.com/{REPOSITORY}/releases/download/{release_id}/"
@@ -475,9 +475,7 @@ def _resolve_one_official_candidate(
         if row["support"] == "supported"
         and row["artifactKind"] == manifest["artifact"]["kind"]
         and next(
-            target["target"]
-            for target in catalog["targets"]
-            if target["id"] == row["targetId"]
+            target["target"] for target in catalog["targets"] if target["id"] == row["targetId"]
         )
         == manifest["target"]
     )
@@ -855,13 +853,7 @@ def test_official_legacy_release_uses_signed_jcs_manifest_and_artifact_attestati
 def test_official_legacy_release_rejects_manifest_as_artifact_attestation_subject(
     field: str,
 ) -> None:
-    fixture_root = (
-        ROOT
-        / "tests"
-        / "fixtures"
-        / "workload-attestation-subjects"
-        / "catalyst-4ad950"
-    )
+    fixture_root = ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "catalyst-4ad950"
     catalog, envelope, _manifest = _official_legacy_release_envelope(
         "cyrene-catalyst",
         index_path=fixture_root / "component-release-index-v1.json",
@@ -873,7 +865,9 @@ def test_official_legacy_release_rejects_manifest_as_artifact_attestation_subjec
         if field == "subjectName"
         else wrapped["manifestAssetDigest"]
     )
-    component = next(row for row in catalog["components"] if row["componentId"] == "cyrene-catalyst")
+    component = next(
+        row for row in catalog["components"] if row["componentId"] == "cyrene-catalyst"
+    )
     target_id = "linux-ubuntu-24.04-x86_64-python-3.12"
     blockers: list[dict[str, Any]] = []
 
@@ -892,9 +886,7 @@ def test_official_legacy_release_rejects_manifest_as_artifact_attestation_subjec
 
 
 def test_official_oci_release_rejects_manifest_digest_as_image_attestation_digest() -> None:
-    fixture_root = (
-        ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "echo-d5"
-    )
+    fixture_root = ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "echo-d5"
     catalog, envelope, _manifest = _official_legacy_release_envelope(
         "cyrene-echo",
         index_path=fixture_root / "component-release-index-v1.json",
@@ -923,11 +915,7 @@ def test_official_oci_release_rejects_manifest_digest_as_image_attestation_diges
 @pytest.mark.parametrize("field", ["source", "target", "version"])
 def test_official_release_rejects_mixed_signed_index_manifest_tuple(field: str) -> None:
     fixture_root = (
-        ROOT
-        / "tests"
-        / "fixtures"
-        / "workload-attestation-subjects"
-        / "platform-sdk-1ec629"
+        ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "platform-sdk-1ec629"
     )
     catalog, envelope, manifest = _official_legacy_release_envelope(
         "cyrene-runtime-maintenance-sdk",

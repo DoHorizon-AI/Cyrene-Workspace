@@ -68,9 +68,7 @@ def _jcs_bytes(value: Any) -> bytes:
             if any(not isinstance(key, str) for key in item):
                 raise ValueError("JCS object keys must be strings")
             keys = sorted(item, key=lambda key: key.encode("utf-16be"))
-            return "{" + ",".join(
-                encode(key) + ":" + encode(item[key]) for key in keys
-            ) + "}"
+            return "{" + ",".join(encode(key) + ":" + encode(item[key]) for key in keys) + "}"
         raise ValueError("Release JSON contains a value outside the JCS subset")
 
     return encode(value).encode("utf-8")
@@ -527,8 +525,7 @@ def _candidate_rows(
             or declared_index_attestation.get("kind") != "github-artifact-attestation"
             or declared_index_attestation.get("repository") != repository
             or declared_index_attestation.get("workflow") != workflow
-            or declared_index_attestation.get("predicateType")
-            != "https://slsa.dev/provenance/v1"
+            or declared_index_attestation.get("predicateType") != "https://slsa.dev/provenance/v1"
             or declared_index_attestation.get("subjectName") != envelope.get("assetName")
         ):
             malformed_binding = True
@@ -606,9 +603,10 @@ def _candidate_rows(
                     and isinstance(artifact.get("archive"), Mapping)
                     else artifact.get("uri")
                 )
-                if _release_asset_basename(
-                    artifact_uri, repository, envelope.get("releaseTag")
-                ) is None:
+                if (
+                    _release_asset_basename(artifact_uri, repository, envelope.get("releaseTag"))
+                    is None
+                ):
                     malformed_binding = True
                     continue
             content_digest = _manifest_content_digest(manifest, artifact)
@@ -665,8 +663,7 @@ def _candidate_rows(
                 or declared_manifest_attestation.get("predicateType")
                 != "https://slsa.dev/provenance/v1"
                 or declared_manifest_attestation.get("subjectName") != artifact_subject_name
-                or declared_manifest_attestation.get("run")
-                != declared_index_attestation.get("run")
+                or declared_manifest_attestation.get("run") != declared_index_attestation.get("run")
                 or not raw_manifest_attestation_valid
             ):
                 malformed_binding = True

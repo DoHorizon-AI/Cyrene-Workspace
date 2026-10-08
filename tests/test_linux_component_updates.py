@@ -108,11 +108,7 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
 
 def test_verified_release_index_separates_manifest_bytes_from_archive_attestation() -> None:
     fixture_root = (
-        WORKSPACE_ROOT
-        / "tests"
-        / "fixtures"
-        / "workload-attestation-subjects"
-        / "catalyst-4ad950"
+        WORKSPACE_ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "catalyst-4ad950"
     )
     index_bytes = (fixture_root / "component-release-index-v1.json").read_bytes()
     manifest_bytes = (fixture_root / "catalyst-ubuntu24-manifest.json").read_bytes()
@@ -180,8 +176,9 @@ def test_verified_release_index_separates_manifest_bytes_from_archive_attestatio
     )
     v2_trusted = updates.ComponentUpdater._trusted_release_indexes(updater, [v2_candidate])
     v2_release = v2_trusted["indexes"][0]["manifests"][0]
-    assert v2_release["manifestAssetAttestationRef"]["subjectName"] == (
-        candidate.manifest_uri.rsplit("/", 1)[-1]
+    assert (
+        v2_release["manifestAssetAttestationRef"]["subjectName"]
+        == (candidate.manifest_uri.rsplit("/", 1)[-1])
     )
     assert v2_release["manifestAssetAttestationRef"]["subjectDigest"] == manifest_asset_digest
 
