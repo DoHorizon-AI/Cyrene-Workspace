@@ -280,10 +280,21 @@ def _validate_bind(args: argparse.Namespace) -> tuple[str | None, bool]:
 def _project_root(source_root: Path, name: str) -> Path:
     """Resolve one sibling Product or Plugins repository in the task source tree."""
 
-    path = source_root / name
-    if path.is_symlink() or not path.is_dir():
-        raise TrialLauncherError(f"required {name} source directory is missing: {path}")
-    return path.resolve()
+    if name == "plugins":
+        candidates = [
+            source_root / "Cyrene-Plugins-Official",
+            source_root / "plugins",
+        ]
+    else:
+        candidates = [
+            source_root / name,
+            source_root / f"Cyrene-Services/Cyrene-{name.capitalize()}",
+            source_root / f"Cyrene-{name.capitalize()}",
+        ]
+    for path in candidates:
+        if path.is_dir() and not path.is_symlink():
+            return path.resolve()
+    raise TrialLauncherError(f"required {name} source directory is missing: {source_root / name}")
 
 
 def _plugin_package_path(plugins_root: Path, plugin_name: str) -> Path:
