@@ -97,7 +97,8 @@ def _write_catalog_release_files(
     metadata_path.write_text(
         json.dumps(
             {
-                "schemaVersion": schema_version,
+                "schemaVersion": module.VERIFIED_CATALOG_METADATA_SCHEMA_VERSION,
+                "catalogSchemaVersion": schema_version,
                 "repository": module.REPOSITORY,
                 "workflow": module.CATALOG_WORKFLOW,
                 "channel": channel,
@@ -106,6 +107,8 @@ def _write_catalog_release_files(
                 "sourceRef": source_ref,
                 "catalogSha256": f"sha256:{digest}",
                 "generation": generation if metadata_generation is None else metadata_generation,
+                "subjectName": asset_name,
+                "attestationAssetName": f"{asset_name}.attestation.jsonl",
             }
         ),
         encoding="utf-8",
@@ -229,6 +232,7 @@ def test_verified_catalog_metadata_rejects_boolean_schema_version(
         json.dumps(
             {
                 "schemaVersion": True,
+                "catalogSchemaVersion": 1,
                 "repository": module.REPOSITORY,
                 "workflow": module.CATALOG_WORKFLOW,
                 "channel": "preview",
@@ -236,6 +240,7 @@ def test_verified_catalog_metadata_rejects_boolean_schema_version(
                 "sourceCommit": "a" * 40,
                 "sourceRef": "refs/heads/develop",
                 "catalogSha256": f"sha256:{digest}",
+                "generation": 13,
             }
         ),
         encoding="utf-8",
@@ -260,7 +265,7 @@ def test_verified_catalog_metadata_rejects_boolean_schema_version(
     ("active_generation", "accepted"),
     [(14, True), (15, True), (12, False), (True, False), ("15", False)],
 )
-def test_record_inputs_binds_the_actual_active_catalog_generation(
+def test_record_inputs_accepts_verified_metadata_shape_and_binds_active_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     active_generation: object,
@@ -277,6 +282,7 @@ def test_record_inputs_binds_the_actual_active_catalog_generation(
         json.dumps(
             {
                 "schemaVersion": 1,
+                "catalogSchemaVersion": 1,
                 "repository": module.REPOSITORY,
                 "workflow": module.CATALOG_WORKFLOW,
                 "channel": "preview",
@@ -285,6 +291,8 @@ def test_record_inputs_binds_the_actual_active_catalog_generation(
                 "sourceRef": "refs/heads/develop",
                 "catalogSha256": f"sha256:{baseline_digest}",
                 "generation": 13,
+                "subjectName": "component-catalog-v1.json",
+                "attestationAssetName": "component-catalog-v1.json.attestation.jsonl",
             }
         ),
         encoding="utf-8",
@@ -300,6 +308,9 @@ def test_record_inputs_binds_the_actual_active_catalog_generation(
             source_commit="b" * 40,
         )
     )
+    active_metadata = json.loads(active_metadata_path.read_text(encoding="utf-8"))
+    assert active_metadata["schemaVersion"] == module.VERIFIED_CATALOG_METADATA_SCHEMA_VERSION
+    assert active_metadata["catalogSchemaVersion"] == 2
     catalog_locators = {
         "baselineV1": {
             "releaseId": "catalog-preview-" + "a" * 40,
@@ -377,6 +388,34 @@ def test_verified_catalog_metadata_generation_must_match_exact_bytes(
         source_commit="f" * 40,
         metadata_generation=14,
     )
+    monkeypatch.setattr(module, "_run_attestation_verify", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(module.ReleaseError, match="metadata or bytes differ"):
+        module._verify_catalog_input(
+            catalog_path,
+            metadata_path,
+            attestation_path,
+            locator,
+            expected_schema=2,
+            expected_generation=None,
+            channel="preview",
+        )
+
+
+def test_verified_catalog_metadata_rejects_mismatched_catalog_schema_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    catalog_path, metadata_path, attestation_path, locator = _write_catalog_release_files(
+        tmp_path,
+        module,
+        schema_version=2,
+        generation=15,
+        source_commit="f" * 40,
+    )
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["catalogSchemaVersion"] = 1
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     monkeypatch.setattr(module, "_run_attestation_verify", lambda *_args, **_kwargs: None)
 
     with pytest.raises(module.ReleaseError, match="metadata or bytes differ"):
