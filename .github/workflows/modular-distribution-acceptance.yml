@@ -128,6 +128,8 @@ jobs:
               "echo_exact_match_evaluate_uninstall",
               "plugins_platform_supervision",
               "client_release_integration",
+              "client_curation_proxy_mutation",
+              "client_curation_browser_submission",
           )
 
           def root() -> Path:
@@ -454,6 +456,17 @@ jobs:
               record("echo_exact_match_evaluate_uninstall", "NOT_RUN", "no exact Echo OCI, Runtime SDK, and exact-match plugin pins are supplied")
               record("plugins_platform_supervision", "NOT_RUN", "runs after exact Package Runtime policy and Platform UDS binding readback")
               record("client_release_integration", "NOT_RUN", "Client publication/integration gate is not yet supplied")
+              record(
+                  "client_curation_browser_submission",
+                  "NOT_RUN",
+                  "no browser automation is run; the installed Client route, same-origin CSRF proxy mutation, and direct Product readback are exercised by separate required gates",
+                  {
+                      "route": "/datasets",
+                      "method": "POST",
+                      "path": "/api/v1/catalyst/api/v1/datasets/{datasetId}/processing-runs",
+                      "operation": "curateTrainingData",
+                  },
+              )
 
           def validate_pin_shape(value: Any) -> None:
               """Fail before mutation if required exact identity assertions are missing."""
@@ -2250,6 +2263,13 @@ jobs:
               root_digest = "sha256:" + hashlib.sha256(root_body).hexdigest()
               require(root_status == 200, f"Client Web root returned HTTP {root_status}")
               require(root_digest == index_digest, "Client Web HTTP root bytes differ from the signed installed index.html digest")
+              datasets_status, _datasets_headers, datasets_body = request_loopback(
+                  origin + "/datasets",
+                  {"Accept-Encoding": "identity", "Origin": origin},
+              )
+              datasets_digest = "sha256:" + hashlib.sha256(datasets_body).hexdigest()
+              require(datasets_status == 200, f"Client datasets route returned HTTP {datasets_status}")
+              require(datasets_digest == index_digest, "Client datasets route bytes differ from the signed installed index.html digest")
               health_status, _health_headers, health_body = request_loopback(
                   origin + "/healthz", {"Accept": "application/json", "Origin": origin}
               )
@@ -2302,11 +2322,13 @@ jobs:
                   "activeReceiptDigest": metadata["activeReceiptDigest"],
                   "indexDigest": index_digest,
                   "httpRoot": {"status": root_status, "sha256": root_digest},
+                  "datasetsRoute": {"path": "/datasets", "status": datasets_status, "sha256": datasets_digest},
                   "health": {"status": health_status, "bodyStatus": health["status"]},
                   "controlReady": {"status": control_status, "bodyStatus": control["status"]},
                   "localSession": {"status": session_status, "authenticated": True, "state": "AUTHENTICATED", "refreshable": False, "csrfTokenFormatValid": True},
                   "csrfTokenStored": False,
                   "sessionCommandPosted": False,
+                  "browserInteractionRun": False,
               }
               write_json(root() / "evidence" / "client-web-http-acceptance.json", evidence)
               return evidence
@@ -2548,6 +2570,242 @@ jobs:
               write_json(root() / "evidence" / "client-control-integration.json", evidence)
               return evidence
 
+          def client_curation_proxy_mutation() -> dict[str, Any]:
+              """Submit the published Client curation operation through same-origin CSRF and read it back. | 通过同源 CSRF 代理提交并回读 Client 数据整理操作。"""
+              workload = pins()["workloads"]["catalyst"]
+              report_path = root() / "catalyst-output" / "acceptance-report.json"
+              require(report_path.is_file() and not report_path.is_symlink(), "installed Catalyst acceptance report is unavailable for Client curation")
+              report = load_json(report_path)
+              require(report.get("status") == "PASS", "installed Catalyst acceptance report did not pass")
+              require(report.get("fixture") == "release-packaged authored business examples; no customer data", "Client curation may only reuse the fixed public synthetic Catalyst fixture")
+              require(report.get("fixtureVersion") == "1", "Client curation fixture version differs from the official fixed fixture")
+              dataset_id = report.get("datasetId")
+              curation_run_id = report.get("curationRunId")
+              uuid_pattern = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+              require(isinstance(dataset_id, str) and re.fullmatch(uuid_pattern, dataset_id) is not None, "fixed synthetic dataset ID is missing or malformed")
+              require(isinstance(curation_run_id, str) and re.fullmatch(uuid_pattern, curation_run_id) is not None, "fixed synthetic curation run ID is missing or malformed")
+
+              origin = "http://127.0.0.1:8100"
+              auth_status, _auth_headers, auth_body = request_loopback(
+                  origin + "/api/v1/auth/session",
+                  {"Accept": "application/json", "Host": "127.0.0.1:8100", "Origin": origin},
+              )
+              require(auth_status == 200, f"Client curation local auth session returned HTTP {auth_status}")
+              try:
+                  auth = json.loads(auth_body.decode("utf-8"))
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise RuntimeError("Client curation local auth session is not JSON") from error
+              csrf_token = auth.get("csrfToken") if isinstance(auth, dict) else None
+              require(
+                  isinstance(auth, dict) and auth.get("authenticated") is True
+                  and auth.get("state") == "AUTHENTICATED" and auth.get("sessionId") == "local"
+                  and auth.get("refreshable") is False
+                  and isinstance(csrf_token, str) and re.fullmatch(r"[0-9a-f]{64}", csrf_token) is not None,
+                  "Client curation did not receive the expected local user session and CSRF token",
+              )
+
+              code = textwrap.dedent(r'''
+              import grp
+              import hashlib
+              import json
+              import os
+              import pwd
+              import re
+              import stat
+              import time
+              import urllib.error
+              import urllib.request
+              from pathlib import Path
+              from urllib.parse import quote, urlsplit
+              def fail(message):
+                  raise SystemExit(message)
+              def read_protected(path, allowed_owners, maximum):
+                  target=Path(path)
+                  for parent in reversed(target.parents):
+                      parent_info=parent.lstat()
+                      if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid!=0 or stat.S_IMODE(parent_info.st_mode)&0o022:
+                          fail("Control runtime credential/config path has an unsafe ancestor")
+                  descriptor=os.open(target,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0))
+                  try:
+                      before=os.fstat(descriptor)
+                      identity=(before.st_uid,before.st_gid,stat.S_IMODE(before.st_mode))
+                      if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or identity not in allowed_owners or before.st_size>maximum:
+                          fail("Control runtime credential/config file has unsafe ownership, mode, or size")
+                      raw=b""
+                      while True:
+                          block=os.read(descriptor,65536)
+                          if not block: break
+                          raw+=block
+                          if len(raw)>maximum: fail("Control runtime credential/config file exceeds the size limit")
+                      after=os.fstat(descriptor)
+                      if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+                          fail("Control runtime credential/config file changed while being read")
+                  finally:
+                      os.close(descriptor)
+                  return raw
+              class DenyRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self,*_args,**_kwargs): return None
+              def request_json(url,method,headers,body=None,expected_status=200):
+                  request=urllib.request.Request(url,data=body,headers=headers,method=method)
+                  opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),DenyRedirect())
+                  try:
+                      response=opener.open(request,timeout=15)
+                  except urllib.error.HTTPError as error:
+                      response=error
+                  except (urllib.error.URLError,TimeoutError):
+                      fail("Loopback Product request failed")
+                  with response:
+                      raw=response.read(4*1024*1024+1)
+                      if len(raw)>4*1024*1024: fail("Loopback Product response exceeded the size limit")
+                      if response.geturl()!=url: fail("Loopback Product request changed route")
+                      status=int(response.status)
+                  if status!=expected_status:
+                      fail(f"Product {method} returned HTTP {status}; expected {expected_status}")
+                  try:
+                      value=json.loads(raw.decode("utf-8"))
+                  except (UnicodeDecodeError,json.JSONDecodeError):
+                      fail("Product response is not JSON")
+                  return value,raw
+              def schema(value):
+                  if isinstance(value,dict): return {"object":{key:schema(child) for key,child in sorted(value.items())}}
+                  if isinstance(value,list): return {"array":sorted({json.dumps(schema(child),sort_keys=True,separators=(",",":")) for child in value})}
+                  if value is None: return "null"
+                  if isinstance(value,bool): return "boolean"
+                  if isinstance(value,int): return "integer"
+                  if isinstance(value,float): return "number"
+                  if isinstance(value,str): return "string"
+                  fail("Product response contains a non-JSON value")
+              expected=json.load(__import__("sys").stdin)
+              catalyst_url=expected["catalystUrl"]
+              origin=expected["clientOrigin"]
+              dataset_id=expected["datasetId"]
+              original_run_id=expected["curationRunId"]
+              csrf=expected["csrfToken"]
+              if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",dataset_id): fail("Synthetic dataset identity is malformed")
+              if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",original_run_id): fail("Synthetic curation identity is malformed")
+              if not re.fullmatch(r"[0-9a-f]{64}",csrf): fail("Local session CSRF token is malformed")
+              parsed=urlsplit(catalyst_url)
+              if parsed.scheme!="http" or parsed.hostname!="127.0.0.1" or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+                  fail("Installed Catalyst URL is not a loopback service origin")
+              cyrene_uid=pwd.getpwnam("cyrene").pw_uid
+              cyrene_gid=grp.getgrnam("cyrene").gr_gid
+              environment_raw=read_protected("/etc/cyrene/studio-control.env",{(0,cyrene_gid,0o640)},65536)
+              values={}
+              for raw_line in environment_raw.decode("ascii").splitlines():
+                  line=raw_line.strip()
+                  if not line or line.startswith("#"): continue
+                  key,separator,value=line.partition("=")
+                  if not separator or key not in {"STUDIO_CATALYST_URL","STUDIO_CATALYST_API_TOKEN_FILE"} or key in values or not value or value!=value.strip():
+                      fail("Control runtime environment file has an unexpected shape")
+                  values[key]=value
+              if set(values)!={"STUDIO_CATALYST_URL","STUDIO_CATALYST_API_TOKEN_FILE"} or values["STUDIO_CATALYST_URL"]!=catalyst_url:
+                  fail("Control runtime environment does not match the pinned Catalyst endpoint")
+              token_path=Path(values["STUDIO_CATALYST_API_TOKEN_FILE"])
+              if not token_path.is_absolute() or ".." in token_path.parts: fail("Control Catalyst token-file path is not normalized")
+              token_raw=read_protected(token_path,{(0,cyrene_gid,0o640),(cyrene_uid,cyrene_gid,0o600)},4096)
+              token=token_raw.rstrip(b"\r\n")
+              if len(token)<32 or any(byte<33 or byte>126 for byte in token): fail("Control Catalyst service token is not a protected high-entropy printable value")
+              direct_headers={"Accept":"application/json","Authorization":"Bearer "+token.decode("ascii")}
+              proxy_headers={"Accept":"application/json","Host":"127.0.0.1:8100","Origin":origin,"X-CSRF-Token":csrf}
+              encoded_dataset=quote(dataset_id,safe="")
+              encoded_original=quote(original_run_id,safe="")
+              direct_original,_=request_json(catalyst_url+"/api/v1/processing-runs/"+encoded_original,"GET",direct_headers)
+              if direct_original.get("id")!=original_run_id or direct_original.get("datasetId")!=dataset_id or direct_original.get("operation")!="curateTrainingData" or direct_original.get("state")!="SUCCEEDED":
+                  fail("Installed Catalyst acceptance curation run does not match its fixed synthetic report")
+              proxy_original,_=request_json(origin+"/api/v1/catalyst/api/v1/processing-runs/"+encoded_original,"GET",proxy_headers)
+              for key in ("id","datasetId","operation","state","sourceRevisionIds","recipeDigest"):
+                  if direct_original.get(key)!=proxy_original.get(key): fail("Client proxy curation-run readback differs from direct Catalyst")
+              source_ids=direct_original.get("sourceRevisionIds")
+              if not isinstance(source_ids,list) or len(source_ids)!=4 or len(set(source_ids))!=4 or not all(isinstance(item,str) for item in source_ids):
+                  fail("Fixed acceptance run does not identify the four release-packaged source revisions")
+              direct_sources,_=request_json(catalyst_url+"/api/v1/datasets/"+encoded_dataset+"/sources","GET",direct_headers)
+              proxy_sources,_=request_json(origin+"/api/v1/catalyst/api/v1/datasets/"+encoded_dataset+"/sources","GET",proxy_headers)
+              if not isinstance(direct_sources,list) or direct_sources!=proxy_sources:
+                  fail("Client source-list proxy differs from direct Catalyst")
+              source_rows={row.get("id"):row for row in direct_sources if isinstance(row,dict)}
+              if len(source_rows)!=len(direct_sources) or set(source_rows)!=set(source_ids):
+                  fail("Fixed acceptance source list differs from its successful curation run")
+              if any(not str(row.get("filename"," ")).lower().endswith((".json",".jsonl")) for row in source_rows.values()):
+                  fail("Fixed acceptance source selection includes a non-JSON training source")
+              source_policies={source_id:{"allowKnowledge":False,"allowTraining":True,"allowedPrincipalRefs":[],"allowedUsePurposes":["model_training"]} for source_id in source_ids}
+              body={"operation":"curateTrainingData","sourceRevisionIds":source_ids,"config":{"sourcePolicies":source_policies,"curation":{"id":"training-curation-v1","version":"1","format":"auto","fieldMapping":{},"roleMapping":{},"maxCharacters":100000,"minCharacters":2,"unicodeNormalization":"NFC"}}}
+              body_raw=json.dumps(body,separators=(",",":"),ensure_ascii=False).encode("utf-8")
+              create_path="/api/v1/catalyst/api/v1/datasets/"+encoded_dataset+"/processing-runs"
+              created,_=request_json(origin+create_path,"POST",{**proxy_headers,"Content-Type":"application/json"},body_raw,expected_status=202)
+              created_id=created.get("id")
+              if not isinstance(created_id,str) or created_id==original_run_id or created.get("datasetId")!=dataset_id or created.get("operation")!="curateTrainingData" or set(created.get("sourceRevisionIds",[]))!=set(source_ids):
+                  fail("Client curation submission returned an unexpected Product run identity")
+              if created.get("state") not in {"QUEUED","RUNNING","SUCCEEDED"}: fail("Client curation submission did not enter an executable state")
+              encoded_created=quote(created_id,safe="")
+              deadline=time.monotonic()+180
+              proxy_run=created
+              while time.monotonic()<deadline and proxy_run.get("state") in {"QUEUED","RUNNING"}:
+                  time.sleep(2)
+                  proxy_run,_=request_json(origin+"/api/v1/catalyst/api/v1/processing-runs/"+encoded_created,"GET",proxy_headers)
+              direct_run,_=request_json(catalyst_url+"/api/v1/processing-runs/"+encoded_created,"GET",direct_headers)
+              if proxy_run.get("state")!="SUCCEEDED" or direct_run.get("state")!="SUCCEEDED":
+                  fail("Client curation Product run did not reach SUCCEEDED within the bounded wait")
+              if direct_run!=proxy_run:
+                  fail("Client curation run readback differs between direct Catalyst and the same-origin proxy")
+              if direct_run.get("id")!=created_id or direct_run.get("datasetId")!=dataset_id or direct_run.get("operation")!="curateTrainingData" or set(direct_run.get("sourceRevisionIds",[]))!=set(source_ids):
+                  fail("Client curation Product run readback changed its submitted identity")
+              if schema(direct_run)!=schema(proxy_run): fail("Client curation direct/proxy response schema differs")
+              schema_raw=json.dumps(schema(direct_run),sort_keys=True,separators=(",",":")).encode("utf-8")
+              run_raw=json.dumps(direct_run,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode("utf-8")
+              print(json.dumps({
+                  "datasetIdSha256":hashlib.sha256(dataset_id.encode("ascii")).hexdigest(),
+                  "originalCurationRunIdSha256":hashlib.sha256(original_run_id.encode("ascii")).hexdigest(),
+                  "newCurationRunIdSha256":hashlib.sha256(created_id.encode("ascii")).hexdigest(),
+                  "sourceRevisionCount":len(source_ids),
+                  "sourcesProxyMatchesDirect":True,
+                  "originalRunProxyMatchesDirect":True,
+                  "clientMutation":{"method":"POST","status":202,"operation":"curateTrainingData","path":"/api/v1/catalyst/api/v1/datasets/{datasetId}/processing-runs","attempts":1,"retryAttempted":False,"csrfHeaderPresent":True,"origin":"http://127.0.0.1:8100"},
+                  "runReadback":{"directStatus":200,"proxyStatus":200,"state":"SUCCEEDED","jsonSchemaSha256":hashlib.sha256(schema_raw).hexdigest(),"canonicalBodySha256":hashlib.sha256(run_raw).hexdigest()},
+                  "recordsStored":False,
+                  "csrfTokenStored":False,
+                  "serverCredentialStored":False,
+              },sort_keys=True,separators=(",",":")))
+              ''').strip()
+              helper_input = {
+                  "catalystUrl": workload["service"]["baseUrl"],
+                  "clientOrigin": origin,
+                  "datasetId": dataset_id,
+                  "curationRunId": curation_run_id,
+                  "csrfToken": csrf_token,
+              }
+              helper_result = run(
+                  ["sudo", "-n", "python3", "-s", "-c", code],
+                  label="client-catalyst-curation-proxy-mutation",
+                  timeout=240,
+                  input_text=json.dumps(helper_input, separators=(",", ":")),
+                  retain_output=False,
+              )
+              proxy_evidence = json.loads(helper_result.stdout)
+              require(proxy_evidence.get("clientMutation", {}).get("status") == 202, "Client curation proxy mutation was not accepted")
+              require(proxy_evidence.get("clientMutation", {}).get("csrfHeaderPresent") is True, "Client curation mutation did not use the local session CSRF header")
+              require(proxy_evidence.get("runReadback", {}).get("state") == "SUCCEEDED", "Client curation Product run did not complete")
+              require(proxy_evidence.get("sourcesProxyMatchesDirect") is True and proxy_evidence.get("originalRunProxyMatchesDirect") is True, "Client curation read proxy did not match direct Catalyst")
+              require(proxy_evidence.get("csrfTokenStored") is False and proxy_evidence.get("serverCredentialStored") is False, "Client curation evidence retained a credential")
+              evidence = {
+                  "componentId": "cyrene-client-workspace-control",
+                  "clientRoute": "/datasets",
+                  "datasetFixture": "fixed release-packaged synthetic Catalyst acceptance data",
+                  "datasetIdSha256": proxy_evidence["datasetIdSha256"],
+                  "originalCurationRunIdSha256": proxy_evidence["originalCurationRunIdSha256"],
+                  "newCurationRunIdSha256": proxy_evidence["newCurationRunIdSha256"],
+                  "sourceRevisionCount": proxy_evidence["sourceRevisionCount"],
+                  "sourcesProxyMatchesDirect": proxy_evidence["sourcesProxyMatchesDirect"],
+                  "originalRunProxyMatchesDirect": proxy_evidence["originalRunProxyMatchesDirect"],
+                  "clientMutation": proxy_evidence["clientMutation"],
+                  "runReadback": proxy_evidence["runReadback"],
+                  "csrfTokenStored": False,
+                  "serverCredentialStored": False,
+                  "recordsStored": False,
+                  "browserInteractionRun": False,
+              }
+              write_json(root() / "evidence" / "client-catalyst-curation-proxy-mutation.json", evidence)
+              return evidence
+
           def product_acceptance() -> None:
               """Exercise installed Catalyst APIs and independently validate the generated ZIP."""
               service = pins()["workloads"]["catalyst"]["service"]
@@ -2620,8 +2878,9 @@ jobs:
               raise RuntimeError(f"Catalyst did not recover after systemd restart: {last_error}")
 
           def core_products() -> None:
-              """Run acceptance, independent verification, and restart in dependency order."""
+              """Run installed Product acceptance, Client curation, and restart in dependency order."""
               product_acceptance()
+              phase("client_curation_proxy_mutation", client_curation_proxy_mutation)
               phase("catalyst_service_restart_recovery", restart_recovery)
 
           def finalize() -> None:
@@ -2646,6 +2905,7 @@ jobs:
                   "catalyst_installed_acceptance_producer",
                   "catalyst_independent_bundle_consumer", "catalyst_service_restart_recovery",
                   "missing_selection_gate", "client_release_integration",
+                  "client_curation_proxy_mutation",
               )
               required = ("release_pins_validation", "attestation_cli_provision", *required)
               value["requiredCorePass"] = all(phases[name]["status"] == "PASS" for name in required)
@@ -2675,6 +2935,7 @@ jobs:
                   "echo_exact_match_evaluate_uninstall",
                   "plugins_platform_supervision",
                   "client_release_integration",
+                  "client_curation_browser_submission",
               )
               full_distribution_required = tuple(dict.fromkeys(full_distribution_required))
               value["fullDistributionRequiredPhases"] = list(full_distribution_required)
