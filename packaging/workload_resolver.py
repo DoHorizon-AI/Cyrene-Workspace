@@ -440,6 +440,7 @@ def _candidate_rows(
     blockers: list[dict[str, Any]],
     *,
     requiredness: str,
+    channel: str,
 ) -> list[dict[str, Any]]:
     """Collect only candidates tied to an exact trusted index and publisher workflow."""
 
@@ -464,7 +465,7 @@ def _candidate_rows(
     workflow = publisher.get("workflow")
     candidates: list[dict[str, Any]] = []
     malformed_binding = False
-    expected_channel = catalog.get("defaultChannel", "stable")
+    expected_channel = channel
     for envelope in _index_envelopes(trusted_release_index):
         index = envelope.get("index")
         identity_fields = (
@@ -501,10 +502,19 @@ def _candidate_rows(
             malformed_binding = True
             continue
         source = envelope.get("source")
+        channel_policies = catalog.get("channels")
+        channel_policy = (
+            channel_policies.get(channel) if isinstance(channel_policies, Mapping) else None
+        )
+        allowed_source_refs = (
+            channel_policy.get("sourceRefs") if isinstance(channel_policy, Mapping) else None
+        )
         if (
             not isinstance(source, Mapping)
             or not _source_repository_matches(source.get("repository"), repository)
             or not isinstance(source.get("ref"), str)
+            or not isinstance(allowed_source_refs, list)
+            or source.get("ref") not in allowed_source_refs
             or not isinstance(source.get("commit"), str)
             or index.get("source") != source
         ):
@@ -1222,6 +1232,7 @@ class Resolution:
 def _finalize_resolution(
     *,
     action: str,
+    channel: str,
     catalog_digest: str,
     workload_id: str,
     target_id: str,
@@ -1262,6 +1273,7 @@ def _finalize_resolution(
     plan_material = {
         "schemaVersion": 1,
         "action": action,
+        "channel": channel,
         "catalogDigest": catalog_digest,
         "workloadId": workload_id,
         "targetId": target_id,
@@ -1278,6 +1290,7 @@ def _finalize_resolution(
             "schemaVersion": 1,
             "status": "blocked" if blockers else "ready",
             "action": action,
+            "channel": channel,
             "catalogDigest": catalog_digest,
             "workloadId": workload_id,
             "targetId": target_id,
@@ -1681,6 +1694,7 @@ def resolve_workload(
     installed_components: Any,
     trusted_release_index: Any,
     action: str = "install",
+    channel: str | None = None,
 ) -> Resolution:
     """Resolve an explicit workload selection and bind every output to trusted inputs.
 
@@ -1705,6 +1719,24 @@ def resolve_workload(
         action = ""
     if not isinstance(catalog, Mapping):
         catalog = {}
+    selected_channel = catalog.get("defaultChannel", "stable") if channel is None else channel
+    channels = catalog.get("channels")
+    if (
+        not isinstance(selected_channel, str)
+        or selected_channel not in {"stable", "preview"}
+        or not isinstance(channels, Mapping)
+        or selected_channel not in channels
+    ):
+        blockers.append(
+            _blocker(
+                "INVALID_CHANNEL",
+                None,
+                None,
+                target_id if isinstance(target_id, str) else None,
+                "channel must name an enabled stable or preview policy in the trusted catalog.",
+            )
+        )
+        selected_channel = ""
     if not _valid_digest(catalog_digest):
         blockers.append(
             _blocker(
@@ -1789,6 +1821,7 @@ def resolve_workload(
         )
         return _finalize_resolution(
             action=action,
+            channel=selected_channel,
             catalog_digest=catalog_digest,
             workload_id=workload_id,
             target_id=target_id,
@@ -1801,6 +1834,7 @@ def resolve_workload(
     if action != "install":
         return _finalize_resolution(
             action=action,
+            channel=selected_channel,
             catalog_digest=catalog_digest,
             workload_id=workload_id,
             target_id=target_id,
@@ -2011,6 +2045,7 @@ def resolve_workload(
             artifact_kind,
             blockers,
             requiredness=requiredness,
+            channel=selected_channel,
         )
         component_constraints = constraints.get(component_id, [])
         if component_id in selected_roots:
@@ -2140,6 +2175,7 @@ def resolve_workload(
 
     return _finalize_resolution(
         action=action,
+        channel=selected_channel,
         catalog_digest=catalog_digest,
         workload_id=workload_id,
         target_id=target_id,

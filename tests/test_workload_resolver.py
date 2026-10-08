@@ -139,6 +139,10 @@ def _catalog() -> dict[str, Any]:
         "schemaVersion": 2,
         "generation": 1,
         "defaultChannel": "stable",
+        "channels": {
+            "stable": {"sourceRefs": ["refs/heads/main", "refs/heads/release"]},
+            "preview": {"sourceRefs": ["refs/heads/develop"]},
+        },
         "targets": [
             {"id": "linux-u24-host", "target": HOST, "hostSupport": "supported"},
             *[
@@ -206,6 +210,7 @@ def _release_envelopes(
     versions: dict[str, str] | None = None,
     missing_indexes: set[str] | None = None,
     workflow: str = WORKFLOW,
+    channel: str = "stable",
 ) -> dict[str, Any]:
     versions = versions or {}
     missing_indexes = missing_indexes or set()
@@ -219,7 +224,8 @@ def _release_envelopes(
             row["target"] for row in catalog["targets"] if row["id"] == target_row["targetId"]
         )
         version = versions.get(component_id, "1.2.0" if component_id == "shared" else "1.0.0")
-        release_id = f"stable-{component_id}-{version}-{SOURCE_COMMIT}"
+        source_ref = "refs/heads/main" if channel == "stable" else "refs/heads/develop"
+        release_id = f"{channel}-{component_id}-{version}-{SOURCE_COMMIT}"
         payload_digest = _sha(f"payload:{component_id}:{version}")
         dependencies = copy.deepcopy(component["dependencies"])
         asset_name = f"{component_id}-payload.tar.gz"
@@ -246,7 +252,7 @@ def _release_envelopes(
         source = {
             "repository": f"https://github.com/{REPOSITORY}",
             "commit": SOURCE_COMMIT,
-            "ref": "refs/heads/main",
+            "ref": source_ref,
         }
         run = {
             "id": "123",
@@ -258,7 +264,7 @@ def _release_envelopes(
             "releaseId": release_id,
             "componentId": component_id,
             "version": version,
-            "channel": "stable",
+            "channel": channel,
             "target": target,
             "artifact": artifact,
             "dependencies": dependencies,
@@ -288,7 +294,7 @@ def _release_envelopes(
         index = {
             "schemaVersion": 1,
             "repository": REPOSITORY,
-            "channel": "stable",
+            "channel": channel,
             "source": source,
             "provenance": {
                 "attestation": {
@@ -318,7 +324,7 @@ def _release_envelopes(
             "repository": REPOSITORY,
             "workflow": workflow,
             "sourceCommit": SOURCE_COMMIT,
-            "sourceRef": "refs/heads/main",
+            "sourceRef": source_ref,
             "subjectName": "component-release-index-v1.json",
             "subjectDigest": asset_digest,
         }
@@ -326,7 +332,7 @@ def _release_envelopes(
             "repository": REPOSITORY,
             "workflow": workflow,
             "sourceCommit": SOURCE_COMMIT,
-            "sourceRef": "refs/heads/main",
+            "sourceRef": source_ref,
             "subjectName": asset_name,
             "subjectDigest": payload_digest,
         }
@@ -337,7 +343,7 @@ def _release_envelopes(
                 "assetUri": f"https://github.com/{REPOSITORY}/releases/download/{release_id}/component-release-index-v1.json",
                 "assetDigest": asset_digest,
                 "indexDigest": index_digest,
-                "channel": "stable",
+                "channel": channel,
                 "releaseTag": release_id,
                 "source": source,
                 "attestationRef": index_attestation,
@@ -358,7 +364,7 @@ def _release_envelopes(
                             "repository": REPOSITORY,
                             "workflow": workflow,
                             "sourceCommit": SOURCE_COMMIT,
-                            "sourceRef": "refs/heads/main",
+                            "sourceRef": source_ref,
                             "subjectName": "component-release-manifest-v2.json",
                             "subjectDigest": manifest_asset_digest,
                         },
@@ -379,6 +385,7 @@ def _resolve(catalog: dict[str, Any], indexes: dict[str, Any], **kwargs: Any):
         kwargs.pop("installed_components", {}),
         indexes,
         kwargs.pop("action", "install"),
+        kwargs.pop("channel", None),
     ).to_dict()
 
 
@@ -489,6 +496,7 @@ def _resolve_one_official_candidate(
         target_row["artifactKind"],
         blockers,
         requiredness="required",
+        channel=envelope["channel"],
     )
     return rows, blockers, manifest
 
@@ -718,6 +726,43 @@ def test_digest_is_reproducible_and_binds_selection_and_index_identity() -> None
     )
 
 
+def test_channel_selection_defaults_to_catalog_and_binds_plan_digest() -> None:
+    catalog = _catalog()
+    component_ids = {"app", "runtime", "shared", "plugin-a"}
+    stable = _resolve(catalog, _release_envelopes(catalog, component_ids))
+    preview = _resolve(
+        catalog,
+        _release_envelopes(catalog, component_ids, channel="preview"),
+        channel="preview",
+    )
+    wrong_channel = _resolve(catalog, _release_envelopes(catalog, component_ids, channel="preview"))
+    untrusted_source_ref_catalog = copy.deepcopy(catalog)
+    untrusted_source_ref_catalog["channels"]["preview"]["sourceRefs"] = ["refs/heads/main"]
+    untrusted_source_ref = _resolve(
+        untrusted_source_ref_catalog,
+        _release_envelopes(catalog, component_ids, channel="preview"),
+        channel="preview",
+    )
+    unavailable = _resolve(
+        catalog,
+        {"indexes": []},
+        channel="stable-canary",
+    )
+
+    assert stable["status"] == preview["status"] == "ready"
+    assert stable["channel"] == stable["planDigestMaterial"]["channel"] == "stable"
+    assert preview["channel"] == preview["planDigestMaterial"]["channel"] == "preview"
+    assert stable["planDigest"] != preview["planDigest"]
+    assert wrong_channel["status"] == "blocked"
+    assert any(row["code"] == "MISSING_RELEASE" for row in wrong_channel["blockers"])
+    assert untrusted_source_ref["status"] == "blocked"
+    assert any(
+        row["code"] == "TRUSTED_INDEX_BINDING_INVALID" for row in untrusted_source_ref["blockers"]
+    )
+    assert unavailable["status"] == "blocked"
+    assert any(row["code"] == "INVALID_CHANNEL" for row in unavailable["blockers"])
+
+
 def test_artifact_attestation_is_separate_from_manifest_raw_and_jcs_digests() -> None:
     catalog = _catalog()
     indexes = _release_envelopes(catalog, {"app", "runtime", "shared", "plugin-a"})
@@ -879,6 +924,7 @@ def test_official_legacy_release_rejects_manifest_as_artifact_attestation_subjec
         "python-bundle",
         blockers,
         requiredness="required",
+        channel=envelope["channel"],
     )
 
     assert rows == []
@@ -906,6 +952,7 @@ def test_official_oci_release_rejects_manifest_digest_as_image_attestation_diges
         "oci-image",
         blockers,
         requiredness="required",
+        channel=envelope["channel"],
     )
 
     assert rows == []
@@ -945,6 +992,7 @@ def test_official_release_rejects_mixed_signed_index_manifest_tuple(field: str) 
         "python-bundle",
         blockers,
         requiredness="required",
+        channel=envelope["channel"],
     )
 
     assert rows == []
