@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -943,7 +944,72 @@ def test_release_workflow_and_builder_pass_the_verified_selected_catalog() -> No
     assert 'cp "${SELECTED_BOOTSTRAP_CATALOG}"' in build_script
     assert '"${STAGE_DIR}/usr/share/cyrene/component-catalog-v2.json"' in build_script
     assert '"${STAGE_DIR}/usr/lib/cyrene/scripts/workload_resolver.py"' in build_script
+    for packaged_helper in (
+        "workload_package_runtime.py",
+        "workload_sdk_environment.py",
+        "workload_web_host.py",
+        "cyrene-workspace-web.nginx.conf.template",
+        "cyrene-workspace-web.service.template",
+    ):
+        assert (WORKSPACE_ROOT / "packaging" / packaged_helper).is_file()
+        assert f'"${{STAGE_DIR}}/usr/lib/cyrene/scripts/{packaged_helper}"' in build_script
+        assert f'chmod 644 "${{STAGE_DIR}}/usr/lib/cyrene/scripts/{packaged_helper}"' in build_script
     assert '--catalog "${STAGE_DIR}/usr/share/cyrene/component-catalog-v1.json"' in build_script
+
+
+def test_studio_control_data_directory_is_safe_and_preserves_existing_data(
+    tmp_path: Path,
+) -> None:
+    build_script = (WORKSPACE_ROOT / "packaging/build-deb.sh").read_text(encoding="utf-8")
+    function = re.search(
+        r"(?ms)^ensure_fresh_service_directory\(\) \{\n.*?^\}", build_script
+    )
+    assert function is not None
+    existing = tmp_path / "studio-control"
+    existing.mkdir()
+    marker = existing / "user-data.json"
+    marker.write_text('{"retained":true}\n', encoding="utf-8")
+    shell = function.group(0) + '\nensure_fresh_service_directory "$1"\n'
+
+    accepted = subprocess.run(
+        ["sh", "-c", shell, "ensure-directory-test", str(existing)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0
+    assert marker.read_text(encoding="utf-8") == '{"retained":true}\n'
+
+    link = tmp_path / "studio-control-link"
+    link.symlink_to(existing, target_is_directory=True)
+    rejected_link = subprocess.run(
+        ["sh", "-c", shell, "ensure-directory-test", str(link)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected_link.returncode != 0
+    assert "is a symlink" in rejected_link.stderr
+
+    regular_file = tmp_path / "studio-control-file"
+    regular_file.write_text("preserve", encoding="utf-8")
+    rejected_file = subprocess.run(
+        ["sh", "-c", shell, "ensure-directory-test", str(regular_file)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected_file.returncode != 0
+    assert "not a directory" in rejected_file.stderr
+
+    start = build_script.index("STUDIO_CONTROL_DIR=/var/lib/cyrene/studio-control")
+    end = build_script.index("# Provision only the dedicated broker state directory.", start)
+    block = build_script[start:end]
+    assert 'ensure_fresh_service_directory "${STUDIO_CONTROL_DIR}"' in block
+    assert 'install -d -o cyrene -g cyrene -m 750 "$path"' in build_script
+    assert 'STUDIO_CONTROL_META="$(stat -c \'%u:%g:%a\' -- "${STUDIO_CONTROL_DIR}")"' in block
+    assert '"${STUDIO_CONTROL_UID}:${STUDIO_CONTROL_GID}:750"' in block
+    assert "rm -" not in block
 
 
 def test_release_workflow_scopes_github_token_to_locked_python_prepare() -> None:

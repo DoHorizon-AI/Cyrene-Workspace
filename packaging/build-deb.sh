@@ -315,6 +315,18 @@ cp "${SCRIPT_DIR}/workload_resolver.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/wor
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_resolver.py"
 cp "${SCRIPT_DIR}/native_package_runtime_bootstrap.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py"
+cp "${SCRIPT_DIR}/workload_package_runtime.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_package_runtime.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_package_runtime.py"
+cp "${SCRIPT_DIR}/workload_sdk_environment.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_sdk_environment.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_sdk_environment.py"
+cp "${SCRIPT_DIR}/workload_web_host.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_web_host.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_web_host.py"
+cp "${SCRIPT_DIR}/cyrene-workspace-web.nginx.conf.template" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.nginx.conf.template"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.nginx.conf.template"
+cp "${SCRIPT_DIR}/cyrene-workspace-web.service.template" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.service.template"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.service.template"
 cp "${SCRIPT_DIR}/native_product_package_environment.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/native_product_package_environment.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_product_package_environment.py"
 cp "${SCRIPT_DIR}/catalog_metadata.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/catalog_metadata.py"
@@ -648,6 +660,35 @@ ensure_fresh_service_directory() {
 }
 ensure_fresh_service_directory /var/lib/cyrene
 ensure_fresh_service_directory /var/log/cyrene
+
+# Studio Control owns user-visible workload state. Create only a missing
+# directory and preserve existing files; unsafe path types or ownership fail
+# closed before any service can consume it.
+STUDIO_CONTROL_DIR=/var/lib/cyrene/studio-control
+ensure_fresh_service_directory "${STUDIO_CONTROL_DIR}"
+STUDIO_CONTROL_UID="$(id -u cyrene)"
+STUDIO_CONTROL_GID="$(getent group cyrene | cut -d: -f3)"
+case "${STUDIO_CONTROL_UID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene account or primary group has no valid numeric identity." >&2
+        exit 1
+        ;;
+esac
+case "${STUDIO_CONTROL_GID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene account or primary group has no valid numeric identity." >&2
+        exit 1
+        ;;
+esac
+if [ "${STUDIO_CONTROL_UID}" = "0" ] || [ "${STUDIO_CONTROL_GID}" = "0" ]; then
+    echo "ERROR: Studio Control data cannot be owned by root." >&2
+    exit 1
+fi
+STUDIO_CONTROL_META="$(stat -c '%u:%g:%a' -- "${STUDIO_CONTROL_DIR}")"
+if [ "${STUDIO_CONTROL_META}" != "${STUDIO_CONTROL_UID}:${STUDIO_CONTROL_GID}:750" ]; then
+    echo "ERROR: Refusing to repair existing Studio Control data directory (${STUDIO_CONTROL_DIR}: ${STUDIO_CONTROL_META})." >&2
+    exit 1
+fi
 
 # Provision only the dedicated broker state directory. Existing state is
 # validated without repair so package upgrades cannot rewrite broker metadata.
