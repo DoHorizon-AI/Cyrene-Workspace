@@ -15,6 +15,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 ## 2. Engineering & Developer Guides
 - [**QUICKSTART.md**](QUICKSTART.md): Prerequisites, bootstrap, and developer onboarding.
 - [**DEVELOPMENT.md**](DEVELOPMENT.md): Multi-repo topology, agent worktree isolation, JetBrains IDE integration, and quality gates.
+- [**TASK_LIFECYCLE.md**](TASK_LIFECYCLE.md): Cross-tool delivery requirements, guarded cleanup, and preserved unfinished work. 跨工具交付、安全清理与未完成任务保留规则。
 - [**DATA_TOOLS_TRIAL.md**](DATA_TOOLS_TRIAL.md): Linux Catalyst/Echo trial launcher, optional UI, remote binding, backup, and cleanup.
 - [**CATALYST_V02_WORKFLOW.md**](CATALYST_V02_WORKFLOW.md): Catalyst-only source review, isolated OCR setup, one-call local model acceptance, dual-profile publishing, and restart recovery.
 - [**Component update packaging**](../packaging/service-bundle.md): Linux component updater, verified catalog metadata, and immutable service packaging.

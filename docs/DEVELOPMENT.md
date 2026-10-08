@@ -7,7 +7,7 @@ The Cyrene ecosystem is orchestrated via `Cyrene-Workspace`.
 - Every repository is independently buildable and testable.
 
 ## 2. Agent Worktree Isolation
-To prevent race conditions during concurrent multi-agent or multi-developer workflows, git worktree isolation is mandatory:
+Use an ordinary task branch when the checkout is safe. For concurrent writers or dirty overlap, use an isolated Git worktree to prevent races. Complete delivery with the [task lifecycle and guarded cleanup](TASK_LIFECYCLE.md):
 
 ```bash
 # Create dedicated task worktree for an agent
@@ -55,7 +55,7 @@ Cyrene 生态由 `Cyrene-Workspace` 统一编排。
 - 每个仓库都可以独立构建和测试。
 
 ## 2. Agent 工作树隔离
-为避免多个 Agent 或开发者并行工作时发生竞态，必须使用 Git 工作树隔离：
+工作区安全时可以使用普通任务分支；多个 Agent 并行写入或脏文件重叠时，使用 Git 工作树隔离以避免竞态。完成交付后按[任务生命周期与安全清理](TASK_LIFECYCLE.md)收尾：
 
 ```bash
 # 为 Agent 创建专用任务工作树
