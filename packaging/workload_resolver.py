@@ -1139,7 +1139,9 @@ def _workload_membership_requiredness(workload: Mapping[str, Any], component_id:
     return None
 
 
-def _installed_identity_projection(record: Any) -> dict[str, Any] | None:
+def _installed_identity_projection(
+    record: Any, *, include_installation_id: bool = True
+) -> dict[str, Any] | None:
     """Keep only stable local installation identity fields in a plan digest."""
 
     if not isinstance(record, Mapping):
@@ -1153,16 +1155,35 @@ def _installed_identity_projection(record: Any) -> dict[str, Any] | None:
         "manifestDigest",
         "manifestAssetDigest",
         "digest",
-        "installationId",
         "targetId",
+        "releaseIdentity",
+        "releasePath",
+        "archivePath",
+        "pointerIdentity",
+        "bundleIdentity",
+        "imageDigest",
+        "imageReference",
+        "receiptPath",
+        "receiptRef",
+        "deploymentRef",
         "indexIdentity",
+        "deploymentIdentity",
+        "imageIdentity",
+        "receiptIdentity",
     )
+    if include_installation_id:
+        fields = (*fields, "installationId")
     identity: dict[str, Any] = {}
     for field in fields:
         value = record.get(field)
         if isinstance(value, (str, bool)):
             identity[field] = value
-        elif field == "indexIdentity" and isinstance(value, Mapping):
+        elif field in {
+            "indexIdentity",
+            "deploymentIdentity",
+            "imageIdentity",
+            "receiptIdentity",
+        } and isinstance(value, Mapping):
             identity[field] = copy.deepcopy(dict(value))
     return identity or None
 
@@ -1228,7 +1249,6 @@ def _resolve_uninstall_component(
         "manifestDigest",
         "manifestAssetDigest",
         "digest",
-        "installationId",
         "targetId",
     )
     if (
@@ -1247,7 +1267,7 @@ def _resolve_uninstall_component(
                 component_id,
                 requiredness,
                 host_target_id,
-                "Uninstall requires a locally verified installation ID, release, manifest, version, and content digest.",
+                "Uninstall requires a locally verified release, manifest, version, target, and content digest.",
             )
         )
         return [], []
@@ -1325,7 +1345,25 @@ def _resolve_uninstall_component(
         )
         return [], []
 
-    is_plugin = isinstance(component.get("pluginPackage"), Mapping)
+    requires_package_installation_id = artifact_kind == "plugin-package"
+    installation_id = record.get("installationId")
+    if requires_package_installation_id and (
+        not isinstance(installation_id, str) or not installation_id
+    ):
+        blockers.append(
+            _blocker(
+                "INSTALLED_IDENTITY_UNAVAILABLE",
+                component_id,
+                requiredness,
+                installed_target_id,
+                "Package Runtime uninstall requires the verified package installation ID.",
+            )
+        )
+        return [], []
+
+    is_plugin = requires_package_installation_id and isinstance(
+        component.get("pluginPackage"), Mapping
+    )
     publisher_identity = _publisher_identity(catalog, component)
     if publisher_identity is None:
         blockers.append(
@@ -1355,7 +1393,9 @@ def _resolve_uninstall_component(
             )
         )
 
-    installed_identity = _installed_identity_projection(record)
+    installed_identity = _installed_identity_projection(
+        record, include_installation_id=requires_package_installation_id
+    )
     row = {
         "componentId": component_id,
         "version": record["version"],
@@ -1374,7 +1414,7 @@ def _resolve_uninstall_component(
         "attestationRef": copy.deepcopy(record.get("attestationRef")),
         "publisherIdentity": publisher_identity,
         "installed": True,
-        "installationId": record["installationId"],
+        "installationId": installation_id if requires_package_installation_id else None,
         "installedIdentity": installed_identity,
         "capabilityId": (
             component["pluginPackage"].get("capabilityId")
@@ -1904,11 +1944,15 @@ def resolve_workload(
                 "installed": bool(is_installed),
                 "installationId": (
                     installed_record.get("installationId")
-                    if is_installed and isinstance(installed_record.get("installationId"), str)
+                    if is_installed
+                    and is_plugin
+                    and isinstance(installed_record.get("installationId"), str)
                     else None
                 ),
                 "installedIdentity": (
-                    _installed_identity_projection(installed_record)
+                    _installed_identity_projection(
+                        installed_record, include_installation_id=is_plugin
+                    )
                     if isinstance(installed_record, Mapping)
                     and installed_record.get("installed", True) is True
                     else None

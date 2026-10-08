@@ -918,6 +918,66 @@ def test_uninstall_requires_verified_installation_identity_and_blocks_dependents
     )
 
 
+def test_echo_oci_uninstall_uses_deployment_receipt_without_package_installation_id() -> None:
+    metadata = _catalog_metadata_module()
+    catalog = metadata._validate_catalog(
+        (ROOT / "governance" / "component-catalog-v2.json").read_bytes(),
+        ROOT / "governance",
+    )
+    image_digest = _sha("echo-oci-image")
+    installed_echo = {
+        "installed": True,
+        "version": "0.1.0",
+        "releaseId": "preview-cyrene-echo-0.1.0-" + SOURCE_COMMIT,
+        "manifestDigest": _sha("echo-oci-canonical-manifest"),
+        "manifestAssetDigest": _sha("echo-oci-raw-manifest"),
+        "digest": image_digest,
+        "targetId": "linux-ubuntu-24.04-x86_64-oci",
+        "releaseIdentity": _sha("echo-oci-release-receipt"),
+        "pointerIdentity": "sha256-echo-oci-release",
+        "imageDigest": image_digest,
+        "releasePath": "/var/lib/cyrene/workloads/cyrene-echo/releases/echo-release",
+    }
+
+    result = resolve_workload(
+        catalog,
+        _sha("catalog-v2-echo-uninstall"),
+        "echo",
+        "linux-ubuntu-24.04-x86_64",
+        {"includeComponentIds": ["cyrene-echo"]},
+        {"cyrene-echo": installed_echo},
+        {"indexes": []},
+        action="uninstall",
+    ).to_dict()
+
+    assert result["status"] == "ready"
+    assert [row["componentId"] for row in result["selectedComponents"]] == ["cyrene-echo"]
+    selected = result["selectedComponents"][0]
+    assert selected["artifactKind"] == "oci-image"
+    assert selected["installationId"] is None
+    assert "installationId" not in selected["installedIdentity"]
+    assert selected["installedIdentity"]["releaseIdentity"] == installed_echo["releaseIdentity"]
+    assert selected["installedIdentity"]["pointerIdentity"] == installed_echo["pointerIdentity"]
+    assert selected["installedIdentity"]["imageDigest"] == image_digest
+
+    changed_receipt = {
+        **installed_echo,
+        "releasePath": "/var/lib/cyrene/workloads/echo/releases/other",
+    }
+    changed = resolve_workload(
+        catalog,
+        _sha("catalog-v2-echo-uninstall"),
+        "echo",
+        "linux-ubuntu-24.04-x86_64",
+        {"includeComponentIds": ["cyrene-echo"]},
+        {"cyrene-echo": changed_receipt},
+        {"indexes": []},
+        action="uninstall",
+    ).to_dict()
+    assert changed["status"] == "ready"
+    assert changed["planDigest"] != result["planDigest"]
+
+
 def test_uninstall_requires_exactly_one_direct_component_selection() -> None:
     catalog = _catalog()
     result = _resolve(
