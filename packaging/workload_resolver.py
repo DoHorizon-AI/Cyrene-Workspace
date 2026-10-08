@@ -20,7 +20,9 @@ from dataclasses import dataclass
 from typing import Any
 
 _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+_VERSION_RE = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\+sha\.[0-9a-f]{40})?$"
+)
 _EXACT_RANGE_RE = re.compile(r"^=(\d+\.\d+\.\d+)$")
 _INTERVAL_RANGE_RE = re.compile(r"^>=(\d+\.\d+\.\d+), <(\d+\.\d+\.\d+)$")
 _BINDING_ID_RE = re.compile(r"^[a-z][a-z0-9._-]{0,159}$")

@@ -747,6 +747,7 @@ def test_existing_v1_and_new_v2_catalogs_validate_without_mutating_v1_schema() -
     )
     assert v1["schemaVersion"] == 1
     assert v2["schemaVersion"] == 2
+    assert v2["generation"] == 15
     invalid_binding = copy.deepcopy(v2)
     invalid_binding["workloads"][0]["bindings"][0]["bindingId"] = "invalid/scope-id"
     with pytest.raises(metadata.CatalogMetadataError):
@@ -809,6 +810,112 @@ def test_existing_v1_and_new_v2_catalogs_validate_without_mutating_v1_schema() -
     )
     plugins = next(row for row in v2["workloads"] if row["workloadId"] == "plugins")
     assert plugins["minimumExplicitOptionalSelections"] == 1
+
+
+def test_catalyst_requires_workspace_control_without_changing_echo() -> None:
+    metadata = _catalog_metadata_module()
+    governance = ROOT / "governance"
+    catalog = metadata._validate_catalog(
+        (governance / "component-catalog-v2.json").read_bytes(), governance
+    )
+    target_id = "linux-ubuntu-24.04-x86_64-node-24"
+    expected_target = {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "abi": "glibc-2.39",
+        "runtime": "node:24",
+    }
+    target = next(row for row in catalog["targets"] if row["id"] == target_id)
+    assert target["target"] == expected_target
+    control = next(
+        row
+        for row in catalog["components"]
+        if row["componentId"] == "cyrene-client-workspace-control"
+    )
+    publisher = next(
+        row for row in catalog["publishers"] if row.get("id") == "official-client-workspace-control"
+    )
+    assert publisher["repository"] == "DoHorizon-AI/Cyrene-Client"
+    assert (
+        publisher["workflow"]
+        == "DoHorizon-AI/Cyrene-Client/.github/workflows/workspace-control-release.yml"
+    )
+    assert publisher["tagFormat"] == "component-source-sha"
+    assert _RESOLVER_MODULE._expected_release_tag(
+        control, publisher, "preview", f"0.0.1+sha.{SOURCE_COMMIT}", SOURCE_COMMIT
+    ) == ("component-source-sha", f"preview-cyrene-client-workspace-control-{SOURCE_COMMIT}")
+    assert control["kind"] == "native-binary"
+    assert control["role"] == "service"
+    assert control["publisherId"] == "official-client-workspace-control"
+    assert control["protocolVersion"] == "cyrene.client.studio-control.v1"
+    assert control["systemdUnit"] == "cyrene-client-workspace-control.service"
+    assert control["restart"] == {
+        "group": "single-service",
+        "unit": "cyrene-client-workspace-control.service",
+    }
+    assert control["dependencies"] == []
+    assert control["targets"] == [
+        {"targetId": target_id, "artifactKind": "native-binary", "support": "supported"}
+    ]
+
+    catalyst = next(row for row in catalog["workloads"] if row["workloadId"] == "catalyst")
+    assert "cyrene-client-workspace-control" in catalyst["requiredComponents"]
+    assert {
+        "componentId": "cyrene-client-workspace-control",
+        "targetId": target_id,
+    } in catalyst["targetPreferences"]
+    selected_target, target_error = _RESOLVER_MODULE._component_target(
+        catalog, control, catalyst, "linux-ubuntu-24.04-x86_64"
+    )
+    assert target_error is None
+    assert selected_target is not None and selected_target["targetId"] == target_id
+    catalyst_fetches = potential_component_ids(catalog, "catalyst")
+    assert "cyrene-client-workspace-control" in catalyst_fetches
+    assert "cyrene-echo" not in catalyst_fetches
+    echo = next(row for row in catalog["workloads"] if row["workloadId"] == "echo")
+    assert "cyrene-client-workspace-control" not in echo["requiredComponents"]
+    assert "cyrene-client-workspace-web" not in echo["requiredComponents"]
+    assert "cyrene-client-workspace-control" not in potential_component_ids(catalog, "echo")
+    web = next(
+        row for row in catalog["components"] if row["componentId"] == "cyrene-client-workspace-web"
+    )
+    assert web["dependencies"] == []
+
+
+def test_semver_build_metadata_accepts_only_official_source_sha_suffix() -> None:
+    version = f"0.0.1+sha.{SOURCE_COMMIT}"
+    assert _RESOLVER_MODULE._parse_semver(version) == (0, 0, 1)
+    assert _RESOLVER_MODULE._range_matches(version, ">=0.0.1, <0.0.2")
+    invalid_version = "0.0.1+sha.not-a-source-sha"
+    assert _RESOLVER_MODULE._parse_semver(invalid_version) is None
+    assert not _RESOLVER_MODULE._range_matches(invalid_version, "*")
+
+    catalog = _catalog()
+    valid = _resolve(
+        catalog,
+        _release_envelopes(
+            catalog,
+            {"app", "runtime", "shared", "plugin-a", "plugin-b"},
+            versions={"app": version},
+        ),
+    )
+    assert valid["status"] == "ready"
+    selected_app = next(row for row in valid["selectedComponents"] if row["componentId"] == "app")
+    assert selected_app["version"] == version
+
+    invalid = _resolve(
+        catalog,
+        _release_envelopes(
+            catalog,
+            {"app", "runtime", "shared", "plugin-a", "plugin-b"},
+            versions={"app": invalid_version},
+        ),
+    )
+    assert invalid["status"] == "blocked"
+    assert any(row["code"] == "VERSION_CONFLICT" for row in invalid["blockers"])
 
 
 def test_plugins_workload_requires_one_explicit_package_in_addition_to_sdk() -> None:
