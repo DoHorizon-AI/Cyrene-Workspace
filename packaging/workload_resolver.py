@@ -23,6 +23,7 @@ _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 _EXACT_RANGE_RE = re.compile(r"^=(\d+\.\d+\.\d+)$")
 _INTERVAL_RANGE_RE = re.compile(r"^>=(\d+\.\d+\.\d+), <(\d+\.\d+\.\d+)$")
+_BINDING_ID_RE = re.compile(r"^[a-z][a-z0-9._-]{0,159}$")
 _HTTPS_REPOSITORY_PREFIX = "https://github.com/"
 _REQUIREDNESS = frozenset({"required", "recommended", "optional", "choice", "dependency"})
 
@@ -756,7 +757,11 @@ def _component_bindings(workload: Mapping[str, Any]) -> tuple[dict[str, str], se
             invalid.add("<malformed>")
             continue
         component_id, binding_id = row.get("componentId"), row.get("bindingId")
-        if not isinstance(component_id, str) or not isinstance(binding_id, str) or not binding_id:
+        if (
+            not isinstance(component_id, str)
+            or not isinstance(binding_id, str)
+            or _BINDING_ID_RE.fullmatch(binding_id) is None
+        ):
             invalid.add(component_id if isinstance(component_id, str) else "<malformed>")
             continue
         if binding_id in seen_ids:
@@ -955,6 +960,18 @@ def _select_direct_components(
                     "choice",
                     None,
                     "Choice is not a member of the selected choice group.",
+                    details={"choiceId": choice_id},
+                )
+            )
+            continue
+        if component_id in excludes:
+            blockers.append(
+                _blocker(
+                    "SELECTION_CONFLICT",
+                    component_id,
+                    "choice",
+                    None,
+                    "A workload choice cannot select a component that was explicitly excluded.",
                     details={"choiceId": choice_id},
                 )
             )

@@ -184,8 +184,8 @@ def _catalog() -> dict[str, Any]:
                     ],
                 },
                 "bindings": [
-                    {"componentId": "plugin-a", "bindingId": "resolver-binding/app/plugin-a"},
-                    {"componentId": "plugin-b", "bindingId": "resolver-binding/app/plugin-b"},
+                    {"componentId": "plugin-a", "bindingId": "resolver-binding-app-plugin-a"},
+                    {"componentId": "plugin-b", "bindingId": "resolver-binding-app-plugin-b"},
                 ],
             }
         ],
@@ -378,7 +378,7 @@ def test_resolves_transitive_closure_and_ignores_build_dependencies() -> None:
         for row in result["closureReasons"]
     )
     plugin = next(row for row in result["selectedComponents"] if row["componentId"] == "plugin-a")
-    assert plugin["bindingId"] == "resolver-binding/app/plugin-a"
+    assert plugin["bindingId"] == "resolver-binding-app-plugin-a"
     assert plugin["sourcePolicy"]["productComponentIds"] == ["app"]
     assert plugin["sourcePolicy"]["productSources"] == [{"componentId": "app", "sourceId": "app"}]
 
@@ -392,6 +392,53 @@ def test_rejects_explicit_unselect_of_required_component() -> None:
     )
     assert result["status"] == "blocked"
     assert any(item["code"] == "REQUIRED_COMPONENT_UNSELECTABLE" for item in result["blockers"])
+
+
+def test_choice_cannot_override_explicit_component_exclusion() -> None:
+    catalog = _catalog()
+    workload = catalog["workloads"][0]
+    workload["choiceGroups"] = [{"choiceId": "backend", "componentIds": ["backend-a", "backend-b"]}]
+    workload["targetPreferences"].extend(
+        [
+            {"componentId": "backend-a", "targetId": "linux-u24-data"},
+            {"componentId": "backend-b", "targetId": "linux-u24-data"},
+        ]
+    )
+    indexes = _release_envelopes(catalog, {"app", "runtime", "shared", "plugin-a", "backend-a"})
+    result = _resolve(
+        catalog,
+        indexes,
+        selections={
+            "choices": {"backend": "backend-a"},
+            "excludeComponentIds": ["backend-a"],
+        },
+    )
+
+    assert result["status"] == "blocked"
+    assert "backend-a" not in {row["componentId"] for row in result["selectedComponents"]}
+    assert any(
+        row["code"] == "SELECTION_CONFLICT"
+        and row["componentId"] == "backend-a"
+        and row["details"]["choiceId"] == "backend"
+        for row in result["blockers"]
+    )
+
+
+def test_rejects_binding_ids_outside_platform_scope_identifier_subset() -> None:
+    catalog = _catalog()
+    catalog["workloads"][0]["bindings"][0]["bindingId"] = "resolver-binding/app/plugin-a"
+    result = _resolve(
+        catalog,
+        _release_envelopes(catalog, {"app", "runtime", "shared", "plugin-a"}),
+    )
+
+    assert result["status"] == "blocked"
+    assert any(
+        row["code"] == "SOURCE_BINDING_INVALID" and row["componentId"] == "plugin-a"
+        for row in result["blockers"]
+    )
+    plugin = next(row for row in result["selectedComponents"] if row["componentId"] == "plugin-a")
+    assert plugin["bindingId"] is None
 
 
 def test_missing_plugin_capability_is_structured_and_names_exact_capability() -> None:
@@ -700,6 +747,10 @@ def test_existing_v1_and_new_v2_catalogs_validate_without_mutating_v1_schema() -
     )
     assert v1["schemaVersion"] == 1
     assert v2["schemaVersion"] == 2
+    invalid_binding = copy.deepcopy(v2)
+    invalid_binding["workloads"][0]["bindings"][0]["bindingId"] = "invalid/scope-id"
+    with pytest.raises(metadata.CatalogMetadataError):
+        metadata._validate_catalog(json.dumps(invalid_binding).encode("utf-8"), governance)
     target_id = "linux-ubuntu-24.04-x86_64-oci"
     assert any(row["id"] == target_id for row in v1["targets"])
     legacy_oci_target = next(row for row in v1["targets"] if row["id"] == target_id)
@@ -836,7 +887,7 @@ def test_standalone_operator_binding_is_catalog_selected_and_digest_bound() -> N
         "sourceId": "cyrene-plugin-standalone-operator",
     }
     workload["bindings"] = [
-        {"componentId": "plugin-a", "bindingId": "resolver-binding/standalone/plugin-a"}
+        {"componentId": "plugin-a", "bindingId": "resolver-binding-standalone-plugin-a"}
     ]
     result = _resolve(
         catalog,
@@ -846,7 +897,7 @@ def test_standalone_operator_binding_is_catalog_selected_and_digest_bound() -> N
     plugin = next(row for row in result["selectedComponents"] if row["componentId"] == "plugin-a")
     assert result["status"] == "ready"
     assert plugin["sourcePolicy"]["sourceId"] == "cyrene-plugin-standalone-operator"
-    assert plugin["bindingId"] == "resolver-binding/standalone/plugin-a"
+    assert plugin["bindingId"] == "resolver-binding-standalone-plugin-a"
     assert plugin in result["planDigestMaterial"]["selectedComponents"]
 
 

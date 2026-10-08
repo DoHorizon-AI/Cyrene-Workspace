@@ -1542,19 +1542,19 @@
       "bindings": [
         {
           "componentId": "cyrene-tools-dataset-generation",
-          "bindingId": "catalog-binding/actual-product/cyrene-catalyst/cyrene-tools-dataset-generation"
+          "bindingId": "catalog-binding-actual-product-cyrene-catalyst-cyrene-tools-dataset-generation"
         },
         {
           "componentId": "cyrene-tools-dataset-preparation",
-          "bindingId": "catalog-binding/actual-product/cyrene-catalyst/cyrene-tools-dataset-preparation"
+          "bindingId": "catalog-binding-actual-product-cyrene-catalyst-cyrene-tools-dataset-preparation"
         },
         {
           "componentId": "cyrene-tools-document-parsing",
-          "bindingId": "catalog-binding/actual-product/cyrene-catalyst/cyrene-tools-document-parsing"
+          "bindingId": "catalog-binding-actual-product-cyrene-catalyst-cyrene-tools-document-parsing"
         },
         {
           "componentId": "cyrene-tools-knowledge-preparation",
-          "bindingId": "catalog-binding/actual-product/cyrene-catalyst/cyrene-tools-knowledge-preparation"
+          "bindingId": "catalog-binding-actual-product-cyrene-catalyst-cyrene-tools-knowledge-preparation"
         }
       ]
     },
@@ -1609,7 +1609,7 @@
       "bindings": [
         {
           "componentId": "cyrene-evaluation-exact-match",
-          "bindingId": "catalog-binding/actual-product/cyrene-echo/cyrene-evaluation-exact-match"
+          "bindingId": "catalog-binding-actual-product-cyrene-echo-cyrene-evaluation-exact-match"
         }
       ]
     },
@@ -1674,23 +1674,23 @@
       "bindings": [
         {
           "componentId": "cyrene-evaluation-exact-match",
-          "bindingId": "catalog-binding/standalone-operator/cyrene-evaluation-exact-match"
+          "bindingId": "catalog-binding-standalone-operator-cyrene-evaluation-exact-match"
         },
         {
           "componentId": "cyrene-tools-dataset-generation",
-          "bindingId": "catalog-binding/standalone-operator/cyrene-tools-dataset-generation"
+          "bindingId": "catalog-binding-standalone-operator-cyrene-tools-dataset-generation"
         },
         {
           "componentId": "cyrene-tools-dataset-preparation",
-          "bindingId": "catalog-binding/standalone-operator/cyrene-tools-dataset-preparation"
+          "bindingId": "catalog-binding-standalone-operator-cyrene-tools-dataset-preparation"
         },
         {
           "componentId": "cyrene-tools-document-parsing",
-          "bindingId": "catalog-binding/standalone-operator/cyrene-tools-document-parsing"
+          "bindingId": "catalog-binding-standalone-operator-cyrene-tools-document-parsing"
         },
         {
           "componentId": "cyrene-tools-knowledge-preparation",
-          "bindingId": "catalog-binding/standalone-operator/cyrene-tools-knowledge-preparation"
+          "bindingId": "catalog-binding-standalone-operator-cyrene-tools-knowledge-preparation"
         }
       ]
     }

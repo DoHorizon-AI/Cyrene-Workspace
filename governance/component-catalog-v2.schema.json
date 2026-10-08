@@ -1227,7 +1227,7 @@
         },
         "bindingId": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9._:/-]{0,159}$"
+          "pattern": "^[a-z][a-z0-9._-]{0,159}$"
         }
       }
     }
