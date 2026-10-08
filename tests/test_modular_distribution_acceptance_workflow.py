@@ -235,6 +235,14 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     }
     assert '[[ "$GITHUB_REF" == "refs/heads/develop" ]]' in source
     assert '"workflowSha": os.environ.get("GITHUB_WORKFLOW_SHA")' in source
+    assert 'MINIMUM_GH_ATTESTATION_VERSION = (2, 102, 0)' in source
+    assert 'GH_RELEASE_TAG = "v2.102.0"' in source
+    assert '"attestation_cli_provision"' in source
+    assert '"sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends"' in source
+    assert 'https://github.com/cli/cli/releases/download/v2.102.0' in source
+    assert 'https://api.github.com/repos/cli/cli/releases/tags/v2.102.0' in source
+    assert 'GH_RELEASE_ASSET_SHA256 = "7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"' in source
+    assert '"ghVersion": ".".join(str(part) for part in gh_version)' in source
     assert '"native-installer-release-v2.json"' in source
     assert '"native-installer-source-receipt-v2.json"' in source
     assert '"native_static_binding_readback"' in source
@@ -292,6 +300,149 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     )
     assert '"--cert-oidc-issuer", "https://token.actions.githubusercontent.com"' in source
     assert "Runnable Catalyst core" in source
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("gh version 2.102.0 (2026-09-01)", (2, 102, 0)),
+        ("gh version 2.110.3 (2026-10-01)", (2, 110, 3)),
+    ],
+)
+def test_attestation_cli_version_gate_accepts_supported_versions(
+    tmp_path: Path, output: str, expected: tuple[int, int, int]
+) -> None:
+    """The acceptance runner records only a supported verifier version."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_gh_version")
+    assert module.parse_gh_cli_version(output) == expected
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "gh version 2.97.0 (2026-07-31)",
+        "GitHub CLI not installed",
+    ],
+)
+def test_attestation_cli_version_gate_rejects_unsupported_versions(
+    tmp_path: Path, output: str
+) -> None:
+    """Older or unparseable GitHub CLI versions fail before attestation checks."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_gh_version_reject")
+    with pytest.raises(RuntimeError):
+        module.parse_gh_cli_version(output)
+
+
+def test_attestation_cli_keeps_an_already_supported_runner_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A supported hosted runner avoids package installation and records its version."""
+    acceptance_root = tmp_path / "acceptance"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_gh_already_supported")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        assert command == ["gh", "--version"]
+        return subprocess.CompletedProcess(command, 0, "gh version 2.102.0 (2026-09-30)\n", "")
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    evidence = module.ensure_attestation_cli()
+
+    assert evidence["versionBefore"] == "2.102.0"
+    assert evidence["versionAfter"] == "2.102.0"
+    assert evidence["upgraded"] is False
+    assert commands == [["gh", "--version"]]
+    assert json.loads(
+        (acceptance_root / "evidence" / "attestation-cli-provision.json").read_text(
+            encoding="utf-8"
+        )
+    ) == evidence
+
+
+def test_attestation_cli_upgrades_old_runner_from_exact_official_checksum_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An old disposable runner verifies fixed official release bytes before apt install."""
+    acceptance_root = tmp_path / "acceptance"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    module = _load_driver_module(tmp_path, "acceptance_driver_gh_upgrade")
+    calls: list[list[str]] = []
+    expected_deb_sha = "7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"
+    expected_checksums_sha = "afe49e9affa232faa8212aed035417166f6ade9b9470acb53d4dbd28c0504e8d"
+
+    def fake_run(
+        command: list[str], *, label: str, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command == ["gh", "--version"]:
+            version = "2.97.0" if label == "gh-attestation-cli-before" else "2.102.0"
+            return subprocess.CompletedProcess(command, 0, f"gh version {version}\n", "")
+        if command[0] == "curl":
+            output = Path(command[command.index("--output") + 1])
+            if output.name == "release-api.json":
+                output.write_text(
+                    json.dumps(
+                        {
+                            "tag_name": "v2.102.0",
+                            "immutable": True,
+                            "draft": False,
+                            "target_commitish": "fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd",
+                            "assets": [
+                                {
+                                    "name": "gh_2.102.0_linux_amd64.deb",
+                                    "digest": "sha256:" + expected_deb_sha,
+                                    "size": 15392446,
+                                    "browser_download_url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.deb",
+                                },
+                                {
+                                    "name": "gh_2.102.0_checksums.txt",
+                                    "digest": "sha256:" + expected_checksums_sha,
+                                    "size": 1971,
+                                    "browser_download_url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_checksums.txt",
+                                },
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            elif output.name == "gh_2.102.0_linux_amd64.deb":
+                with output.open("wb") as stream:
+                    stream.truncate(15392446)
+            else:
+                output.write_text(
+                    expected_deb_sha + "  gh_2.102.0_linux_amd64.deb\n", encoding="utf-8"
+                )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[0] == "dpkg-deb":
+            return subprocess.CompletedProcess(command, 0, "gh\n2.102.0\namd64\n", "")
+        assert command[:4] == ["sudo", "-n", "apt-get", "install"]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_sha256(path: Path) -> str:
+        return expected_deb_sha if path.suffix == ".deb" else expected_checksums_sha
+
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(module, "sha256", fake_sha256)
+
+    evidence = module.ensure_attestation_cli()
+
+    assert evidence["versionBefore"] == "2.97.0"
+    assert evidence["versionAfter"] == "2.102.0"
+    assert evidence["assetSha256"] == expected_deb_sha
+    assert evidence["checksumsAssetSha256"] == expected_checksums_sha
+    assert evidence["packageMetadata"] == {
+        "name": "gh",
+        "version": "2.102.0",
+        "architecture": "amd64",
+    }
+    assert evidence["upgraded"] is True
+    # Read the release API first, then fetch the exact DEB and checksum asset.
+    assert sum(command[0] == "curl" for command in calls) == 3
+    apt_call = next(command for command in calls if command[:3] == ["sudo", "-n", "apt-get"])
+    assert apt_call[-1].endswith("gh_2.102.0_linux_amd64.deb")
 
 
 def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
@@ -371,6 +522,16 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
     jsonschema.Draft202012Validator(schema).validate(plugins_pins)
     module.validate_pin_shape(plugins_pins)
 
+    index_metadata = json.loads(json.dumps(plugins_pins))
+    first_component = index_metadata["workloads"]["catalyst"]["selectedComponents"][0]
+    first_component["indexIdentity"].update(
+        publisherIdentity=first_component["publisherIdentity"],
+        assetUri="https://github.com/DoHorizon-AI/Cyrene-Catalyst/releases/download/preview/component-release-index-v1.json",
+        channel="preview",
+    )
+    jsonschema.Draft202012Validator(schema).validate(index_metadata)
+    module.validate_pin_shape(index_metadata)
+
     wrong_plugin_target = json.loads(json.dumps(plugins_pins))
     wrong_plugin_target["workloads"]["plugins"]["selectedComponents"][0]["targetId"] = (
         "linux-ubuntu-24.04-x86_64"
@@ -433,6 +594,7 @@ def test_standalone_plugins_pins_are_accepted_without_echo_install_contract(
     monkeypatch.setenv("NATIVE_RELEASE_ID", pins["nativeInstaller"]["releaseId"])
     monkeypatch.setenv("RELEASE_PINS_JSON", json.dumps(pins))
     module = _load_driver_module(tmp_path, "acceptance_driver_plugins_pins")
+    monkeypatch.setattr(module, "ensure_attestation_cli", lambda: {"versionAfter": "test-only"})
     monkeypatch.setattr(module, "runner_identity", lambda: {"testOnly": True})
 
     module.init()
@@ -633,6 +795,84 @@ def test_catalyst_proxy_comparison_checks_status_and_json_shape_without_records(
         module.compare_catalyst_read_responses(200, direct, 200, mismatched)
     with pytest.raises(RuntimeError, match="returned HTTP 503"):
         module.compare_catalyst_read_responses(200, direct, 503, mismatched)
+
+
+@pytest.mark.parametrize("consumer_succeeds", [True, False])
+def test_public_sft_fixture_is_staged_only_after_consumer_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    consumer_succeeds: bool,
+) -> None:
+    """Only the exact ZIP accepted by the installed consumer enters uploadable evidence."""
+    acceptance_root = tmp_path / "acceptance"
+    acceptance_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("GH_TOKEN", "test-gh-token-must-not-reach-product")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-github-token-must-not-reach-product")
+    module = _load_driver_module(tmp_path, "acceptance_driver_public_sft_fixture")
+    module.write_json(acceptance_root / "release-pins-v1.json", _valid_pins())
+    active_bundle = tmp_path / "installed-catalyst-release"
+    active_bundle.mkdir()
+    monkeypatch.setattr(
+        module,
+        "bundle_identity",
+        lambda: {"activePath": str(active_bundle), "version": "pinned-version"},
+    )
+    monkeypatch.setattr(
+        module,
+        "request_http",
+        lambda base_url, path: {
+            "url": base_url + path,
+            "status": 200,
+            "contentType": "application/json",
+        },
+    )
+
+    fixture_bytes = b"public-synthetic-sft-fixture\n"
+    command_environments: list[dict[str, str]] = []
+
+    def fake_run(
+        command: list[str], *, label: str, env: dict[str, str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        """Simulate the two installed commands while preserving fixture bytes."""
+        command_environments.append(env)
+        assert "GH_TOKEN" not in env
+        assert "GITHUB_TOKEN" not in env
+        if label == "installed-catalyst-acceptance-producer":
+            output_directory = Path(command[command.index("--output-directory") + 1])
+            output_directory.mkdir(parents=True, exist_ok=True)
+            (output_directory / "authored-business-sft.zip").write_bytes(fixture_bytes)
+            return subprocess.CompletedProcess(command, 0, "withheld product output", "")
+
+        assert label == "installed-catalyst-bundle-consumer"
+        assert Path(command[-1]).read_bytes() == fixture_bytes
+        if not consumer_succeeds:
+            raise RuntimeError("independent consumer rejected the fixture")
+        return subprocess.CompletedProcess(command, 0, "withheld consumer output", "")
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    if consumer_succeeds:
+        module.product_acceptance()
+    else:
+        with pytest.raises(RuntimeError, match="independent consumer rejected"):
+            module.product_acceptance()
+
+    published_fixture = (
+        acceptance_root / "evidence" / "public-fixtures" / "authored-business-sft.zip"
+    )
+    identity_path = acceptance_root / "evidence" / "catalyst-generated-bundle-identity.json"
+    assert published_fixture.is_file() is consumer_succeeds
+    assert identity_path.is_file() is consumer_succeeds
+    if consumer_succeeds:
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        assert published_fixture.read_bytes() == fixture_bytes
+        assert identity["artifactPath"] == "public-fixtures/authored-business-sft.zip"
+        assert identity["consumerStatus"] == "PASS"
+        assert identity["sha256"] == hashlib.sha256(fixture_bytes).hexdigest()
+    assert all("test-gh-token-must-not-reach-product" not in str(env) for env in command_environments)
+    assert all("test-github-token-must-not-reach-product" not in str(env) for env in command_environments)
+    assert not (acceptance_root / "logs").exists()
 
 
 def test_workload_attestation_token_is_preserved_only_for_explicit_resolution_calls(

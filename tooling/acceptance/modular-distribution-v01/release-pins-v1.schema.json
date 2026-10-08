@@ -224,10 +224,23 @@
           "additionalProperties": false,
           "required": ["repository", "assetName", "assetDigest", "indexDigest", "releaseTag"],
           "properties": {
+            "publisherIdentity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["repository", "workflow"],
+              "properties": {
+                "id": { "type": "string", "minLength": 1 },
+                "repository": { "type": "string", "minLength": 1 },
+                "workflow": { "type": "string", "minLength": 1 },
+                "tagFormat": { "type": "string", "minLength": 1 }
+              }
+            },
             "repository": { "type": "string", "minLength": 1 },
             "assetName": { "const": "component-release-index-v1.json" },
+            "assetUri": { "type": "string", "format": "uri", "minLength": 1 },
             "assetDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
             "indexDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "channel": { "enum": ["stable", "preview"] },
             "releaseTag": { "type": "string", "minLength": 1 }
           }
         },
@@ -239,6 +252,8 @@
             "repository": { "type": "string", "minLength": 1 },
             "workflow": { "type": "string", "minLength": 1 },
             "sourceCommit": { "$ref": "#/$defs/gitSha" },
+            "sourceRef": { "type": "string", "pattern": "^refs/heads/[A-Za-z0-9._/-]+$" },
+            "subjectName": { "type": "string", "minLength": 1 },
             "subjectDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
           }
         }
