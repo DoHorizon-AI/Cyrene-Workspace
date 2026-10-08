@@ -24,12 +24,16 @@ REPOSITORY = "DoHorizon-AI/Cyrene-Workspace"
 WORKFLOW = "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml"
 CATALOG_ASSET = "component-catalog-v1.json"
 ATTESTATION_ASSET = "component-catalog-v1.json.attestation.jsonl"
+CATALOG_ASSETS = {
+    1: (CATALOG_ASSET, ATTESTATION_ASSET),
+    2: ("component-catalog-v2.json", "component-catalog-v2.json.attestation.jsonl"),
+}
 CHANNEL_REFS: dict[str, tuple[str, ...]] = {
     "stable": ("refs/heads/main", "refs/heads/release"),
     "preview": ("refs/heads/develop",),
 }
 CHANNELS = frozenset(CHANNEL_REFS)
-TAG_PATTERN = re.compile(r"^catalog-(stable|preview)-([0-9a-f]{40})$")
+TAG_PATTERN = re.compile(r"^catalog-(?:v2-)?(stable|preview)-([0-9a-f]{40})$")
 API_BASE = "https://api.github.com"
 _MAX_API_BYTES = 8 * 1024 * 1024
 _MAX_ASSET_BYTES = 64 * 1024 * 1024
@@ -62,11 +66,12 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         target = urllib.parse.urlsplit(new_url)
         if target.scheme != "https" or target.hostname not in self.allowed_hosts:
             raise CatalogMetadataError("GitHub returned an untrusted HTTPS redirect.")
-        redirected = super().redirect_request(request, file_pointer, code, message, headers, new_url)
+        redirected = super().redirect_request(
+            request, file_pointer, code, message, headers, new_url
+        )
         source = urllib.parse.urlsplit(request.full_url)
         if redirected is not None and (
-            target.hostname != "api.github.com"
-            or target.netloc.lower() != source.netloc.lower()
+            target.hostname != "api.github.com" or target.netloc.lower() != source.netloc.lower()
         ):
             # urllib copies normal headers to redirected requests; never forward API credentials off-origin.
             redirected.remove_header("Authorization")
@@ -172,10 +177,9 @@ def _release_by_tag(release_id: str) -> dict[str, Any]:
 
 
 def _latest_immutable_release(channel: str) -> dict[str, Any]:
-    """Select the newest immutable release with this channel's tag prefix."""
+    """Prefer the newest v2 release, falling back to v1 only when none exists."""
 
-    prefix = f"catalog-{channel}-"
-    candidates: list[tuple[datetime, dict[str, Any]]] = []
+    candidates: dict[int, list[tuple[datetime, dict[str, Any]]]] = {1: [], 2: []}
     for page in range(1, _MAX_RELEASE_PAGES + 1):
         url = f"{API_BASE}/repos/{REPOSITORY}/releases?per_page=100&page={page}"
         releases = _read_api_json(url)
@@ -183,7 +187,8 @@ def _latest_immutable_release(channel: str) -> dict[str, Any]:
             raise CatalogMetadataError("GitHub release list response is malformed.")
         for release in releases:
             tag_name = release.get("tag_name")
-            if not isinstance(tag_name, str) or not tag_name.startswith(prefix):
+            match = TAG_PATTERN.fullmatch(tag_name) if isinstance(tag_name, str) else None
+            if match is None or match.group(1) != channel:
                 continue
             if release.get("immutable") is not True:
                 continue
@@ -198,19 +203,27 @@ def _latest_immutable_release(channel: str) -> dict[str, Any]:
                 ) from error
             if created.tzinfo is None:
                 raise CatalogMetadataError("Immutable release creation time has no timezone.")
-            candidates.append((created, release))
+            schema_version = _tag_schema_version(tag_name)
+            candidates[schema_version].append((created, release))
         if len(releases) < 100:
             break
     else:
         raise CatalogMetadataError("GitHub release history exceeds the supported scan depth.")
 
-    if not candidates:
+    preferred_candidates = candidates[2] or candidates[1]
+    if not preferred_candidates:
         raise CatalogMetadataError(f"No immutable {channel} component catalog release exists.")
-    latest_time = max(candidate[0] for candidate in candidates)
-    latest = [release for created, release in candidates if created == latest_time]
+    latest_time = max(candidate[0] for candidate in preferred_candidates)
+    latest = [release for created, release in preferred_candidates if created == latest_time]
     if len(latest) != 1:
         raise CatalogMetadataError(f"Latest immutable {channel} release selection is ambiguous.")
     return latest[0]
+
+
+def _tag_schema_version(tag_name: str) -> int:
+    """Map the explicit v2 tag namespace to its catalog schema version."""
+
+    return 2 if tag_name.startswith("catalog-v2-") else 1
 
 
 def _validate_release(release: dict[str, Any], channel: str, requested_tag: str | None) -> str:
@@ -220,7 +233,7 @@ def _validate_release(release: dict[str, Any], channel: str, requested_tag: str 
     match = TAG_PATTERN.fullmatch(tag_name) if isinstance(tag_name, str) else None
     if match is None or match.group(1) != channel:
         raise CatalogMetadataError(
-            "Release tag must be catalog-<channel>- followed by a full lowercase SHA-1."
+            "Release tag must be catalog-<channel>-<SHA-1> or catalog-v2-<channel>-<SHA-1>."
         )
     if requested_tag is not None and tag_name != requested_tag:
         raise CatalogMetadataError("GitHub exact-tag response differs from the requested release.")
@@ -244,16 +257,18 @@ def _expected_browser_url(tag_name: str, asset_name: str) -> str:
     )
 
 
-def _find_assets(release: dict[str, Any], tag_name: str) -> dict[str, tuple[str, int]]:
-    """Require exactly one uploaded catalog and attestation asset from this repo."""
+def _find_assets(
+    release: dict[str, Any], tag_name: str
+) -> tuple[dict[str, tuple[str, int]], str, str]:
+    """Select one exact v1 or v2 catalog and its matching attestation assets."""
 
     assets = release.get("assets")
     if not isinstance(assets, list):
         raise CatalogMetadataError("Selected GitHub release has no asset list.")
-    wanted = {CATALOG_ASSET, ATTESTATION_ASSET}
-    if len(assets) != len(wanted):
+    asset_names = {name for pair in CATALOG_ASSETS.values() for name in pair}
+    if len(assets) != 2:
         raise CatalogMetadataError(
-            "Selected GitHub catalog release must contain exactly the raw catalog and attestation assets."
+            "Selected GitHub catalog release must contain exactly one raw catalog and its attestation."
         )
     found: dict[str, tuple[str, int]] = {}
     for asset in assets:
@@ -262,7 +277,7 @@ def _find_assets(release: dict[str, Any], tag_name: str) -> dict[str, tuple[str,
         name = asset.get("name")
         if not isinstance(name, str):
             raise CatalogMetadataError("Selected GitHub release contains an asset without a name.")
-        if name not in wanted:
+        if name not in asset_names:
             continue
         if name in found:
             raise CatalogMetadataError(
@@ -287,12 +302,18 @@ def _find_assets(release: dict[str, Any], tag_name: str) -> dict[str, tuple[str,
         if asset.get("browser_download_url") != _expected_browser_url(tag_name, name):
             raise CatalogMetadataError(f"Release asset {name!r} download URL is not exact.")
         found[name] = (expected_api_url, size)
-    if found.keys() != wanted:
-        missing = sorted(wanted - found.keys())
+    pairs = [pair for pair in CATALOG_ASSETS.values() if set(pair) == found.keys()]
+    if len(pairs) != 1:
+        missing = sorted(asset_names - found.keys())
         raise CatalogMetadataError(
-            f"Selected GitHub release is missing assets: {', '.join(missing)}."
+            "Selected GitHub catalog release must contain one matching catalog/attestation pair; "
+            f"available catalog assets are {', '.join(missing)}."
         )
-    return found
+    if len(pairs[0]) != 2:
+        raise CatalogMetadataError("Catalog release must contain one exact catalog asset pair.")
+    if pairs[0][0] != CATALOG_ASSETS[_tag_schema_version(tag_name)][0]:
+        raise CatalogMetadataError("Release tag schema version differs from its catalog assets.")
+    return found, pairs[0][0], pairs[0][1]
 
 
 def _download_asset(url: str, *, size: int, name: str) -> bytes:
@@ -341,8 +362,11 @@ def _validate_catalog(payload: bytes, schema_root: Path) -> dict[str, Any]:
     if not isinstance(catalog, dict):
         raise CatalogMetadataError("Downloaded component catalog must be a JSON object.")
 
+    schema_version = catalog.get("schemaVersion")
+    if isinstance(schema_version, bool) or schema_version not in {1, 2}:
+        raise CatalogMetadataError("Component catalog schemaVersion must be 1 or 2.")
     catalog_schema = _read_local_json(
-        schema_root / "component-catalog-v1.schema.json", "catalog schema"
+        schema_root / f"component-catalog-v{schema_version}.schema.json", "catalog schema"
     )
     manifest_v1_schema = _read_local_json(
         schema_root / "component-release-manifest-v1.schema.json", "component manifest schema"
@@ -402,12 +426,270 @@ def _validate_catalog(payload: bytes, schema_root: Path) -> dict[str, Any]:
     generation = catalog.get("generation")
     if not isinstance(generation, int) or isinstance(generation, bool):
         raise CatalogMetadataError("Component catalog generation must be an integer.")
+    if schema_version == 2:
+        _validate_catalog_v2_relationships(catalog)
     return catalog
+
+
+def _validate_catalog_v2_relationships(catalog: dict[str, Any]) -> None:
+    """Validate identity and workload relationships that JSON Schema cannot express."""
+
+    publishers = catalog.get("publishers")
+    components = catalog.get("components")
+    workloads = catalog.get("workloads")
+    targets = catalog.get("targets")
+    if not all(isinstance(value, list) for value in (publishers, components, workloads, targets)):
+        raise CatalogMetadataError("Catalog v2 identity arrays are malformed.")
+
+    publisher_by_id: dict[str, dict[str, Any]] = {}
+    for publisher in publishers:
+        if not isinstance(publisher, dict):
+            raise CatalogMetadataError("Catalog v2 publisher row is malformed.")
+        repository = publisher.get("repository")
+        publisher_id = publisher.get("id", repository)
+        if not isinstance(repository, str) or not isinstance(publisher_id, str):
+            raise CatalogMetadataError("Catalog v2 publisher identity is malformed.")
+        if publisher_id in publisher_by_id:
+            raise CatalogMetadataError(
+                f"Catalog v2 publisher identity {publisher_id!r} is duplicated."
+            )
+        publisher_by_id[publisher_id] = publisher
+
+    component_by_id: dict[str, dict[str, Any]] = {}
+    package_ids: set[str] = set()
+    for component in components:
+        if not isinstance(component, dict):
+            raise CatalogMetadataError("Catalog v2 component row is malformed.")
+        component_id = component.get("componentId")
+        if not isinstance(component_id, str) or component_id in component_by_id:
+            raise CatalogMetadataError("Catalog v2 component IDs must be unique strings.")
+        component_by_id[component_id] = component
+        repository = component.get("publisher")
+        publisher_id = component.get("publisherId", repository)
+        publisher = publisher_by_id.get(publisher_id) if isinstance(publisher_id, str) else None
+        if publisher is None or publisher.get("repository") != repository:
+            raise CatalogMetadataError(
+                f"Catalog component {component_id!r} does not bind to its exact publisher identity and repository."
+            )
+        package = component.get("pluginPackage")
+        if package is not None:
+            if not isinstance(package, dict):
+                raise CatalogMetadataError(
+                    f"Catalog plugin mapping for {component_id!r} is malformed."
+                )
+            package_id = package.get("packageId")
+            if not isinstance(package_id, str) or package_id in package_ids:
+                raise CatalogMetadataError(
+                    "Catalog plugin package IDs must map uniquely to components."
+                )
+            package_ids.add(package_id)
+        component_targets = component.get("targets", [])
+        if not isinstance(component_targets, list):
+            raise CatalogMetadataError(f"Catalog component {component_id!r} has malformed targets.")
+        for component_target in component_targets:
+            if not isinstance(component_target, dict) or component_target.get("targetId") not in {
+                target.get("id") for target in targets if isinstance(target, dict)
+            }:
+                raise CatalogMetadataError(
+                    f"Catalog component {component_id!r} references an unknown target."
+                )
+        dependencies = component.get("dependencies", [])
+        if not isinstance(dependencies, list):
+            raise CatalogMetadataError(
+                f"Catalog component {component_id!r} has malformed dependencies."
+            )
+        for dependency in dependencies:
+            if not isinstance(dependency, dict) or dependency.get("componentId") not in {
+                item.get("componentId") for item in components if isinstance(item, dict)
+            }:
+                raise CatalogMetadataError(
+                    f"Catalog component {component_id!r} references an unknown dependency."
+                )
+
+    target_by_id: dict[str, dict[str, Any]] = {}
+    for target in targets:
+        if not isinstance(target, dict) or not isinstance(target.get("id"), str):
+            raise CatalogMetadataError("Catalog v2 target row is malformed.")
+        if target["id"] in target_by_id:
+            raise CatalogMetadataError(f"Catalog v2 target ID {target['id']!r} is duplicated.")
+        target_by_id[target["id"]] = target
+
+    workload_ids: set[str] = set()
+    binding_ids: set[str] = set()
+    for workload in workloads:
+        if not isinstance(workload, dict):
+            raise CatalogMetadataError("Catalog v2 workload row is malformed.")
+        workload_id = workload.get("workloadId")
+        if not isinstance(workload_id, str) or workload_id in workload_ids:
+            raise CatalogMetadataError("Catalog v2 workload IDs must be unique strings.")
+        workload_ids.add(workload_id)
+        memberships: set[str] = set()
+        category_members: set[str] = set()
+        for key in ("requiredComponents", "recommendedComponents", "optionalComponents"):
+            values = workload.get(key)
+            if not isinstance(values, list):
+                raise CatalogMetadataError(f"Workload {workload_id!r} has malformed {key}.")
+            if len(set(values)) != len(values) or category_members.intersection(values):
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} component membership categories must be disjoint."
+                )
+            category_members.update(values)
+            memberships.update(values)
+        minimum_explicit_optional = workload.get("minimumExplicitOptionalSelections", 0)
+        optional_members = workload.get("optionalComponents", [])
+        if (
+            not isinstance(minimum_explicit_optional, int)
+            or isinstance(minimum_explicit_optional, bool)
+            or minimum_explicit_optional < 0
+            or not isinstance(optional_members, list)
+            or minimum_explicit_optional > len(optional_members)
+        ):
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} has an invalid minimum explicit optional selection count."
+            )
+        groups = workload.get("choiceGroups", [])
+        if not isinstance(groups, list):
+            raise CatalogMetadataError(f"Workload {workload_id!r} has malformed choices.")
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("componentIds"), list):
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} has a malformed choice group."
+                )
+            if len(set(group["componentIds"])) != len(
+                group["componentIds"]
+            ) or category_members.intersection(group["componentIds"]):
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} choice members overlap another selection category."
+                )
+            category_members.update(group["componentIds"])
+            memberships.update(group["componentIds"])
+        missing_members = memberships - component_by_id.keys()
+        if missing_members:
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} references unknown components: {', '.join(sorted(missing_members))}."
+            )
+        host_targets = workload.get("hostTargets")
+        if not isinstance(host_targets, list) or any(
+            item not in target_by_id for item in host_targets
+        ):
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} references an unknown host target."
+            )
+        preferences = workload.get("targetPreferences", [])
+        if not isinstance(preferences, list):
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} has malformed target preferences."
+            )
+        preference_ids: set[str] = set()
+        for preference in preferences:
+            if not isinstance(preference, dict):
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} has a malformed target preference."
+                )
+            component_id = preference.get("componentId")
+            target_id = preference.get("targetId")
+            component = component_by_id.get(component_id) if isinstance(component_id, str) else None
+            if component is None or component_id not in memberships:
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} target preference is not a member binding."
+                )
+            if target_id not in target_by_id or target_id not in {
+                row.get("targetId") for row in component.get("targets", []) if isinstance(row, dict)
+            }:
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} target preference is not supported by its component row."
+                )
+            if component_id in preference_ids:
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} has duplicate target preferences."
+                )
+            preference_ids.add(component_id)
+        bindings = workload.get("bindings", [])
+        if not isinstance(bindings, list):
+            raise CatalogMetadataError(f"Workload {workload_id!r} has malformed plugin bindings.")
+        bound_components: set[str] = set()
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} has a malformed plugin binding."
+                )
+            component_id = binding.get("componentId")
+            binding_id = binding.get("bindingId")
+            component = component_by_id.get(component_id) if isinstance(component_id, str) else None
+            if (
+                component is None
+                or component_id not in memberships
+                or not isinstance(component.get("pluginPackage"), dict)
+                or not isinstance(binding_id, str)
+                or not binding_id
+            ):
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} binding does not identify a member plugin."
+                )
+            if component_id in bound_components or binding_id in binding_ids:
+                raise CatalogMetadataError("Catalog v2 workload binding identities must be unique.")
+            bound_components.add(component_id)
+            binding_ids.add(binding_id)
+        expected_plugins = {
+            component_id
+            for component_id in memberships
+            if isinstance(component_by_id[component_id].get("pluginPackage"), dict)
+        }
+        if bound_components != expected_plugins:
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} must declare one explicit binding for each member plugin."
+            )
+        source_policy = workload.get("sourcePolicy")
+        if not isinstance(source_policy, dict):
+            raise CatalogMetadataError(f"Workload {workload_id!r} has no source policy object.")
+        product_ids = source_policy.get("productComponentIds", [])
+        if not isinstance(product_ids, list) or any(
+            item not in component_by_id for item in product_ids
+        ):
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} source policy references unknown products."
+            )
+        product_sources = source_policy.get("productSources")
+        if not isinstance(product_sources, list):
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} source policy has no explicit product source map."
+            )
+        source_map: dict[str, str] = {}
+        for row in product_sources:
+            if not isinstance(row, dict):
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} product source mapping is malformed."
+                )
+            component_id = row.get("componentId")
+            source_id = row.get("sourceId")
+            if (
+                not isinstance(component_id, str)
+                or component_id not in component_by_id
+                or not isinstance(source_id, str)
+                or not source_id
+                or component_id in source_map
+                or source_id in source_map.values()
+            ):
+                raise CatalogMetadataError(
+                    f"Workload {workload_id!r} product source mapping is unknown or ambiguous."
+                )
+            source_map[component_id] = source_id
+        if set(source_map) != set(product_ids):
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} product source map must explicitly match its product IDs."
+            )
+        if source_policy.get("mode") == "actualProduct" and not set(product_ids).issubset(
+            memberships
+        ):
+            raise CatalogMetadataError(
+                f"Workload {workload_id!r} source products must be workload members."
+            )
 
 
 def _verify_source_ref(
     *,
     payload: bytes,
+    subject_name: str,
     bundle_path: Path,
     digest: str,
     source_commit: str,
@@ -422,7 +704,7 @@ def _verify_source_ref(
         try:
             result = verify_attestation(
                 payload,
-                subject_name=CATALOG_ASSET,
+                subject_name=subject_name,
                 digest=digest,
                 repository=REPOSITORY,
                 workflow=WORKFLOW,
@@ -551,7 +833,7 @@ def fetch_verified_catalog(
     if release_id is not None:
         if not isinstance(release_id, str):
             raise CatalogMetadataError(
-                "release_id must be a catalog channel-prefixed full SHA-1 tag."
+                "release_id must be a versioned catalog channel-prefixed full SHA-1 tag."
             )
         match = TAG_PATTERN.fullmatch(release_id)
         if match is None or match.group(1) != channel:
@@ -570,17 +852,19 @@ def fetch_verified_catalog(
 
     source_commit = _validate_release(release, channel, requested_tag)
     tag_name = release["tag_name"]
-    assets = _find_assets(release, tag_name)
+    assets, catalog_asset, attestation_asset = _find_assets(release, tag_name)
     catalog_bytes = _download_asset(
-        assets[CATALOG_ASSET][0], size=assets[CATALOG_ASSET][1], name=CATALOG_ASSET
+        assets[catalog_asset][0], size=assets[catalog_asset][1], name=catalog_asset
     )
     attestation_bytes = _download_asset(
-        assets[ATTESTATION_ASSET][0],
-        size=assets[ATTESTATION_ASSET][1],
-        name=ATTESTATION_ASSET,
+        assets[attestation_asset][0],
+        size=assets[attestation_asset][1],
+        name=attestation_asset,
     )
     catalog_digest = "sha256:" + hashlib.sha256(catalog_bytes).hexdigest()
     catalog = _validate_catalog(catalog_bytes, Path(schema_root))
+    if catalog["schemaVersion"] != _tag_schema_version(tag_name):
+        raise CatalogMetadataError("Release tag schema version differs from the catalog payload.")
 
     bundle_file: Path | None = None
     try:
@@ -593,6 +877,7 @@ def fetch_verified_catalog(
             bundle_file = Path(stream.name)
         source_ref = _verify_source_ref(
             payload=catalog_bytes,
+            subject_name=catalog_asset,
             bundle_path=bundle_file,
             digest=catalog_digest,
             source_commit=source_commit,
@@ -612,9 +897,10 @@ def fetch_verified_catalog(
         "sourceCommit": source_commit,
         "sourceRef": source_ref,
         "catalogSha256": catalog_digest,
+        "catalogSchemaVersion": catalog["schemaVersion"],
         "generation": catalog["generation"],
-        "subjectName": CATALOG_ASSET,
-        "attestationAssetName": ATTESTATION_ASSET,
+        "subjectName": catalog_asset,
+        "attestationAssetName": attestation_asset,
     }
     metadata_bytes = (
         json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2) + "\n"

@@ -25,7 +25,7 @@ BOOTSTRAP_JOURNAL_NAME = "runtime-maintenance-first-install.json"
 DEFAULT_BROKER_EXECUTABLE = Path("/usr/bin/cyrene-runtime-maintenance")
 DEFAULT_PROC_ROOT = Path("/proc")
 RUNTIME_SYSTEMD_UNIT_DIRECTORY = Path("/run/systemd/system")
-COMPILED_CATALOG_DIGEST = "sha256:4f0696f0f7dd24fe65d955a5269f3e2591517f4b75c79b7b7fced921dfb4bb81"
+COMPILED_CATALOG_DIGEST = "sha256:79866ed32c4393e5bbbd3e36144ae080f316e9bf2695a0768bdbbfa98bf76247"
 _DELETED_EXE_SUFFIX = " (deleted)"
 
 

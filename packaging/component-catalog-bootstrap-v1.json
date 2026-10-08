@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generation": 12,
+  "generation": 13,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -126,6 +126,18 @@
         "architecture": "x86_64",
         "abi": "glibc-2.35",
         "runtime": "python:3.12"
+      },
+      "hostSupport": "supported"
+    },
+    {
+      "id": "linux-ubuntu-24.04-x86_64-oci",
+      "target": {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "runtime": "oci"
       },
       "hostSupport": "supported"
     }
@@ -899,6 +911,11 @@
             "containerName": "cyrene-echo",
             "healthcheck": "docker-healthcheck"
           }
+        },
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-oci",
+          "artifactKind": "oci-image",
+          "support": "supported"
         }
       ],
       "restart": {

@@ -1,0 +1,1495 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/component-catalog-v2.schema.json",
+  "title": "Cyrene Component Catalog v2",
+  "description": "Versioned workload definitions and typed component identities over the v1 component, dependency, target, and trusted publisher authorities. Catalog v1 remains a separate strict schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generation",
+    "defaultChannel",
+    "channels",
+    "targets",
+    "publishers",
+    "activitySourceCatalog",
+    "dataBundleTrust",
+    "components",
+    "compatibilityGroups",
+    "workloads"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "defaultChannel": {
+      "const": "stable"
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stable",
+        "preview"
+      ],
+      "properties": {
+        "stable": {
+          "$ref": "#/$defs/channel"
+        },
+        "preview": {
+          "$ref": "#/$defs/channel"
+        }
+      }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "$ref": "#/$defs/platformTarget"
+      },
+      "uniqueItems": true
+    },
+    "publishers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/publisher"
+      },
+      "uniqueItems": true
+    },
+    "activitySourceCatalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "managedBy",
+        "path",
+        "generationSource",
+        "minimumSources"
+      ],
+      "properties": {
+        "managedBy": {
+          "const": "cyrene-runtime-maintenance"
+        },
+        "path": {
+          "const": "/var/lib/cyrene/runtime/activity-sources.json"
+        },
+        "generationSource": {
+          "const": "install_catalog_generation"
+        },
+        "minimumSources": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/component"
+      },
+      "uniqueItems": true
+    },
+    "compatibilityGroups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/compatibilityGroup"
+      },
+      "maxItems": 100,
+      "uniqueItems": true
+    },
+    "dataBundleTrust": {
+      "$ref": "#/$defs/dataBundleTrust"
+    },
+    "workloads": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/workload"
+      },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "componentId": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/componentId"
+    },
+    "target": {
+      "$ref": "component-release-manifest-v1.schema.json#/$defs/target"
+    },
+    "channel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releasePrerelease",
+        "sourceRefs"
+      ],
+      "properties": {
+        "releasePrerelease": {
+          "type": "boolean"
+        },
+        "sourceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^refs/(heads|tags)/[A-Za-z0-9._/-]+$"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "platformTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "target",
+        "hostSupport"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,80}$"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "hostSupport": {
+          "enum": [
+            "supported",
+            "contract-only",
+            "unsupported"
+          ]
+        }
+      }
+    },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "workflow",
+        "releaseDiscovery"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "workflow": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$"
+        },
+        "releaseDiscovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "apiUri",
+            "indexAssetName"
+          ],
+          "properties": {
+            "apiUri": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://api\\.github\\.com/repos/"
+            },
+            "indexAssetName": {
+              "const": "component-release-index-v1.json"
+            }
+          }
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,79}$",
+          "description": "Versioned publisher identity. Legacy publisher rows without id use repository as their identity."
+        },
+        "tagFormat": {
+          "enum": [
+            "source-sha",
+            "component-source-sha",
+            "component-version-source-sha"
+          ],
+          "description": "Exact release tag construction. Missing values retain the legacy component-prefix plus source SHA format."
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "kind",
+        "publisher",
+        "artifactKinds",
+        "targets",
+        "restart",
+        "dependencies"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "kind": {
+          "enum": [
+            "native-binary",
+            "python-bundle",
+            "oci-image",
+            "data-bundle",
+            "plugin-package",
+            "static-web"
+          ]
+        },
+        "publisher": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "artifactKinds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "native-binary",
+              "python-bundle",
+              "oci-image",
+              "data-bundle",
+              "plugin-package",
+              "static-web"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/componentTarget"
+          },
+          "uniqueItems": true
+        },
+        "restart": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/restart"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "component-release-manifest-v1.schema.json#/$defs/dependency"
+          },
+          "uniqueItems": true
+        },
+        "systemdUnit": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.@-]+\\.service$"
+        },
+        "pythonBundleService": {
+          "enum": [
+            "navigator",
+            "yield",
+            "reactor",
+            "exchange",
+            "catalyst"
+          ]
+        },
+        "ociImageRepository": {
+          "type": "string",
+          "pattern": "^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+$"
+        },
+        "compatibilityGroup": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+        },
+        "protocolVersion": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$",
+          "description": "Trusted protocol version for v2 manifests outside a catalog compatibility group."
+        },
+        "role": {
+          "enum": [
+            "service",
+            "build-dependency"
+          ]
+        },
+        "releaseDiscovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tagPrefixes"
+          ],
+          "properties": {
+            "tagPrefixes": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "preview",
+                "stable"
+              ],
+              "properties": {
+                "preview": {
+                  "type": "string",
+                  "pattern": "^preview-[a-z][a-z0-9-]{0,63}-$"
+                },
+                "stable": {
+                  "type": "string",
+                  "pattern": "^stable-[a-z][a-z0-9-]{0,63}-$"
+                }
+              }
+            }
+          }
+        },
+        "pluginPackage": {
+          "$ref": "#/$defs/pluginPackage"
+        },
+        "activation": {
+          "enum": [
+            "restart",
+            "refresh"
+          ]
+        },
+        "publisherId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,79}$",
+          "description": "Exact publisher identity from the catalog publishers array; never selected by repository alone when multiple workflows exist."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "plugin-package"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "pluginPackage"
+            ],
+            "properties": {
+              "artifactKinds": {
+                "contains": {
+                  "const": "plugin-package"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "pluginPackage"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "plugin-package"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "static-web"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "activation"
+            ],
+            "properties": {
+              "artifactKinds": {
+                "contains": {
+                  "const": "static-web"
+                }
+              },
+              "activation": {
+                "const": "refresh"
+              },
+              "restart": {
+                "properties": {
+                  "group": {
+                    "const": "none"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "activation": {
+                "const": "refresh"
+              }
+            },
+            "required": [
+              "activation"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "const": "static-web"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "componentTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targetId",
+        "artifactKind",
+        "support"
+      ],
+      "properties": {
+        "targetId": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,80}$"
+        },
+        "artifactKind": {
+          "enum": [
+            "native-binary",
+            "python-bundle",
+            "oci-image",
+            "data-bundle",
+            "plugin-package",
+            "static-web"
+          ]
+        },
+        "support": {
+          "enum": [
+            "supported",
+            "contract-only",
+            "unsupported"
+          ]
+        },
+        "windowsRuntime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "composeService",
+            "containerName",
+            "healthcheck"
+          ],
+          "properties": {
+            "composeService": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,62}$"
+            },
+            "containerName": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]{0,62}$"
+            },
+            "healthcheck": {
+              "const": "docker-healthcheck"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "targetId": {
+                "pattern": "^windows-"
+              },
+              "artifactKind": {
+                "const": "oci-image"
+              },
+              "support": {
+                "const": "supported"
+              }
+            },
+            "required": [
+              "targetId",
+              "artifactKind",
+              "support"
+            ]
+          },
+          "then": {
+            "required": [
+              "windowsRuntime"
+            ]
+          }
+        },
+        {
+          "if": {
+            "not": {
+              "properties": {
+                "targetId": {
+                  "pattern": "^windows-"
+                },
+                "artifactKind": {
+                  "const": "oci-image"
+                },
+                "support": {
+                  "const": "supported"
+                }
+              },
+              "required": [
+                "targetId",
+                "artifactKind",
+                "support"
+              ]
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "windowsRuntime"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "compatibilityGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "groupId",
+        "contractApiVersion",
+        "wireApiVersion",
+        "members"
+      ],
+      "properties": {
+        "groupId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+        },
+        "groupVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+$"
+        },
+        "contractApiVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "wireApiVersion": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+        },
+        "contractLock": {
+          "$ref": "component-release-manifest-v2.schema.json#/$defs/contractLock"
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/compatibilityGroupMember"
+          },
+          "uniqueItems": true
+        },
+        "deploymentRoles": {
+          "description": "Generation-12 host profiles for workspace-product-v2. Each role appears once and pins a unique required/allowed member set.",
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/deploymentRole"
+          },
+          "uniqueItems": true,
+          "allOf": [
+            {
+              "contains": {
+                "properties": {
+                  "roleId": {
+                    "const": "control-host"
+                  }
+                },
+                "required": [
+                  "roleId"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {
+                "properties": {
+                  "roleId": {
+                    "const": "connector-host"
+                  }
+                },
+                "required": [
+                  "roleId"
+                ]
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "groupVersion"
+            ]
+          },
+          "then": {
+            "required": [
+              "contractLock"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "groupId": {
+                "const": "workspace-product-v2"
+              }
+            },
+            "required": [
+              "groupId"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "deploymentRoles"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "deploymentRole": {
+      "description": "A host profile whose requiredMembers are a subset of allowedMembers. C12 pins each role's member arrays in the schema and catalog.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "roleId",
+        "requiredMembers",
+        "allowedMembers"
+      ],
+      "properties": {
+        "roleId": {
+          "enum": [
+            "control-host",
+            "connector-host"
+          ]
+        },
+        "requiredMembers": {
+          "description": "Unique component members that must be present on this host role.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/componentId"
+          },
+          "uniqueItems": true
+        },
+        "allowedMembers": {
+          "description": "Unique component members permitted on this host role.",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/componentId"
+          },
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "roleId": {
+                "const": "control-host"
+              }
+            },
+            "required": [
+              "roleId"
+            ]
+          },
+          "then": {
+            "properties": {
+              "requiredMembers": {
+                "const": [
+                  "cy-workspace-relay",
+                  "cy-workspace-web-bff",
+                  "cy-workspace-frontend-bridge",
+                  "cy-workspace-authority-host",
+                  "cyrene-product-contract-bundle"
+                ]
+              },
+              "allowedMembers": {
+                "const": [
+                  "cy-workspace-relay",
+                  "cy-workspace-web-bff",
+                  "cy-workspace-frontend-bridge",
+                  "cy-workspace-authority-host",
+                  "cyrene-product-contract-bundle"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "roleId": {
+                "const": "connector-host"
+              }
+            },
+            "required": [
+              "roleId"
+            ]
+          },
+          "then": {
+            "properties": {
+              "requiredMembers": {
+                "const": [
+                  "cy-workspace-connector"
+                ]
+              },
+              "allowedMembers": {
+                "const": [
+                  "cy-workspace-connector",
+                  "cy-workspace-sidecar"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "compatibilityGroupMember": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "requiredForAdoption"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "requiredForAdoption": {
+          "type": "boolean"
+        },
+        "protocolVersion": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+        }
+      }
+    },
+    "dataBundleTrust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifestPath",
+        "protocolVersion",
+        "contractApiVersion",
+        "policySource",
+        "owners"
+      ],
+      "properties": {
+        "manifestPath": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+        },
+        "protocolVersion": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+        },
+        "contractApiVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "policySource": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "path",
+            "schemaVersion"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "path": {
+              "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+            },
+            "schemaVersion": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9._-]{0,127}$"
+            }
+          }
+        },
+        "owners": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/dataBundleOwnerTrust"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "dataBundleOwnerTrust": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerId",
+        "repository",
+        "catalogPath"
+      ],
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,63}$"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "catalogPath": {
+          "$ref": "component-release-manifest-v1.schema.json#/$defs/relativePath"
+        }
+      }
+    },
+    "ubuntu2204Python312PlatformTarget": {
+      "const": {
+        "id": "linux-ubuntu-22.04-x86_64-python-3.12",
+        "target": {
+          "os": "linux",
+          "osVersion": "22.04",
+          "distribution": "ubuntu",
+          "distributionVersion": "22.04",
+          "architecture": "x86_64",
+          "abi": "glibc-2.35",
+          "runtime": "python:3.12"
+        },
+        "hostSupport": "supported"
+      }
+    },
+    "ubuntu2204Python312ComponentTarget": {
+      "const": {
+        "targetId": "linux-ubuntu-22.04-x86_64-python-3.12",
+        "artifactKind": "python-bundle",
+        "support": "supported"
+      }
+    },
+    "pluginPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packageId",
+        "capabilityId",
+        "interfaceVersion"
+      ],
+      "properties": {
+        "packageId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){1,7}$",
+          "description": "Exact dotted Plugin manifest id. It is explicitly mapped here and is never derived from componentId."
+        },
+        "capabilityId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*){1,7}$"
+        },
+        "interfaceVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$"
+        }
+      }
+    },
+    "componentIdList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/componentId"
+      },
+      "uniqueItems": true
+    },
+    "sourcePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "productComponentIds",
+        "productSources",
+        "operations"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "actualProduct",
+            "standaloneOperator"
+          ]
+        },
+        "productComponentIds": {
+          "$ref": "#/$defs/componentIdList"
+        },
+        "productSources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "componentId",
+              "sourceId"
+            ],
+            "properties": {
+              "componentId": {
+                "$ref": "#/$defs/componentId"
+              },
+              "sourceId": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9._-]{0,159}$"
+              }
+            }
+          },
+          "uniqueItems": true
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "activate",
+              "recover_binding",
+              "deactivate",
+              "runtime_status",
+              "get_installation"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "sourceId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,79}$"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "actualProduct"
+            },
+            "productComponentIds": {
+              "minItems": 1
+            },
+            "productSources": {
+              "minItems": 1
+            },
+            "operations": {
+              "minItems": 1,
+              "const": [
+                "activate",
+                "recover_binding",
+                "deactivate",
+                "runtime_status",
+                "get_installation"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "standaloneOperator"
+            },
+            "productComponentIds": {
+              "maxItems": 0
+            },
+            "productSources": {
+              "maxItems": 0
+            },
+            "operations": {
+              "const": [
+                "activate",
+                "recover_binding",
+                "deactivate",
+                "runtime_status",
+                "get_installation"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "productComponentIds",
+            "productSources",
+            "operations",
+            "sourceId"
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "actualProduct"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "sourceId"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "standaloneOperator"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "sourceId": {
+                "const": "cyrene-plugin-standalone-operator"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "choiceGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "choiceId",
+        "componentIds"
+      ],
+      "properties": {
+        "choiceId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,79}$"
+        },
+        "componentIds": {
+          "$ref": "#/$defs/componentIdList",
+          "minItems": 2,
+          "maxItems": 100
+        }
+      }
+    },
+    "componentConflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentIds",
+        "reason"
+      ],
+      "properties": {
+        "componentIds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/componentId"
+          },
+          "minItems": 2,
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "targetPreference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "targetId"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "targetId": {
+          "type": "string",
+          "pattern": "^[a-z0-9._-]{1,80}$"
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workloadId",
+        "hostTargets",
+        "requiredComponents",
+        "recommendedComponents",
+        "optionalComponents",
+        "choiceGroups",
+        "conflicts",
+        "sourcePolicy",
+        "bindings"
+      ],
+      "properties": {
+        "workloadId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{0,79}$"
+        },
+        "hostTargets": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9._-]{1,80}$"
+          },
+          "uniqueItems": true
+        },
+        "requiredComponents": {
+          "$ref": "#/$defs/componentIdList"
+        },
+        "recommendedComponents": {
+          "$ref": "#/$defs/componentIdList"
+        },
+        "optionalComponents": {
+          "$ref": "#/$defs/componentIdList"
+        },
+        "minimumExplicitOptionalSelections": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Minimum number of optional workload members the caller must explicitly include."
+        },
+        "choiceGroups": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/choiceGroup"
+          },
+          "uniqueItems": true
+        },
+        "conflicts": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/componentConflict"
+          },
+          "uniqueItems": true
+        },
+        "targetPreferences": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/targetPreference"
+          },
+          "uniqueItems": true
+        },
+        "sourcePolicy": {
+          "$ref": "#/$defs/sourcePolicy"
+        },
+        "bindings": {
+          "type": "array",
+          "maxItems": 500,
+          "items": {
+            "$ref": "#/$defs/binding"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "bindingId"
+      ],
+      "properties": {
+        "componentId": {
+          "$ref": "#/$defs/componentId"
+        },
+        "bindingId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._:/-]{0,159}$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "generation": {
+            "minimum": 9
+          }
+        },
+        "required": [
+          "generation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "targets": {
+            "contains": {
+              "$ref": "#/$defs/ubuntu2204Python312PlatformTarget"
+            },
+            "items": {
+              "if": {
+                "properties": {
+                  "id": {
+                    "const": "linux-ubuntu-22.04-x86_64-python-3.12"
+                  }
+                },
+                "required": [
+                  "id"
+                ]
+              },
+              "then": {
+                "$ref": "#/$defs/ubuntu2204Python312PlatformTarget"
+              }
+            }
+          },
+          "components": {
+            "allOf": [
+              {
+                "items": {
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "componentId": {
+                            "enum": [
+                              "cyrene-catalyst",
+                              "cyrene-exchange",
+                              "cyrene-navigator",
+                              "cyrene-reactor",
+                              "cyrene-yield"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "componentId"
+                        ]
+                      },
+                      "then": {
+                        "properties": {
+                          "targets": {
+                            "items": {
+                              "if": {
+                                "properties": {
+                                  "targetId": {
+                                    "const": "linux-ubuntu-22.04-x86_64-python-3.12"
+                                  }
+                                },
+                                "required": [
+                                  "targetId"
+                                ]
+                              },
+                              "then": {
+                                "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "if": {
+                        "not": {
+                          "properties": {
+                            "componentId": {
+                              "enum": [
+                                "cyrene-catalyst",
+                                "cyrene-exchange",
+                                "cyrene-navigator",
+                                "cyrene-reactor",
+                                "cyrene-yield"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "componentId"
+                          ]
+                        }
+                      },
+                      "then": {
+                        "properties": {
+                          "targets": {
+                            "items": {
+                              "not": {
+                                "properties": {
+                                  "targetId": {
+                                    "const": "linux-ubuntu-22.04-x86_64-python-3.12"
+                                  }
+                                },
+                                "required": [
+                                  "targetId"
+                                ]
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-catalyst"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-exchange"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-navigator"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-reactor"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "componentId": {
+                      "const": "cyrene-yield"
+                    },
+                    "targets": {
+                      "contains": {
+                        "$ref": "#/$defs/ubuntu2204Python312ComponentTarget"
+                      }
+                    }
+                  },
+                  "required": [
+                    "componentId",
+                    "targets"
+                  ]
+                },
+                "minContains": 1,
+                "maxContains": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "generation": {
+            "minimum": 12
+          }
+        },
+        "required": [
+          "generation"
+        ]
+      },
+      "then": {
+        "properties": {
+          "compatibilityGroups": {
+            "items": {
+              "if": {
+                "properties": {
+                  "groupId": {
+                    "const": "workspace-product-v2"
+                  }
+                },
+                "required": [
+                  "groupId"
+                ]
+              },
+              "then": {
+                "required": [
+                  "deploymentRoles"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

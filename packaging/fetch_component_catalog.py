@@ -62,7 +62,7 @@ def _parser() -> argparse.ArgumentParser:
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument(
         "--release-id",
-        help="Fetch this exact immutable catalog-stable-<40hex> or catalog-preview-<40hex> release.",
+        help="Fetch this exact immutable v1 catalog-{stable|preview}-<40hex> or v2 catalog-v2-{stable|preview}-<40hex> release.",
     )
     selection.add_argument(
         "--latest-channel",
@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         match = TAG_PATTERN.fullmatch(args.release_id)
         if match is None:
             print(
-                "release-id must be catalog-stable-<40 lowercase hex> or catalog-preview-<40 lowercase hex>.",
+                "release-id must be catalog-{stable|preview}-<40 lowercase hex> or catalog-v2-{stable|preview}-<40 lowercase hex>.",
                 file=sys.stderr,
             )
             return 2

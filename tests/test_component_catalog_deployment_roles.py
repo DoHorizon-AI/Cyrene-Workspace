@@ -49,7 +49,7 @@ def test_c12_workspace_product_deployment_roles_match_the_catalog_members() -> N
     group = _group(catalog, "workspace-product-v2")
     members = {member["componentId"]: member for member in group["members"]}
 
-    assert catalog["generation"] == 12
+    assert catalog["generation"] == 13
     assert group["groupVersion"] == "2"
     assert group["contractApiVersion"] == "0.1.0"
     assert group["wireApiVersion"] == "cyrene.workspace.product.v2"
