@@ -238,13 +238,16 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     }
     assert '[[ "$GITHUB_REF" == "refs/heads/develop" ]]' in source
     assert '"workflowSha": os.environ.get("GITHUB_WORKFLOW_SHA")' in source
-    assert 'MINIMUM_GH_ATTESTATION_VERSION = (2, 102, 0)' in source
+    assert "MINIMUM_GH_ATTESTATION_VERSION = (2, 102, 0)" in source
     assert 'GH_RELEASE_TAG = "v2.102.0"' in source
     assert '"attestation_cli_provision"' in source
     assert '"sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends"' in source
-    assert 'https://github.com/cli/cli/releases/download/v2.102.0' in source
-    assert 'https://api.github.com/repos/cli/cli/releases/tags/v2.102.0' in source
-    assert 'GH_RELEASE_ASSET_SHA256 = "7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"' in source
+    assert "https://github.com/cli/cli/releases/download/v2.102.0" in source
+    assert "https://api.github.com/repos/cli/cli/releases/tags/v2.102.0" in source
+    assert (
+        'GH_RELEASE_ASSET_SHA256 = "7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"'
+        in source
+    )
     assert '"ghVersion": ".".join(str(part) for part in gh_version)' in source
     assert '"native-installer-release-v2.json"' in source
     assert '"native-installer-source-receipt-v2.json"' in source
@@ -366,11 +369,14 @@ def test_attestation_cli_keeps_an_already_supported_runner_unchanged(
     assert evidence["versionAfter"] == "2.102.0"
     assert evidence["upgraded"] is False
     assert commands == [["gh", "--version"]]
-    assert json.loads(
-        (acceptance_root / "evidence" / "attestation-cli-provision.json").read_text(
-            encoding="utf-8"
+    assert (
+        json.loads(
+            (acceptance_root / "evidence" / "attestation-cli-provision.json").read_text(
+                encoding="utf-8"
+            )
         )
-    ) == evidence
+        == evidence
+    )
 
 
 def test_attestation_cli_upgrades_old_runner_from_exact_official_checksum_pins(
@@ -480,7 +486,9 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
         module.validate_pin_shape(wrong_workload_channel)
 
     wrong_index_channel = json.loads(json.dumps(pins))
-    wrong_index_channel["workloads"]["catalyst"]["selectedComponents"][0]["indexIdentity"]["channel"] = "stable"
+    wrong_index_channel["workloads"]["catalyst"]["selectedComponents"][0]["indexIdentity"][
+        "channel"
+    ] = "stable"
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.Draft202012Validator(schema).validate(wrong_index_channel)
     with pytest.raises(RuntimeError, match="index channel differs from the workload plan channel"):
@@ -1008,8 +1016,12 @@ def test_public_sft_fixture_is_staged_only_after_consumer_success(
         assert identity["artifactPath"] == "public-fixtures/authored-business-sft.zip"
         assert identity["consumerStatus"] == "PASS"
         assert identity["sha256"] == hashlib.sha256(fixture_bytes).hexdigest()
-    assert all("test-gh-token-must-not-reach-product" not in str(env) for env in command_environments)
-    assert all("test-github-token-must-not-reach-product" not in str(env) for env in command_environments)
+    assert all(
+        "test-gh-token-must-not-reach-product" not in str(env) for env in command_environments
+    )
+    assert all(
+        "test-github-token-must-not-reach-product" not in str(env) for env in command_environments
+    )
     assert not (acceptance_root / "logs").exists()
 
 
