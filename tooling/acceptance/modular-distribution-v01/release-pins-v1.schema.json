@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.dev/schemas/modular-distribution-v01/release-pins-v1.schema.json",
+  "title": "Cyrene modular distribution clean-host release pins",
+  "description": "Expected official identities for one fresh-host acceptance run. These values assert installer and resolver results; they do not select or replace runtime authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "nativeInstaller", "catalog", "workloads"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "nativeInstaller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseId",
+        "sourceRepository",
+        "sourceRef",
+        "sourceCommit",
+        "workflow",
+        "targetId",
+        "debAssetName",
+        "debSha256",
+        "debSizeBytes"
+      ],
+      "properties": {
+        "releaseId": {
+          "type": "string",
+          "pattern": "^native-installer-preview-[0-9a-f]{40}$"
+        },
+        "sourceRepository": { "const": "DoHorizon-AI/Cyrene-Workspace" },
+        "sourceRef": { "const": "refs/heads/develop" },
+        "sourceCommit": { "$ref": "#/$defs/gitSha" },
+        "workflow": {
+          "const": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/native-installer-release.yml"
+        },
+        "targetId": { "const": "linux-ubuntu-24.04-x86_64-python-3.12" },
+        "debAssetName": {
+          "type": "string",
+          "pattern": "^cyrene_[A-Za-z0-9.+~:-]+_ubuntu-24\\.04_amd64\\.deb$"
+        },
+        "debSha256": { "$ref": "#/$defs/rawSha256" },
+        "debSizeBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseId",
+        "repository",
+        "workflow",
+        "sourceRef",
+        "sourceCommit",
+        "assetName",
+        "sha256",
+        "sizeBytes",
+        "attestationAssetName",
+        "attestationSha256",
+        "schemaVersion",
+        "generation"
+      ],
+      "properties": {
+        "releaseId": {
+          "type": "string",
+          "pattern": "^catalog-v2-preview-[0-9a-f]{40}$"
+        },
+        "repository": { "const": "DoHorizon-AI/Cyrene-Workspace" },
+        "workflow": {
+          "const": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml"
+        },
+        "sourceRef": { "const": "refs/heads/develop" },
+        "sourceCommit": { "$ref": "#/$defs/gitSha" },
+        "assetName": { "const": "component-catalog-v2.json" },
+        "sha256": { "$ref": "#/$defs/rawSha256" },
+        "sizeBytes": { "type": "integer", "minimum": 1 },
+        "attestationAssetName": { "const": "component-catalog-v2.json.attestation.jsonl" },
+        "attestationSha256": { "$ref": "#/$defs/rawSha256" },
+        "schemaVersion": { "const": 2 },
+        "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "workloads": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalyst"],
+      "properties": {
+        "catalyst": {
+          "allOf": [
+            { "$ref": "#/$defs/workload" },
+            {
+              "type": "object",
+              "required": ["service"],
+              "properties": {
+                "selectedComponents": {
+                  "minItems": 8,
+                  "allOf": [
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-catalyst" } }, "required": ["componentId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-client-workspace-control" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-node-24" } }, "required": ["componentId", "targetId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-client-workspace-web" } }, "required": ["componentId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-runtime-maintenance-sdk" } }, "required": ["componentId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-tools-dataset-generation" } }, "required": ["componentId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-tools-dataset-preparation" } }, "required": ["componentId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-tools-document-parsing" } }, "required": ["componentId"] } },
+                    { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-tools-knowledge-preparation" } }, "required": ["componentId"] } }
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "rawSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workloadId", "targetId", "catalogDigest", "selectedComponents"],
+      "properties": {
+        "workloadId": { "const": "catalyst" },
+        "targetId": { "const": "linux-ubuntu-24.04-x86_64" },
+        "catalogDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["unit", "baseUrl", "healthPath"],
+          "properties": {
+            "unit": { "const": "cyrene-catalyst.service" },
+            "baseUrl": { "type": "string", "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}$" },
+            "healthPath": { "const": "/healthz" }
+          }
+        },
+        "selectedComponents": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/selectedComponent" }
+        }
+      }
+    },
+    "selectedComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "componentId",
+        "targetId",
+        "version",
+        "releaseId",
+        "manifestDigest",
+        "manifestAssetDigest",
+        "digest",
+        "publisherIdentity",
+        "indexIdentity",
+        "attestationRef"
+      ],
+      "properties": {
+        "componentId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,127}$" },
+        "targetId": { "type": "string", "minLength": 1 },
+        "version": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$"
+        },
+        "releaseId": { "type": "string", "minLength": 1 },
+        "manifestDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "manifestAssetDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "publisherIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "workflow"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "repository": { "type": "string", "minLength": 1 },
+            "workflow": { "type": "string", "minLength": 1 },
+            "tagFormat": { "type": "string", "minLength": 1 }
+          }
+        },
+        "indexIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "assetName", "assetDigest", "indexDigest", "releaseTag"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "assetName": { "const": "component-release-index-v1.json" },
+            "assetDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "indexDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "releaseTag": { "type": "string", "minLength": 1 }
+          }
+        },
+        "attestationRef": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "workflow", "sourceCommit", "subjectDigest"],
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "workflow": { "type": "string", "minLength": 1 },
+            "sourceCommit": { "$ref": "#/$defs/gitSha" },
+            "subjectDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,2189 @@
+name: Modular distribution clean-host acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      native_release_id:
+        description: Exact immutable native-installer-preview-<40 character source SHA> release tag
+        required: true
+        type: string
+      release_pins_json:
+        description: Exact expected release identities matching tooling/acceptance/modular-distribution-v01/release-pins-v1.schema.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  attestations: read
+
+concurrency:
+  group: modular-distribution-acceptance-${{ inputs.native_release_id }}
+  cancel-in-progress: false
+
+jobs:
+  clean-host-acceptance:
+    name: Fresh Ubuntu 24.04 native release acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      attestations: read
+    env:
+      NATIVE_RELEASE_ID: ${{ inputs.native_release_id }}
+
+    steps:
+      - name: Initialize the phase ledger and prove the runner is a clean host
+        id: initialize
+        shell: bash
+        env:
+          RELEASE_PINS_JSON: ${{ inputs.release_pins_json }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "DoHorizon-AI/Cyrene-Workspace" ]]
+          [[ "$GITHUB_REF" == "refs/heads/develop" ]]
+          export ACCEPTANCE_ROOT="$RUNNER_TEMP/modular-distribution-v01"
+          printf 'ACCEPTANCE_ROOT=%s\n' "$ACCEPTANCE_ROOT" >> "$GITHUB_ENV"
+          mkdir -p "$ACCEPTANCE_ROOT/evidence" "$ACCEPTANCE_ROOT/logs"
+          cat > "$ACCEPTANCE_ROOT/acceptance_driver.py" <<'PY'
+          """Runner-local native release verifier and installed-product acceptance driver."""
+
+          from __future__ import annotations
+
+          import argparse
+          import base64
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import platform
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import textwrap
+          import time
+          import urllib.error
+          import urllib.request
+          from collections.abc import Callable
+          from pathlib import Path
+          from typing import Any
+
+          REPOSITORY = "DoHorizon-AI/Cyrene-Workspace"
+          NATIVE_WORKFLOW = f"{REPOSITORY}/.github/workflows/native-installer-release.yml"
+          CATALOG_WORKFLOW = f"{REPOSITORY}/.github/workflows/component-catalog-release.yml"
+          SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
+          WORKLOAD_PROTOCOL = "cyrene.workload-plan.v1"
+          HOST_TARGET = "linux-ubuntu-24.04-x86_64"
+          PRIVATE_PYTHON = "/opt/cyrene/python/3.12.14/bin/python3.12"
+          CATALYST_ACCEPTANCE_MODULE = "cyrene_catalyst.external_acceptance"
+          CATALYST_CONSUMER_MODULE = "cyrene_catalyst_consumer.training_bundle"
+          CATALYST_REQUIRED_PLUGIN_IDS = frozenset(
+              {
+                  "cyrene-tools-dataset-generation",
+                  "cyrene-tools-dataset-preparation",
+                  "cyrene-tools-document-parsing",
+                  "cyrene-tools-knowledge-preparation",
+              }
+          )
+          WORKLOAD_REQUEST_SEQUENCE = 0
+          PREFLIGHT_STAGE = "native_release_metadata"
+          PHASES = (
+              "release_pins_validation",
+              "runner_identity",
+              "native_release_metadata",
+              "native_release_provenance",
+              "catalog_provenance",
+              "release_asset_integrity",
+              "native_deb_install",
+              "native_static_binding_readback",
+              "fresh_workload_inventory",
+              "catalyst_workload_check",
+              "catalyst_exact_plan_pins",
+              "catalyst_workload_stage",
+              "catalyst_workload_apply",
+              "catalyst_runtime_source_activation",
+              "catalyst_active_receipt_readback",
+              "catalyst_installed_status_readback",
+              "catalyst_public_repeat_install",
+              "catalyst_active_bundle_identity",
+              "catalyst_http_liveness",
+              "client_static_web_http",
+              "catalyst_installed_acceptance_producer",
+              "catalyst_independent_bundle_consumer",
+              "catalyst_service_restart_recovery",
+              "host_reboot_recovery",
+              "missing_selection_gate",
+              "version_conflict_gate",
+              "offline_retry_gate",
+              "echo_exact_match_evaluate_uninstall",
+              "plugins_platform_supervision",
+              "client_release_integration",
+          )
+
+          def root() -> Path:
+              """Return the per-job evidence directory."""
+              return Path(os.environ["ACCEPTANCE_ROOT"])
+
+          def utc_now() -> str:
+              """Return a stable UTC timestamp for one ledger update."""
+              return dt.datetime.now(dt.UTC).isoformat()
+
+          def load_json(path: Path) -> Any:
+              """Load UTF-8 JSON while rejecting duplicate keys."""
+              def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+                  value: dict[str, Any] = {}
+                  for key, item in pairs:
+                      if key in value:
+                          raise ValueError(f"duplicate JSON key: {key}")
+                      value[key] = item
+                  return value
+
+              return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique)
+
+          def write_json(path: Path, value: Any) -> None:
+              """Atomically write one evidence JSON document."""
+              path.parent.mkdir(parents=True, exist_ok=True)
+              temporary = path.with_suffix(path.suffix + ".tmp")
+              temporary.write_text(
+                  json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                  encoding="utf-8",
+              )
+              os.replace(temporary, path)
+
+          def ledger() -> dict[str, Any]:
+              """Load the current phase ledger."""
+              path = root() / "phase-ledger.json"
+              return load_json(path) if path.is_file() else {"schemaVersion": 1, "phases": {}}
+
+          def record(phase: str, status: str, reason: str, evidence: Any = None) -> None:
+              """Persist one phase result without overwriting another phase's evidence."""
+              value = ledger()
+              value.setdefault("phases", {})[phase] = {
+                  "status": status,
+                  "reason": reason,
+                  "recordedAtUtc": utc_now(),
+                  "evidence": evidence,
+              }
+              value["updatedAtUtc"] = utc_now()
+              write_json(root() / "phase-ledger.json", value)
+
+          def phase(name: str, operation: Callable[[], Any]) -> Any:
+              """Run a gate and save its evidence or failure before returning."""
+              try:
+                  evidence = operation()
+              except Exception as error:
+                  record(name, "FAIL", f"{type(error).__name__}: {error}")
+                  print(f"FAIL {name}: {error}", file=sys.stderr)
+                  raise
+              record(name, "PASS", "gate completed", evidence)
+              print(f"PASS {name}")
+              return evidence
+
+          def run(
+              command: list[str],
+              *,
+              label: str,
+              input_text: str | None = None,
+              timeout: int = 1800,
+              env: dict[str, str] | None = None,
+              cwd: Path | None = None,
+              retain_output: bool = True,
+          ) -> subprocess.CompletedProcess[str]:
+              """Run a command and retain raw output only when the phase permits it."""
+              completed = subprocess.run(
+                  command,
+                  input=input_text,
+                  text=True,
+                  capture_output=True,
+                  timeout=timeout,
+                  check=False,
+                  env=env,
+                  cwd=cwd,
+              )
+              safe = re.sub(r"[^A-Za-z0-9._-]", "_", label)
+              if retain_output:
+                  (root() / "logs" / f"{safe}.stdout.txt").write_text(
+                      completed.stdout, encoding="utf-8"
+                  )
+                  (root() / "logs" / f"{safe}.stderr.txt").write_text(
+                      completed.stderr, encoding="utf-8"
+                  )
+              if completed.returncode != 0:
+                  if retain_output:
+                      tail = completed.stderr.strip()[-1000:] or completed.stdout.strip()[-1000:]
+                      raise RuntimeError(f"{label} exited {completed.returncode}: {tail}")
+                  raise RuntimeError(f"{label} exited {completed.returncode}; raw Product output was withheld")
+              return completed
+
+          def pins() -> dict[str, Any]:
+              """Read pins already copied to the acceptance directory."""
+              return load_json(root() / "release-pins-v1.json")
+
+          def sha256(path: Path) -> str:
+              """Hash a regular file in bounded chunks."""
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          def require(condition: bool, message: str) -> None:
+              """Raise a readable acceptance failure when an identity does not match."""
+              if not condition:
+                  raise RuntimeError(message)
+
+          def runner_identity() -> dict[str, Any]:
+              """Record the actual VM boundary and require Ubuntu 24.04 x86_64 systemd."""
+              os_release = {}
+              for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+                  key, separator, value = line.partition("=")
+                  if separator:
+                      os_release[key] = value.strip().strip('"')
+              facts = {
+                  "osRelease": os_release,
+                  "machine": platform.machine(),
+                  "uname": platform.uname()._asdict(),
+                  "pid1": Path("/proc/1/comm").read_text(encoding="utf-8").strip(),
+                  "runnerImageOS": os.environ.get("ImageOS"),
+                  "runnerImageVersion": os.environ.get("ImageVersion"),
+                  "workflowRef": os.environ.get("GITHUB_WORKFLOW_REF"),
+                  "workflowSha": os.environ.get("GITHUB_WORKFLOW_SHA"),
+                  "workflowRepository": os.environ.get("GITHUB_REPOSITORY"),
+                  "workflowGitRef": os.environ.get("GITHUB_REF"),
+                  "uid": os.getuid(),
+                  "sudoNoninteractive": False,
+              }
+              require(os_release.get("ID") == "ubuntu", "runner is not Ubuntu")
+              require(os_release.get("VERSION_ID") == "24.04", "runner is not Ubuntu 24.04")
+              require(platform.machine().lower() in {"x86_64", "amd64"}, "runner is not x86_64")
+              require(facts["workflowRepository"] == REPOSITORY, "acceptance workflow is not running from the canonical repository")
+              require(facts["workflowGitRef"] == "refs/heads/develop", "acceptance workflow must run from the develop integration branch")
+              require(re.fullmatch(r"[0-9a-f]{40}", str(facts["workflowSha"])) is not None, "acceptance workflow SHA is missing or malformed")
+              require(facts["pid1"] == "systemd", f"PID 1 is {facts['pid1']}, not systemd")
+              run(["sudo", "-n", "true"], label="sudo-preflight", timeout=30)
+              facts["sudoNoninteractive"] = True
+              write_json(root() / "evidence" / "runner-identity.json", facts)
+              return facts
+
+          def init() -> None:
+              """Initialize all required outcomes as NOT_RUN until an observed command changes them."""
+              base = root()
+              (base / "evidence").mkdir(parents=True, exist_ok=True)
+              (base / "logs").mkdir(parents=True, exist_ok=True)
+              statuses = {
+                  name: {
+                      "status": "NOT_RUN",
+                      "reason": "gate has not been reached",
+                      "recordedAtUtc": utc_now(),
+                      "evidence": None,
+                  }
+                  for name in PHASES
+              }
+              write_json(base / "phase-ledger.json", {"schemaVersion": 1, "phases": statuses})
+              raw = os.environ.get("RELEASE_PINS_JSON", "")
+              require(bool(raw), "release_pins_json input is empty")
+              pins_path = base / "release-pins-v1.json"
+              pins_path.write_text(raw + "\n", encoding="utf-8")
+              shutil.copy2(pins_path, base / "evidence" / "release-pins-v1.json")
+              phase("release_pins_validation", lambda: (
+                  validate_pin_shape(load_json(pins_path)) or {"schemaVersion": 1, "status": "valid"}
+              ))
+              phase("runner_identity", runner_identity)
+              record("host_reboot_recovery", "NOT_RUN", "the disposable GitHub-hosted VM is not rebooted by this job")
+              record("version_conflict_gate", "NOT_RUN", "requires a published, pinned conflict fixture or resolver test contract")
+              record("offline_retry_gate", "NOT_RUN", "no isolated, reversible network-failure control is published")
+              record("client_static_web_http", "NOT_RUN", "runs after the selected static-Web release has been installed and its exact host receipt is available")
+              record("echo_exact_match_evaluate_uninstall", "NOT_RUN", "optional Echo trial is not enabled by this workflow revision")
+              record("plugins_platform_supervision", "NOT_RUN", "runs after exact Package Runtime policy and Platform UDS binding readback")
+              record("client_release_integration", "NOT_RUN", "Client publication/integration gate is not yet supplied")
+
+          def validate_pin_shape(value: Any) -> None:
+              """Fail before mutation if required exact identity assertions are missing."""
+              require(isinstance(value, dict) and value.get("schemaVersion") == 1, "pins schemaVersion must be 1")
+              require(set(value) == {"schemaVersion", "nativeInstaller", "catalog", "workloads"}, "pins top-level fields differ from schema")
+              native = value["nativeInstaller"]
+              expected_native_fields = {
+                  "releaseId", "sourceRepository", "sourceRef", "sourceCommit", "workflow",
+                  "targetId", "debAssetName", "debSha256", "debSizeBytes",
+              }
+              require(isinstance(native, dict) and set(native) == expected_native_fields, "nativeInstaller pin shape differs from schema")
+              require(native["sourceRepository"] == REPOSITORY, "native installer repository pin is invalid")
+              require(native["sourceRef"] == "refs/heads/develop", "native installer source ref must be develop")
+              require(native["workflow"] == NATIVE_WORKFLOW, "native installer workflow pin is invalid")
+              require(native["targetId"] == "linux-ubuntu-24.04-x86_64-python-3.12", "native target pin is invalid")
+              require(re.fullmatch(r"native-installer-preview-[0-9a-f]{40}", native["releaseId"]) is not None, "native release ID must be an exact preview source tag")
+              require(native["releaseId"] == os.environ["NATIVE_RELEASE_ID"], "dispatch tag and nativeInstaller.releaseId pin differ")
+              require(re.fullmatch(r"[0-9a-f]{40}", native["sourceCommit"]) is not None, "native source commit must be a full SHA")
+              require(native["releaseId"].endswith(native["sourceCommit"]), "native release tag does not bind the pinned source SHA")
+              require(re.fullmatch(r"[0-9a-f]{64}", native["debSha256"]) is not None, "native DEB pin must be a raw SHA-256")
+              require(type(native["debSizeBytes"]) is int and native["debSizeBytes"] > 0, "native DEB size pin is invalid")
+              require(re.fullmatch(r"cyrene_[A-Za-z0-9.+~:-]+_ubuntu-24\.04_amd64\.deb", native["debAssetName"]) is not None, "native DEB asset name is not canonical")
+              catalog = value["catalog"]
+              expected_catalog_fields = {
+                  "releaseId", "repository", "workflow", "sourceRef", "sourceCommit", "assetName", "sha256",
+                  "sizeBytes", "attestationAssetName", "attestationSha256", "schemaVersion", "generation",
+              }
+              require(isinstance(catalog, dict) and set(catalog) == expected_catalog_fields, "catalog pin shape differs from schema")
+              require(catalog["repository"] == REPOSITORY and catalog["workflow"] == CATALOG_WORKFLOW, "catalog publisher identity pin is invalid")
+              require(catalog["sourceRef"] == "refs/heads/develop", "catalog source ref must be develop")
+              require(re.fullmatch(r"[0-9a-f]{40}", catalog["sourceCommit"]) is not None, "catalog source commit must be a full SHA")
+              require(re.fullmatch(r"catalog-v2-preview-[0-9a-f]{40}", catalog["releaseId"]) is not None, "catalog tag must pin a v2 preview source SHA")
+              require(catalog["releaseId"].endswith(catalog["sourceCommit"]), "catalog tag does not bind its pinned source SHA")
+              require(catalog["assetName"] == "component-catalog-v2.json" and catalog["schemaVersion"] == 2, "catalog v2 asset/schema pin is invalid")
+              require(catalog["attestationAssetName"] == "component-catalog-v2.json.attestation.jsonl", "catalog attestation asset pin is invalid")
+              for field in ("sha256", "attestationSha256"):
+                  require(re.fullmatch(r"[0-9a-f]{64}", str(catalog[field])) is not None, f"catalog {field} must be raw SHA-256")
+              require(type(catalog["sizeBytes"]) is int and catalog["sizeBytes"] > 0, "catalog size pin is invalid")
+              require(type(catalog["generation"]) is int and catalog["generation"] > 0, "catalog generation pin is invalid")
+              workloads = value["workloads"]
+              require(isinstance(workloads, dict) and "catalyst" in workloads, "Catalyst workload pins are required")
+              require(set(workloads) == {"catalyst"}, "this workflow revision accepts only Catalyst workload pins")
+              for workload_id, workload in workloads.items():
+                  required_workload_fields = {"workloadId", "targetId", "catalogDigest", "selectedComponents"}
+                  if workload_id == "catalyst":
+                      required_workload_fields.add("service")
+                  require(isinstance(workload, dict) and set(workload) == required_workload_fields, f"{workload_id} workload pin shape differs from schema")
+                  require(workload.get("workloadId") == workload_id, f"{workload_id} workload ID pin differs")
+                  require(workload.get("targetId") == HOST_TARGET, f"{workload_id} workload target pin differs")
+                  require(workload.get("catalogDigest") == "sha256:" + catalog["sha256"], f"{workload_id} catalog digest pin differs from signed catalog bytes")
+                  rows = workload.get("selectedComponents")
+                  require(isinstance(rows, list) and rows, f"{workload_id} has no selected component identity pins")
+                  component_ids = [row.get("componentId") for row in rows if isinstance(row, dict)]
+                  require(len(component_ids) == len(rows) and len(component_ids) == len(set(component_ids)), f"{workload_id} component pins are malformed or duplicated")
+                  if workload_id == "catalyst":
+                      required_components = {
+                          "cyrene-catalyst",
+                          "cyrene-client-workspace-control",
+                          "cyrene-client-workspace-web",
+                          "cyrene-runtime-maintenance-sdk",
+                          *CATALYST_REQUIRED_PLUGIN_IDS,
+                      }
+                      require(
+                          required_components <= set(component_ids),
+                          "Catalyst acceptance pins must include Node 24 Client Control, the Client Web host, Runtime SDK, and all four Platform-supervised data plugins",
+                      )
+                      control_pin = next(
+                          row for row in rows
+                          if row["componentId"] == "cyrene-client-workspace-control"
+                      )
+                      require(
+                          control_pin.get("targetId") == "linux-ubuntu-24.04-x86_64-node-24",
+                          "Client Control pin must use the Ubuntu 24.04 Node 24 target",
+                      )
+                  for row in rows:
+                      required_component_fields = {
+                          "componentId", "targetId", "version", "releaseId", "manifestDigest",
+                          "manifestAssetDigest", "digest", "publisherIdentity", "indexIdentity",
+                          "attestationRef",
+                      }
+                      require(set(row) == required_component_fields, f"{workload_id} component pin has unexpected fields")
+                      require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}", str(row["version"])) is not None, f"{workload_id} {row['componentId']} version is not a safe immutable path segment")
+                      for digest_field in ("manifestDigest", "manifestAssetDigest", "digest"):
+                          require(re.fullmatch(r"sha256:[0-9a-f]{64}", row[digest_field]) is not None, f"{workload_id} {row['componentId']} has malformed {digest_field}")
+                      publisher = row["publisherIdentity"]
+                      require(isinstance(publisher, dict) and {"repository", "workflow"} <= set(publisher) <= {"id", "repository", "workflow", "tagFormat"}, f"{workload_id} {row['componentId']} publisher pin is malformed")
+                      index = row["indexIdentity"]
+                      index_fields = {"publisherIdentity", "repository", "assetName", "assetUri", "assetDigest", "indexDigest", "channel", "releaseTag"}
+                      require(isinstance(index, dict) and {"repository", "assetName", "assetDigest", "indexDigest", "releaseTag"} <= set(index) <= index_fields, f"{workload_id} {row['componentId']} index pin is malformed")
+                      require(index["assetName"] == "component-release-index-v1.json", f"{workload_id} {row['componentId']} index asset is not canonical")
+                      for digest_field in ("assetDigest", "indexDigest"):
+                          require(re.fullmatch(r"sha256:[0-9a-f]{64}", index[digest_field]) is not None, f"{workload_id} {row['componentId']} has malformed index {digest_field}")
+                      proof = row["attestationRef"]
+                      proof_fields = {"repository", "workflow", "sourceCommit", "subjectDigest", "subjectName", "sourceRef", "predicateType"}
+                      require(isinstance(proof, dict) and {"repository", "workflow", "sourceCommit", "subjectDigest"} <= set(proof) <= proof_fields, f"{workload_id} {row['componentId']} attestation pin is malformed")
+                      require(re.fullmatch(r"[0-9a-f]{40}", proof["sourceCommit"]) is not None, f"{workload_id} {row['componentId']} attestation source commit is malformed")
+                      require(re.fullmatch(r"sha256:[0-9a-f]{64}", proof["subjectDigest"]) is not None, f"{workload_id} {row['componentId']} attestation subject digest is malformed")
+              catalyst = workloads["catalyst"]
+              require(catalyst.get("service") == {
+                  "unit": "cyrene-catalyst.service",
+                  "baseUrl": catalyst.get("service", {}).get("baseUrl"),
+                  "healthPath": "/healthz",
+              }, "Catalyst service pin shape differs from schema")
+              service_match = re.fullmatch(r"http://127\.0\.0\.1:([0-9]{1,5})", str(catalyst["service"]["baseUrl"]))
+              require(service_match is not None and 1 <= int(service_match.group(1)) <= 65535, "Catalyst URL must be loopback HTTP with a valid port")
+              require("cyrene-catalyst" in {row["componentId"] for row in catalyst["selectedComponents"]}, "Catalyst pins must include cyrene-catalyst")
+          def verify_attestation(path: Path, bundle: Path, repository: str, workflow: str, source_ref: str, source_commit: str, label: str) -> None:
+              """Verify one detached SLSA bundle against the exact publisher workflow and source."""
+              output = run(
+                  [
+                      "gh", "attestation", "verify", str(path), "--bundle", str(bundle),
+                      "--repo", repository, "--signer-workflow", workflow,
+                      "--source-ref", source_ref, "--source-digest", source_commit,
+                      "--predicate-type", SLSA_PREDICATE,
+                      "--cert-oidc-issuer", "https://token.actions.githubusercontent.com",
+                      "--format", "json",
+                  ],
+                  label=f"attestation-{label}",
+                  timeout=300,
+              )
+              write_json(root() / "evidence" / f"attestation-{label}.json", json.loads(output.stdout))
+
+          def preflight() -> None:
+              """Download and verify only the exact immutable official native release."""
+              global PREFLIGHT_STAGE
+              value = pins()
+              native = value["nativeInstaller"]
+              catalog_pin = value["catalog"]
+              release_id = os.environ["NATIVE_RELEASE_ID"]
+              asset_dir = root() / "downloads"
+              asset_dir.mkdir(parents=True, exist_ok=True)
+              safe_env = os.environ.copy()
+              PREFLIGHT_STAGE = "native_release_metadata"
+              require(bool(safe_env.get("GH_TOKEN")), "read-only GH_TOKEN is not available")
+
+              def metadata_gate() -> dict[str, Any]:
+                  release = json.loads(
+                      run(
+                          ["gh", "api", f"repos/{REPOSITORY}/releases/tags/{release_id}"],
+                          label="native-release-api", timeout=120, env=safe_env,
+                      ).stdout
+                  )
+                  require(release.get("tag_name") == release_id, "GitHub returned a different native tag")
+                  require(release.get("immutable") is True, "native release is not immutable")
+                  require(release.get("draft") is False and release.get("prerelease") is True, "native release must be a published preview")
+                  assets = release.get("assets")
+                  require(isinstance(assets, list) and assets, "native release has no assets")
+                  names = [row.get("name") for row in assets if isinstance(row, dict)]
+                  require(len(names) == len(assets) and len(names) == len(set(names)), "native release asset names are malformed or duplicated")
+                  for name in names:
+                      require(isinstance(name, str) and Path(name).name == name and "/" not in name and "\\" not in name, "native release contains an unsafe asset name")
+                  write_json(root() / "evidence" / "native-release-api.json", release)
+                  gh_env = safe_env.copy()
+                  run(
+                      ["gh", "release", "download", release_id, "--repo", REPOSITORY, "--dir", str(asset_dir)],
+                      label="native-release-download", timeout=900, env=gh_env,
+                  )
+                  for row in assets:
+                      path = asset_dir / row["name"]
+                      require(path.is_file() and not path.is_symlink(), f"native release asset was not downloaded: {row['name']}")
+                      require(path.stat().st_size == row.get("size"), f"GitHub asset size differs: {row['name']}")
+                  return release
+
+              release = phase("native_release_metadata", metadata_gate)
+              PREFLIGHT_STAGE = "native_release_provenance"
+              manifest_path = asset_dir / "native-installer-release-v2.json"
+              receipt_path = asset_dir / "native-installer-source-receipt-v2.json"
+              checksums_path = asset_dir / "SHA256SUMS"
+              require(manifest_path.is_file() and receipt_path.is_file() and checksums_path.is_file(), "native release is missing canonical manifest, source receipt, or checksum asset")
+              manifest = load_json(manifest_path)
+              receipt = load_json(receipt_path)
+              require(manifest.get("schemaVersion") == 2 and receipt.get("schemaVersion") == 2, "native release must use the v2 manifest/receipt pair")
+              source = manifest.get("source")
+              require(manifest.get("repository") == REPOSITORY, "native manifest repository differs")
+              require(manifest.get("releaseId") == release_id, "native manifest release ID differs")
+              require(manifest.get("workflow") == NATIVE_WORKFLOW, "native manifest publisher workflow differs")
+              require(source == {"repository": REPOSITORY, "ref": native["sourceRef"], "commit": native["sourceCommit"]}, "native manifest source identity differs from root pins")
+              require(manifest.get("channel") == "preview", "native release is not a preview channel")
+              require(receipt.get("workspaceSource") == {
+                  "repository": REPOSITORY,
+                  "ref": native["sourceRef"],
+                  "commit": native["sourceCommit"],
+                  "workflow": NATIVE_WORKFLOW,
+              }, "native source receipt is not bound to the exact pinned Workspace source")
+              manifest_source_receipt = manifest.get("sourceReceipt")
+              require(isinstance(manifest_source_receipt, dict), "native manifest has no source receipt identity")
+              require(manifest_source_receipt.get("assetName") == receipt_path.name, "native source receipt asset name differs")
+              require(manifest_source_receipt.get("sha256") == sha256(receipt_path), "native source receipt digest differs from manifest")
+              require(manifest_source_receipt.get("sizeBytes") == receipt_path.stat().st_size, "native source receipt size differs from manifest")
+              target_rows = [
+                  row for row in manifest.get("targets", [])
+                  if isinstance(row, dict) and row.get("targetId") == native["targetId"]
+              ]
+              require(len(target_rows) == 1, "native manifest must contain exactly one pinned Ubuntu 24.04 target")
+              target = target_rows[0]
+              require(target.get("assetName") == native["debAssetName"], "native target asset name differs from root pins")
+              require(target.get("sha256") == native["debSha256"], "native target SHA differs from root pins")
+              require(target.get("sizeBytes") == native["debSizeBytes"], "native target size differs from root pins")
+              deb_path = asset_dir / native["debAssetName"]
+              require(deb_path.is_file(), "pinned native DEB was not downloaded")
+              require(deb_path.stat().st_size == native["debSizeBytes"], "downloaded native DEB size differs from pins")
+              require(sha256(deb_path) == native["debSha256"], "downloaded native DEB digest differs from pins")
+              write_json(root() / "evidence" / "native-deb-identity.json", {
+                  "releaseId": release_id,
+                  "assetName": deb_path.name,
+                  "sizeBytes": deb_path.stat().st_size,
+                  "sha256": sha256(deb_path),
+                  "targetId": native["targetId"],
+              })
+
+              manifest_catalogs = manifest.get("workspaceCatalogs")
+              receipt_catalogs = receipt.get("releaseInputs", {}).get("workspaceCatalogs")
+              require(
+                  isinstance(manifest_catalogs, dict)
+                  and set(manifest_catalogs) == {"baselineV1", "activeV2"}
+                  and isinstance(receipt_catalogs, dict)
+                  and set(receipt_catalogs) == {"baselineV1", "activeV2"},
+                  "native v2 release does not bind both baseline and active Workspace catalogs",
+              )
+              require(manifest.get("workspaceCatalog") == manifest_catalogs["baselineV1"], "native manifest v1 compatibility projection differs from baselineV1")
+              baseline_projection = {key: value for key, value in receipt_catalogs["baselineV1"].items() if key != "generation"}
+              require(receipt.get("releaseInputs", {}).get("workspaceCatalog") == baseline_projection, "native receipt v1 compatibility projection differs from baselineV1")
+              catalog = manifest_catalogs["activeV2"]
+              receipt_catalog = receipt_catalogs["activeV2"]
+              require(isinstance(catalog, dict) and isinstance(receipt_catalog, dict), "native release does not bind its active Workspace catalog")
+              require(catalog.get("assetName") == catalog_pin["assetName"], "native manifest catalog asset differs from root pins")
+              require(catalog.get("sha256") == catalog_pin["sha256"], "native manifest catalog digest differs from root pins")
+              require(catalog.get("sizeBytes") == catalog_pin["sizeBytes"], "native manifest catalog size differs from root pins")
+              require(catalog.get("attestationAssetName") == catalog_pin["attestationAssetName"], "native manifest catalog bundle name differs from root pins")
+              require(catalog.get("attestationSha256") == catalog_pin["attestationSha256"], "native manifest catalog bundle SHA differs from root pins")
+              require(receipt_catalog.get("repository") == catalog_pin["repository"], "native receipt catalog repository differs from pins")
+              require(receipt_catalog.get("workflow") == catalog_pin["workflow"], "native receipt catalog workflow differs from pins")
+              require(receipt_catalog.get("releaseId") == catalog_pin["releaseId"], "native receipt catalog release tag differs from pins")
+              require(receipt_catalog.get("source") == {"ref": catalog_pin["sourceRef"], "commit": catalog_pin["sourceCommit"]}, "native receipt catalog source differs from pins")
+              require(receipt_catalog.get("assetName") == catalog_pin["assetName"], "native receipt catalog asset differs from pins")
+              require(receipt_catalog.get("sha256") == catalog_pin["sha256"], "native receipt catalog SHA differs from pins")
+              require(receipt_catalog.get("attestationBundleSha256") == catalog_pin["attestationSha256"], "native receipt catalog attestation SHA differs from pins")
+              catalog_path = asset_dir / catalog_pin["assetName"]
+              catalog_bundle_path = asset_dir / catalog_pin["attestationAssetName"]
+              require(catalog_path.is_file() and catalog_bundle_path.is_file(), "native release is missing the pinned v2 catalog or detached bundle")
+              require(catalog_path.stat().st_size == catalog_pin["sizeBytes"] and sha256(catalog_path) == catalog_pin["sha256"], "catalog asset bytes differ from exact pins")
+              require(catalog_bundle_path.stat().st_size > 0 and sha256(catalog_bundle_path) == catalog_pin["attestationSha256"], "catalog attestation bundle differs from exact pins")
+              catalog_doc = load_json(catalog_path)
+              require(catalog_doc.get("schemaVersion") == catalog_pin["schemaVersion"] and catalog_doc.get("generation") == catalog_pin["generation"], "catalog schema/generation differs from pins")
+              def attestations() -> dict[str, Any]:
+                  for path, label in ((manifest_path, "native-manifest"), (receipt_path, "native-source-receipt"), (deb_path, "native-deb")):
+                      bundle = asset_dir / f"{path.name}.attestation.jsonl"
+                      require(bundle.is_file() and bundle.stat().st_size > 0, f"missing native detached SLSA bundle: {bundle.name}")
+                      verify_attestation(path, bundle, REPOSITORY, NATIVE_WORKFLOW, native["sourceRef"], native["sourceCommit"], label)
+                  return {"manifest": "verified", "sourceReceipt": "verified", "deb": "verified"}
+              phase("native_release_provenance", lambda: {
+                  "releaseId": release_id,
+                  "source": source,
+                  "workflow": manifest["workflow"],
+                  "releaseDatabaseId": release.get("id"),
+                  "immutable": release["immutable"],
+                  "subjects": attestations(),
+              })
+
+              PREFLIGHT_STAGE = "catalog_provenance"
+              def catalog_attestation() -> dict[str, Any]:
+                  official_catalog_release = json.loads(
+                      run(
+                          ["gh", "api", f"repos/{catalog_pin['repository']}/releases/tags/{catalog_pin['releaseId']}"],
+                          label="workspace-catalog-v2-release-api",
+                          timeout=120,
+                          env=safe_env,
+                      ).stdout
+                  )
+                  require(official_catalog_release.get("tag_name") == catalog_pin["releaseId"], "official catalog API returned a different release tag")
+                  require(official_catalog_release.get("immutable") is True, "official catalog release is not immutable")
+                  require(official_catalog_release.get("draft") is False and official_catalog_release.get("prerelease") is True, "official catalog release must be a published preview")
+                  catalog_assets = official_catalog_release.get("assets")
+                  require(isinstance(catalog_assets, list), "official catalog release has no asset list")
+                  catalog_asset_rows = {row.get("name"): row for row in catalog_assets if isinstance(row, dict)}
+                  require(len(catalog_asset_rows) == len(catalog_assets), "official catalog release asset list is malformed or duplicated")
+                  require(
+                      set(catalog_asset_rows)
+                      == {catalog_pin["assetName"], catalog_pin["attestationAssetName"]},
+                      "official catalog release has unexpected or missing assets",
+                  )
+                  for asset_name, expected_size in (
+                      (catalog_pin["assetName"], catalog_pin["sizeBytes"]),
+                      (catalog_pin["attestationAssetName"], None),
+                  ):
+                      row = catalog_asset_rows.get(asset_name)
+                      require(isinstance(row, dict), f"official catalog release is missing {asset_name}")
+                      require(row.get("state") == "uploaded", f"official catalog asset is not uploaded: {asset_name}")
+                      expected_digest = (
+                          catalog_pin["sha256"]
+                          if asset_name == catalog_pin["assetName"]
+                          else catalog_pin["attestationSha256"]
+                      )
+                      require(row.get("digest") == "sha256:" + expected_digest, f"official catalog API digest differs for {asset_name}")
+                      if expected_size is not None:
+                          require(row.get("size") == expected_size, f"official catalog API size differs for {asset_name}")
+                      else:
+                          require(type(row.get("size")) is int and row["size"] > 0, f"official catalog API size is invalid for {asset_name}")
+                  official_dir = root() / "downloads" / "official-catalog-v2"
+                  official_dir.mkdir(parents=True, exist_ok=True)
+                  run(
+                      ["gh", "release", "download", catalog_pin["releaseId"], "--repo", catalog_pin["repository"], "--dir", str(official_dir), "--pattern", catalog_pin["assetName"], "--pattern", catalog_pin["attestationAssetName"]],
+                      label="workspace-catalog-v2-release-download",
+                      timeout=300,
+                      env=safe_env,
+                  )
+                  official_catalog = official_dir / catalog_pin["assetName"]
+                  official_bundle = official_dir / catalog_pin["attestationAssetName"]
+                  require(official_catalog.is_file() and official_bundle.is_file(), "official catalog release assets were not downloaded")
+                  require(official_catalog.stat().st_size == catalog_pin["sizeBytes"] and sha256(official_catalog) == catalog_pin["sha256"], "official catalog release bytes differ from exact pins")
+                  require(official_bundle.stat().st_size == catalog_asset_rows[catalog_pin["attestationAssetName"]]["size"], "official catalog bundle size differs from GitHub release metadata")
+                  require(sha256(official_bundle) == catalog_pin["attestationSha256"], "official catalog attestation bundle differs from exact pins")
+                  require(official_catalog.read_bytes() == catalog_path.read_bytes(), "native installer catalog bytes differ from the official catalog release")
+                  require(official_bundle.read_bytes() == catalog_bundle_path.read_bytes(), "native installer catalog bundle differs from the official catalog release")
+                  verify_attestation(
+                      official_catalog,
+                      official_bundle,
+                      catalog_pin["repository"],
+                      catalog_pin["workflow"],
+                      catalog_pin["sourceRef"],
+                      catalog_pin["sourceCommit"],
+                      "workspace-catalog-v2",
+                  )
+                  write_json(root() / "evidence" / "workspace-catalog-v2-release-api.json", official_catalog_release)
+                  return {"subject": official_catalog.name, "bundle": official_bundle.name, "status": "verified", "releaseId": official_catalog_release["tag_name"], "immutable": official_catalog_release["immutable"]}
+              phase("catalog_provenance", lambda: {
+                  "releaseId": catalog_pin["releaseId"],
+                  "repository": catalog_pin["repository"],
+                  "workflow": catalog_pin["workflow"],
+                  "sourceRef": catalog_pin["sourceRef"],
+                  "sourceCommit": catalog_pin["sourceCommit"],
+                  "assetName": catalog_path.name,
+                  "sha256": sha256(catalog_path),
+                  "generation": catalog_pin["generation"],
+                  "attestation": catalog_attestation(),
+              })
+
+              PREFLIGHT_STAGE = "release_asset_integrity"
+              def checksum_gate() -> dict[str, Any]:
+                  result = run(["sha256sum", "--check", "--strict", checksums_path.name], label="native-sha256sums", timeout=300, cwd=asset_dir)
+                  require(result.returncode == 0, "native SHA256SUMS verification failed")
+                  write_json(root() / "evidence" / "native-release-manifest.json", manifest)
+                  write_json(root() / "evidence" / "native-source-receipt.json", receipt)
+                  shutil.copy2(catalog_path, root() / "evidence" / catalog_path.name)
+                  shutil.copy2(catalog_bundle_path, root() / "evidence" / catalog_bundle_path.name)
+                  shutil.copy2(checksums_path, root() / "evidence" / "SHA256SUMS")
+                  for subject in (manifest_path, receipt_path, deb_path):
+                      bundle = asset_dir / f"{subject.name}.attestation.jsonl"
+                      shutil.copy2(bundle, root() / "evidence" / bundle.name)
+                  return {"sha256sums": "verified", "downloadedAssetCount": len(release["assets"]), "debAsset": deb_path.name, "debSha256": sha256(deb_path), "debSizeBytes": deb_path.stat().st_size}
+              phase("release_asset_integrity", checksum_gate)
+              output = Path(os.environ["GITHUB_OUTPUT"])
+              with output.open("a", encoding="utf-8") as stream:
+                  stream.write(f"deb_path={deb_path}\n")
+                  stream.write(f"native_release_id={release_id}\n")
+                  stream.write(f"source_commit={native['sourceCommit']}\n")
+
+          def dpkg_install() -> None:
+              """Install only the already verified native Ubuntu 24.04 DEB."""
+              path = root() / "downloads" / pins()["nativeInstaller"]["debAssetName"]
+              require(path.is_file() and sha256(path) == pins()["nativeInstaller"]["debSha256"], "verified DEB changed before apt install")
+              manifest = load_json(root() / "evidence" / "native-release-manifest.json")
+              package = run(["dpkg-deb", "-f", str(path), "Package"], label="native-deb-package-field", timeout=60).stdout.strip()
+              version = run(["dpkg-deb", "-f", str(path), "Version"], label="native-deb-version-field", timeout=60).stdout.strip()
+              architecture = run(["dpkg-deb", "-f", str(path), "Architecture"], label="native-deb-architecture-field", timeout=60).stdout.strip()
+              require(package == "cyrene", "verified DEB control package name differs")
+              require(version == manifest.get("version"), "verified DEB version differs from the attested native manifest")
+              require(architecture == "amd64", "verified DEB architecture is not amd64")
+              run(["sudo", "-n", "apt", "install", "--yes", str(path)], label="apt-install-native-deb", timeout=1800)
+              installed = run(["dpkg-query", "-W", "-f=${Status}\t${Version}\t${Architecture}", "cyrene"], label="dpkg-native-status", timeout=60).stdout.strip().split("\t")
+              require(installed == ["install ok installed", version, "amd64"], "dpkg status/version/architecture differs from the verified DEB")
+              write_json(root() / "evidence" / "native-deb-installed.json", {
+                  "releaseId": pins()["nativeInstaller"]["releaseId"],
+                  "sourceCommit": pins()["nativeInstaller"]["sourceCommit"],
+                  "debSha256": pins()["nativeInstaller"]["debSha256"],
+                  "dpkg": {"status": installed[0], "version": installed[1], "architecture": installed[2]},
+              })
+
+          def static_binding_readback() -> dict[str, Any]:
+              """Verify the installed DEB catalogs, signed v2 binding, and static package contract."""
+              catalog_pin = pins()["catalog"]
+              manifest = load_json(root() / "evidence" / "native-release-manifest.json")
+              baseline = manifest["workspaceCatalogs"]["baselineV1"]
+              receipt = load_json(root() / "evidence" / "native-source-receipt.json")
+              baseline_generation = receipt["releaseInputs"]["workspaceCatalogs"]["baselineV1"]["generation"]
+              code = textwrap.dedent(r'''
+                  import hashlib
+                  import importlib.util
+                  import json
+                  import os
+                  import re
+                  import stat
+              import sys
+              from pathlib import Path
+              module_spec=importlib.util.spec_from_file_location("bootstrap_catalog_binding", "/usr/lib/cyrene/scripts/bootstrap_catalog_binding.py")
+              if module_spec is None or module_spec.loader is None: raise SystemExit("installed catalog binding validator is unavailable")
+              module=importlib.util.module_from_spec(module_spec)
+              module_spec.loader.exec_module(module)
+              load_bootstrap_catalog_binding=module.load_bootstrap_catalog_binding
+              def unique(pairs):
+                  result={}
+                  for key,value in pairs:
+                      if key in result: raise ValueError("duplicate JSON key")
+                      result[key]=value
+                  return result
+              def read(path):
+                  target=Path(path)
+                  descriptor=os.open(target,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0))
+                  try:
+                      before=os.fstat(descriptor)
+                      if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0 or before.st_mode & 0o022:
+                          raise SystemExit("installed static asset is not a root-owned safe regular file: "+path)
+                      raw=b""
+                      while True:
+                          block=os.read(descriptor,1048576)
+                          if not block: break
+                          raw+=block
+                          if len(raw)>33554432: raise SystemExit("installed static asset exceeds 32 MiB: "+path)
+                      after=os.fstat(descriptor)
+                      if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+                          raise SystemExit("installed static asset changed while read: "+path)
+                  finally:
+                      os.close(descriptor)
+                  value=json.loads(raw.decode("utf-8"),object_pairs_hook=unique)
+                  if not isinstance(value,dict): raise SystemExit("installed static asset must be a JSON object: "+path)
+                  return raw,value
+              expected=json.load(sys.stdin,object_pairs_hook=unique)
+              binding_path="/usr/share/cyrene/bootstrap-catalog-binding-v1.json"
+              baseline_path="/usr/share/cyrene/component-catalog-v1.json"
+              active_path="/usr/share/cyrene/component-catalog-v2.json"
+              contract_path="/usr/share/cyrene/native-install-contract-v1.json"
+              binding=load_bootstrap_catalog_binding(Path(binding_path),Path(active_path),require_root=True)
+              binding_raw,binding_doc=read(binding_path)
+              baseline_raw,baseline_doc=read(baseline_path)
+              active_raw,active_doc=read(active_path)
+              contract_raw,contract=read(contract_path)
+              expected_catalog=expected["catalog"]
+              expected_binding={"schemaVersion":1,"catalog":{
+                  "repository":expected_catalog["repository"],"workflow":expected_catalog["workflow"],
+                  "releaseId":expected_catalog["releaseId"],"source":{"ref":expected_catalog["sourceRef"],"commit":expected_catalog["sourceCommit"]},
+                  "assetName":expected_catalog["assetName"],"sha256":expected_catalog["sha256"],
+                  "attestationBundleSha256":expected_catalog["attestationSha256"],"generation":expected_catalog["generation"]}}
+              if binding_doc != expected_binding or binding != expected_binding:
+                  raise SystemExit("installed active catalog binding differs from pinned official release identity")
+              if hashlib.sha256(active_raw).hexdigest()!=expected_catalog["sha256"] or active_doc.get("schemaVersion")!=2 or active_doc.get("generation")!=expected_catalog["generation"]:
+                  raise SystemExit("installed active v2 catalog bytes/schema/generation differ from pins")
+              expected_baseline=expected["baseline"]
+              if hashlib.sha256(baseline_raw).hexdigest()!=expected_baseline["sha256"] or len(baseline_raw)!=expected_baseline["sizeBytes"] or baseline_doc.get("schemaVersion")!=1 or baseline_doc.get("generation")!=expected_baseline["generation"]:
+                  raise SystemExit("installed frozen baseline v1 catalog bytes/schema/generation differ from attested release evidence")
+              if contract.get("schemaVersion")!=1 or contract.get("targetProfile")!=expected["targetId"] or contract.get("initializationMode")!="stage-only" or contract.get("serviceArtifactsMode")!="verified-published-bytes" or contract.get("serviceActivation")!="deferred" or contract.get("brokerAction")!="preserve-existing" or contract.get("oldRuntimeAction")!="preserve":
+                  raise SystemExit("installed native package contract is missing or differs from the stage-only safe contract")
+              def file_evidence(path,raw):
+                  info=Path(path).lstat()
+                  if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_gid!=0 or info.st_mode & 0o022:
+                      raise SystemExit("installed static asset metadata is unsafe: "+path)
+                  return {"path":path,"sha256":hashlib.sha256(raw).hexdigest(),"sizeBytes":len(raw),"uid":info.st_uid,"gid":info.st_gid,"mode":oct(stat.S_IMODE(info.st_mode))}
+              print(json.dumps({"binding":file_evidence(binding_path,binding_raw),"baselineV1":file_evidence(baseline_path,baseline_raw),"activeV2":file_evidence(active_path,active_raw),"nativeInstallContract":file_evidence(contract_path,contract_raw),"activeBindingIdentity":binding["catalog"],"nativeInstallContractIdentity":{"schemaVersion":contract["schemaVersion"],"targetProfile":contract["targetProfile"],"initializationMode":contract["initializationMode"],"serviceArtifactsMode":contract["serviceArtifactsMode"],"serviceActivation":contract["serviceActivation"],"brokerAction":contract["brokerAction"],"oldRuntimeAction":contract["oldRuntimeAction"],"serviceCount":len(contract.get("services",{}))}},separators=(",",":")))
+              ''').strip()
+              result = run(
+                  ["sudo", "-n", PRIVATE_PYTHON, "-s", "-c", code],
+                  label="installed-native-static-binding-probe",
+                  timeout=120,
+                  input_text=json.dumps({"catalog": catalog_pin, "baseline": {**baseline, "generation": baseline_generation}, "targetId": pins()["nativeInstaller"]["targetId"]}, ensure_ascii=False, separators=(",", ":")),
+              )
+              projection = json.loads(result.stdout)
+              write_json(root() / "evidence" / "installed-native-static-binding.json", projection)
+              return projection
+
+          def workload_request(
+              operation: str, *, preserve_read_token: bool = False, **fields: Any
+          ) -> dict[str, Any]:
+              """Call the fixed installed JSONL API as root and preserve exact envelopes."""
+              global WORKLOAD_REQUEST_SEQUENCE
+              WORKLOAD_REQUEST_SEQUENCE += 1
+              request = {"protocolVersion": WORKLOAD_PROTOCOL, "operation": operation, **fields}
+              command = ["sudo", "-n"]
+              if preserve_read_token:
+                  require(bool(os.environ.get("GH_TOKEN")), "read-only GH_TOKEN is unavailable for signed release resolution")
+                  command.append("--preserve-env=GH_TOKEN")
+              command.extend(["/usr/bin/cyrene", "workload", "--json"])
+              completed = run(
+                  command,
+                  label=f"workload-{operation}-{WORKLOAD_REQUEST_SEQUENCE:02d}",
+                  timeout=1800,
+                  input_text=json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n",
+              )
+              lines = completed.stdout.splitlines()
+              require(len(lines) == 1, f"workload {operation} must return exactly one JSONL envelope")
+              response = json.loads(lines[0])
+              require(response.get("protocolVersion") == WORKLOAD_PROTOCOL and response.get("operation") == operation, f"workload {operation} envelope identity differs")
+              path = root() / "evidence" / f"workload-{operation}-{WORKLOAD_REQUEST_SEQUENCE:02d}.json"
+              write_json(path, {"request": request, "response": response})
+              require(response.get("ok") is True, f"workload {operation} failed: {response.get('error')}")
+              return response["result"]
+
+          def compare_nested(actual: Any, expected: Any, context: str) -> None:
+              """Require every supplied pin field to match while allowing runtime-added evidence."""
+              if isinstance(expected, dict):
+                  require(isinstance(actual, dict), f"{context} is not an object")
+                  for key, child in expected.items():
+                      require(key in actual, f"{context} is missing pinned field {key}")
+                      compare_nested(actual[key], child, f"{context}.{key}")
+              elif isinstance(expected, list):
+                  require(actual == expected, f"{context} differs from its exact pin")
+              else:
+                  require(actual == expected, f"{context} differs from its exact pin")
+
+          def assert_selected_components(actual_rows: Any, expected_rows: Any, context: str) -> None:
+              """Compare the exact selected component set and its published provenance identities."""
+              require(isinstance(actual_rows, list), f"{context} has no component rows")
+              actual = {row.get("componentId"): row for row in actual_rows if isinstance(row, dict)}
+              expected = {row["componentId"]: row for row in expected_rows}
+              require(len(actual) == len(actual_rows), f"{context} has malformed or duplicate component rows")
+              require(set(actual) == set(expected), f"{context} selected component set differs from root pins")
+              for component_id, pin in expected.items():
+                  compare_nested(actual[component_id], pin, f"{context}.{component_id}")
+
+          def assert_installed_components(actual_rows: Any, expected_rows: Any, context: str) -> None:
+              """Compare receipt-backed installed identities using stable status fields."""
+              require(isinstance(actual_rows, list), f"{context} has no component rows")
+              actual = {row.get("componentId"): row for row in actual_rows if isinstance(row, dict)}
+              expected = {row["componentId"]: row for row in expected_rows}
+              require(len(actual) == len(actual_rows), f"{context} has malformed or duplicate component rows")
+              require(set(expected) <= set(actual), f"{context} is missing selected workload components")
+              unexpected_active = sorted(
+                  component_id for component_id, row in actual.items()
+                  if component_id not in expected and row.get("installed") is True
+              )
+              require(not unexpected_active, f"{context} has active components outside the pinned workload: {unexpected_active}")
+              for component_id, pin in expected.items():
+                  row = actual[component_id]
+                  require(row.get("installed") is True, f"{context} component is not installed: {component_id}")
+                  require(row.get("version") == pin["version"], f"{context} component version differs: {component_id}")
+                  require(row.get("digest") == pin["digest"], f"{context} component artifact digest differs: {component_id}")
+                  for field in ("targetId", "releaseId", "manifestDigest", "manifestAssetDigest"):
+                      require(field in row and row[field] == pin[field], f"{context} component {field} differs or is missing: {component_id}")
+                  require(row.get("verification", {}).get("identityAttested") is True, f"{context} installed identity is not attested: {component_id}")
+
+          def expected_catalyst_bindings(selected_rows: Any) -> list[dict[str, str]]:
+              """Derive the exact Product-owned bindings from the verified v2 Catalog."""
+              catalog_pin = pins()["catalog"]
+              catalog_path = root() / "downloads" / catalog_pin["assetName"]
+              require(catalog_path.is_file(), "verified v2 Catalog bytes are unavailable for binding readback")
+              require(sha256(catalog_path) == catalog_pin["sha256"], "binding readback Catalog bytes differ from exact release pins")
+              catalog = load_json(catalog_path)
+              require(catalog.get("schemaVersion") == 2 and catalog.get("generation") == catalog_pin["generation"], "binding readback Catalog schema/generation differs from exact pins")
+              workload_rows = [
+                  row for row in catalog.get("workloads", [])
+                  if isinstance(row, dict) and row.get("workloadId") == "catalyst"
+              ]
+              require(len(workload_rows) == 1, "verified Catalog must define one Catalyst workload")
+              workload = workload_rows[0]
+              policy = workload.get("sourcePolicy")
+              require(isinstance(policy, dict) and policy.get("mode") == "actualProduct", "Catalyst workload does not declare actualProduct source ownership")
+              products = policy.get("productSources")
+              require(isinstance(products, list), "Catalyst Product source mapping is missing")
+              catalyst_sources = [
+                  row for row in products
+                  if isinstance(row, dict) and row.get("componentId") == "cyrene-catalyst"
+              ]
+              require(len(catalyst_sources) == 1 and catalyst_sources[0].get("sourceId") == "cyrene-catalyst", "Catalog Catalyst source identity differs")
+              require(policy.get("operations") == ["activate", "recover_binding", "deactivate", "runtime_status", "get_installation"], "Catalog Catalyst source operations differ from the installed SDK contract")
+              selected_ids = {
+                  row.get("componentId") for row in selected_rows if isinstance(row, dict)
+              }
+              require(len(selected_ids) == len(selected_rows), "Catalyst selected rows are malformed or duplicated")
+              component_rows = {
+                  row.get("componentId"): row
+                  for row in catalog.get("components", [])
+                  if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+              }
+              binding_rows = workload.get("bindings")
+              require(isinstance(binding_rows, list), "Catalog Catalyst workload has no binding map")
+              result = []
+              for binding in binding_rows:
+                  require(isinstance(binding, dict), "Catalog Catalyst binding row is malformed")
+                  component_id = binding.get("componentId")
+                  if component_id not in selected_ids:
+                      continue
+                  component = component_rows.get(component_id)
+                  package = component.get("pluginPackage") if isinstance(component, dict) else None
+                  binding_id = binding.get("bindingId")
+                  require(isinstance(package, dict), f"Selected component has no signed plugin package identity: {component_id}")
+                  package_id = package.get("packageId")
+                  require(isinstance(binding_id, str) and binding_id, f"Selected component has no Catalog binding ID: {component_id}")
+                  require(isinstance(package_id, str) and package_id, f"Selected component has no Catalog package ID: {component_id}")
+                  result.append({
+                      "componentId": component_id,
+                      "sourceId": "cyrene-catalyst",
+                      "bindingId": binding_id,
+                      "packageId": package_id,
+                  })
+              selected_plugins = {
+                  component_id for component_id in selected_ids
+                  if isinstance(component_rows.get(component_id, {}).get("pluginPackage"), dict)
+              }
+              result_plugins = {row["componentId"] for row in result}
+              require(selected_plugins == result_plugins, "Selected plugin rows differ from Catalog Catalyst binding ownership")
+              require(result_plugins == CATALYST_REQUIRED_PLUGIN_IDS, "Catalyst pins must select all four Catalog-owned data plugin bindings")
+              return sorted(result, key=lambda row: row["bindingId"])
+
+          def assert_catalyst_source_bindings(
+              actual_rows: Any, expected_rows: Any, context: str
+          ) -> list[dict[str, Any]]:
+              """Require active Platform UDS readback for each pinned package binding."""
+              require(isinstance(actual_rows, list), f"{context} has no Package Runtime UDS sourceBindings")
+              expected = {row["bindingId"]: row for row in expected_rows}
+              actual = {
+                  row.get("bindingId"): row for row in actual_rows
+                  if isinstance(row, dict)
+              }
+              require(len(actual) == len(actual_rows), f"{context} sourceBindings are malformed or duplicated")
+              require(set(actual) == set(expected), f"{context} sourceBindings differ from selected Catalog bindings")
+              result = []
+              for binding_id, pin in expected.items():
+                  row = actual[binding_id]
+                  require(row.get("sourceId") == pin["sourceId"], f"{context} source ID differs: {binding_id}")
+                  require(row.get("packageId") == pin["packageId"], f"{context} package ID differs: {binding_id}")
+                  ids = row.get("installationIds")
+                  require(isinstance(ids, list) and ids and all(re.fullmatch(r"installation-[0-9a-f]{32}", str(item)) for item in ids), f"{context} installation IDs are missing or malformed: {binding_id}")
+                  require(ids == sorted(set(ids)), f"{context} installation IDs are not sorted and unique: {binding_id}")
+                  active_id = row.get("activeInstallationId")
+                  require(active_id in ids, f"{context} has no active UDS installation: {binding_id}")
+                  require(row.get("state") == "RUNNING", f"{context} Platform-supervised installation is not running: {binding_id}")
+                  require(row.get("failureCode") is None, f"{context} Platform reports a binding failure: {binding_id}")
+                  result.append({**pin, "installationIds": ids, "activeInstallationId": active_id, "state": row["state"]})
+              return sorted(result, key=lambda row: row["bindingId"])
+
+          def active_receipt_readback(expected_rows: Any, staged_rows: Any) -> dict[str, Any]:
+              """Verify root-owned active and immutable receipts from the installed updater."""
+              require(isinstance(expected_rows, list) and isinstance(staged_rows, list), "installed workload pins or stage receipts are missing")
+              staged = {row.get("componentId"): row for row in staged_rows if isinstance(row, dict)}
+              require(len(staged) == len(staged_rows), "workload stage receipts are malformed or duplicated")
+              sdk_pin = next((row for row in expected_rows if row.get("componentId") == "cyrene-runtime-maintenance-sdk"), None)
+              sdk_stage = staged.get("cyrene-runtime-maintenance-sdk")
+              if sdk_pin is not None:
+                  require(isinstance(sdk_stage, dict), "Runtime Maintenance SDK stage evidence is missing")
+                  sdk_wheel_digest = sdk_stage.get("wheelDigest")
+                  require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(sdk_wheel_digest)) is not None, "SDK staged wheel digest is malformed")
+                  require(sdk_stage.get("stagedIdentity", {}).get("wheelDigest") == sdk_wheel_digest, "SDK stage receipt wheel identities differ")
+              else:
+                  sdk_wheel_digest = None
+              code = textwrap.dedent(r'''
+              import base64
+              import hashlib
+              import importlib.util
+              import json
+              import os
+              import stat
+              import sys
+              from pathlib import Path
+              def unique(pairs):
+                  result={}
+                  for key,value in pairs:
+                      if key in result: raise ValueError("duplicate JSON key")
+                      result[key]=value
+                  return result
+              def read_json(path, *, exact_mode=None):
+                  target=Path(path)
+                  descriptor=os.open(target,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0))
+                  try:
+                      before=os.fstat(descriptor)
+                      if not stat.S_ISREG(before.st_mode) or before.st_uid!=0 or before.st_gid!=0 or before.st_nlink!=1 or (exact_mode is not None and stat.S_IMODE(before.st_mode)!=exact_mode) or (exact_mode is None and stat.S_IMODE(before.st_mode)&0o077):
+                          raise SystemExit("installed receipt is not a root-owned private regular file: "+str(target))
+                      raw=b""
+                      while True:
+                          block=os.read(descriptor,1048576)
+                          if not block: break
+                          raw+=block
+                          if len(raw)>16777216: raise SystemExit("installed receipt exceeds 16 MiB: "+str(target))
+                      after=os.fstat(descriptor)
+                      if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+                          raise SystemExit("installed receipt changed while read: "+str(target))
+                  finally:
+                      os.close(descriptor)
+                  value=json.loads(raw.decode("utf-8"),object_pairs_hook=unique)
+                  if not isinstance(value,dict): raise SystemExit("installed receipt must be a JSON object: "+str(target))
+                  return raw,value
+              def require_private_dir(path, *, exact_mode=0o700):
+                  target=Path(path)
+                  info=target.lstat()
+                  if not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_gid!=0 or stat.S_IMODE(info.st_mode)!=exact_mode:
+                      raise SystemExit("installed receipt directory is unsafe: "+str(target))
+              def require_root_dir(path, *, exact_mode=None):
+                  target=Path(path)
+                  info=target.lstat()
+                  if not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_gid!=0 or (stat.S_IMODE(info.st_mode)&0o022) or (exact_mode is not None and stat.S_IMODE(info.st_mode)!=exact_mode):
+                      raise SystemExit("installed release directory is unsafe: "+str(target))
+              def subset_matches(actual,expected):
+                  if isinstance(expected,dict):
+                      return isinstance(actual,dict) and all(key in actual and subset_matches(actual[key],value) for key,value in expected.items())
+                  return actual==expected
+              expected=json.load(sys.stdin,object_pairs_hook=unique)
+              rows=expected["selectedComponents"]
+              sdk_wheel_digest=expected.get("sdkWheelDigest")
+              helper_path=Path("/usr/lib/cyrene/scripts/component_updates.py")
+              spec=importlib.util.spec_from_file_location("_cyrene_acceptance_component_updates",helper_path)
+              if spec is None or spec.loader is None: raise SystemExit("installed workload receipt validator is unavailable")
+              module=importlib.util.module_from_spec(spec)
+              sys.modules[spec.name]=module
+              spec.loader.exec_module(module)
+              updater=object.__new__(module.ComponentUpdater)
+              updater.state_root=Path("/var/lib/cyrene-updates")
+              state_root=updater.state_root
+              installed_root=state_root/"installed"
+              require_private_dir(state_root)
+              require_private_dir(installed_root)
+              result=[]
+              for pin in rows:
+                  component_id=pin["componentId"]
+                  if component_id=="cyrene-runtime-maintenance-sdk":
+                      operator=Path("/opt/cyrene/workload-operator")
+                      releases=operator/"releases"
+                      current=operator/"current"
+                      require_root_dir(operator,exact_mode=0o755)
+                      require_root_dir(releases,exact_mode=0o755)
+                      link_info=current.lstat()
+                      target=os.readlink(current) if stat.S_ISLNK(link_info.st_mode) else ""
+                      if link_info.st_uid!=0 or link_info.st_gid!=0 or target!=f"releases/{pin['version']}--{pin['manifestDigest'].removeprefix('sha256:')}":
+                          raise SystemExit("SDK current pointer does not match the exact pinned immutable release")
+                      release_path=releases/target.removeprefix("releases/")
+                      require_root_dir(release_path,exact_mode=0o755)
+                      receipt_path=release_path/".workload-sdk-install.json"
+                      raw,receipt=read_json(receipt_path,exact_mode=0o444)
+                      required={"schemaVersion","componentId","version","digest","manifestDigest","manifestAssetDigest","wheelDigest","targetId"}
+                      if set(receipt)!=required or receipt.get("schemaVersion")!=1 or receipt.get("componentId")!=component_id:
+                          raise SystemExit("SDK installation receipt schema differs")
+                      for field in ("version","digest","manifestDigest","manifestAssetDigest","targetId"):
+                          if receipt.get(field)!=pin.get(field): raise SystemExit("SDK installation receipt differs from pin: "+field)
+                      if receipt.get("wheelDigest")!=sdk_wheel_digest:
+                          raise SystemExit("SDK installed wheel digest differs from its verified stage evidence")
+                      result.append({"componentId":component_id,"receiptPath":str(receipt_path),"receiptSha256":hashlib.sha256(raw).hexdigest(),"releasePath":str(release_path),"currentTarget":target,"receiptRawBase64":base64.b64encode(raw).decode("ascii")})
+                      continue
+                  component_dir=installed_root/component_id
+                  require_private_dir(component_dir)
+                  releases_dir=component_dir/"releases"
+                  require_private_dir(releases_dir)
+                  active_path=component_dir/"active.json"
+                  active_raw,active=read_json(active_path,exact_mode=0o600)
+                  active_fields={"schemaVersion","componentId","releaseIdentity","bundleIdentity"}
+                  if set(active)!=active_fields or active.get("schemaVersion")!=1 or active.get("componentId")!=component_id:
+                      raise SystemExit("active workload receipt schema differs: "+component_id)
+                  if active.get("releaseIdentity")!=pin["manifestDigest"]:
+                      raise SystemExit("active workload receipt points to another manifest: "+component_id)
+                  receipt_path=releases/(pin["manifestDigest"].removeprefix("sha256:")+".json")
+                  release_raw,receipt=read_json(receipt_path,exact_mode=0o600)
+                  validated=updater._read_active_receipt(component_id)
+                  if validated!=receipt:
+                      raise SystemExit("installed Workspace receipt validator projection differs: "+component_id)
+                  if receipt.get("schemaVersion")!=2 or receipt.get("componentId")!=component_id:
+                      raise SystemExit("immutable workload receipt must use schema v2: "+component_id)
+                  for field in ("releaseIdentity","manifestDigest","artifactDigest","version","releaseId","releaseTag","targetId","manifestAssetDigest","indexIdentity","publisherIdentity","attestationRef"):
+                      if field in pin and not subset_matches(receipt.get(field),pin[field]):
+                          raise SystemExit("immutable workload receipt differs from pinned field: "+component_id+"."+field)
+                  if active.get("bundleIdentity")!=receipt.get("bundleIdentity"):
+                      raise SystemExit("active and immutable workload receipts disagree on bundle identity: "+component_id)
+                  manifest=receipt.get("manifest")
+                  if not isinstance(manifest,dict) or manifest.get("componentId")!=component_id or manifest.get("version")!=pin["version"]:
+                      raise SystemExit("immutable receipt manifest component/version differs: "+component_id)
+                  updater._validate_manifest_digest(manifest,pin["manifestDigest"])
+                  if module._artifact_digest_from_manifest(manifest)!=pin["digest"]:
+                      raise SystemExit("immutable receipt manifest artifact digest differs: "+component_id)
+                  row={"componentId":component_id,"activeReceiptPath":str(active_path),"activeReceiptSha256":hashlib.sha256(active_raw).hexdigest(),"immutableReceiptPath":str(receipt_path),"immutableReceiptSha256":hashlib.sha256(release_raw).hexdigest(),"releaseIdentity":receipt["releaseIdentity"],"releasePath":receipt.get("releasePath"),"pointerIdentity":receipt.get("pointerIdentity"),"bundleIdentity":receipt.get("bundleIdentity"),"receiptRawBase64":base64.b64encode(release_raw).decode("ascii"),"activeRawBase64":base64.b64encode(active_raw).decode("ascii")}
+                  artifact=manifest.get("artifact")
+                  if isinstance(artifact,dict) and artifact.get("kind")=="native-binary":
+                      component_root=module.DEFAULT_INSTALL_ROOT/"components"/component_id
+                      expected_pointer=f"{pin['version']}--{pin['manifestDigest'].removeprefix('sha256:')}"
+                      for directory in (module.DEFAULT_INSTALL_ROOT,module.DEFAULT_INSTALL_ROOT/"components",component_root,component_root/"releases"):
+                          require_root_dir(directory,exact_mode=0o755)
+                      active_pointer=component_root/"active"
+                      pointer_info=active_pointer.lstat()
+                      pointer_target=os.readlink(active_pointer) if stat.S_ISLNK(pointer_info.st_mode) else ""
+                      if pointer_info.st_uid!=0 or pointer_info.st_gid!=0 or pointer_target!=f"releases/{expected_pointer}" or receipt.get("pointerIdentity")!=expected_pointer:
+                          raise SystemExit("native active pointer differs from the exact pinned release: "+component_id)
+                      native_release=component_root/"releases"/expected_pointer
+                      require_root_dir(native_release,exact_mode=0o755)
+                      if receipt.get("releasePath")!=str(native_release):
+                          raise SystemExit("native immutable receipt release path differs from active pointer: "+component_id)
+                      component_manifest=native_release/"component-manifest.json"
+                      manifest_info=component_manifest.lstat()
+                      if not stat.S_ISREG(manifest_info.st_mode) or manifest_info.st_uid!=0 or manifest_info.st_gid!=0 or manifest_info.st_nlink!=1 or stat.S_IMODE(manifest_info.st_mode)&0o022:
+                          raise SystemExit("native active manifest is not a protected root-owned file: "+component_id)
+                      installed_manifest=json.loads(component_manifest.read_text(encoding="utf-8"),object_pairs_hook=unique)
+                      if installed_manifest!=manifest:
+                          raise SystemExit("native active manifest bytes differ from immutable receipt: "+component_id)
+                      files=artifact.get("files")
+                      if not isinstance(files,dict) or not files:
+                          raise SystemExit("native active manifest has no signed file map: "+component_id)
+                      for name,expected_digest in files.items():
+                          relative=module._safe_relative(name,field="artifact.files path")
+                          candidate=native_release/relative
+                          cursor=native_release
+                          for index,part in enumerate(relative.parts):
+                              cursor=cursor/part
+                              file_info=cursor.lstat()
+                              final=index==len(relative.parts)-1
+                              if final:
+                                  if not stat.S_ISREG(file_info.st_mode) or file_info.st_uid!=0 or file_info.st_gid!=0 or file_info.st_nlink!=1 or stat.S_IMODE(file_info.st_mode)&0o022:
+                                      raise SystemExit("native active payload file is not protected: "+component_id+":"+name)
+                                  actual_digest=module._file_digest(candidate)
+                                  if actual_digest!=expected_digest:
+                                      raise SystemExit("native active payload file digest differs: "+component_id+":"+name)
+                              elif not stat.S_ISDIR(file_info.st_mode) or file_info.st_uid!=0 or file_info.st_gid!=0 or stat.S_IMODE(file_info.st_mode)&0o022:
+                                  raise SystemExit("native active payload path contains an unsafe directory: "+component_id+":"+name)
+                      unit_digest=files.get("systemd/cyrene-client-workspace-control.service") if component_id=="cyrene-client-workspace-control" else None
+                      if component_id=="cyrene-client-workspace-control" and not isinstance(unit_digest,str):
+                          raise SystemExit("signed Client Control release has no systemd unit member")
+                      row["nativeBinary"]={"activePath":str(active_pointer),"activeTarget":pointer_target,"releasePath":str(native_release),"manifestFileCount":len(files),"controlUnitDigest":unit_digest}
+                  if receipt.get("manifest",{}).get("artifact",{}).get("kind")=="static-web":
+                      static=updater._installed_static_web({"componentId":component_id})
+                      if static.get("active") is not True or static.get("manifestDigest")!=pin["manifestDigest"] or static.get("artifactDigest")!=pin["digest"]:
+                          raise SystemExit("static Web pointer/tree does not match its verified installed receipt")
+                      web_root=Path("/var/lib/cyrene/workloads/web")/component_id
+                      pointer=web_root/"current"
+                      pointer_target=os.readlink(pointer)
+                      if pointer_target!="releases/"+receipt["pointerIdentity"]:
+                          raise SystemExit("static Web current pointer differs from immutable receipt")
+                      files=manifest.get("artifact",{}).get("files",{})
+                      index_digest=files.get("index.html") if isinstance(files,dict) else None
+                      if not isinstance(index_digest,str) or re.fullmatch(r"sha256:[0-9a-f]{64}",index_digest) is None:
+                          raise SystemExit("verified static Web receipt has no typed index.html digest")
+                      row["staticWeb"]={"currentPath":str(pointer),"currentTarget":pointer_target,"releasePath":receipt["releasePath"],"indexDigest":index_digest,"fileCount":len(files)}
+                  result.append(row)
+              print(json.dumps({"components":result},separators=(",",":")))
+              ''').strip()
+              payload = {"selectedComponents": expected_rows, "sdkWheelDigest": sdk_wheel_digest}
+              completed = run(
+                  ["sudo", "-n", PRIVATE_PYTHON, "-s", "-c", code],
+                  label="installed-active-workload-receipts",
+                  timeout=180,
+                  input_text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+              )
+              value = json.loads(completed.stdout)
+              entries = value.get("components")
+              require(isinstance(entries, list) and len(entries) == len(expected_rows), "active workload receipt count differs from pins")
+              expected_ids = [row["componentId"] for row in expected_rows]
+              actual_ids = [row.get("componentId") for row in entries if isinstance(row, dict)]
+              require(actual_ids == expected_ids, "active workload receipt component set/order differs from pins")
+              evidence_dir = root() / "evidence" / "installed-workload-receipts"
+              evidence_dir.mkdir(parents=True, exist_ok=True)
+              projection = []
+              for entry in entries:
+                  component_id = entry["componentId"]
+                  receipt_dir = evidence_dir / component_id
+                  receipt_dir.mkdir(mode=0o700, exist_ok=True)
+                  saved = {key: child for key, child in entry.items() if not key.endswith("RawBase64")}
+                  if component_id == "cyrene-runtime-maintenance-sdk":
+                      raw = base64.b64decode(entry["receiptRawBase64"], validate=True)
+                      out = receipt_dir / "sdk-install.json"
+                      out.write_bytes(raw)
+                      require(sha256(out) == entry["receiptSha256"], f"saved SDK receipt digest differs: {component_id}")
+                  else:
+                      for key, filename, digest_key in (
+                          ("activeRawBase64", "active.json", "activeReceiptSha256"),
+                          ("receiptRawBase64", "release.json", "immutableReceiptSha256"),
+                      ):
+                          raw = base64.b64decode(entry[key], validate=True)
+                          out = receipt_dir / filename
+                          out.write_bytes(raw)
+                          require(sha256(out) == entry[digest_key], f"saved installed receipt digest differs: {component_id}/{filename}")
+                  projection.append(saved)
+              result = {"components": projection}
+              web_rows = [row for row in projection if row.get("componentId") == "cyrene-client-workspace-web"]
+              require(len(web_rows) == 1 and isinstance(web_rows[0].get("staticWeb"), dict), "verified Client Web installation receipt is missing")
+              web_receipt = web_rows[0]
+              static_web = web_receipt["staticWeb"]
+              require(static_web.get("indexDigest") and re.fullmatch(r"sha256:[0-9a-f]{64}", static_web["indexDigest"]) is not None, "verified Client Web index digest is missing")
+              static_web["sourceReceiptDigest"] = web_receipt["immutableReceiptSha256"]
+              static_web["activeReceiptDigest"] = web_receipt["activeReceiptSha256"]
+              write_json(root() / "evidence" / "installed-workload-receipt-identities.json", result)
+              return result
+
+          def catalyst_workload() -> None:
+              """Check exact pins, apply one digest-bound plan, and prove repeat-install idempotence."""
+              workload = pins()["workloads"]["catalyst"]
+              def inventory() -> dict[str, Any]:
+                  initial = workload_request("status", workloadId="catalyst")
+                  rows = initial.get("components", [])
+                  active = [row.get("componentId") for row in rows if isinstance(row, dict) and row.get("installed") is True]
+                  require(not active, f"fresh runner already has active workload components: {active}")
+                  require(initial.get("status") == "ready", "fresh Catalyst workload inventory is not ready")
+                  require(initial.get("catalogDigest") == workload["catalogDigest"], "fresh Catalyst inventory catalog digest differs from pins")
+                  return {"workloadId": "catalyst", "activeComponentsBeforeInstall": active, "catalogDigest": initial.get("catalogDigest")}
+              phase("fresh_workload_inventory", inventory)
+              selection = {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}}
+              def check_gate() -> dict[str, Any]:
+                  checked = workload_request(
+                      "check", preserve_read_token=True,
+                      workloadId="catalyst", targetId=workload["targetId"],
+                      action="install", selections=selection,
+                  )
+                  require(checked.get("status") == "ready", f"Catalyst workload check is not ready: {checked.get('blockers')}")
+                  require(checked.get("workloadId") == "catalyst" and checked.get("targetId") == workload["targetId"], "Catalyst check workload/target identity differs")
+                  require(checked.get("catalogDigest") == workload["catalogDigest"], "Catalyst check catalog digest differs from root pins")
+                  require(checked.get("action") == "install", "Catalyst check action is not install")
+                  return checked
+              checked = phase("catalyst_workload_check", check_gate)
+              def exact_plan() -> dict[str, Any]:
+                  assert_selected_components(checked.get("components"), workload["selectedComponents"], "Catalyst check")
+                  resolution = checked.get("resolution")
+                  require(isinstance(resolution, dict), "Catalyst check has no resolver resolution")
+                  require(resolution.get("catalogDigest") == workload["catalogDigest"], "Catalyst resolution catalog digest differs")
+                  assert_selected_components(resolution.get("selectedComponents"), workload["selectedComponents"], "Catalyst resolver resolution")
+                  require(re.fullmatch(r"plan-[0-9a-f]{32}", str(checked.get("planId", ""))) is not None, "Catalyst plan ID is malformed")
+                  require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(checked.get("planDigest", ""))) is not None, "Catalyst plan digest is malformed")
+                  write_json(root() / "evidence" / "catalyst-checked-plan.json", checked)
+                  return {"selectedComponents": workload["selectedComponents"], "planId": checked["planId"], "planDigest": checked["planDigest"]}
+              phase("catalyst_exact_plan_pins", exact_plan)
+              def stage_gate() -> dict[str, Any]:
+                  staged = workload_request(
+                      "stage", preserve_read_token=True,
+                      workloadId="catalyst", targetId=workload["targetId"],
+                      action="install", planId=checked["planId"], planDigest=checked["planDigest"],
+                  )
+                  require(staged.get("status") == "staged", f"Catalyst plan was not staged: {staged.get('status')}")
+                  require(staged.get("planId") == checked["planId"] and staged.get("planDigest") == checked["planDigest"], "Catalyst stage changed the checked plan identity")
+                  require(staged.get("catalogDigest") == workload["catalogDigest"], "Catalyst stage catalog digest differs")
+                  require(staged.get("action") == "install", "Catalyst stage action differs from the checked plan")
+                  assert_selected_components(staged.get("components"), workload["selectedComponents"], "Catalyst stage result")
+                  return staged
+              staged = phase("catalyst_workload_stage", stage_gate)
+
+              def apply_gate() -> dict[str, Any]:
+                  applied = workload_request(
+                      "apply", workloadId="catalyst", targetId=workload["targetId"],
+                      action="install", planId=checked["planId"], planDigest=checked["planDigest"],
+                      confirmation={"planId": checked["planId"], "planDigest": checked["planDigest"], "confirmed": True},
+                  )
+                  require(applied.get("status") in {"installed", "activated"}, f"Catalyst apply did not report an install/activation result: {applied.get('status')}")
+                  require(applied.get("action") == "install", "Catalyst apply returned an action other than install")
+                  require(applied.get("workloadId") == "catalyst" and applied.get("targetId") == workload["targetId"], "Catalyst apply returned a different workload or target")
+                  require(applied.get("planId") == checked["planId"], "Catalyst apply returned a different or missing plan ID")
+                  require(applied.get("planDigest") == checked["planDigest"], "Catalyst apply returned a different or missing plan digest")
+                  assert_selected_components(applied.get("components"), workload["selectedComponents"], "Catalyst apply result")
+                  return applied
+              phase("catalyst_workload_apply", apply_gate)
+
+              runtime_evidence = phase("catalyst_runtime_source_activation", runtime_source_activation)
+              def plugin_supervision_gate() -> dict[str, Any]:
+                  bindings = runtime_evidence.get("bindings")
+                  expected = expected_catalyst_bindings(workload["selectedComponents"])
+                  require(isinstance(bindings, list), "Catalyst runtime activation returned no verified plugin bindings")
+                  actual = {row.get("bindingId"): row for row in bindings if isinstance(row, dict)}
+                  require(len(actual) == len(bindings) and set(actual) == {row["bindingId"] for row in expected}, "Platform UDS active binding set differs from all four pinned plugins")
+                  require(all(row.get("state") == "RUNNING" and row.get("activeInstallationId") in row.get("installationIds", []) for row in actual.values()), "a selected plugin is not Platform-supervised and active")
+                  return {"sourceId": "cyrene-catalyst", "bindingCount": len(actual), "activeInstallationCount": sum(len(row["installationIds"]) for row in actual.values()), "allSelectedBindingsRunning": True}
+              phase("plugins_platform_supervision", plugin_supervision_gate)
+
+              phase(
+                  "catalyst_active_receipt_readback",
+                  lambda: active_receipt_readback(
+                      workload["selectedComponents"], staged.get("components")
+                  ),
+              )
+
+              def readback() -> dict[str, Any]:
+                  current = workload_request("status", workloadId="catalyst")
+                  require(current.get("status") == "ready", "Catalyst installed status is not ready")
+                  require(current.get("catalogDigest") == workload["catalogDigest"], "Catalyst status catalog digest differs from pins")
+                  rows_now = current.get("components", [])
+                  assert_installed_components(rows_now, workload["selectedComponents"], "Catalyst installed status")
+                  return {"catalogDigest": current["catalogDigest"], "components": rows_now}
+              phase("catalyst_installed_status_readback", readback)
+
+              def repeat_install() -> dict[str, Any]:
+                  command = run(["sudo", "-n", "cyrene", "workload", "install", "catalyst", "--yes"], label="public-catalyst-repeat-install", timeout=1800)
+                  after = workload_request("status", workloadId="catalyst")
+                  require(after.get("catalogDigest") == workload["catalogDigest"], "repeat install changed the active catalog identity")
+                  assert_installed_components(after.get("components", []), workload["selectedComponents"], "Catalyst repeated install readback")
+                  receipt_after = active_receipt_readback(workload["selectedComponents"], staged.get("components"))
+                  receipt_before = load_json(root() / "evidence" / "installed-workload-receipt-identities.json")
+                  require(receipt_after == receipt_before, "repeated install changed active or immutable receipt identities")
+                  return {"publicCommand": "sudo cyrene workload install catalyst --yes", "stdoutBytes": len(command.stdout.encode("utf-8")), "catalogDigest": after["catalogDigest"], "componentCount": len(after["components"]), "receiptIdentitiesUnchanged": True}
+              phase("catalyst_public_repeat_install", repeat_install)
+              phase("client_static_web_http", client_web_http)
+              phase("client_release_integration", client_release_integration)
+
+          def runtime_source_activation() -> dict[str, Any]:
+              """Compare installed ActivitySource scopes with authenticated SDK UDS readback."""
+              service_url = pins()["workloads"]["catalyst"]["service"]["baseUrl"]
+              expected_port = service_url.rsplit(":", 1)[1]
+              selected_rows = pins()["workloads"]["catalyst"]["selectedComponents"]
+              expected_bindings = expected_catalyst_bindings(selected_rows)
+              inventory = workload_request("status", workloadId="catalyst")
+              require(inventory.get("status") == "ready", "Catalyst status is unavailable during source activation readback")
+              require(inventory.get("catalogDigest") == pins()["workloads"]["catalyst"]["catalogDigest"], "Catalyst status Catalog identity changed during source activation readback")
+              observed_bindings = assert_catalyst_source_bindings(
+                  inventory.get("sourceBindings"), expected_bindings, "Catalyst Package Runtime UDS readback"
+              )
+              code = textwrap.dedent(r'''
+              import importlib.util
+              import grp
+              import hashlib
+              import json
+              import os
+              import pwd
+              import stat
+              import subprocess
+              import sys
+              from pathlib import Path
+              def unique(pairs):
+                  result={}
+                  for key,value in pairs:
+                      if key in result: raise ValueError("duplicate JSON key")
+                      result[key]=value
+                  return result
+              def read_regular(path, *, mode, maximum, gid=0):
+                  target=Path(path)
+                  before=target.lstat()
+                  if not stat.S_ISREG(before.st_mode) or before.st_uid!=0 or (gid is not None and before.st_gid!=gid) or stat.S_IMODE(before.st_mode)!=mode or before.st_nlink!=1 or before.st_size>maximum:
+                      raise SystemExit("installed runtime source evidence file is unsafe: "+str(target))
+                  descriptor=os.open(target,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0))
+                  try:
+                      opened=os.fstat(descriptor)
+                      if (opened.st_dev,opened.st_ino,opened.st_size,opened.st_uid,opened.st_gid,stat.S_IMODE(opened.st_mode),opened.st_nlink)!=(before.st_dev,before.st_ino,before.st_size,before.st_uid,before.st_gid,mode,before.st_nlink):
+                          raise SystemExit("installed runtime source evidence changed while opening: "+str(target))
+                      blocks=[]
+                      total=0
+                      while True:
+                          block=os.read(descriptor,65536)
+                          if not block: break
+                          total+=len(block)
+                          if total>maximum: raise SystemExit("installed runtime source evidence exceeds size bound: "+str(target))
+                          blocks.append(block)
+                      after=os.fstat(descriptor)
+                      if (opened.st_dev,opened.st_ino,opened.st_size,opened.st_mtime_ns,opened.st_ctime_ns,opened.st_uid,opened.st_gid,stat.S_IMODE(opened.st_mode))!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns,after.st_uid,after.st_gid,stat.S_IMODE(after.st_mode)):
+                          raise SystemExit("installed runtime source evidence changed while reading: "+str(target))
+                      return b"".join(blocks)
+                  finally:
+                      os.close(descriptor)
+              supplied=json.load(sys.stdin,object_pairs_hook=unique)
+              expected_bindings=supplied.get("expectedBindings")
+              observed_bindings=supplied.get("observedBindings")
+              if not isinstance(expected_bindings,list) or not isinstance(observed_bindings,list) or len(expected_bindings)!=len(observed_bindings):
+                  raise SystemExit("Catalyst expected binding or SDK readback rows are malformed")
+              catalog_path=Path("/var/lib/cyrene/runtime/activity-sources.json")
+              maintenance_group=grp.getgrnam("cyrene-runtime-maintenance")
+              catalog_raw=read_regular(catalog_path,mode=0o640,maximum=1048576,gid=maintenance_group.gr_gid)
+              catalog_group_id=catalog_path.lstat().st_gid
+              catalog=json.loads(catalog_raw.decode("utf-8"),object_pairs_hook=unique)
+              if not isinstance(catalog,dict) or set(catalog)!={"schema_version","generation","sources"} or catalog.get("schema_version")!=1 or type(catalog.get("generation")) is not int or catalog["generation"]<1 or not isinstance(catalog.get("sources"),list):
+                  raise SystemExit("installed ActivitySource catalog schema/generation is invalid")
+              matches=[row for row in catalog["sources"] if isinstance(row,dict) and row.get("source_id")=="cyrene-catalyst"]
+              if len(matches)!=1: raise SystemExit("installed ActivitySource catalog has no unique Catalyst source")
+              source=matches[0]
+              if set(source)!={"source_id","uid","gid","source_token_sha256","binding_scopes"} or source.get("source_id")!="cyrene-catalyst" or type(source.get("uid")) is not int or type(source.get("gid")) is not int or not isinstance(source.get("binding_scopes"),list):
+                  raise SystemExit("installed Catalyst ActivitySource identity or binding scope schema differs")
+              account=pwd.getpwnam("cyrene")
+              group=grp.getgrnam("cyrene")
+              if (source["uid"],source["gid"])!=(account.pw_uid,group.gr_gid):
+                  raise SystemExit("installed Catalyst ActivitySource UID/GID differs from its signed unit account")
+              helper_path=Path("/usr/lib/cyrene/scripts/native_package_runtime_bootstrap.py")
+              spec=importlib.util.spec_from_file_location("_cyrene_acceptance_native_package_runtime",helper_path)
+              if spec is None or spec.loader is None: raise SystemExit("installed Package Runtime source policy validator is unavailable")
+              helper=importlib.util.module_from_spec(spec)
+              sys.modules[spec.name]=helper
+              spec.loader.exec_module(helper)
+              policy=helper.read_runtime_source_policy()
+              if not isinstance(policy,dict) or policy.get("schema_version")!=1 or policy.get("generation")!=catalog["generation"] or not isinstance(policy.get("sources"),list):
+                  raise SystemExit("installed Package Runtime source policy schema/generation differs from the ActivitySource catalog")
+              policy_sources=[row for row in policy["sources"] if isinstance(row,dict) and row.get("source_id")=="cyrene-catalyst"]
+              if len(policy_sources)!=1 or len(policy["sources"])!=1: raise SystemExit("installed Package Runtime source policy has missing or unexpected owners")
+              policy_source=policy_sources[0]
+              if (policy_source.get("uid"),policy_source.get("gid"),policy_source.get("source_token_sha256"))!=(source["uid"],source["gid"],source["source_token_sha256"]):
+                  raise SystemExit("installed Package Runtime source trust differs from ActivitySource identity")
+              expected_by_id={row.get("bindingId"):row for row in expected_bindings if isinstance(row,dict)}
+              observed_by_id={row.get("bindingId"):row for row in observed_bindings if isinstance(row,dict)}
+              runtime_rows=policy_source.get("bindings")
+              activity_rows=source["binding_scopes"]
+              if len(expected_by_id)!=len(expected_bindings) or len(observed_by_id)!=len(observed_bindings):
+                  raise SystemExit("expected or observed Catalyst binding IDs are malformed or duplicated")
+              if set(expected_by_id)!=set(observed_by_id): raise SystemExit("Package Runtime UDS bindings differ from the pinned Catalog bindings")
+              if not isinstance(runtime_rows,list) or not isinstance(activity_rows,list):
+                  raise SystemExit("installed Catalyst source binding scopes are malformed")
+              runtime_by_id={row.get("binding_id"):row for row in runtime_rows if isinstance(row,dict)}
+              activity_by_id={row.get("binding_id"):row for row in activity_rows if isinstance(row,dict)}
+              if len(runtime_by_id)!=len(runtime_rows) or len(activity_by_id)!=len(activity_rows) or set(runtime_by_id)!=set(expected_by_id) or set(activity_by_id)!=set(expected_by_id):
+                  raise SystemExit("installed Runtime or ActivitySource binding set differs from exact selected Catalog bindings")
+              if [row.get("binding_id") for row in runtime_rows]!=sorted(runtime_by_id) or [row.get("binding_id") for row in activity_rows]!=sorted(activity_by_id):
+                  raise SystemExit("installed Runtime or ActivitySource binding rows are not canonical")
+              expected_runtime_operations=["activate","deactivate","get_installation","recover_binding","runtime_status"]
+              expected_broker_operations=["activate","deactivate","recover"]
+              verified_bindings=[]
+              for binding_id,pin in expected_by_id.items():
+                  observed=observed_by_id[binding_id]
+                  runtime=runtime_by_id[binding_id]
+                  activity=activity_by_id[binding_id]
+                  if pin.get("sourceId")!="cyrene-catalyst" or pin.get("bindingId")!=binding_id:
+                      raise SystemExit("pinned Catalyst source identity is malformed")
+                  installation_ids=observed.get("installationIds")
+                  active_id=observed.get("activeInstallationId")
+                  if not isinstance(installation_ids,list) or not installation_ids or installation_ids!=sorted(set(installation_ids)) or active_id not in installation_ids or observed.get("state")!="RUNNING" or observed.get("failureCode") is not None:
+                      raise SystemExit("Package Runtime UDS does not report an active Platform-supervised installation")
+                  runtime_identity=(runtime.get("binding_id"),runtime.get("package_id"),runtime.get("installation_ids"),runtime.get("operations"))
+                  if runtime_identity!=(binding_id,pin.get("packageId"),installation_ids,expected_runtime_operations):
+                      raise SystemExit("installed Package Runtime policy differs from signed selected binding or UDS installation IDs")
+                  activity_identity=(activity.get("binding_id"),activity.get("package_id"),activity.get("installation_ids"),activity.get("operations"))
+                  if activity_identity!=(binding_id,pin.get("packageId"),installation_ids,expected_broker_operations):
+                      raise SystemExit("installed ActivitySource mutation scope differs from selected Package Runtime identity")
+                  verified_bindings.append({"bindingId":binding_id,"packageId":pin["packageId"],"installationIds":installation_ids,"activeInstallationId":active_id,"state":observed["state"]})
+              token_dir=Path("/etc/cyrene/runtime-activity-source-tokens")
+              token_dir_info=token_dir.lstat()
+              if not stat.S_ISDIR(token_dir_info.st_mode) or token_dir_info.st_uid!=0 or stat.S_IMODE(token_dir_info.st_mode)&0o022:
+                  raise SystemExit("installed ActivitySource token directory is unsafe")
+              token_path=token_dir/"cyrene-catalyst.token"
+              token_raw=read_regular(token_path,mode=0o400,maximum=256)
+              token=token_raw.removesuffix(b"\n")
+              if not token or token_raw!=token+b"\n" or hashlib.sha256(token).hexdigest()!=source["source_token_sha256"]:
+                  raise SystemExit("installed Catalyst ActivitySource token does not match its catalog hash")
+              generation=catalog["generation"]
+              environment=read_regular("/etc/cyrene/runtime-activity-sources.env",mode=0o644,maximum=4096)
+              expected_environment=f"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION={generation}\n".encode("ascii")
+              if environment!=expected_environment:
+                  raise SystemExit("installed Product generation environment does not match the ActivitySource catalog")
+              unit="cyrene-catalyst.service"
+              show=subprocess.run(["systemctl","show",unit,"--property=ActiveState","--property=SubState","--property=MainPID"],text=True,capture_output=True,check=True)
+              unit_fields=dict(line.split("=",1) for line in show.stdout.splitlines() if "=" in line)
+              if unit_fields.get("ActiveState")!="active" or unit_fields.get("SubState")!="running":
+                  raise SystemExit("installed Catalyst systemd unit is not active/running")
+              pid=int(unit_fields.get("MainPID","0"))
+              if pid<=1: raise SystemExit("installed Catalyst unit has no live main process")
+              status=(Path("/proc")/str(pid)/"status").read_text(encoding="ascii")
+              proc_fields={line.split(":",1)[0]:line.split(":",1)[1].strip() for line in status.splitlines() if ":" in line}
+              process_uid=[int(value) for value in proc_fields.get("Uid","").split()]
+              process_gid=[int(value) for value in proc_fields.get("Gid","").split()]
+              if process_uid!=[account.pw_uid]*4 or process_gid!=[group.gr_gid]*4:
+                  raise SystemExit("running Catalyst process UID/GID differs from its ActivitySource catalog row")
+              environ=(Path("/proc")/str(pid)/"environ").read_bytes().split(b"\0")
+              values={entry.split(b"=",1)[0].decode("ascii"):entry.split(b"=",1)[1].decode("utf-8","strict") for entry in environ if b"=" in entry}
+              if values.get("CYRENE_RUNTIME_ACTIVITY_SOURCE_ID")!="cyrene-catalyst":
+                  raise SystemExit("running Catalyst process has the wrong ActivitySource ID")
+              if not values.get("CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE","").endswith("activity-token"):
+                  raise SystemExit("running Catalyst process has no systemd-projected ActivitySource credential path")
+              if values.get("CYRENE_RUNTIME_MAINTENANCE_SOCKET")!="/run/cyrene/runtime-maintenance.sock":
+                  raise SystemExit("running Catalyst process does not target the installed Package Runtime socket")
+              if values.get("CYRENE_PORT_CATALYST")!=sys.argv[1]:
+                  raise SystemExit("running Catalyst process listener port differs from the pinned installed Product listener")
+              if values.get("CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION")!=str(generation):
+                  raise SystemExit("running Catalyst process loaded a different ActivitySource catalog generation")
+              maintenance_active=subprocess.run(["systemctl","is-active","--quiet","cyrene-runtime-maintenance.service"],check=False).returncode==0
+              if not maintenance_active: raise SystemExit("installed Package Runtime maintenance unit is not active")
+              socket_path=Path("/run/cyrene/runtime-maintenance.sock")
+              socket_info=socket_path.lstat()
+              if not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid!=0 or stat.S_IMODE(socket_info.st_mode)&0o007:
+                  raise SystemExit("installed Package Runtime maintenance UDS is unsafe or unavailable")
+              print(json.dumps({"sourceId":"cyrene-catalyst","uid":source["uid"],"gid":source["gid"],"bindingScopeCount":len(verified_bindings),"bindings":verified_bindings,"catalogGeneration":generation,"catalogGroupId":catalog_group_id,"environmentGeneration":generation,"processGeneration":generation,"tokenFileMode":"0400","tokenOwner":"root:root","tokenHashMatchesCatalog":True,"packagePolicySourceCount":len(policy["sources"]),"unit":unit,"systemdActive":True,"mainPid":pid,"processUid":account.pw_uid,"processGid":group.gr_gid,"listenerPort":int(values["CYRENE_PORT_CATALYST"]),"systemdCredentialProjected":True,"maintenanceUnitActive":True,"maintenanceSocket":"/run/cyrene/runtime-maintenance.sock","maintenanceSocketPresent":True},separators=(",",":")))
+              ''').strip()
+              output = run(
+                  ["sudo", "-n", "/usr/bin/python3", "-s", "-c", code, expected_port],
+                  label="installed-catalyst-runtime-source-readback",
+                  timeout=120,
+                  input_text=json.dumps({
+                      "expectedBindings": expected_bindings,
+                      "observedBindings": observed_bindings,
+                  }, ensure_ascii=False, separators=(",", ":")),
+              )
+              value = json.loads(output.stdout)
+              write_json(root() / "evidence" / "catalyst-runtime-source-activation.json", value)
+              return value
+
+          def missing_required_selection() -> dict[str, Any]:
+              """Prove a required component cannot be excluded without staging or applying a plan."""
+              workload = pins()["workloads"]["catalyst"]
+              saved = load_json(root() / "evidence" / "catalyst-checked-plan.json")
+              rows = saved.get("resolution", {}).get("selectedComponents", [])
+              required = next(
+                  (row.get("componentId") for row in rows if row.get("requiredness") == "required"),
+                  None,
+              )
+              require(isinstance(required, str) and required, "checked Catalyst plan exposes no required component for the omission gate")
+              sequence_before = WORKLOAD_REQUEST_SEQUENCE
+              blocked = workload_request(
+                  "check",
+                  workloadId="catalyst",
+                  targetId=workload["targetId"],
+                  action="install",
+                  selections={
+                      "includeComponentIds": [],
+                      "excludeComponentIds": [required],
+                      "choices": {},
+                  },
+              )
+              require(WORKLOAD_REQUEST_SEQUENCE == sequence_before + 1, "required omission gate sent unexpected follow-up workload requests")
+              blocker_codes = {
+                  row.get("code") for row in blocked.get("blockers", [])
+                  if isinstance(row, dict)
+              }
+              require(blocked.get("status") == "blocked", "excluding a required Catalyst component did not block the plan")
+              require("REQUIRED_COMPONENT_UNSELECTABLE" in blocker_codes, f"required omission returned unexpected blockers: {sorted(blocker_codes)}")
+              require(not blocked.get("components"), "blocked omission unexpectedly selected install components")
+              return {
+                  "excludedRequiredComponent": required,
+                  "status": blocked["status"],
+                  "blockerCodes": sorted(blocker_codes),
+                  "workloadRequests": 1,
+                  "staged": False,
+                  "applied": False,
+              }
+
+          def bundle_identity() -> dict[str, Any]:
+              """Use the installed validator and active pointer to prove immutable Product bytes."""
+              catalyst_pin = next(
+                  row for row in pins()["workloads"]["catalyst"]["selectedComponents"]
+                  if row["componentId"] == "cyrene-catalyst"
+              )
+              code = textwrap.dedent(r'''
+              import json
+              import stat
+              import sys
+              from pathlib import Path
+              import service_bundle
+              root=Path("/usr/lib/cyrene/services/catalyst")
+              active=root/"active"
+              info=active.lstat()
+              if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0: raise SystemExit("unsafe Catalyst active pointer")
+              entrypoint,version=service_bundle.resolve_active_release("catalyst")
+              release=Path(entrypoint).parent
+              manifest=service_bundle.validate_bundle(release,expected_service="catalyst",expected_target_profile=sys.argv[1])
+              if manifest["version"] != version: raise SystemExit("active release version differs from manifest")
+              print(json.dumps({"activePath":str(active.resolve(strict=True)),"version":version,"manifest":manifest},separators=(",",":")))
+              ''').strip()
+              result = run(
+                  ["sudo", "-n", "env", "PYTHONPATH=/usr/lib/cyrene/scripts", PRIVATE_PYTHON, "-s", "-c", code, catalyst_pin["targetId"]],
+                  label="installed-catalyst-bundle-validator", timeout=120,
+              )
+              value = json.loads(result.stdout)
+              manifest = value.get("manifest", {})
+              require(manifest.get("service") == "catalyst", "active bundle is not Catalyst")
+              require(manifest.get("version") == catalyst_pin["version"], "active Catalyst version differs from resolver pins")
+              require(manifest.get("artifact_digest") == catalyst_pin["digest"], "active Catalyst artifact digest differs from resolver pins")
+              receipt_rows = load_json(root() / "evidence" / "installed-workload-receipt-identities.json").get("components", [])
+              receipt = next((row for row in receipt_rows if row.get("componentId") == "cyrene-catalyst"), None)
+              require(isinstance(receipt, dict), "Catalyst immutable installation receipt was not read back")
+              require(receipt.get("bundleIdentity") == manifest.get("artifact_digest"), "Catalyst active receipt bundle identity differs from the installed service bundle")
+              require(receipt.get("pointerIdentity") == version, "Catalyst active receipt pointer identity differs from the service active release")
+              require(Path(str(receipt.get("releasePath"))).resolve(strict=True) == release.resolve(strict=True), "Catalyst active receipt release path differs from the installed service bundle")
+              expected_source_repository = "https://github.com/" + catalyst_pin["publisherIdentity"]["repository"]
+              require(expected_source_repository == manifest.get("source_repository"), "active Catalyst source repository differs from resolver pins")
+              require(manifest.get("source_commit") == catalyst_pin["attestationRef"]["sourceCommit"], "active Catalyst source commit differs from resolver pins")
+              require(manifest.get("target", {}).get("profile_id") == catalyst_pin["targetId"], "active Catalyst target differs from resolver pins")
+              write_json(root() / "evidence" / "catalyst-active-bundle.json", value)
+              return {"activePath": value["activePath"], "version": value["version"], "sourceRepository": manifest["source_repository"], "sourceCommit": manifest["source_commit"], "artifactDigest": manifest["artifact_digest"], "targetId": manifest["target"]["profile_id"], "manifestFileCount": len(manifest.get("files", {})), "receiptReleasePath": receipt["releasePath"], "receiptPointerIdentity": receipt["pointerIdentity"], "receiptBundleIdentity": receipt["bundleIdentity"]}
+
+          def request_http(base_url: str, path: str) -> dict[str, Any]:
+              """Make one bounded loopback request and preserve its response body."""
+              url = base_url + path
+              request = urllib.request.Request(url, headers={"Accept": "application/json"})
+              try:
+                  with urllib.request.urlopen(request, timeout=15) as response:
+                      body = response.read(1_048_577)
+                      require(len(body) <= 1_048_576, f"HTTP response is too large: {url}")
+                      require(response.status == 200, f"HTTP returned {response.status}: {url}")
+                      return {"url": url, "status": response.status, "contentType": response.headers.get("Content-Type"), "body": body.decode("utf-8", errors="replace")}
+              except urllib.error.URLError as error:
+                  raise RuntimeError(f"HTTP request failed for {url}: {error}") from error
+
+          def request_loopback(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
+              """Read one fixed local route without following redirects or retaining its body."""
+              class DenyRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self, request: Any, response: Any, code: int, message: str, headers: Any, new_url: str) -> None:
+                      return None
+
+              request = urllib.request.Request(url, headers=headers, method="GET")
+              opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), DenyRedirect())
+              try:
+                  response = opener.open(request, timeout=15)
+              except urllib.error.HTTPError as error:
+                  response = error
+              except (urllib.error.URLError, TimeoutError) as error:
+                  raise RuntimeError(f"Loopback HTTP request failed: {url}: {error}") from error
+              with response:
+                  body = response.read(8 * 1024 * 1024 + 1)
+                  require(len(body) <= 8 * 1024 * 1024, f"Loopback HTTP response exceeds the size limit: {url}")
+                  require(response.geturl() == url, f"Loopback HTTP response changed route: {url}")
+                  return int(response.status), dict(response.headers.items()), body
+
+          def response_schema(value: Any) -> Any:
+              """Describe JSON structure without retaining Product response values."""
+              if isinstance(value, dict):
+                  return {"object": {key: response_schema(child) for key, child in sorted(value.items())}}
+              if isinstance(value, list):
+                  item_schemas = {
+                      json.dumps(response_schema(child), sort_keys=True, separators=(",", ":"))
+                      for child in value
+                  }
+                  return {"array": sorted(item_schemas)}
+              if value is None:
+                  return "null"
+              if isinstance(value, bool):
+                  return "boolean"
+              if isinstance(value, int):
+                  return "integer"
+              if isinstance(value, float):
+                  return "number"
+              if isinstance(value, str):
+                  return "string"
+              raise RuntimeError("Catalyst dataset response contains an unsupported JSON value")
+
+          def compare_catalyst_read_responses(
+              direct_status: int, direct_body: bytes, proxy_status: int, proxy_body: bytes
+          ) -> dict[str, Any]:
+              """Require matching successful Product JSON responses while retaining no records."""
+              require(direct_status == 200, f"direct Catalyst dataset read returned HTTP {direct_status}")
+              require(proxy_status == direct_status, f"Client Catalyst proxy returned HTTP {proxy_status}, direct Catalyst returned {direct_status}")
+              try:
+                  direct_value = json.loads(direct_body.decode("utf-8"))
+                  proxy_value = json.loads(proxy_body.decode("utf-8"))
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise RuntimeError("Catalyst direct/proxy dataset response is not JSON") from error
+              direct_schema = response_schema(direct_value)
+              proxy_schema = response_schema(proxy_value)
+              require(direct_schema == proxy_schema, "Client Catalyst proxy response schema differs from direct Catalyst")
+              schema_bytes = json.dumps(direct_schema, sort_keys=True, separators=(",", ":")).encode("utf-8")
+              return {
+                  "direct": {
+                      "status": direct_status,
+                      "bodyBytes": len(direct_body),
+                      "bodySha256": hashlib.sha256(direct_body).hexdigest(),
+                  },
+                  "proxy": {
+                      "status": proxy_status,
+                      "bodyBytes": len(proxy_body),
+                      "bodySha256": hashlib.sha256(proxy_body).hexdigest(),
+                  },
+                  "jsonSchemaSha256": hashlib.sha256(schema_bytes).hexdigest(),
+                  "jsonSchemaMatches": True,
+                  "recordsStored": False,
+              }
+
+          def client_web_http() -> dict[str, Any]:
+              """Verify installed Client bytes, managed unit metadata, and same-origin Control routes."""
+              workload = pins()["workloads"]["catalyst"]
+              web_pin = next(
+                  row for row in workload["selectedComponents"]
+                  if row["componentId"] == "cyrene-client-workspace-web"
+              )
+              installed = load_json(root() / "evidence" / "installed-workload-receipt-identities.json")
+              web_rows = [
+                  row for row in installed["components"]
+                  if row.get("componentId") == "cyrene-client-workspace-web"
+              ]
+              require(len(web_rows) == 1, "verified Client Web active receipt is missing")
+              web_receipt = web_rows[0]
+              static = web_receipt.get("staticWeb")
+              require(isinstance(static, dict), "verified Client Web static receipt projection is missing")
+              index_digest = static.get("indexDigest")
+              require(isinstance(index_digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", index_digest) is not None, "verified Client Web index digest is malformed")
+
+              status = workload_request("status", workloadId="catalyst")
+              require(status.get("status") == "ready", "installed workload status is unavailable for Client Web host readback")
+              require(status.get("catalogDigest") == workload["catalogDigest"], "Client Web host status uses a different installed Catalog")
+              metadata = status.get("hostMetadata", {}).get("web") if isinstance(status.get("hostMetadata"), dict) else None
+              require(isinstance(metadata, dict), "installed workload status has no hostMetadata.web receipt")
+              require(metadata.get("schemaVersion") == 1 and metadata.get("componentId") == web_pin["componentId"], "Client Web host receipt schema/component differs")
+              require(metadata.get("installed") is True and metadata.get("available") is True, "Client Web host is not installed and available")
+              require(metadata.get("version") == web_pin["version"], "Client Web host receipt version differs from exact release pins")
+              require(metadata.get("releaseIdentity") == web_pin["manifestDigest"], "Client Web host receipt release identity differs from exact manifest pin")
+              require(metadata.get("sourceReceiptDigest") == "sha256:" + web_receipt["immutableReceiptSha256"], "Client Web source receipt digest differs from the verified immutable receipt")
+              require(metadata.get("activeReceiptDigest") == "sha256:" + web_receipt["activeReceiptSha256"], "Client Web active receipt digest differs from the verified active receipt")
+              require(metadata.get("documentRoot") == "/var/lib/cyrene/workloads/web/cyrene-client-workspace-web/current", "Client Web document root differs from the installed current pointer")
+              require(metadata.get("clientUrl") == "http://127.0.0.1:8100/", "Client Web public URL differs from the loopback-only contract")
+              require(metadata.get("listenerAddress") == "127.0.0.1" and metadata.get("listenerPort") == 8100, "Client Web listener is not the exact loopback address")
+              require(metadata.get("configPath") == "/etc/cyrene/workloads/web/nginx.conf", "Client Web Nginx config path differs from the managed service contract")
+              require(metadata.get("unitPath") == "/etc/systemd/system/cyrene-workspace-web.service", "Client Web systemd unit path differs from the managed service contract")
+              require(metadata.get("serviceUnit") == "cyrene-workspace-web.service", "Client Web status names a different systemd unit")
+              require(metadata.get("serviceState") == "active" and metadata.get("serviceEnabled") is True, "Client Web systemd service is not active and enabled")
+              require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(metadata.get("configDigest"))) is not None, "Client Web managed config digest is missing")
+              require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(metadata.get("unitDigest"))) is not None, "Client Web managed unit digest is missing")
+              require(re.fullmatch(r"nginx/[0-9][A-Za-z0-9.+-]*", str(metadata.get("nginxVersion"))) is not None, "Client Web Nginx version is unavailable")
+
+              origin = "http://127.0.0.1:8100"
+              root_status, _root_headers, root_body = request_loopback(
+                  origin + "/", {"Accept-Encoding": "identity", "Origin": origin}
+              )
+              root_digest = "sha256:" + hashlib.sha256(root_body).hexdigest()
+              require(root_status == 200, f"Client Web root returned HTTP {root_status}")
+              require(root_digest == index_digest, "Client Web HTTP root bytes differ from the signed installed index.html digest")
+              health_status, _health_headers, health_body = request_loopback(
+                  origin + "/healthz", {"Accept": "application/json", "Origin": origin}
+              )
+              require(health_status == 200, f"Client Web health returned HTTP {health_status}")
+              try:
+                  health = json.loads(health_body.decode("utf-8"))
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise RuntimeError("Client Web health response is not JSON") from error
+              require(isinstance(health, dict) and health.get("status") == "ok", "Client Web health response is not ready")
+              control_status, _control_headers, control_body = request_loopback(
+                  "http://127.0.0.1:5182/health/ready", {"Accept": "application/json"}
+              )
+              require(control_status == 200, f"Studio Control readiness returned HTTP {control_status}")
+              try:
+                  control = json.loads(control_body.decode("utf-8"))
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise RuntimeError("Studio Control readiness response is not JSON") from error
+              require(isinstance(control, dict) and control.get("status") == "ready", "Studio Control is not ready")
+              session_status, _session_headers, session_body = request_loopback(
+                  origin + "/api/v1/auth/session",
+                  {"Accept": "application/json", "Host": "127.0.0.1:8100", "Origin": origin},
+              )
+              require(session_status == 200, f"same-origin local Control session returned HTTP {session_status}")
+              try:
+                  session = json.loads(session_body.decode("utf-8"))
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise RuntimeError("same-origin local Control session is not JSON") from error
+              csrf_token = session.get("csrfToken") if isinstance(session, dict) else None
+              require(isinstance(session, dict) and session.get("authenticated") is True, "same-origin local session is not authenticated")
+              require(session.get("state") == "AUTHENTICATED" and session.get("refreshable") is False, "same-origin local session state differs")
+              require(isinstance(csrf_token, str) and re.fullmatch(r"[0-9a-f]{64}", csrf_token) is not None, "same-origin local session CSRF token is missing or malformed")
+              probes = metadata.get("probes")
+              require(isinstance(probes, dict), "Client Web host receipt has no probe readback")
+              compare_nested(probes, {
+                  "root": {"status": 200, "indexDigest": index_digest},
+                  "health": {"status": 200, "bodyStatus": "ok"},
+                  "controlReady": {"status": 200, "bodyStatus": "ready"},
+                  "localSession": {"status": 200, "authenticated": True, "state": "AUTHENTICATED", "refreshable": False},
+              }, "Client Web host probes")
+              evidence = {
+                  "clientUrl": origin + "/",
+                  "documentRoot": metadata["documentRoot"],
+                  "serviceUnit": metadata["serviceUnit"],
+                  "serviceState": metadata["serviceState"],
+                  "serviceEnabled": metadata["serviceEnabled"],
+                  "nginxVersion": metadata["nginxVersion"],
+                  "configDigest": metadata["configDigest"],
+                  "unitDigest": metadata["unitDigest"],
+                  "sourceReceiptDigest": metadata["sourceReceiptDigest"],
+                  "activeReceiptDigest": metadata["activeReceiptDigest"],
+                  "indexDigest": index_digest,
+                  "httpRoot": {"status": root_status, "sha256": root_digest},
+                  "health": {"status": health_status, "bodyStatus": health["status"]},
+                  "controlReady": {"status": control_status, "bodyStatus": control["status"]},
+                  "localSession": {"status": session_status, "authenticated": True, "state": "AUTHENTICATED", "refreshable": False, "csrfTokenFormatValid": True},
+                  "csrfTokenStored": False,
+                  "sessionCommandPosted": False,
+              }
+              write_json(root() / "evidence" / "client-web-http-acceptance.json", evidence)
+              return evidence
+
+          def client_release_integration() -> dict[str, Any]:
+              """Prove the exact Node 24 Control release serves auth and Catalyst read APIs."""
+              workload = pins()["workloads"]["catalyst"]
+              control_pin = next(
+                  row for row in workload["selectedComponents"]
+                  if row["componentId"] == "cyrene-client-workspace-control"
+              )
+              require(
+                  control_pin["targetId"] == "linux-ubuntu-24.04-x86_64-node-24",
+                  "Client Control pin is not the official Ubuntu 24.04 Node 24 target",
+              )
+              status = workload_request("status", workloadId="catalyst")
+              require(status.get("status") == "ready", "installed Control workload status is unavailable")
+              require(status.get("catalogDigest") == workload["catalogDigest"], "installed Control status uses a different Catalog")
+              assert_installed_components(
+                  status.get("components", []), workload["selectedComponents"], "Client Control integration status"
+              )
+              installed = load_json(root() / "evidence" / "installed-workload-receipt-identities.json")
+              control_rows = [
+                  row for row in installed.get("components", [])
+                  if row.get("componentId") == "cyrene-client-workspace-control"
+              ]
+              require(len(control_rows) == 1, "verified Client Control active receipt is missing")
+              native = control_rows[0].get("nativeBinary")
+              require(isinstance(native, dict), "verified Client Control native active-pointer proof is missing")
+              require(
+                  native.get("activePath") == "/usr/lib/cyrene/components/cyrene-client-workspace-control/active"
+                  and native.get("activeTarget") == f"releases/{control_pin['version']}--{control_pin['manifestDigest'].removeprefix('sha256:')}"
+                  and native.get("releasePath") == control_rows[0].get("releasePath"),
+                  "Client Control active pointer does not match the exact installed receipt",
+              )
+              control_unit = "cyrene-client-workspace-control.service"
+              active_state = run(
+                  ["systemctl", "show", "--property=ActiveState", "--value", control_unit],
+                  label="client-control-systemd-active-state", timeout=30, retain_output=False,
+              ).stdout.strip()
+              require(active_state == "active", f"pinned Client Control unit is not active: {active_state or 'empty state'}")
+              fragment_path = run(
+                  ["systemctl", "show", "--property=FragmentPath", "--value", control_unit],
+                  label="client-control-systemd-fragment-path", timeout=30, retain_output=False,
+              ).stdout.strip()
+              require(bool(fragment_path) and Path(fragment_path).is_absolute(), "Client Control systemd unit fragment path is unavailable")
+              unit_path = Path(fragment_path).resolve(strict=True)
+              unit_info = unit_path.lstat()
+              require(
+                  unit_path.is_file() and unit_info.st_uid == 0 and unit_info.st_gid == 0
+                  and not (unit_info.st_mode & 0o022),
+                  "Client Control systemd unit is not a protected root-owned file",
+              )
+              unit_digest = "sha256:" + sha256(unit_path)
+              expected_unit_digest = native.get("controlUnitDigest")
+              require(
+                  isinstance(expected_unit_digest, str) and unit_digest == expected_unit_digest,
+                  "active Client Control unit bytes differ from the pinned signed component archive",
+              )
+
+              origin = "http://127.0.0.1:8100"
+              auth_status, _auth_headers, auth_body = request_loopback(
+                  origin + "/api/v1/auth/session",
+                  {"Accept": "application/json", "Host": "127.0.0.1:8100", "Origin": origin},
+              )
+              require(auth_status == 200, f"local Client auth session returned HTTP {auth_status}")
+              try:
+                  auth = json.loads(auth_body.decode("utf-8"))
+              except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                  raise RuntimeError("local Client auth session is not JSON") from error
+              csrf_token = auth.get("csrfToken") if isinstance(auth, dict) else None
+              require(
+                  isinstance(auth, dict) and auth.get("authenticated") is True
+                  and auth.get("state") == "AUTHENTICATED" and auth.get("sessionId") == "local"
+                  and auth.get("expiresAt") is None and auth.get("refreshExpiresAt") is None
+                  and auth.get("refreshable") is False and auth.get("refreshed") is False
+                  and isinstance(csrf_token, str) and re.fullmatch(r"[0-9a-f]{64}", csrf_token) is not None,
+                  "local Client auth session does not satisfy the no-credential local contract",
+              )
+
+              code = textwrap.dedent(r'''
+              import grp
+              import hashlib
+              import json
+              import os
+              import pwd
+              import stat
+              import urllib.error
+              import urllib.request
+              from pathlib import Path
+              from urllib.parse import urlsplit
+              def fail(message):
+                  raise SystemExit(message)
+              def read_protected(path, allowed_owners, maximum):
+                  target=Path(path)
+                  for parent in reversed(target.parents):
+                      parent_info=parent.lstat()
+                      if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid!=0 or stat.S_IMODE(parent_info.st_mode)&0o022:
+                          fail("Control runtime credential/config path has an unsafe ancestor")
+                  descriptor=os.open(target,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0))
+                  try:
+                      before=os.fstat(descriptor)
+                      identity=(before.st_uid,before.st_gid,stat.S_IMODE(before.st_mode))
+                      if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or identity not in allowed_owners or before.st_size>maximum:
+                          fail("Control runtime credential/config file has unsafe ownership, mode, or size")
+                      raw=b""
+                      while True:
+                          block=os.read(descriptor,65536)
+                          if not block: break
+                          raw+=block
+                          if len(raw)>maximum: fail("Control runtime credential/config file exceeds the size limit")
+                      after=os.fstat(descriptor)
+                      if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+                          fail("Control runtime credential/config file changed while being read")
+                  finally:
+                      os.close(descriptor)
+                  return raw
+              def shape(value):
+                  if isinstance(value,dict): return {"object":{key:shape(child) for key,child in sorted(value.items())}}
+                  if isinstance(value,list):
+                      members={json.dumps(shape(child),sort_keys=True,separators=(",",":")) for child in value}
+                      return {"array":sorted(members)}
+                  if value is None: return "null"
+                  if isinstance(value,bool): return "boolean"
+                  if isinstance(value,int): return "integer"
+                  if isinstance(value,float): return "number"
+                  if isinstance(value,str): return "string"
+                  fail("Product response contains a non-JSON value")
+              class DenyRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self,*_args,**_kwargs): return None
+              def get(url,headers):
+                  request=urllib.request.Request(url,headers=headers,method="GET")
+                  opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),DenyRedirect())
+                  try:
+                      response=opener.open(request,timeout=15)
+                  except urllib.error.HTTPError as error:
+                      response=error
+                  except (urllib.error.URLError,TimeoutError):
+                      fail("Loopback Product read request failed")
+                  with response:
+                      body=response.read(8*1024*1024+1)
+                      if len(body)>8*1024*1024: fail("Loopback Product response exceeded the size limit")
+                      if response.geturl()!=url: fail("Loopback Product read request changed route")
+                      return int(response.status),body
+              expected=json.load(__import__("sys").stdin)
+              catalyst_url=expected["catalystUrl"]
+              origin=expected["clientOrigin"]
+              unit_path=Path(expected["unitPath"])
+              cyrene_uid=pwd.getpwnam("cyrene").pw_uid
+              cyrene_gid=grp.getgrnam("cyrene").gr_gid
+              environment_path=Path("/etc/cyrene/studio-control.env")
+              environment_raw=read_protected(environment_path,{(0,cyrene_gid,0o640)},65536)
+              values={}
+              for raw_line in environment_raw.decode("ascii").splitlines():
+                  line=raw_line.strip()
+                  if not line or line.startswith("#"): continue
+                  key,separator,value=line.partition("=")
+                  if not separator or key not in {"STUDIO_CATALYST_URL","STUDIO_CATALYST_API_TOKEN_FILE"} or key in values or not value or value!=value.strip():
+                      fail("Control runtime environment file has an unexpected shape")
+                  values[key]=value
+              if set(values)!={"STUDIO_CATALYST_URL","STUDIO_CATALYST_API_TOKEN_FILE"}:
+                  fail("Control runtime environment is missing its exact Catalyst endpoint/token-file keys")
+              if values["STUDIO_CATALYST_URL"]!=catalyst_url:
+                  fail("Installed Control Catalyst URL differs from the exact pinned service origin")
+              parsed=urlsplit(values["STUDIO_CATALYST_URL"])
+              if parsed.scheme!="http" or parsed.hostname!="127.0.0.1" or parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment:
+                  fail("Installed Control Catalyst URL is not a loopback service origin")
+              unit_lines=[line.strip() for line in unit_path.read_text(encoding="utf-8").splitlines()]
+              public_origin_line="Environment=STUDIO_PUBLIC_ORIGINS=http://127.0.0.1:8100,http://localhost:8100"
+              if unit_lines.count(public_origin_line)!=1 or any(line.startswith("Environment=STUDIO_PUBLIC_ORIGINS=") and line!=public_origin_line for line in unit_lines):
+                  fail("Signed Control unit does not pin the exact loopback public origins")
+              token_path=Path(values["STUDIO_CATALYST_API_TOKEN_FILE"])
+              if not token_path.is_absolute() or ".." in token_path.parts:
+                  fail("Control Catalyst token-file path is not absolute and normalized")
+              token_raw=read_protected(token_path,{(0,cyrene_gid,0o640),(cyrene_uid,cyrene_gid,0o600)},4096)
+              token=token_raw.rstrip(b"\r\n")
+              if len(token)<32 or any(byte<33 or byte>126 for byte in token):
+                  fail("Control Catalyst service token is not a protected high-entropy printable value")
+              direct_status,direct_body=get(catalyst_url+"/api/v1/datasets",{"Accept":"application/json","Authorization":"Bearer "+token.decode("ascii")})
+              proxy_status,proxy_body=get(origin+"/api/v1/catalyst/datasets",{"Accept":"application/json","Host":"127.0.0.1:8100","Origin":origin})
+              if direct_status!=200: fail("Direct pinned Catalyst dataset read did not return HTTP 200")
+              if proxy_status!=direct_status: fail("Client Catalyst proxy HTTP status differs from direct Catalyst")
+              try:
+                  direct_value=json.loads(direct_body.decode("utf-8"))
+                  proxy_value=json.loads(proxy_body.decode("utf-8"))
+              except (UnicodeDecodeError,json.JSONDecodeError):
+                  fail("Direct Catalyst or Client proxy dataset response is not JSON")
+              direct_shape=shape(direct_value)
+              proxy_shape=shape(proxy_value)
+              if direct_shape!=proxy_shape: fail("Client Catalyst proxy JSON schema differs from direct Catalyst")
+              shape_raw=json.dumps(direct_shape,sort_keys=True,separators=(",",":")).encode("utf-8")
+              print(json.dumps({
+                  "controlEnvironmentUrlMatchesPinnedCatalyst":True,
+                  "controlEnvironmentFileOwner":"root:cyrene",
+                  "controlEnvironmentFileMode":"0640",
+                  "tokenFileReadableByCyrene":True,
+                  "publicOriginsPinnedBySignedUnit":True,
+                  "directCatalystRead":{"status":direct_status,"bodyBytes":len(direct_body),"bodySha256":hashlib.sha256(direct_body).hexdigest()},
+                  "clientCatalystProxy":{"status":proxy_status,"bodyBytes":len(proxy_body),"bodySha256":hashlib.sha256(proxy_body).hexdigest()},
+                  "jsonSchemaSha256":hashlib.sha256(shape_raw).hexdigest(),
+                  "jsonSchemaMatches":True,
+                  "credentialsStored":False,
+                  "datasetRecordsStored":False,
+              },sort_keys=True,separators=(",",":")))
+              ''').strip()
+              proxy_result = run(
+                  ["sudo", "-n", "python3", "-s", "-c", code],
+                  label="client-control-product-proxy-readback", timeout=90,
+                  input_text=json.dumps({
+                      "catalystUrl": workload["service"]["baseUrl"],
+                      "clientOrigin": origin,
+                      "unitPath": str(unit_path),
+                  }, separators=(",", ":")),
+              )
+              proxy_evidence = json.loads(proxy_result.stdout)
+              require(proxy_evidence.get("controlEnvironmentUrlMatchesPinnedCatalyst") is True, "installed Control Catalyst endpoint is not pinned")
+              require(proxy_evidence.get("publicOriginsPinnedBySignedUnit") is True, "installed Control public origin differs from signed loopback unit")
+              require(proxy_evidence.get("jsonSchemaMatches") is True, "Client proxy and direct Catalyst JSON schemas differ")
+              evidence = {
+                  "componentId": control_pin["componentId"],
+                  "targetId": control_pin["targetId"],
+                  "version": control_pin["version"],
+                  "releaseId": control_pin["releaseId"],
+                  "manifestDigest": control_pin["manifestDigest"],
+                  "artifactDigest": control_pin["digest"],
+                  "activePointer": native["activeTarget"],
+                  "activeReceiptSha256": control_rows[0]["immutableReceiptSha256"],
+                  "systemdUnit": control_unit,
+                  "systemdState": active_state,
+                  "unitDigest": unit_digest,
+                  "authSession": {"status": auth_status, "authenticated": True, "state": "AUTHENTICATED", "refreshable": False, "csrfTokenValidated": True, "csrfTokenStored": False},
+                  "controlRuntimeConfig": {"catalystUrlMatchesPinnedService": True, "configOwner": proxy_evidence["controlEnvironmentFileOwner"], "configMode": proxy_evidence["controlEnvironmentFileMode"], "tokenFileReadableByCyrene": proxy_evidence["tokenFileReadableByCyrene"], "publicOriginsPinnedBySignedUnit": True},
+                  "directCatalystRead": {"url": "/api/v1/datasets", **proxy_evidence["directCatalystRead"]},
+                  "clientCatalystProxy": {"url": "/api/v1/catalyst/datasets", **proxy_evidence["clientCatalystProxy"]},
+                  "jsonSchemaSha256": proxy_evidence["jsonSchemaSha256"],
+                  "directAndProxyJsonSchemaMatch": True,
+                  "datasetRecordsStored": False,
+              }
+              write_json(root() / "evidence" / "client-control-integration.json", evidence)
+              return evidence
+
+          def product_acceptance() -> None:
+              """Exercise installed Catalyst APIs and independently validate the generated ZIP."""
+              service = pins()["workloads"]["catalyst"]["service"]
+              bundle_evidence = phase("catalyst_active_bundle_identity", bundle_identity)
+              def health_gate() -> dict[str, Any]:
+                  health = request_http(service["baseUrl"], service["healthPath"])
+                  write_json(root() / "evidence" / "catalyst-healthz.json", health)
+                  return {"url": health["url"], "status": health["status"], "contentType": health["contentType"]}
+              phase("catalyst_http_liveness", health_gate)
+              output_dir = root() / "catalyst-output"
+              output_dir.mkdir(parents=True, exist_ok=True)
+              environment = os.environ.copy()
+              environment.pop("GH_TOKEN", None)
+              environment.pop("GITHUB_TOKEN", None)
+              environment["PYTHONPATH"] = bundle_evidence["activePath"] + "/python"
+              def producer_gate() -> dict[str, Any]:
+                  acceptance_command = [
+                      PRIVATE_PYTHON, "-s", "-m", CATALYST_ACCEPTANCE_MODULE,
+                      "--base-url", service["baseUrl"], "--output-directory", str(output_dir),
+                  ]
+                  produced = run(acceptance_command, label="installed-catalyst-acceptance-producer", timeout=900, env=environment, retain_output=False)
+                  bundle_path = output_dir / "authored-business-sft.zip"
+                  require(bundle_path.is_file() and bundle_path.stat().st_size > 0, "installed Catalyst producer did not create authored-business-sft.zip")
+                  output_bytes = produced.stdout.encode("utf-8")
+                  error_bytes = produced.stderr.encode("utf-8")
+                  return {"module": CATALYST_ACCEPTANCE_MODULE, "baseUrl": service["baseUrl"], "stdoutBytes": len(output_bytes), "stdoutSha256": hashlib.sha256(output_bytes).hexdigest(), "stderrBytes": len(error_bytes), "stderrSha256": hashlib.sha256(error_bytes).hexdigest(), "outputDirectory": str(output_dir), "bundleName": bundle_path.name, "bundleSizeBytes": bundle_path.stat().st_size, "bundleSha256": sha256(bundle_path)}
+              produced = phase("catalyst_installed_acceptance_producer", producer_gate)
+              bundle_path = output_dir / produced["bundleName"]
+              def consumer_gate() -> dict[str, Any]:
+                  consumer_command = [PRIVATE_PYTHON, "-s", "-m", CATALYST_CONSUMER_MODULE, str(bundle_path)]
+                  consumed = run(consumer_command, label="installed-catalyst-bundle-consumer", timeout=900, env=environment, retain_output=False)
+                  output_bytes = consumed.stdout.encode("utf-8")
+                  error_bytes = consumed.stderr.encode("utf-8")
+                  evidence = {"module": CATALYST_CONSUMER_MODULE, "bundleName": bundle_path.name, "bundleSizeBytes": bundle_path.stat().st_size, "bundleSha256": sha256(bundle_path), "stdoutBytes": len(output_bytes), "stdoutSha256": hashlib.sha256(output_bytes).hexdigest(), "stderrBytes": len(error_bytes), "stderrSha256": hashlib.sha256(error_bytes).hexdigest()}
+                  write_json(root() / "evidence" / "catalyst-generated-bundle-identity.json", {
+                      "name": bundle_path.name, "sizeBytes": bundle_path.stat().st_size,
+                      "sha256": evidence["bundleSha256"],
+                  })
+                  return evidence
+              phase("catalyst_independent_bundle_consumer", consumer_gate)
+              # The output ZIP stays outside artifacts because it can contain generated Product data.
+
+          def restart_recovery() -> None:
+              """Restart only the pinned Catalyst unit and prove it returns to HTTP service."""
+              service = pins()["workloads"]["catalyst"]["service"]
+              run(["sudo", "-n", "systemctl", "restart", service["unit"]], label="catalyst-systemd-restart", timeout=180)
+              last_error = "service has not recovered"
+              for _ in range(60):
+                  active = subprocess.run(["systemctl", "is-active", "--quiet", service["unit"]], check=False)
+                  try:
+                      health = request_http(service["baseUrl"], service["healthPath"])
+                      if active.returncode == 0:
+                          write_json(root() / "evidence" / "catalyst-post-restart-healthz.json", health)
+                          status = workload_request("status", workloadId="catalyst")
+                          require(status.get("catalogDigest") == pins()["workloads"]["catalyst"]["catalogDigest"], "Catalyst catalog changed across service restart")
+                          assert_installed_components(status.get("components", []), pins()["workloads"]["catalyst"]["selectedComponents"], "Catalyst post-restart status")
+                          return {"unit": service["unit"], "systemdActive": True, "healthStatus": health["status"], "catalogDigest": status["catalogDigest"]}
+                  except Exception as error:  # noqa: BLE001 - continue the bounded recovery wait.
+                      last_error = str(error)
+                  time.sleep(2)
+              raise RuntimeError(f"Catalyst did not recover after systemd restart: {last_error}")
+
+          def core_products() -> None:
+              """Run acceptance, independent verification, and restart in dependency order."""
+              product_acceptance()
+              phase("catalyst_service_restart_recovery", restart_recovery)
+
+          def finalize() -> None:
+              """Explain every unreached gate and calculate runnable core completion."""
+              value = ledger()
+              phases = value.setdefault("phases", {})
+              for name in PHASES:
+                  if name not in phases:
+                      phases[name] = {"status": "NOT_RUN", "reason": "no command recorded an outcome", "recordedAtUtc": utc_now(), "evidence": None}
+              required = (
+                  "runner_identity", "native_release_metadata", "native_release_provenance",
+                  "catalog_provenance", "release_asset_integrity", "native_deb_install",
+                  "native_static_binding_readback", "fresh_workload_inventory",
+                  "catalyst_workload_check", "catalyst_exact_plan_pins", "catalyst_workload_stage",
+                  "catalyst_workload_apply", "catalyst_runtime_source_activation",
+                  "plugins_platform_supervision",
+                  "catalyst_active_receipt_readback",
+                  "catalyst_installed_status_readback",
+                  "catalyst_public_repeat_install", "catalyst_active_bundle_identity",
+                  "catalyst_http_liveness", "client_static_web_http",
+                  "catalyst_installed_acceptance_producer",
+                  "catalyst_independent_bundle_consumer", "catalyst_service_restart_recovery",
+                  "missing_selection_gate", "client_release_integration",
+              )
+              required = ("release_pins_validation", *required)
+              value["requiredCorePass"] = all(phases[name]["status"] == "PASS" for name in required)
+              value["requiredCoreFailures"] = [
+                  name for name in required if phases[name]["status"] != "PASS"
+              ]
+              value["wholeHostAcceptance"] = "NOT_RUN"
+              value["wholeHostAcceptanceReason"] = "whole-VM reboot recovery is not exercised on a disposable hosted runner"
+              full_distribution_required = (
+                  *required,
+                  "host_reboot_recovery",
+                  "version_conflict_gate",
+                  "offline_retry_gate",
+                  "echo_exact_match_evaluate_uninstall",
+                  "plugins_platform_supervision",
+                  "client_release_integration",
+              )
+              value["fullDistributionAcceptance"] = "INCOMPLETE" if any(
+                  phases[name]["status"] != "PASS" for name in full_distribution_required
+              ) else "PASS"
+              value["updatedAtUtc"] = utc_now()
+              write_json(root() / "phase-ledger.json", value)
+              Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(
+                  "# Modular distribution acceptance\n\n"
+                  f"- Runnable Catalyst core: {'PASS' if value['requiredCorePass'] else 'INCOMPLETE'}\n"
+                  f"- Full distribution / host reboot acceptance: {value['fullDistributionAcceptance']}\n"
+                  "- See phase-ledger.json for each PASS, FAIL, and NOT_RUN phase.\n",
+                  encoding="utf-8",
+              )
+              print(f"Runnable Catalyst core complete: {value['requiredCorePass']}; full distribution acceptance: {value['fullDistributionAcceptance']}")
+              if not value["requiredCorePass"]:
+                  raise RuntimeError(f"required Catalyst core gates did not all pass: {value['requiredCoreFailures']}")
+
+          def main() -> int:
+              """Dispatch one workflow phase without accessing repository source."""
+              parser = argparse.ArgumentParser()
+              parser.add_argument("command", choices=("init", "preflight", "deb-install", "static-readback", "catalyst-core", "catalyst-products", "missing-selection", "finalize"))
+              arguments = parser.parse_args()
+              try:
+                  if arguments.command == "init":
+                      init()
+                  elif arguments.command == "preflight":
+                      preflight()
+                  elif arguments.command == "deb-install":
+                      phase("native_deb_install", dpkg_install)
+                  elif arguments.command == "static-readback":
+                      phase("native_static_binding_readback", static_binding_readback)
+                  elif arguments.command == "catalyst-core":
+                      catalyst_workload()
+                  elif arguments.command == "catalyst-products":
+                      core_products()
+                  elif arguments.command == "missing-selection":
+                      phase("missing_selection_gate", missing_required_selection)
+                  else:
+                      finalize()
+              except Exception as error:  # noqa: BLE001 - the phase ledger is the durable failure record.
+                  if arguments.command == "preflight":
+                      record(PREFLIGHT_STAGE, "FAIL", f"{type(error).__name__}: {error}")
+                  print(f"Acceptance phase failed: {error}", file=sys.stderr)
+                  return 1
+              return 0
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+          python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" init
+
+      - name: Verify exact immutable native release, v2 catalog, and DEB bytes
+        id: verify-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" preflight
+
+      - name: Install the verified native Ubuntu 24.04 DEB
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" deb-install
+
+      - name: Read back the installed native catalog binding and package contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" static-readback
+
+      - name: Check, stage, apply, read back, and repeat Catalyst workload install
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" catalyst-core
+
+      - name: Run installed Catalyst HTTP, producer, consumer, and systemd restart acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" catalyst-products
+
+      - name: Verify the resolver rejects omission of a required Catalyst component
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" missing-selection
+
+      - name: Finalize phase ledger
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f "$ACCEPTANCE_ROOT/acceptance_driver.py" ]]; then
+            python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" finalize
+          fi
+
+      - name: Upload exact pins, receipts, plans, command logs, and phase ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: modular-distribution-acceptance-${{ inputs.native_release_id }}
+          path: |
+            ${{ runner.temp }}/modular-distribution-v01/evidence/
+            ${{ runner.temp }}/modular-distribution-v01/logs/
+            ${{ runner.temp }}/modular-distribution-v01/phase-ledger.json
+          if-no-files-found: warn
+          retention-days: 90
