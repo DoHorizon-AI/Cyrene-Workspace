@@ -4059,6 +4059,7 @@ class ComponentUpdater:
                     "targetId",
                     "selections",
                     "action",
+                    "channel",
                 },
                 "stage": {
                     "protocolVersion",
@@ -4068,6 +4069,7 @@ class ComponentUpdater:
                     "planId",
                     "planDigest",
                     "action",
+                    "channel",
                 },
                 "apply": {
                     "protocolVersion",
@@ -4078,6 +4080,7 @@ class ComponentUpdater:
                     "planDigest",
                     "confirmation",
                     "action",
+                    "channel",
                 },
             }
             if (
@@ -4085,9 +4088,12 @@ class ComponentUpdater:
                 or set(request) - fields_by_operation[operation]
             ):
                 raise UpdateError("INVALID_REQUEST", "The workload request has unsupported fields.")
-            if operation in {"stage", "apply"} and "action" not in request:
+            if operation in {"stage", "apply"} and (
+                "action" not in request or "channel" not in request
+            ):
                 raise UpdateError(
-                    "INVALID_REQUEST", "Stage and apply must repeat the checked action."
+                    "INVALID_REQUEST",
+                    "Stage and apply must repeat the checked action and channel.",
                 )
             self._require_authorized_process()
             if operation == "status":
@@ -4099,6 +4105,7 @@ class ComponentUpdater:
                     request.get("targetId"),
                     request.get("selections", {}),
                     action=action,
+                    channel=request.get("channel"),
                 )
             elif operation == "stage":
                 result = self.stage_workload(
@@ -4107,6 +4114,7 @@ class ComponentUpdater:
                     request.get("planId"),
                     request.get("planDigest"),
                     action=request.get("action"),
+                    channel=request.get("channel"),
                 )
             else:
                 result = self.apply_workload(
@@ -4116,6 +4124,7 @@ class ComponentUpdater:
                     request.get("planDigest"),
                     request.get("confirmation"),
                     action=request.get("action"),
+                    channel=request.get("channel"),
                 )
             return {
                 "protocolVersion": WORKLOAD_PROTOCOL_VERSION,
@@ -4914,7 +4923,9 @@ class ComponentUpdater:
         selections: Any,
         *,
         action: str = "install",
+        channel: Any = None,
     ) -> tuple[dict[str, Any], dict[str, Candidate], dict[str, Any]]:
+        selected_channel = self._resolve_channel(channel)
         resolver = self._load_workload_resolver()
         potential_ids = resolver.potential_component_ids(self.catalog, workload_id)
         if not potential_ids:
@@ -4927,13 +4938,13 @@ class ComponentUpdater:
                 {},
                 {"indexes": []},
                 action=action,
+                channel=selected_channel,
             ).to_dict()
             return (
                 resolution,
                 {},
                 {"components": {}, "installationRecords": {}, "sourceBindings": []},
             )
-        channel = self._resolve_channel(None)
         candidates: dict[str, Candidate] = {}
         if action == "install":
             for component_id in potential_ids:
@@ -4945,7 +4956,9 @@ class ComponentUpdater:
                 if component_target is None:
                     continue
                 try:
-                    candidates[component_id] = self._candidate(component, component_target, channel)
+                    candidates[component_id] = self._candidate(
+                        component, component_target, selected_channel
+                    )
                 except UpdateError:
                     # The pure resolver emits a scoped blocker only if this release is
                     # required by the chosen workload closure.
@@ -4963,6 +4976,7 @@ class ComponentUpdater:
             installed,
             trusted_indexes,
             action=action,
+            channel=selected_channel,
         ).to_dict()
         return resolution, candidates, package_inventory
 
@@ -4973,6 +4987,7 @@ class ComponentUpdater:
         selections: Any,
         *,
         action: Any = "install",
+        channel: Any = None,
     ) -> dict[str, Any]:
         """Resolve the exact catalog workload and persist a digest-bound plan."""
 
@@ -4980,6 +4995,7 @@ class ComponentUpdater:
         self._ensure_state_root()
         if not isinstance(action, str) or action not in {"install", "uninstall"}:
             raise UpdateError("INVALID_ACTION", "Workload action must be install or uninstall.")
+        selected_channel = self._resolve_channel(channel)
         if not isinstance(selections, dict):
             raise UpdateError("INVALID_SELECTION", "selections must be a JSON object.")
         if workload_id is None and action == "uninstall":
@@ -5018,7 +5034,7 @@ class ComponentUpdater:
             workload_id = owner_ids[0]
         workload_id, target_id = self._require_workload_target(workload_id, target_id)
         resolution, candidates, _package_inventory = self._build_workload_plan(
-            workload_id, target_id, selections, action=action
+            workload_id, target_id, selections, action=action, channel=selected_channel
         )
         plan_id = resolution.get("planId")
         plan_digest = resolution.get("planDigest")
@@ -5039,7 +5055,7 @@ class ComponentUpdater:
                 "planDigest": plan_digest,
                 "catalogGeneration": self.catalog_generation,
                 "catalogDigest": self.catalog_digest,
-                "channel": self._resolve_channel(None),
+                "channel": selected_channel,
                 "workloadId": workload_id,
                 "targetId": target_id,
                 "action": action,
@@ -5072,6 +5088,7 @@ class ComponentUpdater:
             "workloadId": workload_id,
             "targetId": target_id,
             "action": action,
+            "channel": selected_channel,
             "components": resolution.get("selectedComponents", []),
             "resolution": resolution,
             "warnings": resolution.get("warnings", []),
@@ -5086,6 +5103,7 @@ class ComponentUpdater:
         plan_digest: Any,
         *,
         action: Any,
+        channel: Any,
     ) -> dict[str, Any]:
         """Re-resolve a checked workload before delegating package materialization."""
 
@@ -5094,6 +5112,7 @@ class ComponentUpdater:
         workload_id, target_id = self._require_workload_target(workload_id, target_id)
         if not isinstance(action, str) or action not in {"install", "uninstall"}:
             raise UpdateError("INVALID_ACTION", "Workload action must be install or uninstall.")
+        selected_channel = self._resolve_channel(channel)
         directory = self._workload_plan_directory()
         stored = _read_object(directory / f"{plan_id}.json", "checked workload plan")
         if (
@@ -5103,6 +5122,7 @@ class ComponentUpdater:
             or stored.get("workloadId") != workload_id
             or stored.get("targetId") != target_id
             or stored.get("action") != action
+            or stored.get("channel") != selected_channel
             or stored.get("catalogDigest") != self.catalog_digest
             or stored.get("catalogGeneration") != self.catalog_generation
             or stored.get("phase") not in {"checked", "staged"}
@@ -5113,12 +5133,17 @@ class ComponentUpdater:
                 retryable=True,
             )
         resolution, candidates, package_inventory = self._build_workload_plan(
-            workload_id, target_id, stored.get("selections"), action=action
+            workload_id,
+            target_id,
+            stored.get("selections"),
+            action=action,
+            channel=selected_channel,
         )
         if (
             resolution.get("status") != "ready"
             or resolution.get("planDigest") != plan_digest
             or resolution.get("action") != action
+            or resolution.get("channel") != selected_channel
         ):
             raise UpdateError(
                 "PLAN_CHANGED",
@@ -5134,6 +5159,7 @@ class ComponentUpdater:
                 "workloadId": workload_id,
                 "targetId": target_id,
                 "action": action,
+                "channel": selected_channel,
                 "components": stored.get("stagedComponents", []),
                 "resolution": resolution,
                 "warnings": resolution.get("warnings", []),
@@ -5241,6 +5267,7 @@ class ComponentUpdater:
             "workloadId": workload_id,
             "targetId": target_id,
             "action": action,
+            "channel": selected_channel,
             "components": staged,
             "resolution": resolution,
             "warnings": resolution.get("warnings", []),
@@ -6098,6 +6125,7 @@ class ComponentUpdater:
         confirmation: Any,
         *,
         action: Any,
+        channel: Any,
     ) -> dict[str, Any]:
         """Apply a staged Product/Web/SDK workload through the native transaction journal."""
 
@@ -6110,6 +6138,7 @@ class ComponentUpdater:
                 plan_digest,
                 confirmation,
                 action=action,
+                channel=channel,
             )
 
     def _apply_workload_locked(
@@ -6121,6 +6150,7 @@ class ComponentUpdater:
         confirmation: Any,
         *,
         action: Any,
+        channel: Any,
     ) -> dict[str, Any]:
         """Revalidate and apply one workload while holding the updater lock."""
 
@@ -6128,6 +6158,7 @@ class ComponentUpdater:
         workload_id, target_id = self._require_workload_target(workload_id, target_id)
         if not isinstance(action, str) or action not in {"install", "uninstall"}:
             raise UpdateError("INVALID_ACTION", "Workload action must be install or uninstall.")
+        selected_channel = self._resolve_channel(channel)
         if (
             not isinstance(confirmation, dict)
             or set(confirmation) != {"planId", "planDigest", "confirmed"}
@@ -6149,6 +6180,7 @@ class ComponentUpdater:
             or stored.get("workloadId") != workload_id
             or stored.get("targetId") != target_id
             or stored.get("action") != action
+            or stored.get("channel") != selected_channel
             or stored.get("catalogDigest") != self.catalog_digest
             or stored.get("catalogGeneration") != self.catalog_generation
         ):
@@ -8746,7 +8778,11 @@ class ComponentUpdater:
                 prior_transaction["packageRuntimeStarted"] = True
                 _atomic_json(transaction_path, prior_transaction)
         resolution, candidates, package_inventory = self._build_workload_plan(
-            workload_id, target_id, stored.get("selections"), action="install"
+            workload_id,
+            target_id,
+            stored.get("selections"),
+            action="install",
+            channel=stored.get("channel"),
         )
         if (
             (resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest)
@@ -9448,6 +9484,7 @@ class ComponentUpdater:
             "catalogDigest": stored["catalogDigest"],
             "workloadId": workload_id,
             "targetId": target_id,
+            "channel": stored["channel"],
             "components": rows,
             "resolution": resolution,
             "sourceBindings": package_inventory.get("sourceBindings", []),
@@ -9485,7 +9522,11 @@ class ComponentUpdater:
         workload_id = stored["workloadId"]
         target_id = stored["targetId"]
         resolution, candidates, _package_inventory = self._build_workload_plan(
-            workload_id, target_id, stored.get("selections"), action="install"
+            workload_id,
+            target_id,
+            stored.get("selections"),
+            action="install",
+            channel=stored.get("channel"),
         )
         if resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest:
             raise UpdateError(
@@ -9665,6 +9706,7 @@ class ComponentUpdater:
                 "catalogDigest": stored["catalogDigest"],
                 "workloadId": workload_id,
                 "targetId": target_id,
+                "channel": stored["channel"],
                 "components": rows,
                 "resolution": resolution,
             }
@@ -9778,6 +9820,7 @@ class ComponentUpdater:
             "catalogDigest": stored["catalogDigest"],
             "workloadId": workload_id,
             "targetId": target_id,
+            "channel": stored["channel"],
             "components": rows,
             "resolution": resolution,
         }
@@ -10240,7 +10283,11 @@ class ComponentUpdater:
                 _atomic_json(transaction_path, transaction)
 
         resolution, _candidates, package_inventory = self._build_workload_plan(
-            workload_id, target_id, stored.get("selections"), action="uninstall"
+            workload_id,
+            target_id,
+            stored.get("selections"),
+            action="uninstall",
+            channel=stored.get("channel"),
         )
         rows = resolution.get("selectedComponents") if isinstance(resolution, dict) else None
         staged_rows = stored.get("stagedComponents")
@@ -10600,6 +10647,7 @@ class ComponentUpdater:
                 "catalogDigest": stored["catalogDigest"],
                 "workloadId": workload_id,
                 "targetId": target_id,
+                "channel": stored["channel"],
                 "components": [component_result],
                 "resolution": resolution,
                 "sourceBindings": latest_inventory.get("sourceBindings", []),
@@ -10669,6 +10717,7 @@ class ComponentUpdater:
                 "catalogDigest": stored["catalogDigest"],
                 "workloadId": workload_id,
                 "targetId": target_id,
+                "channel": stored["channel"],
                 "components": [dict(row)],
                 "resolution": resolution,
                 "hostMetadata": {"web": web_host.read_web_host_status(runner=self.runner)},

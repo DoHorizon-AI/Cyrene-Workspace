@@ -1000,19 +1000,21 @@ def test_index_release_tag_rejects_unversioned_plugin_tag_and_mixed_versions(
         )
 
 
-def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_apply() -> None:
+def test_workload_protocol_defaults_check_action_and_repeats_action_and_channel() -> None:
     updater = object.__new__(updates.ComponentUpdater)
     updater._require_authorized_process = lambda: None
-    calls: list[tuple[str, str | None]] = []
-    updater.check_workload = lambda workload_id, target_id, selections, *, action: (
-        calls.append(("check", action)) or {"status": "ready"}
+    calls: list[tuple[str, str | None, str | None]] = []
+    updater.check_workload = lambda workload_id, target_id, selections, *, action, channel: (
+        calls.append(("check", action, channel)) or {"status": "ready"}
     )
-    updater.stage_workload = lambda workload_id, target_id, plan_id, plan_digest, *, action: (
-        calls.append(("stage", action)) or {"status": "staged"}
+    updater.stage_workload = (
+        lambda workload_id, target_id, plan_id, plan_digest, *, action, channel: (
+            calls.append(("stage", action, channel)) or {"status": "staged"}
+        )
     )
     updater.apply_workload = (
-        lambda workload_id, target_id, plan_id, plan_digest, confirmation, *, action: (
-            calls.append(("apply", action)) or {"status": "installed"}
+        lambda workload_id, target_id, plan_id, plan_digest, confirmation, *, action, channel: (
+            calls.append(("apply", action, channel)) or {"status": "installed"}
         )
     )
 
@@ -1032,6 +1034,7 @@ def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_app
         {
             **common,
             "operation": "check",
+            "channel": "preview",
             "action": "uninstall",
             "selections": {
                 "includeComponentIds": ["cyrene-tools-dataset-preparation"],
@@ -1044,6 +1047,7 @@ def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_app
         {
             **common,
             "operation": "stage",
+            "channel": "preview",
             "action": "uninstall",
             "planId": "plan-example",
             "planDigest": "sha256:" + "a" * 64,
@@ -1053,6 +1057,7 @@ def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_app
         {
             **common,
             "operation": "apply",
+            "channel": "preview",
             "action": "uninstall",
             "planId": "plan-example",
             "planDigest": "sha256:" + "a" * 64,
@@ -1068,10 +1073,10 @@ def test_workload_protocol_defaults_check_action_and_repeats_action_on_stage_app
     assert uninstall_check["ok"] is True
     assert stage["ok"] is True and apply["ok"] is True
     assert calls == [
-        ("check", "install"),
-        ("check", "uninstall"),
-        ("stage", "uninstall"),
-        ("apply", "uninstall"),
+        ("check", "install", None),
+        ("check", "uninstall", "preview"),
+        ("stage", "uninstall", "preview"),
+        ("apply", "uninstall", "preview"),
     ]
 
 
@@ -1090,6 +1095,62 @@ def test_workload_protocol_rejects_stage_without_repeated_action() -> None:
 
     assert response["ok"] is False
     assert response["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_workload_protocol_rejects_stage_without_repeated_channel() -> None:
+    updater = object.__new__(updates.ComponentUpdater)
+    response = updater.handle_workload(
+        {
+            "protocolVersion": updates.WORKLOAD_PROTOCOL_VERSION,
+            "operation": "stage",
+            "workloadId": "catalyst",
+            "targetId": updates.WORKLOAD_HOST_TARGET,
+            "planId": "plan-example",
+            "planDigest": "sha256:" + "a" * 64,
+            "action": "install",
+        }
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_blocked_workload_check_echoes_digest_bound_channel() -> None:
+    updater = object.__new__(updates.ComponentUpdater)
+    updater.catalog = {"defaultChannel": "stable", "channels": {"stable": {}, "preview": {}}}
+    updater.catalog_digest = "sha256:" + "b" * 64
+    updater.catalog_generation = 15
+    updater._reload_catalog_for_operation = lambda: None
+    updater._ensure_state_root = lambda: None
+    updater._require_workload_target = lambda workload_id, target_id: (workload_id, target_id)
+    plan_digest = "sha256:" + "a" * 64
+    resolution = {
+        "status": "blocked",
+        "planId": "plan-" + "a" * 32,
+        "planDigest": plan_digest,
+        "action": "install",
+        "channel": "preview",
+        "planDigestMaterial": {"channel": "preview"},
+        "selectedComponents": [],
+        "warnings": [],
+        "blockers": [{"code": "MISSING_RELEASE"}],
+    }
+    updater._build_workload_plan = lambda *args, **kwargs: (
+        resolution,
+        {},
+        {"components": {}, "installationRecords": {}, "sourceBindings": []},
+    )
+
+    result = updater.check_workload(
+        "catalyst",
+        updates.WORKLOAD_HOST_TARGET,
+        {},
+        channel="preview",
+    )
+
+    assert result["status"] == "blocked"
+    assert result["channel"] == result["resolution"]["channel"] == "preview"
+    assert result["resolution"]["planDigestMaterial"]["channel"] == "preview"
 
 
 @pytest.mark.parametrize(

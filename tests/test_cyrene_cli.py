@@ -41,17 +41,66 @@ def _set_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_workload_cli_accepts_guided_install_and_exact_component_uninstall() -> None:
     module = _module()
 
-    install = module.build_parser().parse_args(["workload", "install", "catalyst", "--yes"])
+    install = module.build_parser().parse_args(
+        ["workload", "install", "catalyst", "--channel", "preview", "--yes"]
+    )
     uninstall = module.build_parser().parse_args(
         ["workload", "uninstall", "cyrene-tools-dataset-preparation", "--workload", "plugins"]
     )
 
     assert install.workload_action == "install"
     assert install.workload_id == "catalyst"
+    assert install.channel == "preview"
     assert install.yes is True
     assert uninstall.workload_action == "uninstall"
     assert uninstall.workload_id == "cyrene-tools-dataset-preparation"
     assert uninstall.workload_owner == "plugins"
+
+
+def test_workload_cli_repeats_explicit_channel_through_check_stage_and_apply(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _module()
+    monkeypatch.setattr(module.os, "geteuid", lambda: 0)
+    requests: list[dict[str, object]] = []
+
+    def run(_command: list[str], *, input: str, **_kwargs: object) -> SimpleNamespace:
+        request = json.loads(input)
+        requests.append(request)
+        operation = request["operation"]
+        result: dict[str, object] = {"status": "ready"}
+        if operation == "check":
+            result.update(
+                {
+                    "planId": "plan-example",
+                    "planDigest": "sha256:" + "a" * 64,
+                    "workloadId": "catalyst",
+                    "channel": "preview",
+                    "resolution": {"selectedComponents": []},
+                }
+            )
+        elif operation == "stage":
+            result["status"] = "staged"
+        else:
+            result["status"] = "installed"
+        response = {
+            "protocolVersion": "cyrene.workload-plan.v1",
+            "ok": True,
+            "operation": operation,
+            "result": result,
+        }
+        return SimpleNamespace(returncode=0, stdout=json.dumps(response) + "\n", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+    args = module.build_parser().parse_args(
+        ["workload", "install", "catalyst", "--channel", "preview", "--yes"]
+    )
+
+    assert args.func(args) == 0
+    capsys.readouterr()
+    assert [request["operation"] for request in requests] == ["check", "stage", "apply"]
+    assert all(request["channel"] == "preview" for request in requests)
+    assert all(request["action"] == "install" for request in requests)
 
 
 def test_backup_rejects_destination_inside_data_directory(
