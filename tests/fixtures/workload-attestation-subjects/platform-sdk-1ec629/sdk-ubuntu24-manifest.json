@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "releaseId": "preview-1ec629e55195fa803651fb23d1c50d04696a94a8",
+  "componentId": "cyrene-runtime-maintenance-sdk",
+  "version": "0.1.0",
+  "channel": "preview",
+  "target": {
+    "os": "linux",
+    "osVersion": "24.04",
+    "distribution": "ubuntu",
+    "distributionVersion": "24.04",
+    "architecture": "x86_64",
+    "abi": "glibc-2.39",
+    "runtime": "python:3.12"
+  },
+  "artifact": {
+    "kind": "python-bundle",
+    "format": "tar.gz",
+    "sha256": "sha256:27fa46eb3ef1b9081c1fda10dbcb474cccd4ab7cf7b5a7d0c3ba8e7c7e7c9bce",
+    "sizeBytes": 23419,
+    "files": {
+      "cyrene_runtime_maintenance-0.1.0-py3-none-any.whl": "sha256:580354046af87fc529ab6c19c9f6d14be24859028403b7d941de85d1c10c44fb",
+      "sdk-release.json": "sha256:ec64025d61bbb4caf6517588eb9a72c653db9f188588fdc6ff64b7b818ae568d"
+    },
+    "uri": "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/preview-1ec629e55195fa803651fb23d1c50d04696a94a8/cyrene-runtime-maintenance-sdk-linux-ubuntu-24.04-x86_64-python-3.12-library.tar.gz"
+  },
+  "dependencies": [],
+  "restart": {
+    "group": "none"
+  },
+  "source": {
+    "repository": "https://github.com/DoHorizon-AI/Cyrene-Platform",
+    "ref": "refs/heads/develop",
+    "commit": "1ec629e55195fa803651fb23d1c50d04696a94a8"
+  },
+  "provenance": {
+    "attestation": {
+      "kind": "github-artifact-attestation",
+      "subjectName": "cyrene-runtime-maintenance-sdk-linux-ubuntu-24.04-x86_64-python-3.12-library.tar.gz",
+      "repository": "DoHorizon-AI/Cyrene-Platform",
+      "workflow": "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml",
+      "predicateType": "https://slsa.dev/provenance/v1",
+      "run": {
+        "id": "37849780192",
+        "attempt": 1,
+        "url": "https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/37849780192/attempts/1"
+      }
+    }
+  },
+  "manifestDigest": "sha256:fe04da79a0925be23d3d168d9dc5c4e3214eb1ab322ec8ce7cddc8dd6828eb36"
+}

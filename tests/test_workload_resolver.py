@@ -48,6 +48,13 @@ def _sha(label: str) -> str:
     return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
 
 
+def _jcs_digest(value: dict[str, Any], field: str) -> str:
+    material = dict(value)
+    material.pop(field, None)
+    payload = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+
+
 def _component(
     component_id: str,
     kind: str,
@@ -198,6 +205,7 @@ def _release_envelopes(
     *,
     versions: dict[str, str] | None = None,
     missing_indexes: set[str] | None = None,
+    workflow: str = WORKFLOW,
 ) -> dict[str, Any]:
     versions = versions or {}
     missing_indexes = missing_indexes or set()
@@ -212,20 +220,37 @@ def _release_envelopes(
         )
         version = versions.get(component_id, "1.2.0" if component_id == "shared" else "1.0.0")
         release_id = f"stable-{component_id}-{version}-{SOURCE_COMMIT}"
-        manifest_digest = _sha(f"manifest:{component_id}:{version}")
-        manifest_asset_digest = _sha(f"manifest-asset:{component_id}:{version}")
         payload_digest = _sha(f"payload:{component_id}:{version}")
         dependencies = copy.deepcopy(component["dependencies"])
-        artifact: dict[str, Any] = {"kind": target_row["artifactKind"], "sha256": payload_digest}
+        asset_name = f"{component_id}-payload.tar.gz"
+        asset_uri = f"https://github.com/{REPOSITORY}/releases/download/{release_id}/{asset_name}"
+        artifact: dict[str, Any] = {
+            "kind": target_row["artifactKind"],
+            "sha256": payload_digest,
+            "sizeBytes": 1,
+            "uri": asset_uri,
+        }
         if artifact["kind"] == "plugin-package":
             package = component["pluginPackage"]
+            asset_name = f"{component_id}-payload.zip"
+            asset_uri = f"https://github.com/{REPOSITORY}/releases/download/{release_id}/{asset_name}"
             artifact = {
                 "kind": "plugin-package",
                 "packageId": package["packageId"],
                 "capabilityId": package["capabilityId"],
                 "interfaceVersion": package["interfaceVersion"],
-                "archive": {"sha256": payload_digest},
+                "archive": {"sha256": payload_digest, "sizeBytes": 1, "uri": asset_uri},
             }
+        source = {
+            "repository": f"https://github.com/{REPOSITORY}",
+            "commit": SOURCE_COMMIT,
+            "ref": "refs/heads/main",
+        }
+        run = {
+            "id": "123",
+            "attempt": 1,
+            "url": f"https://github.com/{REPOSITORY}/actions/runs/123/attempts/1",
+        }
         manifest = {
             "schemaVersion": 2,
             "releaseId": release_id,
@@ -236,53 +261,74 @@ def _release_envelopes(
             "artifact": artifact,
             "dependencies": dependencies,
             "restart": copy.deepcopy(component["restart"]),
-            "source": {
-                "repository": f"https://github.com/{REPOSITORY}",
-                "commit": SOURCE_COMMIT,
-                "ref": f"refs/tags/{release_id}",
+            "source": source,
+            "provenance": {
+                "attestation": {
+                    "kind": "github-artifact-attestation",
+                    "repository": REPOSITORY,
+                    "workflow": workflow,
+                    "predicateType": "https://slsa.dev/provenance/v1",
+                    "subjectName": asset_name,
+                    "run": run,
+                }
             },
-            "provenance": {},
-            "manifestDigest": manifest_digest,
             "protocolVersion": component["protocolVersion"],
             "contentDigest": payload_digest,
         }
-        asset_digest = _sha(f"index-bytes:{component_id}:{version}")
-        index_digest = _sha(f"index-content:{component_id}:{version}")
+        manifest_digest = _jcs_digest(manifest, "manifestDigest")
+        manifest["manifestDigest"] = manifest_digest
+        manifest_bytes = json.dumps(
+            manifest, ensure_ascii=False, separators=(",", ":")
+        ).encode()
+        manifest_asset_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        manifest_uri = (
+            f"https://github.com/{REPOSITORY}/releases/download/{release_id}/"
+            "component-release-manifest-v2.json"
+        )
         index = {
             "schemaVersion": 1,
             "repository": REPOSITORY,
             "channel": "stable",
-            "source": {
-                "repository": f"https://github.com/{REPOSITORY}",
-                "ref": "refs/heads/main",
-                "commit": SOURCE_COMMIT,
+            "source": source,
+            "provenance": {
+                "attestation": {
+                    "kind": "github-artifact-attestation",
+                    "repository": REPOSITORY,
+                    "workflow": workflow,
+                    "predicateType": "https://slsa.dev/provenance/v1",
+                    "subjectName": "component-release-index-v1.json",
+                    "run": run,
+                }
             },
             "releases": [
                 {
                     "componentId": component_id,
                     "version": version,
                     "target": target,
-                    "manifestUri": f"https://github.com/{REPOSITORY}/releases/download/{release_id}/component-release-manifest-v2.json",
+                    "manifestUri": manifest_uri,
                     "manifestDigest": manifest_digest,
                 }
             ],
-            "indexDigest": index_digest,
         }
+        index_digest = _jcs_digest(index, "indexDigest")
+        index["indexDigest"] = index_digest
+        index_bytes = json.dumps(index, ensure_ascii=False, separators=(",", ":")).encode()
+        asset_digest = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
         index_attestation = {
             "repository": REPOSITORY,
-            "workflow": WORKFLOW,
+            "workflow": workflow,
             "sourceCommit": SOURCE_COMMIT,
             "sourceRef": "refs/heads/main",
             "subjectName": "component-release-index-v1.json",
             "subjectDigest": asset_digest,
         }
-        manifest_attestation = {
+        artifact_attestation = {
             "repository": REPOSITORY,
-            "workflow": WORKFLOW,
+            "workflow": workflow,
             "sourceCommit": SOURCE_COMMIT,
-            "sourceRef": f"refs/tags/{release_id}",
-            "subjectName": "component-release-manifest-v2.json",
-            "subjectDigest": manifest_asset_digest,
+            "sourceRef": "refs/heads/main",
+            "subjectName": asset_name,
+            "subjectDigest": payload_digest,
         }
         envelopes.append(
             {
@@ -293,11 +339,7 @@ def _release_envelopes(
                 "indexDigest": index_digest,
                 "channel": "stable",
                 "releaseTag": release_id,
-                "source": {
-                    "repository": f"https://github.com/{REPOSITORY}",
-                    "ref": "refs/heads/main",
-                    "commit": SOURCE_COMMIT,
-                },
+                "source": source,
                 "attestationRef": index_attestation,
                 "index": index,
                 "manifests": [
@@ -305,13 +347,21 @@ def _release_envelopes(
                         "componentId": component_id,
                         "version": version,
                         "target": target,
-                        "manifestUri": index["releases"][0]["manifestUri"],
+                        "manifestUri": manifest_uri,
                         "manifestDigest": manifest_digest,
                         "manifestAssetDigest": manifest_asset_digest,
                         "artifactDigest": payload_digest,
                         "manifest": manifest,
                         "releaseTag": release_id,
-                        "attestationRef": manifest_attestation,
+                        "attestationRef": artifact_attestation,
+                        "manifestAssetAttestationRef": {
+                            "repository": REPOSITORY,
+                            "workflow": workflow,
+                            "sourceCommit": SOURCE_COMMIT,
+                            "sourceRef": "refs/heads/main",
+                            "subjectName": "component-release-manifest-v2.json",
+                            "subjectDigest": manifest_asset_digest,
+                        },
                     }
                 ],
             }
@@ -330,6 +380,119 @@ def _resolve(catalog: dict[str, Any], indexes: dict[str, Any], **kwargs: Any):
         indexes,
         kwargs.pop("action", "install"),
     ).to_dict()
+
+
+def _official_legacy_release_envelope(
+    component_id: str,
+    *,
+    index_path: Path,
+    manifest_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build an envelope from immutable official v1 release assets on disk."""
+
+    catalog = json.loads((ROOT / "governance" / "component-catalog-v2.json").read_text())
+    catalog["defaultChannel"] = "preview"
+    index_bytes = index_path.read_bytes()
+    index = json.loads(index_bytes)
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    release = next(
+        row
+        for row in index["releases"]
+        if row["componentId"] == component_id
+        and row["target"] == manifest["target"]
+        and row["manifestDigest"] == manifest["manifestDigest"]
+    )
+    index_attestation = index["provenance"]["attestation"]
+    manifest_attestation = manifest["provenance"]["attestation"]
+    repository = index["repository"]
+    index_asset_digest = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
+    manifest_asset_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+    release_tag = manifest["releaseId"]
+    artifact_digest = manifest["artifact"].get("sha256", manifest["artifact"].get("digest"))
+    envelope = {
+        "repository": repository,
+        "assetName": "component-release-index-v1.json",
+        "assetUri": (
+            f"https://github.com/{repository}/releases/download/{release_tag}/"
+            "component-release-index-v1.json"
+        ),
+        "assetDigest": index_asset_digest,
+        "indexDigest": index["indexDigest"],
+        "channel": index["channel"],
+        "releaseTag": release_tag,
+        "source": index["source"],
+        "attestationRef": {
+            "repository": repository,
+            "workflow": index_attestation["workflow"],
+            "sourceCommit": index["source"]["commit"],
+            "sourceRef": index["source"]["ref"],
+            "subjectName": index_attestation["subjectName"],
+            "subjectDigest": index_asset_digest,
+        },
+        "index": index,
+        "manifests": [
+            {
+                "componentId": component_id,
+                "version": manifest["version"],
+                "target": manifest["target"],
+                "manifestUri": release["manifestUri"],
+                "manifestDigest": release["manifestDigest"],
+                "manifestAssetDigest": manifest_asset_digest,
+                "artifactDigest": artifact_digest,
+                "manifest": manifest,
+                "releaseTag": release_tag,
+                "attestationRef": {
+                    "repository": repository,
+                    "workflow": manifest_attestation["workflow"],
+                    "sourceCommit": manifest["source"]["commit"],
+                    "sourceRef": manifest["source"]["ref"],
+                    "subjectName": manifest_attestation["subjectName"],
+                    "subjectDigest": artifact_digest,
+                },
+            }
+        ],
+    }
+    return catalog, envelope, manifest
+
+
+def _resolve_one_official_candidate(
+    component_id: str,
+    *,
+    index_path: Path,
+    manifest_path: Path,
+    envelope_override: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    catalog, envelope, manifest = _official_legacy_release_envelope(
+        component_id, index_path=index_path, manifest_path=manifest_path
+    )
+    if envelope_override is not None:
+        envelope = envelope_override
+    component = next(row for row in catalog["components"] if row["componentId"] == component_id)
+    target_id = next(
+        row["targetId"]
+        for row in component["targets"]
+        if row["support"] == "supported"
+        and row["artifactKind"] == manifest["artifact"]["kind"]
+        and next(
+            target["target"]
+            for target in catalog["targets"]
+            if target["id"] == row["targetId"]
+        )
+        == manifest["target"]
+    )
+    target_row = next(row for row in component["targets"] if row["targetId"] == target_id)
+    blockers: list[dict[str, Any]] = []
+    rows = _RESOLVER_MODULE._candidate_rows(
+        {"indexes": [envelope]},
+        catalog,
+        component,
+        target_id,
+        target_row["artifactKind"],
+        blockers,
+        requiredness="required",
+    )
+    return rows, blockers, manifest
 
 
 def _installed_identity(component_id: str, target_id: str) -> dict[str, Any]:
@@ -557,7 +720,7 @@ def test_digest_is_reproducible_and_binds_selection_and_index_identity() -> None
     )
 
 
-def test_manifest_attestation_binds_raw_asset_digest_separately_from_jcs_digest() -> None:
+def test_artifact_attestation_is_separate_from_manifest_raw_and_jcs_digests() -> None:
     catalog = _catalog()
     indexes = _release_envelopes(catalog, {"app", "runtime", "shared", "plugin-a"})
     selected = next(
@@ -567,7 +730,8 @@ def test_manifest_attestation_binds_raw_asset_digest_separately_from_jcs_digest(
         if row["componentId"] == "app"
     )
     assert selected["manifestAssetDigest"] != selected["manifestDigest"]
-    assert selected["attestationRef"]["subjectDigest"] == selected["manifestAssetDigest"]
+    assert selected["attestationRef"]["subjectDigest"] == selected["artifactDigest"]
+    assert selected["attestationRef"]["subjectName"].endswith("-payload.tar.gz")
 
     original = _resolve(catalog, indexes)
     changed_indexes = copy.deepcopy(indexes)
@@ -578,10 +742,40 @@ def test_manifest_attestation_binds_raw_asset_digest_separately_from_jcs_digest(
         if row["componentId"] == "app"
     )
     changed["manifestAssetDigest"] = _sha("different-raw-manifest")
-    changed["attestationRef"]["subjectDigest"] = changed["manifestAssetDigest"]
+    changed["manifestAssetAttestationRef"]["subjectDigest"] = changed["manifestAssetDigest"]
     changed_result = _resolve(catalog, changed_indexes)
     assert changed_result["status"] == "ready"
     assert changed_result["planDigest"] != original["planDigest"]
+
+    raw_manifest_proof_indexes = copy.deepcopy(indexes)
+    raw_manifest_proof = next(
+        row
+        for envelope in raw_manifest_proof_indexes["indexes"]
+        for row in envelope["manifests"]
+        if row["componentId"] == "app"
+    )
+    raw_manifest_proof["manifestAssetAttestationRef"]["subjectDigest"] = _sha(
+        "different-raw-manifest"
+    )
+    raw_manifest_proof_result = _resolve(catalog, raw_manifest_proof_indexes)
+    assert any(
+        row["code"] == "TRUSTED_INDEX_BINDING_INVALID"
+        for row in raw_manifest_proof_result["blockers"]
+    )
+
+    missing_raw_manifest_proof_indexes = copy.deepcopy(indexes)
+    missing_raw_manifest_proof = next(
+        row
+        for envelope in missing_raw_manifest_proof_indexes["indexes"]
+        for row in envelope["manifests"]
+        if row["componentId"] == "app"
+    )
+    missing_raw_manifest_proof.pop("manifestAssetAttestationRef")
+    missing_raw_manifest_proof_result = _resolve(catalog, missing_raw_manifest_proof_indexes)
+    assert any(
+        row["code"] == "TRUSTED_INDEX_BINDING_INVALID"
+        for row in missing_raw_manifest_proof_result["blockers"]
+    )
 
     broken_indexes = copy.deepcopy(indexes)
     broken = next(
@@ -593,6 +787,179 @@ def test_manifest_attestation_binds_raw_asset_digest_separately_from_jcs_digest(
     broken["attestationRef"]["subjectDigest"] = broken["manifestDigest"]
     broken_result = _resolve(catalog, broken_indexes)
     assert any(row["code"] == "TRUSTED_INDEX_BINDING_INVALID" for row in broken_result["blockers"])
+
+
+@pytest.mark.parametrize(
+    ("component_id", "directory", "manifest_name", "raw_manifest_digest", "jcs_digest"),
+    [
+        (
+            "cyrene-catalyst",
+            "catalyst-4ad950",
+            "catalyst-ubuntu24-manifest.json",
+            "sha256:cbea66b69b7087872e911dc034229000ae11cfd7b3c31942b1d13eb48c49b1a8",
+            "sha256:47e5a723f59ab2ba90e6a7f75a33a1db3566228b04301af0b4e1f56525e520e4",
+        ),
+        (
+            "cyrene-runtime-maintenance-sdk",
+            "platform-sdk-1ec629",
+            "sdk-ubuntu24-manifest.json",
+            "sha256:0ffc6db33002fae16788c7d5a1600b43baf4e674e1c7fc3618a8f80aba028c87",
+            "sha256:fe04da79a0925be23d3d168d9dc5c4e3214eb1ab322ec8ce7cddc8dd6828eb36",
+        ),
+        (
+            "cyrene-echo",
+            "echo-d5",
+            "echo-ubuntu24-oci-manifest.json",
+            "sha256:1106d990493a617cc83d21fae409929ccb0ffc71573701e523bf4038059e99a7",
+            "sha256:42aa2d24fcb3451868bff301816b4a954656006c8cd226824fab774e27d3678e",
+        ),
+    ],
+)
+def test_official_legacy_release_uses_signed_jcs_manifest_and_artifact_attestation(
+    component_id: str,
+    directory: str,
+    manifest_name: str,
+    raw_manifest_digest: str,
+    jcs_digest: str,
+) -> None:
+    fixture_root = ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / directory
+    index_path = fixture_root / "component-release-index-v1.json"
+    manifest_path = fixture_root / manifest_name
+
+    rows, blockers, manifest = _resolve_one_official_candidate(
+        component_id, index_path=index_path, manifest_path=manifest_path
+    )
+
+    assert blockers == []
+    assert len(rows) == 1
+    selected = rows[0]
+    artifact = manifest["artifact"]
+    actual_raw_digest = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert actual_raw_digest == raw_manifest_digest
+    assert selected["manifestAssetDigest"] == raw_manifest_digest
+    assert selected["manifestDigest"] == jcs_digest
+    assert selected["manifestDigest"] != selected["manifestAssetDigest"]
+    artifact_digest = _RESOLVER_MODULE._manifest_content_digest(manifest, artifact)
+    assert selected["digest"] == artifact_digest
+    assert selected["attestationRef"]["subjectName"] == (
+        _RESOLVER_MODULE._manifest_attestation_subject_name(artifact)
+    )
+    assert selected["attestationRef"]["subjectDigest"] == artifact_digest
+    assert selected["attestationRef"]["subjectDigest"] not in {
+        selected["manifestDigest"],
+        selected["manifestAssetDigest"],
+    }
+
+
+@pytest.mark.parametrize("field", ["subjectName", "subjectDigest"])
+def test_official_legacy_release_rejects_manifest_as_artifact_attestation_subject(
+    field: str,
+) -> None:
+    fixture_root = (
+        ROOT
+        / "tests"
+        / "fixtures"
+        / "workload-attestation-subjects"
+        / "catalyst-4ad950"
+    )
+    catalog, envelope, _manifest = _official_legacy_release_envelope(
+        "cyrene-catalyst",
+        index_path=fixture_root / "component-release-index-v1.json",
+        manifest_path=fixture_root / "catalyst-ubuntu24-manifest.json",
+    )
+    wrapped = envelope["manifests"][0]
+    wrapped["attestationRef"][field] = (
+        wrapped["manifestUri"].rsplit("/", 1)[-1]
+        if field == "subjectName"
+        else wrapped["manifestAssetDigest"]
+    )
+    component = next(row for row in catalog["components"] if row["componentId"] == "cyrene-catalyst")
+    target_id = "linux-ubuntu-24.04-x86_64-python-3.12"
+    blockers: list[dict[str, Any]] = []
+
+    rows = _RESOLVER_MODULE._candidate_rows(
+        {"indexes": [envelope]},
+        catalog,
+        component,
+        target_id,
+        "python-bundle",
+        blockers,
+        requiredness="required",
+    )
+
+    assert rows == []
+    assert any(row["code"] == "TRUSTED_INDEX_BINDING_INVALID" for row in blockers)
+
+
+def test_official_oci_release_rejects_manifest_digest_as_image_attestation_digest() -> None:
+    fixture_root = (
+        ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "echo-d5"
+    )
+    catalog, envelope, _manifest = _official_legacy_release_envelope(
+        "cyrene-echo",
+        index_path=fixture_root / "component-release-index-v1.json",
+        manifest_path=fixture_root / "echo-ubuntu24-oci-manifest.json",
+    )
+    wrapped = envelope["manifests"][0]
+    wrapped["attestationRef"]["subjectDigest"] = wrapped["manifestAssetDigest"]
+    component = next(row for row in catalog["components"] if row["componentId"] == "cyrene-echo")
+    target_id = "linux-ubuntu-24.04-x86_64-oci"
+    blockers: list[dict[str, Any]] = []
+
+    rows = _RESOLVER_MODULE._candidate_rows(
+        {"indexes": [envelope]},
+        catalog,
+        component,
+        target_id,
+        "oci-image",
+        blockers,
+        requiredness="required",
+    )
+
+    assert rows == []
+    assert any(row["code"] == "TRUSTED_INDEX_BINDING_INVALID" for row in blockers)
+
+
+@pytest.mark.parametrize("field", ["source", "target", "version"])
+def test_official_release_rejects_mixed_signed_index_manifest_tuple(field: str) -> None:
+    fixture_root = (
+        ROOT
+        / "tests"
+        / "fixtures"
+        / "workload-attestation-subjects"
+        / "platform-sdk-1ec629"
+    )
+    catalog, envelope, manifest = _official_legacy_release_envelope(
+        "cyrene-runtime-maintenance-sdk",
+        index_path=fixture_root / "component-release-index-v1.json",
+        manifest_path=fixture_root / "sdk-ubuntu24-manifest.json",
+    )
+    if field == "source":
+        manifest["source"]["commit"] = "f" * 40
+    elif field == "target":
+        manifest["target"]["architecture"] = "aarch64"
+    else:
+        manifest["version"] = "0.1.1"
+    envelope["manifests"][0]["manifest"] = manifest
+    component = next(
+        row
+        for row in catalog["components"]
+        if row["componentId"] == "cyrene-runtime-maintenance-sdk"
+    )
+    target_id = "linux-ubuntu-24.04-x86_64-python-3.12-library"
+    blockers: list[dict[str, Any]] = []
+
+    rows = _RESOLVER_MODULE._candidate_rows(
+        {"indexes": [envelope]},
+        catalog,
+        component,
+        target_id,
+        "python-bundle",
+        blockers,
+        requiredness="required",
+    )
+
+    assert rows == []
 
 
 def test_explicit_publisher_identity_prevents_same_repository_workflow_ambiguity() -> None:
@@ -615,10 +982,11 @@ def test_explicit_publisher_identity_prevents_same_repository_workflow_ambiguity
     result = _resolve(catalog, indexes)
     assert result["status"] == "blocked"
     wrong_workflow = "Example-Corp/Resolver-Releases/.github/workflows/other.yml"
-    for envelope in indexes["indexes"]:
-        envelope["attestationRef"]["workflow"] = wrong_workflow
-        for manifest in envelope["manifests"]:
-            manifest["attestationRef"]["workflow"] = wrong_workflow
+    indexes = _release_envelopes(
+        catalog,
+        {"app", "runtime", "shared", "plugin-a"},
+        workflow=wrong_workflow,
+    )
     result = _resolve(catalog, indexes)
     assert result["status"] == "ready"
     assert all(

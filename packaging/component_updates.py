@@ -14801,6 +14801,8 @@ class ComponentUpdater:
                 or not isinstance(index_attestation, dict)
                 or not isinstance(manifest_source, dict)
                 or not isinstance(manifest_attestation, dict)
+                or candidate.manifest.get("schemaVersion") == 2
+                and not _valid_digest(candidate.manifest_asset_digest)
             ):
                 raise UpdateError(
                     "UNTRUSTED_RELEASE_INDEX",
@@ -14823,8 +14825,23 @@ class ComponentUpdater:
                 "sourceCommit": manifest_source["commit"],
                 "sourceRef": manifest_source["ref"],
                 "subjectName": manifest_attestation["subjectName"],
-                "subjectDigest": candidate.manifest_asset_digest,
+                # Manifest bytes are bound by the index's JCS digest; the
+                # manifest's provenance subject is its payload/archive digest.
+                "subjectDigest": candidate.artifact_digest,
             }
+            manifest_asset_attestation_ref = None
+            if candidate.manifest.get("schemaVersion") == 2:
+                manifest_name = PurePosixPath(
+                    urllib.parse.urlsplit(candidate.manifest_uri).path
+                ).name
+                manifest_asset_attestation_ref = {
+                    "repository": repository,
+                    "workflow": workflow,
+                    "sourceCommit": manifest_source["commit"],
+                    "sourceRef": manifest_source["ref"],
+                    "subjectName": manifest_name,
+                    "subjectDigest": candidate.manifest_asset_digest,
+                }
             identity = indexes.get(key)
             if identity is None:
                 identity = {
@@ -14862,6 +14879,11 @@ class ComponentUpdater:
                     "manifest": candidate.manifest,
                     "releaseTag": candidate.release_tag,
                     "attestationRef": manifest_attestation_ref,
+                    **(
+                        {"manifestAssetAttestationRef": manifest_asset_attestation_ref}
+                        if manifest_asset_attestation_ref is not None
+                        else {}
+                    ),
                 }
             )
         normalized = []
