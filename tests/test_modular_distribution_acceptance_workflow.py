@@ -83,6 +83,7 @@ def _valid_pins() -> dict[str, object]:
                 "assetName": "component-release-index-v1.json",
                 "assetDigest": "sha256:" + "f" * 64,
                 "indexDigest": "sha256:" + "a" * 64,
+                "channel": "preview",
                 "releaseTag": component_release,
             },
             "attestationRef": {
@@ -137,6 +138,7 @@ def _valid_pins() -> dict[str, object]:
                 "workloadId": "catalyst",
                 "targetId": "linux-ubuntu-24.04-x86_64",
                 "catalogDigest": "sha256:" + catalog_sha,
+                "channel": "preview",
                 "service": {
                     "unit": "cyrene-catalyst.service",
                     "baseUrl": "http://127.0.0.1:8004",
@@ -161,6 +163,7 @@ def _with_exact_match_plugins(pins: dict[str, object]) -> dict[str, object]:
         "workloadId": "plugins",
         "targetId": "linux-ubuntu-24.04-x86_64",
         "catalogDigest": catalyst["catalogDigest"],
+        "channel": "preview",
         "selectedComponents": [
             rows["cyrene-runtime-maintenance-sdk"],
             exact_match,
@@ -461,6 +464,20 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
     spec.loader.exec_module(module)
     module.validate_pin_shape(pins)
 
+    wrong_workload_channel = json.loads(json.dumps(pins))
+    wrong_workload_channel["workloads"]["catalyst"]["channel"] = "stable"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(wrong_workload_channel)
+    with pytest.raises(RuntimeError, match="must explicitly pin the signed preview channel"):
+        module.validate_pin_shape(wrong_workload_channel)
+
+    wrong_index_channel = json.loads(json.dumps(pins))
+    wrong_index_channel["workloads"]["catalyst"]["selectedComponents"][0]["indexIdentity"]["channel"] = "stable"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(wrong_index_channel)
+    with pytest.raises(RuntimeError, match="index channel differs from the workload plan channel"):
+        module.validate_pin_shape(wrong_index_channel)
+
     catalyst_rows = {
         row["componentId"]: row for row in pins["workloads"]["catalyst"]["selectedComponents"]
     }
@@ -475,6 +492,7 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
         "workloadId": "echo",
         "targetId": "linux-ubuntu-24.04-x86_64",
         "catalogDigest": "sha256:" + "b" * 64,
+        "channel": "preview",
         "selectedComponents": [
             echo_product,
             catalyst_rows["cyrene-runtime-maintenance-sdk"],
@@ -887,12 +905,14 @@ def test_workload_attestation_token_is_preserved_only_for_explicit_resolution_ca
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     commands: list[list[str]] = []
+    requests: list[dict[str, object]] = []
 
     def fake_run(
         command: list[str], *, input_text: str, **_kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         request = json.loads(input_text)
         commands.append(command)
+        requests.append(request)
         envelope = {
             "protocolVersion": module.WORKLOAD_PROTOCOL,
             "operation": request["operation"],
@@ -902,12 +922,15 @@ def test_workload_attestation_token_is_preserved_only_for_explicit_resolution_ca
         return subprocess.CompletedProcess(command, 0, json.dumps(envelope) + "\n", "")
 
     monkeypatch.setattr(module, "run", fake_run)
-    module.workload_request("check", preserve_read_token=True, workloadId="catalyst")
-    module.workload_request("apply", workloadId="catalyst")
+    module.workload_request(
+        "check", preserve_read_token=True, workloadId="catalyst", channel="preview"
+    )
+    module.workload_request("apply", workloadId="catalyst", channel="preview")
 
     assert "--preserve-env=GH_TOKEN" in commands[0]
     assert "--preserve-env=GH_TOKEN" not in commands[1]
     assert "synthetic-read-only-token" not in " ".join(commands[0] + commands[1])
+    assert [request["channel"] for request in requests] == ["preview", "preview"]
 
 
 def test_network_isolated_workload_failure_uses_fixed_cli_and_sanitized_evidence(
@@ -979,6 +1002,7 @@ def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
     checked = {
         "planId": "plan-" + "1" * 32,
         "planDigest": "sha256:" + "2" * 64,
+        "channel": workload["channel"],
     }
     selected = workload["selectedComponents"]
     staged_rows = [{**row, "status": "staged"} for row in selected]
@@ -989,6 +1013,7 @@ def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
         "catalogDigest": workload["catalogDigest"],
         "workloadId": "catalyst",
         "targetId": workload["targetId"],
+        "channel": workload["channel"],
         "action": "install",
         "components": staged_rows,
     }
@@ -1023,6 +1048,7 @@ def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
     assert all(
         fields["planId"] == checked["planId"]
         and fields["planDigest"] == checked["planDigest"]
+        and fields["channel"] == workload["channel"]
         and fields["action"] == "install"
         for _, fields in stage_calls
     )
@@ -1053,7 +1079,11 @@ def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
     pins = _valid_pins()
     module.write_json(evidence_root / "release-pins-v1.json", pins)
     workload = pins["workloads"]["catalyst"]
-    checked = {"planId": "plan-" + "3" * 32, "planDigest": "sha256:" + "4" * 64}
+    checked = {
+        "planId": "plan-" + "3" * 32,
+        "planDigest": "sha256:" + "4" * 64,
+        "channel": workload["channel"],
+    }
     staged_result = {
         "status": "staged",
         "planId": checked["planId"],
@@ -1061,6 +1091,7 @@ def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
         "catalogDigest": workload["catalogDigest"],
         "workloadId": "catalyst",
         "targetId": workload["targetId"],
+        "channel": workload["channel"],
         "action": "install",
         "components": [{**row, "status": "staged"} for row in workload["selectedComponents"]],
     }
@@ -1110,11 +1141,13 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
     catalyst_check = {
         "planId": "plan-" + "3" * 32,
         "planDigest": "sha256:" + "4" * 64,
+        "channel": catalyst["channel"],
     }
     plugin_check = {
         "status": "ready",
         "workloadId": "plugins",
         "targetId": plugins["targetId"],
+        "channel": plugins["channel"],
         "action": "install",
         "catalogDigest": plugins["catalogDigest"],
         "planId": "plan-" + "5" * 32,
@@ -1122,6 +1155,8 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
         "components": plugins["selectedComponents"],
         "resolution": {
             "catalogDigest": plugins["catalogDigest"],
+            "channel": plugins["channel"],
+            "planDigestMaterial": {"channel": plugins["channel"]},
             "selectedComponents": plugins["selectedComponents"],
         },
     }
@@ -1132,6 +1167,7 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
         "catalogDigest": plugins["catalogDigest"],
         "workloadId": "plugins",
         "targetId": plugins["targetId"],
+        "channel": plugins["channel"],
         "action": "install",
         "components": [{**row, "status": "staged"} for row in plugins["selectedComponents"]],
     }
@@ -1142,6 +1178,7 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
         "catalogDigest": catalyst["catalogDigest"],
         "workloadId": "catalyst",
         "targetId": catalyst["targetId"],
+        "channel": catalyst["channel"],
         "action": "install",
         "components": [{**row, "status": "staged"} for row in catalyst["selectedComponents"]],
     }
@@ -1223,6 +1260,7 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
     assert all(
         fields["planId"] == plugin_check["planId"]
         and fields["planDigest"] == plugin_check["planDigest"]
+        and fields["channel"] == plugins["channel"]
         and fields["action"] == "install"
         for fields in plugin_stages
     )
@@ -1254,11 +1292,16 @@ def test_exact_match_plugin_fallback_reports_cache_without_claiming_failure_reco
     module.write_json(evidence_root / "release-pins-v1.json", pins)
     catalyst = pins["workloads"]["catalyst"]
     plugins = pins["workloads"]["plugins"]
-    catalyst_checked = {"planId": "plan-" + "3" * 32, "planDigest": "sha256:" + "4" * 64}
+    catalyst_checked = {
+        "planId": "plan-" + "3" * 32,
+        "planDigest": "sha256:" + "4" * 64,
+        "channel": catalyst["channel"],
+    }
     plugin_checked = {
         "status": "ready",
         "workloadId": "plugins",
         "targetId": plugins["targetId"],
+        "channel": plugins["channel"],
         "action": "install",
         "catalogDigest": plugins["catalogDigest"],
         "planId": "plan-" + "5" * 32,
@@ -1266,6 +1309,8 @@ def test_exact_match_plugin_fallback_reports_cache_without_claiming_failure_reco
         "components": plugins["selectedComponents"],
         "resolution": {
             "catalogDigest": plugins["catalogDigest"],
+            "channel": plugins["channel"],
+            "planDigestMaterial": {"channel": plugins["channel"]},
             "selectedComponents": plugins["selectedComponents"],
         },
     }
@@ -1281,6 +1326,7 @@ def test_exact_match_plugin_fallback_reports_cache_without_claiming_failure_reco
             "catalogDigest": workload["catalogDigest"],
             "workloadId": workload_id,
             "targetId": workload["targetId"],
+            "channel": workload["channel"],
             "action": "install",
             "components": [{**row, "status": "staged"} for row in workload["selectedComponents"]],
         }
