@@ -1,0 +1,55 @@
+worker_processes 1;
+pid /run/cyrene-workspace-web/nginx.pid;
+error_log stderr notice;
+
+events { worker_connections 512; }
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    access_log /dev/stdout;
+    sendfile on;
+    server_tokens off;
+
+    server {
+        listen 127.0.0.1:8100;
+        server_name 127.0.0.1 localhost;
+        root /var/lib/cyrene/workloads/web/cyrene-client-workspace-web/current;
+        index index.html;
+        client_max_body_size 32m;
+
+        location = /healthz {
+            access_log off;
+            default_type application/json;
+            return 200 '{"status":"ok"}';
+        }
+
+        # Forward browser identity and CSRF headers unchanged to the local Control.
+        # Do not trust caller-supplied forwarding headers or expose the upstream.
+        location ~ ^/(studio-|api) {
+            proxy_pass http://127.0.0.1:5182;
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header Origin $http_origin;
+            proxy_set_header Cookie $http_cookie;
+            proxy_set_header X-Studio-Control-Token $http_x_studio_control_token;
+            proxy_set_header X-CSRF-Token $http_x_csrf_token;
+            proxy_set_header X-Forwarded-For "";
+            proxy_set_header Forwarded "";
+            proxy_set_header X-Real-IP "";
+            proxy_set_header Connection "";
+            proxy_buffering off;
+            proxy_read_timeout 300s;
+        }
+
+        location /assets/ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+
+        location / {
+            try_files $uri $uri/ /index.html;
+            add_header Cache-Control "no-store, no-cache, must-revalidate";
+        }
+    }
+}
