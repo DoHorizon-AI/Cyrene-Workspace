@@ -1,12 +1,13 @@
-"""Prepare the verified Runtime Maintenance SDK for Workspace operators.
+"""Prepare and restore the verified Runtime Maintenance SDK for Workspace operators.
 
 The helper installs one attested SDK wheel into an immutable private venv and
-atomically selects that release for the existing updater.
-中文：为 Workspace updater 安装已验证的运行维护 SDK，并切换到版本化环境。
+atomically selects or restores that release for the existing updater.
+中文：为 Workspace updater 安装已验证 SDK，并原子切换或恢复版本化环境。
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -16,7 +17,8 @@ import stat
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -54,6 +56,7 @@ INSTALL_STABLE_FIELDS = (
     "pointerIdentity",
     "verification",
 )
+INSTALL_RECEIPT_FIELDS = frozenset(INSTALL_STABLE_FIELDS) | {"archivePath", "sourceIdentity"}
 
 CommandRunner = Callable[[Sequence[str], Mapping[str, str]], subprocess.CompletedProcess[str]]
 
@@ -684,8 +687,7 @@ def _validate_install_receipt(receipt: Any, path: Path) -> dict[str, Any]:
     """Validate all immutable release and provenance fields in the root-owned receipt."""
 
     value = _copy_json_mapping(receipt, "SDK install receipt")
-    expected_fields = set(INSTALL_STABLE_FIELDS) | {"archivePath", "sourceIdentity"}
-    if set(value) != expected_fields:
+    if set(value) != INSTALL_RECEIPT_FIELDS:
         raise WorkloadSdkEnvironmentError("SDK install receipt has an invalid field set")
     if type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1:
         raise WorkloadSdkEnvironmentError("SDK install receipt schema version is unsupported")
@@ -761,6 +763,72 @@ def _read_install_receipt(path: Path, expected: Mapping[str, Any]) -> dict[str, 
     return receipt
 
 
+def _receipt_identity(value: Any, label: str, root: Path) -> dict[str, Any]:
+    """Validate and select the complete receipt fields from a journal identity."""
+
+    mapping = _copy_json_mapping(value, label)
+    if not INSTALL_RECEIPT_FIELDS.issubset(mapping):
+        raise WorkloadSdkEnvironmentError(
+            f"{label} does not contain a complete SDK receipt identity"
+        )
+    receipt = {field: mapping[field] for field in INSTALL_RECEIPT_FIELDS}
+    release_path = _require_absolute_path(receipt.get("releasePath"), f"{label}.releasePath")
+    releases_root = root / "releases"
+    if str(release_path) != receipt.get("releasePath") or release_path.parent != releases_root:
+        raise WorkloadSdkEnvironmentError(
+            f"{label} release path is outside the SDK releases directory"
+        )
+    return _validate_install_receipt(receipt, release_path)
+
+
+def _receipt_fields_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Compare complete durable receipt identities, including staging provenance."""
+
+    return all(left.get(field) == right.get(field) for field in INSTALL_RECEIPT_FIELDS)
+
+
+def _require_release_venv(release_path: Path) -> Path:
+    """Require the release's root-owned venv interpreter and configuration."""
+
+    python_path = _require_venv_python(release_path)
+    _require_root_file(release_path / "venv" / "pyvenv.cfg", "SDK venv configuration")
+    return python_path
+
+
+@contextmanager
+def _lock_current_pointer(root: Path) -> Iterator[None]:
+    """Serialize cooperating SDK pointer writers on the protected operator directory."""
+
+    descriptor: int | None = None
+    try:
+        try:
+            before = _lstat_without_links(root, "workload operator root")
+            descriptor = os.open(
+                root,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+            )
+            opened = os.fstat(descriptor)
+            _require_root_owned(opened, "workload operator root")
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_dev != before.st_dev
+                or opened.st_ino != before.st_ino
+            ):
+                raise WorkloadSdkEnvironmentError("workload operator root changed while locking")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except OSError as error:
+            raise WorkloadSdkEnvironmentError(
+                "workload SDK current pointer lock is unavailable"
+            ) from error
+        yield
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def read_workload_sdk_environment() -> dict[str, Any] | None:
     """Read the active installed SDK identity from its immutable root-owned receipt.
 
@@ -808,8 +876,7 @@ def read_workload_sdk_environment() -> dict[str, Any] | None:
     receipt = _validate_install_receipt(
         _read_receipt_file(release_path / INSTALL_RECEIPT_NAME), release_path
     )
-    python_path = _require_venv_python(release_path)
-    _require_root_file(release_path / "venv" / "pyvenv.cfg", "SDK venv configuration")
+    python_path = _require_release_venv(release_path)
     identity_attested = receipt["verification"]["identityAttested"]
     return {
         **receipt,
@@ -872,6 +939,100 @@ def _restore_current_pointer(current: Path, old_target: str | None) -> None:
         _fsync_directory(current.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def restore_workload_sdk_environment(
+    prior_identity: Mapping[str, Any] | None,
+    *,
+    expected_current: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Restore the exact prior SDK pointer only while this plan remains active.
+
+    Args:
+        prior_identity: Complete root-owned receipt identity captured before prepare,
+            or ``None`` when the plan performed the first SDK installation.
+        expected_current: Complete identity returned by this plan's successful prepare.
+    Returns:
+        The prior active SDK inventory row, or ``None`` after first-install rollback.
+    Raises:
+        PermissionError: If the caller is not root.
+        WorkloadSdkEnvironmentError: If receipt, venv, path, or compare-and-swap checks fail.
+
+    中文：仅当当前仍是本计划安装的 SDK 时，原子恢复先前版本或移除首次安装指针。
+    """
+
+    if os.geteuid() != 0:
+        raise PermissionError("workload SDK environment restoration requires root")
+
+    root = WORKLOAD_OPERATOR_ROOT
+    if not _existing_root_owned_directory_chain(root, "workload operator path"):
+        raise WorkloadSdkEnvironmentError(
+            "workload operator root is unavailable for SDK restoration"
+        )
+    _require_root_directory(root, "workload operator root")
+    releases_root = root / "releases"
+    _require_root_directory(releases_root, "workload operator releases")
+
+    expected_receipt = _receipt_identity(expected_current, "expected_current", root)
+    prior_receipt: dict[str, Any] | None = None
+    prior_release_path: Path | None = None
+    if prior_identity is not None:
+        prior_receipt = _receipt_identity(prior_identity, "prior_identity", root)
+        prior_release_path = Path(prior_receipt["releasePath"])
+        _require_root_directory(prior_release_path, "prior SDK release")
+        stored_prior = _validate_install_receipt(
+            _read_receipt_file(prior_release_path / INSTALL_RECEIPT_NAME), prior_release_path
+        )
+        if not _receipt_fields_equal(stored_prior, prior_receipt):
+            raise WorkloadSdkEnvironmentError(
+                "prior SDK receipt differs from the captured identity"
+            )
+        _require_release_venv(prior_release_path)
+
+    current = root / "current"
+    with _lock_current_pointer(root):
+        installed = read_workload_sdk_environment()
+        if installed is None:
+            raise WorkloadSdkEnvironmentError(
+                "current SDK identity no longer matches expected_current"
+            )
+        active_receipt = _receipt_identity(installed, "active SDK receipt", root)
+        if not _receipt_fields_equal(active_receipt, expected_receipt):
+            raise WorkloadSdkEnvironmentError(
+                "current SDK identity no longer matches expected_current"
+            )
+        old_target = _current_pointer_target(current, releases_root)
+        if old_target is None:
+            raise WorkloadSdkEnvironmentError("current SDK pointer disappeared during restoration")
+
+        if prior_release_path is not None:
+            _activate_current(current, releases_root, prior_release_path)
+            restored = read_workload_sdk_environment()
+            if restored is None:
+                raise WorkloadSdkEnvironmentError(
+                    "prior SDK pointer was not active after restoration"
+                )
+            actual_prior = _receipt_identity(restored, "restored SDK receipt", root)
+            if not _receipt_fields_equal(actual_prior, prior_receipt or {}):
+                raise WorkloadSdkEnvironmentError(
+                    "restored SDK identity differs from prior receipt"
+                )
+            return restored
+
+        try:
+            current.unlink()
+            _fsync_directory(root)
+        except OSError as error:
+            try:
+                _restore_current_pointer(current, old_target)
+            except OSError as restore_error:
+                raise WorkloadSdkEnvironmentError(
+                    "SDK first-install rollback failed and prepared current pointer could not be restored"
+                ) from restore_error
+            raise WorkloadSdkEnvironmentError(
+                "SDK first-install rollback failed; prepared version restored"
+            ) from error
+    return None
 
 
 def _activate_current(current: Path, releases_root: Path, release_path: Path) -> None:
@@ -1036,7 +1197,8 @@ def prepare_workload_sdk_environment(
         )
 
     current = WORKLOAD_OPERATOR_ROOT / "current"
-    _activate_current(current, releases_root, release_path)
+    with _lock_current_pointer(WORKLOAD_OPERATOR_ROOT):
+        _activate_current(current, releases_root, release_path)
     return {
         **identity,
         "releasePath": str(release_path),

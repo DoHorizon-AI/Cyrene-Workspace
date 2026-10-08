@@ -193,6 +193,25 @@ def _prepare(values: dict[str, Any], runner: FakeCommandRunner) -> dict[str, Any
     )
 
 
+def _prepare_alternate_release(values: dict[str, Any], runner: FakeCommandRunner) -> dict[str, Any]:
+    """Prepare another immutable SDK release while reusing the verified test wheel."""
+
+    component = json.loads(json.dumps(values["component"]))
+    component["digest"] = _sha("alternate official archive identity")
+    component["manifestDigest"] = _sha("alternate SDK manifest")
+    component["manifestAssetDigest"] = _sha("alternate SDK manifest asset")
+    component["indexIdentity"]["assetDigest"] = _sha("alternate release index asset")
+    component["indexIdentity"]["indexDigest"] = _sha("alternate release index content")
+    component["attestationRef"]["subjectDigest"] = component["manifestAssetDigest"]
+    staged_identity = json.loads(json.dumps(values["staged"]))
+    staged_identity["planId"] = "plan-test-alternate"
+    staged_identity["planDigest"] = _sha("alternate plan material")
+    return cast(
+        dict[str, Any],
+        environment.prepare_workload_sdk_environment(component, staged_identity, runner=runner),
+    )
+
+
 def test_rejects_a_wheel_sha_mismatch_before_running_commands(
     sdk_stage: dict[str, Any],
 ) -> None:
@@ -432,3 +451,161 @@ def test_root_owner_gate_rejects_non_root_stage_metadata() -> None:
     info = type("StatInfo", (), {"st_uid": 1000, "st_gid": 0})()
     with pytest.raises(environment.WorkloadSdkEnvironmentError, match="owned by root"):
         environment._require_root_owned(info, "test SDK wheel")
+
+
+def test_restore_returns_to_the_exact_prior_receipt(sdk_stage: dict[str, Any]) -> None:
+    """Rollback selects the saved immutable release and keeps both venvs intact."""
+
+    runner = FakeCommandRunner(sdk_stage["privatePython"])
+    _prepare(sdk_stage, runner)
+    prior = environment.read_workload_sdk_environment()
+    assert prior is not None
+    expected_current = _prepare_alternate_release(sdk_stage, runner)
+
+    restored = environment.restore_workload_sdk_environment(
+        prior, expected_current=expected_current
+    )
+
+    assert restored is not None
+    assert restored["releasePath"] == prior["releasePath"]
+    assert restored["sourceIdentity"] == prior["sourceIdentity"]
+    assert restored["active"] is True
+    current = sdk_stage["operatorRoot"] / "current"
+    assert current.readlink() == Path("releases") / Path(prior["releasePath"]).name
+    assert Path(prior["releasePath"]).is_dir()
+    assert Path(expected_current["releasePath"]).is_dir()
+
+
+def test_first_install_restore_removes_only_current_pointer(sdk_stage: dict[str, Any]) -> None:
+    """First-install rollback removes current while retaining its immutable release."""
+
+    expected_current = _prepare(sdk_stage, FakeCommandRunner(sdk_stage["privatePython"]))
+    release_path = Path(expected_current["releasePath"])
+    current = sdk_stage["operatorRoot"] / "current"
+
+    restored = environment.restore_workload_sdk_environment(None, expected_current=expected_current)
+
+    assert restored is None
+    assert not current.is_symlink()
+    assert not current.exists()
+    assert release_path.is_dir()
+    assert environment.read_workload_sdk_environment() is None
+
+
+def test_restore_rejects_a_stale_expected_current_identity(sdk_stage: dict[str, Any]) -> None:
+    """A later activation wins over a stale rollback request without pointer changes."""
+
+    runner = FakeCommandRunner(sdk_stage["privatePython"])
+    prior = _prepare(sdk_stage, runner)
+    expected_current = _prepare_alternate_release(sdk_stage, runner)
+    current = sdk_stage["operatorRoot"] / "current"
+    active_target = current.readlink()
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="expected_current"):
+        environment.restore_workload_sdk_environment(prior, expected_current=prior)
+
+    assert current.readlink() == active_target
+    assert (
+        environment.read_workload_sdk_environment()["releasePath"]
+        == expected_current["releasePath"]
+    )
+
+
+def test_restore_rejects_invalid_prior_venv_before_switching(
+    sdk_stage: dict[str, Any],
+) -> None:
+    """An incomplete prior interpreter cannot become active during rollback."""
+
+    runner = FakeCommandRunner(sdk_stage["privatePython"])
+    prior = _prepare(sdk_stage, runner)
+    expected_current = _prepare_alternate_release(sdk_stage, runner)
+    current = sdk_stage["operatorRoot"] / "current"
+    active_target = current.readlink()
+    Path(prior["releasePath"], "venv", "bin", "python").unlink()
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="SDK venv Python"):
+        environment.restore_workload_sdk_environment(prior, expected_current=expected_current)
+
+    assert current.readlink() == active_target
+
+
+def test_restore_rejects_prior_receipt_changed_after_capture(
+    sdk_stage: dict[str, Any],
+) -> None:
+    """A saved prior identity cannot authorize a different on-disk receipt."""
+
+    runner = FakeCommandRunner(sdk_stage["privatePython"])
+    prior = _prepare(sdk_stage, runner)
+    expected_current = _prepare_alternate_release(sdk_stage, runner)
+    current = sdk_stage["operatorRoot"] / "current"
+    active_target = current.readlink()
+    receipt_path = Path(prior["releasePath"]) / environment.INSTALL_RECEIPT_NAME
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["sourceIdentity"]["planId"] = "a-different-plan"
+    receipt_path.chmod(0o644)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    receipt_path.chmod(0o444)
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="prior SDK receipt"):
+        environment.restore_workload_sdk_environment(prior, expected_current=expected_current)
+
+    assert current.readlink() == active_target
+
+
+def test_restore_rejects_symlinked_operator_root(sdk_stage: dict[str, Any]) -> None:
+    """Rollback never traverses a substituted operator-root symlink."""
+
+    expected_current = _prepare(sdk_stage, FakeCommandRunner(sdk_stage["privatePython"]))
+    operator_root = sdk_stage["operatorRoot"]
+    actual_root = operator_root.with_name("operator-real")
+    operator_root.rename(actual_root)
+    operator_root.symlink_to(actual_root, target_is_directory=True)
+    actual_current = actual_root / "current"
+    active_target = actual_current.readlink()
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="symbolic link"):
+        environment.restore_workload_sdk_environment(None, expected_current=expected_current)
+
+    assert actual_current.readlink() == active_target
+
+
+def test_restore_requires_root(sdk_stage: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only root can compare or change the protected active pointer."""
+
+    expected_current = _prepare(sdk_stage, FakeCommandRunner(sdk_stage["privatePython"]))
+    current = sdk_stage["operatorRoot"] / "current"
+    active_target = current.readlink()
+    monkeypatch.setattr(environment.os, "geteuid", lambda: 1000)
+
+    with pytest.raises(PermissionError, match="requires root"):
+        environment.restore_workload_sdk_environment(None, expected_current=expected_current)
+
+    assert current.readlink() == active_target
+
+
+def test_failed_restore_switch_keeps_the_prepared_version_active(
+    sdk_stage: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed atomic replacement restores the plan's prepared pointer."""
+
+    runner = FakeCommandRunner(sdk_stage["privatePython"])
+    prior = _prepare(sdk_stage, runner)
+    expected_current = _prepare_alternate_release(sdk_stage, runner)
+    current = sdk_stage["operatorRoot"] / "current"
+    expected_target = current.readlink()
+    replace = environment._replace_current_link
+    failed = False
+
+    def replace_then_fail_once(source: Path, destination: Path) -> None:
+        nonlocal failed
+        replace(source, destination)
+        if destination == current and not failed:
+            failed = True
+            raise OSError("simulated rollback directory sync failure")
+
+    monkeypatch.setattr(environment, "_replace_current_link", replace_then_fail_once)
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="previous version restored"):
+        environment.restore_workload_sdk_environment(prior, expected_current=expected_current)
+
+    assert current.readlink() == expected_target
