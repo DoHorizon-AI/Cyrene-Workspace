@@ -466,6 +466,9 @@ def _candidate_rows(
     candidates: list[dict[str, Any]] = []
     malformed_binding = False
     expected_channel = channel
+    target_row = _id_map(component.get("targets"), "targetId").get(target_id)
+    catalog_target = _id_map(catalog.get("targets"), "id").get(target_id)
+    expected_target = catalog_target.get("target") if isinstance(catalog_target, Mapping) else None
     for envelope in _index_envelopes(trusted_release_index):
         index = envelope.get("index")
         identity_fields = (
@@ -487,6 +490,47 @@ def _candidate_rows(
             or envelope.get("channel") != expected_channel
             or index.get("channel") != envelope.get("channel")
         ):
+            continue
+        # A repository may publish several components through separate workflows.
+        # Ignore a same-repository index that cannot be a candidate for this exact
+        # component target before comparing its publisher workflow. If it declares
+        # this candidate, the full signed binding below remains mandatory.
+        releases = index.get("releases")
+        manifests = envelope.get("manifests")
+
+        def manifest_declares_candidate(wrapped: Any) -> bool:
+            if not isinstance(wrapped, Mapping):
+                return False
+            manifest = wrapped.get("manifest")
+            wrapped_component = wrapped.get("componentId")
+            if wrapped_component is None and isinstance(manifest, Mapping):
+                wrapped_component = manifest.get("componentId")
+            return (
+                wrapped_component == component_id
+                and isinstance(expected_target, Mapping)
+                and (
+                    wrapped.get("target") == expected_target
+                    or (isinstance(manifest, Mapping) and manifest.get("target") == expected_target)
+                )
+            )
+
+        declares_candidate = (
+            isinstance(expected_target, Mapping)
+            and isinstance(releases, list)
+            and any(
+                isinstance(row, Mapping)
+                and row.get("componentId") == component_id
+                and row.get("target") == expected_target
+                for row in releases
+            )
+        )
+        if (
+            not declares_candidate
+            and isinstance(expected_target, Mapping)
+            and isinstance(manifests, list)
+        ):
+            declares_candidate = any(manifest_declares_candidate(row) for row in manifests)
+        if not declares_candidate:
             continue
         if (
             envelope.get("assetName") != "component-release-index-v1.json"
@@ -540,8 +584,6 @@ def _candidate_rows(
         ):
             malformed_binding = True
             continue
-        manifests = envelope.get("manifests")
-        releases = index.get("releases")
         if not isinstance(manifests, list) or not isinstance(releases, list):
             continue
         for wrapped in manifests:
@@ -588,11 +630,6 @@ def _candidate_rows(
                 continue
             release_tag = envelope["releaseTag"]
             channel = envelope["channel"]
-            target_row = _id_map(component.get("targets"), "targetId").get(target_id)
-            catalog_target = _id_map(catalog.get("targets"), "id").get(target_id)
-            expected_target = (
-                catalog_target.get("target") if isinstance(catalog_target, Mapping) else None
-            )
             if (
                 target_row is None
                 or not isinstance(expected_target, Mapping)

@@ -1036,6 +1036,72 @@ def test_explicit_publisher_identity_prevents_same_repository_workflow_ambiguity
     )
 
 
+def test_same_repository_other_component_workflow_does_not_poison_candidate() -> None:
+    catalog = _catalog()
+    other_workflow = f"{REPOSITORY}/.github/workflows/other.yml"
+    catalog["publishers"].append(
+        {
+            "id": "other-publisher",
+            "repository": REPOSITORY,
+            "workflow": other_workflow,
+            "tagFormat": "component-version-source-sha",
+            "releaseDiscovery": {
+                "apiUri": f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100",
+                "indexAssetName": "component-release-index-v1.json",
+            },
+        }
+    )
+    other = _component("other-component", "python-bundle", "linux-u24-python", "python-bundle")
+    other["publisherId"] = "other-publisher"
+    catalog["components"].append(other)
+
+    expected_indexes = _release_envelopes(catalog, {"app"})
+    other_indexes = _release_envelopes(
+        catalog,
+        {"other-component"},
+        workflow=other_workflow,
+    )
+    component = next(row for row in catalog["components"] if row["componentId"] == "app")
+    blockers: list[dict[str, Any]] = []
+
+    rows = _RESOLVER_MODULE._candidate_rows(
+        {"indexes": expected_indexes["indexes"] + other_indexes["indexes"]},
+        catalog,
+        component,
+        "linux-u24-python",
+        "python-bundle",
+        blockers,
+        requiredness="required",
+        channel="stable",
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["componentId"] == "app"
+    assert blockers == []
+
+
+def test_same_repository_wrong_workflow_for_exact_component_target_fails_closed() -> None:
+    catalog = _catalog()
+    wrong_workflow = f"{REPOSITORY}/.github/workflows/other.yml"
+    indexes = _release_envelopes(catalog, {"app"}, workflow=wrong_workflow)
+    component = next(row for row in catalog["components"] if row["componentId"] == "app")
+    blockers: list[dict[str, Any]] = []
+
+    rows = _RESOLVER_MODULE._candidate_rows(
+        indexes,
+        catalog,
+        component,
+        "linux-u24-python",
+        "python-bundle",
+        blockers,
+        requiredness="required",
+        channel="stable",
+    )
+
+    assert rows == []
+    assert any(row["code"] == "TRUSTED_INDEX_BINDING_INVALID" for row in blockers)
+
+
 def test_component_version_source_sha_tag_format_is_exact() -> None:
     catalog = _catalog()
     indexes = _release_envelopes(catalog, {"app", "runtime", "shared", "plugin-a"})
