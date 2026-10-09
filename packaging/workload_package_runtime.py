@@ -64,6 +64,16 @@ _VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\
 _TYPED_SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _RAW_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+# CPython may omit these Linux UAPI exports even when the host kernel supports seals.
+# 即使宿主内核支持密封，CPython 也可能不导出这些 Linux UAPI 常量。
+_LINUX_SEAL_FCNTL_VALUES = {
+    "F_ADD_SEALS": 1033,
+    "F_GET_SEALS": 1034,
+    "F_SEAL_SEAL": 0x0001,
+    "F_SEAL_SHRINK": 0x0002,
+    "F_SEAL_GROW": 0x0004,
+    "F_SEAL_WRITE": 0x0008,
+}
 _MUTATION_TO_BROKER = {
     "activate": "activate",
     "recover_binding": "recover",
@@ -2670,14 +2680,17 @@ def _read_token(path: Path, expected_digest: str) -> str:
 def _create_token_memfd(token: str, *, uid: int | None = None, gid: int | None = None) -> int:
     """Put one verified token into an anonymous sealed descriptor for the child."""
 
-    required_os_flags = ("MFD_ALLOW_SEALING",)
-    required_seals = ("F_SEAL_SEAL", "F_SEAL_SHRINK", "F_SEAL_GROW", "F_SEAL_WRITE", "F_ADD_SEALS")
-    if not hasattr(os, "memfd_create") or any(not hasattr(os, name) for name in required_os_flags):
+    if (
+        sys.platform != "linux"
+        or not hasattr(os, "memfd_create")
+        or not hasattr(os, "MFD_ALLOW_SEALING")
+    ):
         raise WorkloadPackageRuntimeError("Linux anonymous token descriptors are unavailable")
     import fcntl as _fcntl
 
-    if any(not hasattr(_fcntl, name) for name in required_seals):
-        raise WorkloadPackageRuntimeError("Linux sealed token descriptors are unavailable")
+    seal_constants = {
+        name: getattr(_fcntl, name, value) for name, value in _LINUX_SEAL_FCNTL_VALUES.items()
+    }
     try:
         descriptor = os.memfd_create(
             "cyrene-activity-token",
@@ -2698,8 +2711,16 @@ def _create_token_memfd(token: str, *, uid: int | None = None, gid: int | None =
         os.fchmod(descriptor, 0o400)
         os.lseek(descriptor, 0, os.SEEK_SET)
         os.set_inheritable(descriptor, True)
-        seals = _fcntl.F_SEAL_SEAL | _fcntl.F_SEAL_SHRINK | _fcntl.F_SEAL_GROW | _fcntl.F_SEAL_WRITE
-        _fcntl.fcntl(descriptor, _fcntl.F_ADD_SEALS, seals)
+        seals = (
+            seal_constants["F_SEAL_SEAL"]
+            | seal_constants["F_SEAL_SHRINK"]
+            | seal_constants["F_SEAL_GROW"]
+            | seal_constants["F_SEAL_WRITE"]
+        )
+        _fcntl.fcntl(descriptor, seal_constants["F_ADD_SEALS"], seals)
+        applied_seals = _fcntl.fcntl(descriptor, seal_constants["F_GET_SEALS"])
+        if applied_seals & seals != seals:
+            raise OSError("kernel did not apply all required token descriptor seals")
         return descriptor
     except OSError as error:
         if "descriptor" in locals():
