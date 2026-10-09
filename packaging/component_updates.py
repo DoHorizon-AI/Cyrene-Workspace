@@ -227,6 +227,20 @@ class UpdateError(RuntimeError):
         self.maintenance_not_acquired = maintenance_not_acquired
 
 
+class _FirstCoreCandidateError(UpdateError):
+    """Keep the C10 identity attached to an unchanged candidate failure."""
+
+    def __init__(self, error: UpdateError, *, component_id: str, target_id: str) -> None:
+        super().__init__(
+            error.code,
+            str(error),
+            error.retryable,
+            maintenance_not_acquired=error.maintenance_not_acquired,
+        )
+        self.component_id = component_id
+        self.target_id = target_id
+
+
 @dataclass(frozen=True)
 class Candidate:
     """One verified manifest selected by a trusted channel index."""
@@ -5414,9 +5428,9 @@ class ComponentUpdater:
                 blockers.append(
                     {
                         "code": error.code,
-                        "componentId": None,
+                        "componentId": getattr(error, "component_id", None),
                         "requiredness": "required",
-                        "targetId": WORKLOAD_FIRST_CORE_TARGET_ID,
+                        "targetId": getattr(error, "target_id", WORKLOAD_FIRST_CORE_TARGET_ID),
                         "message": " ".join(str(error).split())[:500],
                         "retryable": error.retryable,
                         "details": {"phase": "firstCoreBootstrap"},
@@ -5778,7 +5792,14 @@ class ComponentUpdater:
                 )
             candidate = candidates.get(component_id)
             if candidate is None or candidate.manifest.get("target") != target.get("target"):
-                candidate = self._candidate(component, target, channel)
+                try:
+                    candidate = self._candidate(component, target, channel)
+                except UpdateError as error:
+                    raise _FirstCoreCandidateError(
+                        error,
+                        component_id=component_id,
+                        target_id=WORKLOAD_FIRST_CORE_TARGET_ID,
+                    ) from error
             core_candidates[component_id] = candidate
 
         unique_candidates: dict[tuple[str, str, str], Candidate] = {}
@@ -6551,13 +6572,19 @@ class ComponentUpdater:
             or set(core_candidates) != set(WORKLOAD_FIRST_CORE_COMPONENT_IDS)
         ):
             raise UpdateError("INVALID_STAGE", "The staged first-Core cohort is malformed.")
-        helper = core_module or self._load_native_core_bootstrap()
+        core_helper = core_module or self._load_native_core_bootstrap()
         try:
-            helper._validate_staged_cohort(self, staged_components)
+            core_helper._validate_staged_cohort(self, staged_components)
         except Exception as error:
             raise UpdateError(
                 "INVALID_STAGE", "The staged C10 compatibility cohort is invalid."
             ) from error
+        component_helper = self._load_native_component_bootstrap()
+        payload_verifier = getattr(component_helper, "_verify_release_payload", None)
+        if not callable(payload_verifier):
+            raise UpdateError(
+                "HELPER_UNAVAILABLE", "The native component payload verifier is unavailable."
+            )
         selected_by_id = {row["componentId"]: row for row in block["components"]}
         staged_by_id = {row["componentId"]: row for row in staged_components}
         stage_root = self._private_state_directory("staged") / "workload-plans" / plan_id
@@ -6621,7 +6648,7 @@ class ComponentUpdater:
                 archive_info = archive_path.stat()
                 artifact = candidate.manifest["artifact"]
                 receipt = self._read_release_receipt(component_id, candidate.manifest_digest)
-                helper._verify_release_payload(self, release_path, candidate.manifest)
+                payload_verifier(self, release_path, candidate.manifest)
             except Exception as error:
                 raise UpdateError(
                     "INVALID_STAGE", f"Staged C10 payload is unsafe for {component_id}."
