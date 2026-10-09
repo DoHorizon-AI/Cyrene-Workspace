@@ -321,6 +321,8 @@ cp "${SCRIPT_DIR}/workload_sdk_environment.py" "${STAGE_DIR}/usr/lib/cyrene/scri
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_sdk_environment.py"
 cp "${SCRIPT_DIR}/workload_web_host.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_web_host.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_web_host.py"
+cp "${SCRIPT_DIR}/workload_oci_host.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_oci_host.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_oci_host.py"
 cp "${SCRIPT_DIR}/cyrene-workspace-web.nginx.conf.template" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.nginx.conf.template"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/cyrene-workspace-web.nginx.conf.template"

@@ -1255,6 +1255,7 @@ def test_release_workflow_and_builder_pass_the_verified_selected_catalog() -> No
         "workload_package_runtime.py",
         "workload_sdk_environment.py",
         "workload_web_host.py",
+        "workload_oci_host.py",
         "cyrene-workspace-web.nginx.conf.template",
         "cyrene-workspace-web.service.template",
     ):
