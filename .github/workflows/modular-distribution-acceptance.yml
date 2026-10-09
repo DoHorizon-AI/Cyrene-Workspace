@@ -61,9 +61,11 @@ jobs:
           import stat
           import subprocess
           import sys
+          import tempfile
           import textwrap
           import time
           import urllib.error
+          import urllib.parse
           import urllib.request
           from collections.abc import Callable
           from pathlib import Path
@@ -85,6 +87,11 @@ jobs:
           GH_RELEASE_ASSET_SIZE_BYTES = 15392446
           GH_CHECKSUMS_ASSET_SHA256 = "afe49e9affa232faa8212aed035417166f6ade9b9470acb53d4dbd28c0504e8d"
           GH_CHECKSUMS_ASSET_SIZE_BYTES = 1971
+          GITHUB_API_HOSTS = frozenset({"api.github.com"})
+          GITHUB_RELEASE_HOSTS = frozenset(
+              {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
+          )
+          MAX_PUBLIC_RELEASE_ASSET_BYTES = 512 * 1024 * 1024
           CATALYST_ACCEPTANCE_MODULE = "cyrene_catalyst.external_acceptance"
           CATALYST_CONSUMER_MODULE = "cyrene_catalyst_consumer.training_bundle"
           CATALYST_REQUIRED_PLUGIN_IDS = frozenset(
@@ -164,6 +171,423 @@ jobs:
               )
               os.replace(temporary, path)
 
+          class GitHubHttpFailure(RuntimeError):
+              """A sanitized GitHub HTTP/network failure with retry and rate-limit facts."""
+
+              def __init__(self, message: str, evidence: dict[str, Any]) -> None:
+                  super().__init__(message)
+                  self.safe_evidence = evidence
+
+          class GitHubRedirectHandler(urllib.request.HTTPRedirectHandler):
+              """Permit HTTPS redirects only to the endpoint's fixed GitHub hosts."""
+
+              def __init__(self, allowed_hosts: frozenset[str]) -> None:
+                  super().__init__()
+                  self.allowed_hosts = allowed_hosts
+
+              def redirect_request(
+                  self,
+                  request: urllib.request.Request,
+                  file_pointer: Any,
+                  code: int,
+                  message: str,
+                  headers: Any,
+                  new_url: str,
+              ) -> urllib.request.Request | None:
+                  source = urllib.parse.urlsplit(request.full_url)
+                  target = urllib.parse.urlsplit(new_url)
+                  if (
+                      target.scheme != "https"
+                      or target.hostname not in self.allowed_hosts
+                      or target.username is not None
+                      or target.password is not None
+                      or target.port not in (None, 443)
+                  ):
+                      raise urllib.error.HTTPError(
+                          request.full_url,
+                          code,
+                          "GitHub redirected to an untrusted HTTPS endpoint",
+                          headers,
+                          file_pointer,
+                      )
+                  redirected = super().redirect_request(
+                      request, file_pointer, code, message, headers, new_url
+                  )
+                  if (
+                      redirected is not None
+                      and source.netloc.lower() != target.netloc.lower()
+                  ):
+                      redirected.remove_header("Authorization")
+                  return redirected
+
+          def acceptance_execution_mode() -> str:
+              """Return the explicitly recorded hosted-runner or SSH-guest mode."""
+              mode = os.environ.get("ACCEPTANCE_EXECUTION_MODE", "github-hosted")
+              require(
+                  mode in {"github-hosted", "ssh-guest"},
+                  "acceptance execution mode is unsupported",
+              )
+              return mode
+
+          def github_api_token() -> str | None:
+              """Use only the explicitly supplied read token; SSH guest mode must be anonymous."""
+              mode = acceptance_execution_mode()
+              if mode == "ssh-guest":
+                  require(
+                      not any(
+                          os.environ.get(name)
+                          for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+                      ),
+                      "ssh-guest acceptance must not receive GitHub token environment variables",
+                  )
+                  return None
+              require(mode == "github-hosted", "acceptance execution mode is unsupported")
+              return os.environ.get("GH_TOKEN") or None
+
+          def _github_safe_headers(headers: Any) -> dict[str, str | None]:
+              """Retain only public rate-limit and request identifiers from response headers."""
+              names = (
+                  "X-RateLimit-Limit",
+                  "X-RateLimit-Remaining",
+                  "X-RateLimit-Used",
+                  "X-RateLimit-Reset",
+                  "X-RateLimit-Resource",
+                  "Retry-After",
+                  "X-GitHub-Request-Id",
+              )
+              return {name: headers.get(name) for name in names}
+
+          def _record_github_http(evidence: dict[str, Any]) -> None:
+              """Append sanitized public API/asset observations for later rate-limit review."""
+              path = root() / "evidence" / "github-http-readback.json"
+              value = (
+                  load_json(path)
+                  if path.is_file()
+                  else {"schemaVersion": 1, "requests": []}
+              )
+              requests = value.get("requests")
+              require(isinstance(requests, list), "GitHub HTTP observation file is malformed")
+              requests.append(evidence)
+              write_json(path, value)
+
+          def _github_http_failure(
+              *,
+              label: str,
+              category: str,
+              url: str,
+              status: int | None,
+              headers: Any,
+              auth_mode: str,
+              error_type: str | None = None,
+          ) -> GitHubHttpFailure:
+              """Build a retryable error without retaining response bodies or credentials."""
+              parsed = urllib.parse.urlsplit(url)
+              safe_headers = _github_safe_headers(headers)
+              retryable = status in {401, 403, 408, 425, 429} or (
+                  status is not None and status >= 500
+              ) or status is None
+              evidence = {
+                  "label": label,
+                  "category": category,
+                  "host": parsed.hostname,
+                  "path": parsed.path,
+                  "httpStatus": status,
+                  "retryable": retryable,
+                  "authMode": auth_mode,
+                  "rateLimit": safe_headers,
+                  "errorType": error_type,
+              }
+              _record_github_http(evidence)
+              status_text = f"HTTP {status}" if status is not None else "transport failure"
+              remaining = safe_headers.get("X-RateLimit-Remaining")
+              reset = safe_headers.get("X-RateLimit-Reset")
+              rate_detail = (
+                  f"; rateLimitRemaining={remaining}; rateLimitResetEpoch={reset}"
+                  if remaining is not None or reset is not None
+                  else ""
+              )
+              return GitHubHttpFailure(
+                  f"GitHub {category} GET failed with {status_text}; retryable={str(retryable).lower()}{rate_detail}; no credential fallback was attempted",
+                  evidence,
+              )
+
+          def github_api_json(url: str, *, label: str) -> dict[str, Any]:
+              """Fetch public GitHub release metadata using anonymous or explicit read-only API auth."""
+              parsed = urllib.parse.urlsplit(url)
+              require(
+                  parsed.scheme == "https"
+                  and parsed.hostname in GITHUB_API_HOSTS
+                  and parsed.port in (None, 443)
+                  and parsed.username is None
+                  and parsed.password is None
+                  and not parsed.fragment,
+                  "GitHub API URL is outside the fixed public HTTPS endpoint",
+              )
+              token = github_api_token()
+              auth_mode = "read-only-token" if token else "anonymous"
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "CyreneModularDistributionAcceptance/1",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      **({"Authorization": f"Bearer {token}"} if token else {}),
+                  },
+              )
+              opener = urllib.request.build_opener(GitHubRedirectHandler(GITHUB_API_HOSTS))
+              try:
+                  with opener.open(request, timeout=120) as response:
+                      status = int(response.status)
+                      headers = _github_safe_headers(response.headers)
+                      payload = response.read(16 * 1024 * 1024 + 1)
+                      require(
+                          len(payload) <= 16 * 1024 * 1024,
+                          "GitHub release metadata exceeds the acceptance limit",
+                      )
+                      parsed_payload = json.loads(payload.decode("utf-8"))
+                      require(
+                          isinstance(parsed_payload, dict),
+                          "GitHub release metadata is not a JSON object",
+                      )
+                      _record_github_http(
+                          {
+                              "label": label,
+                              "category": "release-metadata",
+                              "host": parsed.hostname,
+                              "path": parsed.path,
+                              "httpStatus": status,
+                              "retryable": False,
+                              "authMode": auth_mode,
+                              "rateLimit": headers,
+                          }
+                      )
+                      return parsed_payload
+              except urllib.error.HTTPError as error:
+                  failure = _github_http_failure(
+                      label=label,
+                      category="release-metadata",
+                      url=url,
+                      status=error.code,
+                      headers=error.headers,
+                      auth_mode=auth_mode,
+                      error_type="HTTPError",
+                  )
+                  error.close()
+                  raise failure from None
+              except (urllib.error.URLError, TimeoutError, OSError) as error:
+                  raise _github_http_failure(
+                      label=label,
+                      category="release-metadata",
+                      url=url,
+                      status=None,
+                      headers={},
+                      auth_mode=auth_mode,
+                      error_type=type(error).__name__,
+                  ) from None
+
+          def github_release_metadata(
+              repository: str, release_tag: str, *, label: str
+          ) -> dict[str, Any]:
+              """Read one exact public immutable release through the GitHub REST API."""
+              require(
+                  re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+                  is not None,
+                  "GitHub release repository pin is malformed",
+              )
+              require(
+                  isinstance(release_tag, str)
+                  and release_tag
+                  and "/" not in release_tag
+                  and ".." not in release_tag,
+                  "GitHub release tag pin is malformed",
+              )
+              uri = (
+                  f"https://api.github.com/repos/{repository}/releases/tags/"
+                  f"{urllib.parse.quote(release_tag, safe='')}"
+              )
+              return github_api_json(uri, label=label)
+
+          def download_github_release_asset(
+              asset: dict[str, Any],
+              destination: Path,
+              *,
+              repository: str,
+              release_tag: str,
+              label: str,
+          ) -> dict[str, Any]:
+              """Download one canonical public asset, verifying the API size and digest."""
+              name = asset.get("name")
+              size = asset.get("size")
+              digest = asset.get("digest")
+              require(
+                  isinstance(name, str)
+                  and name
+                  and Path(name).name == name
+                  and "/" not in name
+                  and "\\" not in name,
+                  "GitHub release asset name is unsafe",
+              )
+              require(
+                  type(size) is int
+                  and 0 < size <= MAX_PUBLIC_RELEASE_ASSET_BYTES,
+                  f"GitHub release asset size is invalid for {name}",
+              )
+              require(
+                  isinstance(digest, str)
+                  and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is not None,
+                  f"GitHub release asset digest is invalid for {name}",
+              )
+              expected_url = (
+                  f"https://github.com/{repository}/releases/download/{release_tag}/"
+                  f"{urllib.parse.quote(name, safe='')}"
+              )
+              uri = asset.get("browser_download_url")
+              require(uri == expected_url, f"GitHub release asset URL differs from the canonical immutable tag path: {name}")
+              destination.mkdir(parents=True, exist_ok=True)
+              path = destination / name
+              if path.exists() or path.is_symlink():
+                  require(path.is_file() and not path.is_symlink(), f"existing release asset is not a regular file: {name}")
+                  observed_digest = "sha256:" + sha256(path)
+                  require(path.stat().st_size == size and observed_digest == digest, f"existing release asset bytes differ from GitHub metadata: {name}")
+                  result = {
+                      "label": label,
+                      "category": "release-asset",
+                      "assetName": name,
+                      "releaseTag": release_tag,
+                      "repository": repository,
+                      "httpStatus": None,
+                      "retryable": False,
+                      "authMode": "anonymous-public-asset",
+                      "sizeBytes": size,
+                      "sha256": observed_digest,
+                      "verifiedExistingBytes": True,
+                  }
+                  _record_github_http(result)
+                  return result
+
+              request = urllib.request.Request(
+                  uri,
+                  headers={
+                      "Accept": "application/octet-stream",
+                      "User-Agent": "CyreneModularDistributionAcceptance/1",
+                  },
+              )
+              opener = urllib.request.build_opener(
+                  GitHubRedirectHandler(GITHUB_RELEASE_HOSTS)
+              )
+              temporary_path: Path | None = None
+              try:
+                  with opener.open(request, timeout=1800) as response:
+                      final_url = urllib.parse.urlsplit(response.geturl())
+                      require(
+                          final_url.scheme == "https"
+                          and final_url.hostname in GITHUB_RELEASE_HOSTS
+                          and final_url.port in (None, 443),
+                          "GitHub release asset resolved to an untrusted HTTPS host",
+                      )
+                      file_descriptor, temporary_name = tempfile.mkstemp(
+                          prefix=f".{name}.", suffix=".part", dir=destination
+                      )
+                      temporary_path = Path(temporary_name)
+                      hasher = hashlib.sha256()
+                      observed_size = 0
+                      with os.fdopen(file_descriptor, "wb") as output:
+                          while chunk := response.read(1024 * 1024):
+                              observed_size += len(chunk)
+                              require(
+                                  observed_size <= size,
+                                  f"GitHub release asset exceeded its API size: {name}",
+                              )
+                              hasher.update(chunk)
+                              output.write(chunk)
+                          output.flush()
+                          os.fsync(output.fileno())
+                      observed_digest = "sha256:" + hasher.hexdigest()
+                      require(
+                          observed_size == size and observed_digest == digest,
+                          f"GitHub release asset bytes differ from API size/digest: {name}",
+                      )
+                      os.replace(temporary_path, path)
+                      temporary_path = None
+                      result = {
+                          "label": label,
+                          "category": "release-asset",
+                          "assetName": name,
+                          "releaseTag": release_tag,
+                          "repository": repository,
+                          "httpStatus": int(response.status),
+                          "retryable": False,
+                          "authMode": "anonymous-public-asset",
+                          "finalHost": final_url.hostname,
+                          "sizeBytes": observed_size,
+                          "sha256": observed_digest,
+                          "verifiedExistingBytes": False,
+                      }
+                      _record_github_http(result)
+                      return result
+              except urllib.error.HTTPError as error:
+                  failure = _github_http_failure(
+                      label=label,
+                      category="release-asset",
+                      url=uri,
+                      status=error.code,
+                      headers=error.headers,
+                      auth_mode="anonymous-public-asset",
+                      error_type="HTTPError",
+                  )
+                  error.close()
+                  raise failure from None
+              except (urllib.error.URLError, TimeoutError, OSError) as error:
+                  raise _github_http_failure(
+                      label=label,
+                      category="release-asset",
+                      url=uri,
+                      status=None,
+                      headers={},
+                      auth_mode="anonymous-public-asset",
+                      error_type=type(error).__name__,
+                  ) from None
+              finally:
+                  if temporary_path is not None:
+                      temporary_path.unlink(missing_ok=True)
+
+          def download_github_release_assets(
+              release: dict[str, Any],
+              destination: Path,
+              *,
+              repository: str,
+              release_tag: str,
+              label: str,
+              selected_names: set[str] | None = None,
+          ) -> list[dict[str, Any]]:
+              """Download all or an exact subset of assets from a validated release response."""
+              assets = release.get("assets")
+              require(isinstance(assets, list), "GitHub release metadata has no asset list")
+              rows = [asset for asset in assets if isinstance(asset, dict)]
+              names = [asset.get("name") for asset in rows]
+              require(
+                  len(rows) == len(assets)
+                  and all(isinstance(name, str) for name in names)
+                  and len(names) == len(set(names)),
+                  "GitHub release asset names are malformed or duplicated",
+              )
+              if selected_names is not None:
+                  require(
+                      selected_names <= set(names),
+                      "GitHub release is missing an exact requested asset",
+                  )
+                  rows = [asset for asset in rows if asset["name"] in selected_names]
+              return [
+                  download_github_release_asset(
+                      asset,
+                      destination,
+                      repository=repository,
+                      release_tag=release_tag,
+                      label=f"{label}-{asset['name']}",
+                  )
+                  for asset in rows
+              ]
+
           def ledger() -> dict[str, Any]:
               """Load the current phase ledger."""
               path = root() / "phase-ledger.json"
@@ -186,7 +610,12 @@ jobs:
               try:
                   evidence = operation()
               except Exception as error:
-                  record(name, "FAIL", f"{type(error).__name__}: {error}")
+                  record(
+                      name,
+                      "FAIL",
+                      f"{type(error).__name__}: {error}",
+                      getattr(error, "safe_evidence", None),
+                  )
                   print(f"FAIL {name}: {error}", file=sys.stderr)
                   raise
               record(name, "PASS", "gate completed", evidence)
@@ -316,17 +745,23 @@ jobs:
           def ensure_attestation_cli() -> dict[str, Any]:
               """Install the fixed official gh release only on this disposable runner when needed."""
               (root() / "evidence").mkdir(parents=True, exist_ok=True)
-              before_output = run(
-                  ["gh", "--version"],
-                  label="gh-attestation-cli-before",
-                  timeout=30,
-                  retain_output=False,
-              ).stdout
-              before_version = parse_gh_cli_version(before_output, require_supported=False)
-              before_text = ".".join(str(part) for part in before_version)
+              gh_binary = shutil.which("gh")
+              if gh_binary is None:
+                  before_version = (0, 0, 0)
+                  before_text = "not-installed"
+              else:
+                  before_output = run(
+                      ["gh", "--version"],
+                      label="gh-attestation-cli-before",
+                      timeout=30,
+                      retain_output=False,
+                  ).stdout
+                  before_version = parse_gh_cli_version(before_output, require_supported=False)
+                  before_text = ".".join(str(part) for part in before_version)
               facts: dict[str, Any] = {
                   "minimumVersion": "2.102.0",
                   "versionBefore": before_text,
+                  "binaryPresentBefore": gh_binary is not None,
                   "repository": "cli/cli",
                   "releaseTag": GH_RELEASE_TAG,
                   "releaseCommit": GH_RELEASE_COMMIT,
@@ -334,24 +769,21 @@ jobs:
                   "releaseApiUrl": "https://api.github.com/repos/cli/cli/releases/tags/v2.102.0",
                   "releaseImmutable": True,
                   "upgraded": False,
+                  "metadataAuthentication": None,
               }
               if before_version < MINIMUM_GH_ATTESTATION_VERSION:
                   base = root() / "downloads" / "official-gh-cli-v2.102.0"
                   base.mkdir(parents=True, exist_ok=True)
                   deb_path = base / GH_RELEASE_ASSET
                   checksum_path = base / "gh_2.102.0_checksums.txt"
-                  release_base = "https://github.com/cli/cli/releases/download/v2.102.0"
-                  common_curl = [
-                      "curl", "--proto", "=https", "--proto-redir", "=https",
-                      "--tlsv1.2", "--fail", "--location", "--silent", "--show-error",
-                  ]
                   release_api_path = base / "release-api.json"
-                  run(
-                      [*common_curl, facts["releaseApiUrl"], "--output", str(release_api_path)],
-                      label="read-official-gh-release-api",
-                      timeout=60,
+                  release_api = github_release_metadata(
+                      "cli/cli", GH_RELEASE_TAG, label="gh-cli-official-release-api"
                   )
-                  release_api = load_json(release_api_path)
+                  facts["metadataAuthentication"] = (
+                      "read-only-token" if github_api_token() else "anonymous"
+                  )
+                  write_json(release_api_path, release_api)
                   require(release_api.get("tag_name") == GH_RELEASE_TAG, "official gh release API returned a different tag")
                   require(release_api.get("immutable") is True and release_api.get("draft") is False, "official gh release is not immutable and published")
                   require(release_api.get("target_commitish") == GH_RELEASE_COMMIT, "official gh release source commit differs from the pinned release")
@@ -367,15 +799,19 @@ jobs:
                   require(deb_asset.get("browser_download_url") == f"https://github.com/cli/cli/releases/download/v2.102.0/{GH_RELEASE_ASSET}", "official gh DEB download URL differs from the canonical release asset URL")
                   require(checksums_asset.get("browser_download_url") == "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_checksums.txt", "official gh checksum download URL differs from the canonical release asset URL")
                   shutil.copy2(release_api_path, root() / "evidence" / "gh-cli-release-api.json")
-                  run(
-                      [*common_curl, deb_asset["browser_download_url"], "--output", str(deb_path)],
-                      label="download-official-gh-deb",
-                      timeout=180,
+                  download_github_release_asset(
+                      deb_asset,
+                      base,
+                      repository="cli/cli",
+                      release_tag=GH_RELEASE_TAG,
+                      label="gh-cli-deb",
                   )
-                  run(
-                      [*common_curl, checksums_asset["browser_download_url"], "--output", str(checksum_path)],
-                      label="download-official-gh-checksums",
-                      timeout=60,
+                  download_github_release_asset(
+                      checksums_asset,
+                      base,
+                      repository="cli/cli",
+                      release_tag=GH_RELEASE_TAG,
+                      label="gh-cli-checksums",
                   )
                   require(deb_path.is_file() and not deb_path.is_symlink(), "official gh DEB is not a regular downloaded file")
                   require(deb_path.stat().st_size == GH_RELEASE_ASSET_SIZE_BYTES, "official gh DEB size differs from pinned GitHub release metadata")
@@ -409,7 +845,7 @@ jobs:
                   facts.update({
                       "upgraded": True,
                       "assetName": GH_RELEASE_ASSET,
-                      "assetUrl": f"{release_base}/{GH_RELEASE_ASSET}",
+                      "assetUrl": deb_asset["browser_download_url"],
                       "assetSha256": deb_digest,
                       "assetSizeBytes": deb_path.stat().st_size,
                       "checksumsAssetName": "gh_2.102.0_checksums.txt",
@@ -421,6 +857,7 @@ jobs:
                       "versionAfter": ".".join(str(part) for part in after_version),
                       "releaseApiAssetDigest": deb_asset["digest"],
                       "releaseApiChecksumsDigest": checksums_asset["digest"],
+                      "downloadMode": "anonymous-public-asset",
                       "installCommand": "sudo -n apt-get install -y --no-install-recommends <verified-official-gh-deb>",
                   })
               else:
@@ -442,18 +879,37 @@ jobs:
                   key, separator, value = line.partition("=")
                   if separator:
                       os_release[key] = value.strip().strip('"')
+              execution_mode = acceptance_execution_mode()
+              if execution_mode == "github-hosted":
+                  driver_repository = os.environ.get("GITHUB_REPOSITORY")
+                  driver_ref = os.environ.get("GITHUB_REF")
+                  driver_commit = os.environ.get("GITHUB_WORKFLOW_SHA")
+              else:
+                  driver_repository = os.environ.get("ACCEPTANCE_DRIVER_SOURCE_REPOSITORY")
+                  driver_ref = os.environ.get("ACCEPTANCE_DRIVER_SOURCE_REF")
+                  driver_commit = os.environ.get("ACCEPTANCE_DRIVER_SOURCE_COMMIT")
+                  github_api_token()
               facts = {
+                  "executionMode": execution_mode,
+                  "driverSource": {
+                      "repository": driver_repository,
+                      "ref": driver_ref,
+                      "commit": driver_commit,
+                      "workflowPath": ".github/workflows/modular-distribution-acceptance.yml",
+                      "driverScriptSha256": sha256(Path(__file__)),
+                  },
                   "osRelease": os_release,
                   "machine": platform.machine(),
                   "uname": platform.uname()._asdict(),
                   "pid1": Path("/proc/1/comm").read_text(encoding="utf-8").strip(),
-                  "runnerImageOS": os.environ.get("ImageOS"),
-                  "runnerImageVersion": os.environ.get("ImageVersion"),
-                  "workflowRef": os.environ.get("GITHUB_WORKFLOW_REF"),
-                  "workflowSha": os.environ.get("GITHUB_WORKFLOW_SHA"),
-                  "workflowRepository": os.environ.get("GITHUB_REPOSITORY"),
-                  "workflowGitRef": os.environ.get("GITHUB_REF"),
+                  "runnerImageOS": os.environ.get("ImageOS") if execution_mode == "github-hosted" else None,
+                  "runnerImageVersion": os.environ.get("ImageVersion") if execution_mode == "github-hosted" else None,
+                  "workflowRef": os.environ.get("GITHUB_WORKFLOW_REF") if execution_mode == "github-hosted" else None,
+                  "workflowSha": os.environ.get("GITHUB_WORKFLOW_SHA") if execution_mode == "github-hosted" else None,
+                  "workflowRepository": os.environ.get("GITHUB_REPOSITORY") if execution_mode == "github-hosted" else None,
+                  "workflowGitRef": os.environ.get("GITHUB_REF") if execution_mode == "github-hosted" else None,
                   "uid": os.getuid(),
+                  "gid": os.getgid(),
                   "ghVersion": ".".join(str(part) for part in gh_version),
                   "attestationVerifier": "gh attestation verify",
                   "sudoNoninteractive": False,
@@ -462,9 +918,13 @@ jobs:
               require(os_release.get("ID") == "ubuntu", "runner is not Ubuntu")
               require(os_release.get("VERSION_ID") == "24.04", "runner is not Ubuntu 24.04")
               require(platform.machine().lower() in {"x86_64", "amd64"}, "runner is not x86_64")
-              require(facts["workflowRepository"] == REPOSITORY, "acceptance workflow is not running from the canonical repository")
-              require(facts["workflowGitRef"] == "refs/heads/develop", "acceptance workflow must run from the develop integration branch")
-              require(re.fullmatch(r"[0-9a-f]{40}", str(facts["workflowSha"])) is not None, "acceptance workflow SHA is missing or malformed")
+              require(driver_repository == REPOSITORY, "acceptance driver source is not the canonical repository")
+              require(driver_ref == "refs/heads/develop", "acceptance driver source must come from the develop integration branch")
+              require(re.fullmatch(r"[0-9a-f]{40}", str(driver_commit)) is not None, "acceptance driver source commit is missing or malformed")
+              if execution_mode == "github-hosted":
+                  require(facts["workflowRepository"] == REPOSITORY, "acceptance workflow is not running from the canonical repository")
+                  require(facts["workflowGitRef"] == "refs/heads/develop", "acceptance workflow must run from the develop integration branch")
+                  require(re.fullmatch(r"[0-9a-f]{40}", str(facts["workflowSha"])) is not None, "acceptance workflow SHA is missing or malformed")
               require(facts["pid1"] == "systemd", f"PID 1 is {facts['pid1']}, not systemd")
               run(["sudo", "-n", "true"], label="sudo-preflight", timeout=30)
               facts["sudoNoninteractive"] = True
@@ -496,7 +956,13 @@ jobs:
               ))
               phase("attestation_cli_provision", ensure_attestation_cli)
               phase("runner_identity", runner_identity)
-              record("host_reboot_recovery", "NOT_RUN", "the disposable GitHub-hosted VM is not rebooted by this job")
+              record(
+                  "host_reboot_recovery",
+                  "NOT_RUN",
+                  "the SSH guest reboot phase has not run"
+                  if acceptance_execution_mode() == "ssh-guest"
+                  else "the disposable GitHub-hosted VM is not rebooted by this job",
+              )
               record("version_conflict_gate", "NOT_RUN", "runs against the read-only exact Catalyst resolution before staging")
               record("offline_retry_gate", "NOT_RUN", "runs after the exact workload plan is checked using a network-isolated stage subprocess")
               record("installer_interrupted_transaction_recovery", "NOT_RUN", "no official deferred-transaction fault-injection and resume contract is published; acceptance never edits installer journals")
@@ -694,16 +1160,11 @@ jobs:
               release_id = os.environ["NATIVE_RELEASE_ID"]
               asset_dir = root() / "downloads"
               asset_dir.mkdir(parents=True, exist_ok=True)
-              safe_env = os.environ.copy()
               PREFLIGHT_STAGE = "native_release_metadata"
-              require(bool(safe_env.get("GH_TOKEN")), "read-only GH_TOKEN is not available")
 
               def metadata_gate() -> dict[str, Any]:
-                  release = json.loads(
-                      run(
-                          ["gh", "api", f"repos/{REPOSITORY}/releases/tags/{release_id}"],
-                          label="native-release-api", timeout=120, env=safe_env,
-                      ).stdout
+                  release = github_release_metadata(
+                      REPOSITORY, release_id, label="native-release-api"
                   )
                   require(release.get("tag_name") == release_id, "GitHub returned a different native tag")
                   require(release.get("immutable") is True, "native release is not immutable")
@@ -715,15 +1176,19 @@ jobs:
                   for name in names:
                       require(isinstance(name, str) and Path(name).name == name and "/" not in name and "\\" not in name, "native release contains an unsafe asset name")
                   write_json(root() / "evidence" / "native-release-api.json", release)
-                  gh_env = safe_env.copy()
-                  run(
-                      ["gh", "release", "download", release_id, "--repo", REPOSITORY, "--dir", str(asset_dir)],
-                      label="native-release-download", timeout=900, env=gh_env,
+                  download_facts = download_github_release_assets(
+                      release,
+                      asset_dir,
+                      repository=REPOSITORY,
+                      release_tag=release_id,
+                      label="native-release",
                   )
                   for row in assets:
                       path = asset_dir / row["name"]
                       require(path.is_file() and not path.is_symlink(), f"native release asset was not downloaded: {row['name']}")
                       require(path.stat().st_size == row.get("size"), f"GitHub asset size differs: {row['name']}")
+                  release["acceptanceDownloadMode"] = "anonymous-public-assets"
+                  release["acceptanceDownloadedAssetCount"] = len(download_facts)
                   return release
 
               release = phase("native_release_metadata", metadata_gate)
@@ -824,13 +1289,10 @@ jobs:
 
               PREFLIGHT_STAGE = "catalog_provenance"
               def catalog_attestation() -> dict[str, Any]:
-                  official_catalog_release = json.loads(
-                      run(
-                          ["gh", "api", f"repos/{catalog_pin['repository']}/releases/tags/{catalog_pin['releaseId']}"],
-                          label="workspace-catalog-v2-release-api",
-                          timeout=120,
-                          env=safe_env,
-                      ).stdout
+                  official_catalog_release = github_release_metadata(
+                      catalog_pin["repository"],
+                      catalog_pin["releaseId"],
+                      label="workspace-catalog-v2-release-api",
                   )
                   require(official_catalog_release.get("tag_name") == catalog_pin["releaseId"], "official catalog API returned a different release tag")
                   require(official_catalog_release.get("immutable") is True, "official catalog release is not immutable")
@@ -863,11 +1325,16 @@ jobs:
                           require(type(row.get("size")) is int and row["size"] > 0, f"official catalog API size is invalid for {asset_name}")
                   official_dir = root() / "downloads" / "official-catalog-v2"
                   official_dir.mkdir(parents=True, exist_ok=True)
-                  run(
-                      ["gh", "release", "download", catalog_pin["releaseId"], "--repo", catalog_pin["repository"], "--dir", str(official_dir), "--pattern", catalog_pin["assetName"], "--pattern", catalog_pin["attestationAssetName"]],
-                      label="workspace-catalog-v2-release-download",
-                      timeout=300,
-                      env=safe_env,
+                  download_github_release_assets(
+                      official_catalog_release,
+                      official_dir,
+                      repository=catalog_pin["repository"],
+                      release_tag=catalog_pin["releaseId"],
+                      label="workspace-catalog-v2-release",
+                      selected_names={
+                          catalog_pin["assetName"],
+                          catalog_pin["attestationAssetName"],
+                      },
                   )
                   official_catalog = official_dir / catalog_pin["assetName"]
                   official_bundle = official_dir / catalog_pin["attestationAssetName"]
@@ -914,11 +1381,15 @@ jobs:
                       shutil.copy2(bundle, root() / "evidence" / bundle.name)
                   return {"sha256sums": "verified", "downloadedAssetCount": len(release["assets"]), "debAsset": deb_path.name, "debSha256": sha256(deb_path), "debSizeBytes": deb_path.stat().st_size}
               phase("release_asset_integrity", checksum_gate)
-              output = Path(os.environ["GITHUB_OUTPUT"])
-              with output.open("a", encoding="utf-8") as stream:
-                  stream.write(f"deb_path={deb_path}\n")
-                  stream.write(f"native_release_id={release_id}\n")
-                  stream.write(f"source_commit={native['sourceCommit']}\n")
+              write_json(root() / "evidence" / "preflight-source-identity.json", {
+                  "executionMode": acceptance_execution_mode(),
+                  "driverSource": load_json(root() / "evidence" / "runner-identity.json").get("driverSource"),
+                  "nativeReleaseId": release_id,
+                  "nativeSourceCommit": native["sourceCommit"],
+                  "releaseApiAuthMode": "read-only-token" if github_api_token() else "anonymous",
+                  "releaseAssetMode": "anonymous-public-assets",
+                  "ghAttestationVerifier": "gh attestation verify --bundle",
+              })
 
           def dpkg_install() -> None:
               """Install only the already verified native Ubuntu 24.04 DEB."""
@@ -1044,8 +1515,7 @@ jobs:
               WORKLOAD_REQUEST_SEQUENCE += 1
               request = {"protocolVersion": WORKLOAD_PROTOCOL, "operation": operation, **fields}
               command = ["sudo", "-n"]
-              if preserve_read_token:
-                  require(bool(os.environ.get("GH_TOKEN")), "read-only GH_TOKEN is unavailable for signed release resolution")
+              if preserve_read_token and github_api_token() is not None:
                   command.append("--preserve-env=GH_TOKEN")
               if network_isolated:
                   # A fresh Linux network namespace makes this one root command unable to
@@ -3473,8 +3943,16 @@ jobs:
               value["requiredCoreFailures"] = [
                   name for name in required if phases[name]["status"] != "PASS"
               ]
+              runner_identity_path = root() / "evidence" / "runner-identity.json"
+              identity = load_json(runner_identity_path) if runner_identity_path.is_file() else {}
+              value["executionMode"] = identity.get("executionMode", acceptance_execution_mode())
+              value["driverSource"] = identity.get("driverSource")
               value["wholeHostAcceptance"] = "NOT_RUN"
-              value["wholeHostAcceptanceReason"] = "whole-VM reboot recovery is not exercised on a disposable hosted runner"
+              value["wholeHostAcceptanceReason"] = (
+                  "the SSH guest reboot recovery phase has not run"
+                  if value["executionMode"] == "ssh-guest"
+                  else "whole-VM reboot recovery is not exercised on a disposable hosted runner"
+              )
               phase2_required = (
                   "version_conflict_gate",
                   "offline_retry_gate",
@@ -3508,8 +3986,14 @@ jobs:
               ) else "PASS"
               value["updatedAtUtc"] = utc_now()
               write_json(root() / "phase-ledger.json", value)
-              Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(
+              summary_path = Path(
+                  os.environ.get("GITHUB_STEP_SUMMARY", str(root() / "acceptance-summary.md"))
+              )
+              source_commit = (value.get("driverSource") or {}).get("commit")
+              summary_path.write_text(
                   "# Modular distribution acceptance\n\n"
+                  f"- Execution mode: {value['executionMode']}\n"
+                  f"- Driver source commit: {source_commit or 'unavailable'}\n"
                   f"- Runnable Catalyst core: {'PASS' if value['requiredCorePass'] else 'INCOMPLETE'}\n"
                   f"- Phase 2 safety, reliability, and optional workloads: {value['phase2Acceptance']}\n"
                   f"- Full distribution acceptance: {value['fullDistributionAcceptance']}\n"

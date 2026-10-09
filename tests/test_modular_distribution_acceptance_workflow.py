@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import email.message
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -12,8 +14,10 @@ import stat
 import subprocess
 import sys
 import textwrap
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Self
 
 import jsonschema
 import pytest
@@ -312,12 +316,299 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     schema = json.loads(PINS_SCHEMA.read_text(encoding="utf-8"))
     assert "installedReceipt" not in schema["properties"]["nativeInstaller"]["properties"]
     assert "native_install_receipt_readback" not in source
-    assert (
-        '"gh", "api", f"repos/{catalog_pin[\'repository\']}/releases/tags/{catalog_pin[\'releaseId\']}"'
-        in source
-    )
+    assert "official_catalog_release = github_release_metadata(" in source
+    assert '"GitHub API URL is outside the fixed public HTTPS endpoint"' in source
+    assert "no credential fallback was attempted" in source
+    assert '"ssh-guest acceptance must not receive GitHub token environment variables"' in source
     assert '"--cert-oidc-issuer", "https://token.actions.githubusercontent.com"' in source
     assert "Runnable Catalyst core" in source
+
+
+def test_anonymous_release_api_records_public_rate_limit_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SSH guest release discovery uses one anonymous public API request."""
+    acceptance_root = tmp_path / "acceptance"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("ACCEPTANCE_EXECUTION_MODE", "ssh-guest")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_ENTERPRISE_TOKEN", raising=False)
+    module = _load_driver_module(tmp_path, "acceptance_driver_anonymous_api")
+    requests: list[object] = []
+
+    class Response:
+        status = 200
+
+        def __init__(self) -> None:
+            self.headers = email.message.Message()
+            self.headers["X-RateLimit-Remaining"] = "18"
+            self.headers["X-RateLimit-Reset"] = "1791500000"
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"tag_name":"preview-test","immutable":true}'
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class Opener:
+        def open(self, request: object, *, timeout: int) -> Response:
+            assert timeout == 120
+            requests.append(request)
+            return Response()
+
+    monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_args: Opener())
+
+    result = module.github_api_json(
+        "https://api.github.com/repos/DoHorizon-AI/Cyrene-Workspace/releases/tags/preview-test",
+        label="test-release",
+    )
+
+    assert result["tag_name"] == "preview-test"
+    assert len(requests) == 1
+    assert requests[0].get_header("Authorization") is None
+    evidence = json.loads(
+        (acceptance_root / "evidence" / "github-http-readback.json").read_text(encoding="utf-8")
+    )
+    assert evidence["requests"] == [
+        {
+            "label": "test-release",
+            "category": "release-metadata",
+            "host": "api.github.com",
+            "path": "/repos/DoHorizon-AI/Cyrene-Workspace/releases/tags/preview-test",
+            "httpStatus": 200,
+            "retryable": False,
+            "authMode": "anonymous",
+            "rateLimit": {
+                "X-RateLimit-Limit": None,
+                "X-RateLimit-Remaining": "18",
+                "X-RateLimit-Used": None,
+                "X-RateLimit-Reset": "1791500000",
+                "X-RateLimit-Resource": None,
+                "Retry-After": None,
+                "X-GitHub-Request-Id": None,
+            },
+        }
+    ]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("mode", ["ssh-guest", "github-hosted"])
+def test_github_http_auth_failure_is_retryable_without_credential_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    mode: str,
+) -> None:
+    """401/403 keeps rate-limit facts, drops bodies, and never retries with another credential."""
+    acceptance_root = tmp_path / f"acceptance-{mode}-{status}"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("ACCEPTANCE_EXECUTION_MODE", mode)
+    if mode == "ssh-guest":
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        monkeypatch.delenv("GH_ENTERPRISE_TOKEN", raising=False)
+        expected_authorization = None
+    else:
+        monkeypatch.setenv("GH_TOKEN", "synthetic-explicit-read-token")
+        expected_authorization = "Bearer synthetic-explicit-read-token"
+    module = _load_driver_module(tmp_path, f"acceptance_driver_failure_{mode}_{status}")
+    requests: list[object] = []
+
+    class Opener:
+        def open(self, request: object, *, timeout: int) -> object:
+            assert timeout == 120
+            requests.append(request)
+            headers = email.message.Message()
+            headers["X-RateLimit-Remaining"] = "0"
+            headers["X-RateLimit-Reset"] = "1791501234"
+            headers["Retry-After"] = "30"
+            raise urllib.error.HTTPError(
+                request.full_url,
+                status,
+                "public body contains synthetic-explicit-read-token",
+                headers,
+                io.BytesIO(b"private response body must not be retained"),
+            )
+
+    monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_args: Opener())
+
+    with pytest.raises(module.GitHubHttpFailure) as failure:
+        module.github_api_json(
+            "https://api.github.com/repos/DoHorizon-AI/Cyrene-Workspace/releases/tags/preview-test",
+            label="test-auth-failure",
+        )
+
+    assert len(requests) == 1
+    assert requests[0].get_header("Authorization") == expected_authorization
+    assert "no credential fallback was attempted" in str(failure.value)
+    assert "private response body" not in str(failure.value)
+    assert "synthetic-explicit-read-token" not in str(failure.value)
+    assert failure.value.safe_evidence["httpStatus"] == status
+    assert failure.value.safe_evidence["retryable"] is True
+    assert failure.value.safe_evidence["rateLimit"]["X-RateLimit-Remaining"] == "0"
+    assert failure.value.safe_evidence["rateLimit"]["X-RateLimit-Reset"] == "1791501234"
+    serialized = json.dumps(
+        json.loads(
+            (acceptance_root / "evidence" / "github-http-readback.json").read_text(encoding="utf-8")
+        )
+    )
+    assert f'"httpStatus": {status}' in serialized
+    assert '"retryable": true' in serialized
+    assert "private response body" not in serialized
+    assert "synthetic-explicit-read-token" not in serialized
+
+
+@pytest.mark.parametrize("name", ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"])
+def test_ssh_guest_rejects_any_github_token_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Manual guest execution cannot silently inherit any supported GitHub token env."""
+    monkeypatch.setenv("ACCEPTANCE_EXECUTION_MODE", "ssh-guest")
+    monkeypatch.setenv(name, "synthetic-token-must-not-be-used")
+    module = _load_driver_module(tmp_path, f"acceptance_driver_guest_token_{name.lower()}")
+
+    with pytest.raises(RuntimeError, match="ssh-guest acceptance must not receive"):
+        module.github_api_token()
+
+
+def test_release_asset_download_is_anonymous_and_digest_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Release assets are fetched without Authorization and checked against API bytes."""
+    acceptance_root = tmp_path / "acceptance"
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("ACCEPTANCE_EXECUTION_MODE", "github-hosted")
+    monkeypatch.setenv("GH_TOKEN", "synthetic-read-only-token")
+    module = _load_driver_module(tmp_path, "acceptance_driver_asset_anonymous")
+    payload = b"official release fixture\n"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    tag = "preview-test"
+    repository = "DoHorizon-AI/Cyrene-Workspace"
+    asset_name = "fixture.txt"
+    asset = {
+        "name": asset_name,
+        "size": len(payload),
+        "digest": digest,
+        "browser_download_url": f"https://github.com/{repository}/releases/download/{tag}/{asset_name}",
+    }
+    requests: list[object] = []
+
+    class Response:
+        status = 200
+
+        def __init__(self) -> None:
+            self.stream = io.BytesIO(payload)
+
+        def read(self, limit: int) -> bytes:
+            return self.stream.read(limit)
+
+        def geturl(self) -> str:
+            return "https://release-assets.githubusercontent.com/fixture"
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class Opener:
+        def open(self, request: object, *, timeout: int) -> Response:
+            assert timeout == 1800
+            requests.append(request)
+            return Response()
+
+    monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_args: Opener())
+    destination = tmp_path / "downloads"
+
+    result = module.download_github_release_asset(
+        asset,
+        destination,
+        repository=repository,
+        release_tag=tag,
+        label="test-asset",
+    )
+
+    assert len(requests) == 1
+    assert requests[0].get_header("Authorization") is None
+    assert (destination / asset_name).read_bytes() == payload
+    assert result["sha256"] == digest
+    assert result["sizeBytes"] == len(payload)
+    assert result["authMode"] == "anonymous-public-asset"
+
+
+def test_ssh_guest_runner_identity_records_driver_and_real_guest_without_workflow_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SSH guest evidence identifies the driver source and leaves hosted workflow fields null."""
+    acceptance_root = tmp_path / "acceptance"
+    (acceptance_root / "evidence").mkdir(parents=True)
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("ACCEPTANCE_EXECUTION_MODE", "ssh-guest")
+    monkeypatch.setenv("ACCEPTANCE_DRIVER_SOURCE_REPOSITORY", "DoHorizon-AI/Cyrene-Workspace")
+    monkeypatch.setenv("ACCEPTANCE_DRIVER_SOURCE_REF", "refs/heads/develop")
+    monkeypatch.setenv("ACCEPTANCE_DRIVER_SOURCE_COMMIT", "a" * 40)
+    for variable in (
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_REPOSITORY",
+        "GITHUB_REF",
+        "GITHUB_WORKFLOW_REF",
+        "GITHUB_WORKFLOW_SHA",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    module = _load_driver_module(tmp_path, "acceptance_driver_ssh_guest_identity")
+    monkeypatch.setattr(
+        module,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            "gh version 2.102.0\n" if command == ["gh", "--version"] else "",
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "trusted_prefix_lstat",
+        lambda: {"method": "os.lstat", "followedSymlinks": False, "entries": []},
+    )
+    original_read_text = Path.read_text
+
+    def read_guest_identity(path: Path, *args: object, **kwargs: object) -> str:
+        if str(path) == "/etc/os-release":
+            return 'ID=ubuntu\nVERSION_ID="24.04"\n'
+        if str(path) == "/proc/1/comm":
+            return "systemd\n"
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_guest_identity)
+
+    result = module.runner_identity()
+
+    assert result["executionMode"] == "ssh-guest"
+    assert result["driverSource"] == {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "ref": "refs/heads/develop",
+        "commit": "a" * 40,
+        "workflowPath": ".github/workflows/modular-distribution-acceptance.yml",
+        "driverScriptSha256": hashlib.sha256(Path(module.__file__).read_bytes()).hexdigest(),
+    }
+    assert result["workflowRepository"] is None
+    assert result["workflowGitRef"] is None
+    assert result["workflowSha"] is None
+    assert result["uid"] == os.getuid()
+    assert result["gid"] == os.getgid()
+    assert (
+        json.loads(
+            (acceptance_root / "evidence" / "runner-identity.json").read_text(encoding="utf-8")
+        )
+        == result
+    )
 
 
 def test_echo_storage_probe_compares_nested_secret_identity_without_retaining_raw_output(
@@ -580,6 +871,9 @@ def test_attestation_cli_keeps_an_already_supported_runner_unchanged(
     monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
     module = _load_driver_module(tmp_path, "acceptance_driver_gh_already_supported")
     commands: list[list[str]] = []
+    monkeypatch.setattr(
+        module.shutil, "which", lambda name: "/usr/bin/gh" if name == "gh" else None
+    )
 
     def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         commands.append(command)
@@ -604,13 +898,13 @@ def test_attestation_cli_keeps_an_already_supported_runner_unchanged(
     )
 
 
-def test_attestation_cli_upgrades_old_runner_from_exact_official_checksum_pins(
+def test_attestation_cli_bootstraps_missing_runner_from_exact_official_checksum_pins(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An old disposable runner verifies fixed official release bytes before apt install."""
     acceptance_root = tmp_path / "acceptance"
     monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
-    module = _load_driver_module(tmp_path, "acceptance_driver_gh_upgrade")
+    module = _load_driver_module(tmp_path, "acceptance_driver_gh_bootstrap")
     calls: list[list[str]] = []
     expected_deb_sha = "7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0"
     expected_checksums_sha = "afe49e9affa232faa8212aed035417166f6ade9b9470acb53d4dbd28c0504e8d"
@@ -620,58 +914,61 @@ def test_attestation_cli_upgrades_old_runner_from_exact_official_checksum_pins(
     ) -> subprocess.CompletedProcess[str]:
         calls.append(command)
         if command == ["gh", "--version"]:
-            version = "2.97.0" if label == "gh-attestation-cli-before" else "2.102.0"
-            return subprocess.CompletedProcess(command, 0, f"gh version {version}\n", "")
-        if command[0] == "curl":
-            output = Path(command[command.index("--output") + 1])
-            if output.name == "release-api.json":
-                output.write_text(
-                    json.dumps(
-                        {
-                            "tag_name": "v2.102.0",
-                            "immutable": True,
-                            "draft": False,
-                            "target_commitish": "fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd",
-                            "assets": [
-                                {
-                                    "name": "gh_2.102.0_linux_amd64.deb",
-                                    "digest": "sha256:" + expected_deb_sha,
-                                    "size": 15392446,
-                                    "browser_download_url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.deb",
-                                },
-                                {
-                                    "name": "gh_2.102.0_checksums.txt",
-                                    "digest": "sha256:" + expected_checksums_sha,
-                                    "size": 1971,
-                                    "browser_download_url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_checksums.txt",
-                                },
-                            ],
-                        }
-                    ),
-                    encoding="utf-8",
-                )
-            elif output.name == "gh_2.102.0_linux_amd64.deb":
-                with output.open("wb") as stream:
-                    stream.truncate(15392446)
-            else:
-                output.write_text(
-                    expected_deb_sha + "  gh_2.102.0_linux_amd64.deb\n", encoding="utf-8"
-                )
-            return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(command, 0, "gh version 2.102.0\n", "")
         if command[0] == "dpkg-deb":
             return subprocess.CompletedProcess(command, 0, "gh\n2.102.0\namd64\n", "")
         assert command[:4] == ["sudo", "-n", "apt-get", "install"]
         return subprocess.CompletedProcess(command, 0, "", "")
+
+    release = {
+        "tag_name": "v2.102.0",
+        "immutable": True,
+        "draft": False,
+        "target_commitish": "fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd",
+        "assets": [
+            {
+                "name": "gh_2.102.0_linux_amd64.deb",
+                "digest": "sha256:" + expected_deb_sha,
+                "size": 15392446,
+                "browser_download_url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_amd64.deb",
+            },
+            {
+                "name": "gh_2.102.0_checksums.txt",
+                "digest": "sha256:" + expected_checksums_sha,
+                "size": 1971,
+                "browser_download_url": "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_checksums.txt",
+            },
+        ],
+    }
+
+    def fake_release_metadata(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return release
+
+    def fake_download(
+        asset: dict[str, object], destination: Path, **_kwargs: object
+    ) -> dict[str, object]:
+        path = destination / str(asset["name"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.name.endswith(".deb"):
+            with path.open("wb") as stream:
+                stream.truncate(int(asset["size"]))
+        else:
+            path.write_text(expected_deb_sha + "  gh_2.102.0_linux_amd64.deb\n", encoding="utf-8")
+        return {"assetName": path.name, "verifiedExistingBytes": False}
 
     def fake_sha256(path: Path) -> str:
         return expected_deb_sha if path.suffix == ".deb" else expected_checksums_sha
 
     monkeypatch.setattr(module, "run", fake_run)
     monkeypatch.setattr(module, "sha256", fake_sha256)
+    monkeypatch.setattr(module, "github_release_metadata", fake_release_metadata)
+    monkeypatch.setattr(module, "download_github_release_asset", fake_download)
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
 
     evidence = module.ensure_attestation_cli()
 
-    assert evidence["versionBefore"] == "2.97.0"
+    assert evidence["versionBefore"] == "not-installed"
+    assert evidence["binaryPresentBefore"] is False
     assert evidence["versionAfter"] == "2.102.0"
     assert evidence["assetSha256"] == expected_deb_sha
     assert evidence["checksumsAssetSha256"] == expected_checksums_sha
@@ -681,8 +978,7 @@ def test_attestation_cli_upgrades_old_runner_from_exact_official_checksum_pins(
         "architecture": "amd64",
     }
     assert evidence["upgraded"] is True
-    # Read the release API first, then fetch the exact DEB and checksum asset.
-    assert sum(command[0] == "curl" for command in calls) == 3
+    assert [command for command in calls if command == ["gh", "--version"]] == [["gh", "--version"]]
     apt_call = next(command for command in calls if command[:3] == ["sudo", "-n", "apt-get"])
     assert apt_call[-1].endswith("gh_2.102.0_linux_amd64.deb")
 
@@ -1315,6 +1611,43 @@ def test_workload_attestation_token_is_preserved_only_for_explicit_resolution_ca
     assert "--preserve-env=GH_TOKEN" not in commands[1]
     assert "synthetic-read-only-token" not in " ".join(commands[0] + commands[1])
     assert [request["channel"] for request in requests] == ["preview", "preview"]
+
+
+def test_ssh_guest_workload_resolution_does_not_preserve_or_require_github_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Manual guest resolution stays anonymous while retaining the installed JSONL protocol."""
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(tmp_path / "acceptance"))
+    monkeypatch.setenv("ACCEPTANCE_EXECUTION_MODE", "ssh-guest")
+    for variable in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"):
+        monkeypatch.delenv(variable, raising=False)
+    module = _load_driver_module(tmp_path, "acceptance_driver_guest_workload_request")
+    commands: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], *, input_text: str, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        request = json.loads(input_text)
+        envelope = {
+            "protocolVersion": module.WORKLOAD_PROTOCOL,
+            "operation": request["operation"],
+            "ok": True,
+            "result": {"status": "ready"},
+        }
+        return subprocess.CompletedProcess(command, 0, json.dumps(envelope) + "\n", "")
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    response = module.workload_request(
+        "check",
+        preserve_read_token=True,
+        workloadId="catalyst",
+        channel="preview",
+    )
+
+    assert response["status"] == "ready"
+    assert commands == [["sudo", "-n", "/usr/bin/cyrene", "workload", "--json"]]
 
 
 def test_network_isolated_workload_failure_uses_fixed_cli_and_sanitized_evidence(
