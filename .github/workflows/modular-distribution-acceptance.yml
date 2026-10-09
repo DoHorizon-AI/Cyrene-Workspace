@@ -2555,7 +2555,7 @@ jobs:
                       static=updater._installed_static_web({"componentId":component_id})
                       if static.get("active") is not True or static.get("manifestDigest")!=pin["manifestDigest"] or static.get("artifactDigest")!=pin["digest"]:
                           raise SystemExit("static Web pointer/tree does not match its verified installed receipt")
-                      web_root=Path("/var/lib/cyrene/workloads/web")/component_id
+                      web_root=Path("/opt/cyrene/workloads/web")/component_id
                       pointer=web_root/"current"
                       pointer_target=os.readlink(pointer)
                       if pointer_target!="releases/"+receipt["pointerIdentity"]:
@@ -3126,7 +3126,7 @@ jobs:
               require(metadata.get("releaseIdentity") == web_pin["manifestDigest"], "Client Web host receipt release identity differs from exact manifest pin")
               require(metadata.get("sourceReceiptDigest") == "sha256:" + web_receipt["immutableReceiptSha256"], "Client Web source receipt digest differs from the verified immutable receipt")
               require(metadata.get("activeReceiptDigest") == "sha256:" + web_receipt["activeReceiptSha256"], "Client Web active receipt digest differs from the verified active receipt")
-              require(metadata.get("documentRoot") == "/var/lib/cyrene/workloads/web/cyrene-client-workspace-web/current", "Client Web document root differs from the installed current pointer")
+              require(metadata.get("documentRoot") == "/opt/cyrene/workloads/web/cyrene-client-workspace-web/current", "Client Web document root differs from the installed current pointer")
               require(metadata.get("clientUrl") == "http://127.0.0.1:8100/", "Client Web public URL differs from the loopback-only contract")
               require(metadata.get("listenerAddress") == "127.0.0.1" and metadata.get("listenerPort") == 8100, "Client Web listener is not the exact loopback address")
               require(metadata.get("configPath") == "/etc/cyrene/workloads/web/nginx.conf", "Client Web Nginx config path differs from the managed service contract")

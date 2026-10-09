@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 WEB_COMPONENT_ID = "cyrene-client-workspace-web"
-WEB_ROOT = Path("/var/lib/cyrene/workloads/web/cyrene-client-workspace-web")
+WEB_ROOT = Path("/opt/cyrene/workloads/web/cyrene-client-workspace-web")
 WEB_CURRENT = WEB_ROOT / "current"
 UPDATER_STATE_ROOT = Path("/var/lib/cyrene-updates")
 INSTALLED_RECEIPTS = UPDATER_STATE_ROOT / "installed" / WEB_COMPONENT_ID

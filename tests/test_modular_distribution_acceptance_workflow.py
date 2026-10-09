@@ -1700,7 +1700,7 @@ def test_client_web_http_gate_checks_live_contract_without_saving_session_token(
         ),
         "sourceReceiptDigest": source_digest,
         "activeReceiptDigest": active_digest,
-        "documentRoot": "/var/lib/cyrene/workloads/web/cyrene-client-workspace-web/current",
+        "documentRoot": "/opt/cyrene/workloads/web/cyrene-client-workspace-web/current",
         "clientUrl": "http://127.0.0.1:8100/",
         "listenerAddress": "127.0.0.1",
         "listenerPort": 8100,

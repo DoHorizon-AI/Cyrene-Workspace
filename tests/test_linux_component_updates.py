@@ -1861,6 +1861,275 @@ def test_workload_receipt_upgrade_persists_exact_raw_release_identity(
     assert inventory[manifest["componentId"]]["targetId"] == "linux-ubuntu-24.04-x86_64-web"
 
 
+def test_static_web_release_guard_rejects_cyrene_owned_var_lib_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "var" / "lib" / "cyrene" / "workloads" / "web" / "releases"
+    service_owned = tmp_path / "var" / "lib" / "cyrene"
+    controlled_paths = set(target.parents) | {target}
+    original_lstat = Path.lstat
+
+    def controlled_lstat(path: Path) -> os.stat_result:
+        result = original_lstat(path)
+        if path not in controlled_paths:
+            return result
+        fields = list(result)
+        fields[0] = stat.S_IFDIR | 0o755
+        fields[4] = 999 if path == service_owned else 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", controlled_lstat)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updates.ComponentUpdater._ensure_workload_release_directory(target)
+
+    assert error.value.code == "UNSAFE_WEB_ROOT"
+    assert service_owned.is_dir()
+
+
+def test_static_web_workload_uses_opt_root_through_uninstall_and_preserves_user_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    component_id = "cyrene-client-workspace-web"
+    assert updates.DEFAULT_WORKLOAD_WEB_ROOT == Path("/opt/cyrene/workloads/web")
+    web_root = tmp_path / "opt" / "cyrene" / "workloads" / "web"
+    component_root = web_root / component_id
+    stage_root = tmp_path / "staged"
+    stage_root.mkdir()
+    user_state = tmp_path / "var" / "lib" / "cyrene" / "user-state" / "keep.json"
+    user_state.parent.mkdir(parents=True)
+    user_state.write_text("preserve", encoding="utf-8")
+    monkeypatch.setattr(updates, "DEFAULT_WORKLOAD_WEB_ROOT", web_root)
+
+    original_lstat = Path.lstat
+    original_stat = Path.stat
+    root_owned_trees = (web_root, stage_root)
+
+    def root_controlled(path: Path, result: os.stat_result) -> os.stat_result:
+        if path in web_root.parents:
+            fields = list(result)
+            fields[0] = stat.S_IFDIR | 0o755
+            fields[4] = 0
+            return os.stat_result(fields)
+        if any(path == root or root in path.parents for root in root_owned_trees):
+            fields = list(result)
+            fields[4] = 0
+            return os.stat_result(fields)
+        return result
+
+    def controlled_lstat(path: Path) -> os.stat_result:
+        return root_controlled(path, original_lstat(path))
+
+    def controlled_stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        return root_controlled(path, original_stat(path, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "lstat", controlled_lstat)
+    monkeypatch.setattr(Path, "stat", controlled_stat)
+    monkeypatch.setattr(updates.os, "chown", lambda *_args, **_kwargs: None)
+
+    index_bytes = b"<!doctype html><title>Verified Client</title>\n"
+    archive_stream = io.BytesIO()
+    with tarfile.open(fileobj=archive_stream, mode="w:gz") as archive:
+        entry = tarfile.TarInfo("index.html")
+        entry.size = len(index_bytes)
+        entry.mode = 0o644
+        archive.addfile(entry, io.BytesIO(index_bytes))
+    archive_bytes = archive_stream.getvalue()
+    artifact_digest = "sha256:" + hashlib.sha256(archive_bytes).hexdigest()
+    manifest_asset_digest = "sha256:" + "b" * 64
+    release_id = "preview-cyrene-client-workspace-web-" + "c" * 40
+    artifact = {
+        "kind": "static-web",
+        "format": "tar.gz",
+        "uri": f"https://example.invalid/releases/{release_id}/client.tar.gz",
+        "sha256": artifact_digest,
+        "sizeBytes": len(archive_bytes),
+        "files": {"index.html": "sha256:" + hashlib.sha256(index_bytes).hexdigest()},
+        "maxEntries": 1,
+        "maxUncompressedBytes": 4096,
+        "entrypoint": "index.html",
+    }
+    manifest: dict[str, Any] = {
+        "schemaVersion": 2,
+        "releaseId": release_id,
+        "componentId": component_id,
+        "version": "0.1.0",
+        "artifact": artifact,
+        "dependencies": [],
+        "restart": {"group": "none"},
+    }
+    manifest_digest = updates._digest_json(manifest, "manifestDigest")
+    manifest["manifestDigest"] = manifest_digest
+    component = {"componentId": component_id, "publisher": "Example-Corp/Client"}
+    publisher_identity = {
+        "id": "official-client-workspace-web",
+        "repository": "Example-Corp/Client",
+        "workflow": "Example-Corp/Client/.github/workflows/web.yml",
+        "tagFormat": "component-source-sha",
+    }
+    candidate = updates.Candidate(
+        component=component,
+        manifest=manifest,
+        manifest_digest=manifest_digest,
+        artifact_digest=artifact_digest,
+        manifest_uri="https://example.invalid/releases/manifest.json",
+        index={},
+        index_uri="https://example.invalid/releases/index.json",
+        release_tag=release_id,
+        index_asset_name="component-release-index-v1.json",
+        index_asset_digest="sha256:" + "a" * 64,
+        manifest_asset_digest=manifest_asset_digest,
+    )
+    resolution_row = {
+        "releaseId": release_id,
+        "targetId": "linux-ubuntu-24.04-x86_64-web",
+        "indexIdentity": {
+            "assetName": "component-release-index-v1.json",
+            "assetDigest": candidate.index_asset_digest,
+        },
+        "publisherIdentity": publisher_identity,
+        "attestationRef": {
+            "repository": publisher_identity["repository"],
+            "workflow": publisher_identity["workflow"],
+            "sourceCommit": "e" * 40,
+            "subjectName": "component-release-manifest-v2.json",
+            "subjectDigest": manifest_asset_digest,
+        },
+    }
+    updater = _empty_updater(tmp_path)
+    monkeypatch.setattr(
+        updater,
+        "_workload_asset_bytes",
+        lambda *_args, **_kwargs: (archive_bytes, "sha256:" + "d" * 64),
+    )
+    staged = updater._stage_workload_static_web(
+        candidate,
+        stage_root,
+        "plan-" + "1" * 32,
+        "sha256:" + "1" * 64,
+        resolution_component=resolution_row,
+    )
+    release_path = Path(staged["stagedIdentity"]["releasePath"])
+    assert release_path == component_root / "releases" / staged["stagedIdentity"]["releaseIdentity"]
+    assert release_path.is_dir()
+
+    receipt = updater._read_release_receipt(component_id, manifest_digest)
+    assert receipt is not None
+    assert receipt["releasePath"] == str(release_path)
+    assert receipt["archivePath"] == staged["stagedIdentity"]["archivePath"]
+    updater.components = {component_id: {"componentId": component_id, "kind": "static-web"}}
+    updater._activate_workload_web(receipt, expected_current=None)
+    assert (component_root / "current").is_symlink()
+    assert updater._installed_static_web(updater.components[component_id])["releasePath"] == str(
+        release_path
+    )
+
+    class WebHost:
+        def capture_web_host_state(self, *, runner: Any) -> dict[str, Any]:
+            del runner
+            return {"schemaVersion": 1, "componentId": component_id}
+
+        def remove_web_host(
+            self,
+            *,
+            expected_state: dict[str, Any],
+            durable_callback: Any,
+            runner: Any,
+        ) -> None:
+            del runner
+            assert expected_state["componentId"] == component_id
+            durable_callback({"phase": "removed"})
+
+        def read_web_host_status(
+            self,
+            *,
+            expected_source_receipt: dict[str, Any] | None = None,
+            runner: Any,
+        ) -> dict[str, Any]:
+            del runner
+            return {
+                "installed": expected_source_receipt is not None,
+                "documentRoot": str(component_root / "current"),
+            }
+
+    monkeypatch.setattr(updater, "_reload_catalog_for_operation", lambda: None)
+    monkeypatch.setattr(
+        updater,
+        "_load_workload_resolver",
+        lambda: SimpleNamespace(
+            potential_component_ids=lambda _catalog, _workload: (component_id,)
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_package_inventory",
+        lambda _workload, _components: {"components": {}, "sourceBindings": []},
+    )
+    monkeypatch.setattr(updater, "_load_workload_web_host", lambda: WebHost())
+    updater.catalog = {"schemaVersion": 2}
+    updater.catalog_generation = 15
+    updater.catalog_digest = "sha256:" + "f" * 64
+
+    status = updater.workload_status("catalyst")
+    web_row = next(row for row in status["components"] if row["componentId"] == component_id)
+    assert web_row["installed"] is True
+    assert status["hostMetadata"]["web"]["documentRoot"] == str(component_root / "current")
+    assert status["hostMetadata"]["web"]["installed"] is True
+
+    selected_row = {
+        "componentId": component_id,
+        "artifactKind": "static-web",
+        "version": manifest["version"],
+        "releaseId": release_id,
+        "targetId": "linux-ubuntu-24.04-x86_64-web",
+        "manifestDigest": manifest_digest,
+        "manifestAssetDigest": manifest_asset_digest,
+        "digest": artifact_digest,
+        "installationId": None,
+        "installedIdentity": {
+            "installed": True,
+            "version": manifest["version"],
+            "releaseId": release_id,
+            "manifestDigest": manifest_digest,
+            "manifestAssetDigest": manifest_asset_digest,
+            "digest": artifact_digest,
+            "targetId": "linux-ubuntu-24.04-x86_64-web",
+            "pointerIdentity": receipt["pointerIdentity"],
+        },
+    }
+    resolution = {"status": "ready", "selectedComponents": [selected_row]}
+    monkeypatch.setattr(
+        updater, "_build_workload_plan", lambda *_args, **_kwargs: (resolution, {}, {})
+    )
+    monkeypatch.setattr(updates, "_running_as_root", lambda: True)
+    monkeypatch.setattr(updater, "_ensure_workload_phase", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(updater, "_end_workload_hold", lambda *_args, **_kwargs: None)
+    plan_id = "plan-" + "2" * 32
+    result = updater._apply_workload_uninstall_locked(
+        {
+            "planId": plan_id,
+            "planDigest": "sha256:" + "2" * 64,
+            "workloadId": "catalyst",
+            "targetId": updates.WORKLOAD_HOST_TARGET,
+            "channel": "preview",
+            "selections": {},
+            "catalogDigest": updater.catalog_digest,
+            "stagedComponents": [{"componentId": component_id, "status": "staged"}],
+        },
+        {},
+    )
+
+    assert result["status"] == "uninstalled"
+    assert not (component_root / "current").exists()
+    assert updater._read_active_receipt(component_id) is None
+    assert release_path.is_dir()
+    assert user_state.read_text(encoding="utf-8") == "preserve"
+    after = updater.workload_status("catalyst")
+    after_row = next(row for row in after["components"] if row["componentId"] == component_id)
+    assert after_row["installed"] is False
+    assert after["hostMetadata"]["web"]["installed"] is False
+
+
 def test_workspace_bootstrap_uses_the_compiled_catalog_authority_pin(tmp_path: Path) -> None:
     updater = updates.ComponentUpdater(
         catalog_path=updates.DEFAULT_CATALOG,
