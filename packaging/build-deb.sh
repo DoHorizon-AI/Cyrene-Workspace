@@ -769,6 +769,9 @@ if [[ -n "${VERIFIED_SERVICE_ARTIFACTS}" ]]; then
         --target-profile "${TARGET_PROFILE}" \
         --service-artifacts-index "${STAGE_DIR}/usr/share/cyrene/service-artifacts/index.json" \
         --scripts-dir "${STAGE_DIR}/DEBIAN" \
+        --unit-directory "${STAGE_DIR}/lib/systemd/system" \
+        --source-ref "${SOURCE_REF}" \
+        --source-commit "${SOURCE_COMMIT}" \
         --output "${STAGE_DIR}/usr/share/cyrene/native-install-contract-v1.json"
     chmod 644 "${STAGE_DIR}/usr/share/cyrene/native-install-contract-v1.json"
 fi

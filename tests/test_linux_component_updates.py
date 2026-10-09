@@ -1320,6 +1320,46 @@ def test_workload_managed_token_writer_accepts_exact_cyrene_0600_identity(
     assert transaction.get("managedConfigFiles", []) == []
 
 
+def test_existing_exact_workload_config_is_recorded_as_prior_transaction_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    path = tmp_path / "etc/cyrene/catalyst-auth.env"
+    path.parent.mkdir(parents=True)
+    content = b"CYRENE_DATA_TOOLS_TOKEN=stable-token\n"
+    path.write_bytes(content)
+    path.chmod(0o640)
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda _path, **_kwargs: content,
+    )
+    transaction: dict[str, Any] = {}
+
+    digest = updater._write_workload_managed_config(
+        transaction,
+        tmp_path / "transactions/plan-test.json",
+        path=path,
+        content=content,
+        group_id=1234,
+        mode=0o640,
+        entry_kind="catalyst-auth-environment",
+    )
+
+    assert digest == "sha256:" + hashlib.sha256(content).hexdigest()
+    assert transaction["managedConfigFiles"] == [
+        {
+            "path": str(path),
+            "kind": "catalyst-auth-environment",
+            "priorDigest": digest,
+            "writtenDigest": digest,
+            "mode": 0o640,
+            "groupId": 1234,
+        }
+    ]
+    assert path.read_bytes() == content
+
+
 def test_workload_auth_preflight_rejects_token_in_general_env_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1526,8 +1566,8 @@ def test_source_update_intent_reconcile_returns_committed_result_without_reproje
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     updater = _empty_updater(tmp_path)
-    plan_id = "plan-" + "a" * 32
     plan_digest = "sha256:" + "b" * 64
+    plan_id = "plan-" + "b" * 32
     phase = "package-only"
     result = {
         "catalogGeneration": 6,
@@ -1543,7 +1583,7 @@ def test_source_update_intent_reconcile_returns_committed_result_without_reproje
     intent = {
         "schemaVersion": 1,
         "phase": phase,
-        "requestId": "cyrene-wsource-package-only-" + "a" * 32,
+        "requestId": "cyrene-wsource-package-only-" + "b" * 32,
         "previousCatalogGeneration": 5,
         "expectedCatalogGeneration": 6,
         "previousPolicyDigest": "sha256:" + "f" * 64,
@@ -1617,8 +1657,8 @@ def test_legacy_source_update_intent_persists_success_history_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     updater = _empty_updater(tmp_path)
-    plan_id = "plan-" + "a" * 32
     plan_digest = "sha256:" + "b" * 64
+    plan_id = "plan-" + "b" * 32
     phase = "core-runtime"
     component_id = "cyrene-client-workspace-control"
     digest = "sha256:" + "c" * 64
@@ -1651,7 +1691,7 @@ def test_legacy_source_update_intent_persists_success_history_map(
     intent = {
         "schemaVersion": 1,
         "phase": phase,
-        "requestId": "cyrene-wsource-core-runtime-" + "a" * 32,
+        "requestId": "cyrene-wsource-core-runtime-" + "b" * 32,
         "previousCatalogGeneration": 5,
         "expectedCatalogGeneration": 6,
         "previousPolicyDigest": prior_policy_digest,
@@ -2885,6 +2925,528 @@ def test_portable_data_target_remains_independent_of_ubuntu_version(
     assert target is not None
     assert target["id"] == "portable-contract-data-v1"
     assert target["artifactKind"] == "data-bundle"
+
+
+def _native_unit_contract_module() -> Any:
+    path = WORKSPACE_ROOT / "packaging" / "native_install_contract.py"
+    contract_spec = importlib.util.spec_from_file_location(
+        "cyrene_native_install_contract_runtime_test", path
+    )
+    assert contract_spec is not None and contract_spec.loader is not None
+    module = importlib.util.module_from_spec(contract_spec)
+    sys.modules[contract_spec.name] = module
+    contract_spec.loader.exec_module(module)
+    return module
+
+
+def _native_unit_runtime_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[
+    updates.ComponentUpdater,
+    dict[str, Any],
+    dict[str, Any],
+    Path,
+    Path,
+    Path,
+    dict[str, str],
+]:
+    target_id = "linux-ubuntu-24.04-x86_64-python-3.12"
+    host_root = tmp_path / "host"
+    canonical_units = host_root / "usr/lib/systemd/system"
+    canonical_units.mkdir(parents=True)
+    (host_root / "lib").symlink_to("usr/lib")
+    systemd_units = host_root / "etc/systemd/system"
+    systemd_units.mkdir(parents=True)
+    source = {
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "ref": "refs/heads/main",
+        "commit": "d" * 40,
+    }
+    for component_id, service in updates.NATIVE_PRODUCT_SERVICES.items():
+        (canonical_units / f"{component_id}.service").write_text(
+            "[Unit]\nDescription=managed Product\n"
+            "[Service]\nUser=cyrene\nGroup=cyrene\n"
+            "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+            f"/usr/lib/cyrene/scripts/cyrene.py service-run {service}\n",
+            encoding="utf-8",
+        )
+        (canonical_units / f"{component_id}.service").chmod(0o644)
+
+    managed_units = _native_unit_contract_module().managed_units_from_directory(
+        canonical_units,
+        target_profile=target_id,
+        source_ref=source["ref"],
+        source_commit=source["commit"],
+    )
+    service_records = {
+        component_id: {
+            "componentId": component_id,
+            "source": {"ref": "refs/heads/product", "commit": "e" * 40},
+        }
+        for component_id in updates.NATIVE_PRODUCT_SERVICES
+    }
+    contract_path = host_root / "usr/share/cyrene/native-install-contract-v1.json"
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "targetProfile": target_id,
+                "initializationMode": "stage-only",
+                "serviceArtifactsMode": "verified-published-bytes",
+                "serviceActivation": "deferred",
+                "brokerAction": "preserve-existing",
+                "oldRuntimeAction": "preserve",
+                "serviceArtifactsIndexSha256": "1" * 64,
+                "services": service_records,
+                "managedUnits": managed_units,
+                "maintainerScriptsSha256": {
+                    name: "2" * 64 for name in ("postinst", "prerm", "postrm")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    contract_path.chmod(0o644)
+
+    updater_root = tmp_path / "updater"
+    updater_root.mkdir()
+    updater = _empty_updater(updater_root)
+    updater.native_install_contract_path = contract_path
+    updater.native_deb_unit_root = host_root / "lib/systemd/system"
+    updater.systemd_unit_dirs = (
+        systemd_units,
+        host_root / "lib/systemd/system",
+        canonical_units,
+    )
+    dropin_search_root = tmp_path / "systemd-dropin-search"
+    dropin_search_root.mkdir()
+    monkeypatch.setattr(updates, "SYSTEMD_SYSTEM_UNIT_SEARCH_ROOTS", (dropin_search_root,))
+
+    def fake_root_file(path: Path, *, mode: int, gid: int = 0) -> Any:
+        info = Path(path).lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != mode
+            or info.st_nlink != 1
+        ):
+            raise updates.UpdateError("UNSAFE_CONTROL_ADMISSION", "fixture file is unsafe")
+        return SimpleNamespace(st_nlink=info.st_nlink)
+
+    monkeypatch.setattr(updater, "_verify_root_path_chain", lambda _path: None)
+    monkeypatch.setattr(updater, "_verify_root_file", fake_root_file)
+
+    component = {
+        "componentId": "cyrene-catalyst",
+        "kind": "python-bundle",
+        "pythonBundleService": "catalyst",
+        "systemdUnit": "cyrene-catalyst.service",
+        "restart": {"group": "single-service", "unit": "cyrene-catalyst.service", "order": 0},
+    }
+    updater.components[component["componentId"]] = component
+    candidate = {"componentId": component["componentId"], "targetId": target_id}
+    systemd_properties = {
+        "FragmentPath": str(canonical_units / "cyrene-catalyst.service"),
+        "DropInPaths": "",
+        "User": "cyrene",
+        "Group": "cyrene",
+        "ExecStart": (
+            "{ path=/opt/cyrene/python/3.12.14/bin/python3.12 ; "
+            "argv[]=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+            "/usr/lib/cyrene/scripts/cyrene.py service-run catalyst ; "
+            "ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; "
+            "code=(null) ; status=0/0 }"
+        ),
+    }
+    monkeypatch.setattr(
+        updater,
+        "_systemd_property",
+        lambda _unit, name: systemd_properties[name],
+    )
+    return (
+        updater,
+        component,
+        candidate,
+        contract_path,
+        canonical_units / "cyrene-catalyst.service",
+        systemd_units,
+        systemd_properties,
+    )
+
+
+def test_catalyst_uses_deb_owned_unit_and_restarts_without_replacing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, component, candidate, _contract, unit_path, _systemd_units, _properties = (
+        _native_unit_runtime_fixture(tmp_path, monkeypatch)
+    )
+    payload_before = unit_path.read_bytes()
+    services = updater._workload_service_units(
+        [{"componentId": component["componentId"]}], {}, [candidate]
+    )
+
+    assert len(services) == 1
+    assert services[0]["unitOwner"] == "native-deb"
+    assert services[0]["candidate"] == candidate
+    transaction: dict[str, Any] = {"unitFileChanges": []}
+    updater._install_workload_service_units(transaction, services)
+    assert transaction["unitFileChanges"] == []
+    assert unit_path.read_bytes() == payload_before
+    assert updater._restart_order(
+        {
+            "targetKind": "CORE_RUNTIME",
+            "components": [{"componentId": component["componentId"]}],
+        }
+    ) == [component["systemdUnit"]]
+
+
+def test_control_service_keeps_signed_release_unit_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    component = {
+        "componentId": "cyrene-client-workspace-control",
+        "kind": "native-binary",
+        "systemdUnit": "cyrene-client-workspace-control.service",
+        "restart": {
+            "group": "single-service",
+            "unit": "cyrene-client-workspace-control.service",
+        },
+    }
+    updater.components[component["componentId"]] = component
+    candidate = {"componentId": component["componentId"], "targetId": "control-target"}
+    checked: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+
+    def signed_unit(
+        selected: dict[str, Any], staged: dict[str, Any] | None
+    ) -> tuple[bytes, Path, str]:
+        checked.append((selected, staged))
+        return (
+            b"signed control unit",
+            tmp_path / "release/systemd/control.service",
+            "sha256:" + "a" * 64,
+        )
+
+    monkeypatch.setattr(updater, "_workload_signed_unit_bytes", signed_unit)
+
+    services = updater._workload_service_units(
+        [{"componentId": component["componentId"]}], {}, [candidate]
+    )
+
+    assert len(services) == 1
+    assert services[0]["unitOwner"] == "signed-release"
+    assert checked == [(component, candidate)]
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing-map",
+        "schema-bool",
+        "path",
+        "digest",
+        "target",
+        "source",
+        "source-ref",
+        "runner",
+        "shadow",
+        "fragment",
+        "effective-execstart",
+        "effective-user",
+        "effective-group",
+        "effective-dropin",
+    ],
+)
+def test_deb_managed_unit_readback_rejects_mismatched_contract_or_systemd_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    updater, component, candidate, contract_path, unit_path, systemd_units, properties = (
+        _native_unit_runtime_fixture(tmp_path, monkeypatch)
+    )
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    row = contract["managedUnits"][component["componentId"]]
+    if corruption == "missing-map":
+        del contract["managedUnits"]
+    elif corruption == "schema-bool":
+        contract["schemaVersion"] = True
+    elif corruption == "path":
+        row["packagePath"] = "usr/lib/systemd/system/cyrene-catalyst.service"
+    elif corruption == "digest":
+        row["sha256"] = "f" * 64
+    elif corruption == "target":
+        row["targetProfile"] = "linux-ubuntu-22.04-x86_64-python-3.12"
+    elif corruption == "source":
+        row["source"]["commit"] = "f" * 40
+    elif corruption == "source-ref":
+        row["source"]["ref"] = "arbitrary"
+    elif corruption == "runner":
+        unit_path.write_text(
+            unit_path.read_text(encoding="utf-8").replace("service-run catalyst", "other-runner"),
+            encoding="utf-8",
+        )
+        row["sha256"] = hashlib.sha256(unit_path.read_bytes()).hexdigest()
+    elif corruption == "effective-execstart":
+        properties["ExecStart"] = (
+            "{ path=/bin/false ; argv[]=/bin/false ; ignore_errors=no ; "
+            "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+        )
+    elif corruption == "effective-user":
+        properties["User"] = "root"
+    elif corruption == "effective-group":
+        properties["Group"] = "root"
+    elif corruption == "effective-dropin":
+        properties["DropInPaths"] = str(
+            tmp_path / "etc/systemd/system/cyrene-catalyst.service.d/override.conf"
+        )
+    elif corruption == "shadow":
+        (systemd_units / component["systemdUnit"]).write_text(
+            "[Service]\nUser=cyrene\nGroup=cyrene\nExecStart=/bin/false\n",
+            encoding="utf-8",
+        )
+        (systemd_units / component["systemdUnit"]).chmod(0o644)
+    elif corruption == "fragment":
+        properties["FragmentPath"] = str(systemd_units / component["systemdUnit"])
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_deb_managed_unit_bytes(component, candidate, verify_fragment=True)
+
+    assert error.value.code == "SERVICE_NOT_MANAGED"
+
+
+def test_native_unit_resolver_accepts_only_exact_lib_usrmerge_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, component, candidate, _contract, _unit_path, _systemd_units, _properties = (
+        _native_unit_runtime_fixture(tmp_path, monkeypatch)
+    )
+    assert updater._workload_deb_managed_unit_bytes(component, candidate, verify_fragment=True)[
+        2
+    ].startswith("sha256:")
+
+    host_root = updater.native_deb_unit_root.parents[2]
+    lib_alias = host_root / "lib"
+    lib_alias.unlink()
+    (host_root / "lib").symlink_to("other-lib")
+    (host_root / "other-lib/systemd/system").mkdir(parents=True)
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_deb_managed_unit_bytes(component, candidate, verify_fragment=True)
+    assert error.value.code == "SERVICE_NOT_MANAGED"
+
+
+@pytest.mark.parametrize(
+    ("component_id", "service"),
+    list(updates.NATIVE_PRODUCT_SERVICES.items()),
+)
+@pytest.mark.parametrize(
+    "dropin_shape",
+    [
+        "unit-specific",
+        "dash-prefix",
+        "service-type",
+    ],
+)
+def test_native_product_unit_rejects_unloaded_disk_dropins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component_id: str,
+    service: str,
+    dropin_shape: str,
+) -> None:
+    updater, component, candidate, _contract, _unit, _systemd_units, properties = (
+        _native_unit_runtime_fixture(tmp_path, monkeypatch)
+    )
+    unit = f"{component_id}.service"
+    component = {
+        "componentId": component_id,
+        "kind": "python-bundle",
+        "pythonBundleService": service,
+        "systemdUnit": unit,
+        "restart": {"group": "single-service", "unit": unit, "order": 0},
+    }
+    candidate = {**candidate, "componentId": component_id}
+    updater.components[component_id] = component
+    properties["FragmentPath"] = str(_unit.parent / unit)
+    properties["ExecStart"] = (
+        "{ path=/opt/cyrene/python/3.12.14/bin/python3.12 ; "
+        "argv[]=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+        f"/usr/lib/cyrene/scripts/cyrene.py service-run {service} ; "
+        "ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; "
+        "code=(null) ; status=0/0 }"
+    )
+    search_root = tmp_path / "systemd-dropin-search"
+    if dropin_shape == "unit-specific":
+        dropin_directory = f"{unit}.d"
+    elif dropin_shape == "dash-prefix":
+        dropin_directory = f"{component_id.split('-', 1)[0]}-.service.d"
+    else:
+        dropin_directory = "service.d"
+    directory = search_root / dropin_directory
+    directory.mkdir()
+    (directory / "90-unmanaged-override.conf").write_text(
+        "[Service]\nExecStart=\nExecStart=/bin/false\n",
+        encoding="utf-8",
+    )
+
+    original_lstat = Path.lstat
+
+    def root_owned_directory(path: Path) -> Any:
+        if path == directory:
+            original_lstat(path)
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755,
+                st_uid=0,
+                st_gid=0,
+            )
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", root_owned_directory)
+    assert properties["DropInPaths"] == ""
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_deb_managed_unit_bytes(component, candidate, verify_fragment=True)
+
+    assert error.value.code == "SERVICE_NOT_MANAGED"
+
+
+@pytest.mark.parametrize("owner_state", ["valid", "valid-unloaded", "missing", "mismatched"])
+def test_catalyst_auth_dropin_requires_exact_durable_transaction_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_state: str,
+) -> None:
+    updater, component, candidate, _contract, _unit, _systemd_units, properties = (
+        _native_unit_runtime_fixture(tmp_path, monkeypatch)
+    )
+    config_root = tmp_path / "managed-config"
+    dropin = config_root / "systemd/cyrene-catalyst.service.d/80-workload-api-token.conf"
+    auth_environment = config_root / "cyrene/catalyst-auth.env"
+    token_path = config_root / "cyrene/secrets/catalyst-api-token"
+    for path in (dropin, auth_environment, token_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    dropin_payload = f"[Service]\nEnvironmentFile={auth_environment}\n".encode()
+    token_payload = b"private-test-token\n"
+    environment_payload = b"CYRENE_DATA_TOOLS_TOKEN=private-test-token\n"
+    for path, payload, mode in (
+        (dropin, dropin_payload, 0o644),
+        (auth_environment, environment_payload, 0o640),
+        (token_path, token_payload, 0o640),
+    ):
+        path.write_bytes(payload)
+        path.chmod(mode)
+    monkeypatch.setattr(updates, "SYSTEMD_SYSTEM_UNIT_SEARCH_ROOTS", (config_root / "systemd",))
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_AUTH_DROPIN", dropin)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_AUTH_ENVIRONMENT", auth_environment)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_API_TOKEN", token_path)
+    properties["DropInPaths"] = "" if owner_state in {"valid-unloaded", "missing"} else str(dropin)
+    original_lstat = Path.lstat
+
+    def root_owned_directory(path: Path) -> Any:
+        if path == dropin.parent:
+            original_lstat(path)
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", root_owned_directory)
+    group_id = 1200
+    user_id = 1201
+    monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=group_id))
+    monkeypatch.setattr(updates.pwd, "getpwnam", lambda _name: SimpleNamespace(pw_uid=user_id))
+
+    protected_files = {
+        dropin: dropin_payload,
+        auth_environment: environment_payload,
+        token_path: token_payload,
+    }
+
+    def read_protected(
+        path: Path,
+        *,
+        allowed_identities: set[tuple[int, int, int]],
+        maximum_bytes: int,
+        error_code: str = "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+    ) -> bytes | None:
+        del error_code
+        payload = protected_files.get(path)
+        if payload is None:
+            return None
+        assert len(payload) <= maximum_bytes
+        assert any(mode == stat.S_IMODE(path.stat().st_mode) for _, _, mode in allowed_identities)
+        return payload
+
+    monkeypatch.setattr(updater, "_read_workload_protected_file", read_protected)
+    plan_digest = "sha256:" + "b" * 64
+    plan_id = "plan-" + "b" * 32
+    dropin_digest = "sha256:" + hashlib.sha256(dropin_payload).hexdigest()
+    environment_digest = "sha256:" + hashlib.sha256(environment_payload).hexdigest()
+    if owner_state != "missing":
+        transactions = updater.state_root / "transactions"
+        transactions.mkdir(parents=True, mode=0o700)
+        auth_dropin_digest = (
+            dropin_digest if owner_state in {"valid", "valid-unloaded"} else "sha256:" + "f" * 64
+        )
+        record = {
+            "path": str(dropin),
+            "kind": "catalyst-auth-dropin",
+            "priorDigest": None,
+            "writtenDigest": auth_dropin_digest,
+            "mode": 0o644,
+            "groupId": 0,
+        }
+        transaction = {
+            "schemaVersion": 2,
+            "transactionKind": "workload-assembly.v1",
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "catalogDigest": "sha256:" + "d" * 64,
+            "workloadId": "catalyst",
+            "action": "install",
+            "targetId": "linux-ubuntu-24.04-x86_64",
+            "phase": "succeeded",
+            "selectedComponents": [{"componentId": "cyrene-catalyst"}],
+            "catalystAuth": {
+                "tokenPath": str(token_path),
+                "tokenSha256": "sha256:" + hashlib.sha256(token_payload).hexdigest(),
+                "catalystEnvironmentDigest": environment_digest,
+                "controlEnvironmentDigest": "sha256:" + "c" * 64,
+                "unitDropInDigest": auth_dropin_digest,
+                "origin": updates.CATALYST_API_ORIGIN,
+            },
+            "managedConfigFiles": [
+                {
+                    "path": str(auth_environment),
+                    "kind": "catalyst-auth-environment",
+                    "priorDigest": None,
+                    "writtenDigest": environment_digest,
+                    "mode": 0o640,
+                    "groupId": group_id,
+                },
+                record,
+            ],
+            "result": {
+                "action": "install",
+                "workloadId": "catalyst",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+            },
+        }
+        updates._atomic_json(transactions / f"{plan_id}.json", transaction)
+
+    if owner_state in {"valid", "valid-unloaded"}:
+        updater._check_workload_catalyst_auth_conflicts(group_id)
+        assert updater._workload_deb_managed_unit_bytes(component, candidate, verify_fragment=True)[
+            2
+        ].startswith("sha256:")
+    else:
+        with pytest.raises(updates.UpdateError) as preflight_error:
+            updater._check_workload_catalyst_auth_conflicts(group_id)
+        assert preflight_error.value.code == "SERVICE_NOT_MANAGED"
+        with pytest.raises(updates.UpdateError) as error:
+            updater._workload_deb_managed_unit_bytes(component, candidate, verify_fragment=True)
+        assert error.value.code == "SERVICE_NOT_MANAGED"
 
 
 def _configure_unmanaged_runtime_agent(

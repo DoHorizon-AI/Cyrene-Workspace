@@ -71,6 +71,24 @@ def _scripts(directory: Path) -> None:
         (directory / name).write_text(f"#!/bin/sh\n# {name}\nexit 0\n", encoding="utf-8")
 
 
+def _units(directory: Path, *, invalid_service: str | None = None) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for component_id in SERVICES:
+        service = component_id.removeprefix("cyrene-")
+        command = (
+            "/usr/bin/cyrene component-run " + component_id
+            if service == invalid_service
+            else "/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+            f"/usr/lib/cyrene/scripts/cyrene.py service-run {service}"
+        )
+        path = directory / f"{component_id}.service"
+        path.write_text(
+            "[Service]\nUser=cyrene\nGroup=cyrene\nExecStart=" + command + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o644)
+
+
 def test_contract_binds_the_exact_index_bytes_and_maintainer_scripts(tmp_path: Path) -> None:
     module = _module()
     index_path = tmp_path / "service-artifacts" / "index.json"
@@ -79,12 +97,17 @@ def test_contract_binds_the_exact_index_bytes_and_maintainer_scripts(tmp_path: P
     index_path.write_bytes(index_bytes)
     scripts = tmp_path / "DEBIAN"
     _scripts(scripts)
+    units = tmp_path / "lib/systemd/system"
+    _units(units)
     output = tmp_path / "contract.json"
 
     result = module.create_contract(
         target_profile=TARGET,
         service_artifacts_index=index_path,
         scripts_dir=scripts,
+        unit_directory=units,
+        source_ref="refs/heads/develop",
+        source_commit="a" * 40,
         output=output,
     )
     written = json.loads(output.read_text(encoding="utf-8"))
@@ -97,6 +120,22 @@ def test_contract_binds_the_exact_index_bytes_and_maintainer_scripts(tmp_path: P
     assert written["oldRuntimeAction"] == "preserve"
     assert written["serviceArtifactsIndexSha256"] == hashlib.sha256(index_bytes).hexdigest()
     assert set(written["services"]) == set(SERVICES)
+    assert set(written["managedUnits"]) == set(SERVICES)
+    for component_id, unit in written["managedUnits"].items():
+        service = component_id.removeprefix("cyrene-")
+        assert unit == {
+            "componentId": component_id,
+            "service": service,
+            "unit": f"{component_id}.service",
+            "packagePath": f"lib/systemd/system/{component_id}.service",
+            "sha256": hashlib.sha256((units / f"{component_id}.service").read_bytes()).hexdigest(),
+            "targetProfile": TARGET,
+            "source": {
+                "repository": "DoHorizon-AI/Cyrene-Workspace",
+                "ref": "refs/heads/develop",
+                "commit": "a" * 40,
+            },
+        }
     assert set(written["maintainerScriptsSha256"]) == {"postinst", "prerm", "postrm"}
     for name in written["maintainerScriptsSha256"]:
         assert (
@@ -121,14 +160,52 @@ def test_contract_rejects_incomplete_or_mismatched_source_index(
     index_path.write_text(json.dumps(index), encoding="utf-8")
     scripts = tmp_path / "DEBIAN"
     _scripts(scripts)
+    units = tmp_path / "lib/systemd/system"
+    _units(units)
 
     with pytest.raises(module.ContractError):
         module.create_contract(
             target_profile=TARGET,
             service_artifacts_index=index_path,
             scripts_dir=scripts,
+            unit_directory=units,
+            source_ref="refs/heads/develop",
+            source_commit="a" * 40,
             output=tmp_path / "contract.json",
         )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["wrong-runner", "invalid-target", "invalid-source"],
+)
+def test_contract_rejects_unmanaged_runner_or_source_target_tuple(
+    tmp_path: Path, corruption: str
+) -> None:
+    module = _module()
+    index_path = tmp_path / "index.json"
+    index_path.write_text(json.dumps(_index()), encoding="utf-8")
+    scripts = tmp_path / "DEBIAN"
+    _scripts(scripts)
+    units = tmp_path / "lib/systemd/system"
+    _units(units, invalid_service="catalyst" if corruption == "wrong-runner" else None)
+
+    arguments = {
+        "target_profile": TARGET,
+        "service_artifacts_index": index_path,
+        "scripts_dir": scripts,
+        "unit_directory": units,
+        "source_ref": "refs/heads/develop",
+        "source_commit": "a" * 40,
+        "output": tmp_path / "contract.json",
+    }
+    if corruption == "invalid-target":
+        arguments["target_profile"] = "linux-ubuntu-20.04-x86_64-python-3.12"
+    elif corruption == "invalid-source":
+        arguments["source_commit"] = "not-a-commit"
+
+    with pytest.raises(module.ContractError):
+        module.create_contract(**arguments)
 
 
 def test_verified_release_builder_scripts_remain_stage_only() -> None:

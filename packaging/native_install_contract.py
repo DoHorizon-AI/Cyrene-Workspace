@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,11 @@ TARGETS = frozenset(
 )
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RELEASE = re.compile(r"^(stable|preview)-([0-9a-f]{40})$")
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+WORKSPACE_REPOSITORY = "DoHorizon-AI/Cyrene-Workspace"
+UNIT_DIRECTORY = "lib/systemd/system"
+PRIVATE_PYTHON = "/opt/cyrene/python/3.12.14/bin/python3.12"
+SERVICE_RUNNER = "/usr/lib/cyrene/scripts/cyrene.py"
 
 
 class ContractError(RuntimeError):
@@ -72,6 +79,96 @@ def _sha_file(path: Path, label: str) -> str:
     except OSError as error:
         raise ContractError(f"cannot hash {label} at {path}: {error}") from error
     return digest.hexdigest()
+
+
+def _validate_service_unit(path: Path, service: str) -> str:
+    """Bind staged unit bytes to the fixed rootless private-Python runner."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ContractError(f"managed service unit is missing or unsafe: {path.name}")
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o644:
+        raise ContractError(f"managed service unit metadata is unsafe: {path.name}")
+    try:
+        unit_bytes = path.read_bytes()
+        lines = unit_bytes.decode("utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        raise ContractError(f"managed service unit is unreadable: {path.name}") from error
+
+    section = ""
+    service_values: dict[str, list[str]] = {"User": [], "Group": [], "ExecStart": []}
+    for raw_line in lines:
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if section == "Service" and "=" in line:
+            key, value = line.split("=", 1)
+            if key in service_values:
+                service_values[key].append(value.strip())
+    expected_command = [
+        PRIVATE_PYTHON,
+        "-sE",
+        SERVICE_RUNNER,
+        "service-run",
+        service,
+    ]
+    try:
+        commands = [shlex.split(value) for value in service_values["ExecStart"]]
+    except ValueError as error:
+        raise ContractError(f"managed service unit command is malformed: {path.name}") from error
+    if (
+        service_values["User"] != ["cyrene"]
+        or service_values["Group"] != ["cyrene"]
+        or commands != [expected_command]
+    ):
+        raise ContractError(f"managed service unit runner differs from policy: {path.name}")
+    return hashlib.sha256(unit_bytes).hexdigest()
+
+
+def managed_units_from_directory(
+    unit_directory: Path,
+    *,
+    target_profile: str,
+    source_ref: str,
+    source_commit: str,
+) -> dict[str, dict[str, Any]]:
+    """Project exact DEB member paths and digests for the five Product units."""
+
+    if unit_directory.is_symlink() or not unit_directory.is_dir():
+        raise ContractError(f"managed unit directory is missing or unsafe: {unit_directory}")
+    if target_profile not in TARGETS:
+        raise ContractError("managed units require the selected native Python target profile")
+    if (
+        not isinstance(source_ref, str)
+        or re.fullmatch(r"refs/(heads|tags)/[A-Za-z0-9._/-]{1,200}", source_ref) is None
+    ):
+        raise ContractError("Workspace source ref must be an exact Git ref")
+    if not isinstance(source_commit, str) or COMMIT.fullmatch(source_commit) is None:
+        raise ContractError("Workspace source commit must be a lowercase 40-hex commit")
+
+    source = {
+        "repository": WORKSPACE_REPOSITORY,
+        "ref": source_ref,
+        "commit": source_commit,
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for component_id in SERVICES:
+        service = component_id.removeprefix("cyrene-")
+        unit = f"{component_id}.service"
+        digest = _validate_service_unit(unit_directory / unit, service)
+        result[component_id] = {
+            "componentId": component_id,
+            "service": service,
+            "unit": unit,
+            "packagePath": f"{UNIT_DIRECTORY}/{unit}",
+            "sha256": digest,
+            "targetProfile": target_profile,
+            "source": source,
+        }
+    return result
 
 
 def _verified_source_summary(index: dict[str, Any], target_profile: str) -> dict[str, Any]:
@@ -182,7 +279,14 @@ def _verified_source_summary(index: dict[str, Any], target_profile: str) -> dict
 
 
 def create_contract(
-    *, target_profile: str, service_artifacts_index: Path, scripts_dir: Path, output: Path
+    *,
+    target_profile: str,
+    service_artifacts_index: Path,
+    scripts_dir: Path,
+    unit_directory: Path,
+    source_ref: str,
+    source_commit: str,
+    output: Path,
 ) -> dict[str, Any]:
     """Create a marker bound to the installed source index and actual scripts."""
 
@@ -203,6 +307,12 @@ def create_contract(
         "oldRuntimeAction": "preserve",
         "serviceArtifactsIndexSha256": hashlib.sha256(index_bytes).hexdigest(),
         "services": _verified_source_summary(index, target_profile),
+        "managedUnits": managed_units_from_directory(
+            unit_directory,
+            target_profile=target_profile,
+            source_ref=source_ref,
+            source_commit=source_commit,
+        ),
         "maintainerScriptsSha256": scripts,
     }
     if output.exists() or output.is_symlink():
@@ -222,6 +332,9 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--target-profile", required=True)
     create.add_argument("--service-artifacts-index", required=True, type=Path)
     create.add_argument("--scripts-dir", required=True, type=Path)
+    create.add_argument("--unit-directory", required=True, type=Path)
+    create.add_argument("--source-ref", required=True)
+    create.add_argument("--source-commit", required=True)
     create.add_argument("--output", required=True, type=Path)
     create.set_defaults(handler=_create_command)
     return parser
@@ -232,6 +345,9 @@ def _create_command(args: argparse.Namespace) -> int:
         target_profile=args.target_profile,
         service_artifacts_index=args.service_artifacts_index,
         scripts_dir=args.scripts_dir,
+        unit_directory=args.unit_directory,
+        source_ref=args.source_ref,
+        source_commit=args.source_commit,
         output=args.output,
     )
     print(
