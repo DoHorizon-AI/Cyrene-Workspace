@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -10,6 +11,7 @@ import os
 import stat
 import subprocess
 import sys
+import tarfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -107,6 +109,138 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
         broker_path=tmp_path / "missing-broker",
         trusted_catalog_digest=None,
     )
+
+
+def _service_bundle_archive(
+    archive_path: Path,
+    service_bundle: Any,
+    *,
+    entrypoint_mode: int,
+) -> tuple[dict[str, str], dict[str, bytes]]:
+    """Build a digest-mapped Product bundle archive with controlled tar modes."""
+
+    commit = "a" * 40
+    lock_bytes = b"cyrene-catalyst==1.0.0 --hash=sha256:" + b"b" * 64 + b"\n"
+    payloads = {
+        "run-service": b"#!/bin/sh\nexit 0\n",
+        "requirements.lock": lock_bytes,
+        "execution-runtime/bin/runtime-helper": b"#!/bin/sh\nexit 0\n",
+    }
+    source_record = {
+        "schema_version": 1,
+        "service": "catalyst",
+        "source_repository": "Cyrene-Catalyst",
+        "source_commit": commit,
+        "requirements_lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
+    }
+    payloads["source.json"] = json.dumps(source_record, sort_keys=True).encode() + b"\n"
+    files = {name: hashlib.sha256(value).hexdigest() for name, value in sorted(payloads.items())}
+    manifest: dict[str, Any] = {
+        "schema_version": 1,
+        "service": "catalyst",
+        "version": "",
+        "entrypoint": "run-service",
+        "health": {"path": service_bundle.HEALTH_PATHS["catalyst"]},
+        "files": files,
+        "source_repository": "Cyrene-Catalyst",
+        "source_commit": commit,
+        "dependencies": {
+            "lock_file": "requirements.lock",
+            "lock_sha256": files["requirements.lock"],
+        },
+        "target": {"debian_arch": service_bundle._debian_arch_for_host(), "python": "3.12"},
+        "artifact_digest": "",
+    }
+    digest = service_bundle._artifact_digest(manifest)
+    manifest["version"] = digest
+    manifest["artifact_digest"] = digest
+    payloads["manifest.json"] = json.dumps(manifest, sort_keys=True).encode() + b"\n"
+
+    member_modes = {
+        "run-service": entrypoint_mode,
+        "requirements.lock": 0o666,
+        "execution-runtime/bin/runtime-helper": 0o7777,
+    }
+    expected_files: dict[str, str] = {}
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for name, value in sorted(payloads.items()):
+            archive_name = f"service-bundle/{name}"
+            expected_files[archive_name] = hashlib.sha256(value).hexdigest()
+            member = tarfile.TarInfo(archive_name)
+            member.mode = member_modes.get(name, 0o644)
+            member.uid = 1234
+            member.gid = 2345
+            member.size = len(value)
+            archive.addfile(member, io.BytesIO(value))
+    return expected_files, payloads
+
+
+@pytest.mark.parametrize(
+    ("entrypoint_mode", "accepted"),
+    [(0o755, True), (0o644, False)],
+)
+def test_python_bundle_extraction_restores_only_verified_safe_execute_bits(
+    tmp_path: Path,
+    entrypoint_mode: int,
+    accepted: bool,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    service_bundle = updater._load_service_bundle()
+    archive_path = tmp_path / "service-bundle.tar.gz"
+    expected_files, payloads = _service_bundle_archive(
+        archive_path,
+        service_bundle,
+        entrypoint_mode=entrypoint_mode,
+    )
+    destination = tmp_path / "extracted"
+
+    updater._extract_tar(
+        archive_path,
+        destination,
+        expected_files=expected_files,
+        preserve_executable_bits=True,
+    )
+
+    bundle_root = destination / "service-bundle"
+    for name, expected_bytes in payloads.items():
+        extracted = bundle_root / name
+        assert extracted.read_bytes() == expected_bytes
+        assert (
+            hashlib.sha256(extracted.read_bytes()).hexdigest()
+            == expected_files[f"service-bundle/{name}"]
+        )
+    assert stat.S_IMODE((bundle_root / "run-service").stat().st_mode) == (
+        0o644 | (entrypoint_mode & 0o111)
+    )
+    assert stat.S_IMODE((bundle_root / "requirements.lock").stat().st_mode) == 0o644
+    assert (
+        stat.S_IMODE((bundle_root / "execution-runtime/bin/runtime-helper").stat().st_mode) == 0o755
+    )
+    assert (bundle_root / "run-service").stat().st_uid == os.geteuid()
+    assert (bundle_root / "run-service").stat().st_gid == os.getegid()
+
+    if accepted:
+        verified = service_bundle.validate_bundle(bundle_root, expected_service="catalyst")
+        assert verified["entrypoint"] == "run-service"
+    else:
+        with pytest.raises(
+            service_bundle.ServiceBundleError,
+            match="entrypoint must be executable by the service user",
+        ):
+            service_bundle.validate_bundle(bundle_root, expected_service="catalyst")
+
+    bad_destination = tmp_path / "wrong-digest-extraction"
+    wrong_digest_files = dict(expected_files)
+    wrong_digest_files["service-bundle/run-service"] = "0" * 64
+    with pytest.raises(updates.UpdateError) as error:
+        updater._extract_tar(
+            archive_path,
+            bad_destination,
+            expected_files=wrong_digest_files,
+            preserve_executable_bits=True,
+        )
+    assert error.value.code == "PAYLOAD_FILE_DIGEST_MISMATCH"
+    assert not ((bad_destination / "service-bundle/run-service").stat().st_mode & 0o111)
 
 
 def _release_discovery_entry(
