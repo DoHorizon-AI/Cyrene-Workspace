@@ -6040,6 +6040,8 @@ class ComponentUpdater:
         distribution = "cyrene-runtime-maintenance"
         version = "0.1.0"
         wheel_name = "cyrene_runtime_maintenance-0.1.0-py3-none-any.whl"
+        # V1 may omit this optional assertion; artifact.sha256 remains mandatory below.
+        content_digest = candidate.manifest.get("contentDigest")
         if (
             not isinstance(metadata, dict)
             or set(metadata) != {"distribution", "version", "wheel", "wheelSha256"}
@@ -6048,7 +6050,8 @@ class ComponentUpdater:
             or metadata.get("wheel") != wheel_name
             or not _valid_digest(metadata.get("wheelSha256"))
             or candidate.manifest.get("version") != version
-            or candidate.manifest.get("contentDigest") != candidate.artifact_digest
+            or artifact.get("sha256") != candidate.artifact_digest
+            or (content_digest is not None and content_digest != candidate.artifact_digest)
             or set(artifact.get("files", {})) != {"sdk-release.json", wheel_name}
         ):
             raise UpdateError(
