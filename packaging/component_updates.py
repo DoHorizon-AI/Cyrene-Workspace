@@ -510,6 +510,80 @@ def _atomic_json(path: Path, value: dict[str, Any], *, mode: int = 0o600) -> Non
         temporary.unlink(missing_ok=True)
 
 
+def _atomic_private_bytes(path: Path, value: bytes) -> None:
+    """Atomically store an opaque private cache object without changing its bytes."""
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _verify_private_directory(path.parent)
+    temporary = path.parent / f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    try:
+        descriptor = os.open(
+            temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_private_cache_bytes(path: Path, *, max_bytes: int, description: str) -> bytes:
+    """Read one regular, single-link, current-user-owned 0600 cache file safely."""
+
+    try:
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or before.st_nlink != 1
+            or before.st_size < 1
+            or before.st_size > max_bytes
+        ):
+            raise UpdateError("UNSAFE_STATE", f"Private {description} metadata is unsafe.")
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        raise
+    except OSError as error:
+        raise UpdateError("UNSAFE_STATE", f"Cannot open private {description}: {error}") from error
+
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+        ):
+            raise UpdateError("UNSAFE_STATE", f"Private {description} changed while opening.")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            payload = stream.read(max_bytes + 1)
+        after = os.fstat(descriptor)
+        if (
+            len(payload) < 1
+            or len(payload) > max_bytes
+            or after.st_dev != opened.st_dev
+            or after.st_ino != opened.st_ino
+            or after.st_size != opened.st_size
+        ):
+            raise UpdateError("UNSAFE_STATE", f"Private {description} changed while reading.")
+        return payload
+    except OSError as error:
+        raise UpdateError("UNSAFE_STATE", f"Cannot read private {description}: {error}") from error
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_control_state(path: Path, value: dict[str, Any], *, gid: int) -> None:
     """Atomically persist one reader-accessible gate record without exposing a token."""
 
@@ -875,6 +949,7 @@ class ComponentUpdater:
             tuple[dict[str, Any], str, tuple[dict[str, Any], ...], str],
         ] = {}
         self._index_asset_identity: dict[tuple[str, ...], tuple[str, str]] = {}
+        self._release_list_cache: dict[tuple[str, str, str], bytes] = {}
         self._readiness_cache: dict[tuple[str, bool], dict[str, Any]] = {}
         self.catalog_source: dict[str, Any] | None = None
         self.catalog_bytes = bootstrap_bytes
@@ -1198,7 +1273,15 @@ class ComponentUpdater:
         return self.state_root
 
     def _private_state_directory(self, name: str) -> Path:
-        if name not in {"plans", "staged", "transactions", "locks", "installed", "placement"}:
+        if name not in {
+            "plans",
+            "staged",
+            "transactions",
+            "locks",
+            "installed",
+            "placement",
+            "attestations",
+        }:
             raise UpdateError("UNSAFE_STATE", "Invalid updater state directory.")
         root = self._ensure_state_root()
         directory = root / name
@@ -1210,6 +1293,13 @@ class ComponentUpdater:
             ) from error
         _verify_private_directory(directory)
         return directory
+
+    def _clear_release_discovery_caches(self) -> None:
+        """Discard operation-local release metadata before a new protocol operation."""
+
+        self._index_cache.clear()
+        self._index_asset_identity.clear()
+        self._release_list_cache.clear()
 
     def _read_catalog_floor(self) -> dict[str, Any] | None:
         """Read the private monotonic catalog receipt used by privileged operations."""
@@ -1584,6 +1674,9 @@ class ComponentUpdater:
     def _reload_catalog_for_operation(self) -> None:
         """Re-read the protected active pointer at each check/stage/apply boundary."""
 
+        # These objects are discovery accelerators for one operation only. In particular,
+        # a later check/stage/apply must observe the current release list and selected index.
+        self._clear_release_discovery_caches()
         active = self._read_active_catalog()
         if active is None:
             if _running_as_root() and self._read_catalog_floor() is not None:
@@ -5422,6 +5515,7 @@ class ComponentUpdater:
         """Re-resolve a checked workload before delegating package materialization."""
 
         self._require_authorized_process()
+        self._clear_release_discovery_caches()
         self._validate_plan_identity(plan_id, plan_digest)
         workload_id, target_id = self._require_workload_target(workload_id, target_id)
         if not isinstance(action, str) or action not in {"install", "uninstall"}:
@@ -6637,6 +6731,7 @@ class ComponentUpdater:
         """Apply a staged Product/Web/SDK workload through the native transaction journal."""
 
         self._require_authorized_process()
+        self._clear_release_discovery_caches()
         with self._exclusive_update_lock():
             return self._apply_workload_locked(
                 workload_id,
@@ -16379,13 +16474,7 @@ class ComponentUpdater:
             seen_release_tags: set[str] = set()
             for page in range(1, 101):
                 page_uri = releases_uri if page == 1 else f"{releases_uri}&page={page}"
-                releases = self._get_json(page_uri)
-                if not isinstance(releases, list):
-                    raise UpdateError(
-                        "RELEASE_DISCOVERY_INVALID",
-                        "GitHub Releases API did not return a release list.",
-                        retryable=True,
-                    )
+                releases = self._release_list_page(publisher["repository"], channel, page_uri)
                 for item in releases:
                     tag_name = item.get("tag_name") if isinstance(item, dict) else None
                     if (
@@ -16506,6 +16595,30 @@ class ComponentUpdater:
             retryable=True,
         )
 
+    def _release_list_page(self, repository: str, channel: str, uri: str) -> list[Any]:
+        """Decode a cached raw release-list page without caching component filtering."""
+
+        key = (repository, channel, uri)
+        body = self._release_list_cache.get(key)
+        if body is None:
+            body = self._get_bytes(uri)
+        try:
+            releases = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise UpdateError(
+                "INVALID_HTTP_JSON", f"Response from {uri} is not valid JSON.", retryable=True
+            ) from error
+        if not isinstance(releases, list):
+            raise UpdateError(
+                "RELEASE_DISCOVERY_INVALID",
+                "GitHub Releases API did not return a release list.",
+                retryable=True,
+            )
+        if key not in self._release_list_cache:
+            # Store the original body only after it has decoded as a successful list response.
+            self._release_list_cache[key] = body
+        return releases
+
     def _release_asset_metadata(
         self,
         assets: tuple[dict[str, Any], ...],
@@ -16602,6 +16715,40 @@ class ComponentUpdater:
             f"https://api.github.com/repos/{repository}/attestations/"
             f"{urllib.parse.quote(digest, safe=':')}?per_page=100"
         )
+        cache_identity = {
+            "schemaVersion": 1,
+            "repository": repository,
+            "subjectName": subject_name,
+            "subjectDigest": digest,
+            "workflow": workflow,
+            "sourceRef": source_ref,
+            "sourceCommit": source_commit,
+        }
+        cache_key = hashlib.sha256(
+            json.dumps(cache_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        cache_path = self._private_state_directory("attestations") / f"{cache_key}.bundle"
+        try:
+            cached_bundle = _read_private_cache_bytes(
+                cache_path,
+                max_bytes=MAX_ATTESTATION_BUNDLE_BYTES,
+                description="cached attestation bundle",
+            )
+        except FileNotFoundError:
+            cached_bundle = None
+        if cached_bundle is not None:
+            self._verify_cached_attestation_bundle(
+                cached_bundle,
+                payload=payload,
+                repository=repository,
+                digest=digest,
+                workflow=workflow,
+                source_ref=source_ref,
+                source_commit=source_commit,
+                subject_name=subject_name,
+            )
+            return cached_bundle
+
         response_bytes = self._get_bytes(endpoint, max_bytes=MAX_ATTESTATION_RESPONSE_BYTES)
         try:
             response = json.loads(response_bytes, object_pairs_hook=_unique_json_object)
@@ -16661,21 +16808,22 @@ class ComponentUpdater:
             if not self._bundle_declares_subject(bundle, subject_name, digest):
                 continue
             try:
-                self._verify_attestation(
+                self._verify_cached_attestation_bundle(
+                    bundle_bytes,
                     payload,
-                    subject_name=subject_name,
-                    digest=digest,
                     repository=repository,
+                    digest=digest,
                     workflow=workflow,
                     source_ref=source_ref,
                     source_commit=source_commit,
-                    bundle_bytes=bundle_bytes,
+                    subject_name=subject_name,
                 )
             except UpdateError as error:
                 if error.code in {"ATTESTATION_INVALID", "ATTESTATION_SUBJECT_MISMATCH"}:
                     verification_errors.append(error)
                     continue
                 raise
+            _atomic_private_bytes(cache_path, bundle_bytes)
             return bundle_bytes
         if verification_errors:
             raise UpdateError(
@@ -16684,6 +16832,52 @@ class ComponentUpdater:
             ) from verification_errors[-1]
         raise UpdateError(
             "ATTESTATION_INVALID", "No acceptable GitHub attestation bundle was returned."
+        )
+
+    def _verify_cached_attestation_bundle(
+        self,
+        bundle_bytes: bytes,
+        payload: bytes,
+        *,
+        repository: str,
+        digest: str,
+        workflow: str,
+        source_ref: str,
+        source_commit: str,
+        subject_name: str,
+    ) -> None:
+        """Re-run subject and cryptographic verification for every bundle consumption."""
+
+        if not bundle_bytes or len(bundle_bytes) > MAX_ATTESTATION_BUNDLE_BYTES:
+            raise UpdateError("INVALID_ATTESTATION", "Attestation bundle size is invalid.")
+        try:
+            bundle = json.loads(bundle_bytes, object_pairs_hook=_unique_json_object)
+        except (UnicodeDecodeError, json.JSONDecodeError, UpdateError) as error:
+            raise UpdateError(
+                "INVALID_ATTESTATION", "Attestation bundle JSON is invalid."
+            ) from error
+        if (
+            not isinstance(bundle, dict)
+            or set(bundle) != {"mediaType", "verificationMaterial", "dsseEnvelope"}
+            or not isinstance(bundle.get("mediaType"), str)
+            or not isinstance(bundle.get("verificationMaterial"), dict)
+            or not isinstance(bundle.get("dsseEnvelope"), dict)
+        ):
+            raise UpdateError("INVALID_ATTESTATION", "Attestation bundle shape is invalid.")
+        if not self._bundle_declares_subject(bundle, subject_name, digest):
+            raise UpdateError(
+                "ATTESTATION_SUBJECT_MISMATCH",
+                "Attestation bundle does not bind the expected subject and SHA-256 digest.",
+            )
+        self._verify_attestation(
+            payload,
+            subject_name=subject_name,
+            digest=digest,
+            repository=repository,
+            workflow=workflow,
+            source_ref=source_ref,
+            source_commit=source_commit,
+            bundle_bytes=bundle_bytes,
         )
 
     @staticmethod
