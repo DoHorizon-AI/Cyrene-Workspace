@@ -34,6 +34,10 @@ INSTALL_RECEIPT_NAME = ".workload-sdk-install.json"
 SHA256_PATTERN = re.compile(r"^sha256:([0-9a-f]{64})$")
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$")
 SOURCE_COMMIT_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+CHANNEL_SOURCE_REFS = {
+    "stable": frozenset({"refs/heads/main", "refs/heads/release"}),
+    "preview": frozenset({"refs/heads/develop"}),
+}
 INSTALL_STABLE_FIELDS = (
     "schemaVersion",
     "componentId",
@@ -270,8 +274,10 @@ def _validate_component_identity(component: Mapping[str, Any]) -> dict[str, Any]
         _require_digest(index_identity.get(field), f"indexIdentity.{field}")
     index_asset_uri = _https_uri(index_identity.get("assetUri"), "indexIdentity.assetUri")
     release_tag = _require_text(index_identity.get("releaseTag"), "indexIdentity.releaseTag")
+    channel = index_identity.get("channel")
     if (
-        index_identity.get("publisherIdentity") != publisher_identity
+        channel not in CHANNEL_SOURCE_REFS
+        or index_identity.get("publisherIdentity") != publisher_identity
         or index_identity.get("repository") != publisher_identity["repository"]
         or urlsplit(index_asset_uri).path.rsplit("/", 1)[-1] != index_identity["assetName"]
         or release_id != release_tag
@@ -281,18 +287,21 @@ def _validate_component_identity(component: Mapping[str, Any]) -> dict[str, Any]
     attestation_ref = _copy_json_mapping(
         component.get("attestationRef"), "component.attestationRef"
     )
-    for field in ("repository", "workflow", "sourceCommit", "subjectName"):
+    for field in ("repository", "workflow", "sourceCommit", "sourceRef", "subjectName"):
         _require_text(attestation_ref.get(field), f"attestationRef.{field}")
     _require_digest(attestation_ref.get("subjectDigest"), "attestationRef.subjectDigest")
-    manifest_name = urlsplit(manifest_uri).path.rsplit("/", 1)[-1]
+    source_commit = str(attestation_ref.get("sourceCommit"))
+    source_ref = attestation_ref.get("sourceRef")
     if (
         attestation_ref.get("repository") != publisher_identity["repository"]
         or attestation_ref.get("workflow") != publisher_identity["workflow"]
-        or SOURCE_COMMIT_PATTERN.fullmatch(str(attestation_ref.get("sourceCommit"))) is None
-        or attestation_ref.get("subjectName") != manifest_name
-        or attestation_ref.get("subjectDigest") != manifest_asset_digest
+        or SOURCE_COMMIT_PATTERN.fullmatch(source_commit) is None
+        or source_ref not in CHANNEL_SOURCE_REFS[channel]
+        or publisher_identity["tagFormat"] != "source-sha"
+        or release_tag != f"{channel}-{source_commit}"
+        or attestation_ref.get("subjectDigest") != digest
     ):
-        raise WorkloadSdkEnvironmentError("SDK manifest attestation identity is inconsistent")
+        raise WorkloadSdkEnvironmentError("SDK archive attestation identity is inconsistent")
 
     return {
         "componentId": WORKLOAD_SDK_COMPONENT_ID,
@@ -329,6 +338,7 @@ def _validate_candidate(
     archive_path = _require_absolute_path(
         staged_identity.get("archivePath"), "stagedIdentity.archivePath"
     )
+    _validate_archive_attestation_subject(archive_path, selected_identity)
     bundle_path = _require_absolute_path(
         staged_identity.get("bundlePath"), "stagedIdentity.bundlePath"
     )
@@ -350,6 +360,21 @@ def _validate_candidate(
         "planId": plan_id,
         "planDigest": plan_digest,
     }
+
+
+def _validate_archive_attestation_subject(
+    archive_path: Path, selected_identity: Mapping[str, Any]
+) -> None:
+    """Bind the selected archive attestation subject to the staged tarball name."""
+
+    attestation_ref = selected_identity.get("attestationRef")
+    if (
+        not isinstance(attestation_ref, Mapping)
+        or attestation_ref.get("subjectName") != archive_path.name
+    ):
+        raise WorkloadSdkEnvironmentError(
+            "SDK archive attestation subject does not match the staged archive"
+        )
 
 
 def _source_identity(candidate: Mapping[str, Any]) -> dict[str, Any]:
@@ -698,6 +723,7 @@ def _validate_install_receipt(receipt: Any, path: Path) -> dict[str, Any]:
     wheel_digest = _require_digest(value.get("wheelDigest"), "receipt.wheelDigest")
     declared_release_path = _require_absolute_path(value.get("releasePath"), "receipt.releasePath")
     archive_path = _require_absolute_path(value.get("archivePath"), "receipt.archivePath")
+    _validate_archive_attestation_subject(archive_path, selected)
     if (
         declared_release_path != path
         or path.name != _release_path(path.parent, selected).name
