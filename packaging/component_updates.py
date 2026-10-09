@@ -122,6 +122,15 @@ DEFAULT_DATA_BUNDLE_ROOT = Path("/var/lib/cyrene-product-bundles")
 DEFAULT_WORKLOAD_WEB_ROOT = Path("/opt/cyrene/workloads/web")
 DEFAULT_RELEASE_LOCK = Path("/usr/lib/cyrene/release-lock.json")
 DEFAULT_PRIVATE_PYTHON = Path("/opt/cyrene/python/3.12.14/bin/python3.12")
+NATIVE_INSTALL_CONTRACT_PATH = Path("/usr/share/cyrene/native-install-contract-v1.json")
+NATIVE_DEB_UNIT_ROOT = Path("/lib/systemd/system")
+NATIVE_PRODUCT_SERVICES = {
+    "cyrene-catalyst": "catalyst",
+    "cyrene-exchange": "exchange",
+    "cyrene-navigator": "navigator",
+    "cyrene-reactor": "reactor",
+    "cyrene-yield": "yield",
+}
 DEFAULT_AUTHORITY_ADMIN_SOCKET = Path("/run/cyrene-workspace-authority/admin.sock")
 DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT = Path("/etc/cyrene/runtime-activity-sources.env")
 DEFAULT_PACKAGE_RUNTIME_POLICY = Path("/etc/cyrene/runtime-package-sources.json")
@@ -131,6 +140,20 @@ DEFAULT_CATALYST_AUTH_ENVIRONMENT = Path("/etc/cyrene/catalyst-auth.env")
 DEFAULT_STUDIO_CONTROL_ENVIRONMENT = Path("/etc/cyrene/studio-control.env")
 DEFAULT_CATALYST_AUTH_DROPIN = Path(
     "/etc/systemd/system/cyrene-catalyst.service.d/80-workload-api-token.conf"
+)
+SYSTEMD_SYSTEM_UNIT_SEARCH_ROOTS = (
+    Path("/etc/systemd/system.control"),
+    Path("/run/systemd/system.control"),
+    Path("/run/systemd/transient"),
+    Path("/run/systemd/generator.early"),
+    Path("/etc/systemd/system.attached"),
+    Path("/etc/systemd/system"),
+    Path("/run/systemd/system.attached"),
+    Path("/run/systemd/system"),
+    Path("/run/systemd/generator"),
+    Path("/usr/local/lib/systemd/system"),
+    Path("/usr/lib/systemd/system"),
+    Path("/run/systemd/generator.late"),
 )
 CATALYST_SERVICE_UNIT = "cyrene-catalyst.service"
 STUDIO_CONTROL_COMPONENT_ID = "cyrene-client-workspace-control"
@@ -880,6 +903,8 @@ class ComponentUpdater:
         authority_admin_socket: Path = DEFAULT_AUTHORITY_ADMIN_SOCKET,
         load_active_catalog: bool = True,
         allow_incomplete_catalog: bool = False,
+        native_install_contract_path: Path = NATIVE_INSTALL_CONTRACT_PATH,
+        native_deb_unit_root: Path = NATIVE_DEB_UNIT_ROOT,
     ) -> None:
         requested_catalog_path = Path(catalog_path)
         installed_catalog_paths = {
@@ -902,6 +927,8 @@ class ComponentUpdater:
         self.state_root = Path(state_root)
         self.data_bundle_root = Path(data_bundle_root)
         self.release_lock_path = Path(release_lock_path)
+        self.native_install_contract_path = Path(native_install_contract_path)
+        self.native_deb_unit_root = Path(native_deb_unit_root)
         self.authority_admin_socket = Path(authority_admin_socket)
         self.opener = opener
         self.runner = runner
@@ -8576,7 +8603,15 @@ class ComponentUpdater:
                     retryable=True,
                 )
             try:
-                self._workload_signed_unit_bytes(component, candidate_by_id.get(component_id))
+                candidate = candidate_by_id.get(component_id)
+                if component.get("pythonBundleService"):
+                    self._workload_deb_managed_unit_bytes(
+                        component, candidate, verify_fragment=True
+                    )
+                    unit_owner = "native-deb"
+                else:
+                    self._workload_signed_unit_bytes(component, candidate)
+                    unit_owner = "signed-release"
             except UpdateError:
                 raise
             except Exception as error:
@@ -8590,9 +8625,693 @@ class ComponentUpdater:
                 "unit": unit,
                 "order": restart.get("order", 0),
                 "restartGroup": restart.get("group"),
-                "candidate": candidate_by_id.get(component_id),
+                "candidate": candidate,
+                "unitOwner": unit_owner,
             }
         return sorted(services.values(), key=lambda item: (item["order"], item["componentId"]))
+
+    def _workload_deb_managed_unit_bytes(
+        self,
+        component: dict[str, Any],
+        candidate: dict[str, Any] | None,
+        *,
+        verify_fragment: bool,
+    ) -> tuple[bytes, Path, str]:
+        """Verify a Product unit owned by the installed, attested Workspace DEB."""
+
+        component_id = component.get("componentId")
+        service = component.get("pythonBundleService")
+        unit = self._catalog_matched_unit(component)
+        if (
+            not isinstance(component_id, str)
+            or NATIVE_PRODUCT_SERVICES.get(component_id) != service
+            or not isinstance(service, str)
+            or unit != f"{component_id}.service"
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalog Product service identity is not DEB-managed."
+            )
+
+        target_profile = candidate.get("targetId") if isinstance(candidate, dict) else None
+        if not isinstance(target_profile, str):
+            receipt = self._read_active_receipt(component_id)
+            target_profile = receipt.get("targetId") if isinstance(receipt, dict) else None
+        if not isinstance(target_profile, str):
+            target = self._target_for(component)
+            target_profile = target.get("id") if isinstance(target, dict) else None
+        if target_profile not in {
+            "linux-ubuntu-22.04-x86_64-python-3.12",
+            "linux-ubuntu-24.04-x86_64-python-3.12",
+        }:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalog Product target has no matching DEB unit profile."
+            )
+
+        contract_path = self.native_install_contract_path
+        try:
+            self._verify_root_path_chain(contract_path.parent)
+            self._verify_root_file(contract_path, mode=0o644)
+            contract = json.loads(
+                contract_path.read_text(encoding="utf-8"),
+                object_pairs_hook=_unique_json_object,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, UpdateError) as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Installed native DEB managed-unit contract is unsafe."
+            ) from error
+
+        expected_contract_fields = {
+            "schemaVersion",
+            "targetProfile",
+            "initializationMode",
+            "serviceArtifactsMode",
+            "serviceActivation",
+            "brokerAction",
+            "oldRuntimeAction",
+            "serviceArtifactsIndexSha256",
+            "services",
+            "managedUnits",
+            "maintainerScriptsSha256",
+        }
+        expected_service_ids = set(NATIVE_PRODUCT_SERVICES)
+        managed_units = contract.get("managedUnits") if isinstance(contract, dict) else None
+        service_records = contract.get("services") if isinstance(contract, dict) else None
+        if (
+            not isinstance(contract, dict)
+            or set(contract) != expected_contract_fields
+            or type(contract.get("schemaVersion")) is not int
+            or contract.get("schemaVersion") != 1
+            or contract.get("targetProfile") != target_profile
+            or contract.get("initializationMode") != "stage-only"
+            or contract.get("serviceArtifactsMode") != "verified-published-bytes"
+            or contract.get("serviceActivation") != "deferred"
+            or contract.get("brokerAction") != "preserve-existing"
+            or contract.get("oldRuntimeAction") != "preserve"
+            or not isinstance(contract.get("serviceArtifactsIndexSha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", contract["serviceArtifactsIndexSha256"]) is None
+            or not isinstance(managed_units, dict)
+            or set(managed_units) != expected_service_ids
+            or not isinstance(service_records, dict)
+            or set(service_records) != expected_service_ids
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED",
+                "Installed native DEB managed-unit contract is missing or mismatched.",
+            )
+
+        expected_source: dict[str, Any] | None = None
+        for product_id, product_service in NATIVE_PRODUCT_SERVICES.items():
+            row = managed_units.get(product_id)
+            source_row = service_records.get(product_id)
+            if (
+                not isinstance(row, dict)
+                or set(row)
+                != {
+                    "componentId",
+                    "service",
+                    "unit",
+                    "packagePath",
+                    "sha256",
+                    "targetProfile",
+                    "source",
+                }
+                or row.get("componentId") != product_id
+                or row.get("service") != product_service
+                or row.get("unit") != f"{product_id}.service"
+                or row.get("packagePath") != f"lib/systemd/system/{product_id}.service"
+                or row.get("targetProfile") != target_profile
+                or not isinstance(row.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None
+                or not isinstance(row.get("source"), dict)
+                or set(row["source"]) != {"repository", "ref", "commit"}
+                or row["source"].get("repository") != "DoHorizon-AI/Cyrene-Workspace"
+                or not isinstance(row["source"].get("ref"), str)
+                or re.fullmatch(
+                    r"refs/(heads|tags)/[A-Za-z0-9._/-]{1,200}",
+                    row["source"]["ref"],
+                )
+                is None
+                or not isinstance(row["source"].get("commit"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", row["source"]["commit"]) is None
+                or not isinstance(source_row, dict)
+                or source_row.get("componentId") != product_id
+                or not isinstance(source_row.get("source"), dict)
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED",
+                    "Installed native DEB managed-unit identity is malformed.",
+                )
+            if expected_source is None:
+                expected_source = row["source"]
+            elif row["source"] != expected_source:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED",
+                    "Installed native DEB managed-unit source identities disagree.",
+                )
+
+        unit_record = managed_units[component_id]
+        try:
+            package_real_root = self._resolve_native_unit_directory(self.native_deb_unit_root)
+            package_real_path = package_real_root / unit
+            if package_real_path.is_symlink():
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "DEB-owned Product unit path is a symbolic link."
+                )
+            package_info = self._verify_root_file(package_real_path, mode=0o644)
+            package_bytes = package_real_path.read_bytes()
+        except (OSError, UpdateError) as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "DEB-owned Product unit is unavailable or unsafe."
+            ) from error
+        actual_digest = hashlib.sha256(package_bytes).hexdigest()
+        if (
+            package_info.st_nlink != 1
+            or unit_record["sha256"] != actual_digest
+            or not self._unit_uses_native_service_runner(package_real_path, service)
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "DEB-owned Product unit differs from its contract."
+            )
+
+        visible_paths: list[Path] = []
+        for directory in self.systemd_unit_dirs:
+            path = Path(directory) / unit
+            if not path.exists() and not path.is_symlink():
+                continue
+            if path.is_symlink():
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", f"Systemd unit {unit} is shadowed by a symlink."
+                )
+            try:
+                info = self._verify_root_file(path, mode=0o644)
+                visible_root = self._resolve_native_unit_directory(Path(directory))
+                resolved = visible_root / unit
+                payload = path.read_bytes()
+            except OSError as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", f"Systemd unit {unit} cannot be read."
+                ) from error
+            except UpdateError:
+                raise
+            if (
+                info.st_nlink != 1
+                or resolved != package_real_path
+                or hashlib.sha256(payload).hexdigest() != actual_digest
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", f"Systemd unit {unit} is not the mapped DEB member."
+                )
+            visible_paths.append(path)
+        if not visible_paths:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", f"DEB-owned Product unit {unit} is not in systemd paths."
+            )
+
+        if verify_fragment:
+            try:
+                fragment = self._systemd_property(unit, "FragmentPath")
+                fragment_path = Path(fragment)
+                if not fragment_path.is_absolute() or fragment_path.name != unit:
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED", f"Systemd fragment path differs for {unit}."
+                    )
+                fragment_real_root = self._resolve_native_unit_directory(fragment_path.parent)
+                fragment_real_path = fragment_real_root / unit
+                fragment_info = self._verify_root_file(fragment_real_path, mode=0o644)
+            except (OSError, UpdateError) as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", f"Systemd has no trusted loaded fragment for {unit}."
+                ) from error
+            if (
+                fragment_path.is_symlink()
+                or fragment_real_path != package_real_path
+                or fragment_info.st_nlink != 1
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", f"Loaded systemd fragment differs for {unit}."
+                )
+            self._verify_native_product_effective_unit(
+                unit=unit,
+                service=service,
+            )
+        return package_bytes, package_real_path, "sha256:" + actual_digest
+
+    def _verify_native_product_effective_unit(
+        self,
+        *,
+        unit: str,
+        service: str,
+    ) -> None:
+        """Bind effective systemd properties and loaded drop-ins to the DEB unit."""
+
+        try:
+            effective_user = self._systemd_property(unit, "User")
+            effective_group = self._systemd_property(unit, "Group")
+            effective_exec = self._systemd_property(unit, "ExecStart")
+            dropin_property = self._systemd_property(unit, "DropInPaths")
+        except UpdateError as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", f"Effective systemd properties are unavailable for {unit}."
+            ) from error
+
+        if (
+            effective_user != "cyrene"
+            or effective_group != "cyrene"
+            or not self._native_product_effective_exec_matches(effective_exec, service)
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", f"Effective systemd service policy differs for {unit}."
+            )
+
+        disk_dropins = self._verify_native_product_dropin_files(
+            unit=unit,
+            service=service,
+            error_code="SERVICE_NOT_MANAGED",
+        )
+        dropin_paths = dropin_property.split()
+        if len(dropin_paths) != len(set(dropin_paths)):
+            raise UpdateError("SERVICE_NOT_MANAGED", f"Systemd drop-ins are duplicated for {unit}.")
+        if not dropin_paths:
+            return
+        if (
+            service != "catalyst"
+            or dropin_paths != [str(DEFAULT_CATALYST_AUTH_DROPIN)]
+            or str(DEFAULT_CATALYST_AUTH_DROPIN) not in disk_dropins
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", f"Systemd has an unmanaged drop-in for {unit}."
+            )
+
+    def _workload_native_unit_dropin_directories(self, unit: str) -> tuple[Path, ...]:
+        """Enumerate exact-unit, dash-prefix, and service-type drop-in paths."""
+
+        if not isinstance(unit, str) or "/" in unit or not unit.endswith(".service"):
+            raise UpdateError("SERVICE_NOT_MANAGED", "The managed systemd unit name is invalid.")
+        prefix = unit.removesuffix(".service")
+        directory_names = [f"{unit}.d"]
+        while "-" in prefix:
+            prefix = prefix.rsplit("-", 1)[0]
+            directory_names.append(f"{prefix}-.service.d")
+        directory_names.append("service.d")
+        return tuple(
+            root / name for root in SYSTEMD_SYSTEM_UNIT_SEARCH_ROOTS for name in directory_names
+        )
+
+    def _native_unit_dropin_files(
+        self,
+        unit: str,
+        *,
+        error_code: str,
+    ) -> tuple[Path, ...]:
+        """Inventory on-disk .conf drop-ins from each supported systemd search root."""
+
+        files: list[Path] = []
+        for directory in self._workload_native_unit_dropin_directories(unit):
+            try:
+                info = directory.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise UpdateError(
+                    error_code, "Systemd unit drop-ins cannot be inspected safely."
+                ) from error
+            try:
+                self._verify_root_path_chain(directory.parent)
+                if (
+                    stat.S_ISLNK(info.st_mode)
+                    or not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != 0
+                    or info.st_gid != 0
+                    or stat.S_IMODE(info.st_mode) & 0o022
+                ):
+                    raise UpdateError(
+                        error_code,
+                        "A systemd unit drop-in directory has unsafe ownership or mode.",
+                    )
+                files.extend(sorted(directory.glob("*.conf")))
+            except UpdateError:
+                raise
+            except OSError as error:
+                raise UpdateError(
+                    error_code, "Systemd unit drop-ins cannot be enumerated safely."
+                ) from error
+        if len(files) != len(set(files)):
+            raise UpdateError(error_code, "Systemd unit drop-ins are duplicated.")
+        return tuple(files)
+
+    def _verify_native_product_dropin_files(
+        self,
+        *,
+        unit: str,
+        service: str,
+        error_code: str,
+    ) -> tuple[str, ...]:
+        """Allow only the transaction-owned fixed Catalyst auth drop-in."""
+
+        expected_dropin = (
+            "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
+        ).encode("ascii")
+        found: list[str] = []
+        for path in self._native_unit_dropin_files(unit, error_code=error_code):
+            if service != "catalyst" or path != DEFAULT_CATALYST_AUTH_DROPIN:
+                raise UpdateError(
+                    error_code,
+                    f"An unmanaged systemd drop-in may override the verified service policy for {unit}.",
+                )
+            try:
+                content = self._read_workload_protected_file(
+                    path,
+                    allowed_identities={(0, 0, 0o644)},
+                    maximum_bytes=4096,
+                    error_code=error_code,
+                )
+            except (OSError, UpdateError) as error:
+                raise UpdateError(
+                    error_code, "Catalyst's authentication drop-in is unsafe."
+                ) from error
+            if content != expected_dropin:
+                raise UpdateError(
+                    error_code,
+                    "Catalyst's authentication drop-in differs from its fixed contract.",
+                )
+            digest = "sha256:" + hashlib.sha256(content).hexdigest()
+            self._verify_workload_catalyst_dropin_owner(digest)
+            found.append(str(path))
+        return tuple(found)
+
+    def _verify_workload_catalyst_dropin_owner(self, dropin_digest: str) -> None:
+        """Require the exact fixed Catalyst drop-in to have a durable transaction owner."""
+
+        transaction_root = self.state_root / "transactions"
+        if not transaction_root.exists() and not transaction_root.is_symlink():
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalyst authentication drop-in has no durable owner."
+            )
+        try:
+            _verify_private_directory(transaction_root)
+            entries = sorted(transaction_root.iterdir())
+        except (OSError, UpdateError) as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalyst transaction ownership records are unavailable."
+            ) from error
+
+        try:
+            group_id = grp.getgrnam("cyrene").gr_gid
+            user_id = pwd.getpwnam("cyrene").pw_uid
+        except KeyError as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalyst service identity is unavailable."
+            ) from error
+
+        expected_environment = DEFAULT_CATALYST_AUTH_ENVIRONMENT
+        expected_dropin = DEFAULT_CATALYST_AUTH_DROPIN
+        owner_found = False
+        for journal_path in entries:
+            if (
+                journal_path.is_symlink()
+                or not journal_path.is_file()
+                or journal_path.suffix != ".json"
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst transaction ownership inventory is unsafe."
+                )
+            try:
+                info = journal_path.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1
+                    or info.st_size > 16 * 1024 * 1024
+                ):
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED", "Catalyst transaction record is unsafe."
+                    )
+                transaction = json.loads(
+                    journal_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_unique_json_object,
+                )
+            except UpdateError:
+                raise
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst transaction record cannot be read safely."
+                ) from error
+            if not isinstance(transaction, dict):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst transaction record has an invalid shape."
+                )
+
+            if (
+                transaction.get("transactionKind") != "workload-assembly.v1"
+                or transaction.get("workloadId") != "catalyst"
+                or transaction.get("action") != "install"
+            ):
+                continue
+            selected = transaction.get("selectedComponents")
+            if not isinstance(selected, list) or not any(
+                isinstance(row, dict) and row.get("componentId") == CATALYST_COMPONENT_ID
+                for row in selected
+            ):
+                continue
+            managed_files = transaction.get("managedConfigFiles", [])
+            if not isinstance(managed_files, list):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst managed-file journal is malformed."
+                )
+            references_dropin = [
+                item
+                for item in managed_files
+                if isinstance(item, dict) and item.get("path") == str(expected_dropin)
+            ]
+            if not references_dropin:
+                continue
+            if len(references_dropin) != 1:
+                raise UpdateError("SERVICE_NOT_MANAGED", "Catalyst drop-in ownership is ambiguous.")
+
+            phase = transaction.get("phase")
+            if phase == "rolled_back":
+                continue
+            plan_id = transaction.get("planId")
+            plan_digest = transaction.get("planDigest")
+            auth = transaction.get("catalystAuth")
+            dropin_record = references_dropin[0]
+            if (
+                transaction.get("schemaVersion") != 2
+                or phase not in {"applying", "succeeded"}
+                or not isinstance(plan_id, str)
+                or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+                or journal_path.name != f"{plan_id}.json"
+                or not _valid_digest(plan_digest)
+                or plan_id != "plan-" + plan_digest.removeprefix("sha256:")[:32]
+                or not _valid_digest(transaction.get("catalogDigest"))
+                or not isinstance(auth, dict)
+                or set(auth)
+                != {
+                    "tokenPath",
+                    "tokenSha256",
+                    "catalystEnvironmentDigest",
+                    "controlEnvironmentDigest",
+                    "unitDropInDigest",
+                    "origin",
+                }
+                or auth.get("tokenPath") != str(DEFAULT_CATALYST_API_TOKEN)
+                or not _valid_digest(auth.get("tokenSha256"))
+                or not _valid_digest(auth.get("catalystEnvironmentDigest"))
+                or not _valid_digest(auth.get("controlEnvironmentDigest"))
+                or auth.get("unitDropInDigest") != dropin_digest
+                or auth.get("origin") != CATALYST_API_ORIGIN
+                or not isinstance(dropin_record, dict)
+                or set(dropin_record)
+                != {"path", "kind", "priorDigest", "writtenDigest", "mode", "groupId"}
+                or dropin_record.get("kind") != "catalyst-auth-dropin"
+                or dropin_record.get("priorDigest") not in {None, dropin_digest}
+                or dropin_record.get("writtenDigest") != dropin_digest
+                or type(dropin_record.get("mode")) is not int
+                or dropin_record.get("mode") != 0o644
+                or type(dropin_record.get("groupId")) is not int
+                or dropin_record.get("groupId") != 0
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst drop-in transaction ownership is invalid."
+                )
+
+            environment_records = [
+                item
+                for item in managed_files
+                if isinstance(item, dict) and item.get("path") == str(expected_environment)
+            ]
+            if (
+                len(environment_records) != 1
+                or not isinstance(environment_records[0], dict)
+                or set(environment_records[0])
+                != {"path", "kind", "priorDigest", "writtenDigest", "mode", "groupId"}
+                or environment_records[0].get("kind") != "catalyst-auth-environment"
+                or environment_records[0].get("priorDigest")
+                not in {None, auth.get("catalystEnvironmentDigest")}
+                or environment_records[0].get("writtenDigest")
+                != auth.get("catalystEnvironmentDigest")
+                or type(environment_records[0].get("mode")) is not int
+                or environment_records[0].get("mode") != 0o640
+                or type(environment_records[0].get("groupId")) is not int
+                or environment_records[0].get("groupId") != group_id
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst auth environment ownership is invalid."
+                )
+            environment_bytes = self._read_workload_protected_file(
+                expected_environment,
+                allowed_identities={(0, group_id, 0o640)},
+                maximum_bytes=4096,
+                error_code="SERVICE_NOT_MANAGED",
+            )
+            if environment_bytes is None or "sha256:" + hashlib.sha256(
+                environment_bytes
+            ).hexdigest() != auth.get("catalystEnvironmentDigest"):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst auth environment differs from its journal."
+                )
+            token_bytes = self._read_workload_protected_file(
+                DEFAULT_CATALYST_API_TOKEN,
+                allowed_identities={(0, group_id, 0o640), (user_id, group_id, 0o600)},
+                maximum_bytes=4096,
+                error_code="SERVICE_NOT_MANAGED",
+            )
+            if token_bytes is None or "sha256:" + hashlib.sha256(
+                token_bytes
+            ).hexdigest() != auth.get("tokenSha256"):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst token differs from its transaction identity."
+                )
+
+            if phase == "succeeded":
+                result = transaction.get("result")
+                if (
+                    not isinstance(result, dict)
+                    or result.get("action") != "install"
+                    or result.get("workloadId") != "catalyst"
+                    or result.get("planId") != plan_id
+                    or result.get("planDigest") != plan_digest
+                ):
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED", "Catalyst completed owner receipt is inconsistent."
+                    )
+            owner_found = True
+
+        if not owner_found:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED",
+                "Catalyst authentication drop-in has no matching transaction.",
+            )
+
+    @staticmethod
+    def _native_product_effective_exec_matches(value: str, service: str) -> bool:
+        expected = [
+            "/opt/cyrene/python/3.12.14/bin/python3.12",
+            "-sE",
+            "/usr/lib/cyrene/scripts/cyrene.py",
+            "service-run",
+            service,
+        ]
+        match = re.match(
+            r"^\{\s*path=([^;]+);\s*argv\[\]=([^;]+);\s*ignore_errors=([^;]+);",
+            value,
+        )
+        if match is None or match.group(1).strip() != expected[0]:
+            return False
+        try:
+            argv = shlex.split(match.group(2).strip())
+        except ValueError:
+            return False
+        return argv == expected and match.group(3).strip() == "no"
+
+    def _resolve_native_unit_directory(self, directory: Path) -> Path:
+        """Resolve one systemd directory, allowing only Ubuntu's exact usrmerge alias."""
+
+        absolute = Path(directory).absolute()
+        current = Path(absolute.anchor)
+        symlink_ancestors: list[Path] = []
+        try:
+            for part in absolute.parts[1:]:
+                current /= part
+                if stat.S_ISLNK(current.lstat().st_mode):
+                    symlink_ancestors.append(current)
+        except OSError as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Systemd unit directory is missing or unsafe."
+            ) from error
+
+        if symlink_ancestors:
+            alias = symlink_ancestors[0]
+            try:
+                relative_root = absolute.relative_to(alias)
+                link_target = os.readlink(alias)
+                if (
+                    len(symlink_ancestors) != 1
+                    or alias.name != "lib"
+                    or link_target != "usr/lib"
+                    or relative_root.parts != ("systemd", "system")
+                ):
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED", "Systemd unit directory has an unsafe symlink."
+                    )
+                resolved = (alias.parent / "usr" / "lib" / "systemd" / "system").resolve(
+                    strict=True
+                )
+            except (OSError, ValueError) as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Systemd usrmerge unit directory is invalid."
+                ) from error
+        else:
+            try:
+                resolved = absolute.resolve(strict=True)
+            except OSError as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Systemd unit directory is missing or unsafe."
+                ) from error
+
+        if not resolved.is_dir():
+            raise UpdateError("SERVICE_NOT_MANAGED", "Systemd unit directory is not a directory.")
+        self._verify_root_path_chain(resolved)
+        return resolved
+
+    @staticmethod
+    def _unit_uses_native_service_runner(path: Path, service: str) -> bool:
+        try:
+            contents = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        section = ""
+        values: dict[str, list[str]] = {"User": [], "Group": [], "ExecStart": []}
+        for raw_line in contents.splitlines():
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1]
+                continue
+            if section == "Service" and "=" in line:
+                key, value = line.split("=", 1)
+                if key in values:
+                    values[key].append(value.strip())
+        try:
+            commands = [shlex.split(value) for value in values["ExecStart"]]
+        except ValueError:
+            return False
+        return (
+            values["User"] == ["cyrene"]
+            and values["Group"] == ["cyrene"]
+            and commands
+            == [
+                [
+                    "/opt/cyrene/python/3.12.14/bin/python3.12",
+                    "-sE",
+                    "/usr/lib/cyrene/scripts/cyrene.py",
+                    "service-run",
+                    service,
+                ]
+            ]
+        )
 
     def _workload_signed_unit_bytes(
         self, component: dict[str, Any], candidate: dict[str, Any] | None
@@ -8696,6 +9415,9 @@ class ComponentUpdater:
             unit = service["unit"]
             component = self.components[service["componentId"]]
             candidate = service.get("candidate")
+            if service.get("unitOwner") == "native-deb":
+                self._workload_deb_managed_unit_bytes(component, candidate, verify_fragment=True)
+                continue
             candidate_bytes, _source, candidate_digest = self._workload_signed_unit_bytes(
                 component, candidate
             )
@@ -8931,76 +9653,11 @@ class ComponentUpdater:
                     "Catalyst bearer is configured in the world-readable general environment file; move it to a protected token file before installing.",
                 )
 
-        expected_dropin = (
-            "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
-        ).encode("ascii")
-        known_dropin_dirs = (
-            Path("/etc/systemd/system/cyrene-catalyst.service.d"),
-            Path("/run/systemd/system/cyrene-catalyst.service.d"),
-            Path("/usr/local/lib/systemd/system/cyrene-catalyst.service.d"),
-            Path("/usr/lib/systemd/system/cyrene-catalyst.service.d"),
+        self._verify_native_product_dropin_files(
+            unit=CATALYST_SERVICE_UNIT,
+            service="catalyst",
+            error_code="CATALYST_AUTH_CONFIGURATION_CONFLICT",
         )
-        for directory in known_dropin_dirs:
-            if not directory.exists() and not directory.is_symlink():
-                continue
-            try:
-                info = directory.lstat()
-                self._verify_root_path_chain(directory.parent)
-                if (
-                    stat.S_ISLNK(info.st_mode)
-                    or not stat.S_ISDIR(info.st_mode)
-                    or info.st_uid != 0
-                    or info.st_gid != 0
-                    or stat.S_IMODE(info.st_mode) & 0o022
-                ):
-                    raise UpdateError(
-                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
-                        "A Catalyst unit drop-in directory has unsafe ownership or mode.",
-                    )
-                files = sorted(directory.glob("*.conf"))
-            except UpdateError:
-                raise
-            except OSError as error:
-                raise UpdateError(
-                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
-                    "Catalyst unit drop-ins cannot be enumerated safely.",
-                ) from error
-            for path in files:
-                if path == DEFAULT_CATALYST_AUTH_DROPIN:
-                    content = self._read_workload_protected_file(
-                        path,
-                        allowed_identities={(0, 0, 0o644)},
-                        maximum_bytes=4096,
-                    )
-                    if content != expected_dropin:
-                        raise UpdateError(
-                            "CATALYST_AUTH_CONFIGURATION_CONFLICT",
-                            "The managed Catalyst authentication drop-in differs from its fixed contract.",
-                        )
-                    continue
-                content = self._read_workload_protected_file(
-                    path,
-                    allowed_identities={(0, 0, 0o600), (0, 0, 0o644)},
-                    maximum_bytes=16384,
-                )
-                if content is None:
-                    continue
-                try:
-                    lines = content.decode("utf-8").splitlines()
-                except UnicodeDecodeError as error:
-                    raise UpdateError(
-                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
-                        "An unmanaged Catalyst unit drop-in cannot be inspected safely.",
-                    ) from error
-                if any(
-                    line.strip().partition("=")[0].strip() in {"Environment", "EnvironmentFile"}
-                    for line in lines
-                    if line.strip() and not line.lstrip().startswith("#")
-                ):
-                    raise UpdateError(
-                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
-                        "An unmanaged Catalyst unit drop-in supplies environment values; refusing an ambiguous bearer configuration.",
-                    )
 
     def _workload_catalyst_token_configuration(
         self, *, generate: bool
@@ -9223,6 +9880,7 @@ class ComponentUpdater:
             raise UpdateError(
                 "INVALID_TRANSACTION", "Managed configuration rollback journal is malformed."
             )
+        is_bearer_file = entry_kind == "catalyst-api-token"
         entry = next(
             (item for item in changes if isinstance(item, dict) and item.get("path") == str(path)),
             None,
@@ -9238,6 +9896,18 @@ class ComponentUpdater:
                 raise UpdateError(
                     "INVALID_TRANSACTION", "Managed configuration retry changed its digest."
                 )
+            if entry is None and not is_bearer_file:
+                changes.append(
+                    {
+                        "path": str(path),
+                        "kind": entry_kind,
+                        "priorDigest": current_digest,
+                        "writtenDigest": digest,
+                        "mode": mode,
+                        "groupId": group_id,
+                    }
+                )
+                _atomic_json(transaction_path, transaction)
             return digest
         if entry is not None and entry.get("writtenDigest") != digest:
             raise UpdateError(
@@ -9248,7 +9918,6 @@ class ComponentUpdater:
         else:
             parent_group, parent_mode = 0, 0o755
         self._ensure_workload_config_directory(path.parent, group_id=parent_group, mode=parent_mode)
-        is_bearer_file = entry_kind == "catalyst-api-token"
         if entry is None and not is_bearer_file:
             entry = {
                 "path": str(path),
@@ -21482,6 +22151,12 @@ class ComponentUpdater:
         unit = self._catalog_matched_unit(component)
         if unit is None:
             return False
+        if component.get("pythonBundleService"):
+            try:
+                self._workload_deb_managed_unit_bytes(component, None, verify_fragment=True)
+            except UpdateError:
+                return False
+            return True
         for directory in self.systemd_unit_dirs:
             path = directory / unit
             try:

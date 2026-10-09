@@ -341,45 +341,28 @@ def _read_root_file(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _unit_path(updater: Any, component: dict[str, Any], service: str) -> tuple[Path, bytes]:
-    unit = component.get("systemdUnit")
-    restart = component.get("restart")
-    if not isinstance(unit, str) or not isinstance(restart, dict) or restart.get("unit") != unit:
-        raise ValueError(f"Catalog has no fixed systemd unit for {service}")
-    found: list[tuple[Path, bytes]] = []
-    for directory in updater.systemd_unit_dirs:
-        path = Path(directory) / unit
-        if not path.exists() and not path.is_symlink():
-            continue
-        info = path.lstat()
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(info.st_mode)
-            or info.st_uid != ROOT_UID
-            or info.st_mode & 0o022
-        ):
-            raise ValueError(f"Product systemd unit is unsafe: {unit}")
-        content = path.read_bytes()
-        text = content.decode("utf-8")
-        lines = text.splitlines()
-        exec_lines = [line for line in lines if line.startswith("ExecStart=")]
-        if (
-            lines.count("User=cyrene") != 1
-            or lines.count("Group=cyrene") != 1
-            or len(exec_lines) != 1
-            or exec_lines[0]
-            != (
-                "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
-                f"/usr/lib/cyrene/scripts/cyrene.py service-run {service}"
-            )
-        ):
-            raise ValueError(
-                f"Product systemd unit does not match the fixed API-only runner: {unit}"
-            )
-        found.append((path, content))
-    if not found or any(content != found[0][1] for _, content in found[1:]):
-        raise ValueError(f"Product systemd unit is missing or shadowed: {unit}")
-    return found[0]
+def _unit_path(
+    updater: Any,
+    component: dict[str, Any],
+    service: str,
+    *,
+    target_profile: str,
+) -> tuple[Path, bytes]:
+    """Read a Product unit only through the updater's DEB-owned unit contract."""
+
+    if component.get("pythonBundleService") != service:
+        raise TypeError(f"Catalog does not bind the Product unit to {service}")
+    validate_unit = getattr(updater, "_workload_deb_managed_unit_bytes", None)
+    if not callable(validate_unit):
+        raise TypeError("Native updater has no DEB-managed Product unit verifier")
+    content, path, _digest = validate_unit(
+        component,
+        {"targetId": target_profile},
+        verify_fragment=True,
+    )
+    if not isinstance(content, bytes) or not isinstance(path, Path):
+        raise TypeError(f"DEB-managed Product unit proof is malformed for {service}")
+    return path, content
 
 
 def _pointer(updater: Any, service: str) -> str | None:
@@ -415,7 +398,12 @@ def _check_fresh(
                 f"An existing active Product pointer blocks first activation: {service}"
             )
         component = updater.components[product["componentId"]]
-        _unit_path(updater, component, service)
+        _unit_path(
+            updater,
+            component,
+            service,
+            target_profile=product["targetProfileId"],
+        )
         pid = _main_pid(updater, component["systemdUnit"])
         if pid != 0 and service not in allow_owned:
             raise ValueError(f"An existing Product process blocks first activation: {service}")
@@ -557,7 +545,12 @@ def _live_product(updater: Any, product: dict[str, Any], *, proc_root: Path = PR
         raise RuntimeError(
             f"Active Product pointer differs from the confirmed cohort: {product['service']}"
         )
-    _unit_path(updater, component, product["service"])
+    _unit_path(
+        updater,
+        component,
+        product["service"],
+        target_profile=product["targetProfileId"],
+    )
     pid = _main_pid(updater, component["systemdUnit"])
     if pid <= 1:
         raise RuntimeError(f"Product unit has no live MainPID: {product['service']}")

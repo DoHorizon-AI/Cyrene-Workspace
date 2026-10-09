@@ -133,6 +133,19 @@ def _bootstrap_catalog_binding_module() -> Any:
     return module
 
 
+def _native_install_contract_module() -> Any:
+    """Load the source-bound builder used to describe DEB-owned Product units."""
+
+    path = Path(__file__).resolve().parents[1] / "packaging" / "native_install_contract.py"
+    spec = importlib.util.spec_from_file_location("cyrene_release_native_install_contract", path)
+    if spec is None or spec.loader is None:
+        raise ReleaseError("cannot load the source-bound native install contract helper")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 @dataclass(frozen=True)
 class ComponentRequest:
     """One exact component/target tuple requested from a verified release."""
@@ -1763,11 +1776,24 @@ def _inspect_deb_initialization(
                 "DEB original verified service index differs from staged payload index"
             )
         script_hashes = _static_installer_activation_check(control)
+        workspace_source = receipt.get("workspaceSource")
+        if not isinstance(workspace_source, dict):
+            raise ReleaseError("source receipt has no Workspace source identity for managed units")
+        try:
+            managed_units = _native_install_contract_module().managed_units_from_directory(
+                extraction / "lib/systemd/system",
+                target_profile=profile_id,
+                source_ref=workspace_source.get("ref"),
+                source_commit=workspace_source.get("commit"),
+            )
+        except (OSError, RuntimeError, ValueError, TypeError) as error:
+            raise ReleaseError(f"DEB managed Product units are invalid: {error}") from error
         expected_marker_keys = {
             *INSTALL_CONTRACT_POLICY,
             "targetProfile",
             "serviceArtifactsIndexSha256",
             "services",
+            "managedUnits",
             "maintainerScriptsSha256",
         }
         if set(marker) != expected_marker_keys:
@@ -1777,6 +1803,7 @@ def _inspect_deb_initialization(
             "targetProfile": profile_id,
             "serviceArtifactsIndexSha256": _sha256(index_path),
             "services": _marker_services_from_index(index, profile_id, receipt),
+            "managedUnits": managed_units,
             "maintainerScriptsSha256": script_hashes,
         }
         if marker != expected_policy:
