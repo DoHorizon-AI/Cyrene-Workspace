@@ -823,13 +823,18 @@ jobs:
                   checksum_line = f"{GH_RELEASE_ASSET_SHA256}  {GH_RELEASE_ASSET}"
                   checksum_lines = checksum_path.read_text(encoding="utf-8").splitlines()
                   require(checksum_lines.count(checksum_line) == 1, "official gh checksum list does not bind the exact amd64 DEB")
-                  package = run(
+                  package_fields = run(
                       ["dpkg-deb", "-f", str(deb_path), "Package", "Version", "Architecture"],
                       label="inspect-official-gh-deb",
                       timeout=30,
                       retain_output=False,
                   ).stdout.splitlines()
-                  require(package == ["gh", "2.102.0", "amd64"], "official gh DEB metadata differs from the pinned package/version/architecture")
+                  require(
+                      package_fields
+                      == ["Package: gh", "Version: 2.102.0", "Architecture: amd64"],
+                      "official gh DEB control fields differ from the pinned package/version/architecture",
+                  )
+                  package = [field.partition(": ")[2] for field in package_fields]
                   run(
                       ["sudo", "-n", "apt-get", "install", "-y", "--no-install-recommends", str(deb_path)],
                       label="install-official-gh-deb",
