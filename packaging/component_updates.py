@@ -8,6 +8,7 @@ activation, and rollback in separate operations. Product v2 manifests are not re
 from __future__ import annotations
 
 import base64
+import datetime
 import fcntl
 import grp
 import hashlib
@@ -16246,6 +16247,7 @@ class ComponentUpdater:
         publisher: dict[str, Any],
         channel: str,
         component: dict[str, Any],
+        target: dict[str, Any],
         *,
         release_id: str | None = None,
     ) -> tuple[dict[str, Any], str, tuple[dict[str, Any], ...], str]:
@@ -16253,7 +16255,8 @@ class ComponentUpdater:
         key = (
             publisher["repository"],
             channel,
-            component["componentId"] if component_prefix else "",
+            component["componentId"],
+            target["id"],
             release_id or "latest",
         )
         if key in self._index_cache:
@@ -16269,7 +16272,7 @@ class ComponentUpdater:
             )
         channel_cfg = self.catalog["channels"][channel]
         expected_prerelease = channel_cfg["releasePrerelease"]
-        selected_release = None
+        candidate_releases: list[dict[str, Any]] = []
         if release_id is not None:
             if (
                 not isinstance(release_id, str)
@@ -16293,8 +16296,23 @@ class ComponentUpdater:
                 and candidate_release.get("draft") is False
                 and candidate_release.get("prerelease") is expected_prerelease
             ):
-                selected_release = candidate_release
+                candidate_releases.append(candidate_release)
         else:
+            tag_format = publisher.get("tagFormat", "source-sha")
+            if tag_format == "source-sha":
+                release_prefix = component_prefix or f"{channel}-"
+            elif tag_format in {"component-source-sha", "component-version-source-sha"}:
+                release_prefix = f"{channel}-{component['componentId']}-"
+                if component_prefix not in {None, release_prefix}:
+                    raise UpdateError(
+                        "INVALID_CATALOG",
+                        "The component release prefix differs from the publisher tag format.",
+                    )
+            else:
+                raise UpdateError(
+                    "INVALID_CATALOG", f"Unsupported publisher tag format {tag_format!r}."
+                )
+            seen_release_tags: set[str] = set()
             for page in range(1, 101):
                 page_uri = releases_uri if page == 1 else f"{releases_uri}&page={page}"
                 releases = self._get_json(page_uri)
@@ -16304,87 +16322,125 @@ class ComponentUpdater:
                         "GitHub Releases API did not return a release list.",
                         retryable=True,
                     )
-                selected_release = next(
-                    (
-                        item
-                        for item in releases
-                        if isinstance(item, dict)
+                for item in releases:
+                    tag_name = item.get("tag_name") if isinstance(item, dict) else None
+                    if (
+                        isinstance(item, dict)
                         and item.get("draft") is False
                         and item.get("prerelease") is expected_prerelease
-                        and (
-                            component_prefix is None
-                            or (
-                                isinstance(item.get("tag_name"), str)
-                                and item["tag_name"].startswith(component_prefix)
-                            )
-                        )
-                    ),
-                    None,
-                )
-                if selected_release is not None or len(releases) < 100:
+                        and isinstance(tag_name, str)
+                        and tag_name.startswith(release_prefix)
+                        and tag_name not in seen_release_tags
+                    ):
+                        candidate_releases.append(item)
+                        seen_release_tags.add(tag_name)
+                if len(releases) < 100:
                     break
-        if selected_release is None:
+
+            def published_timestamp(release: dict[str, Any]) -> tuple[bool, float, str]:
+                value = release.get("published_at")
+                if not isinstance(value, str):
+                    value = release.get("created_at")
+                if isinstance(value, str):
+                    try:
+                        parsed = datetime.datetime.fromisoformat(value)
+                        if parsed.tzinfo is not None:
+                            return True, parsed.timestamp(), str(release.get("tag_name", ""))
+                    except (OverflowError, ValueError):
+                        pass
+                return False, 0.0, str(release.get("tag_name", ""))
+
+            candidate_releases.sort(key=published_timestamp, reverse=True)
+
+        if not candidate_releases:
             raise UpdateError(
                 "NO_RELEASE",
                 f"No {channel} component release is published for {publisher['repository']}.",
                 retryable=True,
             )
-        assets = selected_release.get("assets")
-        asset = (
-            next(
-                (
-                    entry
-                    for entry in assets
-                    if isinstance(entry, dict)
-                    and entry.get("name") == publisher["releaseDiscovery"]["indexAssetName"]
-                ),
-                None,
+
+        index_asset_name = publisher["releaseDiscovery"]["indexAssetName"]
+        requested_target = target.get("target")
+        for selected_release in candidate_releases:
+            release_tag = selected_release.get("tag_name")
+            assets = selected_release.get("assets")
+            asset = (
+                next(
+                    (
+                        entry
+                        for entry in assets
+                        if isinstance(entry, dict) and entry.get("name") == index_asset_name
+                    ),
+                    None,
+                )
+                if isinstance(assets, list)
+                else None
             )
-            if isinstance(assets, list)
-            else None
-        )
-        if asset is None or not isinstance(asset.get("browser_download_url"), str):
-            raise UpdateError(
-                "RELEASE_INDEX_MISSING",
-                f"The selected {channel} release has no component index asset.",
-                retryable=True,
+            if asset is None or not isinstance(asset.get("browser_download_url"), str):
+                if release_id is not None:
+                    raise UpdateError(
+                        "RELEASE_INDEX_MISSING",
+                        f"The selected {channel} release has no component index asset.",
+                        retryable=True,
+                    )
+                continue
+            if not isinstance(assets, list) or not all(isinstance(item, dict) for item in assets):
+                raise UpdateError(
+                    "INVALID_RELEASE_ASSETS", "The selected release asset list is invalid."
+                )
+            release_assets = tuple(dict(item) for item in assets)
+            index_uri = asset["browser_download_url"]
+            index_bytes = self._get_release_asset_bytes(
+                release_assets,
+                index_uri,
+                repository=publisher["repository"],
+                release_tag=release_tag,
             )
-        if not isinstance(assets, list) or not all(isinstance(item, dict) for item in assets):
-            raise UpdateError(
-                "INVALID_RELEASE_ASSETS", "The selected release asset list is invalid."
+            try:
+                index = json.loads(index_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise UpdateError(
+                    "INVALID_RELEASE_INDEX",
+                    "The component release index is not valid UTF-8 JSON.",
+                ) from error
+            if not isinstance(index, dict) or not isinstance(index.get("releases"), list):
+                raise UpdateError(
+                    "INVALID_RELEASE_INDEX", "The component release index has no release list."
+                )
+            matching_rows = [
+                row
+                for row in index["releases"]
+                if isinstance(row, dict)
+                and row.get("componentId") == component["componentId"]
+                and row.get("target") == requested_target
+            ]
+            if not matching_rows and release_id is None:
+                continue
+
+            self._validate_index(index, publisher, channel, selected_release, component)
+            index_asset_digest = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
+            self._release_attestation_bundle(
+                payload=index_bytes,
+                repository=publisher["repository"],
+                digest=index_asset_digest,
+                workflow=publisher["workflow"],
+                source_ref=index["source"]["ref"],
+                source_commit=index["source"]["commit"],
+                subject_name=index["provenance"]["attestation"]["subjectName"],
             )
-        release_assets = tuple(dict(item) for item in assets)
-        index_uri = asset["browser_download_url"]
-        index_bytes = self._get_release_asset_bytes(
-            release_assets,
-            index_uri,
-            repository=publisher["repository"],
-            release_tag=selected_release.get("tag_name"),
+            result = (index, index_uri, release_assets, release_tag)
+            self._index_cache[key] = result
+            self._index_asset_identity[key] = (
+                index_asset_name,
+                index_asset_digest,
+            )
+            return result
+
+        raise UpdateError(
+            "TARGET_RELEASE_MISSING",
+            f"No {channel} release index contains {component['componentId']} at {target['id']}.",
+            retryable=True,
         )
-        try:
-            index = json.loads(index_bytes)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise UpdateError(
-                "INVALID_RELEASE_INDEX", "The component release index is not valid UTF-8 JSON."
-            ) from error
-        self._validate_index(index, publisher, channel, selected_release, component)
-        index_asset_digest = "sha256:" + hashlib.sha256(index_bytes).hexdigest()
-        self._release_attestation_bundle(
-            payload=index_bytes,
-            repository=publisher["repository"],
-            digest="sha256:" + hashlib.sha256(index_bytes).hexdigest(),
-            workflow=publisher["workflow"],
-            source_ref=index["source"]["ref"],
-            source_commit=index["source"]["commit"],
-            subject_name=index["provenance"]["attestation"]["subjectName"],
-        )
-        result = (index, index_uri, release_assets, selected_release["tag_name"])
-        self._index_cache[key] = result
-        self._index_asset_identity[key] = (
-            publisher["releaseDiscovery"]["indexAssetName"],
-            index_asset_digest,
-        )
-        return result
 
     def _release_asset_metadata(
         self,
@@ -16780,13 +16836,13 @@ class ComponentUpdater:
                 f"No trusted publisher is configured for {component['componentId']}.",
             )
         index, index_uri, release_assets, release_tag = self._channel_releases(
-            publisher, channel, component, release_id=release_id
+            publisher, channel, component, target, release_id=release_id
         )
-        component_prefix = self._component_release_tag_prefix(component, channel)
         index_key = (
             publisher["repository"],
             channel,
-            component["componentId"] if component_prefix else "",
+            component["componentId"],
+            target["id"],
             release_id or "latest",
         )
         index_asset_identity = self._index_asset_identity.get(index_key)
