@@ -106,6 +106,279 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
     )
 
 
+def _release_discovery_entry(
+    repository: str,
+    workflow: str,
+    channel: str,
+    commit: str,
+    published_at: str,
+    release_rows: list[dict[str, object]],
+) -> tuple[dict[str, object], str, bytes]:
+    release_tag = f"{channel}-{commit}"
+    source = {
+        "repository": f"https://github.com/{repository}",
+        "ref": "refs/heads/develop" if channel == "preview" else "refs/heads/main",
+        "commit": commit,
+    }
+    run = {
+        "id": "123",
+        "attempt": 1,
+        "url": f"https://github.com/{repository}/actions/runs/123/attempts/1",
+    }
+    index: dict[str, object] = {
+        "schemaVersion": 1,
+        "repository": repository,
+        "channel": channel,
+        "source": source,
+        "provenance": {
+            "attestation": {
+                "kind": "github-artifact-attestation",
+                "repository": repository,
+                "workflow": workflow,
+                "predicateType": "https://slsa.dev/provenance/v1",
+                "subjectName": "component-release-index-v1.json",
+                "run": run,
+            }
+        },
+        "releases": release_rows,
+        "compatibilityGroups": [],
+    }
+    index["indexDigest"] = updates._digest_json(index, "indexDigest")
+    index_bytes = json.dumps(index, separators=(",", ":")).encode()
+    asset_uri = (
+        f"https://github.com/{repository}/releases/download/{release_tag}/"
+        "component-release-index-v1.json"
+    )
+    asset = {
+        "name": "component-release-index-v1.json",
+        "browser_download_url": asset_uri,
+        "digest": "sha256:" + updates.hashlib.sha256(index_bytes).hexdigest(),
+        "size": len(index_bytes),
+    }
+    release: dict[str, object] = {
+        "tag_name": release_tag,
+        "draft": False,
+        "prerelease": channel == "preview",
+        "published_at": published_at,
+        "assets": [asset],
+    }
+    return release, asset_uri, index_bytes
+
+
+def _install_release_discovery_fixtures(
+    updater: updates.ComponentUpdater,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    releases: list[dict[str, object]],
+    asset_bodies: dict[str, bytes],
+) -> None:
+    updater.catalog = {
+        "channels": {
+            "preview": {"releasePrerelease": True, "sourceRefs": ["refs/heads/develop"]},
+            "stable": {"releasePrerelease": False, "sourceRefs": ["refs/heads/main"]},
+        }
+    }
+    monkeypatch.setattr(updater, "_get_json", lambda uri: releases)
+    monkeypatch.setattr(
+        updater,
+        "_get_bytes",
+        lambda uri, **_kwargs: asset_bodies[uri],
+    )
+    monkeypatch.setattr(updater, "_release_attestation_bundle", lambda **_kwargs: b"verified")
+
+
+def test_release_discovery_uses_newest_exact_component_target_not_api_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    repository = "Example-Corp/Release-Assets"
+    workflow = f"{repository}/.github/workflows/publish.yml"
+    target = {
+        "os": "linux",
+        "osVersion": "24.04",
+        "distribution": "ubuntu",
+        "distributionVersion": "24.04",
+        "architecture": "x86_64",
+        "runtime": "systemd",
+    }
+    component = {"componentId": "sample-service"}
+    publisher = {
+        "repository": repository,
+        "workflow": workflow,
+        "tagFormat": "source-sha",
+        "releaseDiscovery": {
+            "apiUri": f"https://api.github.com/repos/{repository}/releases?per_page=100",
+            "indexAssetName": "component-release-index-v1.json",
+        },
+    }
+    older, older_uri, older_bytes = _release_discovery_entry(
+        repository,
+        workflow,
+        "preview",
+        "a" * 40,
+        "2026-10-08T21:30:00Z",
+        [{"componentId": "sample-service", "target": target}],
+    )
+    newest_matching, newest_uri, newest_bytes = _release_discovery_entry(
+        repository,
+        workflow,
+        "preview",
+        "b" * 40,
+        "2026-10-08T22:30:00Z",
+        [{"componentId": "sample-service", "target": target}],
+    )
+    newest_unrelated, unrelated_uri, unrelated_bytes = _release_discovery_entry(
+        repository,
+        workflow,
+        "preview",
+        "c" * 40,
+        "2026-10-08T23:30:00Z",
+        [{"componentId": "another-service", "target": target}],
+    )
+    newest_without_index: dict[str, object] = {
+        "tag_name": "preview-" + "d" * 40,
+        "draft": False,
+        "prerelease": True,
+        "published_at": "2026-10-08T23:45:00Z",
+        "assets": [],
+    }
+    # The API list is deliberately not in published-time order.
+    api_releases = [older, newest_unrelated, newest_matching, newest_without_index]
+    bodies = {
+        older_uri: older_bytes,
+        newest_uri: newest_bytes,
+        unrelated_uri: unrelated_bytes,
+    }
+    _install_release_discovery_fixtures(
+        updater,
+        monkeypatch,
+        releases=api_releases,
+        asset_bodies=bodies,
+    )
+
+    index, _uri, _assets, tag = updater._channel_releases(
+        publisher,
+        "preview",
+        component,
+        {"id": "linux-u24-systemd", "target": target},
+    )
+
+    assert tag == "preview-" + "b" * 40
+    assert index["releases"] == [{"componentId": "sample-service", "target": target}]
+    assert len(updater._index_cache) == 1
+
+
+def test_release_discovery_cache_is_scoped_to_component_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    repository = "Example-Corp/Release-Assets"
+    workflow = f"{repository}/.github/workflows/publish.yml"
+    target_a = {"os": "linux", "architecture": "x86_64", "runtime": "systemd"}
+    target_b = {"os": "linux", "architecture": "aarch64", "runtime": "systemd"}
+    component = {"componentId": "multi-target-service"}
+    publisher = {
+        "repository": repository,
+        "workflow": workflow,
+        "tagFormat": "source-sha",
+        "releaseDiscovery": {
+            "apiUri": f"https://api.github.com/repos/{repository}/releases?per_page=100",
+            "indexAssetName": "component-release-index-v1.json",
+        },
+    }
+    release_a, uri_a, bytes_a = _release_discovery_entry(
+        repository,
+        workflow,
+        "preview",
+        "a" * 40,
+        "2026-10-08T21:30:00Z",
+        [{"componentId": "multi-target-service", "target": target_a}],
+    )
+    release_b, uri_b, bytes_b = _release_discovery_entry(
+        repository,
+        workflow,
+        "preview",
+        "b" * 40,
+        "2026-10-08T22:30:00Z",
+        [{"componentId": "multi-target-service", "target": target_b}],
+    )
+    _install_release_discovery_fixtures(
+        updater,
+        monkeypatch,
+        releases=[release_a, release_b],
+        asset_bodies={uri_a: bytes_a, uri_b: bytes_b},
+    )
+
+    _first = updater._channel_releases(
+        publisher,
+        "preview",
+        component,
+        {"id": "linux-u24-x86_64", "target": target_a},
+    )
+    second_index, _uri, _assets, second_tag = updater._channel_releases(
+        publisher,
+        "preview",
+        component,
+        {"id": "linux-u24-aarch64", "target": target_b},
+    )
+
+    assert second_tag == "preview-" + "b" * 40
+    assert second_index["releases"] == [{"componentId": "multi-target-service", "target": target_b}]
+    assert len(updater._index_cache) == 2
+
+
+def test_release_discovery_does_not_fallback_after_bad_matching_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    repository = "Example-Corp/Release-Assets"
+    workflow = f"{repository}/.github/workflows/publish.yml"
+    target = {"os": "linux", "architecture": "x86_64", "runtime": "systemd"}
+    component = {"componentId": "sample-service"}
+    publisher = {
+        "repository": repository,
+        "workflow": workflow,
+        "tagFormat": "source-sha",
+        "releaseDiscovery": {
+            "apiUri": f"https://api.github.com/repos/{repository}/releases?per_page=100",
+            "indexAssetName": "component-release-index-v1.json",
+        },
+    }
+    older, older_uri, older_bytes = _release_discovery_entry(
+        repository,
+        workflow,
+        "preview",
+        "a" * 40,
+        "2026-10-08T21:30:00Z",
+        [{"componentId": "sample-service", "target": target}],
+    )
+    invalid, invalid_uri, invalid_bytes = _release_discovery_entry(
+        repository,
+        "Wrong-Corp/Other/.github/workflows/publish.yml",
+        "preview",
+        "b" * 40,
+        "2026-10-08T22:30:00Z",
+        [{"componentId": "sample-service", "target": target}],
+    )
+    _install_release_discovery_fixtures(
+        updater,
+        monkeypatch,
+        releases=[older, invalid],
+        asset_bodies={older_uri: older_bytes, invalid_uri: invalid_bytes},
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._channel_releases(
+            publisher,
+            "preview",
+            component,
+            {"id": "linux-u24-systemd", "target": target},
+        )
+
+    assert error.value.code == "UNTRUSTED_WORKFLOW"
+    assert not updater._index_cache
+
+
 def test_workload_status_adapts_web_host_environment_for_subprocess_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
