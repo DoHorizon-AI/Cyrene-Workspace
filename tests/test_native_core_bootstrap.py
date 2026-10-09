@@ -9,6 +9,7 @@ import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -951,6 +952,96 @@ def _install_c10_broker_fixture(updater: FakeUpdater, tmp_path: Path) -> tuple[P
     return proc_root, executable
 
 
+def test_partial_c10_resume_allows_owned_kernel_state_but_rejects_foreign_core_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    broker_identity = updater.bootstrap_broker_identity
+    assert broker_identity is not None
+    staged: list[dict[str, Any]] = []
+    kernel_executable = ""
+    for component_id in bootstrap.C10_FIRST_CORE_COMPONENT_IDS:
+        if component_id == "cyrene-runtime-maintenance":
+            version = broker_identity["version"]
+            manifest_digest = broker_identity["manifestDigest"]
+            artifact_digest = broker_identity["artifactDigest"]
+        else:
+            version = "1.2.3"
+            manifest_digest = _digest((component_id + " manifest").encode())
+            artifact_digest = _digest((component_id + " artifact").encode())
+        entrypoint = "bin/" + component_id
+        manifest = {"artifact": {"entrypoint": entrypoint}}
+        row = {
+            "componentId": component_id,
+            "version": version,
+            "manifestDigest": manifest_digest,
+            "artifactDigest": artifact_digest,
+            "manifest": manifest,
+        }
+        pointer = version + "--" + manifest_digest.removeprefix("sha256:")
+        updater.pointers[component_id] = pointer
+        staged.append(row)
+        if component_id == "cyrene-kernel":
+            kernel_executable = str(
+                (
+                    updater.install_root
+                    / "components"
+                    / component_id
+                    / "releases"
+                    / pointer
+                    / entrypoint
+                ).resolve()
+            )
+
+    assert kernel_executable
+    updater.core_runtime_root.mkdir(parents=True)
+    updater.core_run_root.mkdir(parents=True)
+    (updater.core_runtime_root / "journal.jsonl").write_text("owned kernel journal\n")
+    (updater.core_run_root / "kernel.sock").touch()
+    monkeypatch.setattr(bootstrap, "_verified_running_c10_broker", lambda *_args: broker_identity)
+    monkeypatch.setattr(
+        bootstrap,
+        "_core_process_snapshot",
+        lambda *_args, **_kwargs: [("cyrene-kernel", kernel_executable, "88")],
+    )
+
+    def runner(argv: list[str], **_kwargs: Any) -> SimpleNamespace:
+        if argv[:2] == ["systemctl", "show"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="88\n" if "MainPID" in argv[2] else "active\n",
+            )
+        assert argv[0] == "nvidia-smi"
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(updater, "runner", runner)
+    assert (
+        bootstrap._assert_fresh(
+            updater,
+            proc_root=tmp_path / "proc-resumed-c10",
+            planned_components=staged,
+            require_empty_kernel_state=False,
+            expected_bootstrap_broker=broker_identity,
+        )
+        == broker_identity
+    )
+
+    foreign_executable = str((tmp_path / "foreign" / "cyrene-kernel").resolve())
+    monkeypatch.setattr(
+        bootstrap,
+        "_core_process_snapshot",
+        lambda *_args, **_kwargs: [("cyrene-kernel", foreign_executable, "89")],
+    )
+    with pytest.raises(ValueError, match="Legacy or manually started Core process"):
+        bootstrap._assert_fresh(
+            updater,
+            proc_root=tmp_path / "proc-resumed-c10",
+            planned_components=staged,
+            require_empty_kernel_state=False,
+            expected_bootstrap_broker=broker_identity,
+        )
+
+
 def test_c10_fresh_check_accepts_only_the_exact_attested_active_broker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1818,3 +1909,242 @@ def test_fixed_four_operation_helper_routes_only_the_named_bootstrap_mode(tmp_pa
     )
     assert unscoped["ok"] is False
     assert unscoped["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_fresh_workload_plan_delegates_active_v2_authority_validation(
+    tmp_path: Path,
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    active_digest = _digest(b"signed active C10 catalog generation 15")
+    updater.catalog_digest = active_digest
+    updater.bootstrap_catalog_digest = active_digest
+    group = updater.catalog["compatibilityGroups"][0]
+    component_rows = []
+    for component_id in bootstrap.C10_FIRST_CORE_COMPONENT_IDS:
+        digest = _digest(component_id.encode("utf-8"))
+        manifest_digest = _digest((component_id + "-manifest").encode("utf-8"))
+        row: dict[str, Any] = {
+            "componentId": component_id,
+            "version": "1.2.3",
+            "manifestDigest": manifest_digest,
+            "artifactDigest": digest,
+            "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+        }
+        protocol = bootstrap._PACKAGE_RUNTIME_PROTOCOLS.get(component_id)
+        if protocol is not None:
+            row["manifest"] = {
+                "schemaVersion": 2,
+                "protocolVersion": protocol,
+                "compatibility": {
+                    "groupId": group["groupId"],
+                    "groupVersion": group["groupVersion"],
+                    "contractApiVersion": group["contractApiVersion"],
+                    "wireApiVersion": group["wireApiVersion"],
+                    "contractLock": group["contractLock"],
+                },
+            }
+        component_rows.append(row)
+    digests = {row["componentId"]: row["artifactDigest"] for row in component_rows}
+    full_digests = {**digests, "cyrene-plugin-example": _digest(b"plugin")}
+    broker_digest = _digest(b"offline Broker plan")
+    source_policy = {
+        "mode": "standaloneOperator",
+        "sourceId": "cyrene-plugin-standalone-operator",
+    }
+    child_material = {
+        "schemaVersion": 1,
+        "cohortId": "C10",
+        "workloadId": "test-workload",
+        "channel": "stable",
+        "catalogDigest": active_digest,
+        "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+        "sourcePolicy": source_policy,
+        "components": [
+            {
+                key: row[key]
+                for key in (
+                    "componentId",
+                    "version",
+                    "manifestDigest",
+                    "artifactDigest",
+                    "targetId",
+                )
+            }
+            for row in component_rows
+        ],
+        "componentArtifactDigests": digests,
+        "maintenanceComponentArtifactDigests": full_digests,
+        "brokerBootstrapPlanDigest": broker_digest,
+    }
+    plan_digest = _digest(
+        json.dumps(
+            child_material,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    block = {
+        "schemaVersion": 1,
+        "cohortId": "C10",
+        "planId": "plan-" + plan_digest.removeprefix("sha256:")[:32],
+        "planDigest": plan_digest,
+        "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+        "catalogDigest": active_digest,
+        "components": [
+            {
+                key: row[key]
+                for key in (
+                    "componentId",
+                    "version",
+                    "manifestDigest",
+                    "artifactDigest",
+                    "targetId",
+                )
+            }
+            for row in component_rows
+        ],
+        "componentArtifactDigests": digests,
+        "maintenanceComponentArtifactDigests": full_digests,
+    }
+    parent_plan = {
+        "channel": "stable",
+        "firstCoreBootstrap": block,
+        "resolution": {
+            "sourcePolicy": source_policy,
+            "planDigestMaterial": {
+                "firstCoreBootstrapInternal": {
+                    "brokerBootstrapPlanDigest": broker_digest,
+                    "childPlanDigestMaterial": child_material,
+                }
+            },
+        },
+    }
+
+    validated_catalogs: list[str] = []
+
+    def validate_active_v2_context(actual_updater: Any, digest: str) -> None:
+        assert actual_updater is updater
+        assert actual_updater.bootstrap_catalog_digest == active_digest
+        validated_catalogs.append(digest)
+
+    bootstrap_module = SimpleNamespace(
+        _require_active_v2_catalog_context=validate_active_v2_context
+    )
+    plan, checked_block, full_digests = bootstrap._fresh_workload_core_plan(
+        updater, parent_plan, component_rows, "stable", bootstrap_module
+    )
+
+    assert checked_block == block
+    assert validated_catalogs == [active_digest]
+    assert plan["requestId"] == "first-core-bootstrap-" + block["planId"].removeprefix("plan-")
+    assert plan["brokerBootstrapPlanDigest"] == broker_digest
+    assert plan["componentArtifactDigests"] == block["maintenanceComponentArtifactDigests"]
+    assert full_digests == block["maintenanceComponentArtifactDigests"]
+
+
+def test_fresh_workload_hold_validation_binds_full_map_at_generation_one() -> None:
+    source_id = "cyrene-plugin-standalone-operator"
+    source_uid, source_gid = 12001, 12002
+    component_digests = {
+        component_id: _digest(component_id.encode("utf-8"))
+        for component_id in bootstrap.C10_FIRST_CORE_COMPONENT_IDS
+    }
+    component_digests["cyrene-plugin-example"] = _digest(b"selected plugin")
+    plan = {
+        "requestId": "first-core-bootstrap-" + "a" * 32,
+        "planId": "plan-" + "a" * 32,
+        "planDigest": _digest(b"fresh workload plan"),
+    }
+    transaction = {
+        "maintenanceToken": "held-token",
+        "maintenanceGateGeneration": 14,
+        "progress": "cohort_installing",
+    }
+
+    class HoldUpdater:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def _activity_catalog(
+            self, *, allow_uninitialized: bool = False
+        ) -> tuple[dict[str, Any], list[str]]:
+            assert allow_uninitialized is True
+            return (
+                {
+                    "schema_version": 1,
+                    "generation": 1,
+                    "sources": [
+                        {
+                            "source_id": source_id,
+                            "uid": source_uid,
+                            "gid": source_gid,
+                            "binding_scopes": [],
+                        }
+                    ],
+                },
+                [source_id],
+            )
+
+        def _broker_request(
+            self, method: str, params: dict[str, Any], *, request_id: str | None = None
+        ) -> dict[str, Any]:
+            assert method == "ValidateMaintenanceHold"
+            assert request_id == plan["requestId"]
+            self.calls.append(params)
+            return {
+                "valid": True,
+                "request_id": params["request_id"],
+                "target_kind": params["target_kind"],
+                "plan_id": params["plan_id"],
+                "plan_digest": params["plan_digest"],
+                "component_artifact_digests": params["component_artifact_digests"],
+                "component_id": params["component_id"],
+                "artifact_digest": params["artifact_digest"],
+                "gate_generation": params["expected_gate_generation"],
+                "catalog_generation": params["expected_catalog_generation"],
+            }
+
+    updater = HoldUpdater()
+    generation = bootstrap._fresh_workload_core_validate_maintenance_hold(
+        updater,
+        plan,
+        transaction,
+        component_digests,
+        source_id=source_id,
+        source_uid=source_uid,
+        source_gid=source_gid,
+    )
+
+    assert generation == 1
+    assert len(updater.calls) == len(component_digests)
+    assert {call["component_id"] for call in updater.calls} == set(component_digests)
+    assert all(call["component_artifact_digests"] == component_digests for call in updater.calls)
+    assert all(call["maintenance_token"] == "held-token" for call in updater.calls)
+
+
+@pytest.mark.parametrize(
+    ("progress", "requires_empty_state"),
+    [
+        ("held", True),
+        ("catalog_initialization_pending", True),
+        ("catalog_initialized", True),
+        ("cohort_installing", False),
+        ("cohort_activated", False),
+        ("cohort_starting", False),
+        ("cohort_started", False),
+        ("readiness_pending", False),
+    ],
+)
+def test_fresh_workload_resume_state_depends_on_durable_cohort_progress(
+    progress: str, requires_empty_state: bool
+) -> None:
+    assert (
+        bootstrap._fresh_workload_core_requires_empty_kernel_state(progress) is requires_empty_state
+    )
+
+
+def test_fresh_workload_resume_rejects_unknown_held_progress() -> None:
+    with pytest.raises(ValueError, match="unsupported held progress"):
+        bootstrap._fresh_workload_core_requires_empty_kernel_state("unknown")

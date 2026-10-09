@@ -2349,7 +2349,9 @@ def _daemon_bindings(scopes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return bindings
 
 
-def _activity_catalog_identity(catalog: Any) -> tuple[int, dict[str, Any]]:
+def _activity_catalog_identity(
+    catalog: Any, *, requested_source_id: str = PACKAGE_SOURCE_ID
+) -> tuple[int, dict[str, Any]]:
     if not isinstance(catalog, dict) or set(catalog) != {"schema_version", "generation", "sources"}:
         raise PackageRuntimeBootstrapError("Runtime activity catalog has an unsupported shape")
     generation = catalog.get("generation")
@@ -2375,10 +2377,10 @@ def _activity_catalog_identity(catalog: Any) -> tuple[int, dict[str, Any]]:
             raise PackageRuntimeBootstrapError("Runtime activity source ID is invalid")
         ids.append(source_id)
         _validate_catalog_binding_scopes(source)
-        if source_id == PACKAGE_SOURCE_ID:
+        if source_id == requested_source_id:
             selected = source
     if ids != sorted(ids) or len(set(ids)) != len(ids) or selected is None:
-        raise PackageRuntimeBootstrapError("Yield activity source is missing or ambiguous")
+        raise PackageRuntimeBootstrapError("Requested activity source is missing or ambiguous")
     if (
         type(selected.get("uid")) is not int
         or selected["uid"] < 1
@@ -2386,7 +2388,7 @@ def _activity_catalog_identity(catalog: Any) -> tuple[int, dict[str, Any]]:
         or not isinstance(selected.get("source_token_sha256"), str)
         or RAW_SHA256.fullmatch(selected["source_token_sha256"]) is None
     ):
-        raise PackageRuntimeBootstrapError("Yield activity source trust fields are invalid")
+        raise PackageRuntimeBootstrapError("Activity source trust fields are invalid")
     return generation, selected
 
 
@@ -2599,6 +2601,9 @@ def probe_runtime_authority(
     activity_catalog: Any,
     *,
     expected_catalog_generation: int,
+    source_id: str = PACKAGE_SOURCE_ID,
+    expected_uid: int | None = None,
+    expected_gid: int | None = None,
     socket_path: Path = PACKAGE_RUNTIME_CONTROL_SOCKET,
     token_directory: Path = Path("/etc/cyrene/runtime-activity-source-tokens"),
     timeout: float = 5.0,
@@ -2608,19 +2613,32 @@ def probe_runtime_authority(
     中文：通过真实 Unix socket 和已配置来源令牌确认 daemon generation 与能力。
     """
 
-    generation, source = _activity_catalog_identity(activity_catalog)
+    if (
+        not isinstance(source_id, str)
+        or re.fullmatch(r"[a-z0-9._-]{1,160}", source_id) is None
+        or (expected_uid is None) != (expected_gid is None)
+        or (expected_uid is not None and (type(expected_uid) is not int or expected_uid <= 0))
+        or (expected_gid is not None and (type(expected_gid) is not int or expected_gid <= 0))
+    ):
+        raise PackageRuntimeBootstrapError("Package Runtime authority source identity is invalid")
+    generation, source = _activity_catalog_identity(activity_catalog, requested_source_id=source_id)
     if generation != expected_catalog_generation:
         raise PackageRuntimeBootstrapError("Package Runtime catalog generation is stale")
-    token_path = token_directory / f"{PACKAGE_SOURCE_ID}.token"
-    token = _read_source_token(token_path, source["source_token_sha256"])
     if not socket_path.is_absolute() or timeout <= 0 or timeout > 30:
         raise PackageRuntimeBootstrapError("Package Runtime control endpoint is invalid")
     runtime_uid = _runtime_user_id()
     runtime_gid = _runtime_group_id()
-    if source["uid"] != runtime_uid or source["gid"] != runtime_gid:
-        raise PackageRuntimeBootstrapError(
-            "Package Runtime probe source does not match the fixed cyrene service identity"
-        )
+    if expected_uid is None:
+        expected_uid = runtime_uid
+        expected_gid = runtime_gid
+        if source["uid"] != expected_uid or source["gid"] != expected_gid:
+            raise PackageRuntimeBootstrapError(
+                "Package Runtime probe source does not match the fixed cyrene service identity"
+            )
+    elif source["uid"] != expected_uid or source["gid"] != expected_gid:
+        raise PackageRuntimeBootstrapError("Package Runtime probe source principal differs")
+    token_path = token_directory / f"{source_id}.token"
+    token = _read_source_token(token_path, source["source_token_sha256"])
     try:
         parent_info = socket_path.parent.lstat()
         socket_info = socket_path.lstat()
@@ -2645,7 +2663,7 @@ def probe_runtime_authority(
     request = {
         "request_id": request_id,
         "operation": "authority",
-        "auth": {"source_id": PACKAGE_SOURCE_ID, "source_token": token},
+        "auth": {"source_id": source_id, "source_token": token},
         "catalog_generation": expected_catalog_generation,
     }
     encoded = _canonical_json(request) + b"\n"

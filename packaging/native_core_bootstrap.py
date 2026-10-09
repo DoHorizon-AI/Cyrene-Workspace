@@ -8,10 +8,13 @@ until the newly started Kernel reports known, empty runtime ownership counts.
 from __future__ import annotations
 
 import errno
+import grp
 import hashlib
 import json
 import math
 import os
+import pwd
+import re
 import shlex
 import shutil
 import socket
@@ -75,6 +78,18 @@ CORE_EXEC_STARTUP_WAIT_SECONDS = 10.0
 CORE_EXEC_STARTUP_POLL_SECONDS = 0.1
 CORE_UNIT_QUIESCE_WAIT_SECONDS = 10.0
 CORE_UNIT_QUIESCE_POLL_SECONDS = 0.1
+_FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS = frozenset(
+    {
+        "cohort_installing",
+        "cohort_activated",
+        "cohort_starting",
+        "cohort_started",
+        "readiness_pending",
+    }
+)
+_FRESH_WORKLOAD_CORE_EMPTY_PROGRESS = frozenset(
+    {"held", "catalog_initialization_pending", "catalog_initialized"}
+)
 
 
 @dataclass(frozen=True)
@@ -786,22 +801,22 @@ def _assert_fresh(
                     or path.read_bytes() != candidate_unit.read_bytes()
                 ):
                     raise ValueError(f"Existing Core unit differs from this bootstrap plan: {unit}")
+    runtime_root = Path(getattr(updater, "core_runtime_root", CORE_RUNTIME_ROOT))
+    run_root = Path(getattr(updater, "core_run_root", CORE_RUN_ROOT))
+    for root in (runtime_root, run_root):
+        try:
+            info = root.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise RuntimeError(
+                "Kernel runtime ownership inventory is unavailable; first-Core eligibility is UNKNOWN"
+            ) from error
+        if root.is_symlink() or not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError(
+                "Kernel runtime ownership root is unsafe; first-Core eligibility is UNKNOWN"
+            )
     if require_empty_kernel_state:
-        runtime_root = Path(getattr(updater, "core_runtime_root", CORE_RUNTIME_ROOT))
-        run_root = Path(getattr(updater, "core_run_root", CORE_RUN_ROOT))
-        for root in (runtime_root, run_root):
-            try:
-                info = root.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as error:
-                raise RuntimeError(
-                    "Kernel runtime ownership inventory is unavailable; first-Core eligibility is UNKNOWN"
-                ) from error
-            if root.is_symlink() or not stat.S_ISDIR(info.st_mode):
-                raise RuntimeError(
-                    "Kernel runtime ownership root is unsafe; first-Core eligibility is UNKNOWN"
-                )
         kernel_journal = runtime_root / "journal.jsonl"
         if kernel_journal.exists() or kernel_journal.is_symlink():
             raise ValueError("Existing Kernel runtime ownership journal blocks first install")
@@ -1321,7 +1336,11 @@ def _require_c10_package_runtime_ready(updater: Any, plan: dict[str, Any]) -> di
 
 
 def _verify_live_core_cohort(
-    updater: Any, transaction: dict[str, Any], plan: dict[str, Any]
+    updater: Any,
+    transaction: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    probe_package_runtime: bool = True,
 ) -> None:
     """Prove all four exact staged releases are active and their units are healthy."""
 
@@ -1366,7 +1385,8 @@ def _verify_live_core_cohort(
         or snapshot["activitySources"] != sources
     ):
         raise RuntimeError("Platform activity catalog changed while the Core hold is active")
-    _require_c10_package_runtime_ready(updater, plan)
+    if probe_package_runtime:
+        _require_c10_package_runtime_ready(updater, plan)
 
 
 def _verify_started_processes(updater: Any, components: list[dict[str, Any]]) -> None:
@@ -2303,6 +2323,1468 @@ def _core_bootstrap_begin_request(plan: dict[str, Any]) -> dict[str, Any]:
         "plan_digest": plan["planDigest"],
         "component_artifact_digests": plan["componentArtifactDigests"],
     }
+
+
+_FRESH_WORKLOAD_CORE_SOURCE_IDENTITY_FIELDS = (
+    "componentId",
+    "version",
+    "manifestDigest",
+    "artifactDigest",
+)
+_FRESH_WORKLOAD_CORE_BROKER_INPUT_FIELDS = frozenset(
+    {
+        "index_bytes",
+        "index_attestation_bytes",
+        "manifest_bytes",
+        "artifact_attestation_bytes",
+        "target_id",
+        "confirm_plan_digest",
+    }
+)
+
+
+def _fresh_workload_core_plan(
+    updater: Any,
+    parent_plan: dict[str, Any],
+    staged_components: list[dict[str, Any]],
+    channel: str,
+    bootstrap_module: Any,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+    """Validate the immutable C10 child identity and its complete parent hold map.
+
+    The broker hold and source-catalog proof must use one plan identity and one
+    complete digest map. The six-component child map only binds the C10 cohort.
+    中文：Begin 与 init-catalog 共用父工作负载计划身份和完整摘要表。
+    """
+
+    if not isinstance(parent_plan, dict):
+        raise TypeError("Fresh workload first-Core parent plan is malformed")
+    if parent_plan.get("channel", channel) != channel:
+        raise ValueError("Fresh workload channel differs from the checked parent plan")
+    block = parent_plan.get("firstCoreBootstrap")
+    required_block_fields = {
+        "schemaVersion",
+        "cohortId",
+        "planId",
+        "planDigest",
+        "targetId",
+        "catalogDigest",
+        "components",
+        "componentArtifactDigests",
+        "maintenanceComponentArtifactDigests",
+    }
+    forbidden_block_fields = {
+        "requestId",
+        "brokerBootstrapPlanDigest",
+        "gateGeneration",
+        "catalogGeneration",
+        "activitySources",
+    }
+    if (
+        not isinstance(block, dict)
+        or set(block) != required_block_fields
+        or forbidden_block_fields.intersection(block)
+        or type(block.get("schemaVersion")) is not int
+        or block.get("schemaVersion") != 1
+        or block.get("cohortId") != "C10"
+    ):
+        raise ValueError("Fresh workload plan has no confirmed C10 first-Core block")
+    if block.get("targetId") != "linux-ubuntu-24.04-x86_64-systemd":
+        raise ValueError("Fresh workload C10 plan target is not the supported systemd host")
+    if block.get("catalogDigest") != updater.catalog_digest:
+        raise ValueError("Fresh workload C10 plan trusted catalog changed")
+    validate_active_catalog = getattr(bootstrap_module, "_require_active_v2_catalog_context", None)
+    if not callable(validate_active_catalog):
+        raise TypeError("Fresh workload first-Core has no trusted V2 catalog authority checker")
+    validate_active_catalog(updater, block["catalogDigest"])
+    if _validate_package_runtime_group(updater) is None:
+        raise ValueError("Fresh workload first-Core requires the complete signed C10 group")
+
+    plan_id = block.get("planId")
+    plan_digest = block.get("planDigest")
+    if (
+        not isinstance(plan_id, str)
+        or re.fullmatch(r"plan-[0-9a-f]{32}", plan_id) is None
+        or not isinstance(plan_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", plan_digest) is None
+        or plan_id != "plan-" + plan_digest.split(":", 1)[1][:32]
+    ):
+        raise ValueError("Fresh workload C10 held-plan identity is malformed")
+
+    component_rows = block.get("components")
+    child_digests = block.get("componentArtifactDigests")
+    full_digests = block.get("maintenanceComponentArtifactDigests")
+    expected_ids = set(C10_FIRST_CORE_COMPONENT_IDS)
+    if (
+        not isinstance(component_rows, list)
+        or len(component_rows) != len(expected_ids)
+        or any(not isinstance(row, dict) for row in component_rows)
+        or {row.get("componentId") for row in component_rows} != expected_ids
+        or not isinstance(child_digests, dict)
+        or set(child_digests) != expected_ids
+        or not isinstance(full_digests, dict)
+        or not expected_ids.issubset(full_digests)
+        or not full_digests
+    ):
+        raise ValueError("Fresh workload C10 identity maps are incomplete")
+    for digest_map in (child_digests, full_digests):
+        if any(
+            not isinstance(component_id, str)
+            or not isinstance(digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            for component_id, digest in digest_map.items()
+        ):
+            raise ValueError("Fresh workload C10 artifact digest map is malformed")
+    rows_by_id = {row["componentId"]: row for row in component_rows}
+    if any(
+        rows_by_id[component_id].get("artifactDigest") != child_digests.get(component_id)
+        or full_digests.get(component_id) != child_digests.get(component_id)
+        or rows_by_id[component_id].get("targetId", block["targetId"]) != block["targetId"]
+        for component_id in expected_ids
+    ):
+        raise ValueError("Fresh workload C10 child identities differ from the held parent map")
+    if (
+        not isinstance(staged_components, list)
+        or len(staged_components) != len(expected_ids)
+        or _validate_staged_cohort(updater, staged_components) != C10_FIRST_CORE_COMPONENT_IDS
+    ):
+        raise ValueError("Fresh workload first-Core stage is not the exact six-member C10 cohort")
+    staged_by_id = {item["componentId"]: item for item in staged_components}
+    for component_id in expected_ids:
+        staged = staged_by_id[component_id]
+        identity = rows_by_id[component_id]
+        if (
+            any(
+                staged.get(field) != identity.get(field)
+                for field in _FRESH_WORKLOAD_CORE_SOURCE_IDENTITY_FIELDS
+            )
+            or staged.get("artifactDigest") != child_digests[component_id]
+        ):
+            raise ValueError(
+                f"Staged C10 candidate differs from the checked identity: {component_id}"
+            )
+        if staged.get("targetId", block["targetId"]) != block["targetId"]:
+            raise ValueError(f"Staged C10 candidate target differs: {component_id}")
+
+    resolution = parent_plan.get("resolution")
+    plan_digest_material = (
+        resolution.get("planDigestMaterial") if isinstance(resolution, dict) else None
+    )
+    first_core_material = (
+        plan_digest_material.get("firstCoreBootstrapInternal")
+        if isinstance(plan_digest_material, dict)
+        else None
+    )
+    child_material = (
+        first_core_material.get("childPlanDigestMaterial")
+        if isinstance(first_core_material, dict)
+        else None
+    )
+    bootstrap_digest = (
+        first_core_material.get("brokerBootstrapPlanDigest")
+        if isinstance(first_core_material, dict)
+        else None
+    )
+    if (
+        not isinstance(bootstrap_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", bootstrap_digest) is None
+    ):
+        raise ValueError("Fresh workload plan material has no confirmed Broker bootstrap digest")
+    if not isinstance(child_material, dict):
+        raise TypeError("Fresh workload plan material has no exact C10 child digest projection")
+    resolution = parent_plan.get("resolution")
+    source_policy = resolution.get("sourcePolicy") if isinstance(resolution, dict) else None
+    if (
+        child_material.get("schemaVersion") != 1
+        or child_material.get("cohortId") != "C10"
+        or child_material.get("channel") != channel
+        or child_material.get("catalogDigest") != block["catalogDigest"]
+        or child_material.get("targetId") != block["targetId"]
+        or child_material.get("sourcePolicy") != source_policy
+        or child_material.get("components") != component_rows
+        or child_material.get("componentArtifactDigests") != child_digests
+        or child_material.get("maintenanceComponentArtifactDigests") != full_digests
+        or child_material.get("brokerBootstrapPlanDigest") != bootstrap_digest
+    ):
+        raise ValueError(
+            "Fresh workload child digest material differs from its immutable C10 block"
+        )
+    try:
+        child_material_digest = _digest(
+            json.dumps(
+                child_material,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "Fresh workload child plan material cannot be canonically encoded"
+        ) from error
+    if child_material_digest != plan_digest:
+        raise ValueError("Fresh workload child plan digest differs from its checked material")
+    plan = {
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "requestId": "first-core-bootstrap-" + plan_id.removeprefix("plan-"),
+        "gateGeneration": None,
+        "catalogGeneration": 0,
+        "activitySources": [],
+        "components": staged_components,
+        "componentArtifactDigests": dict(full_digests),
+        "firstCoreBootstrap": block,
+        "brokerBootstrapPlanDigest": bootstrap_digest,
+    }
+    return plan, block, dict(full_digests)
+
+
+def _fresh_workload_core_source_inputs(
+    parent_plan: dict[str, Any],
+    *,
+    source_policy: dict[str, Any],
+    selected_plugin_rows: list[dict[str, Any]],
+    source_principals: dict[str, dict[str, Any]],
+) -> tuple[str, int, int]:
+    """Bind source initialization inputs back to the trusted workload resolution."""
+
+    resolution = parent_plan.get("resolution")
+    if not isinstance(resolution, dict):
+        raise TypeError("Fresh workload plan has no signed resolver projection")
+    if resolution.get("sourcePolicy") != source_policy:
+        raise ValueError("Fresh workload sourcePolicy differs from the signed resolver output")
+    resolver_rows = resolution.get("selectedComponents")
+    if not isinstance(resolver_rows, list) or any(
+        not isinstance(row, dict) for row in resolver_rows
+    ):
+        raise ValueError("Fresh workload resolver component identities are malformed")
+    resolver_rows_by_identity = {
+        (row.get("componentId"), row.get("artifactDigest"), row.get("manifestDigest")): row
+        for row in resolver_rows
+    }
+    if not isinstance(selected_plugin_rows, list) or any(
+        not isinstance(row, dict) for row in selected_plugin_rows
+    ):
+        raise ValueError("Fresh workload selected plugin identity rows are malformed")
+    selected_keys = [
+        (row.get("componentId"), row.get("artifactDigest"), row.get("manifestDigest"))
+        for row in selected_plugin_rows
+    ]
+    if len(selected_keys) != len(set(selected_keys)) or any(
+        resolver_rows_by_identity.get(key) != row
+        for key, row in zip(selected_keys, selected_plugin_rows)
+    ):
+        raise ValueError("Fresh workload selected plugin rows differ from the resolver output")
+    if not isinstance(source_principals, dict):
+        raise TypeError("Fresh workload source principal map is malformed")
+    try:
+        source_owner_id = source_policy.get("sourceId")
+        if source_policy.get("mode") == "actualProduct":
+            owners = source_policy.get("productSources")
+            if not isinstance(owners, list) or len(owners) != 1:
+                raise ValueError("First-Core sourcePolicy must identify one source owner")
+            source_owner_id = owners[0].get("sourceId") if isinstance(owners[0], dict) else None
+    except AttributeError as error:
+        raise ValueError("Fresh workload sourcePolicy is malformed") from error
+    if not isinstance(source_owner_id, str) or not source_owner_id:
+        raise ValueError("Fresh workload sourcePolicy has no unique owner")
+    principal = source_principals.get(source_owner_id)
+    if (
+        not isinstance(principal, dict)
+        or type(principal.get("uid")) is not int
+        or principal["uid"] <= 0
+        or type(principal.get("gid")) is not int
+        or principal["gid"] <= 0
+        or not isinstance(principal.get("tokenPath"), (str, os.PathLike))
+    ):
+        raise ValueError("Fresh workload source owner has no actual host principal")
+    try:
+        if pwd.getpwuid(principal["uid"]).pw_uid != principal["uid"]:
+            raise ValueError("Fresh workload source UID does not resolve to an OS account")
+        if grp.getgrgid(principal["gid"]).gr_gid != principal["gid"]:
+            raise ValueError("Fresh workload source GID does not resolve to an OS group")
+    except KeyError as error:
+        raise ValueError("Fresh workload source principal is not a host account") from error
+    return source_owner_id, principal["uid"], principal["gid"]
+
+
+def _fresh_workload_core_broker_inputs(
+    broker_release: dict[str, Any],
+    broker_row: dict[str, Any],
+    updater: Any,
+    *,
+    channel: str,
+    expected_target_id: str,
+    expected_plan_digest: str,
+) -> dict[str, Any]:
+    """Validate the exact immutable offline bytes passed to the Broker verifier."""
+
+    if (
+        not isinstance(broker_release, dict)
+        or set(broker_release) != _FRESH_WORKLOAD_CORE_BROKER_INPUT_FIELDS
+    ):
+        raise TypeError("Fresh workload offline Broker release inputs are malformed")
+    byte_fields = (
+        "index_bytes",
+        "index_attestation_bytes",
+        "manifest_bytes",
+        "artifact_attestation_bytes",
+    )
+    if any(not isinstance(broker_release.get(field), bytes) for field in byte_fields):
+        raise TypeError("Fresh workload offline Broker release bytes must be immutable")
+    manifest = broker_row.get("manifest")
+    artifact = manifest.get("artifact") if isinstance(manifest, dict) else None
+    archive_path_value = broker_row.get("archivePath")
+    if not isinstance(archive_path_value, (str, os.PathLike)):
+        raise TypeError("Staged Broker row has no immutable archive path")
+    archive_path = Path(archive_path_value)
+    staged_root = Path(updater.state_root) / "staged"
+    if (
+        not archive_path.is_absolute()
+        or ".." in archive_path.parts
+        or not archive_path.is_relative_to(staged_root)
+    ):
+        raise ValueError("Staged Broker archive is outside the checked staged tree")
+    try:
+        staged_root_info = staged_root.lstat()
+        if (
+            staged_root.is_symlink()
+            or not stat.S_ISDIR(staged_root_info.st_mode)
+            or staged_root_info.st_uid != os.geteuid()
+            or stat.S_IMODE(staged_root_info.st_mode) != 0o700
+        ):
+            raise ValueError("Staged Broker archive root is unsafe")
+        current = archive_path.parent
+        while current != staged_root:
+            directory_info = current.lstat()
+            if (
+                current.is_symlink()
+                or not stat.S_ISDIR(directory_info.st_mode)
+                or directory_info.st_uid != os.geteuid()
+                or stat.S_IMODE(directory_info.st_mode) != 0o700
+            ):
+                raise ValueError("Staged Broker archive parent is unsafe")
+            current = current.parent
+        if not current.is_relative_to(staged_root):
+            raise ValueError("Staged Broker archive parent escaped the staged tree")
+        archive_info = archive_path.lstat()
+    except OSError as error:
+        raise ValueError("Staged Broker archive bytes are unavailable") from error
+    if (
+        archive_path.is_symlink()
+        or not stat.S_ISREG(archive_info.st_mode)
+        or archive_info.st_uid != os.geteuid()
+        or stat.S_IMODE(archive_info.st_mode) & 0o077
+        or archive_info.st_nlink != 1
+        or not isinstance(artifact, dict)
+        or type(artifact.get("sizeBytes")) is not int
+        or artifact["sizeBytes"] <= 0
+        or archive_info.st_size != artifact.get("sizeBytes")
+        or artifact.get("sha256") != broker_row.get("artifactDigest")
+    ):
+        raise ValueError("Staged Broker archive bytes differ from the exact C10 candidate")
+    try:
+        artifact_bytes = archive_path.read_bytes()
+    except OSError as error:
+        raise ValueError("Staged Broker archive bytes are unavailable") from error
+    if len(artifact_bytes) != artifact["sizeBytes"] or _digest(artifact_bytes) != broker_row.get(
+        "artifactDigest"
+    ):
+        raise ValueError("Staged Broker archive bytes differ from the exact C10 candidate")
+    try:
+        parsed_manifest = json.loads(broker_release["manifest_bytes"].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Offline Broker manifest bytes are invalid JSON") from error
+    if parsed_manifest != manifest:
+        raise ValueError("Offline Broker manifest bytes differ from the staged signed row")
+    if (
+        broker_release.get("target_id") != expected_target_id
+        or broker_release.get("confirm_plan_digest") != expected_plan_digest
+        or channel not in {"stable", "preview"}
+    ):
+        raise ValueError("Offline Broker confirmation differs from the fresh workload plan")
+    return {
+        **{field: broker_release[field] for field in byte_fields},
+        "artifact_bytes": artifact_bytes,
+        "target_id": expected_target_id,
+        "channel": channel,
+        "confirm_plan_digest": expected_plan_digest,
+    }
+
+
+def _fresh_workload_core_check_empty_host(updater: Any, *, proc_root: Path) -> None:
+    """Reject pre-existing non-Broker Core state before starting first Broker."""
+
+    other_ids = set(C10_FIRST_CORE_COMPONENT_IDS) - {"cyrene-runtime-maintenance"}
+    for component_id in other_ids:
+        if updater._active_native_pointer_identity(component_id) is not None:
+            raise ValueError(
+                f"Existing Core pointer blocks fresh workload bootstrap: {component_id}"
+            )
+        if updater._read_active_receipt(component_id) is not None:
+            raise ValueError(
+                f"Existing Core receipt blocks fresh workload bootstrap: {component_id}"
+            )
+        component = updater.components[component_id]
+        unit = component.get("systemdUnit")
+        if not isinstance(unit, str):
+            raise TypeError(f"Trusted catalog has no fixed unit for {component_id}")
+        if any(
+            (Path(directory) / unit).exists() or (Path(directory) / unit).is_symlink()
+            for directory in updater.systemd_unit_dirs
+        ):
+            raise ValueError(f"Existing Core systemd unit blocks fresh workload bootstrap: {unit}")
+    processes = _core_process_snapshot(
+        proc_root,
+        executable_names=frozenset(CORE_EXECUTABLE_NAMES - {"cyrene-runtime-maintenance"}),
+    )
+    if processes:
+        raise ValueError("An existing Core process blocks fresh workload bootstrap")
+    runtime_root = Path(getattr(updater, "core_runtime_root", CORE_RUNTIME_ROOT))
+    run_root = Path(getattr(updater, "core_run_root", CORE_RUN_ROOT))
+    for root in (runtime_root, run_root):
+        try:
+            info = root.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise RuntimeError("Core runtime ownership inventory is unavailable") from error
+        if root.is_symlink() or not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError("Core runtime ownership root is unsafe")
+    for relative in (
+        Path("journal.jsonl"),
+        Path("workers"),
+        Path("kernel.sock"),
+        Path("worker.sock"),
+        Path("provider.sock"),
+        LINUX_SYS_ADAPTER_SOCKET,
+        Path("nvidia-adapter.sock"),
+        Path("sandboxd.sock"),
+    ):
+        root = runtime_root if relative == Path("journal.jsonl") else run_root
+        path = root / relative
+        if path.exists() or path.is_symlink():
+            raise ValueError(f"Existing Core ownership state blocks first install: {relative}")
+
+
+def _fresh_workload_core_verify_broker_activation(
+    updater: Any,
+    bootstrap_module: Any,
+    broker_row: dict[str, Any],
+    broker_inputs: dict[str, Any],
+    *,
+    expected_plan_digest: str,
+    expected_active_catalog_digest: str,
+    lock_lease: Any,
+) -> dict[str, Any]:
+    """Recover only an exact Broker pointer written by the offline verifier."""
+
+    component_id = "cyrene-runtime-maintenance"
+    pointer = f"{broker_row['version']}--{broker_row['manifestDigest'].removeprefix('sha256:')}"
+    current = updater._active_native_pointer_identity(component_id)
+    if current is not None and current != pointer:
+        raise ValueError("An unrelated maintenance Broker pointer blocks first-Core bootstrap")
+    if current is not None:
+        native_journal_path = bootstrap_module._journal_path(updater)
+        native_journal = bootstrap_module._read_journal(native_journal_path)
+        expected_identity = {
+            "componentId": component_id,
+            "targetId": broker_inputs["target_id"],
+            "version": broker_row["version"],
+            "manifestDigest": broker_row["manifestDigest"],
+            "artifactDigest": broker_row["artifactDigest"],
+            "indexDigest": _digest(broker_inputs["index_bytes"]),
+        }
+        if (
+            not isinstance(native_journal, dict)
+            or native_journal.get("phase") != "complete"
+            or native_journal.get("planDigest") != expected_plan_digest
+            or native_journal.get("identity") != expected_identity
+        ):
+            raise ValueError("Active Broker lacks the exact completed offline bootstrap journal")
+        receipt = updater._read_active_receipt(component_id)
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("manifest") != broker_row["manifest"]
+            or receipt.get("manifestDigest") != broker_row["manifestDigest"]
+            or receipt.get("artifactDigest") != broker_row["artifactDigest"]
+            or receipt.get("releaseIdentity") != broker_row["manifestDigest"]
+        ):
+            raise ValueError("Active Broker receipt differs from the checked C10 candidate")
+        release = updater.install_root / "components" / component_id / "releases" / pointer
+        bootstrap_module._verify_release_payload(updater, release, broker_row["manifest"])
+        return {
+            "status": "activated",
+            "planDigest": expected_plan_digest,
+            "releasePath": str(release),
+            **expected_identity,
+        }
+
+    return bootstrap_module.bootstrap_verified_runtime_maintenance_under_lock(
+        updater,
+        lock_lease=lock_lease,
+        active_catalog_digest=expected_active_catalog_digest,
+        **broker_inputs,
+    )
+
+
+def _fresh_workload_core_broker_health(
+    updater: Any,
+    broker_row: dict[str, Any],
+    *,
+    proc_root: Path,
+    expected_gate_generation: int | None = None,
+    require_eligible: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Require the verified Broker to serve C10 Health while Kernel is absent."""
+
+    expected_pointer = (
+        f"{broker_row['version']}--{broker_row['manifestDigest'].removeprefix('sha256:')}"
+    )
+    broker = _verified_running_c10_broker(updater, proc_root)
+    if (
+        broker.get("pointerIdentity") != expected_pointer
+        or broker.get("manifestDigest") != broker_row.get("manifestDigest")
+        or broker.get("artifactDigest") != broker_row.get("artifactDigest")
+    ):
+        raise RuntimeError("Started maintenance Broker differs from the signed C10 candidate")
+    health = updater._broker_request("Health", {})
+    required_capabilities = {
+        "cyrene.runtime-maintenance.state.v2",
+        "cyrene.runtime-maintenance.binding-operations.v1",
+    }
+    capabilities = health.get("capabilities")
+    if (
+        not isinstance(health, dict)
+        or health.get("status") != "SERVING"
+        or health.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
+        or type(health.get("catalog_generation")) is not int
+        or health.get("catalog_generation") != 0
+        or type(health.get("gate_generation")) is not int
+        or health.get("gate_generation") < 1
+        or type(health.get("core_bootstrap_eligible")) is not bool
+        or (require_eligible and health.get("core_bootstrap_eligible") is not True)
+        or (
+            expected_gate_generation is not None
+            and health.get("gate_generation") != expected_gate_generation
+        )
+        or not isinstance(capabilities, list)
+        or any(not isinstance(value, str) or not value for value in capabilities)
+        or len(capabilities) != len(set(capabilities))
+        or not required_capabilities.issubset(capabilities)
+    ):
+        raise RuntimeError("Fresh C10 Broker Health does not prove generation-zero eligibility")
+    return broker, health
+
+
+def _fresh_workload_core_catalog_result(
+    updater: Any,
+    result: dict[str, Any],
+    *,
+    source_id: str,
+    source_uid: int,
+    source_gid: int,
+) -> tuple[dict[str, Any], list[str]]:
+    """Verify generation-one catalog readback and the exact source principal."""
+
+    if (
+        not isinstance(result, dict)
+        or type(result.get("catalogGeneration")) is not int
+        or result.get("catalogGeneration") != 1
+        or not isinstance(result.get("sourceIdentities"), list)
+        or len(result["sourceIdentities"]) != 1
+    ):
+        raise RuntimeError(
+            "First-Core source initialization did not commit one generation-one owner"
+        )
+    identity = result["sourceIdentities"][0]
+    if (
+        not isinstance(identity, dict)
+        or identity.get("sourceId") != source_id
+        or type(identity.get("uid")) is not int
+        or identity.get("uid") != source_uid
+        or type(identity.get("gid")) is not int
+        or identity.get("gid") != source_gid
+    ):
+        raise RuntimeError("First-Core source initialization changed its signed owner principal")
+    catalog, sources = updater._activity_catalog()
+    if catalog.get("generation") != 1 or sources != [source_id]:
+        raise RuntimeError("First-Core activity catalog readback differs from generation one")
+    rows = catalog.get("sources")
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise RuntimeError("First-Core activity catalog has an unexpected owner set")
+    row = rows[0]
+    if (
+        not isinstance(row, dict)
+        or row.get("source_id") != source_id
+        or type(row.get("uid")) is not int
+        or row.get("uid") != source_uid
+        or type(row.get("gid")) is not int
+        or row.get("gid") != source_gid
+        or row.get("binding_scopes", []) != []
+    ):
+        raise RuntimeError("First-Core source catalog row differs from the zero-binding plan")
+    return catalog, sources
+
+
+def _fresh_workload_core_package_runtime_authority(
+    updater: Any,
+    catalog: dict[str, Any],
+    *,
+    source_id: str,
+    source_uid: int,
+    source_gid: int,
+) -> dict[str, Any]:
+    """Authenticate Package Runtime using the workload owner registered at init."""
+
+    helper = updater._load_native_package_runtime_bootstrap()
+    try:
+        result = helper.probe_runtime_authority(
+            catalog,
+            expected_catalog_generation=1,
+            source_id=source_id,
+            expected_uid=source_uid,
+            expected_gid=source_gid,
+        )
+    except Exception as error:
+        raise RuntimeError(
+            "Package Runtime source-authenticated authority readiness is unavailable"
+        ) from error
+    expected = {
+        "authority": "platform_package_runtime",
+        "protocol_version": "cy-package-runtime.control.v1",
+        "catalog_generation": 1,
+        "capabilities": ["cy-package-runtime.binding-operation-admission.v1"],
+    }
+    if result != expected:
+        raise RuntimeError("Package Runtime authority identity differs from the C10 contract")
+    return result
+
+
+def _fresh_workload_core_validate_transaction(
+    transaction: dict[str, Any],
+    plan: dict[str, Any],
+    *,
+    source_policy: dict[str, Any],
+    selected_plugin_rows: list[dict[str, Any]],
+    source_principals: dict[str, dict[str, Any]],
+) -> None:
+    """Keep recovery attached to the original signed plan and principal set."""
+
+    expected_principals = {
+        source_id: {key: value.get(key) for key in ("uid", "gid")}
+        for source_id, value in source_principals.items()
+        if isinstance(value, dict)
+    }
+    immutable = {
+        "mode": "fresh-workload-first-core",
+        "planId": plan["planId"],
+        "planDigest": plan["planDigest"],
+        "requestId": plan["requestId"],
+        "expectedCatalogGeneration": 0,
+        "expectedActivitySources": [],
+        "componentArtifactDigests": plan["componentArtifactDigests"],
+        "firstCoreBootstrap": plan["firstCoreBootstrap"],
+        "components": plan["components"],
+        "sourcePolicy": source_policy,
+        "selectedPluginRows": selected_plugin_rows,
+        "sourcePrincipalIdentities": expected_principals,
+        "brokerBootstrapPlanDigest": plan["brokerBootstrapPlanDigest"],
+    }
+    if any(transaction.get(key) != value for key, value in immutable.items()):
+        raise ValueError("Fresh workload Core journal differs from the exact staged parent plan")
+    gate_generation = transaction.get("expectedGateGeneration")
+    begin_request = transaction.get("beginRequest")
+    if gate_generation is not None:
+        if type(gate_generation) is not int or gate_generation < 1:
+            raise ValueError("Fresh workload Core journal has a changed live gate snapshot")
+        plan["gateGeneration"] = gate_generation
+        if begin_request != _core_bootstrap_begin_request(plan):
+            raise ValueError("Fresh workload Core journal has a changed live gate snapshot")
+    elif begin_request is not None or transaction.get("phase") != "broker_bootstrap_pending":
+        raise ValueError("Fresh workload Core journal has no exact live Broker Health snapshot")
+    phase = transaction.get("phase")
+    progress = transaction.get("progress")
+    if phase == "broker_bootstrap_pending" and progress not in {
+        "planned",
+        "broker_bootstrap_pending",
+    }:
+        raise ValueError("Fresh workload Core journal has an unsupported Broker bootstrap progress")
+    if phase == "begin_pending" and progress not in {
+        "broker_serving",
+        "begin_call_pending",
+        "begin_result_uncertain",
+    }:
+        raise ValueError("Fresh workload Core journal has an unsupported Begin progress")
+    if phase == "hold_required" and progress not in (
+        _FRESH_WORKLOAD_CORE_EMPTY_PROGRESS | _FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS
+    ):
+        raise ValueError("Fresh workload Core journal has an unsupported held progress")
+    if phase in {"hold_required", "end_call_pending", "succeeded"} and gate_generation is None:
+        raise ValueError("Fresh workload Core journal has no durable live gate binding")
+
+
+def _fresh_workload_core_requires_empty_kernel_state(progress: Any) -> bool:
+    """Allow existing runtime state only after this journal records cohort mutation."""
+
+    if progress in _FRESH_WORKLOAD_CORE_EMPTY_PROGRESS:
+        return True
+    if progress in _FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS:
+        return False
+    raise ValueError("Fresh workload Core journal has an unsupported held progress")
+
+
+def _fresh_workload_core_validate_maintenance_hold(
+    updater: Any,
+    plan: dict[str, Any],
+    transaction: dict[str, Any],
+    full_digests: dict[str, str],
+    *,
+    source_id: str,
+    source_uid: int,
+    source_gid: int,
+) -> int:
+    """Prove the same durable hold without replaying generation-zero Begin."""
+
+    token = transaction.get("maintenanceToken")
+    gate_generation = transaction.get("maintenanceGateGeneration")
+    if (
+        not isinstance(token, str)
+        or not token.strip()
+        or type(gate_generation) is not int
+        or gate_generation < 1
+    ):
+        raise RuntimeError("Fresh workload Core journal has no exact durable maintenance hold")
+    catalog, source_ids = updater._activity_catalog(allow_uninitialized=True)
+    catalog_generation = catalog.get("generation") if isinstance(catalog, dict) else None
+    if (
+        type(catalog_generation) is not int
+        or catalog_generation not in {0, 1}
+        or (catalog_generation == 0 and source_ids != [])
+    ):
+        raise RuntimeError(
+            "Fresh workload Core catalog is outside the generation-zero/one recovery window"
+        )
+    progress = transaction.get("progress")
+    if (
+        progress
+        in {
+            "catalog_initialized",
+            "cohort_installing",
+            "cohort_activated",
+            "cohort_starting",
+            "cohort_started",
+            "readiness_pending",
+        }
+        and catalog_generation != 1
+    ):
+        raise RuntimeError("Fresh workload Core catalog regressed after durable initialization")
+    if catalog_generation == 1:
+        rows = catalog.get("sources")
+        if (
+            source_ids != [source_id]
+            or not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(rows[0], dict)
+            or rows[0].get("source_id") != source_id
+            or rows[0].get("uid") != source_uid
+            or rows[0].get("gid") != source_gid
+            or rows[0].get("binding_scopes", []) != []
+        ):
+            raise RuntimeError(
+                "Fresh workload Core catalog differs from its single zero-binding owner"
+            )
+
+    for component_id, artifact_digest in sorted(full_digests.items()):
+        request = {
+            "request_id": plan["requestId"],
+            "maintenance_token": token,
+            "target_kind": "CORE_RUNTIME",
+            "plan_id": plan["planId"],
+            "plan_digest": plan["planDigest"],
+            "component_artifact_digests": full_digests,
+            "component_id": component_id,
+            "artifact_digest": artifact_digest,
+            "expected_gate_generation": gate_generation,
+            "expected_catalog_generation": catalog_generation,
+        }
+        result = updater._broker_request(
+            "ValidateMaintenanceHold",
+            request,
+            request_id=plan["requestId"],
+        )
+        expected = {
+            "valid": True,
+            "request_id": plan["requestId"],
+            "target_kind": "CORE_RUNTIME",
+            "plan_id": plan["planId"],
+            "plan_digest": plan["planDigest"],
+            "component_artifact_digests": full_digests,
+            "component_id": component_id,
+            "artifact_digest": artifact_digest,
+            "gate_generation": gate_generation,
+            "catalog_generation": catalog_generation,
+        }
+        if result != expected:
+            raise RuntimeError("Fresh workload maintenance hold differs from the exact parent plan")
+        if (
+            not isinstance(result, dict)
+            or set(result) != set(expected)
+            or result.get("valid") is not True
+            or type(result.get("gate_generation")) is not int
+            or type(result.get("catalog_generation")) is not int
+        ):
+            raise RuntimeError("Fresh workload maintenance hold response has an invalid shape")
+    return catalog_generation
+
+
+def _fresh_workload_core_public_result(plan: dict[str, Any], result: Any) -> dict[str, Any]:
+    """Validate the public result before returning it from normal or recovered apply."""
+
+    expected = {
+        "status": "installed",
+        "planId": plan["planId"],
+        "planDigest": plan["planDigest"],
+        "catalogGeneration": 1,
+        "componentStatuses": [
+            {"componentId": component_id, "status": "active"}
+            for component_id in C10_FIRST_CORE_COMPONENT_IDS
+        ],
+        "readiness": {
+            "status": "READY",
+            "catalogGeneration": 1,
+            "activeTaskCount": 0,
+            "inflightRuntimeAdmissionCount": 0,
+            "activeWorkerCount": 0,
+            "activeAllocationCount": 0,
+        },
+        "authority": {
+            "authority": "platform_package_runtime",
+            "protocol_version": "cy-package-runtime.control.v1",
+            "catalog_generation": 1,
+            "capabilities": ["cy-package-runtime.binding-operation-admission.v1"],
+        },
+    }
+    if not isinstance(result, dict):
+        raise TypeError("Fresh workload Core journal has an invalid public completion result")
+    readiness = result.get("readiness")
+    if (
+        not isinstance(readiness, dict)
+        or type(result.get("catalogGeneration")) is not int
+        or type(readiness.get("catalogGeneration")) is not int
+    ):
+        raise ValueError("Fresh workload Core journal has an invalid public completion result")
+    authority = result.get("authority")
+    if (
+        any(
+            type(readiness.get(field)) is not int
+            for field in (
+                "activeTaskCount",
+                "inflightRuntimeAdmissionCount",
+                "activeWorkerCount",
+                "activeAllocationCount",
+            )
+        )
+        or not isinstance(authority, dict)
+        or type(authority.get("catalog_generation")) is not int
+        or result != expected
+    ):
+        raise ValueError("Fresh workload Core journal has an invalid public completion result")
+    return result
+
+
+def _finish_fresh_workload_core_transaction(
+    updater: Any,
+    journal_path: Path,
+    transaction: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist the Broker-confirmed end state without exposing the held token."""
+
+    transaction["phase"] = "succeeded"
+    transaction["progress"] = "end_confirmed"
+    transaction["gateReleaseConfirmed"] = True
+    transaction.pop("maintenanceToken", None)
+    transaction.pop("failure", None)
+    transaction.pop("endError", None)
+    transaction.pop("publicResult", None)
+    transaction["result"] = result
+    _write_private_json(updater, journal_path, transaction)
+    return result
+
+
+def apply_fresh_workload_first_core(
+    updater: Any,
+    *,
+    parent_plan: dict[str, Any],
+    staged_components: list[dict[str, Any]],
+    broker_release: dict[str, Any],
+    source_policy: dict[str, Any],
+    selected_plugin_rows: list[dict[str, Any]],
+    source_principals: dict[str, dict[str, Any]],
+    channel: str,
+    lock_lease: Any,
+    bootstrap_module: Any,
+) -> dict[str, Any]:
+    """Bootstrap C10 on a fresh host as part of an ordinary workload apply.
+
+    This function reuses the existing first-Core journal, native Broker
+    verifier, signed release rows, Package Runtime source initializer, and
+    strict Core readiness checks. It returns public identities only; the
+    maintenance token remains in the private recovery journal.
+    中文：首次工作负载应用复用正式Core hold与同一目录，不创建额外注册表。
+
+    Args:
+        updater: The root-authorized ComponentUpdater using the compiled C10 catalog.
+        parent_plan: The exact checked workload plan with its firstCoreBootstrap block.
+        staged_components: The exact six signed C10 rows from the staged parent plan.
+        broker_release: Immutable offline Broker bytes plus target and confirmation digest.
+        source_policy: The signed workload sourcePolicy from resolver output.
+        selected_plugin_rows: Signed selected plugin rows from the same resolver output.
+        source_principals: Actual host owner UID/GID and canonical token path by source ID.
+        channel: The parent plan's stable or preview channel.
+        lock_lease: The active lock lease yielded by bootstrap_module.exclusive_update_lock.
+        bootstrap_module: The caller's already loaded native_component_bootstrap module instance.
+    Returns:
+        Installed status, exact plan identity, generation-one catalog, active components,
+        strict readiness, and source-authenticated Package Runtime authority.
+    Raises:
+        ValueError or RuntimeError while preserving the durable maintenance hold on failure.
+    """
+
+    if not _is_root():
+        raise PermissionError("Fresh workload first-Core apply requires the root updater")
+    if not callable(getattr(bootstrap_module, "_require_active_update_lock_lease", None)):
+        raise TypeError("Fresh workload Broker bootstrap module is invalid")
+    bootstrap_module._require_active_update_lock_lease(updater, lock_lease)
+    updater._reload_catalog_for_operation()
+    plan, block, full_digests = _fresh_workload_core_plan(
+        updater, parent_plan, staged_components, channel, bootstrap_module
+    )
+    source_id, source_uid, source_gid = _fresh_workload_core_source_inputs(
+        parent_plan,
+        source_policy=source_policy,
+        selected_plugin_rows=selected_plugin_rows,
+        source_principals=source_principals,
+    )
+    updater._require_authorized_process()
+    updater._ensure_state_root()
+
+    broker_id = "cyrene-runtime-maintenance"
+    staged_by_id = {item["componentId"]: item for item in staged_components}
+    broker_row = staged_by_id[broker_id]
+    if (
+        broker_row.get("targetId", block["targetId"]) != block["targetId"]
+        or broker_row.get("manifest", {}).get("schemaVersion") != 2
+    ):
+        raise ValueError("Staged Broker row is not the signed C10 systemd candidate")
+    broker_inputs = _fresh_workload_core_broker_inputs(
+        broker_release,
+        broker_row,
+        updater,
+        channel=channel,
+        expected_target_id=block["targetId"],
+        expected_plan_digest=plan["brokerBootstrapPlanDigest"],
+    )
+    if broker_inputs["channel"] != parent_plan.get("channel"):
+        raise ValueError("Offline Broker channel differs from the confirmed workload plan")
+
+    journal_path = _journal_path(updater)
+    existing = _read_private_json(journal_path)
+    if existing is None:
+        _fresh_workload_core_check_empty_host(updater, proc_root=PROC_ROOT)
+        transaction = {
+            "schemaVersion": 1,
+            "mode": "fresh-workload-first-core",
+            "planId": plan["planId"],
+            "planDigest": plan["planDigest"],
+            "requestId": plan["requestId"],
+            "targetKind": "CORE_RUNTIME",
+            "expectedGateGeneration": None,
+            "expectedCatalogGeneration": 0,
+            "expectedActivitySources": [],
+            "componentArtifactDigests": full_digests,
+            "firstCoreBootstrap": block,
+            "brokerBootstrapPlanDigest": plan["brokerBootstrapPlanDigest"],
+            "components": staged_components,
+            "previous": updater._capture_active_versions(staged_components),
+            "beginRequest": None,
+            "sourcePolicy": source_policy,
+            "selectedPluginRows": selected_plugin_rows,
+            "sourcePrincipalIdentities": {
+                source_key: {key: value.get(key) for key in ("uid", "gid")}
+                for source_key, value in source_principals.items()
+                if isinstance(value, dict)
+            },
+            "phase": "broker_bootstrap_pending",
+            "progress": "planned",
+            "createdAt": int(time.time()),
+        }
+        _write_private_json(updater, journal_path, transaction)
+    else:
+        if not isinstance(existing, dict) or existing.get("mode") != "fresh-workload-first-core":
+            raise ValueError("Another first-Core transaction owns the durable Core journal")
+        _fresh_workload_core_validate_transaction(
+            existing,
+            plan,
+            source_policy=source_policy,
+            selected_plugin_rows=selected_plugin_rows,
+            source_principals=source_principals,
+        )
+        transaction = existing
+        if transaction.get("phase") == "succeeded":
+            return _fresh_workload_core_public_result(plan, transaction.get("result"))
+        if transaction.get("phase") not in {
+            "broker_bootstrap_pending",
+            "begin_pending",
+            "hold_required",
+            "end_call_pending",
+        }:
+            raise ValueError("Fresh workload Core journal has an unsupported recovery phase")
+
+    if transaction.get("phase") == "end_call_pending":
+        token = transaction.get("maintenanceToken")
+        result = _fresh_workload_core_public_result(plan, transaction.get("publicResult"))
+        expected_end_request_id = "bootstrap-end-" + plan["planDigest"].split(":", 1)[1][:32]
+        expected_end_request = {
+            "request_id": plan["requestId"],
+            "target_kind": "CORE_RUNTIME",
+            "maintenance_token": token,
+            "outcome": "SUCCESS",
+            "healthy": True,
+        }
+        if (
+            not isinstance(token, str)
+            or not token.strip()
+            or transaction.get("endRequestId") != expected_end_request_id
+            or transaction.get("endRequest") != expected_end_request
+        ):
+            raise ValueError("End recovery does not match the exact first-Core hold")
+        try:
+            end_result = updater._broker_request(
+                "EndMaintenance",
+                expected_end_request,
+                request_id=expected_end_request_id,
+            )
+        except Exception as error:
+            transaction["endError"] = str(error)[:300]
+            _write_private_json(updater, journal_path, transaction)
+            raise RuntimeError(
+                "EndMaintenance result is uncertain; preserve the exact Core hold and retry"
+            ) from error
+        if not isinstance(end_result, dict) or end_result.get("unlocked") is not True:
+            transaction["endError"] = "Platform did not confirm the durable gate release"
+            _write_private_json(updater, journal_path, transaction)
+            raise RuntimeError("Platform did not confirm first-Core gate release")
+        return _finish_fresh_workload_core_transaction(updater, journal_path, transaction, result)
+
+    # ── Phase 1: Activate and start only the signed Broker before Kernel exists.
+    # 第一阶段：仅启动已验签Broker，确认Kernel仍不存在后再申请CoreBootstrap hold。
+    if transaction.get("phase") == "broker_bootstrap_pending":
+        _fresh_workload_core_check_empty_host(updater, proc_root=PROC_ROOT)
+        broker_result = _fresh_workload_core_verify_broker_activation(
+            updater,
+            bootstrap_module,
+            broker_row,
+            broker_inputs,
+            expected_plan_digest=plan["brokerBootstrapPlanDigest"],
+            expected_active_catalog_digest=block["catalogDigest"],
+            lock_lease=lock_lease,
+        )
+        expected_identity = {
+            "componentId": broker_id,
+            "targetId": block["targetId"],
+            "version": broker_row["version"],
+            "manifestDigest": broker_row["manifestDigest"],
+            "artifactDigest": broker_row["artifactDigest"],
+        }
+        if (
+            broker_result.get("status") != "activated"
+            or any(broker_result.get(key) != value for key, value in expected_identity.items())
+            or broker_result.get("planDigest") != plan["brokerBootstrapPlanDigest"]
+        ):
+            raise RuntimeError("Offline Broker verifier did not activate the exact staged C10 row")
+        broker_release_path = Path(broker_result.get("releasePath", ""))
+        expected_release_path = (
+            updater.install_root
+            / "components"
+            / broker_id
+            / "releases"
+            / f"{broker_row['version']}--{broker_row['manifestDigest'].removeprefix('sha256:')}"
+        )
+        if broker_release_path != expected_release_path:
+            raise ValueError("Offline Broker release path differs from the immutable staged row")
+        _write_unit(updater, updater.components[broker_id], expected_release_path)
+        daemon_reload = updater.runner(
+            ["systemctl", "daemon-reload"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if daemon_reload.returncode != 0:
+            raise RuntimeError("systemd daemon-reload failed for the first Broker unit")
+        unit = updater.components[broker_id]["systemdUnit"]
+        updater._run_systemctl("start", unit)
+        updater._wait_unit_active(unit)
+        _fresh_workload_core_check_empty_host(updater, proc_root=PROC_ROOT)
+        _verify_started_processes(updater, [broker_row])
+        broker_identity, broker_health = _fresh_workload_core_broker_health(
+            updater, broker_row, proc_root=PROC_ROOT
+        )
+        plan["gateGeneration"] = broker_health["gate_generation"]
+        transaction["expectedGateGeneration"] = broker_health["gate_generation"]
+        transaction["beginRequest"] = _core_bootstrap_begin_request(plan)
+        transaction["bootstrapBroker"] = broker_identity
+        transaction["progress"] = "broker_serving"
+        transaction["phase"] = "begin_pending"
+        _write_private_json(updater, journal_path, transaction)
+
+    if transaction.get("phase") == "begin_pending":
+        plan["gateGeneration"] = transaction["expectedGateGeneration"]
+        uncertain_begin = transaction.get("progress") in {
+            "begin_call_pending",
+            "begin_result_uncertain",
+        }
+        broker_identity, health = _fresh_workload_core_broker_health(
+            updater,
+            broker_row,
+            proc_root=PROC_ROOT,
+            expected_gate_generation=(
+                None if uncertain_begin else transaction["expectedGateGeneration"]
+            ),
+            require_eligible=not uncertain_begin,
+        )
+        transaction["bootstrapBroker"] = broker_identity
+        if (
+            health.get("status") != "SERVING"
+            or health.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
+            or health.get("catalog_generation") != 0
+            or (not uncertain_begin and health.get("gate_generation") != plan["gateGeneration"])
+            or (not uncertain_begin and health.get("core_bootstrap_eligible") is not True)
+        ):
+            raise RuntimeError("Fresh C10 Broker Health is inconsistent with BeginCoreBootstrap")
+        begin_request = transaction["beginRequest"]
+        transaction["progress"] = "begin_call_pending"
+        _write_private_json(updater, journal_path, transaction)
+        try:
+            response = updater._broker_request(
+                "BeginCoreBootstrap", begin_request, request_id=plan["requestId"]
+            )
+        except Exception as error:
+            transaction["failure"] = str(error)[:500]
+            transaction["progress"] = "begin_result_uncertain"
+            _write_private_json(updater, journal_path, transaction)
+            raise RuntimeError(
+                "BeginCoreBootstrap result is uncertain; preserve the first-Core transaction"
+            ) from error
+        if not isinstance(response, dict):
+            transaction["progress"] = "begin_result_uncertain"
+            _write_private_json(updater, journal_path, transaction)
+            raise RuntimeError("Platform returned no durable CoreBootstrap hold identity")
+        if (
+            response.get("status") != "MAINTENANCE_ACTIVE"
+            or response.get("maintenance_origin") != "CORE_BOOTSTRAP"
+            or response.get("readiness_claimed") is not False
+            or response.get("held") is not True
+            or not isinstance(response.get("maintenance_token"), str)
+            or not response.get("maintenance_token", "").strip()
+            or type(response.get("gate_generation")) is not int
+            or response.get("gate_generation") < 1
+        ):
+            transaction["progress"] = "begin_result_uncertain"
+            _write_private_json(updater, journal_path, transaction)
+            raise RuntimeError("Platform did not confirm a durable generation-zero Core hold")
+        transaction["maintenanceToken"] = response["maintenance_token"]
+        transaction["maintenanceGateGeneration"] = response["gate_generation"]
+        transaction["phase"] = "hold_required"
+        transaction["progress"] = "held"
+        transaction.pop("failure", None)
+        _write_private_json(updater, journal_path, transaction)
+    elif transaction.get("phase") == "hold_required":
+        _fresh_workload_core_validate_maintenance_hold(
+            updater,
+            plan,
+            transaction,
+            full_digests,
+            source_id=source_id,
+            source_uid=source_uid,
+            source_gid=source_gid,
+        )
+    elif transaction.get("phase") == "end_call_pending":
+        if (
+            not isinstance(transaction.get("maintenanceToken"), str)
+            or not transaction["maintenanceToken"].strip()
+        ):
+            raise ValueError("End recovery has no durable first-Core hold token")
+
+    # ── Phase 2: Register one zero-binding workload owner, then install Kernel.
+    # 第二阶段：正式初始化单一零绑定来源；此行之前绝不安装或启动Kernel。
+    if transaction.get("phase") == "hold_required":
+        prior_progress = transaction.get("progress")
+        maintenance = {
+            "transaction_id": plan["requestId"],
+            "maintenance_token": transaction["maintenanceToken"],
+            "target_kind": "CORE_RUNTIME",
+            "plan_id": plan["planId"],
+            "plan_digest": plan["planDigest"],
+            "component_artifact_digests": full_digests,
+            "expected_gate_generation": transaction["maintenanceGateGeneration"],
+            "expected_catalog_generation": 0,
+        }
+        workload_runtime = updater._load_workload_package_runtime()
+        try:
+            source_result = workload_runtime.initialize_first_core_activity_catalog(
+                maintenance=maintenance,
+                request_id=plan["requestId"],
+                source_policy=source_policy,
+                selected_rows=selected_plugin_rows,
+                source_principals=source_principals,
+            )
+        except Exception as error:
+            transaction["failure"] = str(error)[:500]
+            transaction["progress"] = (
+                prior_progress
+                if prior_progress in _FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS
+                else "catalog_initialization_pending"
+            )
+            _write_private_json(updater, journal_path, transaction)
+            raise RuntimeError(
+                "First-Core source catalog initialization failed; the durable hold remains closed"
+            ) from error
+        catalog, activity_sources = _fresh_workload_core_catalog_result(
+            updater,
+            source_result,
+            source_id=source_id,
+            source_uid=source_uid,
+            source_gid=source_gid,
+        )
+        runtime_plan = {
+            **plan,
+            "catalogGeneration": 1,
+            "activitySources": activity_sources,
+        }
+        transaction["sourceCatalog"] = {
+            "catalogGeneration": 1,
+            "sourceIdentities": source_result["sourceIdentities"],
+            "catalogDigest": source_result.get("catalogDigest"),
+            "policyDigest": source_result.get("policyDigest"),
+        }
+        transaction["progress"] = (
+            prior_progress
+            if prior_progress in _FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS
+            else "catalog_initialized"
+        )
+        transaction.pop("failure", None)
+        _write_private_json(updater, journal_path, transaction)
+    else:
+        workload_runtime = updater._load_workload_package_runtime()
+        maintenance = {
+            "transaction_id": plan["requestId"],
+            "maintenance_token": transaction["maintenanceToken"],
+            "target_kind": "CORE_RUNTIME",
+            "plan_id": plan["planId"],
+            "plan_digest": plan["planDigest"],
+            "component_artifact_digests": full_digests,
+            "expected_gate_generation": transaction["maintenanceGateGeneration"],
+            "expected_catalog_generation": 0,
+        }
+        source_result = workload_runtime.initialize_first_core_activity_catalog(
+            maintenance=maintenance,
+            request_id=plan["requestId"],
+            source_policy=source_policy,
+            selected_rows=selected_plugin_rows,
+            source_principals=source_principals,
+        )
+        catalog, activity_sources = _fresh_workload_core_catalog_result(
+            updater,
+            source_result,
+            source_id=source_id,
+            source_uid=source_uid,
+            source_gid=source_gid,
+        )
+        runtime_plan = {
+            **plan,
+            "catalogGeneration": 1,
+            "activitySources": activity_sources,
+        }
+
+    _fresh_workload_core_validate_maintenance_hold(
+        updater,
+        plan,
+        transaction,
+        full_digests,
+        source_id=source_id,
+        source_uid=source_uid,
+        source_gid=source_gid,
+    )
+    broker_identity = transaction.get("bootstrapBroker")
+    if not isinstance(broker_identity, dict):
+        broker_identity, _broker_health = _fresh_workload_core_broker_health(
+            updater, broker_row, proc_root=PROC_ROOT
+        )
+        transaction["bootstrapBroker"] = broker_identity
+        _write_private_json(updater, journal_path, transaction)
+    current_progress = transaction.get("progress")
+    if current_progress in (
+        _FRESH_WORKLOAD_CORE_EMPTY_PROGRESS | _FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS
+    ):
+        _assert_fresh(
+            updater,
+            proc_root=PROC_ROOT,
+            planned_components=staged_components,
+            require_empty_kernel_state=_fresh_workload_core_requires_empty_kernel_state(
+                current_progress
+            ),
+            expected_bootstrap_broker=broker_identity,
+        )
+    remaining = [item for item in staged_components if item["componentId"] != broker_id]
+    if {item["componentId"] for item in remaining} != set(C10_FIRST_CORE_COMPONENT_IDS) - {
+        broker_id
+    }:
+        raise ValueError("Fresh workload C10 remainder is incomplete")
+    try:
+        transaction["progress"] = "cohort_installing"
+        _write_private_json(updater, journal_path, transaction)
+        for item in remaining:
+            component = updater.components[item["componentId"]]
+            pointer = f"{item['version']}--{item['manifestDigest'].removeprefix('sha256:')}"
+            release = (
+                updater.install_root / "components" / item["componentId"] / "releases" / pointer
+            )
+            _write_unit(updater, component, release)
+        activation_transaction = {
+            **transaction,
+            "components": remaining,
+            "previous": [
+                row for row in transaction["previous"] if row.get("componentId") != broker_id
+            ],
+        }
+        _activate_core_cohort(updater, activation_transaction)
+        transaction["progress"] = "cohort_activated"
+        _write_private_json(updater, journal_path, transaction)
+        daemon_reload = updater.runner(
+            ["systemctl", "daemon-reload"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if daemon_reload.returncode != 0:
+            raise RuntimeError("systemd daemon-reload failed for the first-Core cohort")
+        transaction["progress"] = "cohort_starting"
+        _write_private_json(updater, journal_path, transaction)
+        ordered_remaining = [
+            item
+            for component_id in C10_FIRST_CORE_COMPONENT_IDS
+            if component_id != broker_id
+            for item in remaining
+            if item["componentId"] == component_id
+        ]
+        for item in ordered_remaining:
+            unit = updater.components[item["componentId"]]["systemdUnit"]
+            updater._run_systemctl("start", unit)
+            updater._wait_unit_active(unit)
+            _verify_started_processes(updater, [item])
+        health_transaction = getattr(updater, "_health_transaction", None)
+        if callable(health_transaction):
+            health_transaction(transaction)
+        transaction["progress"] = "cohort_started"
+        _write_private_json(updater, journal_path, transaction)
+    except Exception as error:
+        transaction["failure"] = str(error)[:500]
+        transaction["progress"] = transaction.get("progress", "cohort_installing")
+        _write_private_json(updater, journal_path, transaction)
+        raise RuntimeError(
+            "Fresh workload C10 apply failed; the original CoreBootstrap hold remains closed"
+        ) from error
+
+    # ── Phase 3: Prove live Core readiness and Package Runtime authority, then End.
+    # 第三阶段：真实Kernel计数与来源认证均通过后，才按原请求释放门禁。
+    try:
+        _verify_live_core_cohort(updater, transaction, runtime_plan, probe_package_runtime=False)
+        readiness = _require_core_ready(updater, runtime_plan)
+        authority = _fresh_workload_core_package_runtime_authority(
+            updater,
+            catalog,
+            source_id=source_id,
+            source_uid=source_uid,
+            source_gid=source_gid,
+        )
+        component_statuses = [
+            {"componentId": component_id, "status": "active"}
+            for component_id in C10_FIRST_CORE_COMPONENT_IDS
+        ]
+        public_readiness = {
+            "status": "READY",
+            "catalogGeneration": 1,
+            "activeTaskCount": readiness["active_task_count"],
+            "inflightRuntimeAdmissionCount": readiness["inflight_runtime_admission_count"],
+            "activeWorkerCount": readiness["active_worker_count"],
+            "activeAllocationCount": readiness["active_allocation_count"],
+        }
+        _fresh_workload_core_validate_maintenance_hold(
+            updater,
+            plan,
+            transaction,
+            full_digests,
+            source_id=source_id,
+            source_uid=source_uid,
+            source_gid=source_gid,
+        )
+        end_request_id = "bootstrap-end-" + plan["planDigest"].split(":", 1)[1][:32]
+        end_request = {
+            "request_id": plan["requestId"],
+            "target_kind": "CORE_RUNTIME",
+            "maintenance_token": transaction["maintenanceToken"],
+            "outcome": "SUCCESS",
+            "healthy": True,
+        }
+        transaction["endRequestId"] = end_request_id
+        transaction["endRequest"] = end_request
+        transaction["phase"] = "end_call_pending"
+        transaction["progress"] = "readiness_proven"
+        transaction["publicResult"] = {
+            "status": "installed",
+            "planId": plan["planId"],
+            "planDigest": plan["planDigest"],
+            "catalogGeneration": 1,
+            "componentStatuses": component_statuses,
+            "readiness": public_readiness,
+            "authority": authority,
+        }
+        _write_private_json(updater, journal_path, transaction)
+    except Exception as error:
+        transaction["failure"] = str(error)[:500]
+        transaction["progress"] = "readiness_pending"
+        _write_private_json(updater, journal_path, transaction)
+        raise RuntimeError(
+            "Fresh workload Core readiness failed; the durable maintenance hold remains closed"
+        ) from error
+
+    try:
+        end_result = updater._broker_request(
+            "EndMaintenance",
+            end_request,
+            request_id=end_request_id,
+        )
+    except Exception as error:
+        transaction["endError"] = str(error)[:300]
+        _write_private_json(updater, journal_path, transaction)
+        raise RuntimeError(
+            "EndMaintenance result is uncertain; preserve the exact Core hold and retry"
+        ) from error
+    if not isinstance(end_result, dict) or end_result.get("unlocked") is not True:
+        transaction["endError"] = "Platform did not confirm the durable gate release"
+        _write_private_json(updater, journal_path, transaction)
+        raise RuntimeError("Platform did not confirm first-Core gate release")
+    return _finish_fresh_workload_core_transaction(
+        updater,
+        journal_path,
+        transaction,
+        _fresh_workload_core_public_result(plan, transaction.get("publicResult")),
+    )
 
 
 def _verify_held_core_bootstrap(
