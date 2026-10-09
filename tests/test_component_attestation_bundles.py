@@ -82,6 +82,8 @@ def _updater(
     tmp_path: Path,
     response: dict[str, object],
     runner,
+    *,
+    api_calls: list[str] | None = None,
 ) -> updates.ComponentUpdater:
     subject_digest = "sha256:" + hashlib.sha256(b"immutable signed subject bytes").hexdigest()
     api_uri = "https://api.github.com/repos/DoHorizon-AI/Cyrene-Platform/attestations/"
@@ -91,6 +93,8 @@ def _updater(
         assert request.full_url == api_uri
         assert request.get_header("User-agent") == updates.USER_AGENT
         assert timeout == 30
+        if api_calls is not None:
+            api_calls.append(request.full_url)
         return _Response(json.dumps(response, separators=(",", ":")).encode(), request.full_url)
 
     catalog = tmp_path / "catalog.json"
@@ -167,6 +171,168 @@ def test_public_bundle_is_passed_to_locked_verifier_in_private_temp_file(tmp_pat
     )
     assert json.loads(result) == bundle
     assert len(observed) == 1
+
+
+def test_attestation_cache_reuses_raw_bundle_and_reverifies_each_use(tmp_path: Path) -> None:
+    payload = b"immutable signed subject bytes"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    bundle = _bundle_for("subject.tar.gz", digest)
+    response = {"attestations": [_bundle_record(bundle)]}
+    api_calls: list[str] = []
+    verifier_calls: list[list[str]] = []
+
+    def runner(arguments, **_kwargs):
+        verifier_calls.append(arguments)
+        return SimpleNamespace(
+            returncode=0, stdout=_verification_output("subject.tar.gz", digest), stderr=""
+        )
+
+    first = _updater(tmp_path, response, runner, api_calls=api_calls)
+    first_result = first._release_attestation_bundle(
+        payload=payload,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        digest=digest,
+        workflow="owner/repo/.github/workflows/release.yml",
+        source_ref="refs/heads/develop",
+        source_commit="a" * 40,
+        subject_name="subject.tar.gz",
+    )
+    cache_files = list((tmp_path / "state" / "attestations").glob("*.bundle"))
+    assert len(cache_files) == 1
+    assert cache_files[0].read_bytes() == first_result
+    assert stat.S_IMODE(cache_files[0].stat().st_mode) == 0o600
+
+    # A new updater instance models a distinct CLI operation. It must verify the
+    # cached bytes again, while avoiding a second REST attestation lookup.
+    second = _updater(tmp_path, response, runner, api_calls=api_calls)
+    second_result = second._release_attestation_bundle(
+        payload=payload,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        digest=digest,
+        workflow="owner/repo/.github/workflows/release.yml",
+        source_ref="refs/heads/develop",
+        source_commit="a" * 40,
+        subject_name="subject.tar.gz",
+    )
+    assert second_result == first_result
+    assert len(api_calls) == 1
+    assert len(verifier_calls) == 2
+
+
+def test_attestation_cache_key_separates_source_context_and_does_not_cache_failure(
+    tmp_path: Path,
+) -> None:
+    payload = b"immutable signed subject bytes"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    bundle = _bundle_for("subject.tar.gz", digest)
+    api_calls: list[str] = []
+    verifier_contexts: list[tuple[str, str, str]] = []
+
+    def runner(arguments, **_kwargs):
+        workflow = arguments[arguments.index("--signer-workflow") + 1]
+        source_ref = arguments[arguments.index("--source-ref") + 1]
+        source_commit = arguments[arguments.index("--source-digest") + 1]
+        verifier_contexts.append((workflow, source_ref, source_commit))
+        if workflow.endswith("other.yml"):
+            return SimpleNamespace(returncode=1, stdout="", stderr="wrong signed context")
+        return SimpleNamespace(
+            returncode=0, stdout=_verification_output("subject.tar.gz", digest), stderr=""
+        )
+
+    updater = _updater(
+        tmp_path,
+        {"attestations": [_bundle_record(bundle)]},
+        runner,
+        api_calls=api_calls,
+    )
+    updater._release_attestation_bundle(
+        payload=payload,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        digest=digest,
+        workflow="owner/repo/.github/workflows/release.yml",
+        source_ref="refs/heads/develop",
+        source_commit="a" * 40,
+        subject_name="subject.tar.gz",
+    )
+    with pytest.raises(updates.UpdateError) as error:
+        updater._release_attestation_bundle(
+            payload=payload,
+            repository="DoHorizon-AI/Cyrene-Platform",
+            digest=digest,
+            workflow="owner/repo/.github/workflows/other.yml",
+            source_ref="refs/heads/main",
+            source_commit="b" * 40,
+            subject_name="subject.tar.gz",
+        )
+
+    assert error.value.code == "ATTESTATION_INVALID"
+    assert len(api_calls) == 2
+    assert verifier_contexts == [
+        ("owner/repo/.github/workflows/release.yml", "refs/heads/develop", "a" * 40),
+        ("owner/repo/.github/workflows/other.yml", "refs/heads/main", "b" * 40),
+    ]
+    assert len(list((tmp_path / "state" / "attestations").glob("*.bundle"))) == 1
+
+
+def test_tampered_attestation_cache_fails_closed_without_network_fallback(tmp_path: Path) -> None:
+    payload = b"immutable signed subject bytes"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    bundle = _bundle_for("subject.tar.gz", digest)
+    response = {"attestations": [_bundle_record(bundle)]}
+    api_calls: list[str] = []
+    runner_calls: list[list[str]] = []
+
+    def runner(arguments, **_kwargs):
+        runner_calls.append(arguments)
+        return SimpleNamespace(
+            returncode=0, stdout=_verification_output("subject.tar.gz", digest), stderr=""
+        )
+
+    first = _updater(tmp_path, response, runner, api_calls=api_calls)
+    first._release_attestation_bundle(
+        payload=payload,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        digest=digest,
+        workflow="owner/repo/.github/workflows/release.yml",
+        source_ref="refs/heads/develop",
+        source_commit="a" * 40,
+        subject_name="subject.tar.gz",
+    )
+    cache_file = next((tmp_path / "state" / "attestations").glob("*.bundle"))
+    cache_file.write_bytes(
+        json.dumps(_bundle_for("other.tar.gz", digest), separators=(",", ":")).encode()
+    )
+
+    second = _updater(tmp_path, response, runner, api_calls=api_calls)
+    with pytest.raises(updates.UpdateError) as error:
+        second._release_attestation_bundle(
+            payload=payload,
+            repository="DoHorizon-AI/Cyrene-Platform",
+            digest=digest,
+            workflow="owner/repo/.github/workflows/release.yml",
+            source_ref="refs/heads/develop",
+            source_commit="a" * 40,
+            subject_name="subject.tar.gz",
+        )
+
+    assert error.value.code == "ATTESTATION_SUBJECT_MISMATCH"
+    assert len(api_calls) == 1
+    assert len(runner_calls) == 1
+
+    cache_file.chmod(0o644)
+    third = _updater(tmp_path, response, runner, api_calls=api_calls)
+    with pytest.raises(updates.UpdateError) as unsafe_metadata:
+        third._release_attestation_bundle(
+            payload=payload,
+            repository="DoHorizon-AI/Cyrene-Platform",
+            digest=digest,
+            workflow="owner/repo/.github/workflows/release.yml",
+            source_ref="refs/heads/develop",
+            source_commit="a" * 40,
+            subject_name="subject.tar.gz",
+        )
+    assert unsafe_metadata.value.code == "UNSAFE_STATE"
+    assert len(api_calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -251,6 +417,7 @@ def test_unavailable_unknown_or_wrong_subject_proofs_fail_closed(
             subject_name="subject.tar.gz",
         )
     assert error.value.code == error_code
+    assert not list((tmp_path / "state" / "attestations").glob("*.bundle"))
 
 
 def test_asset_metadata_and_signed_tuple_must_match_downloaded_bytes(tmp_path: Path) -> None:
