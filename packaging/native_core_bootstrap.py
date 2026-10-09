@@ -2836,8 +2836,13 @@ def _fresh_workload_core_broker_health(
     proc_root: Path,
     expected_gate_generation: int | None = None,
     require_eligible: bool = True,
+    allow_begin_result_uncertain: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Require the verified Broker to serve C10 Health while Kernel is absent."""
+    """Require the verified Broker to serve C10 Health while Kernel is absent.
+
+    The explicit uncertain-Begin mode accepts only the exact pre-Begin generation
+    or its single committed successor so an idempotent request can be resumed.
+    """
 
     expected_pointer = (
         f"{broker_row['version']}--{broker_row['manifestDigest'].removeprefix('sha256:')}"
@@ -2858,17 +2863,44 @@ def _fresh_workload_core_broker_health(
         "cyrene.runtime-maintenance.binding-operations.v1",
     }
     capabilities = health.get("capabilities")
+    expected_generation_valid = expected_gate_generation is None or (
+        type(expected_gate_generation) is int and expected_gate_generation >= 0
+    )
+    if allow_begin_result_uncertain:
+        generation_valid = (
+            not require_eligible
+            and expected_gate_generation == 0
+            and type(expected_gate_generation) is int
+            and type(gate_generation) is int
+            and gate_generation in (0, 1)
+            and health.get("core_bootstrap_eligible") is (gate_generation == 0)
+        )
+    else:
+        generation_valid = (
+            type(gate_generation) is int
+            and gate_generation >= 0
+            and (
+                (expected_gate_generation is None and gate_generation >= 1)
+                or (
+                    expected_generation_valid
+                    and expected_gate_generation is not None
+                    and gate_generation == expected_gate_generation
+                )
+            )
+            and (
+                gate_generation != 0
+                or (require_eligible and health.get("core_bootstrap_eligible") is True)
+            )
+        )
     if (
         health.get("status") != "SERVING"
         or health.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
         or type(health.get("catalog_generation")) is not int
         or health.get("catalog_generation") != 0
-        or not isinstance(gate_generation, int)
-        or isinstance(gate_generation, bool)
-        or gate_generation < 1
+        or not expected_generation_valid
+        or not generation_valid
         or type(health.get("core_bootstrap_eligible")) is not bool
         or (require_eligible and health.get("core_bootstrap_eligible") is not True)
-        or (expected_gate_generation is not None and gate_generation != expected_gate_generation)
         or not isinstance(capabilities, list)
         or any(not isinstance(value, str) or not value for value in capabilities)
         or len(capabilities) != len(set(capabilities))
@@ -3431,7 +3463,7 @@ def apply_fresh_workload_first_core(
         _fresh_workload_core_check_empty_host(updater, proc_root=PROC_ROOT)
         _verify_started_processes(updater, [broker_row])
         broker_identity, broker_health = _fresh_workload_core_broker_health(
-            updater, broker_row, proc_root=PROC_ROOT
+            updater, broker_row, proc_root=PROC_ROOT, expected_gate_generation=0
         )
         plan["gateGeneration"] = broker_health["gate_generation"]
         transaction["expectedGateGeneration"] = broker_health["gate_generation"]
@@ -3451,10 +3483,9 @@ def apply_fresh_workload_first_core(
             updater,
             broker_row,
             proc_root=PROC_ROOT,
-            expected_gate_generation=(
-                None if uncertain_begin else transaction["expectedGateGeneration"]
-            ),
+            expected_gate_generation=transaction["expectedGateGeneration"],
             require_eligible=not uncertain_begin,
+            allow_begin_result_uncertain=uncertain_begin,
         )
         transaction["bootstrapBroker"] = broker_identity
         if (
