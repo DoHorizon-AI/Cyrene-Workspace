@@ -1745,7 +1745,7 @@ def test_legacy_source_update_intent_persists_success_history_map(
     monkeypatch.setattr(
         updater,
         "_workload_source_state",
-        lambda _workload_id: ({"generation": 5}, {}, {}, RuntimeHelper),
+        lambda _workload_id, **_kwargs: ({"generation": 5}, {}, {}, RuntimeHelper),
     )
     monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: RuntimeHelper)
     monkeypatch.setattr(
@@ -3652,6 +3652,181 @@ def test_empty_activity_catalog_is_a_valid_zero_owner_scope(tmp_path: Path) -> N
 
     assert catalog["sources"] == []
     assert source_ids == []
+
+
+def test_missing_activity_catalog_is_gen_zero_only_for_explicit_first_init(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._activity_catalog()
+    assert error.value.code == "INVALID_LOCAL_STATE"
+
+    catalog, source_ids = updater._activity_catalog(allow_uninitialized=True)
+    assert catalog == {"schema_version": 1, "generation": 0, "sources": []}
+    assert source_ids == []
+
+
+def test_first_init_permission_preserves_an_existing_runtime_catalog(tmp_path: Path) -> None:
+    updater = _empty_updater(tmp_path)
+    existing = {
+        "schema_version": 1,
+        "generation": 5,
+        "sources": [
+            {
+                "source_id": "cyrene-catalyst",
+                "uid": 12001,
+                "gid": 12002,
+                "source_token_sha256": "a" * 64,
+            }
+        ],
+    }
+    updater.activity_catalog_path.write_text(json.dumps(existing), encoding="utf-8")
+
+    catalog, source_ids = updater._activity_catalog(allow_uninitialized=True)
+
+    assert catalog == existing
+    assert source_ids == ["cyrene-catalyst"]
+
+
+@pytest.mark.parametrize("state", ["malformed", "written-gen-zero", "symlink", "symlink-parent"])
+def test_first_init_never_masks_an_existing_unsafe_catalog(tmp_path: Path, state: str) -> None:
+    updater = _empty_updater(tmp_path)
+    catalog_path = updater.activity_catalog_path
+    if state == "malformed":
+        catalog_path.write_text("{not-json", encoding="utf-8")
+    elif state == "written-gen-zero":
+        catalog_path.write_text(
+            json.dumps({"schema_version": 1, "generation": 0, "sources": []}),
+            encoding="utf-8",
+        )
+    elif state == "symlink":
+        target = tmp_path / "catalog-target.json"
+        target.write_text("{}", encoding="utf-8")
+        catalog_path.symlink_to(target)
+    else:
+        parent = tmp_path / "catalog-parent"
+        parent.mkdir()
+        (tmp_path / "catalog-link").symlink_to(parent, target_is_directory=True)
+        updater.activity_catalog_path = tmp_path / "catalog-link" / "activity-sources.json"
+
+    with pytest.raises(updates.UpdateError):
+        updater._activity_catalog(allow_uninitialized=True)
+
+
+def test_initial_workload_hold_moves_from_missing_gen_zero_to_live_generation_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction_dir = tmp_path / "transactions"
+    transaction_dir.mkdir(mode=0o700)
+    transaction_path = transaction_dir / "plan.json"
+    transaction: dict[str, Any] = {
+        "schemaVersion": 2,
+        "transactionKind": "workload-assembly.v1",
+        "planId": "plan-" + "a" * 32,
+        "planDigest": "sha256:" + "b" * 64,
+        "workloadId": "catalyst",
+        "action": "install",
+        "targetKind": "CORE_RUNTIME",
+        "componentArtifactDigests": {"cyrene-catalyst": "sha256:" + "c" * 64},
+        "phase": "applying",
+        "maintenanceHolds": {},
+    }
+    calls: list[tuple[str, int | None, bool]] = []
+
+    def broker_request(
+        method: str,
+        params: dict[str, Any],
+        *,
+        request_id: str | None = None,
+        allow_uninitialized_catalog: bool = False,
+    ) -> dict[str, Any]:
+        generation = params.get("expected_catalog_generation")
+        calls.append(
+            (
+                method,
+                generation if isinstance(generation, int) else None,
+                allow_uninitialized_catalog,
+            )
+        )
+        if method == "GetUpdateReadiness":
+            return {
+                "status": "READY",
+                "gate_generation": 7 if generation == 0 else 8,
+                "install_catalog_generation": generation,
+                "blocker_codes": [],
+                "active_task_count": 0,
+                "active_worker_count": 0,
+                "active_allocation_count": 0,
+                "inflight_runtime_admission_count": 0,
+                "active_tasks": [],
+                "unknown_activity_sources": [],
+                "requires_restart_confirmation": True,
+            }
+        if method == "BeginMaintenance":
+            return {
+                "status": "MAINTENANCE_ACTIVE",
+                "maintenance_token": "m" * 48,
+                "gate_generation": 7 if generation == 0 else 8,
+                "blocker_codes": [],
+            }
+        if method == "EndMaintenance":
+            return {"status": "SUCCESS"}
+        pytest.fail(f"unexpected broker method {method} ({request_id})")
+
+    monkeypatch.setattr(updater, "_broker_request", broker_request)
+    updater._begin_workload_hold(
+        transaction,
+        transaction_path,
+        phase="core-runtime-install",
+        target_kind="CORE_RUNTIME",
+        requires_restart=True,
+        allow_uninitialized_catalog=True,
+    )
+    assert transaction["expectedCatalogGeneration"] == 0
+    assert transaction["expectedActivitySources"] == []
+    assert transaction["allowUninitializedActivityCatalog"] is True
+
+    updater.activity_catalog_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generation": 1,
+                "sources": [
+                    {
+                        "source_id": "cyrene-catalyst",
+                        "uid": 12001,
+                        "gid": 12002,
+                        "source_token_sha256": "d" * 64,
+                        "binding_scopes": [],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    updater._end_workload_hold(transaction, transaction_path, outcome="SUCCESS", healthy=True)
+    updater._begin_workload_hold(
+        transaction,
+        transaction_path,
+        phase="package-only",
+        target_kind="PACKAGE_ONLY",
+        requires_restart=False,
+        allow_uninitialized_catalog=True,
+    )
+
+    assert transaction["expectedCatalogGeneration"] == 1
+    assert transaction["expectedActivitySources"] == ["cyrene-catalyst"]
+    assert transaction["allowUninitializedActivityCatalog"] is False
+    assert calls == [
+        ("GetUpdateReadiness", 0, True),
+        ("BeginMaintenance", 0, True),
+        ("EndMaintenance", None, False),
+        ("GetUpdateReadiness", 1, False),
+        ("BeginMaintenance", 1, False),
+    ]
 
 
 def test_apply_confirmation_is_bound_to_plan_id_and_digest(tmp_path: Path) -> None:

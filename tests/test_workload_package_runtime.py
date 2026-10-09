@@ -177,6 +177,7 @@ def _maintenance(
     *,
     target_kind: str = "PACKAGE_ONLY",
     transaction_id: str = "cyrene-workload-package-only-plan-001",
+    catalog_generation: int = 5,
 ) -> dict[str, Any]:
     return {
         "transaction_id": transaction_id,
@@ -186,7 +187,7 @@ def _maintenance(
         "plan_digest": _digest("parent-plan"),
         "component_artifact_digests": {component_id: artifact_digest or _digest("artifact-1.2.3")},
         "expected_gate_generation": 9,
-        "expected_catalog_generation": 5,
+        "expected_catalog_generation": catalog_generation,
     }
 
 
@@ -464,7 +465,11 @@ def test_apply_source_update_commits_gen_zero_catalog_and_matching_policy(
 
     result = runtime.apply_workload_source_update(
         update,
-        maintenance=_maintenance(target_kind="CORE_RUNTIME", component_id="cyrene-catalyst"),
+        maintenance=_maintenance(
+            target_kind="CORE_RUNTIME",
+            component_id="cyrene-catalyst",
+            catalog_generation=0,
+        ),
         request_id="cyrene-register-product-source",
         expected_policy_digest=None,
         activity_catalog_path=catalog_path,
@@ -483,6 +488,95 @@ def test_apply_source_update_commits_gen_zero_catalog_and_matching_policy(
     assert policy["sources"][0]["source_token_sha256"] == source_digest
     assert source_token not in json.dumps(result)
     assert "private-maintenance-token" not in json.dumps(result)
+
+
+def test_apply_source_update_requires_hold_to_bind_generation_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_id = "cyrene-catalyst"
+    update = runtime.build_workload_source_update(
+        source_policy=_source_policy(),
+        selected_rows=[],
+        installation_records={},
+        activity_catalog={"schema_version": 1, "generation": 0, "sources": []},
+        source_principals={
+            source_id: _principal(
+                source_id,
+                uid=12001,
+                gid=12002,
+                token_path=tmp_path / "tokens" / f"{source_id}.token",
+            )
+        },
+    )
+    monkeypatch.setattr(runtime, "_require_root", lambda: None)
+    monkeypatch.setattr(runtime, "_validate_policy_parent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_runtime_group_id", os.getgid)
+
+    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="held catalog generation"):
+        runtime.apply_workload_source_update(
+            update,
+            maintenance=_maintenance(
+                target_kind="CORE_RUNTIME",
+                component_id="cyrene-catalyst",
+                catalog_generation=1,
+            ),
+            request_id="cyrene-register-product-source",
+            expected_policy_digest=None,
+            activity_catalog_path=tmp_path / "activity-sources.json",
+            policy_path=tmp_path / "runtime-package-sources.json",
+            token_directory=tmp_path / "tokens",
+            command=Path("/usr/bin/cyrene"),
+            runner=lambda *_args, **_kwargs: pytest.fail(
+                "a mismatched generation must fail before init-catalog"
+            ),
+        )
+
+
+def test_apply_source_update_does_not_treat_corrupt_existing_catalog_as_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_id = "cyrene-catalyst"
+    update = runtime.build_workload_source_update(
+        source_policy=_source_policy(),
+        selected_rows=[],
+        installation_records={},
+        activity_catalog={"schema_version": 1, "generation": 0, "sources": []},
+        source_principals={
+            source_id: _principal(
+                source_id,
+                uid=12001,
+                gid=12002,
+                token_path=tmp_path / "tokens" / f"{source_id}.token",
+            )
+        },
+    )
+    catalog_path = tmp_path / "activity-sources.json"
+    catalog_path.write_text("{not-json", encoding="utf-8")
+    catalog_path.chmod(0o600)
+    before = catalog_path.read_bytes()
+    monkeypatch.setattr(runtime, "_require_root", lambda: None)
+    monkeypatch.setattr(runtime, "_validate_policy_parent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_runtime_group_id", os.getgid)
+
+    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="malformed"):
+        runtime.apply_workload_source_update(
+            update,
+            maintenance=_maintenance(
+                target_kind="CORE_RUNTIME",
+                component_id="cyrene-catalyst",
+                catalog_generation=0,
+            ),
+            request_id="cyrene-register-product-source",
+            expected_policy_digest=None,
+            activity_catalog_path=catalog_path,
+            policy_path=tmp_path / "runtime-package-sources.json",
+            token_directory=tmp_path / "tokens",
+            command=Path("/usr/bin/cyrene"),
+            runner=lambda *_args, **_kwargs: pytest.fail(
+                "a corrupt existing catalog must not call init-catalog"
+            ),
+        )
+    assert catalog_path.read_bytes() == before
 
 
 def test_source_update_requires_held_aggregate_and_product_identity_before_mutation(
@@ -517,7 +611,9 @@ def test_source_update_requires_held_aggregate_and_product_identity_before_mutat
     with pytest.raises(runtime.WorkloadPackageRuntimeError, match="outside the held plan"):
         runtime.apply_workload_source_update(
             update,
-            maintenance=_maintenance(row["componentId"], _digest("wrong-artifact")),
+            maintenance=_maintenance(
+                row["componentId"], _digest("wrong-artifact"), catalog_generation=0
+            ),
             request_id="cyrene-source-update-wrong-digest",
             expected_policy_digest=None,
             activity_catalog_path=tmp_path / "activity-catalog.json",
@@ -543,7 +639,7 @@ def test_source_update_requires_held_aggregate_and_product_identity_before_mutat
     with pytest.raises(runtime.WorkloadPackageRuntimeError, match="source identity is outside"):
         runtime.apply_workload_source_update(
             product_update,
-            maintenance=_maintenance("another-component"),
+            maintenance=_maintenance("another-component", catalog_generation=0),
             request_id="cyrene-source-update-wrong-product",
             expected_policy_digest=None,
             activity_catalog_path=tmp_path / "activity-catalog.json",
@@ -560,7 +656,7 @@ def test_source_update_rejects_policy_race_before_broker_mutation(
         source_policy=_source_policy(),
         selected_rows=[],
         installation_records={},
-        activity_catalog={"schema_version": 1, "generation": 0, "sources": []},
+        activity_catalog={"schema_version": 1, "generation": 5, "sources": []},
         source_principals={
             source_id: _principal(
                 source_id,
@@ -590,7 +686,7 @@ def test_source_update_rejects_policy_race_before_broker_mutation(
     ):
         runtime.apply_workload_source_update(
             update,
-            maintenance=_maintenance("cyrene-catalyst"),
+            maintenance=_maintenance("cyrene-catalyst", catalog_generation=5),
             request_id="cyrene-source-update-raced-policy",
             expected_policy_digest=None,
             activity_catalog_path=tmp_path / "activity-catalog.json",
