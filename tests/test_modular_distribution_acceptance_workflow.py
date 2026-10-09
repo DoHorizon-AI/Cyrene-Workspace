@@ -916,7 +916,12 @@ def test_attestation_cli_bootstraps_missing_runner_from_exact_official_checksum_
         if command == ["gh", "--version"]:
             return subprocess.CompletedProcess(command, 0, "gh version 2.102.0\n", "")
         if command[0] == "dpkg-deb":
-            return subprocess.CompletedProcess(command, 0, "gh\n2.102.0\namd64\n", "")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "Package: gh\nVersion: 2.102.0\nArchitecture: amd64\n",
+                "",
+            )
         assert command[:4] == ["sudo", "-n", "apt-get", "install"]
         return subprocess.CompletedProcess(command, 0, "", "")
 
