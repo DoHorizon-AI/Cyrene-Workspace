@@ -70,6 +70,12 @@ CORE_EXECUTABLE_NAMES = frozenset(
 PROC_ROOT = Path("/proc")
 CORE_RUNTIME_ROOT = Path("/var/lib/cyrene/runtime")
 CORE_RUN_ROOT = Path("/run/cyrene")
+PCI_DEVICES_ROOT = Path("/sys/bus/pci/devices")
+PCI_DRIVERS_ROOT = Path("/sys/bus/pci/drivers")
+MODULE_ROOT = Path("/sys/module")
+DEVICE_ROOT = Path("/dev")
+PROC_DRIVER_ROOT = Path("/proc/driver")
+NVIDIA_PCI_VENDOR_ID = "0x10de"
 LINUX_SYS_ADAPTER_COMPONENT_ID = "cyrene-linux-sys-adapter"
 LINUX_SYS_ADAPTER_UNIT = "cyrene-linux-sys-adapter.service"
 LINUX_SYS_ADAPTER_SOCKET = Path("linux-sys-adapter.sock")
@@ -114,6 +120,36 @@ def _is_root() -> bool:
 
 def _journal_path(updater: Any) -> Path:
     return Path(updater.state_root) / "native-first-bootstrap" / JOURNAL_NAME
+
+
+def _private_exception_chain(error: BaseException, *, private_token: str | None) -> dict[str, Any]:
+    """Build a small token-redacted error chain for the private recovery journal.
+
+    Only exception types, stable codes, errno values, and bounded messages are stored.
+    中文：恢复日志仅保存有限错误信息，并先遮盖维护令牌。
+    """
+
+    chain: list[dict[str, Any]] = []
+    current: BaseException | None = error
+    for _depth in range(3):
+        if current is None:
+            break
+        message = " ".join(str(current).split())
+        if private_token:
+            message = message.replace(private_token, "[REDACTED]")
+        record: dict[str, Any] = {"type": type(current).__name__, "message": message[:300]}
+        error_code = getattr(current, "code", None)
+        if isinstance(error_code, (str, int)) and not isinstance(error_code, bool):
+            code_text = str(error_code)
+            if private_token:
+                code_text = code_text.replace(private_token, "[REDACTED]")
+            record["code"] = code_text[:100]
+        error_number = getattr(current, "errno", None)
+        if isinstance(error_number, int) and not isinstance(error_number, bool):
+            record["errno"] = error_number
+        chain.append(record)
+        current = current.__cause__ or current.__context__
+    return {"chain": chain}
 
 
 def _resume_first_products_post_end(
@@ -503,6 +539,51 @@ def _validate_package_runtime_group(updater: Any) -> dict[str, Any] | None:
     return group
 
 
+def _confirmed_cpu_only_host() -> bool:
+    """Prove a missing NVIDIA utility means this host has no NVIDIA device.
+
+    A readable, non-empty PCI inventory and absence of NVIDIA device, driver,
+    and pass-through indicators are all required. Any unreadable or incomplete
+    inventory remains UNKNOWN and blocks first-Core activation.
+    中文：只有完整硬件清单明确无 NVIDIA 设备时，缺少工具才按空 GPU 清单处理。
+    """
+
+    try:
+        if shutil.which("nvidia-smi") is not None:
+            return False
+
+        pci_devices = tuple(PCI_DEVICES_ROOT.iterdir())
+        if not pci_devices:
+            return False
+        for device in pci_devices:
+            vendor = (device / "vendor").read_text(encoding="ascii").strip().lower()
+            if re.fullmatch(r"0x[0-9a-f]{4}", vendor) is None:
+                return False
+            if vendor == NVIDIA_PCI_VENDOR_ID:
+                return False
+
+        device_entries = tuple(DEVICE_ROOT.iterdir())
+        if any(
+            entry.name.lower().startswith("nvidia") or entry.name == "dxg"
+            for entry in device_entries
+        ):
+            return False
+
+        proc_driver_entries = tuple(PROC_DRIVER_ROOT.iterdir())
+        if any(entry.name.lower() == "nvidia" for entry in proc_driver_entries):
+            return False
+
+        pci_driver_entries = tuple(PCI_DRIVERS_ROOT.iterdir())
+        if any(entry.name.lower() == "nvidia" for entry in pci_driver_entries):
+            return False
+        modules = tuple(MODULE_ROOT.iterdir())
+        if any(entry.name.lower() == "nvidia" for entry in modules):
+            return False
+    except (OSError, UnicodeError):
+        return False
+    return True
+
+
 def _catalog_core_component_ids(updater: Any) -> tuple[str, ...]:
     """Select C9's fixed four or C10's complete six-component first-Core cohort."""
 
@@ -889,14 +970,21 @@ def _assert_fresh(
             timeout=10,
             check=False,
         )
-    except (OSError, TimeoutError) as error:
+    except FileNotFoundError as error:
+        if error.errno != errno.ENOENT or not _confirmed_cpu_only_host():
+            raise RuntimeError(
+                "GPU resource inventory is unavailable; first-Core eligibility is UNKNOWN"
+            ) from error
+        gpu = None
+    except (OSError, TimeoutError, subprocess.TimeoutExpired) as error:
         raise RuntimeError(
             "GPU resource inventory is unavailable; first-Core eligibility is UNKNOWN"
         ) from error
-    if gpu.returncode != 0:
-        raise RuntimeError("GPU resource inventory failed; first-Core eligibility is UNKNOWN")
-    if gpu.stdout.strip():
-        raise ValueError("Existing GPU compute resources block first-Core installation")
+    if gpu is not None:
+        if gpu.returncode != 0:
+            raise RuntimeError("GPU resource inventory failed; first-Core eligibility is UNKNOWN")
+        if gpu.stdout.strip():
+            raise ValueError("Existing GPU compute resources block first-Core installation")
     if held_adapter_socket_proof is not None:
         _verify_held_linux_sys_adapter_socket(
             updater,
@@ -905,6 +993,42 @@ def _assert_fresh(
             expected=held_adapter_socket_proof,
         )
     return current_broker
+
+
+def _assert_fresh_with_recovery_record(
+    updater: Any,
+    transaction: dict[str, Any],
+    journal_path: Path,
+    *,
+    proc_root: Path,
+    planned_components: list[dict[str, Any]],
+    require_empty_kernel_state: bool,
+    expected_bootstrap_broker: dict[str, Any],
+) -> None:
+    """Keep a failed pre-install freshness proof in the existing private journal."""
+
+    try:
+        _assert_fresh(
+            updater,
+            proc_root=proc_root,
+            planned_components=planned_components,
+            require_empty_kernel_state=require_empty_kernel_state,
+            expected_bootstrap_broker=expected_bootstrap_broker,
+        )
+    except Exception as error:
+        private_error = _private_exception_chain(
+            error,
+            private_token=(
+                transaction.get("maintenanceToken")
+                if isinstance(transaction.get("maintenanceToken"), str)
+                else None
+            ),
+        )
+        transaction["preInstallFreshnessError"] = private_error
+        transaction["failure"] = private_error["chain"][0]["message"]
+        _write_private_json(updater, journal_path, transaction)
+        raise
+    transaction.pop("preInstallFreshnessError", None)
 
 
 def _health_snapshot(updater: Any, *, require_eligible: bool = True) -> dict[str, Any]:
@@ -3665,8 +3789,10 @@ def apply_fresh_workload_first_core(
     if current_progress in (
         _FRESH_WORKLOAD_CORE_EMPTY_PROGRESS | _FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS
     ):
-        _assert_fresh(
+        _assert_fresh_with_recovery_record(
             updater,
+            transaction,
+            journal_path,
             proc_root=PROC_ROOT,
             planned_components=staged_components,
             require_empty_kernel_state=_fresh_workload_core_requires_empty_kernel_state(
