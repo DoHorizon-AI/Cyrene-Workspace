@@ -121,7 +121,8 @@ jobs:
           print(locator["sha256"])
           PY
           )"
-            python packaging/fetch_component_catalog.py \
+            python scripts/retry_trust_metadata_api.py -- \
+              python packaging/fetch_component_catalog.py \
               --release-id "$release_id" \
               --output "$INPUT_ROOT/$asset" \
               --metadata-output "$INPUT_ROOT/$asset.release.json" \
@@ -164,7 +165,8 @@ jobs:
             output="$INPUT_ROOT/components/$safe_key"
             mkdir -p "$output"
             report="$output/fetch-report.json"
-            python "$PLATFORM_FETCHER" \
+            python scripts/retry_trust_metadata_api.py -- \
+              python "$PLATFORM_FETCHER" \
               --catalog "$CATALOG_PATH" \
               --component "$component" \
               --target-id "$target" \
@@ -182,7 +184,9 @@ jobs:
               digest="$(sha256sum "$artifact_path" | cut -d ' ' -f 1)"
               (
                 cd "$output"
-                gh attestation download "$artifact_path" \
+                python "$GITHUB_WORKSPACE/scripts/retry_trust_metadata_api.py" \
+                  --discard-attestation-bundle "sha256:$digest.jsonl" -- \
+                  gh attestation download "$artifact_path" \
                   --repo "$repository" --predicate-type "$PREDICATE_TYPE"
                 mv "sha256:$digest.jsonl" "$bundle"
               )
@@ -498,7 +502,10 @@ jobs:
           for subject in "${subjects[@]}"; do
             [[ -f "$subject" ]] || continue
             digest="sha256:$(sha256sum "$subject" | cut -d ' ' -f 1)"
-            gh attestation download "$subject" --repo "$GITHUB_REPOSITORY" --predicate-type "$PREDICATE_TYPE"
+            python "$GITHUB_WORKSPACE/scripts/retry_trust_metadata_api.py" \
+              --discard-attestation-bundle "$digest.jsonl" -- \
+              gh attestation download "$subject" \
+              --repo "$GITHUB_REPOSITORY" --predicate-type "$PREDICATE_TYPE"
             mv "$digest.jsonl" "$subject.attestation.jsonl"
           done
           python "$GITHUB_WORKSPACE/scripts/native_installer_release.py" verify \
