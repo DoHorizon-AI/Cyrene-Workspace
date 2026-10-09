@@ -4418,7 +4418,7 @@ class ComponentUpdater:
                 web_host = self._load_workload_web_host()
                 host_metadata["web"] = web_host.read_web_host_status(
                     expected_source_receipt=expected_source_receipt,
-                    runner=self.runner,
+                    runner=self._workload_web_host_runner,
                 )
             except (ImportError, OSError, RuntimeError, ValueError) as error:
                 host_metadata["web"] = {
@@ -6911,6 +6911,20 @@ class ComponentUpdater:
                 "WORKLOAD_WEB_HOST_UNAVAILABLE", "The workload Web host helper API is incomplete."
             )
         return module
+
+    def _workload_web_host_runner(
+        self, arguments: list[str], environment: Mapping[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        """Adapt Web Host's argv/environment callback to the updater runner contract."""
+
+        return self.runner(
+            list(arguments),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=dict(environment),
+        )
 
     def _load_workload_oci_host(self) -> Any:
         """Load the adjacent fixed Echo OCI lifecycle helper."""
@@ -10133,10 +10147,10 @@ class ComponentUpdater:
                         durable_callback=self._journal_callback(
                             transaction, transaction_path, "hostEvents"
                         ),
-                        runner=self.runner,
+                        runner=self._workload_web_host_runner,
                     )
                     transaction["webHostPriorState"] = web_host.capture_web_host_state(
-                        runner=self.runner
+                        runner=self._workload_web_host_runner
                     )
                     transaction["webHostApplied"] = False
                     _atomic_json(transaction_path, transaction)
@@ -10637,7 +10651,7 @@ class ComponentUpdater:
                             durable_callback=self._journal_callback(
                                 transaction, transaction_path, "hostEvents"
                             ),
-                            runner=self.runner,
+                            runner=self._workload_web_host_runner,
                         )
                         transaction["webHostApplied"] = True
                         _atomic_json(transaction_path, transaction)
@@ -11313,7 +11327,7 @@ class ComponentUpdater:
                 host.rollback_web_host(
                     prior_state=prior_state,
                     expected_current_digest=current_digest,
-                    runner=self.runner,
+                    runner=self._workload_web_host_runner,
                 )
             except RuntimeError as error:
                 healthy = False
@@ -12715,7 +12729,7 @@ class ComponentUpdater:
                 target_kind="CORE_RUNTIME",
                 requires_restart=True,
             ):
-                prior_state = web_host.capture_web_host_state(runner=self.runner)
+                prior_state = web_host.capture_web_host_state(runner=self._workload_web_host_runner)
                 transaction["webHostPriorState"] = prior_state
                 _atomic_json(transaction_path, transaction)
                 web_host.remove_web_host(
@@ -12723,7 +12737,7 @@ class ComponentUpdater:
                     durable_callback=self._journal_callback(
                         transaction, transaction_path, "hostEvents"
                     ),
-                    runner=self.runner,
+                    runner=self._workload_web_host_runner,
                 )
                 current = self._capture_workload_web_identity(component_id)
                 pointer_identity = expected_identity.get("pointerIdentity")
@@ -12758,7 +12772,9 @@ class ComponentUpdater:
                 "channel": stored["channel"],
                 "components": [dict(row)],
                 "resolution": resolution,
-                "hostMetadata": {"web": web_host.read_web_host_status(runner=self.runner)},
+                "hostMetadata": {
+                    "web": web_host.read_web_host_status(runner=self._workload_web_host_runner)
+                },
             }
 
         transaction["result"] = result
