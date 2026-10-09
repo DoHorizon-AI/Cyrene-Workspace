@@ -5984,6 +5984,8 @@ class ComponentUpdater:
             source_ref=candidate.manifest["source"]["ref"],
             source_commit=candidate.manifest["source"]["commit"],
             subject_name=subject_name,
+            release_assets=candidate.release_assets,
+            release_tag=candidate.release_tag,
         )
         return payload, "sha256:" + hashlib.sha256(proof).hexdigest()
 
@@ -16580,6 +16582,8 @@ class ComponentUpdater:
                 source_ref=index["source"]["ref"],
                 source_commit=index["source"]["commit"],
                 subject_name=index["provenance"]["attestation"]["subjectName"],
+                release_assets=release_assets,
+                release_tag=release_tag,
             )
             result = (index, index_uri, release_assets, release_tag)
             self._index_cache[key] = result
@@ -16671,11 +16675,20 @@ class ComponentUpdater:
         release_tag: str,
         expected_digest: str | None = None,
         expected_size: int | None = None,
+        max_bytes: int = MAX_RELEASE_ASSET_BYTES,
     ) -> bytes:
-        """Fetch an asset only when API and signed-manifest identities agree."""
+        """Fetch an asset only when API and signed-manifest identities agree.
+
+        `max_bytes` adds a stricter per-asset ceiling for detached proof files.
+        """
         asset = self._release_asset_metadata(
             assets, uri, repository=repository, release_tag=release_tag
         )
+        if asset["size"] > max_bytes:
+            raise UpdateError(
+                "RELEASE_ASSET_TOO_LARGE",
+                "Selected release asset exceeds the allowed download size.",
+            )
         if (expected_digest is not None and asset["digest"] != expected_digest) or (
             expected_size is not None and asset["size"] != expected_size
         ):
@@ -16683,7 +16696,7 @@ class ComponentUpdater:
                 "RELEASE_ASSET_IDENTITY_MISMATCH",
                 "Release asset metadata differs from its trusted signed tuple.",
             )
-        payload = self._get_bytes(uri)
+        payload = self._get_bytes(uri, max_bytes=max_bytes)
         actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
         if len(payload) != asset["size"] or actual_digest != asset["digest"]:
             raise UpdateError(
@@ -16702,8 +16715,14 @@ class ComponentUpdater:
         source_ref: str,
         source_commit: str,
         subject_name: str,
+        release_assets: tuple[dict[str, Any], ...] | None = None,
+        release_tag: str | None = None,
     ) -> bytes:
-        """Return a signed GitHub API bundle matching the exact pinned subject."""
+        """Return one proof bundle for the exact pinned subject and source.
+
+        A listed detached sidecar is authoritative: malformed or mismatched sidecars fail
+        closed. The GitHub attestations API is used only when the selected release omits it.
+        """
         if (
             re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
             or not _valid_digest(digest)
@@ -16711,12 +16730,51 @@ class ComponentUpdater:
             or PurePosixPath(subject_name).name != subject_name
         ):
             raise UpdateError("INVALID_ATTESTATION", "Attestation lookup identity is invalid.")
+        if (release_assets is None) != (release_tag is None):
+            raise UpdateError(
+                "INVALID_ATTESTATION", "Release sidecar lookup is missing its release identity."
+            )
+
+        sidecar_asset: dict[str, Any] | None = None
+        sidecar_uri: str | None = None
+        if release_assets is not None and release_tag is not None:
+            sidecar_name = f"{subject_name}.attestation.jsonl"
+            matching_assets = [
+                item
+                for item in release_assets
+                if isinstance(item, dict) and item.get("name") == sidecar_name
+            ]
+            if len(matching_assets) > 1:
+                raise UpdateError(
+                    "RELEASE_ASSET_AMBIGUOUS",
+                    "Selected release has duplicate attestation sidecar assets.",
+                )
+            if matching_assets:
+                sidecar_asset = matching_assets[0]
+                sidecar_uri = sidecar_asset.get("browser_download_url")
+                # Validate the selected asset against this exact immutable release before
+                # consulting any previously verified bundle cache.
+                sidecar_asset = self._release_asset_metadata(
+                    release_assets,
+                    sidecar_uri,
+                    repository=repository,
+                    release_tag=release_tag,
+                )
+                if sidecar_asset["name"] != sidecar_name:
+                    raise UpdateError(
+                        "INVALID_ATTESTATION", "Release sidecar name does not match its subject."
+                    )
+                if sidecar_asset["size"] > MAX_ATTESTATION_RESPONSE_BYTES:
+                    raise UpdateError(
+                        "INVALID_ATTESTATION", "Attestation sidecar exceeds the size limit."
+                    )
         endpoint = (
             f"https://api.github.com/repos/{repository}/attestations/"
             f"{urllib.parse.quote(digest, safe=':')}?per_page=100"
         )
+        # Sidecar proof identity must not reuse an older API proof when a sidecar exists.
         cache_identity = {
-            "schemaVersion": 1,
+            "schemaVersion": 2 if sidecar_asset is not None else 1,
             "repository": repository,
             "subjectName": subject_name,
             "subjectDigest": digest,
@@ -16724,6 +16782,15 @@ class ComponentUpdater:
             "sourceRef": source_ref,
             "sourceCommit": source_commit,
         }
+        if sidecar_asset is not None:
+            cache_identity["proofSource"] = {
+                "kind": "release-sidecar",
+                "releaseTag": release_tag,
+                "assetName": sidecar_asset["name"],
+                "assetUri": sidecar_uri,
+                "assetDigest": sidecar_asset["digest"],
+                "assetSize": sidecar_asset["size"],
+            }
         cache_key = hashlib.sha256(
             json.dumps(cache_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -16748,6 +16815,48 @@ class ComponentUpdater:
                 subject_name=subject_name,
             )
             return cached_bundle
+
+        if sidecar_asset is not None and sidecar_uri is not None and release_tag is not None:
+            sidecar_bytes = self._get_release_asset_bytes(
+                release_assets or (),
+                sidecar_uri,
+                repository=repository,
+                release_tag=release_tag,
+                expected_digest=sidecar_asset["digest"],
+                expected_size=sidecar_asset["size"],
+                max_bytes=MAX_ATTESTATION_RESPONSE_BYTES,
+            )
+            bundles = self._parse_attestation_jsonl(sidecar_bytes)
+            verification_errors: list[UpdateError] = []
+            for bundle_bytes, bundle in bundles:
+                if not self._bundle_declares_subject(bundle, subject_name, digest):
+                    continue
+                try:
+                    self._verify_cached_attestation_bundle(
+                        bundle_bytes,
+                        payload=payload,
+                        repository=repository,
+                        digest=digest,
+                        workflow=workflow,
+                        source_ref=source_ref,
+                        source_commit=source_commit,
+                        subject_name=subject_name,
+                    )
+                except UpdateError as error:
+                    if error.code in {"ATTESTATION_INVALID", "ATTESTATION_SUBJECT_MISMATCH"}:
+                        verification_errors.append(error)
+                        continue
+                    raise
+                _atomic_private_bytes(cache_path, bundle_bytes)
+                return bundle_bytes
+            if verification_errors:
+                raise UpdateError(
+                    "ATTESTATION_INVALID",
+                    "No detached bundle matches the pinned workflow, source, and subject.",
+                ) from verification_errors[-1]
+            raise UpdateError(
+                "ATTESTATION_INVALID", "Detached sidecar has no bundle for the pinned subject."
+            )
 
         response_bytes = self._get_bytes(endpoint, max_bytes=MAX_ATTESTATION_RESPONSE_BYTES)
         try:
@@ -16833,6 +16942,45 @@ class ComponentUpdater:
         raise UpdateError(
             "ATTESTATION_INVALID", "No acceptable GitHub attestation bundle was returned."
         )
+
+    @staticmethod
+    def _parse_attestation_jsonl(payload: bytes) -> tuple[tuple[bytes, dict[str, Any]], ...]:
+        """Parse every bundle in one bounded detached GitHub attestation sidecar."""
+        if not payload or len(payload) > MAX_ATTESTATION_RESPONSE_BYTES:
+            raise UpdateError("INVALID_ATTESTATION", "Attestation sidecar size is invalid.")
+        lines = payload.split(b"\n")
+        if lines and lines[-1] == b"":  # JSONL producers terminate the last record with LF.
+            lines.pop()
+        if not lines:
+            raise UpdateError("INVALID_ATTESTATION", "Attestation sidecar contains no bundles.")
+
+        parsed: list[tuple[bytes, dict[str, Any]]] = []
+        for raw_line in lines:
+            if raw_line.endswith(b"\r"):
+                raw_line = raw_line[:-1]
+            if not raw_line.strip() or len(raw_line) > MAX_ATTESTATION_BUNDLE_BYTES:
+                raise UpdateError("INVALID_ATTESTATION", "Attestation sidecar line is invalid.")
+            try:
+                bundle = json.loads(raw_line.decode("utf-8"), object_pairs_hook=_unique_json_object)
+            except (UnicodeDecodeError, json.JSONDecodeError, UpdateError) as error:
+                raise UpdateError(
+                    "INVALID_ATTESTATION", "Attestation sidecar contains invalid JSONL."
+                ) from error
+            if (
+                not isinstance(bundle, dict)
+                or set(bundle) != {"mediaType", "verificationMaterial", "dsseEnvelope"}
+                or not isinstance(bundle.get("mediaType"), str)
+                or not isinstance(bundle.get("verificationMaterial"), dict)
+                or not isinstance(bundle.get("dsseEnvelope"), dict)
+            ):
+                raise UpdateError(
+                    "INVALID_ATTESTATION", "Attestation sidecar bundle shape is invalid."
+                )
+            # Validate the envelope and in-toto statement even for bundles for other
+            # subjects; a malformed neighboring record invalidates the whole sidecar.
+            ComponentUpdater._bundle_declares_subject(bundle, "", "sha256:" + "0" * 64)
+            parsed.append((raw_line, bundle))
+        return tuple(parsed)
 
     def _verify_cached_attestation_bundle(
         self,
@@ -17147,6 +17295,8 @@ class ComponentUpdater:
                 source_ref=manifest["source"]["ref"],
                 source_commit=manifest["source"]["commit"],
                 subject_name=manifest_name,
+                release_assets=release_assets,
+                release_tag=release_tag,
             )
         artifact = manifest["artifact"]
         artifact_digest = (
@@ -19046,6 +19196,8 @@ class ComponentUpdater:
             workflow=self.publishers[candidate.component["publisher"]]["workflow"],
             source_ref=manifest["source"]["ref"],
             source_commit=manifest["source"]["commit"],
+            release_assets=candidate.release_assets,
+            release_tag=candidate.release_tag,
         )
         payload_root = component_root / "payload"
         if artifact["kind"] == "native-binary":

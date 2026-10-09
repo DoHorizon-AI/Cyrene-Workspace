@@ -219,6 +219,206 @@ def test_attestation_cache_reuses_raw_bundle_and_reverifies_each_use(tmp_path: P
     assert len(verifier_calls) == 2
 
 
+def test_release_sidecar_selects_exact_source_and_cache_reverifies_bundle(
+    tmp_path: Path,
+) -> None:
+    payload = b"immutable signed subject bytes"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    repository = "DoHorizon-AI/Cyrene-Client"
+    workflow = f"{repository}/.github/workflows/workspace-web-release.yml"
+    old_commit = "297357f08377aee9819d5f14707ec1f8fac3aa88"
+    selected_commit = "b3c3f964540e3aa761612371891e3bb6a3f7ad59"
+    release_tag = f"preview-cyrene-client-workspace-web-{selected_commit}"
+    subject_name = f"cyrene-client-workspace-web-{selected_commit}.tar.gz"
+    sidecar_name = f"{subject_name}.attestation.jsonl"
+    sidecar_uri = f"https://github.com/{repository}/releases/download/{release_tag}/{sidecar_name}"
+    old_bundle = _bundle_for(subject_name, digest)
+    old_bundle["verificationMaterial"] = {"fixtureSourceCommit": old_commit}
+    selected_bundle = _bundle_for(subject_name, digest)
+    selected_bundle["verificationMaterial"] = {"fixtureSourceCommit": selected_commit}
+    old_line = json.dumps(old_bundle, separators=(",", ":")).encode()
+    selected_line = json.dumps(selected_bundle, separators=(",", ":")).encode()
+    sidecar_bytes = old_line + b"\n" + selected_line + b"\n"
+    sidecar_digest = "sha256:" + hashlib.sha256(sidecar_bytes).hexdigest()
+    release_assets = (
+        {
+            "name": sidecar_name,
+            "browser_download_url": sidecar_uri,
+            "size": len(sidecar_bytes),
+            "digest": sidecar_digest,
+        },
+    )
+    downloaded: list[str] = []
+    api_calls: list[str] = []
+    verifier_bundles: list[str] = []
+
+    def runner(arguments, **_kwargs):
+        bundle_path = Path(arguments[arguments.index("--bundle") + 1])
+        bundle = json.loads(bundle_path.read_bytes())
+        signed_source = bundle["verificationMaterial"]["fixtureSourceCommit"]
+        verifier_bundles.append(signed_source)
+        if signed_source != selected_commit:
+            return SimpleNamespace(returncode=1, stdout="", stderr="wrong source commit")
+        assert arguments[arguments.index("--repo") + 1] == repository
+        assert arguments[arguments.index("--signer-workflow") + 1] == workflow
+        assert arguments[arguments.index("--source-ref") + 1] == "refs/heads/develop"
+        assert arguments[arguments.index("--source-digest") + 1] == selected_commit
+        return SimpleNamespace(
+            returncode=0, stdout=_verification_output(subject_name, digest), stderr=""
+        )
+
+    def download(uri: str, **_kwargs) -> bytes:
+        downloaded.append(uri)
+        assert uri == sidecar_uri
+        return sidecar_bytes
+
+    first = _updater(tmp_path, {"attestations": []}, runner, api_calls=api_calls)
+    first._get_bytes = download
+    first_result = first._release_attestation_bundle(
+        payload=payload,
+        repository=repository,
+        digest=digest,
+        workflow=workflow,
+        source_ref="refs/heads/develop",
+        source_commit=selected_commit,
+        subject_name=subject_name,
+        release_assets=release_assets,
+        release_tag=release_tag,
+    )
+    assert first_result == selected_line
+    cached_bundles = list((tmp_path / "state" / "attestations").glob("*.bundle"))
+    assert len(cached_bundles) == 1
+    assert cached_bundles[0].read_bytes() == selected_line
+    assert verifier_bundles == [old_commit, selected_commit]
+
+    second = _updater(tmp_path, {"attestations": []}, runner, api_calls=api_calls)
+    second._get_bytes = lambda *_args, **_kwargs: pytest.fail(
+        "verified sidecar cache should avoid another download"
+    )
+    second_result = second._release_attestation_bundle(
+        payload=payload,
+        repository=repository,
+        digest=digest,
+        workflow=workflow,
+        source_ref="refs/heads/develop",
+        source_commit=selected_commit,
+        subject_name=subject_name,
+        release_assets=release_assets,
+        release_tag=release_tag,
+    )
+    assert second_result == selected_line
+    assert downloaded == [sidecar_uri]
+    assert api_calls == []
+    assert verifier_bundles == [old_commit, selected_commit, selected_commit]
+
+
+@pytest.mark.parametrize(
+    "failure", ["malformed-line", "wrong-size", "wrong-digest", "no-subject", "wrong-context"]
+)
+def test_present_invalid_release_sidecar_fails_closed_without_api_fallback(
+    tmp_path: Path, failure: str
+) -> None:
+    payload = b"immutable signed subject bytes"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    release_tag = "preview-component-" + "c" * 40
+    sidecar_name = "subject.tar.gz.attestation.jsonl"
+    sidecar_uri = (
+        "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/"
+        f"{release_tag}/{sidecar_name}"
+    )
+    subject_name = "other.tar.gz" if failure == "no-subject" else "subject.tar.gz"
+    bundle = _bundle_for(subject_name, digest)
+    if failure == "wrong-context":
+        bundle["verificationMaterial"] = {"fixtureSourceCommit": "a" * 40}
+    line = json.dumps(bundle, separators=(",", ":")).encode()
+    sidecar_bytes = line + (b"\nnot-json\n" if failure == "malformed-line" else b"\n")
+    metadata_digest = "sha256:" + hashlib.sha256(sidecar_bytes).hexdigest()
+    metadata_size = len(sidecar_bytes)
+    if failure == "wrong-size":
+        metadata_size += 1
+    elif failure == "wrong-digest":
+        metadata_digest = "sha256:" + "0" * 64
+    release_assets = (
+        {
+            "name": sidecar_name,
+            "browser_download_url": sidecar_uri,
+            "size": metadata_size,
+            "digest": metadata_digest,
+        },
+    )
+    api_calls: list[str] = []
+    downloads: list[str] = []
+
+    def download(uri: str, **_kwargs) -> bytes:
+        downloads.append(uri)
+        assert uri == sidecar_uri
+        return sidecar_bytes
+
+    updater = _updater(
+        tmp_path,
+        {"attestations": [_bundle_record(_bundle_for("subject.tar.gz", digest))]},
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1 if failure == "wrong-context" else 0,
+            stdout=""
+            if failure == "wrong-context"
+            else _verification_output("subject.tar.gz", digest),
+            stderr="wrong source context" if failure == "wrong-context" else "",
+        ),
+        api_calls=api_calls,
+    )
+    updater._get_bytes = download
+    with pytest.raises(updates.UpdateError) as error:
+        updater._release_attestation_bundle(
+            payload=payload,
+            repository="DoHorizon-AI/Cyrene-Platform",
+            digest=digest,
+            workflow="owner/repo/.github/workflows/release.yml",
+            source_ref="refs/heads/develop",
+            source_commit="b" * 40,
+            subject_name="subject.tar.gz",
+            release_assets=release_assets,
+            release_tag=release_tag,
+        )
+
+    assert error.value.code == (
+        "INVALID_ATTESTATION"
+        if failure == "malformed-line"
+        else "ATTESTATION_INVALID"
+        if failure in {"no-subject", "wrong-context"}
+        else "RELEASE_ASSET_DIGEST_MISMATCH"
+    )
+    assert downloads == [sidecar_uri]
+    assert api_calls == []
+    assert not list((tmp_path / "state" / "attestations").glob("*.bundle"))
+
+
+def test_missing_release_sidecar_uses_existing_attestation_api(tmp_path: Path) -> None:
+    payload = b"immutable signed subject bytes"
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    bundle = _bundle_for("subject.tar.gz", digest)
+    api_calls: list[str] = []
+    updater = _updater(
+        tmp_path,
+        {"attestations": [_bundle_record(bundle)]},
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0, stdout=_verification_output("subject.tar.gz", digest), stderr=""
+        ),
+        api_calls=api_calls,
+    )
+    updater._release_attestation_bundle(
+        payload=payload,
+        repository="DoHorizon-AI/Cyrene-Platform",
+        digest=digest,
+        workflow="owner/repo/.github/workflows/release.yml",
+        source_ref="refs/heads/develop",
+        source_commit="a" * 40,
+        subject_name="subject.tar.gz",
+        release_assets=(),
+        release_tag="preview-component-" + "c" * 40,
+    )
+    assert len(api_calls) == 1
+
+
 def test_attestation_cache_key_separates_source_context_and_does_not_cache_failure(
     tmp_path: Path,
 ) -> None:

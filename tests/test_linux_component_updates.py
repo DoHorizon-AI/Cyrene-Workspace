@@ -572,9 +572,11 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
     }
     release_lists: dict[str, bytes] = {}
     index_assets: dict[str, bytes] = {}
+    sidecar_assets: dict[str, bytes] = {}
     attestation_subjects: dict[tuple[str, str], dict[str, str]] = {}
     publishers: dict[str, dict[str, object]] = {}
     component_contexts: dict[str, tuple[str, str, str, str]] = {}
+    releases_by_repository: dict[str, dict[str, object]] = {}
 
     def target_for(component_id: str) -> tuple[str, dict[str, str]]:
         runtime = {
@@ -596,6 +598,44 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
             "runtime": runtime,
         }
 
+    def sidecar_bundle(subject_name: str, digest: str) -> bytes:
+        statement = {
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [
+                {"name": subject_name, "digest": {"sha256": digest.removeprefix("sha256:")}}
+            ],
+        }
+        encoded = base64.b64encode(json.dumps(statement, separators=(",", ":")).encode()).decode()
+        bundle = {
+            "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.3",
+            "verificationMaterial": {},
+            "dsseEnvelope": {
+                "payloadType": "application/vnd.in-toto+json",
+                "payload": encoded,
+                "signatures": [],
+            },
+        }
+        return json.dumps(bundle, separators=(",", ":")).encode() + b"\n"
+
+    def add_sidecar(
+        release: dict[str, object], repository: str, subject_name: str, digest: str
+    ) -> None:
+        release_tag = str(release["tag_name"])
+        name = f"{subject_name}.attestation.jsonl"
+        uri = f"https://github.com/{repository}/releases/download/{release_tag}/{name}"
+        payload = sidecar_bundle(subject_name, digest)
+        release_assets = release["assets"]
+        assert isinstance(release_assets, list)
+        release_assets.append(
+            {
+                "name": name,
+                "browser_download_url": uri,
+                "size": len(payload),
+                "digest": "sha256:" + updates.hashlib.sha256(payload).hexdigest(),
+            }
+        )
+        sidecar_assets[uri] = payload
+
     for index, (repository, component_ids) in enumerate(repo_components.items()):
         workflow = f"{repository}/.github/workflows/release.yml"
         commit = "abcdef0123456789"[index] * 40
@@ -615,6 +655,7 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
         list_uri = f"https://api.github.com/repos/{repository}/releases?per_page=100"
         release_lists[list_uri] = json.dumps([release], separators=(",", ":")).encode()
         index_assets[index_uri] = index_bytes
+        releases_by_repository[repository] = release
         index_digest = "sha256:" + updates.hashlib.sha256(index_bytes).hexdigest()
         attestation_subjects[(repository, index_digest)] = {
             "subjectName": "component-release-index-v1.json",
@@ -622,6 +663,8 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
             "sourceRef": "refs/heads/develop",
             "sourceCommit": commit,
         }
+        if repository != "DoHorizon-AI/Cyrene-Platform":
+            add_sidecar(release, repository, "component-release-index-v1.json", index_digest)
         publishers[repository] = {
             "repository": repository,
             "workflow": workflow,
@@ -632,7 +675,47 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
             },
         }
 
+    for repository, component_ids in repo_components.items():
+        if repository == "DoHorizon-AI/Cyrene-Platform":
+            continue  # The Platform fixture models publishers without detached sidecars.
+        release = releases_by_repository[repository]
+        for component_id in component_ids:
+            manifest_name = f"{component_id}-manifest-v2.json"
+            manifest_bytes = f"manifest:{component_id}".encode()
+            manifest_digest = "sha256:" + updates.hashlib.sha256(manifest_bytes).hexdigest()
+            add_sidecar(release, repository, manifest_name, manifest_digest)
+
+            payload_name = f"{component_id}-payload.tar.gz"
+            payload_bytes = f"payload:{component_id}".encode()
+            payload_digest = "sha256:" + updates.hashlib.sha256(payload_bytes).hexdigest()
+            add_sidecar(release, repository, payload_name, payload_digest)
+
+            if repository == "DoHorizon-AI/Cyrene-Plugins-Official":
+                for reference_name in (
+                    "descriptor.json",
+                    "requirements.lock",
+                    "release.json",
+                    "sbom.json",
+                ):
+                    subject_name = f"{component_id}-{reference_name}"
+                    subject_digest = (
+                        "sha256:"
+                        + updates.hashlib.sha256(
+                            f"{reference_name}:{component_id}".encode()
+                        ).hexdigest()
+                    )
+                    add_sidecar(release, repository, subject_name, subject_digest)
+        if repository == "DoHorizon-AI/Cyrene-Plugins-Official":
+            wheel_name = "cyrene_plugin_runtime-0.2.0-py3-none-any.whl"
+            wheel_digest = (
+                "sha256:" + updates.hashlib.sha256(b"shared-attested-preparer-wheel").hexdigest()
+            )
+            add_sidecar(release, repository, wheel_name, wheel_digest)
+        list_uri = f"https://api.github.com/repos/{repository}/releases?per_page=100"
+        release_lists[list_uri] = json.dumps([release], separators=(",", ":")).encode()
+
     api_requests: list[tuple[str, str]] = []
+    sidecar_downloads: list[tuple[str, str]] = []
     verifier_calls: list[list[str]] = []
     current_phase = ""
 
@@ -667,6 +750,9 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
             return release_lists[uri]
         if uri in index_assets:
             return index_assets[uri]
+        if uri in sidecar_assets:
+            sidecar_downloads.append((current_phase, uri))
+            return sidecar_assets[uri]
         parts = urllib.parse.urlsplit(uri)
         if parts.hostname == "api.github.com" and "/attestations/" in parts.path:
             api_requests.append((current_phase, "attestation"))
@@ -691,6 +777,7 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
 
     all_component_ids = [component_id for ids in repo_components.values() for component_id in ids]
     plugin_ids = repo_components["DoHorizon-AI/Cyrene-Plugins-Official"]
+    release_contexts: dict[str, tuple[tuple[dict[str, object], ...], str]] = {}
 
     def verify_reference(
         updater: updates.ComponentUpdater,
@@ -706,6 +793,7 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
             "sourceRef": "refs/heads/develop",
             "sourceCommit": commit,
         }
+        release_assets, release_tag = release_contexts[component_id]
         updater._release_attestation_bundle(
             payload=payload,
             repository=repository,
@@ -714,6 +802,8 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
             source_ref="refs/heads/develop",
             source_commit=commit,
             subject_name=subject_name,
+            release_assets=release_assets,
+            release_tag=release_tag,
         )
 
     for phase in ("check", "stage", "apply"):
@@ -731,12 +821,13 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
             publisher = publishers[repository]
             for component_id in component_ids:
                 target_id, target = target_for(component_id)
-                updater._channel_releases(
+                release_context = updater._channel_releases(
                     publisher,
                     "preview",
                     {"componentId": component_id},
                     {"id": target_id, "target": target},
                 )
+                release_contexts[component_id] = (release_context[2], release_context[3])
         for component_id in all_component_ids:
             verify_reference(
                 updater,
@@ -772,10 +863,9 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
                 b"shared-attested-preparer-wheel",
             )
 
-    # Each operation freshly lists four publisher releases. Check fetches the four
-    # index and ten manifest bundles. Stage reuses those immutable proofs and fetches
-    # ten payload, sixteen plugin metadata, and one shared preparer-wheel bundle.
-    # Apply freshly lists releases again and re-verifies cached proofs without REST.
+    # Each operation freshly lists four publisher releases. First-party sidecars cover
+    # Client, Plugins, and Catalyst proofs; Platform deliberately falls back to the
+    # attestation API. Apply re-verifies cached proofs without downloading them again.
     request_counts = {
         phase: {
             endpoint: sum(
@@ -787,13 +877,18 @@ def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
         for phase in ("check", "stage", "apply")
     }
     assert request_counts == {
-        "check": {"release-list": 4, "attestation": 14},
-        "stage": {"release-list": 4, "attestation": 27},
+        "check": {"release-list": 4, "attestation": 4},
+        "stage": {"release-list": 4, "attestation": 3},
         "apply": {"release-list": 4, "attestation": 0},
     }
-    assert len(api_requests) == 53
+    sidecar_counts = {
+        phase: sum(request_phase == phase for request_phase, _uri in sidecar_downloads)
+        for phase in ("check", "stage", "apply")
+    }
+    assert sidecar_counts == {"check": 10, "stage": 24, "apply": 0}
+    assert len(api_requests) == 19
     assert sum(counts["release-list"] for counts in request_counts.values()) == 12
-    assert sum(counts["attestation"] for counts in request_counts.values()) == 41
+    assert sum(counts["attestation"] for counts in request_counts.values()) == 7
     assert len(verifier_calls) == 87
     assert len(api_requests) < 60
 
