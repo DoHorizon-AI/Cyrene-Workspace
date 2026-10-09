@@ -15,7 +15,11 @@ import json
 import os
 import shutil
 import stat
+import sys
 import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -26,11 +30,281 @@ DEFAULT_BROKER_EXECUTABLE = Path("/usr/bin/cyrene-runtime-maintenance")
 DEFAULT_PROC_ROOT = Path("/proc")
 RUNTIME_SYSTEMD_UNIT_DIRECTORY = Path("/run/systemd/system")
 COMPILED_CATALOG_DIGEST = "sha256:79866ed32c4393e5bbbd3e36144ae080f316e9bf2695a0768bdbbfa98bf76247"
+BUNDLED_V1_CATALOG_PATH = Path("/usr/share/cyrene/component-catalog-v1.json")
+COMPILED_V1_CATALOG_GENERATION = 13
 _DELETED_EXE_SUFFIX = " (deleted)"
+
+
+class _UpdateLockLease:
+    """Opaque proof that this thread owns one updater transaction lock."""
+
+    __slots__ = ("_thread_id", "_updater")
+
+    def __init__(self, updater: Any, thread_id: int) -> None:
+        self._updater = updater
+        self._thread_id = thread_id
+
+
+class _HeldUpdateLock:
+    """Track same-thread nesting without opening a second flock descriptor."""
+
+    __slots__ = ("depth", "lease")
+
+    def __init__(self, lease: _UpdateLockLease) -> None:
+        self.lease = lease
+        self.depth = 1
+
+
+_update_lock_context = threading.local()
+
+
+@contextmanager
+def exclusive_update_lock(updater: Any) -> Iterator[_UpdateLockLease]:
+    """Take the official updater lock, reusing its lease for same-thread nesting.
+
+    The OS-level updater lock remains the sole cross-process authority. The
+    thread-local lease only prevents a trusted nested bootstrap from reopening
+    the same lock file through another descriptor, which would self-deadlock.
+    中文：复用官方更新锁，仅避免同线程内层重复打开 flock 文件。
+    """
+
+    contexts = getattr(_update_lock_context, "held", None)
+    if contexts is None:
+        contexts = {}
+        _update_lock_context.held = contexts
+    key = id(updater)
+    held = contexts.get(key)
+    if held is not None and held.lease._updater is updater:
+        held.depth += 1
+        try:
+            yield held.lease
+        finally:
+            held.depth -= 1
+        return
+
+    with updater._exclusive_update_lock():
+        lease = _UpdateLockLease(updater, threading.get_ident())
+        held = _HeldUpdateLock(lease)
+        contexts[key] = held
+        try:
+            yield lease
+        finally:
+            if contexts.get(key) is held:
+                del contexts[key]
+
+
+def _require_active_update_lock_lease(updater: Any, lease: Any) -> None:
+    """Accept only the active lock lease for this updater and current thread."""
+
+    contexts = getattr(_update_lock_context, "held", {})
+    held = contexts.get(id(updater))
+    if (
+        not isinstance(lease, _UpdateLockLease)
+        or lease._updater is not updater
+        or lease._thread_id != threading.get_ident()
+        or held is None
+        or held.lease is not lease
+    ):
+        raise PermissionError("First broker bootstrap requires its active updater lock lease")
 
 
 def _sha256(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def _catalog_row(catalog: dict[str, Any], collection: str, key: str, value: str) -> dict[str, Any]:
+    rows = catalog.get(collection)
+    if not isinstance(rows, list):
+        raise TypeError(f"Trusted catalog {collection} inventory is malformed")
+    matches = [row for row in rows if isinstance(row, dict) and row.get(key) == value]
+    if len(matches) != 1:
+        raise ValueError(f"Trusted catalog has no unique {collection} identity for {value}")
+    return matches[0]
+
+
+def _revalidate_installed_bootstrap_binding(updater: Any) -> dict[str, Any]:
+    """Reload the official installed binding and require it to match updater state."""
+
+    loader = getattr(updater, "_load_installed_bootstrap_catalog_binding", None)
+    if not callable(loader):
+        raise TypeError("The installed bootstrap catalog binding verifier is unavailable")
+    try:
+        binding = loader()
+    except Exception as error:
+        raise ValueError(
+            "The installed bootstrap catalog binding could not be revalidated"
+        ) from error
+    if not isinstance(binding, dict) or binding != getattr(
+        updater, "bootstrap_catalog_binding", None
+    ):
+        raise ValueError("The installed bootstrap catalog binding differs from updater state")
+    if set(binding) != {"schemaVersion", "catalog"} or binding.get("schemaVersion") != 1:
+        raise ValueError("The installed bootstrap catalog binding is not a signed package binding")
+    return binding
+
+
+def _read_bundled_v1_baseline() -> bytes:
+    """Read the fixed installed V1 baseline through the binding helper's root-safe reader."""
+
+    helper = sys.modules.get("_cyrene_bootstrap_catalog_binding")
+    expected_helper_path = Path(__file__).resolve().with_name("bootstrap_catalog_binding.py")
+    try:
+        helper_path = Path(getattr(helper, "__file__", "")).resolve(strict=True)
+    except OSError as error:
+        raise ValueError("The installed bootstrap catalog verifier is not loaded") from error
+    if helper_path != expected_helper_path.resolve(strict=True):
+        raise ValueError("The loaded bootstrap catalog verifier is not the installed helper")
+    reader = getattr(helper, "_read_regular_file", None)
+    if not callable(reader):
+        raise TypeError("The installed bootstrap catalog verifier has no root-safe reader")
+    try:
+        helper_bytes = reader(
+            expected_helper_path,
+            "installed bootstrap catalog verifier source",
+            require_root=True,
+        )
+        if not isinstance(helper_bytes, bytes) or not helper_bytes:
+            raise ValueError("The installed bootstrap catalog verifier source is empty")
+        return reader(
+            BUNDLED_V1_CATALOG_PATH,
+            "frozen generation-13 V1 baseline catalog",
+            require_root=True,
+        )
+    except Exception as error:
+        raise ValueError("The frozen V1 baseline catalog could not be read safely") from error
+
+
+def _require_active_v2_catalog_context(updater: Any, active_catalog_digest: str) -> None:
+    """Prove a V2 plan and the independently pinned V1 first-Broker authority."""
+
+    if (
+        not isinstance(active_catalog_digest, str)
+        or len(active_catalog_digest) != 71
+        or not active_catalog_digest.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in active_catalog_digest[7:])
+        or active_catalog_digest != getattr(updater, "catalog_digest", None)
+        or getattr(updater, "bootstrap_catalog_authorized", None) is not True
+    ):
+        raise ValueError("The selected V2 catalog is not bound to the updater's validated identity")
+
+    bootstrap_bytes = getattr(updater, "bootstrap_catalog_bytes", None)
+    bootstrap_digest = getattr(updater, "bootstrap_catalog_digest", None)
+    if not isinstance(bootstrap_bytes, bytes) or _sha256(bootstrap_bytes) != bootstrap_digest:
+        raise ValueError("Bootstrap catalog bytes differ from their selected digest")
+    bootstrap = _parse_json(bootstrap_bytes, "Selected bootstrap catalog")
+    if not isinstance(bootstrap, dict):
+        raise TypeError("Selected bootstrap catalog is not an object")
+
+    if bootstrap.get("schemaVersion") == 1:
+        if (
+            bootstrap_digest != COMPILED_CATALOG_DIGEST
+            or bootstrap.get("generation") != COMPILED_V1_CATALOG_GENERATION
+        ):
+            raise ValueError("The V1 bootstrap catalog differs from the compiled baseline")
+        baseline_bytes = bootstrap_bytes
+        if getattr(updater, "bootstrap_catalog_binding", None) is not None:
+            binding = _revalidate_installed_bootstrap_binding(updater)
+            bound_catalog = binding.get("catalog")
+            if (
+                not isinstance(bound_catalog, dict)
+                or bound_catalog.get("sha256") != COMPILED_CATALOG_DIGEST.removeprefix("sha256:")
+                or bound_catalog.get("generation") != COMPILED_V1_CATALOG_GENERATION
+                or bound_catalog.get("assetName") != "component-catalog-v1.json"
+            ):
+                raise ValueError("The installed bootstrap binding does not select frozen V1")
+    elif bootstrap.get("schemaVersion") == 2:
+        binding = _revalidate_installed_bootstrap_binding(updater)
+        bound_catalog = binding.get("catalog")
+        if (
+            not isinstance(bound_catalog, dict)
+            or bound_catalog.get("sha256") != bootstrap_digest.removeprefix("sha256:")
+            or bound_catalog.get("generation") != bootstrap.get("generation")
+            or bound_catalog.get("assetName") != "component-catalog-v2.json"
+            or bootstrap.get("generation") != getattr(updater, "catalog_generation", None)
+        ):
+            raise ValueError("The signed V2 bootstrap binding differs from its catalog bytes")
+        baseline_bytes = _read_bundled_v1_baseline()
+        if _sha256(baseline_bytes) != COMPILED_CATALOG_DIGEST:
+            raise ValueError("The bundled V1 baseline bytes differ from the compiled authority pin")
+    else:
+        raise ValueError("The selected bootstrap catalog schema is not supported")
+
+    active_reader = getattr(updater, "_read_active_catalog", None)
+    if not callable(active_reader):
+        raise TypeError("The signed active catalog readback is unavailable")
+    active_readback = active_reader()
+    if active_readback is None:
+        if (
+            bootstrap.get("schemaVersion") != 2
+            or bootstrap_digest != active_catalog_digest
+            or getattr(updater, "catalog_source", None) is not None
+        ):
+            raise ValueError(
+                "No signed active pointer or V2 package bootstrap authorizes the catalog"
+            )
+        active_bytes = bootstrap_bytes
+    else:
+        if (
+            not isinstance(active_readback, tuple)
+            or len(active_readback) != 2
+            or not isinstance(active_readback[0], bytes)
+            or not isinstance(active_readback[1], dict)
+        ):
+            raise ValueError("The signed active catalog has an invalid durable readback")
+        active_bytes, active_receipt = active_readback
+        if (
+            _sha256(active_bytes) != active_catalog_digest
+            or active_receipt.get("catalogSha256") != active_catalog_digest
+            or type(active_receipt.get("generation")) is not int
+            or active_receipt.get("generation") != getattr(updater, "catalog_generation", None)
+            or active_receipt != getattr(updater, "catalog_source", None)
+        ):
+            raise ValueError("The active catalog digest differs from its signed live receipt")
+    if active_bytes != getattr(updater, "catalog_bytes", None):
+        raise ValueError("The selected active catalog bytes differ from updater state")
+
+    baseline = _parse_json(baseline_bytes, "Compiled V1 baseline catalog")
+    active = _parse_json(active_bytes, "Active component catalog")
+    if (
+        not isinstance(baseline, dict)
+        or baseline.get("schemaVersion") != 1
+        or type(baseline.get("generation")) is not int
+        or baseline.get("generation") != COMPILED_V1_CATALOG_GENERATION
+        or _sha256(baseline_bytes) != COMPILED_CATALOG_DIGEST
+        or not isinstance(active, dict)
+        or type(active.get("schemaVersion")) is not int
+        or active.get("schemaVersion") != 2
+        or type(active.get("generation")) is not int
+        or active["generation"] <= baseline["generation"]
+        or active.get("generation") != getattr(updater, "catalog_generation", None)
+        or _sha256(active_bytes) != active_catalog_digest
+        or active != getattr(updater, "catalog", None)
+    ):
+        raise ValueError("The active catalog is not a newer validated V2 catalog")
+
+    broker_id = BOOTSTRAP_COMPONENT_ID
+    target_id = "linux-ubuntu-24.04-x86_64-systemd"
+    active_component = _catalog_row(active, "components", "componentId", broker_id)
+    baseline_component = _catalog_row(baseline, "components", "componentId", broker_id)
+    if active_component != baseline_component:
+        raise ValueError("Active V2 Broker component trust metadata differs from compiled V1")
+    repository = active_component.get("publisher")
+    if not isinstance(repository, str) or baseline_component.get("publisher") != repository:
+        raise ValueError("The first-Broker publisher identity is not stable across catalogs")
+    active_publisher = _catalog_row(active, "publishers", "repository", repository)
+    baseline_publisher = _catalog_row(baseline, "publishers", "repository", repository)
+    if active_publisher != baseline_publisher:
+        raise ValueError("Active V2 Broker publisher trust metadata differs from compiled V1")
+    active_target = _catalog_row(active, "targets", "id", target_id)
+    baseline_target = _catalog_row(baseline, "targets", "id", target_id)
+    if active_target != baseline_target:
+        raise ValueError("Active V2 Broker target metadata differs from compiled V1")
+    if (
+        getattr(updater, "components", {}).get(broker_id) != active_component
+        or getattr(updater, "publishers", {}).get(repository) != active_publisher
+        or getattr(updater, "targets", {}).get(target_id) != active_target
+    ):
+        raise ValueError("Updater Broker trust rows differ from its signed active catalog")
 
 
 def _effective_uid() -> int:
@@ -560,7 +834,7 @@ def _activate_confirmed(
     }
 
 
-def bootstrap_verified_runtime_maintenance(
+def _bootstrap_verified_runtime_maintenance(
     updater: Any,
     *,
     index_bytes: bytes,
@@ -571,6 +845,8 @@ def bootstrap_verified_runtime_maintenance(
     channel: str,
     target_id: str,
     confirm_plan_digest: str | None = None,
+    _active_catalog_digest: str | None = None,
+    _lock_lease: _UpdateLockLease | None = None,
 ) -> dict[str, Any]:
     """Verify and optionally activate the first maintenance broker release.
 
@@ -609,11 +885,22 @@ def bootstrap_verified_runtime_maintenance(
         raise TypeError("Verified release inputs must be immutable byte strings")
     if channel not in {"stable", "preview"}:
         raise ValueError("Channel must be stable or preview")
-    if (
-        updater.bootstrap_catalog_digest != COMPILED_CATALOG_DIGEST
-        or updater.catalog_digest != updater.bootstrap_catalog_digest
-    ):
-        raise ValueError("First broker bootstrap requires the compiled trusted catalog")
+    if _lock_lease is not None:
+        _require_active_update_lock_lease(updater, _lock_lease)
+        if confirm_plan_digest is None:
+            raise ValueError("A lock lease is only valid for confirmed broker activation")
+    if _active_catalog_digest is None:
+        if (
+            updater.bootstrap_catalog_digest != COMPILED_CATALOG_DIGEST
+            or updater.catalog_digest != updater.bootstrap_catalog_digest
+        ):
+            raise ValueError("First broker bootstrap requires the compiled trusted catalog")
+    else:
+        if _lock_lease is None or confirm_plan_digest is None:
+            raise ValueError(
+                "Active V2 Broker bootstrap requires its confirmed first-Core lock lease"
+            )
+        _require_active_v2_catalog_context(updater, _active_catalog_digest)
 
     component = updater.components.get(BOOTSTRAP_COMPONENT_ID)
     publisher = updater.publishers.get(component.get("publisher")) if component else None
@@ -774,7 +1061,8 @@ def bootstrap_verified_runtime_maintenance(
             index_uri="offline:verified-index",
             manifest_bytes=manifest_bytes,
         )
-        with updater._exclusive_update_lock():
+
+        def activate_under_lock() -> dict[str, Any]:
             confirmed_journal = _read_journal(journal_path)
             if confirmed_journal is not None and confirmed_journal.get("phase") == "complete":
                 _assert_completed_broker_plan_reusable(
@@ -794,5 +1082,65 @@ def bootstrap_verified_runtime_maintenance(
                 journal_path=journal_path,
                 payload_root=payload_root,
             )
+
+        if _lock_lease is None:
+            with exclusive_update_lock(updater):
+                return activate_under_lock()
+        _require_active_update_lock_lease(updater, _lock_lease)
+        return activate_under_lock()
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
+
+
+def bootstrap_verified_runtime_maintenance(
+    updater: Any,
+    *,
+    index_bytes: bytes,
+    index_attestation_bytes: bytes,
+    manifest_bytes: bytes,
+    artifact_bytes: bytes,
+    artifact_attestation_bytes: bytes,
+    channel: str,
+    target_id: str,
+    confirm_plan_digest: str | None = None,
+) -> dict[str, Any]:
+    """Verify a release and activate the first broker under the official lock.
+
+    Ordinary CLI and API callers always acquire the updater lock internally.
+    中文：普通入口始终自行获取官方更新锁。
+    """
+
+    return _bootstrap_verified_runtime_maintenance(
+        updater,
+        index_bytes=index_bytes,
+        index_attestation_bytes=index_attestation_bytes,
+        manifest_bytes=manifest_bytes,
+        artifact_bytes=artifact_bytes,
+        artifact_attestation_bytes=artifact_attestation_bytes,
+        channel=channel,
+        target_id=target_id,
+        confirm_plan_digest=confirm_plan_digest,
+    )
+
+
+def bootstrap_verified_runtime_maintenance_under_lock(
+    updater: Any,
+    *,
+    lock_lease: _UpdateLockLease,
+    active_catalog_digest: str | None = None,
+    **release_inputs: Any,
+) -> dict[str, Any]:
+    """Use a live first-Core lock lease while repeating every release check.
+
+    Only fixed internal orchestration should call this function. Its opaque
+    lease must be active on the current thread and bound to this exact updater.
+    中文：仅持有本线程官方更新锁的内部首启流程可以复用该锁。
+    """
+
+    _require_active_update_lock_lease(updater, lock_lease)
+    return _bootstrap_verified_runtime_maintenance(
+        updater,
+        **release_inputs,
+        _active_catalog_digest=active_catalog_digest,
+        _lock_lease=lock_lease,
+    )

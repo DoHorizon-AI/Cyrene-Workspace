@@ -75,6 +75,18 @@ WORKLOAD_ECHO_SOURCE_ID = "cyrene-echo"
 WORKLOAD_ECHO_IMAGE_REPOSITORY = "ghcr.io/dohorizon-ai/cyrene-echo"
 WORKLOAD_ECHO_RECEIPT_NAME = "oci-active.json"
 WORKLOAD_PACKAGE_RUNTIME_UNIT = "cyrene-package-runtime.service"
+WORKLOAD_FIRST_CORE_TARGET_ID = "linux-ubuntu-24.04-x86_64-systemd"
+WORKLOAD_FIRST_CORE_COMPONENT_IDS = (
+    "cyrene-linux-sys-adapter",
+    "cyrene-nvidia-adapter",
+    "cyrene-sandboxd",
+    "cyrene-runtime-maintenance",
+    "cyrene-kernel",
+    "cy-package-runtime",
+)
+WORKLOAD_FIRST_CORE_HOLD_ARTIFACT_KINDS = frozenset(
+    {"native-binary", "oci-image", "python-bundle", "static-web"}
+)
 PRODUCT_CONTRACT_ATTESTATION_WORKFLOW = "/.github/workflows/product-contract.yml"
 PRODUCT_POLICY_ATTESTATION_WORKFLOW = "/.github/workflows/product-policy-release.yml"
 COMPONENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -1236,15 +1248,27 @@ class ComponentUpdater:
             "subjectName",
             "attestationAssetName",
         }
-        if set(metadata) != required_metadata:
+        metadata_fields = set(metadata)
+        if frozenset(metadata_fields) not in {
+            frozenset(required_metadata),
+            frozenset(required_metadata | {"catalogSchemaVersion"}),
+        }:
             raise UpdateError(
                 "INVALID_CATALOG", "Active catalog metadata has an unsupported shape."
             )
         digest = metadata.get("catalogSha256")
         match = re.fullmatch(r"sha256:([0-9a-f]{64})", str(digest))
+        catalog_schema_version = metadata.get("catalogSchemaVersion", 1)
+        catalog_asset_name = {
+            1: "component-catalog-v1.json",
+            2: "component-catalog-v2.json",
+        }.get(catalog_schema_version)
+        release_tag_prefix = "catalog-v2-" if catalog_schema_version == 2 else "catalog-"
         if (
             isinstance(metadata.get("schemaVersion"), bool)
             or metadata.get("schemaVersion") != 1
+            or type(catalog_schema_version) is not int
+            or catalog_schema_version not in {1, 2}
             or metadata.get("repository") != "DoHorizon-AI/Cyrene-Workspace"
             or metadata.get("workflow")
             != "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml"
@@ -1262,11 +1286,11 @@ class ComponentUpdater:
             or not isinstance(metadata.get("generation"), int)
             or isinstance(metadata.get("generation"), bool)
             or metadata["generation"] < 1
-            or metadata.get("subjectName") != "component-catalog-v1.json"
-            or metadata.get("attestationAssetName") != "component-catalog-v1.json.attestation.jsonl"
+            or metadata.get("subjectName") != catalog_asset_name
+            or metadata.get("attestationAssetName") != f"{catalog_asset_name}.attestation.jsonl"
         ):
             raise UpdateError("INVALID_CATALOG", "Active catalog metadata identity is invalid.")
-        expected_tag = f"catalog-{metadata['channel']}-{metadata['sourceCommit']}"
+        expected_tag = f"{release_tag_prefix}{metadata['channel']}-{metadata['sourceCommit']}"
         if metadata.get("releaseId") != expected_tag:
             raise UpdateError(
                 "INVALID_CATALOG", "Active catalog tag does not match its channel/source."
@@ -1300,10 +1324,13 @@ class ComponentUpdater:
             ) from error
         if (
             not isinstance(catalog_value, dict)
+            or type(catalog_value.get("schemaVersion")) is not int
+            or catalog_value.get("schemaVersion") != catalog_schema_version
+            or type(catalog_value.get("generation")) is not int
             or catalog_value.get("generation") != metadata["generation"]
         ):
             raise UpdateError(
-                "INVALID_CATALOG", "Active catalog generation differs from its receipt."
+                "INVALID_CATALOG", "Active catalog schema or generation differs from its receipt."
             )
         return catalog_bytes, metadata
 
@@ -5304,6 +5331,7 @@ class ComponentUpdater:
         *,
         action: str = "install",
         channel: Any = None,
+        expected_first_core_block: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Candidate], dict[str, Any]]:
         selected_channel = self._resolve_channel(channel)
         resolver = self._load_workload_resolver()
@@ -5323,7 +5351,12 @@ class ComponentUpdater:
             return (
                 resolution,
                 {},
-                {"components": {}, "installationRecords": {}, "sourceBindings": []},
+                {
+                    "components": {},
+                    "installationRecords": {},
+                    "sourceBindings": [],
+                    "firstCoreCandidates": {},
+                },
             )
         candidates: dict[str, Candidate] = {}
         candidate_errors: dict[str, UpdateError] = {}
@@ -5361,6 +5394,53 @@ class ComponentUpdater:
         ).to_dict()
         if candidate_errors:
             self._attach_workload_candidate_failures(resolution, candidate_errors)
+        package_inventory["firstCoreCandidates"] = {}
+        if resolution.get("status") == "ready" and action == "install":
+            try:
+                first_core, first_core_candidates = self._first_core_resolution_projection(
+                    resolution,
+                    candidates,
+                    workload_id=workload_id,
+                    channel=selected_channel,
+                    expected_block=expected_first_core_block,
+                )
+                if first_core is not None:
+                    package_inventory["firstCoreCandidates"] = first_core_candidates
+            except UpdateError as error:
+                blockers = resolution.get("blockers")
+                material = resolution.get("planDigestMaterial")
+                if not isinstance(blockers, list) or not isinstance(material, dict):
+                    raise
+                blockers.append(
+                    {
+                        "code": error.code,
+                        "componentId": None,
+                        "requiredness": "required",
+                        "targetId": WORKLOAD_FIRST_CORE_TARGET_ID,
+                        "message": " ".join(str(error).split())[:500],
+                        "retryable": error.retryable,
+                        "details": {"phase": "firstCoreBootstrap"},
+                    }
+                )
+                material = dict(material)
+                material["blockers"] = blockers
+                digest = (
+                    "sha256:"
+                    + hashlib.sha256(
+                        json.dumps(
+                            material,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
+                resolution["status"] = "blocked"
+                resolution["blockers"] = blockers
+                resolution["planDigestMaterial"] = material
+                resolution["planDigest"] = digest
+                resolution["planId"] = "plan-" + digest.removeprefix("sha256:")[:32]
         return resolution, candidates, package_inventory
 
     @staticmethod
@@ -5423,6 +5503,432 @@ class ComponentUpdater:
         resolution["planDigestMaterial"] = digest_material
         resolution["planDigest"] = digest
         resolution["planId"] = "plan-" + digest.removeprefix("sha256:")[:32]
+
+    def _load_native_component_bootstrap(self) -> Any:
+        """Load the one lock-lease module instance used by first-Core callers."""
+
+        module_path = Path(__file__).with_name("native_component_bootstrap.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError(
+                "HELPER_UNAVAILABLE", "The native component bootstrap helper is missing."
+            )
+        module_name = "_cyrene_native_component_bootstrap"
+        module = sys.modules.get(module_name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                raise UpdateError(
+                    "HELPER_UNAVAILABLE", "The native component bootstrap helper cannot load."
+                )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception as error:
+                sys.modules.pop(module_name, None)
+                raise UpdateError(
+                    "HELPER_UNAVAILABLE", "The native component bootstrap helper failed to load."
+                ) from error
+        expected_path = module_path.resolve(strict=True)
+        loaded_path = Path(getattr(module, "__file__", "")).resolve(strict=True)
+        if (
+            loaded_path != expected_path
+            or not callable(getattr(module, "exclusive_update_lock", None))
+            or not callable(
+                getattr(module, "bootstrap_verified_runtime_maintenance_under_lock", None)
+            )
+        ):
+            raise UpdateError(
+                "HELPER_UNAVAILABLE", "The native component bootstrap helper API is invalid."
+            )
+        return module
+
+    def _load_native_core_bootstrap(self) -> Any:
+        """Load the same first-Core implementation instance for plan and apply."""
+
+        module_path = Path(__file__).with_name("native_core_bootstrap.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError("HELPER_UNAVAILABLE", "The first-Core helper is missing or unsafe.")
+        module_name = "_cyrene_native_core_bootstrap"
+        module = sys.modules.get(module_name)
+        if module is None:
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                raise UpdateError("HELPER_UNAVAILABLE", "The first-Core helper cannot load.")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception as error:
+                sys.modules.pop(module_name, None)
+                raise UpdateError(
+                    "HELPER_UNAVAILABLE", "The first-Core helper failed to load."
+                ) from error
+        expected_path = module_path.resolve(strict=True)
+        try:
+            loaded_path = Path(getattr(module, "__file__", "")).resolve(strict=True)
+        except OSError as error:
+            raise UpdateError(
+                "HELPER_UNAVAILABLE", "The first-Core helper path is invalid."
+            ) from error
+        if (
+            loaded_path != expected_path
+            or not callable(getattr(module, "apply_fresh_workload_first_core", None))
+            or not callable(getattr(module, "_validate_package_runtime_group", None))
+        ):
+            raise UpdateError("HELPER_UNAVAILABLE", "The first-Core helper API is invalid.")
+        return module
+
+    def _run_fresh_workload_first_core(
+        self,
+        parent_plan: dict[str, Any],
+        staged_components: list[dict[str, Any]],
+        broker_release: dict[str, Any],
+        source_policy: dict[str, Any],
+        source_principals: dict[str, dict[str, Any]],
+        *,
+        lock_lease: Any,
+        bootstrap_module: Any,
+    ) -> dict[str, Any]:
+        """Run the exact signed C10 first-Core path under the existing updater lock."""
+
+        core = self._load_native_core_bootstrap()
+        try:
+            result = core.apply_fresh_workload_first_core(
+                self,
+                parent_plan=parent_plan,
+                staged_components=staged_components,
+                broker_release=broker_release,
+                source_policy=source_policy,
+                selected_plugin_rows=[],
+                source_principals=source_principals,
+                channel=parent_plan["channel"],
+                lock_lease=lock_lease,
+                bootstrap_module=bootstrap_module,
+            )
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_BOOTSTRAP_FAILED",
+                "The signed first-Core bootstrap did not complete; its durable transaction must be resumed.",
+                retryable=True,
+            ) from error
+        if (
+            not isinstance(result, dict)
+            or result.get("status") != "installed"
+            or result.get("planId") != parent_plan["firstCoreBootstrap"].get("planId")
+            or result.get("planDigest") != parent_plan["firstCoreBootstrap"].get("planDigest")
+            or result.get("catalogGeneration") != 1
+            or not isinstance(result.get("readiness"), dict)
+            or result["readiness"].get("status") != "READY"
+            or result["readiness"].get("catalogGeneration") != 1
+            or not isinstance(result.get("componentStatuses"), list)
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The first-Core helper did not return the exact completed C10 identity and readiness.",
+                retryable=True,
+            )
+        return result
+
+    def _first_core_host_is_unprovisioned(self) -> bool:
+        """Recognize only the true missing-catalog/missing-policy first-install state."""
+
+        activity_catalog, _source_ids = self._activity_catalog(allow_uninitialized=True)
+        if activity_catalog.get("generation") != 0:
+            return False
+        try:
+            self.activity_catalog_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            # `_activity_catalog` only returns generation zero for a direct ENOENT.
+            # Keep this guard explicit in case its implementation changes.
+            raise UpdateError(
+                "INVALID_LOCAL_STATE",
+                "The runtime activity catalog is not an absent first-install file.",
+            )
+        policy_path = DEFAULT_PACKAGE_RUNTIME_POLICY
+        try:
+            policy_path.lstat()
+        except FileNotFoundError:
+            return True
+        raise UpdateError(
+            "PACKAGE_RUNTIME_READBACK_REQUIRED",
+            "A Package Runtime policy exists without the first-install activity catalog.",
+            retryable=True,
+        )
+
+    @staticmethod
+    def _first_core_broker_plan_digest(candidate: Candidate, *, channel: str) -> str:
+        """Reproduce the existing offline Broker confirmation digest from trusted rows."""
+
+        source = candidate.index.get("source")
+        artifact = candidate.manifest.get("artifact")
+        if (
+            candidate.component.get("componentId") != BROKER_COMPONENT_ID
+            or not isinstance(source, dict)
+            or not isinstance(artifact, dict)
+            or artifact.get("kind") != "native-binary"
+            or not _valid_digest(candidate.index_asset_digest)
+            or not _valid_digest(candidate.manifest_digest)
+            or not _valid_digest(candidate.artifact_digest)
+            or type(artifact.get("sizeBytes")) is not int
+            or artifact["sizeBytes"] < 1
+        ):
+            raise UpdateError(
+                "INVALID_RELEASE_INDEX",
+                "The first-Core Broker confirmation identity is incomplete.",
+            )
+        material = {
+            "schemaVersion": 1,
+            "componentId": BROKER_COMPONENT_ID,
+            "channel": channel,
+            "targetId": WORKLOAD_FIRST_CORE_TARGET_ID,
+            "sourceRepository": source.get("repository"),
+            "sourceRef": source.get("ref"),
+            "sourceCommit": source.get("commit"),
+            "indexDigest": candidate.index_asset_digest,
+            "manifestDigest": candidate.manifest_digest,
+            "artifactDigest": candidate.artifact_digest,
+            "artifactSizeBytes": artifact["sizeBytes"],
+        }
+        if (
+            not isinstance(material["sourceRepository"], str)
+            or not isinstance(material["sourceRef"], str)
+            or not isinstance(material["sourceCommit"], str)
+        ):
+            raise UpdateError(
+                "INVALID_RELEASE_INDEX", "The first-Core Broker source identity is malformed."
+            )
+        return (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    material,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+
+    def _first_core_resolution_projection(
+        self,
+        resolution: dict[str, Any],
+        candidates: dict[str, Candidate],
+        *,
+        workload_id: str,
+        channel: str,
+        expected_block: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Candidate]]:
+        """Resolve and hash the exact C10 child identity for a blank host."""
+
+        if workload_id not in WORKLOAD_IDS or resolution.get("action") != "install":
+            return None, {}
+        if expected_block is None:
+            if not self._first_core_host_is_unprovisioned():
+                return None, {}
+        elif not isinstance(expected_block, dict) or set(expected_block) != {
+            "schemaVersion",
+            "cohortId",
+            "planId",
+            "planDigest",
+            "targetId",
+            "catalogDigest",
+            "components",
+            "componentArtifactDigests",
+            "maintenanceComponentArtifactDigests",
+        }:
+            raise UpdateError("INVALID_TRANSACTION", "The durable first-Core block is malformed.")
+        core = self._load_native_core_bootstrap()
+        try:
+            core._validate_package_runtime_group(self)
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_UNAVAILABLE", "The signed Catalog does not provide the exact C10 group."
+            ) from error
+
+        workload = next(
+            (
+                row
+                for row in self.catalog.get("workloads", [])
+                if isinstance(row, dict) and row.get("workloadId") == workload_id
+            ),
+            None,
+        )
+        source_policy = workload.get("sourcePolicy") if isinstance(workload, dict) else None
+        if not isinstance(source_policy, dict):
+            raise UpdateError(
+                "SOURCE_POLICY_INVALID",
+                "The signed workload sourcePolicy is unavailable for first Core.",
+            )
+
+        core_candidates: dict[str, Candidate] = {}
+        for component_id in WORKLOAD_FIRST_CORE_COMPONENT_IDS:
+            component = self.components.get(component_id)
+            if not isinstance(component, dict):
+                raise UpdateError(
+                    "FIRST_CORE_UNAVAILABLE", f"The signed C10 component {component_id} is missing."
+                )
+            target = self._target_for(component, target_id=WORKLOAD_FIRST_CORE_TARGET_ID)
+            if target is None:
+                raise UpdateError(
+                    "UNSUPPORTED_TARGET",
+                    f"The signed C10 component {component_id} has no supported U24 target.",
+                )
+            candidate = candidates.get(component_id)
+            if candidate is None or candidate.manifest.get("target") != target.get("target"):
+                candidate = self._candidate(component, target, channel)
+            core_candidates[component_id] = candidate
+
+        unique_candidates: dict[tuple[str, str, str], Candidate] = {}
+        for candidate in [*candidates.values(), *core_candidates.values()]:
+            key = (
+                str(candidate.component.get("componentId")),
+                candidate.manifest_digest,
+                candidate.artifact_digest,
+            )
+            unique_candidates[key] = candidate
+        trusted_indexes = self._trusted_release_indexes(list(unique_candidates.values()))
+        resolver = self._load_workload_resolver()
+        core_rows: list[dict[str, Any]] = []
+        for component_id in WORKLOAD_FIRST_CORE_COMPONENT_IDS:
+            component = self.components[component_id]
+            target = self.targets[WORKLOAD_FIRST_CORE_TARGET_ID]
+            expected_kind = resolver._expected_artifact_kind(component, target)
+            blockers: list[dict[str, Any]] = []
+            rows = resolver._candidate_rows(
+                trusted_indexes,
+                self.catalog,
+                component,
+                WORKLOAD_FIRST_CORE_TARGET_ID,
+                expected_kind,
+                blockers,
+                requiredness="required",
+                channel=channel,
+            )
+            if len(rows) != 1 or blockers:
+                raise UpdateError(
+                    "TRUSTED_INDEX_BINDING_INVALID",
+                    f"The signed C10 candidate identity is not unique for {component_id}.",
+                )
+            row = dict(rows[0])
+            if (
+                row.get("artifactKind") != "native-binary"
+                or row.get("targetId") != WORKLOAD_FIRST_CORE_TARGET_ID
+            ):
+                raise UpdateError(
+                    "UNSUPPORTED_ARTIFACT",
+                    f"The C10 artifact kind or target is unsupported for {component_id}.",
+                )
+            row["artifactDigest"] = row["digest"]
+            core_rows.append(row)
+
+        child_digests = {row["componentId"]: row["artifactDigest"] for row in core_rows}
+        hold_digests = dict(child_digests)
+        parent_rows = resolution.get("selectedComponents")
+        if not isinstance(parent_rows, list):
+            raise UpdateError(
+                "INVALID_RESOLUTION", "Workload selected component rows are malformed."
+            )
+        for row in parent_rows:
+            if not isinstance(row, dict):
+                raise UpdateError(
+                    "INVALID_RESOLUTION", "Workload selected component row is malformed."
+                )
+            kind = row.get("artifactKind")
+            component_id = row.get("componentId")
+            digest = row.get("digest")
+            if kind == "plugin-package":
+                continue
+            if kind not in WORKLOAD_FIRST_CORE_HOLD_ARTIFACT_KINDS:
+                raise UpdateError(
+                    "UNSUPPORTED_ARTIFACT",
+                    f"First-Core maintenance does not support selected artifact kind {kind!r}.",
+                )
+            if not isinstance(component_id, str) or not _valid_digest(digest):
+                raise UpdateError(
+                    "INVALID_RESOLUTION", "A selected maintenance identity is malformed."
+                )
+            existing = hold_digests.get(component_id)
+            if existing is not None and existing != digest:
+                raise UpdateError(
+                    "VERSION_CONFLICT",
+                    f"Parent and C10 plans select different identities for {component_id}.",
+                )
+            hold_digests[component_id] = digest
+
+        broker_candidate = core_candidates[BROKER_COMPONENT_ID]
+        broker_plan_digest = self._first_core_broker_plan_digest(broker_candidate, channel=channel)
+        child_material = {
+            "schemaVersion": 1,
+            "cohortId": "C10",
+            "workloadId": workload_id,
+            "channel": channel,
+            "catalogDigest": self.catalog_digest,
+            "targetId": WORKLOAD_FIRST_CORE_TARGET_ID,
+            "sourcePolicy": source_policy,
+            "components": core_rows,
+            "componentArtifactDigests": child_digests,
+            "maintenanceComponentArtifactDigests": hold_digests,
+            "brokerBootstrapPlanDigest": broker_plan_digest,
+        }
+        child_digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    child_material,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        block = {
+            "schemaVersion": 1,
+            "cohortId": "C10",
+            "planId": "plan-" + child_digest.removeprefix("sha256:")[:32],
+            "planDigest": child_digest,
+            "targetId": WORKLOAD_FIRST_CORE_TARGET_ID,
+            "catalogDigest": self.catalog_digest,
+            "components": core_rows,
+            "componentArtifactDigests": child_digests,
+            "maintenanceComponentArtifactDigests": hold_digests,
+        }
+        if expected_block is not None and block != expected_block:
+            raise UpdateError(
+                "PLAN_CHANGED",
+                "The durable first-Core identity no longer matches trusted release discovery.",
+                retryable=True,
+            )
+        resolution["sourcePolicy"] = source_policy
+        resolution["firstCoreBootstrap"] = block
+        material = resolution.get("planDigestMaterial")
+        if not isinstance(material, dict):
+            raise UpdateError("INVALID_RESOLUTION", "Workload plan digest material is malformed.")
+        material = dict(material)
+        material["firstCoreBootstrap"] = block
+        material["firstCoreBootstrapInternal"] = {
+            "brokerBootstrapPlanDigest": broker_plan_digest,
+            "childPlanDigestMaterial": child_material,
+        }
+        plan_digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    material,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        resolution["planDigestMaterial"] = material
+        resolution["planDigest"] = plan_digest
+        resolution["planId"] = "plan-" + plan_digest.removeprefix("sha256:")[:32]
+        return block, core_candidates
 
     def check_workload(
         self,
@@ -5533,8 +6039,11 @@ class ComponentUpdater:
                 },
                 "phase": "checked",
             }
+            first_core = resolution.get("firstCoreBootstrap")
+            if isinstance(first_core, dict):
+                plan["firstCoreBootstrap"] = first_core
             _atomic_json(self._workload_plan_directory() / f"{plan_id}.json", plan)
-        return {
+        result = {
             "status": "blocked" if host_blockers else resolution.get("status"),
             "planId": plan_id,
             "planDigest": plan_digest,
@@ -5548,6 +6057,10 @@ class ComponentUpdater:
             "warnings": resolution.get("warnings", []),
             "blockers": [*resolution.get("blockers", []), *host_blockers],
         }
+        first_core = resolution.get("firstCoreBootstrap")
+        if isinstance(first_core, dict):
+            result["firstCoreBootstrap"] = {**first_core, "status": "required"}
+        return result
 
     def stage_workload(
         self,
@@ -5599,6 +6112,7 @@ class ComponentUpdater:
             or resolution.get("planDigest") != plan_digest
             or resolution.get("action") != action
             or resolution.get("channel") != selected_channel
+            or stored.get("firstCoreBootstrap") != resolution.get("firstCoreBootstrap")
         ):
             raise UpdateError(
                 "PLAN_CHANGED",
@@ -5622,7 +6136,7 @@ class ComponentUpdater:
             if changed:
                 stored["stagedComponents"] = staged_rows
                 _atomic_json(directory / f"{plan_id}.json", stored)
-            return {
+            result = {
                 "status": "staged",
                 "planId": plan_id,
                 "planDigest": plan_digest,
@@ -5636,6 +6150,49 @@ class ComponentUpdater:
                 "warnings": resolution.get("warnings", []),
                 "blockers": [],
             }
+            block = resolution.get("firstCoreBootstrap")
+            if isinstance(block, dict):
+                candidates_by_id = package_inventory.get("firstCoreCandidates")
+                stage_record = stored.get("firstCoreBootstrapStage")
+                if (
+                    not isinstance(candidates_by_id, dict)
+                    or not isinstance(stage_record, dict)
+                    or stage_record.get("schemaVersion") != 1
+                    or stage_record.get("parentPlanId") != plan_id
+                    or stage_record.get("parentPlanDigest") != plan_digest
+                ):
+                    raise UpdateError(
+                        "INVALID_STAGE", "The cached first-Core stage record is incomplete."
+                    )
+                core_rows = self._validate_first_core_stage_items(
+                    block,
+                    candidates_by_id,
+                    stage_record.get("stagedComponents"),
+                    plan_id=plan_id,
+                    plan_digest=plan_digest,
+                )
+                broker_candidate = candidates_by_id[BROKER_COMPONENT_ID]
+                broker_row = next(
+                    row for row in core_rows if row["componentId"] == BROKER_COMPONENT_ID
+                )
+                self._read_first_core_broker_release(
+                    broker_candidate,
+                    broker_row,
+                    stage_record.get("brokerProofs"),
+                    resolution,
+                    plan_id=plan_id,
+                    plan_digest=plan_digest,
+                )
+                result["firstCoreBootstrap"] = {
+                    **block,
+                    "status": "staged",
+                    "stagedComponents": core_rows,
+                }
+            elif stored.get("firstCoreBootstrapStage") is not None:
+                raise UpdateError(
+                    "INVALID_STAGE", "A non-Core plan contains a first-Core stage record."
+                )
+            return result
         stage_parent = self._private_state_directory("staged") / "workload-plans"
         stage_parent.mkdir(mode=0o700, exist_ok=True)
         _verify_private_directory(stage_parent)
@@ -5727,10 +6284,50 @@ class ComponentUpdater:
                     resolution_component=row,
                 )
             )
+        block = resolution.get("firstCoreBootstrap")
+        if isinstance(block, dict):
+            core_candidates = package_inventory.get("firstCoreCandidates")
+            if not isinstance(core_candidates, dict):
+                raise UpdateError("INVALID_STAGE", "The checked first-Core candidates disappeared.")
+            core_rows = self._first_core_stage_items(
+                block,
+                core_candidates,
+                staged,
+                stage_root,
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+            core_rows = self._validate_first_core_stage_items(
+                block,
+                core_candidates,
+                core_rows,
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+            broker_candidate = core_candidates[BROKER_COMPONENT_ID]
+            broker_row = next(row for row in core_rows if row["componentId"] == BROKER_COMPONENT_ID)
+            broker_proofs = self._stage_first_core_broker_proofs(
+                broker_candidate,
+                broker_row,
+                stage_root,
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+            stored["firstCoreBootstrapStage"] = {
+                "schemaVersion": 1,
+                "parentPlanId": plan_id,
+                "parentPlanDigest": plan_digest,
+                "stagedComponents": core_rows,
+                "brokerProofs": broker_proofs,
+            }
+        elif stored.get("firstCoreBootstrapStage") is not None:
+            raise UpdateError(
+                "INVALID_STAGE", "A non-Core plan contains a stale first-Core stage record."
+            )
         stored["phase"] = "staged"
         stored["stagedComponents"] = staged
         _atomic_json(directory / f"{plan_id}.json", stored)
-        return {
+        result = {
             "status": "staged",
             "planId": plan_id,
             "planDigest": plan_digest,
@@ -5744,6 +6341,13 @@ class ComponentUpdater:
             "warnings": resolution.get("warnings", []),
             "blockers": [],
         }
+        if isinstance(block, dict):
+            result["firstCoreBootstrap"] = {
+                **block,
+                "status": "staged",
+                "stagedComponents": core_rows,
+            }
+        return result
 
     def _validate_cached_workload_stage_rows(
         self,
@@ -5836,6 +6440,405 @@ class ComponentUpdater:
                 )
             normalized.append(projected)
         return normalized, changed
+
+    def _first_core_stage_items(
+        self,
+        block: dict[str, Any],
+        core_candidates: dict[str, Candidate],
+        parent_stage_rows: list[dict[str, Any]],
+        stage_root: Path,
+        *,
+        plan_id: str,
+        plan_digest: str,
+    ) -> list[dict[str, Any]]:
+        """Stage or project the six signed native rows required by first Core."""
+
+        component_rows = block.get("components")
+        if (
+            not isinstance(component_rows, list)
+            or {row.get("componentId") for row in component_rows if isinstance(row, dict)}
+            != set(WORKLOAD_FIRST_CORE_COMPONENT_IDS)
+            or set(core_candidates) != set(WORKLOAD_FIRST_CORE_COMPONENT_IDS)
+        ):
+            raise UpdateError("INVALID_RESOLUTION", "The first-Core C10 identity is incomplete.")
+        selected_by_id = {row["componentId"]: row for row in component_rows}
+        parent_by_id = {
+            row.get("componentId"): row
+            for row in parent_stage_rows
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        output: list[dict[str, Any]] = []
+        for component_id in WORKLOAD_FIRST_CORE_COMPONENT_IDS:
+            candidate = core_candidates[component_id]
+            selected = selected_by_id[component_id]
+            if (
+                selected.get("digest") != candidate.artifact_digest
+                or selected.get("manifestDigest") != candidate.manifest_digest
+            ):
+                raise UpdateError(
+                    "PLAN_CHANGED", f"The C10 candidate changed for {component_id}.", retryable=True
+                )
+            parent_staged = parent_by_id.get(component_id)
+            if parent_staged is not None:
+                if parent_staged.get("status") != "staged":
+                    raise UpdateError(
+                        "FIRST_CORE_STATE_CONFLICT",
+                        f"A current Product cannot be treated as a fresh C10 candidate: {component_id}.",
+                    )
+                identity = parent_staged.get("stagedIdentity")
+                if not isinstance(identity, dict):
+                    raise UpdateError(
+                        "INVALID_STAGE", f"The staged identity is missing for {component_id}."
+                    )
+                release_path = identity.get("releasePath")
+                archive_path = identity.get("archivePath")
+                pointer_identity = identity.get("pointerIdentity")
+                bundle_identity = identity.get("bundleIdentity")
+            else:
+                staged = self._stage_candidate(
+                    candidate,
+                    stage_root,
+                    plan_id,
+                    plan_digest,
+                    workload_identity=selected,
+                )
+                release_path = staged.get("releasePath")
+                archive_path = staged.get("archivePath")
+                pointer_identity = staged.get("pointerIdentity")
+                bundle_identity = staged.get("bundleIdentity")
+            component = self.components[component_id]
+            item = {
+                "componentId": component_id,
+                "status": "staged",
+                "artifactKind": "native-binary",
+                "version": candidate.manifest["version"],
+                "manifestDigest": candidate.manifest_digest,
+                "releaseIdentity": candidate.manifest_digest,
+                "artifactDigest": candidate.artifact_digest,
+                "digest": candidate.artifact_digest,
+                "manifestAssetDigest": candidate.manifest_asset_digest,
+                "restartGroup": component["restart"]["group"],
+                "pointerIdentity": pointer_identity,
+                "bundleIdentity": bundle_identity,
+                "manifest": candidate.manifest,
+                "releasePath": release_path,
+                "archivePath": archive_path,
+                "stagedPlanId": plan_id,
+                "stagedPlanDigest": plan_digest,
+            }
+            item.update(self._workload_receipt_fields(candidate, selected))
+            output.append(item)
+        return output
+
+    def _validate_first_core_stage_items(
+        self,
+        block: dict[str, Any],
+        core_candidates: dict[str, Candidate],
+        staged_components: Any,
+        *,
+        plan_id: str,
+        plan_digest: str,
+        core_module: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Revalidate C10 stage rows, release receipts, archive bytes, and plan binding."""
+
+        if (
+            not isinstance(staged_components, list)
+            or len(staged_components) != len(WORKLOAD_FIRST_CORE_COMPONENT_IDS)
+            or {row.get("componentId") for row in staged_components if isinstance(row, dict)}
+            != set(WORKLOAD_FIRST_CORE_COMPONENT_IDS)
+            or not isinstance(block.get("components"), list)
+            or set(core_candidates) != set(WORKLOAD_FIRST_CORE_COMPONENT_IDS)
+        ):
+            raise UpdateError("INVALID_STAGE", "The staged first-Core cohort is malformed.")
+        helper = core_module or self._load_native_core_bootstrap()
+        try:
+            helper._validate_staged_cohort(self, staged_components)
+        except Exception as error:
+            raise UpdateError(
+                "INVALID_STAGE", "The staged C10 compatibility cohort is invalid."
+            ) from error
+        selected_by_id = {row["componentId"]: row for row in block["components"]}
+        staged_by_id = {row["componentId"]: row for row in staged_components}
+        stage_root = self._private_state_directory("staged") / "workload-plans" / plan_id
+        _verify_private_directory(stage_root)
+        for component_id in WORKLOAD_FIRST_CORE_COMPONENT_IDS:
+            candidate = core_candidates[component_id]
+            selected = selected_by_id.get(component_id)
+            staged = staged_by_id[component_id]
+            if not isinstance(selected, dict) or not isinstance(staged, dict):
+                raise UpdateError("INVALID_STAGE", "A staged C10 identity row is malformed.")
+            expected_identity = {
+                "componentId": component_id,
+                "version": candidate.manifest.get("version"),
+                "manifestDigest": candidate.manifest_digest,
+                "manifestAssetDigest": candidate.manifest_asset_digest,
+                "digest": candidate.artifact_digest,
+                "artifactDigest": candidate.artifact_digest,
+                "targetId": WORKLOAD_FIRST_CORE_TARGET_ID,
+                "releaseId": selected.get("releaseId"),
+                "publisherIdentity": selected.get("publisherIdentity"),
+                "indexIdentity": selected.get("indexIdentity"),
+                "attestationRef": selected.get("attestationRef"),
+            }
+            if (
+                any(staged.get(key) != value for key, value in expected_identity.items())
+                or any(
+                    selected.get(key) != value
+                    for key, value in expected_identity.items()
+                    if key in selected
+                )
+                or staged.get("status") != "staged"
+                or staged.get("artifactKind") != "native-binary"
+                or staged.get("manifest") != candidate.manifest
+                or staged.get("stagedPlanId") != plan_id
+                or staged.get("stagedPlanDigest") != plan_digest
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Staged C10 identity differs for {component_id}."
+                )
+            release_path = Path(staged.get("releasePath", ""))
+            expected_release = (
+                self.install_root
+                / "components"
+                / component_id
+                / "releases"
+                / f"{candidate.manifest['version']}--{candidate.manifest_digest.removeprefix('sha256:')}"
+            )
+            archive_path = Path(staged.get("archivePath", ""))
+            expected_archive = (
+                stage_root
+                / component_id
+                / PurePosixPath(
+                    urllib.parse.urlsplit(candidate.manifest["artifact"]["uri"]).path
+                ).name
+            )
+            if release_path != expected_release or archive_path != expected_archive:
+                raise UpdateError("INVALID_STAGE", f"Staged C10 paths differ for {component_id}.")
+            try:
+                _verify_private_directory(archive_path.parent)
+                _verify_private_file(archive_path)
+                archive_info = archive_path.stat()
+                artifact = candidate.manifest["artifact"]
+                receipt = self._read_release_receipt(component_id, candidate.manifest_digest)
+                helper._verify_release_payload(self, release_path, candidate.manifest)
+            except Exception as error:
+                raise UpdateError(
+                    "INVALID_STAGE", f"Staged C10 payload is unsafe for {component_id}."
+                ) from error
+            if (
+                archive_info.st_size != artifact.get("sizeBytes")
+                or _file_digest(archive_path) != candidate.artifact_digest
+                or not isinstance(receipt, dict)
+                or receipt.get("manifest") != candidate.manifest
+                or receipt.get("artifactDigest") != candidate.artifact_digest
+                or receipt.get("releasePath") != str(release_path)
+                or receipt.get("archivePath") != str(archive_path)
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Staged C10 readback differs for {component_id}."
+                )
+        return [staged_by_id[component_id] for component_id in WORKLOAD_FIRST_CORE_COMPONENT_IDS]
+
+    def _stage_first_core_broker_proofs(
+        self,
+        candidate: Candidate,
+        broker_stage: dict[str, Any],
+        stage_root: Path,
+        *,
+        plan_id: str,
+        plan_digest: str,
+    ) -> dict[str, Any]:
+        """Persist the exact already-verified offline Broker proof bytes for recovery."""
+
+        publisher = self._publisher_for_component(candidate.component)
+        source = candidate.index.get("source")
+        manifest_source = candidate.manifest.get("source")
+        index_attestation = candidate.index.get("provenance", {}).get("attestation")
+        artifact_attestation = candidate.manifest.get("provenance", {}).get("attestation")
+        archive_path = Path(broker_stage.get("archivePath", ""))
+        if (
+            not isinstance(publisher, dict)
+            or not isinstance(source, dict)
+            or not isinstance(manifest_source, dict)
+            or not isinstance(index_attestation, dict)
+            or not isinstance(artifact_attestation, dict)
+            or candidate.release_tag is None
+            or archive_path.is_symlink()
+            or not archive_path.is_file()
+        ):
+            raise UpdateError(
+                "INVALID_ATTESTATION", "The staged Broker proof identity is incomplete."
+            )
+        index_bytes = self._get_release_asset_bytes(
+            candidate.release_assets,
+            candidate.index_uri,
+            repository=publisher["repository"],
+            release_tag=candidate.release_tag,
+            expected_digest=candidate.index_asset_digest,
+        )
+        if json.loads(index_bytes, object_pairs_hook=_unique_json_object) != candidate.index:
+            raise UpdateError(
+                "INVALID_RELEASE_INDEX", "Offline Broker index bytes changed after check."
+            )
+        index_attestation_bytes = self._release_attestation_bundle(
+            payload=index_bytes,
+            subject_name=index_attestation["subjectName"],
+            digest=candidate.index_asset_digest,
+            repository=publisher["repository"],
+            workflow=publisher["workflow"],
+            source_ref=source["ref"],
+            source_commit=source["commit"],
+            release_assets=candidate.release_assets,
+            release_tag=candidate.release_tag,
+        )
+        manifest_bytes = candidate.manifest_bytes
+        if (
+            not isinstance(manifest_bytes, bytes)
+            or "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+            != candidate.manifest_asset_digest
+        ):
+            raise UpdateError(
+                "INVALID_MANIFEST", "Offline Broker manifest bytes changed after check."
+            )
+        _verify_private_file(archive_path)
+        archive_bytes = archive_path.read_bytes()
+        artifact_attestation_bytes = self._release_attestation_bundle(
+            payload=archive_bytes,
+            subject_name=artifact_attestation["subjectName"],
+            digest=candidate.artifact_digest,
+            repository=publisher["repository"],
+            workflow=publisher["workflow"],
+            source_ref=manifest_source["ref"],
+            source_commit=manifest_source["commit"],
+            release_assets=candidate.release_assets,
+            release_tag=candidate.release_tag,
+        )
+        proof_root = stage_root / "first-core-broker"
+        proof_root.mkdir(mode=0o700)
+        _verify_private_directory(proof_root)
+        assets = {
+            "index": index_bytes,
+            "indexAttestation": index_attestation_bytes,
+            "manifest": manifest_bytes,
+            "artifactAttestation": artifact_attestation_bytes,
+        }
+        paths: dict[str, str] = {}
+        digests: dict[str, str] = {}
+        for name, payload in assets.items():
+            path = proof_root / f"{name}.bin"
+            self._write_private_file(path, payload)
+            paths[name] = str(path)
+            digests[name] = "sha256:" + hashlib.sha256(payload).hexdigest()
+        return {
+            "schemaVersion": 1,
+            "parentPlanId": plan_id,
+            "parentPlanDigest": plan_digest,
+            "paths": paths,
+            "digests": digests,
+        }
+
+    def _read_first_core_broker_release(
+        self,
+        candidate: Candidate,
+        broker_stage: dict[str, Any],
+        stage_proofs: Any,
+        resolution: dict[str, Any],
+        *,
+        plan_id: str,
+        plan_digest: str,
+    ) -> dict[str, Any]:
+        """Read staged Broker proof bytes and bind them to the current trusted candidate."""
+
+        if (
+            not isinstance(stage_proofs, dict)
+            or set(stage_proofs)
+            != {"schemaVersion", "parentPlanId", "parentPlanDigest", "paths", "digests"}
+            or stage_proofs.get("schemaVersion") != 1
+            or stage_proofs.get("parentPlanId") != plan_id
+            or stage_proofs.get("parentPlanDigest") != plan_digest
+            or not isinstance(stage_proofs.get("paths"), dict)
+            or not isinstance(stage_proofs.get("digests"), dict)
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "The staged offline Broker proof binding is malformed."
+            )
+        proof_root = (
+            self._private_state_directory("staged")
+            / "workload-plans"
+            / plan_id
+            / "first-core-broker"
+        )
+        expected_names = {
+            "index": "index.bin",
+            "indexAttestation": "indexAttestation.bin",
+            "manifest": "manifest.bin",
+            "artifactAttestation": "artifactAttestation.bin",
+        }
+        payloads: dict[str, bytes] = {}
+        for name, filename in expected_names.items():
+            path = proof_root / filename
+            if stage_proofs["paths"].get(name) != str(path):
+                raise UpdateError(
+                    "INVALID_STAGE", "The offline Broker proof path differs from its plan."
+                )
+            try:
+                _verify_private_file(path)
+                info = path.stat()
+                limit = (
+                    MAX_RELEASE_ASSET_BYTES if name == "index" else MAX_ATTESTATION_RESPONSE_BYTES
+                )
+                if info.st_size > limit:
+                    raise OSError("proof file exceeds the bounded size")
+                payload = path.read_bytes()
+            except Exception as error:
+                raise UpdateError(
+                    "INVALID_STAGE", "An offline Broker proof file is unsafe or missing."
+                ) from error
+            digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+            if stage_proofs["digests"].get(name) != digest:
+                raise UpdateError("INVALID_STAGE", "An offline Broker proof digest changed.")
+            payloads[name] = payload
+        expected_index_digest = candidate.index_asset_digest
+        expected_manifest_digest = candidate.manifest_asset_digest
+        try:
+            index = json.loads(
+                payloads["index"].decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
+            manifest = json.loads(
+                payloads["manifest"].decode("utf-8"), object_pairs_hook=_unique_json_object
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, UpdateError) as error:
+            raise UpdateError(
+                "INVALID_STAGE", "Staged offline Broker JSON proof is invalid."
+            ) from error
+        material = resolution.get("planDigestMaterial")
+        internal = (
+            material.get("firstCoreBootstrapInternal") if isinstance(material, dict) else None
+        )
+        expected_broker_digest = (
+            internal.get("brokerBootstrapPlanDigest") if isinstance(internal, dict) else None
+        )
+        if (
+            "sha256:" + hashlib.sha256(payloads["index"]).hexdigest() != expected_index_digest
+            or index != candidate.index
+            or "sha256:" + hashlib.sha256(payloads["manifest"]).hexdigest()
+            != expected_manifest_digest
+            or manifest != candidate.manifest
+            or expected_broker_digest
+            != self._first_core_broker_plan_digest(candidate, channel=resolution["channel"])
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "Staged offline Broker proofs differ from the checked identity."
+            )
+        return {
+            "index_bytes": payloads["index"],
+            "index_attestation_bytes": payloads["indexAttestation"],
+            "manifest_bytes": payloads["manifest"],
+            "artifact_attestation_bytes": payloads["artifactAttestation"],
+            "target_id": WORKLOAD_FIRST_CORE_TARGET_ID,
+            "confirm_plan_digest": expected_broker_digest,
+        }
 
     def _validate_cached_workload_plugin_stage(
         self,
@@ -7066,7 +8069,8 @@ class ComponentUpdater:
 
         self._require_authorized_process()
         self._clear_release_discovery_caches()
-        with self._exclusive_update_lock():
+        bootstrap_module = self._load_native_component_bootstrap()
+        with bootstrap_module.exclusive_update_lock(self) as lock_lease:
             return self._apply_workload_locked(
                 workload_id,
                 target_id,
@@ -7075,6 +8079,8 @@ class ComponentUpdater:
                 confirmation,
                 action=action,
                 channel=channel,
+                lock_lease=lock_lease,
+                bootstrap_module=bootstrap_module,
             )
 
     def _apply_workload_locked(
@@ -7087,6 +8093,8 @@ class ComponentUpdater:
         *,
         action: Any,
         channel: Any,
+        lock_lease: Any | None = None,
+        bootstrap_module: Any | None = None,
     ) -> dict[str, Any]:
         """Revalidate and apply one workload while holding the updater lock."""
 
@@ -7123,7 +8131,12 @@ class ComponentUpdater:
             raise UpdateError("PLAN_NOT_STAGED", "This exact workload plan is not staged.")
         if action == "uninstall":
             return self._apply_workload_uninstall_locked(stored, confirmation)
-        return self._apply_workload_install_locked(stored, confirmation)
+        return self._apply_workload_install_locked(
+            stored,
+            confirmation,
+            lock_lease=lock_lease,
+            bootstrap_module=bootstrap_module,
+        )
 
     def _load_workload_sdk_environment(self) -> Any:
         """Load the separately owned, root-verified operator venv installer."""
@@ -10995,7 +12008,12 @@ class ComponentUpdater:
         _atomic_json(transaction_path, transaction)
 
     def _apply_workload_install_assembled(
-        self, stored: dict[str, Any], confirmation: dict[str, Any]
+        self,
+        stored: dict[str, Any],
+        confirmation: dict[str, Any],
+        *,
+        lock_lease: Any | None = None,
+        bootstrap_module: Any | None = None,
     ) -> dict[str, Any]:
         """Apply one signed workload using the existing journal and separated holds."""
 
@@ -11043,6 +12061,12 @@ class ComponentUpdater:
             stored.get("selections"),
             action="install",
             channel=stored.get("channel"),
+            expected_first_core_block=(
+                prior_transaction.get("firstCoreBootstrap")
+                if isinstance(prior_transaction, dict)
+                and isinstance(prior_transaction.get("firstCoreBootstrap"), dict)
+                else None
+            ),
         )
         if (
             (resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest)
@@ -11293,6 +12317,26 @@ class ComponentUpdater:
         transaction["previousWeb"] = transaction.get("previousWeb") or [
             self._capture_workload_web_identity(item["componentId"]) for item in web_components
         ]
+        first_core_block = resolution.get("firstCoreBootstrap")
+        if isinstance(first_core_block, dict):
+            if stored.get("firstCoreBootstrap") != first_core_block:
+                raise UpdateError(
+                    "INVALID_STAGE", "The staged first-Core identity differs from the checked plan."
+                )
+            existing_first_core_block = transaction.get("firstCoreBootstrap")
+            if (
+                existing_first_core_block is not None
+                and existing_first_core_block != first_core_block
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "The first-Core transaction identity changed."
+                )
+            transaction["firstCoreBootstrap"] = first_core_block
+        elif transaction.get("firstCoreBootstrap") is not None:
+            raise UpdateError(
+                "INVALID_TRANSACTION",
+                "A non-Core workload transaction contains a first-Core identity.",
+            )
         if oci_components:
             prior_echo_receipt = self._read_workload_echo_receipt()
             transaction.setdefault("previousEchoReceipt", prior_echo_receipt)
@@ -11307,6 +12351,74 @@ class ComponentUpdater:
                     retryable=True,
                 )
         _atomic_json(transaction_path, transaction)
+
+        first_core_result: dict[str, Any] | None = None
+        if isinstance(first_core_block, dict):
+            if lock_lease is None or bootstrap_module is None:
+                raise UpdateError(
+                    "HELPER_UNAVAILABLE",
+                    "First-Core apply requires the active official updater lock lease.",
+                )
+            core_candidates = package_inventory.get("firstCoreCandidates")
+            stage_record = stored.get("firstCoreBootstrapStage")
+            if not isinstance(core_candidates, dict) or not isinstance(stage_record, dict):
+                raise UpdateError(
+                    "INVALID_STAGE",
+                    "The checked first-Core candidates or stage record are missing.",
+                )
+            staged_core = self._validate_first_core_stage_items(
+                first_core_block,
+                core_candidates,
+                stage_record.get("stagedComponents"),
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+            broker_candidate = core_candidates.get(BROKER_COMPONENT_ID)
+            broker_stage = next(
+                row for row in staged_core if row["componentId"] == BROKER_COMPONENT_ID
+            )
+            if not isinstance(broker_candidate, Candidate):
+                raise UpdateError("INVALID_STAGE", "The staged Broker candidate is unavailable.")
+            broker_release = self._read_first_core_broker_release(
+                broker_candidate,
+                broker_stage,
+                stage_record.get("brokerProofs"),
+                resolution,
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+            source_policy_for_core = resolution.get("sourcePolicy")
+            if source_policy_for_core != source_policy:
+                raise UpdateError(
+                    "SOURCE_POLICY_INVALID",
+                    "First-Core source policy differs from the signed workload.",
+                )
+            activity_catalog, _source_ids = self._activity_catalog(allow_uninitialized=True)
+            source_principals = self._workload_source_principals(
+                source_policy_for_core, activity_catalog
+            )
+            first_core_parent_plan = {
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "catalogDigest": stored["catalogDigest"],
+                "channel": stored["channel"],
+                "firstCoreBootstrap": first_core_block,
+                "resolution": resolution,
+            }
+            transaction["firstCoreBootstrapStatus"] = "pending"
+            _atomic_json(transaction_path, transaction)
+            first_core_result = self._run_fresh_workload_first_core(
+                first_core_parent_plan,
+                staged_core,
+                broker_release,
+                source_policy_for_core,
+                source_principals,
+                lock_lease=lock_lease,
+                bootstrap_module=bootstrap_module,
+            )
+            transaction["firstCoreBootstrapResult"] = first_core_result
+            transaction["firstCoreBootstrapStatus"] = "installed"
+            _atomic_json(transaction_path, transaction)
 
         if sdk_entry is not None:
             selected_sdk, staged_sdk = sdk_entry
@@ -12010,6 +13122,24 @@ class ComponentUpdater:
             "sourceBindings": package_inventory.get("sourceBindings", []),
             **({"hostMetadata": host_metadata} if host_metadata else {}),
         }
+        if isinstance(first_core_block, dict):
+            if not isinstance(first_core_result, dict):
+                first_core_result = transaction.get("firstCoreBootstrapResult")
+            if not isinstance(first_core_result, dict):
+                raise UpdateError(
+                    "FIRST_CORE_READBACK_REQUIRED",
+                    "The first-Core completion receipt is missing from the durable transaction.",
+                    retryable=True,
+                )
+            result["firstCoreBootstrap"] = {
+                **first_core_block,
+                "status": "installed",
+                "readiness": {
+                    "status": first_core_result["readiness"]["status"],
+                    "catalogGeneration": first_core_result["readiness"]["catalogGeneration"],
+                },
+                "componentStatuses": first_core_result["componentStatuses"],
+            }
         transaction["result"] = result
         transaction["phase"] = "succeeded"
         transaction.pop("maintenanceToken", None)
@@ -12021,7 +13151,12 @@ class ComponentUpdater:
         return result
 
     def _apply_workload_install_locked(
-        self, stored: dict[str, Any], confirmation: dict[str, Any]
+        self,
+        stored: dict[str, Any],
+        confirmation: dict[str, Any],
+        *,
+        lock_lease: Any | None = None,
+        bootstrap_module: Any | None = None,
     ) -> dict[str, Any]:
         """Apply typed Product and static-web payloads with recoverable pointers.
 
@@ -12031,7 +13166,12 @@ class ComponentUpdater:
         completed workload.
         """
 
-        return self._apply_workload_install_assembled(stored, confirmation)
+        return self._apply_workload_install_assembled(
+            stored,
+            confirmation,
+            lock_lease=lock_lease,
+            bootstrap_module=bootstrap_module,
+        )
 
         plan_id = stored["planId"]
         plan_digest = stored["planDigest"]
@@ -17003,6 +18143,8 @@ class ComponentUpdater:
                 **request_params,
             },
         }
+        if method == "ValidateMaintenanceHold":
+            payload["protocol_version"] = "cyrene.runtime-maintenance.broker.v1"
         try:
             command = [str(broker_path), "request", "--socket", str(self.socket_path)]
             if method != "Health":
