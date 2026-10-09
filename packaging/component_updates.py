@@ -5186,6 +5186,7 @@ class ComponentUpdater:
                 {"components": {}, "installationRecords": {}, "sourceBindings": []},
             )
         candidates: dict[str, Candidate] = {}
+        candidate_errors: dict[str, UpdateError] = {}
         if action == "install":
             for component_id in potential_ids:
                 component = self.components.get(component_id)
@@ -5199,10 +5200,10 @@ class ComponentUpdater:
                     candidates[component_id] = self._candidate(
                         component, component_target, selected_channel
                     )
-                except UpdateError:
+                except UpdateError as error:
                     # The pure resolver emits a scoped blocker only if this release is
                     # required by the chosen workload closure.
-                    continue
+                    candidate_errors[component_id] = error
         trusted_indexes = self._trusted_release_indexes(list(candidates.values()))
         installed, package_inventory = self._installed_workload_components(
             potential_ids, workload_id=workload_id
@@ -5218,7 +5219,70 @@ class ComponentUpdater:
             action=action,
             channel=selected_channel,
         ).to_dict()
+        if candidate_errors:
+            self._attach_workload_candidate_failures(resolution, candidate_errors)
         return resolution, candidates, package_inventory
+
+    @staticmethod
+    def _attach_workload_candidate_failures(
+        resolution: dict[str, Any], candidate_errors: dict[str, UpdateError]
+    ) -> None:
+        """Attach discovery failures only to components already blocked by resolution.
+
+        The resolver owns workload membership and closure. Candidate failures for
+        unselected optional components must not create new blockers. Enriched blocker
+        details remain part of the plan digest so retries see the same diagnostics.
+        中文：只补充解析器已阻断组件的候选错误，不让未选可选组件产生全局阻断。
+        """
+
+        blockers = resolution.get("blockers")
+        material = resolution.get("planDigestMaterial")
+        if not isinstance(blockers, list) or not isinstance(material, dict):
+            return
+
+        changed = False
+        for blocker in blockers:
+            if not isinstance(blocker, dict) or blocker.get("code") not in {
+                "MISSING_RELEASE",
+                "MISSING_CAPABILITY",
+            }:
+                continue
+            component_id = blocker.get("componentId")
+            error = candidate_errors.get(component_id) if isinstance(component_id, str) else None
+            if error is None:
+                continue
+            message = " ".join(str(error).split())[:500]
+            details = blocker.get("details")
+            updated_details = dict(details) if isinstance(details, dict) else {}
+            updated_details["candidateFailure"] = {
+                "code": error.code,
+                "message": message,
+                "retryable": error.retryable,
+            }
+            blocker["details"] = updated_details
+            blocker["retryable"] = error.retryable
+            changed = True
+
+        if not changed:
+            return
+        digest_material = dict(material)
+        digest_material["blockers"] = blockers
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    digest_material,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+        resolution["blockers"] = blockers
+        resolution["planDigestMaterial"] = digest_material
+        resolution["planDigest"] = digest
+        resolution["planId"] = "plan-" + digest.removeprefix("sha256:")[:32]
 
     def check_workload(
         self,

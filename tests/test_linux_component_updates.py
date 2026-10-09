@@ -12,6 +12,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -1468,6 +1469,106 @@ def test_blocked_workload_check_echoes_digest_bound_channel() -> None:
     assert result["status"] == "blocked"
     assert result["channel"] == result["resolution"]["channel"] == "preview"
     assert result["resolution"]["planDigestMaterial"]["channel"] == "preview"
+
+
+def test_workload_candidate_failures_enrich_only_resolver_blockers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = WORKSPACE_ROOT / "governance" / "component-catalog-v2.json"
+    updater = updates.ComponentUpdater(
+        catalog_path=catalog_path,
+        activity_catalog_path=tmp_path / "activity-sources.json",
+        state_root=tmp_path / "update-state",
+        install_root=tmp_path / "install",
+        broker_path=tmp_path / "missing-broker",
+        release_lock_path=tmp_path / "missing-release-lock.json",
+        trusted_catalog_digest=None,
+        load_active_catalog=False,
+    )
+    optional_id = "cyrene-evaluation-exact-match"
+
+    def target_for(component: dict[str, Any], *, target_id: str | None = None) -> dict[str, Any]:
+        row = next(
+            item
+            for item in component["targets"]
+            if target_id is None or item["targetId"] == target_id
+        )
+        return {
+            **updater.targets[row["targetId"]],
+            "artifactKind": row["artifactKind"],
+        }
+
+    def candidate(
+        component: dict[str, Any],
+        _target: dict[str, Any],
+        _channel: str,
+        *,
+        release_id: str | None = None,
+    ):
+        if release_id is not None:
+            raise AssertionError("The workload candidate probe must use release discovery.")
+        component_id = component["componentId"]
+        if component_id == updates.WORKLOAD_SDK_COMPONENT_ID:
+            raise updates.UpdateError(
+                "ATTESTATION_INVALID", "The required SDK release attestation is invalid."
+            )
+        raise updates.UpdateError(
+            "NETWORK_ERROR", "The optional package release API is temporarily unavailable.", True
+        )
+
+    monkeypatch.setattr(updater, "_target_for", target_for)
+    monkeypatch.setattr(updater, "_candidate", candidate)
+    monkeypatch.setattr(
+        updater,
+        "_installed_workload_components",
+        lambda _component_ids, *, workload_id=None: (
+            {},
+            {"components": {}, "installationRecords": {}, "sourceBindings": []},
+        ),
+    )
+
+    resolution, candidates, _inventory = updater._build_workload_plan(
+        "plugins",
+        updates.WORKLOAD_HOST_TARGET,
+        {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}},
+        action="install",
+        channel="preview",
+    )
+
+    assert candidates == {}
+    sdk_blocker = next(
+        item
+        for item in resolution["blockers"]
+        if item["code"] == "MISSING_RELEASE"
+        and item["componentId"] == updates.WORKLOAD_SDK_COMPONENT_ID
+    )
+    assert sdk_blocker["retryable"] is False
+    assert sdk_blocker["details"]["candidateFailure"] == {
+        "code": "ATTESTATION_INVALID",
+        "message": "The required SDK release attestation is invalid.",
+        "retryable": False,
+    }
+    assert not any(item.get("componentId") == optional_id for item in resolution["blockers"])
+    assert not any(
+        item.get("details", {}).get("candidateFailure")
+        for item in resolution["blockers"]
+        if item.get("componentId") == optional_id
+    )
+    digest_material = resolution["planDigestMaterial"]
+    expected_digest = (
+        "sha256:"
+        + updates.hashlib.sha256(
+            updates.json.dumps(
+                digest_material,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    assert resolution["planDigest"] == expected_digest
+    assert resolution["planId"] == "plan-" + expected_digest.removeprefix("sha256:")[:32]
 
 
 @pytest.mark.parametrize(
