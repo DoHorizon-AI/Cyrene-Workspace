@@ -48,6 +48,7 @@ WORKLOAD_SDK_TARGET_ID = "linux-ubuntu-24.04-x86_64-python-3.12-library"
 WORKLOAD_WEB_COMPONENT_ID = "cyrene-client-workspace-web"
 WORKLOAD_ECHO_COMPONENT_ID = "cyrene-echo"
 WORKLOAD_ECHO_TARGET_ID = "linux-ubuntu-24.04-x86_64-oci"
+NATIVE_BINARY_SUPPORTED_RUNTIMES = frozenset({"systemd", "node:24"})
 WORKLOAD_ECHO_API_URL = "http://127.0.0.1:8094/"
 WORKLOAD_ECHO_HEALTH_PATH = "/healthz"
 WORKLOAD_ECHO_API_TOKEN_PATH = Path("/etc/cyrene/secrets/catalyst-api-token")
@@ -13950,7 +13951,10 @@ class ComponentUpdater:
                     or not self._private_python_runtime_ready(profile)
                 ):
                     continue
-            if entry.get("artifactKind") == "native-binary" and spec.get("runtime") != "systemd":
+            if (
+                entry.get("artifactKind") == "native-binary"
+                and spec.get("runtime") not in NATIVE_BINARY_SUPPORTED_RUNTIMES
+            ):
                 continue
             if entry.get("artifactKind") == "static-web" and spec.get("runtime") != "static-web":
                 continue
