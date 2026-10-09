@@ -1742,13 +1742,17 @@ def _write_package_fixture(
     unit_root = package_root / "lib/systemd/system"
     unit_root.mkdir(parents=True)
     for _, component_id in module.PRODUCTS.values():
-        (unit_root / f"{component_id}.service").write_text(
+        service = component_id.removeprefix("cyrene-")
+        unit_bytes = (
             "[Unit]\nDescription=Product\n"
             "Requires=cyrene-runtime-maintenance.service\n"
             "After=network.target cyrene-runtime-maintenance.service\n"
-            "[Service]\nExecStart=/opt/cyrene/python/3.12.14/bin/python3.12\n",
-            encoding="utf-8",
-        )
+            "[Service]\nUser=cyrene\nGroup=cyrene\n"
+            "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+            f"/usr/lib/cyrene/scripts/cyrene.py service-run {service}\n"
+        ).encode()
+        (unit_root / f"{component_id}.service").write_bytes(unit_bytes)
+        (unit_root / f"{component_id}.service").chmod(0o644)
 
     runtime_lock = json.loads(
         (WORKSPACE_ROOT / "packaging/python-runtime.lock.json").read_text(encoding="utf-8")
@@ -1834,6 +1838,12 @@ def _write_package_fixture(
                 "verifiedTuples": receipt_tuples,
             },
         ),
+        "managedUnits": module._native_install_contract_module().managed_units_from_directory(
+            unit_root,
+            target_profile=profile,
+            source_ref="refs/heads/main",
+            source_commit="d" * 40,
+        ),
         "maintainerScriptsSha256": script_hashes,
     }
     marker_path = package_root / "usr/share/cyrene/native-install-contract-v1.json"
@@ -1903,6 +1913,52 @@ def test_offline_deb_proof_checks_actual_marker_scripts_and_published_bytes(tmp_
     assert proof["workspaceCatalogSha256"] == receipt["releaseInputs"]["workspaceCatalog"]["sha256"]
     assert proof["workspaceCatalogGeneration"] == 12
     assert len(proof["bootstrapCatalogBindingSha256"]) == 64
+
+
+@pytest.mark.parametrize(
+    "mutation", ["mapped-digest", "mapped-source", "mapped-path", "unit-runner"]
+)
+def test_offline_deb_proof_recomputes_managed_unit_map_from_final_package(
+    tmp_path: Path, mutation: str
+) -> None:
+    if shutil.which("dpkg-deb") is None:
+        pytest.skip("dpkg-deb is required for the DEB payload proof test")
+    module = _module()
+    _deb_path, receipt, package_root = _write_package_fixture(tmp_path, module)
+    marker_path = package_root / module.INSTALL_CONTRACT_PATH
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    unit = package_root / "lib/systemd/system/cyrene-catalyst.service"
+    mapped = marker["managedUnits"]["cyrene-catalyst"]
+    if mutation == "mapped-digest":
+        mapped["sha256"] = "f" * 64
+    elif mutation == "mapped-source":
+        mapped["source"]["commit"] = "f" * 40
+    elif mutation == "mapped-path":
+        mapped["packagePath"] = "usr/lib/systemd/system/cyrene-catalyst.service"
+    else:
+        unit.write_text(
+            unit.read_text(encoding="utf-8").replace("service-run catalyst", "other-runner"),
+            encoding="utf-8",
+        )
+        unit.chmod(0o644)
+    marker_path.write_text(json.dumps(marker, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    rebuilt = tmp_path / f"managed-unit-{mutation}.deb"
+    result = subprocess.run(
+        ["dpkg-deb", "--build", "--root-owner-group", str(package_root), str(rebuilt)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    with pytest.raises(module.ReleaseError):
+        module._inspect_deb_initialization(
+            rebuilt,
+            module.PROFILE_IDS[0],
+            receipt,
+            verify_attestations=False,
+            gh_executable="gh",
+        )
 
 
 @pytest.mark.parametrize("active_generation", [14, 15])

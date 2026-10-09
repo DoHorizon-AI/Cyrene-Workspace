@@ -96,6 +96,53 @@ def test_native_core_target_maps_to_exact_product_python_profile() -> None:
         first._python_profile_for_core_target("linux-ubuntu-24.04-x86_64-python-3.12")
 
 
+def test_unit_path_delegates_to_the_deb_managed_contract_verifier(tmp_path: Path) -> None:
+    unit_path = tmp_path / "cyrene-catalyst.service"
+    unit_bytes = b"verified DEB-managed unit"
+    observed: dict[str, Any] = {}
+
+    def validate_unit(
+        component: dict[str, Any], candidate: dict[str, Any], *, verify_fragment: bool
+    ) -> tuple[bytes, Path, str]:
+        observed.update(
+            component=component,
+            candidate=candidate,
+            verify_fragment=verify_fragment,
+        )
+        return unit_bytes, unit_path, "sha256:" + "a" * 64
+
+    updater = SimpleNamespace(_workload_deb_managed_unit_bytes=validate_unit)
+    component = {
+        "componentId": "cyrene-catalyst",
+        "pythonBundleService": "catalyst",
+    }
+
+    path, payload = first._unit_path(
+        updater,
+        component,
+        "catalyst",
+        target_profile="linux-ubuntu-24.04-x86_64-python-3.12",
+    )
+
+    assert path == unit_path
+    assert payload == unit_bytes
+    assert observed == {
+        "component": component,
+        "candidate": {"targetId": "linux-ubuntu-24.04-x86_64-python-3.12"},
+        "verify_fragment": True,
+    }
+
+
+def test_unit_path_fails_closed_without_native_contract_verifier() -> None:
+    with pytest.raises(TypeError, match="no DEB-managed Product unit verifier"):
+        first._unit_path(
+            SimpleNamespace(),
+            {"pythonBundleService": "catalyst"},
+            "catalyst",
+            target_profile="linux-ubuntu-24.04-x86_64-python-3.12",
+        )
+
+
 @pytest.mark.parametrize("raw_digest", ["a" * 64, "0" * 64, "f" * 64])
 def test_bundle_raw_artifact_digest_maps_to_typed_receipt_digest(raw_digest: str) -> None:
     assert first._typed_bundle_artifact_digest(raw_digest) == f"sha256:{raw_digest}"
