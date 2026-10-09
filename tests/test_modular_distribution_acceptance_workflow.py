@@ -48,16 +48,25 @@ def _workflow_driver(tmp_path: Path) -> tuple[dict[str, object], str]:
             isinstance(target, ast.Name) and target.id == "code" for target in node.targets
         ):
             continue
-        value = node.value
-        if (
-            isinstance(value, ast.Call)
-            and isinstance(value.func, ast.Attribute)
-            and value.func.attr == "dedent"
-            and value.args
-            and isinstance(value.args[0], ast.Constant)
-            and isinstance(value.args[0].value, str)
-        ):
-            compile(textwrap.dedent(value.args[0].value), "acceptance-helper.py", "exec")
+        call = node.value
+        while isinstance(call, ast.Call):
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "dedent"
+                and call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+            ):
+                compile(
+                    textwrap.dedent(call.args[0].value),
+                    f"acceptance-helper-line-{node.lineno}.py",
+                    "exec",
+                )
+                break
+            if isinstance(call.func, ast.Attribute):
+                call = call.func.value
+            else:
+                break
     driver_path = tmp_path / "acceptance_driver.py"
     driver_path.write_text(driver, encoding="utf-8")
     return document, str(driver_path)
@@ -288,6 +297,7 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     assert 'phase("client_curation_proxy_mutation", client_curation_proxy_mutation)' in source
     assert '"retryAttempted":False' in source
     assert '"offline_retry_gate"' in source
+
     assert 'command.extend(["/usr/bin/unshare", "--net"])' in source
     assert 'error.get("code") == "NETWORK_ERROR"' in source
     assert '"same-plan repeated stage"' in source
@@ -322,6 +332,52 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     assert '"ssh-guest acceptance must not receive GitHub token environment variables"' in source
     assert '"--cert-oidc-issuer", "https://token.actions.githubusercontent.com"' in source
     assert "Runnable Catalyst core" in source
+
+
+def test_static_binding_readback_compiles_the_generated_probe_before_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compile the exact privileged Python source that the driver passes to python -c."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_static_probe")
+    acceptance_root = tmp_path / "acceptance"
+    evidence_dir = acceptance_root / "evidence"
+    evidence_dir.mkdir(parents=True)
+    module.root = lambda: acceptance_root
+    pins = _valid_pins()
+    monkeypatch.setattr(module, "pins", lambda: pins)
+    (evidence_dir / "native-release-manifest.json").write_text(
+        json.dumps(
+            {"workspaceCatalogs": {"baselineV1": {"assetName": "component-catalog-v1.json"}}}
+        ),
+        encoding="utf-8",
+    )
+    (evidence_dir / "native-source-receipt.json").write_text(
+        json.dumps({"releaseInputs": {"workspaceCatalogs": {"baselineV1": {"generation": 13}}}}),
+        encoding="utf-8",
+    )
+    captured: dict[str, str] = {}
+
+    def run_fake_probe(
+        command: list[str],
+        *,
+        label: str,
+        input_text: str,
+        timeout: int,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        assert label == "installed-native-static-binding-probe"
+        assert command[:4] == ["sudo", "-n", module.PRIVATE_PYTHON, "-s"]
+        compile(command[-1], "installed-native-static-binding-probe.py", "exec")
+        captured["program"] = command[-1]
+        captured["input"] = input_text
+        return subprocess.CompletedProcess(command, 0, '{"compiled":true}', "")
+
+    monkeypatch.setattr(module, "run", run_fake_probe)
+    assert module.static_binding_readback() == {"compiled": True}
+    assert "import importlib.util" in captured["program"]
+    request = json.loads(captured["input"])
+    assert request["baseline"]["generation"] == 13
+    assert request["targetId"] == pins["nativeInstaller"]["targetId"]
 
 
 def test_anonymous_release_api_records_public_rate_limit_headers(
@@ -916,7 +972,12 @@ def test_attestation_cli_bootstraps_missing_runner_from_exact_official_checksum_
         if command == ["gh", "--version"]:
             return subprocess.CompletedProcess(command, 0, "gh version 2.102.0\n", "")
         if command[0] == "dpkg-deb":
-            return subprocess.CompletedProcess(command, 0, "gh\n2.102.0\namd64\n", "")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                "Package: gh\nVersion: 2.102.0\nArchitecture: amd64\n",
+                "",
+            )
         assert command[:4] == ["sudo", "-n", "apt-get", "install"]
         return subprocess.CompletedProcess(command, 0, "", "")
 

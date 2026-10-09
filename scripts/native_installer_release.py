@@ -443,6 +443,19 @@ def _attestation_projection(
     }
 
 
+def _run_trust_metadata_api_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run one local verifier command through the bounded 503 retry wrapper."""
+
+    helper = Path(__file__).with_name("retry_trust_metadata_api.py")
+    return subprocess.run(
+        [sys.executable, str(helper), "--", *command],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+
+
 def _run_attestation_verify(
     subject: Path,
     bundle: Path,
@@ -474,7 +487,7 @@ def _run_attestation_verify(
         "--predicate-type",
         PREDICATE_TYPE,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = _run_trust_metadata_api_command(command)
     if result.returncode != 0:
         raise ReleaseError(f"detached SLSA bundle did not verify for {label}")
 
@@ -3259,7 +3272,7 @@ def verify_release_directory(
                 "--predicate-type",
                 PREDICATE_TYPE,
             ]
-            result = subprocess.run(command, capture_output=True, text=True, check=False)
+            result = _run_trust_metadata_api_command(command)
             if result.returncode != 0:
                 raise ReleaseError(
                     f"offline attestation verification failed for {path.name}: "
