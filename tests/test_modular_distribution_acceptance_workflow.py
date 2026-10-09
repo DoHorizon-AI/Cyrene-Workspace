@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -203,6 +204,127 @@ def _load_driver_module(tmp_path: Path, name: str) -> object:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _build_native_deb(tmp_path: Path, helper_bytes: bytes) -> Path:
+    """Build a small real DEB carrying the exact helper path read by the driver."""
+    dpkg_deb = shutil.which("dpkg-deb")
+    if dpkg_deb is None:
+        pytest.skip("dpkg-deb is required to exercise native package payload verification")
+    package_root = tmp_path / "cyrene-package"
+    control = package_root / "DEBIAN" / "control"
+    control.parent.mkdir(parents=True)
+    control.write_text(
+        "Package: cyrene\nVersion: 0.1.0-rc.1\nArchitecture: amd64\n"
+        "Maintainer: Cyrene Test <test@example.invalid>\nDescription: test fixture\n",
+        encoding="utf-8",
+    )
+    helper = package_root / "usr/lib/cyrene/scripts/component_updates.py"
+    helper.parent.mkdir(parents=True)
+    helper.write_bytes(helper_bytes)
+    deb_path = tmp_path / "cyrene_0.1.0-rc.1_amd64.deb"
+    result = subprocess.run(
+        [dpkg_deb, "--build", "--root-owner-group", str(package_root), str(deb_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return deb_path
+
+
+@pytest.mark.parametrize("installed_matches", [True, False])
+def test_native_deb_reinstall_requires_exact_installed_helper_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed_matches: bool,
+) -> None:
+    """The real driver reinstalls the pinned DEB and rejects stale same-version helpers."""
+    acceptance_root = tmp_path / "acceptance"
+    downloads = acceptance_root / "downloads"
+    evidence = acceptance_root / "evidence"
+    downloads.mkdir(parents=True)
+    evidence.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+
+    helper_bytes = b"# exact release helper fixture\n"
+    built_deb = _build_native_deb(tmp_path, helper_bytes)
+    deb_path = downloads / built_deb.name
+    shutil.copy2(built_deb, deb_path)
+    pins = _valid_pins()
+    native = pins["nativeInstaller"]
+    native["debAssetName"] = deb_path.name
+    native["debSha256"] = hashlib.sha256(deb_path.read_bytes()).hexdigest()
+    native["debSizeBytes"] = deb_path.stat().st_size
+    (acceptance_root / "release-pins-v1.json").write_text(json.dumps(pins), encoding="utf-8")
+    (evidence / "native-release-manifest.json").write_text(
+        json.dumps({"version": "0.1.0-rc.1"}), encoding="utf-8"
+    )
+
+    installed_helper = tmp_path / "installed/component_updates.py"
+    installed_helper.parent.mkdir()
+    actual_bytes = helper_bytes if installed_matches else b"# stale same-version helper\n"
+    installed_helper.write_bytes(actual_bytes)
+    module = _load_driver_module(tmp_path, f"acceptance_driver_native_deb_{installed_matches}")
+    module.INSTALLED_NATIVE_HELPER = installed_helper
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        command_text = [str(part) for part in command]
+        commands.append(command_text)
+        if command_text[:2] == ["dpkg-deb", "-f"]:
+            field = command_text[-1]
+            output = {
+                "Package": "cyrene\n",
+                "Version": "0.1.0-rc.1\n",
+                "Architecture": "amd64\n",
+            }[field]
+            return subprocess.CompletedProcess(command_text, 0, output, "")
+        if command_text[:5] == ["sudo", "-n", "apt", "install", "--reinstall"]:
+            assert command_text[5:7] == ["--yes", str(deb_path)]
+            return subprocess.CompletedProcess(command_text, 0, "", "")
+        assert command_text == [
+            "dpkg-query",
+            "-W",
+            "-f=${Status}\t${Version}\t${Architecture}",
+            "cyrene",
+        ]
+        return subprocess.CompletedProcess(
+            command_text, 0, "install ok installed\t0.1.0-rc.1\tamd64\n", ""
+        )
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    if installed_matches:
+        module.dpkg_install()
+    else:
+        with pytest.raises(
+            RuntimeError,
+            match="installed component_updates.py differs from the exact verified DEB payload",
+        ):
+            module.dpkg_install()
+
+    apt_commands = [
+        command for command in commands if command[:4] == ["sudo", "-n", "apt", "install"]
+    ]
+    assert len(apt_commands) == 1
+    assert apt_commands[0][4:] == ["--reinstall", "--yes", str(deb_path)]
+    receipt_path = evidence / "native-deb-installed.json"
+    if not installed_matches:
+        assert not receipt_path.exists()
+        return
+
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["dpkg"] == {
+        "status": "install ok installed",
+        "version": "0.1.0-rc.1",
+        "architecture": "amd64",
+    }
+    assert receipt["componentUpdates"] == {
+        "path": str(installed_helper),
+        "sha256": hashlib.sha256(helper_bytes).hexdigest(),
+        "sizeBytes": len(helper_bytes),
+    }
 
 
 def _verified_catalyst_catalog() -> dict[str, object]:
