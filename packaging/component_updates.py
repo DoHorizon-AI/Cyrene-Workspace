@@ -45,6 +45,25 @@ WORKLOAD_HOST_TARGET = "linux-ubuntu-24.04-x86_64"
 WORKLOAD_IDS = frozenset({"catalyst", "echo", "plugins"})
 WORKLOAD_SDK_COMPONENT_ID = "cyrene-runtime-maintenance-sdk"
 WORKLOAD_SDK_TARGET_ID = "linux-ubuntu-24.04-x86_64-python-3.12-library"
+WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS = (
+    "componentId",
+    "version",
+    "manifestDigest",
+    "manifestAssetDigest",
+    "digest",
+    "releaseId",
+    "targetId",
+    "publisherIdentity",
+    "indexIdentity",
+    "attestationRef",
+)
+WORKLOAD_STAGE_PLUGIN_BACKFILL_FIELDS = (
+    "releaseId",
+    "targetId",
+    "publisherIdentity",
+    "indexIdentity",
+    "attestationRef",
+)
 WORKLOAD_WEB_COMPONENT_ID = "cyrene-client-workspace-web"
 WORKLOAD_ECHO_COMPONENT_ID = "cyrene-echo"
 WORKLOAD_ECHO_TARGET_ID = "linux-ubuntu-24.04-x86_64-oci"
@@ -5565,6 +5584,17 @@ class ComponentUpdater:
         ):
             self._preflight_workload_oci_runtime()
         if stored.get("phase") == "staged":
+            staged_rows, changed = self._validate_cached_workload_stage_rows(
+                stored,
+                resolution,
+                candidates,
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+                action=action,
+            )
+            if changed:
+                stored["stagedComponents"] = staged_rows
+                _atomic_json(directory / f"{plan_id}.json", stored)
             return {
                 "status": "staged",
                 "planId": plan_id,
@@ -5574,7 +5604,7 @@ class ComponentUpdater:
                 "targetId": target_id,
                 "action": action,
                 "channel": selected_channel,
-                "components": stored.get("stagedComponents", []),
+                "components": staged_rows,
                 "resolution": resolution,
                 "warnings": resolution.get("warnings", []),
                 "blockers": [],
@@ -5687,6 +5717,266 @@ class ComponentUpdater:
             "warnings": resolution.get("warnings", []),
             "blockers": [],
         }
+
+    def _validate_cached_workload_stage_rows(
+        self,
+        stored: dict[str, Any],
+        resolution: dict[str, Any],
+        candidates: dict[str, Candidate],
+        *,
+        plan_id: str,
+        plan_digest: str,
+        action: str,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Validate persisted stage rows and backfill only legacy Plugin identity fields.
+
+        Cached rows are accepted only for the exact checked resolution and verified
+        staged assets. The compatibility projection copies selected resolver identity;
+        it never creates or replaces an asset attestation proof.
+        中文：仅对同一可信计划中的旧插件行补齐身份字段，不重建或替换资产证明。
+        """
+
+        if stored.get("resolution") != resolution:
+            raise UpdateError(
+                "INVALID_STAGE", "Persisted workload resolution differs from the fresh plan."
+            )
+        selected_rows = resolution.get("selectedComponents")
+        staged_rows = stored.get("stagedComponents")
+        if not isinstance(selected_rows, list) or not isinstance(staged_rows, list):
+            raise UpdateError("INVALID_STAGE", "Cached workload stage rows are malformed.")
+        selected_by_id = {
+            row.get("componentId"): row for row in selected_rows if isinstance(row, dict)
+        }
+        staged_by_id = {row.get("componentId"): row for row in staged_rows if isinstance(row, dict)}
+        if (
+            len(selected_by_id) != len(selected_rows)
+            or len(staged_by_id) != len(staged_rows)
+            or set(selected_by_id) != set(staged_by_id)
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "Cached workload component set differs from the plan."
+            )
+
+        stage_root = self.state_root / "staged" / "workload-plans" / plan_id
+        changed = False
+        normalized: list[dict[str, Any]] = []
+        for cached in staged_rows:
+            if not isinstance(cached, dict):
+                raise UpdateError("INVALID_STAGE", "Cached workload component row is malformed.")
+            component_id = cached.get("componentId")
+            selected = selected_by_id[component_id]
+            is_staged_plugin = (
+                action == "install"
+                and selected.get("artifactKind") == "plugin-package"
+                and cached.get("status") == "staged"
+            )
+            projected = dict(cached)
+            for field in WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS:
+                if field in cached:
+                    if cached[field] != selected.get(field):
+                        raise UpdateError(
+                            "INVALID_STAGE",
+                            f"Cached workload identity differs for {component_id}: {field}.",
+                        )
+                    continue
+                if not is_staged_plugin or field not in WORKLOAD_STAGE_PLUGIN_BACKFILL_FIELDS:
+                    raise UpdateError(
+                        "INVALID_STAGE",
+                        f"Cached workload identity is missing for {component_id}: {field}.",
+                    )
+                if selected.get(field) is None:
+                    raise UpdateError(
+                        "INVALID_STAGE",
+                        f"Fresh resolver identity is incomplete for {component_id}: {field}.",
+                    )
+                projected[field] = selected[field]
+                changed = True
+
+            if is_staged_plugin:
+                candidate = candidates.get(component_id)
+                if candidate is None:
+                    raise UpdateError(
+                        "INVALID_STAGE", f"Cached Plugin candidate disappeared for {component_id}."
+                    )
+                self._validate_cached_workload_plugin_stage(
+                    cached,
+                    candidate,
+                    selected,
+                    stored_candidates=stored.get("candidates"),
+                    stage_root=stage_root,
+                    plan_id=plan_id,
+                    plan_digest=plan_digest,
+                )
+            normalized.append(projected)
+        return normalized, changed
+
+    def _validate_cached_workload_plugin_stage(
+        self,
+        cached: dict[str, Any],
+        candidate: Candidate,
+        selected: dict[str, Any],
+        *,
+        stored_candidates: Any,
+        stage_root: Path,
+        plan_id: str,
+        plan_digest: str,
+    ) -> None:
+        """Recheck immutable Plugin stage bytes and recorded proofs before recovery."""
+
+        component_id = candidate.component.get("componentId")
+        artifact = candidate.manifest.get("artifact")
+        source = candidate.manifest.get("source")
+        attestation_ref = selected.get("attestationRef")
+        expected_candidate = {
+            "manifestUri": candidate.manifest_uri,
+            "manifestDigest": candidate.manifest_digest,
+            "manifestAssetDigest": candidate.manifest_asset_digest,
+            "artifactDigest": candidate.artifact_digest,
+            "releaseTag": candidate.release_tag,
+            "targetId": selected.get("targetId"),
+        }
+        if (
+            not isinstance(component_id, str)
+            or not isinstance(artifact, dict)
+            or not isinstance(source, dict)
+            or not isinstance(attestation_ref, dict)
+            or not _valid_digest(candidate.manifest_asset_digest)
+            or selected.get("componentId") != component_id
+            or selected.get("version") != candidate.manifest.get("version")
+            or selected.get("digest") != candidate.artifact_digest
+            or selected.get("manifestDigest") != candidate.manifest_digest
+            or selected.get("manifestAssetDigest") != candidate.manifest_asset_digest
+            or attestation_ref.get("sourceCommit") != source.get("commit")
+            or cached.get("sourceCommit") != source.get("commit")
+            or cached.get("artifactKind") != "plugin-package"
+            or cached.get("status") != "staged"
+            or cached.get("packageId") != artifact.get("packageId")
+            or cached.get("capabilityId") != artifact.get("capabilityId")
+            or cached.get("bindingId") != selected.get("bindingId")
+            or cached.get("sourcePolicy") != selected.get("sourcePolicy")
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", f"Cached Plugin stage identity differs for {component_id}."
+            )
+        if (
+            not isinstance(stored_candidates, dict)
+            or stored_candidates.get(component_id) != expected_candidate
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", f"Cached Plugin candidate snapshot differs for {component_id}."
+            )
+
+        references: list[tuple[str, dict[str, Any]]] = [
+            ("archive", artifact.get("archive")),
+            ("descriptor", artifact.get("descriptor")),
+            ("requirementsLock", artifact.get("requirementsLock")),
+            ("packageReleaseMetadata", artifact.get("packageReleaseMetadata")),
+        ]
+        wheels = artifact.get("preparerWheels")
+        if not isinstance(wheels, list) or not wheels:
+            raise UpdateError("INVALID_STAGE", "Cached Plugin preparer wheel list is invalid.")
+        references.extend((f"preparerWheel{index}", item) for index, item in enumerate(wheels))
+        if artifact.get("sbom") is not None:
+            references.append(("sbom", artifact["sbom"]))
+        labels = [label for label, _ in references]
+        proofs = cached.get("assetAttestations")
+        identity = cached.get("stagedIdentity")
+        if (
+            not isinstance(proofs, dict)
+            or set(proofs) != set(labels)
+            or any(not _valid_digest(value) for value in proofs.values())
+            or not isinstance(identity, dict)
+            or set(identity) != {"assetPaths", "payloadPath", "planId", "planDigest"}
+            or identity.get("planId") != plan_id
+            or identity.get("planDigest") != plan_digest
+        ):
+            raise UpdateError(
+                "INVALID_STAGE",
+                f"Cached Plugin proofs or stage binding are invalid for {component_id}.",
+            )
+
+        component_root = stage_root / component_id
+        payload_root = component_root / "payload"
+        try:
+            _verify_private_directory(stage_root)
+            _verify_private_directory(component_root)
+            _verify_private_directory(payload_root)
+        except UpdateError as error:
+            raise UpdateError(
+                "INVALID_STAGE", "Cached Plugin stage directory is unsafe."
+            ) from error
+        if identity.get("payloadPath") != str(payload_root):
+            raise UpdateError("INVALID_STAGE", "Cached Plugin payload path differs from its plan.")
+        asset_paths = identity.get("assetPaths")
+        if not isinstance(asset_paths, dict) or set(asset_paths) != set(labels):
+            raise UpdateError("INVALID_STAGE", "Cached Plugin asset path map is incomplete.")
+
+        payloads: dict[str, bytes] = {}
+        stored_assets: dict[str, dict[str, Any]] = {}
+        expected_paths: dict[str, str] = {}
+        for label, reference in references:
+            if (
+                not isinstance(reference, dict)
+                or not isinstance(reference.get("uri"), str)
+                or not _valid_digest(reference.get("sha256"))
+                or type(reference.get("sizeBytes")) is not int
+                or reference["sizeBytes"] < 0
+            ):
+                raise UpdateError("INVALID_STAGE", "Fresh Plugin asset references are malformed.")
+            filename = PurePosixPath(urllib.parse.urlsplit(reference["uri"]).path).name
+            if not filename or filename in {".", ".."}:
+                raise UpdateError("INVALID_STAGE", "Fresh Plugin asset filename is unsafe.")
+            asset_path = component_root / filename
+            if label in expected_paths or str(asset_path) in expected_paths.values():
+                raise UpdateError("INVALID_STAGE", "Cached Plugin asset paths are duplicated.")
+            expected_paths[label] = str(asset_path)
+            if asset_paths.get(label) != str(asset_path):
+                raise UpdateError(
+                    "INVALID_STAGE", "Cached Plugin asset path differs from its plan."
+                )
+            try:
+                _verify_private_file(asset_path)
+                info = asset_path.stat()
+                payload = asset_path.read_bytes()
+            except (OSError, UpdateError) as error:
+                raise UpdateError(
+                    "INVALID_STAGE", "Cached Plugin asset is unavailable or unsafe."
+                ) from error
+            if (
+                info.st_size != reference["sizeBytes"]
+                or _file_digest(asset_path) != reference["sha256"]
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", "Cached Plugin asset digest differs from the plan."
+                )
+            payloads[label] = payload
+            stored_assets[label] = {
+                "path": str(asset_path),
+                "uri": reference["uri"],
+                "sha256": reference["sha256"],
+                "sizeBytes": reference["sizeBytes"],
+                "attestationBundleDigest": proofs[label],
+            }
+
+        metadata = self._parse_plugin_package_release_metadata(
+            candidate, payloads["packageReleaseMetadata"], stored_assets
+        )
+        descriptor = self._validate_workload_package_descriptor(
+            payloads["descriptor"], candidate, artifact, payload_root
+        )
+        self._validate_workload_package_source_policy(metadata, selected.get("sourcePolicy"))
+        expected_fields = {
+            "packageArtifactDigest": descriptor["artifactDigest"],
+            "archiveDigest": descriptor["archiveDigest"],
+            "descriptorDigest": artifact["descriptor"].get("sha256"),
+            "dependencyLockDigest": descriptor["dependencyLockDigest"],
+            "packageReleaseDigest": artifact["packageReleaseMetadata"].get("sha256"),
+            "sourceCommit": metadata["source"]["commit"],
+        }
+        if any(cached.get(field) != value for field, value in expected_fields.items()):
+            raise UpdateError(
+                "INVALID_STAGE", f"Cached Plugin package identity differs for {component_id}."
+            )
 
     def _stage_workload_candidate(
         self,
@@ -6195,6 +6485,7 @@ class ComponentUpdater:
                 "SOURCE_BINDING_INVALID",
                 "Plugin package staging requires the selected workload's explicit owner binding.",
             )
+        identity_fields = self._workload_receipt_fields(candidate, resolution_component)
         return {
             "componentId": component_id,
             "status": "staged",
@@ -6203,6 +6494,11 @@ class ComponentUpdater:
             "digest": candidate.artifact_digest,
             "manifestDigest": candidate.manifest_digest,
             "manifestAssetDigest": candidate.manifest_asset_digest,
+            "releaseId": identity_fields["releaseId"],
+            "targetId": identity_fields["targetId"],
+            "publisherIdentity": identity_fields["publisherIdentity"],
+            "indexIdentity": identity_fields["indexIdentity"],
+            "attestationRef": identity_fields["attestationRef"],
             "packageId": package_id,
             "capabilityId": artifact["capabilityId"],
             "bindingId": binding_id,
