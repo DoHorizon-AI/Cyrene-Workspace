@@ -1,8 +1,14 @@
 # ADR: Modular distribution preview / 模块化发行预览
 
-Status: accepted for the Ubuntu 24.04 preview architecture. Matching modular DEB, Client Control, and official Linux Echo releases and clean-host acceptance remain separate pending gates.
+Status: accepted for the Ubuntu 24.04 preview architecture. Client Control/Web,
+Runtime Maintenance SDK, Catalyst, plugin, and Echo component preview releases
+are published. The matching generation-15 native DEB, source receipt, signed
+Catalog binding, and clean-host acceptance remain separate pending gates;
+acceptance is `NOT_RUN`.
 
-状态：Ubuntu 24.04 预览配置采用本决策；正式发布与安装后验收必须分别提供实际证据。
+状态：Ubuntu 24.04 预览配置采用本决策。Client Control/Web、Runtime Maintenance SDK、Catalyst、Plugin 与
+Echo 组件预览发行物已发布；匹配的 generation-15 native DEB、source receipt、签名 Catalog binding 和全新主机验收
+仍分别待完成；当前验收状态为 `NOT_RUN`。
 
 ## Context / 背景
 
@@ -150,10 +156,18 @@ activation starts after that hold ends. Removing a component used by another
 owner must preserve it or produce an explicit blocker. Product removal retains
 datasets, artifacts, review history and backups by default.
 
+An optional `channel` on `check` overrides the signed Catalog's
+`defaultChannel`; the resolved channel is included in the plan and digest.
+`stage` and `apply` must repeat the same channel, while `status` has no channel
+field. Omitting `channel` therefore preserves the Catalog's configured default.
+
 安装和卸载共用同一 plan/check/stage/apply 确认链。binding 操作先持久化 owner 结果并
 完成 Broker admission；离线包变更要求精确 PACKAGE_ONLY hold 和运行时共享锁；
 激活在 hold 结束后执行。仍被其他 owner 使用的组件保留或明确阻止卸载。默认保留
 用户 Dataset、Artifact、审核历史和备份。
+
+`check` 可选传入 `channel` 覆盖签名 Catalog 的 `defaultChannel`；解析出的通道会纳入 plan 和 digest。
+`stage` 与 `apply` 必须重复相同通道，`status` 不含 channel 字段。省略 `channel` 时继续遵循 Catalog 配置的默认值。
 
 The release gate is a fresh Ubuntu 24.04 host consuming official release assets
 without cloning source: Catalyst selection, verified component installation,
@@ -165,17 +179,28 @@ version conflict, failed upgrade and rollback have individual evidence statuses.
 A container-only base probe, a staged DEB, local green tests or transport smoke
 cannot be reported as this gate passing.
 
-At the time of this ADR update, the matching generation-15 native DEB, Client
-Control release, and official Linux Echo release are still pending; full clean-host
-acceptance is `NOT_RUN`. Treat the installation commands as instructions for the
-exact future immutable release pins, not as evidence that the release or host
-workflow has passed.
+At the time of this ADR update, the component previews listed in
+[`MODULAR_DISTRIBUTION_V01.md`](MODULAR_DISTRIBUTION_V01.md) are published, but
+the matching generation-15 native DEB, its source receipt, and signed Catalog
+binding are still pending. The guide records the current native producer source
+and expected tag as candidates only; the producer has not published that
+immutable release. Full clean-host acceptance is `NOT_RUN`. A previous
+GitHub-hosted attempt correctly failed the trusted-prefix guard because
+`/usr/share` and `/opt` were root-owned but group/world writable (`0777`). Do
+not chmod those paths to relabel that runner as pristine; rerun on a fresh
+official Ubuntu 24.04.5 guest with the standard root-owned `0755` prefixes.
+Treat the installation commands as instructions for the exact native release
+pins, not as evidence that release or host acceptance has passed.
 
 最终门禁是在全新 Ubuntu 24.04 上仅消费官方发布物，完成 Catalyst 安装、激活、Web
 访问、真实审核和 SFT 导出及独立读取，再验证可选 Echo 的评测和独立删除。可靠性
 场景逐项记录 PASS/FAIL/NOT_RUN；基础容器检查、stage-only DEB、本地测试或传输
 smoke 都不能冒充完整安装验收。
 
-更新本文时，匹配 generation 15 的 native DEB、Client Control 发行物和 Echo 官方 Linux 发行物仍待发布；
-clean-host 整体验收为 `NOT_RUN`。安装命令是供未来精确不可变 release pins 使用的步骤，不代表发行物或主机流程
-已经通过。
+更新本文时，组件预览版已发布，具体版本见
+[`MODULAR_DISTRIBUTION_V01.md`](MODULAR_DISTRIBUTION_V01.md)；但匹配 generation 15 的 native DEB、source receipt 和
+签名 Catalog binding 仍待完成。指南中列出的 native producer 源码和预期 tag 仅为候选，尚未发布不可变发行物。
+先前 GitHub 托管验收因 `/usr/share` 和 `/opt` 由 root 所有但允许组/其他用户写入（`0777`），被 trusted-prefix guard
+正确拒绝。不要修改这些目录权限后把该 runner 标为 pristine；应在全新的官方 Ubuntu 24.04.5 guest 上重跑，并保持
+标准 root-owned `0755` 前缀。clean-host 整体验收为 `NOT_RUN`。安装命令用于精确 native release pins，不代表发行物
+或主机流程已经通过。
