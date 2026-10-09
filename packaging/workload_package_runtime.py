@@ -1063,6 +1063,18 @@ def apply_workload_source_update(
     ):
         raise WorkloadPackageRuntimeError("Package Runtime update paths must be absolute")
     hold_digests = hold["component_artifact_digests"]
+    if type(update.expected_generation) is not int or type(update.changed) is not bool:
+        raise WorkloadPackageRuntimeError("Source update generation is invalid")
+    previous_generation = update.expected_generation - (1 if update.changed else 0)
+    if (
+        update.expected_generation < 1
+        or previous_generation < 0
+        or (previous_generation == 0 and (update.expected_generation != 1 or not update.changed))
+        or hold["expected_catalog_generation"] != previous_generation
+    ):
+        raise WorkloadPackageRuntimeError(
+            "Source update generation differs from the held catalog generation"
+        )
     if any(
         hold_digests.get(component_id) != digest
         for component_id, digest in update.component_artifact_digests.items()
@@ -1095,6 +1107,10 @@ def apply_workload_source_update(
         if current_policy_bytes is not None
         else None
     )
+    if current_generation == 0 and current_policy_bytes is not None:
+        raise WorkloadPackageRuntimeError(
+            "An uninitialized activity catalog cannot replace an existing Package Runtime policy"
+        )
     if current_policy_digest != expected_policy_digest:
         raise WorkloadPackageRuntimeError("Package Runtime policy changed after source projection")
     if current_policy_bytes is not None:
@@ -1208,6 +1224,12 @@ def reconcile_workload_source_update(
     previous_generation = update.expected_generation - (1 if update.changed else 0)
     if previous_generation < 0 or type(update.changed) is not bool:
         raise WorkloadPackageRuntimeError("Source update prior generation is invalid")
+    if (
+        previous_generation == 0 and (update.expected_generation != 1 or not update.changed)
+    ) or hold["expected_catalog_generation"] != previous_generation:
+        raise WorkloadPackageRuntimeError(
+            "Source update generation differs from the held catalog generation"
+        )
     if not isinstance(update.binding_scopes, Mapping) or not isinstance(
         update.runtime_bindings, Mapping
     ):
@@ -1464,7 +1486,7 @@ def _validate_policy_update_hold(maintenance: Mapping[str, Any]) -> dict[str, An
         or type(maintenance.get("expected_gate_generation")) is not int
         or maintenance["expected_gate_generation"] < 1
         or type(maintenance.get("expected_catalog_generation")) is not int
-        or maintenance["expected_catalog_generation"] < 1
+        or maintenance["expected_catalog_generation"] < 0
     ):
         raise WorkloadPackageRuntimeError("PACKAGE_ONLY hold echo is invalid")
     return dict(maintenance)

@@ -8046,6 +8046,7 @@ class ComponentUpdater:
         phase: str,
         target_kind: str,
         requires_restart: bool,
+        allow_uninitialized_catalog: bool = False,
     ) -> None:
         """Acquire one fresh hold for a resumable subphase of the parent workload plan."""
 
@@ -8063,8 +8064,27 @@ class ComponentUpdater:
         transaction.pop("maintenanceRequestId", None)
         transaction["targetKind"] = target_kind
         transaction["requiresRestart"] = requires_restart
-        activity_catalog, activity_sources = self._activity_catalog()
-        readiness = self._readiness_for(target_kind, requires_restart=requires_restart, force=True)
+        if allow_uninitialized_catalog and (
+            transaction.get("action") != "install"
+            or phase not in {"core-runtime-install", "package-only"}
+            or transaction.get("transactionKind") != "workload-assembly.v1"
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION",
+                "Only initial workload installation can initialize a catalog.",
+            )
+        activity_catalog, activity_sources = self._activity_catalog(
+            allow_uninitialized=allow_uninitialized_catalog
+        )
+        begin_from_uninitialized_catalog = (
+            allow_uninitialized_catalog and activity_catalog["generation"] == 0
+        )
+        readiness = self._readiness_for(
+            target_kind,
+            requires_restart=requires_restart,
+            force=True,
+            allow_uninitialized_catalog=begin_from_uninitialized_catalog,
+        )
         self._require_ready(readiness, target_kind)
         if readiness.get("install_catalog_generation") != activity_catalog["generation"]:
             raise UpdateError(
@@ -8080,6 +8100,7 @@ class ComponentUpdater:
         transaction["expectedGateGeneration"] = gate_generation
         transaction["expectedCatalogGeneration"] = activity_catalog["generation"]
         transaction["expectedActivitySources"] = activity_sources
+        transaction["allowUninitializedActivityCatalog"] = begin_from_uninitialized_catalog
         transaction["phase"] = "begin_pending"
         holds = transaction.setdefault("maintenanceHolds", {})
         if not isinstance(holds, dict):
@@ -8105,7 +8126,10 @@ class ComponentUpdater:
         }
         _atomic_json(transaction_path, transaction)
         try:
-            token = self._begin_maintenance(transaction)
+            token = self._begin_maintenance(
+                transaction,
+                allow_uninitialized_catalog=begin_from_uninitialized_catalog,
+            )
         except UpdateError as error:
             if error.maintenance_not_acquired:
                 holds[phase]["status"] = "not_acquired"
@@ -8260,7 +8284,7 @@ class ComponentUpdater:
             temporary.unlink(missing_ok=True)
 
     def _workload_source_state(
-        self, workload_id: str
+        self, workload_id: str, *, allow_uninitialized_catalog: bool = False
     ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, dict[str, Any]], Any]:
         """Read the current Broker and Package Runtime owner state for one workload."""
 
@@ -8278,7 +8302,9 @@ class ComponentUpdater:
             raise UpdateError(
                 "SOURCE_POLICY_INVALID", "Signed workload sourcePolicy is unavailable."
             )
-        activity_catalog, _activity_sources = self._activity_catalog()
+        activity_catalog, _activity_sources = self._activity_catalog(
+            allow_uninitialized=allow_uninitialized_catalog
+        )
         principals = self._workload_source_principals(policy, activity_catalog)
         runtime_policy: dict[str, Any] | None = None
         if DEFAULT_PACKAGE_RUNTIME_POLICY.exists() or DEFAULT_PACKAGE_RUNTIME_POLICY.is_symlink():
@@ -8298,7 +8324,13 @@ class ComponentUpdater:
                     "Package Runtime source policy cannot be read safely.",
                     retryable=True,
                 ) from error
-        elif activity_catalog.get("sources"):
+        if activity_catalog.get("generation") == 0 and runtime_policy is not None:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "An uninitialized activity catalog cannot replace an existing Package Runtime policy.",
+                retryable=True,
+            )
+        if runtime_policy is None and activity_catalog.get("sources"):
             raise UpdateError(
                 "PACKAGE_RUNTIME_READBACK_REQUIRED",
                 "Activity owners exist without their authenticated Package Runtime policy.",
@@ -8334,9 +8366,20 @@ class ComponentUpdater:
             if reconciled is not None:
                 return reconciled
 
-        activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
-            transaction["workloadId"]
+        allow_uninitialized_catalog = (
+            transaction.get("transactionKind") == "workload-assembly.v1"
+            and transaction.get("action") == "install"
+            and phase in {"core-runtime-install", "package-only"}
+            and source_policy.get("mode") in {"actualProduct", "standaloneOperator"}
         )
+        if allow_uninitialized_catalog:
+            activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                transaction["workloadId"], allow_uninitialized_catalog=True
+            )
+        else:
+            activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                transaction["workloadId"]
+            )
         try:
             update = helper.build_workload_source_update(
                 source_policy=source_policy,
@@ -10653,6 +10696,7 @@ class ComponentUpdater:
         phase: str,
         target_kind: str,
         requires_restart: bool,
+        allow_uninitialized_catalog: bool = False,
     ) -> bool:
         """Acquire or resume one phase; return false when it already committed."""
 
@@ -10672,6 +10716,7 @@ class ComponentUpdater:
             phase=phase,
             target_kind=target_kind,
             requires_restart=requires_restart,
+            allow_uninitialized_catalog=allow_uninitialized_catalog,
         )
         return True
 
@@ -11320,7 +11365,46 @@ class ComponentUpdater:
         oci_changed = any(
             staged_by_id[item["componentId"]].get("status") != "current" for item in oci_components
         )
-        activity_catalog, _activity_source_ids = self._activity_catalog()
+        source_rows = source_policy.get("productSources", [])
+        can_initialize_catalog = (
+            transaction.get("action") == "install"
+            and transaction.get("transactionKind") == "workload-assembly.v1"
+            and (
+                bool(plugin_rows)
+                or (
+                    source_policy.get("mode") == "actualProduct"
+                    and isinstance(source_rows, list)
+                    and bool(source_rows)
+                )
+            )
+        )
+        activity_catalog, _activity_source_ids = self._activity_catalog(
+            allow_uninitialized=can_initialize_catalog
+        )
+        catalog_uninitialized = activity_catalog["generation"] == 0
+        if catalog_uninitialized and (
+            DEFAULT_PACKAGE_RUNTIME_POLICY.exists() or DEFAULT_PACKAGE_RUNTIME_POLICY.is_symlink()
+        ):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "An uninitialized activity catalog cannot replace an existing Package Runtime policy.",
+                retryable=True,
+            )
+        if catalog_uninitialized:
+            for service in service_units:
+                unit = service.get("unit")
+                component_id = service.get("componentId")
+                if (
+                    not isinstance(unit, str)
+                    or not isinstance(component_id, str)
+                    or self._active_native_pointer_identity(component_id) is not None
+                    or self._package_product_unit_state(unit) == "active"
+                ):
+                    raise UpdateError(
+                        "GATE_UNKNOWN",
+                        "The activity catalog is missing while a Product service may already be installed.",
+                        retryable=True,
+                    )
         source_ids = {
             source["source_id"]
             for source in activity_catalog.get("sources", [])
@@ -11419,6 +11503,7 @@ class ComponentUpdater:
                 phase="core-runtime-install",
                 target_kind="CORE_RUNTIME",
                 requires_restart=bool(service_units),
+                allow_uninitialized_catalog=catalog_uninitialized,
             )
         ):
             try:
@@ -11552,6 +11637,7 @@ class ComponentUpdater:
                 phase="package-only",
                 target_kind="PACKAGE_ONLY",
                 requires_restart=False,
+                allow_uninitialized_catalog=catalog_uninitialized,
             ):
                 fresh_inventory = self._workload_inventory_before_daemon_stop(workload_id)
                 if fresh_inventory is not None:
@@ -16728,7 +16814,27 @@ class ComponentUpdater:
             "runtimeActivated": False,
         }
 
-    def _activity_catalog(self) -> tuple[dict[str, Any], list[str]]:
+    def _activity_catalog(
+        self, *, allow_uninitialized: bool = False
+    ) -> tuple[dict[str, Any], list[str]]:
+        if allow_uninitialized:
+            try:
+                self.activity_catalog_path.lstat()
+            except FileNotFoundError:
+                current = self.activity_catalog_path.parent
+                while current != current.parent:
+                    try:
+                        info = current.lstat()
+                    except FileNotFoundError:
+                        current = current.parent
+                        continue
+                    if current.is_symlink() or not stat.S_ISDIR(info.st_mode):
+                        raise UpdateError(
+                            "UNSAFE_STATE",
+                            "Runtime activity catalog parent path is unsafe.",
+                        )
+                    current = current.parent
+                return {"schema_version": 1, "generation": 0, "sources": []}, []
         catalog = _read_object(self.activity_catalog_path, "runtime activity source catalog")
         if (
             set(catalog) != {"schema_version", "generation", "sources"}
@@ -16858,12 +16964,19 @@ class ComponentUpdater:
             )
 
     def _broker_request(
-        self, method: str, params: dict[str, Any], *, request_id: str | None = None
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        request_id: str | None = None,
+        allow_uninitialized_catalog: bool = False,
     ) -> dict[str, Any]:
         catalog: dict[str, Any] | None = None
         sources: list[str] = []
         if method in {"GetUpdateReadiness", "BeginMaintenance"}:
-            catalog, sources = self._activity_catalog()
+            catalog, sources = self._activity_catalog(
+                allow_uninitialized=allow_uninitialized_catalog
+            )
         broker_path = self._resolve_broker_executable()
         if not broker_path.is_file() or not os.access(broker_path, os.X_OK):
             raise UpdateError(
@@ -17206,22 +17319,34 @@ class ComponentUpdater:
         return self._readiness_for(target_kind, requires_restart=True)
 
     def _readiness_for(
-        self, target_kind: str, *, requires_restart: bool, force: bool = False
+        self,
+        target_kind: str,
+        *,
+        requires_restart: bool,
+        force: bool = False,
+        allow_uninitialized_catalog: bool = False,
     ) -> dict[str, Any]:
         key = (target_kind, requires_restart)
-        if not force and key in self._readiness_cache:
+        if not force and not allow_uninitialized_catalog and key in self._readiness_cache:
             return self._readiness_cache[key]
         try:
-            activity_catalog, activity_sources = self._activity_catalog()
-            result = self._broker_request(
-                "GetUpdateReadiness",
-                {
-                    "target_kind": target_kind,
-                    "requires_restart": requires_restart,
-                    "expected_catalog_generation": activity_catalog["generation"],
-                    "expected_activity_sources": activity_sources,
-                },
+            activity_catalog, activity_sources = self._activity_catalog(
+                allow_uninitialized=allow_uninitialized_catalog
             )
+            readiness_params = {
+                "target_kind": target_kind,
+                "requires_restart": requires_restart,
+                "expected_catalog_generation": activity_catalog["generation"],
+                "expected_activity_sources": activity_sources,
+            }
+            if allow_uninitialized_catalog:
+                result = self._broker_request(
+                    "GetUpdateReadiness",
+                    readiness_params,
+                    allow_uninitialized_catalog=True,
+                )
+            else:
+                result = self._broker_request("GetUpdateReadiness", readiness_params)
             if result.get("install_catalog_generation") != activity_catalog["generation"]:
                 result = {
                     **result,
@@ -17243,7 +17368,8 @@ class ComponentUpdater:
                 "requires_restart_confirmation": requires_restart,
                 "message": str(error),
             }
-        self._readiness_cache[key] = result
+        if not allow_uninitialized_catalog:
+            self._readiness_cache[key] = result
         return result
 
     @staticmethod
@@ -21835,8 +21961,20 @@ class ComponentUpdater:
         else:
             self._write_authority_metadata(reference_path, payload)
 
-    def _begin_maintenance(self, transaction: dict[str, Any]) -> str:
+    def _begin_maintenance(
+        self, transaction: dict[str, Any], *, allow_uninitialized_catalog: bool = False
+    ) -> str:
         request_id = _maintenance_request_id(transaction)
+        if allow_uninitialized_catalog and (
+            transaction.get("transactionKind") != "workload-assembly.v1"
+            or transaction.get("action") != "install"
+            or transaction.get("maintenancePhase") not in {"core-runtime-install", "package-only"}
+            or transaction.get("expectedCatalogGeneration") != 0
+            or transaction.get("expectedActivitySources") != []
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Initial catalog hold is not bound to the empty generation."
+            )
         params = {
             "request_id": request_id,
             "target_kind": transaction["targetKind"],
@@ -21850,7 +21988,15 @@ class ComponentUpdater:
             "component_artifact_digests": transaction["componentArtifactDigests"],
         }
         try:
-            result = self._broker_request("BeginMaintenance", params, request_id=request_id)
+            if allow_uninitialized_catalog:
+                result = self._broker_request(
+                    "BeginMaintenance",
+                    params,
+                    request_id=request_id,
+                    allow_uninitialized_catalog=True,
+                )
+            else:
+                result = self._broker_request("BeginMaintenance", params, request_id=request_id)
         except UpdateError as error:
             if error.code in {
                 "ACTIVE_TASKS",
@@ -21977,7 +22123,12 @@ class ComponentUpdater:
     def _end_maintenance(self, transaction: dict[str, Any], *, outcome: str, healthy: bool) -> None:
         token = transaction.get("maintenanceToken")
         if not isinstance(token, str):
-            token = self._begin_maintenance(transaction)
+            token = self._begin_maintenance(
+                transaction,
+                allow_uninitialized_catalog=(
+                    transaction.get("allowUninitializedActivityCatalog") is True
+                ),
+            )
         transaction_id = _maintenance_request_id(transaction)
         if transaction.get("transactionKind") == "workload-assembly.v1" and transaction.get(
             "maintenancePhase"
