@@ -1840,6 +1840,17 @@ jobs:
                   "scope": "read-only exact selected workload resolution",
               }
 
+          def require_retryable_isolated_stage_error(error: Any, context: str) -> str:
+              """Allow only known retryable errors from the network-isolated stage."""
+              require(isinstance(error, dict), f"{context} returned no structured error")
+              code = error.get("code")
+              require(
+                  code in {"NETWORK_ERROR", "PLAN_CHANGED"},
+                  f"{context} returned unexpected code: {code}",
+              )
+              require(error.get("retryable") is True, f"{context} failure was not retryable")
+              return code
+
           def offline_stage_retry(workload: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
               """Isolate stage networking, then prove same-plan retry or report a warm-cache result."""
               fields = {
@@ -1889,9 +1900,9 @@ jobs:
                   }
                   return {**safe_evidence, "stagedResult": cached}
               error = failed.get("error")
-              require(isinstance(error, dict), "network-isolated stage returned no structured error")
-              require(error.get("code") == "NETWORK_ERROR", f"network-isolated stage returned unexpected code: {error.get('code')}")
-              require(error.get("retryable") is True, "network-isolated stage failure was not marked retryable")
+              failure_code = require_retryable_isolated_stage_error(
+                  error, "network-isolated stage"
+              )
 
               active_ids = active_selected_components()
               require(not active_ids, f"a rejected offline stage activated selected components: {active_ids}")
@@ -1901,17 +1912,20 @@ jobs:
               repeated = workload_request("stage", preserve_read_token=True, **fields)
               assert_staged_plan(repeated, workload, checked, "same-plan repeated stage")
               require(resumed["components"] == repeated["components"], "same-plan repeated stage changed staged component identities")
+              active_after_retry = active_selected_components()
+              require(not active_after_retry, f"same-plan stage retry activated selected components: {active_after_retry}")
               safe_evidence = {
-                  "outcome": "network-failure-recovered",
+                  "outcome": "offline-stage-recovered",
                   "failure": {
                       "operation": "stage",
-                      "code": error["code"],
-                      "retryable": error["retryable"],
+                      "code": failure_code,
+                      "retryable": True,
                       "networkNamespace": "isolated-child-process",
                   },
                   "planId": checked["planId"],
                   "planDigest": checked["planDigest"],
                   "activeSelectedComponentsAfterFailure": active_ids,
+                  "activeSelectedComponentsAfterRetry": active_after_retry,
                   "retryStatus": resumed["status"],
                   "repeatStageStatus": repeated["status"],
                   "repeatStageStable": True,
@@ -2076,9 +2090,9 @@ jobs:
                   write_json(root() / "evidence" / "exact-match-plugins-offline-stage.json", evidence)
                   return evidence
               error = isolated.get("error")
-              require(isinstance(error, dict), "network-isolated exact-match stage returned no structured error")
-              require(error.get("code") == "NETWORK_ERROR", f"network-isolated exact-match stage returned unexpected code: {error.get('code')}")
-              require(error.get("retryable") is True, "network-isolated exact-match stage failure was not retryable")
+              failure_code = require_retryable_isolated_stage_error(
+                  error, "network-isolated exact-match stage"
+              )
               after_failure = plugin_status_snapshot(workload, "after isolated exact-match stage failure")
               require(after_failure == baseline, "rejected isolated exact-match stage changed installed component status")
               resumed = workload_request("stage", preserve_read_token=True, **fields)
@@ -2090,12 +2104,12 @@ jobs:
               require(final_status == baseline, "exact-match stage retry changed installed component status")
               evidence = {
                   **plan_identity,
-                  "outcome": "network-failure-recovered",
+                  "outcome": "offline-stage-recovered",
                   "status": "PASS",
                   "failure": {
                       "operation": "stage",
-                      "code": error["code"],
-                      "retryable": error["retryable"],
+                      "code": failure_code,
+                      "retryable": True,
                       "networkNamespace": "isolated-child-process",
                   },
                   "installedStatusBefore": baseline,
@@ -2117,7 +2131,7 @@ jobs:
               """Persist offline-stage evidence without calling a warm cache a recovered failure."""
               try:
                   evidence = offline_stage_retry(workload, checked)
-                  if evidence["outcome"] == "network-failure-recovered":
+                  if evidence["outcome"] == "offline-stage-recovered":
                       evidence["offlineFailureFallback"] = {
                           "status": "NOT_NEEDED",
                           "reason": "the required Catalyst isolated-stage failure was recovered directly",
@@ -2128,12 +2142,12 @@ jobs:
                   record("offline_retry_gate", "FAIL", f"{type(error).__name__}: {error}")
                   print(f"FAIL offline_retry_gate: {error}", file=sys.stderr)
                   raise
-              if evidence["outcome"] == "network-failure-recovered":
+              if evidence["outcome"] == "offline-stage-recovered":
                   record("offline_retry_gate", "PASS", "isolated stage failure resumed and repeated with the same plan", {key: value for key, value in evidence.items() if key != "stagedResult"})
                   print("PASS offline_retry_gate")
               else:
                   fallback = evidence["offlineFailureFallback"]
-                  if fallback.get("outcome") == "network-failure-recovered":
+                  if fallback.get("outcome") == "offline-stage-recovered":
                       record("offline_retry_gate", "PASS", "Catalyst stage was cache-backed; the independent exact-match plugins plan exercised isolated failure and same-plan recovery", {key: value for key, value in evidence.items() if key != "stagedResult"})
                       print("PASS offline_retry_gate via standalone exact-match plugin")
                   else:

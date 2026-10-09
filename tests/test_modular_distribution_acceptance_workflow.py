@@ -546,7 +546,9 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     assert '"offline_retry_gate"' in source
 
     assert 'command.extend(["/usr/bin/unshare", "--net"])' in source
-    assert 'error.get("code") == "NETWORK_ERROR"' in source
+    assert 'code in {"NETWORK_ERROR", "PLAN_CHANGED"}' in source
+    assert 'error.get("retryable") is True' in source
+    assert '"offline-stage-recovered"' in source
     assert '"same-plan repeated stage"' in source
     assert '"/etc/cyrene/studio-control.env"' in source
     assert '"STUDIO_CATALYST_API_TOKEN_FILE"' in source
@@ -2018,10 +2020,22 @@ def test_network_isolated_workload_failure_uses_fixed_cli_and_sanitized_evidence
     assert "synthetic-read-only-token" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("failure_code", "scenario"),
+    [
+        ("NETWORK_ERROR", "recovered"),
+        ("PLAN_CHANGED", "recovered"),
+        ("PLAN_CHANGED", "activated"),
+        ("PLAN_CHANGED", "drift"),
+    ],
+)
 def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
+    scenario: str,
 ) -> None:
-    """Transient offline rejection must preserve one exact plan for same-plan retry."""
+    """Only stable, inactive isolated-stage plans may be retried and accepted."""
     evidence_root = tmp_path / "acceptance"
     monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
     module = _load_driver_module(tmp_path, "acceptance_driver_offline_retry")
@@ -2046,27 +2060,53 @@ def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
         "components": staged_rows,
     }
     calls: list[tuple[str, dict[str, object]]] = []
+    status_reads = 0
 
     def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        nonlocal status_reads
         calls.append((operation, fields))
         if operation == "stage" and fields.get("network_isolated") is True:
             return {
                 "protocolVersion": module.WORKLOAD_PROTOCOL,
                 "ok": False,
                 "operation": "stage",
-                "error": {"code": "NETWORK_ERROR", "retryable": True},
+                "error": {"code": failure_code, "retryable": True},
             }
         if operation == "status":
+            status_reads += 1
+            rows = [{"componentId": row["componentId"], "installed": False} for row in selected]
+            if scenario == "activated" and status_reads == 1:
+                rows[0]["installed"] = True
             return {
                 "status": "ready",
-                "components": [
-                    {"componentId": row["componentId"], "installed": False} for row in selected
-                ],
+                "components": rows,
             }
         assert operation == "stage"
+        if scenario == "drift":
+            return {**staged_result, "planDigest": "sha256:" + "f" * 64}
         return staged_result
 
     monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    if scenario != "recovered":
+        error_message = (
+            "activated selected components"
+            if scenario == "activated"
+            else "changed the checked plan digest"
+        )
+        with pytest.raises(RuntimeError, match=error_message):
+            module.offline_stage_retry(workload, checked)
+
+        stage_calls = [(op, fields) for op, fields in calls if op == "stage"]
+        assert len(stage_calls) == (1 if scenario == "activated" else 2)
+        assert all(
+            fields["planId"] == checked["planId"] and fields["planDigest"] == checked["planDigest"]
+            for _, fields in stage_calls
+        )
+        assert [fields.get("network_isolated", False) for _, fields in stage_calls] == (
+            [True] if scenario == "activated" else [True, False]
+        )
+        return
+
     evidence = module.offline_stage_retry(workload, checked)
 
     stage_calls = [(operation, fields) for operation, fields in calls if operation == "stage"]
@@ -2086,14 +2126,60 @@ def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
         False,
     ]
     assert evidence["activeSelectedComponentsAfterFailure"] == []
+    assert evidence["activeSelectedComponentsAfterRetry"] == []
+    assert evidence["outcome"] == "offline-stage-recovered"
     assert evidence["failure"] == {
         "operation": "stage",
-        "code": "NETWORK_ERROR",
+        "code": failure_code,
         "retryable": True,
         "networkNamespace": "isolated-child-process",
     }
     assert evidence["repeatStageStable"] is True
     assert evidence["stagedResult"] == staged_result
+
+
+@pytest.mark.parametrize(
+    ("code", "retryable", "message"),
+    [
+        ("UNEXPECTED_ERROR", True, "unexpected code"),
+        ("PLAN_CHANGED", False, "failure was not retryable"),
+    ],
+)
+def test_offline_stage_rejects_unknown_or_nonretryable_isolated_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    retryable: bool,
+    message: str,
+) -> None:
+    """Only the two known retryable isolation outcomes may resume a plan."""
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(tmp_path / "acceptance"))
+    module = _load_driver_module(tmp_path, "acceptance_driver_reject_offline_error")
+    workload = _valid_pins()["workloads"]["catalyst"]
+    checked = {
+        "planId": "plan-" + "7" * 32,
+        "planDigest": "sha256:" + "8" * 64,
+        "channel": workload["channel"],
+    }
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        calls.append((operation, fields))
+        assert operation == "stage"
+        assert fields.get("network_isolated") is True
+        return {
+            "ok": False,
+            "operation": "stage",
+            "error": {"code": code, "retryable": retryable},
+        }
+
+    monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    with pytest.raises(RuntimeError, match=message):
+        module.offline_stage_retry(workload, checked)
+
+    assert len(calls) == 1
+    assert calls[0][1]["planId"] == checked["planId"]
+    assert calls[0][1]["planDigest"] == checked["planDigest"]
 
 
 def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
@@ -2156,10 +2242,22 @@ def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
     assert "cached content" in module.ledger()["phases"]["offline_retry_gate"]["reason"]
 
 
+@pytest.mark.parametrize(
+    ("failure_code", "scenario"),
+    [
+        ("NETWORK_ERROR", "recovered"),
+        ("PLAN_CHANGED", "recovered"),
+        ("PLAN_CHANGED", "activated"),
+        ("PLAN_CHANGED", "drift"),
+    ],
+)
 def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without_apply(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_code: str,
+    scenario: str,
 ) -> None:
-    """The plugins fallback retries the same signed plan without Echo or mutation."""
+    """The plugins fallback retries only the original exact plan and fails on drift or activation."""
     evidence_root = tmp_path / "acceptance"
     evidence_root.mkdir()
     monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
@@ -2230,8 +2328,11 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
         ],
     }
     calls: list[tuple[str, dict[str, object]]] = []
+    plugin_component_id = "cyrene-evaluation-exact-match"
+    plugin_status_reads = 0
 
     def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
+        nonlocal plugin_status_reads
         calls.append((operation, fields))
         workload_id = fields.get("workloadId")
         if operation == "check":
@@ -2244,7 +2345,35 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
             return plugin_check
         if operation == "status":
             if workload_id == "plugins":
-                return plugin_status
+                plugin_status_reads += 1
+                observed = json.loads(json.dumps(plugin_status))
+                if scenario == "activated" and plugin_status_reads == 2:
+                    exact_row = next(
+                        row
+                        for row in observed["components"]
+                        if row["componentId"] == plugin_component_id
+                    )
+                    expected = next(
+                        row
+                        for row in module.workload_component_pins(plugins)
+                        if row["componentId"] == plugin_component_id
+                    )
+                    exact_row.update(
+                        {
+                            key: expected[key]
+                            for key in (
+                                "version",
+                                "releaseId",
+                                "targetId",
+                                "manifestDigest",
+                                "manifestAssetDigest",
+                                "digest",
+                            )
+                        }
+                    )
+                    exact_row["installed"] = True
+                    exact_row["verification"] = {"identityAttested": True}
+                return observed
             assert workload_id == "catalyst"
             return {
                 "status": "ready",
@@ -2263,15 +2392,43 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
                 "protocolVersion": module.WORKLOAD_PROTOCOL,
                 "ok": False,
                 "operation": "stage",
-                "error": {"code": "NETWORK_ERROR", "retryable": True},
+                "error": {"code": failure_code, "retryable": True},
             }
+        if scenario == "drift":
+            return {**plugin_staged, "planId": "plan-" + "9" * 32}
         return plugin_staged
 
     monkeypatch.setattr(module, "workload_request", fake_workload_request)
+    if scenario != "recovered":
+        expected_error = (
+            "rejected isolated exact-match stage changed installed component status"
+            if scenario == "activated"
+            else "same-plan exact-match stage retry changed the checked plan ID"
+        )
+        with pytest.raises(RuntimeError, match=expected_error):
+            module.record_offline_stage_outcome(catalyst, catalyst_check)
+
+        plugin_stages = [
+            fields
+            for operation, fields in calls
+            if operation == "stage" and fields.get("workloadId") == "plugins"
+        ]
+        expected_stage_modes = [True] if scenario == "activated" else [True, False]
+        assert [
+            fields.get("network_isolated", False) for fields in plugin_stages
+        ] == expected_stage_modes
+        assert all(
+            fields["planId"] == plugin_check["planId"]
+            and fields["planDigest"] == plugin_check["planDigest"]
+            for fields in plugin_stages
+        )
+        assert not any(operation == "apply" for operation, _ in calls)
+        return
+
     result = module.record_offline_stage_outcome(catalyst, catalyst_check)
 
     assert result["outcome"] == "cached-stage-no-failure"
-    assert result["offlineFailureFallback"]["outcome"] == "network-failure-recovered"
+    assert result["offlineFailureFallback"]["outcome"] == "offline-stage-recovered"
     assert result["offlineFailureFallback"]["status"] == "PASS"
     assert result["offlineFailureFallback"]["applied"] is False
     assert module.ledger()["phases"]["offline_retry_gate"]["status"] == "PASS"
@@ -2302,7 +2459,7 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
     assert "cyrene-echo" not in serialized
     assert fallback_evidence["failure"] == {
         "operation": "stage",
-        "code": "NETWORK_ERROR",
+        "code": failure_code,
         "retryable": True,
         "networkNamespace": "isolated-child-process",
     }

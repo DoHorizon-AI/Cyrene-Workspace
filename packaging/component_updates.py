@@ -6024,7 +6024,12 @@ class ComponentUpdater:
         )
         self._write_private_file(archive_path, payload)
         bundle_path = component_root / "bundle"
-        self._extract_tar(archive_path, bundle_path, expected_files=artifact.get("files"))
+        self._extract_tar(
+            archive_path,
+            bundle_path,
+            expected_files=artifact.get("files"),
+            preserve_executable_bits=True,
+        )
         release_path = bundle_path / "sdk-release.json"
         try:
             metadata = json.loads(release_path.read_bytes(), object_pairs_hook=_unique_json_object)
@@ -19208,7 +19213,12 @@ class ComponentUpdater:
             self._extract_native(archive_path, payload_root, artifact)
             installed_path = self._install_native_release(candidate, payload_root)
         elif artifact["kind"] == "python-bundle":
-            self._extract_tar(archive_path, payload_root, expected_files=artifact.get("files"))
+            self._extract_tar(
+                archive_path,
+                payload_root,
+                expected_files=artifact.get("files"),
+                preserve_executable_bits=True,
+            )
             service = candidate.component.get("pythonBundleService")
             if not service:
                 raise UpdateError(
@@ -19825,10 +19835,17 @@ class ComponentUpdater:
         max_entries: int | None = None,
         max_member_bytes: int | None = None,
         max_expanded_bytes: int | None = None,
+        preserve_executable_bits: bool = False,
     ) -> None:
+        if preserve_executable_bits and expected_files is None:
+            raise UpdateError(
+                "INVALID_ARTIFACT",
+                "Executable permissions may only be restored for digest-verified payloads.",
+            )
         destination.mkdir(mode=0o700)
         found: dict[str, str] = {}
         seen_entries: set[str] = set()
+        executable_bits: dict[str, int] = {}
         expanded_bytes = 0
         try:
             with tarfile.open(archive, "r:*") as tar:
@@ -19881,6 +19898,8 @@ class ComponentUpdater:
                     with source, target.open("xb") as output:
                         shutil.copyfileobj(source, output)
                     found[path.as_posix()] = hashlib.sha256(target.read_bytes()).hexdigest()
+                    if preserve_executable_bits:
+                        executable_bits[normalized] = member.mode & 0o111
         except (OSError, tarfile.TarError) as error:
             raise UpdateError(
                 "INVALID_ARTIFACT", f"Cannot safely extract release archive: {error}"
@@ -19894,6 +19913,37 @@ class ComponentUpdater:
                     "PAYLOAD_FILE_DIGEST_MISMATCH",
                     "Native payload files do not match the manifest file map.",
                 )
+        if preserve_executable_bits:
+            self._restore_verified_executable_bits(destination, executable_bits)
+
+    @staticmethod
+    def _restore_verified_executable_bits(root: Path, executable_bits: dict[str, int]) -> None:
+        """Apply safe archive execute bits only after every payload digest matches."""
+
+        for relative_path, execute_bits in executable_bits.items():
+            target = root.joinpath(*PurePosixPath(relative_path).parts)
+            try:
+                descriptor = os.open(
+                    target,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                )
+                try:
+                    metadata = os.fstat(descriptor)
+                    if not stat.S_ISREG(metadata.st_mode):
+                        raise UpdateError(
+                            "UNSAFE_ARTIFACT",
+                            f"Extracted payload is not a regular file: {relative_path}",
+                        )
+                    # Match the release policy's 0644/0755 files. Only archive execute bits
+                    # survive; special bits and group/other write permissions are discarded.
+                    os.fchmod(descriptor, 0o644 | execute_bits)
+                finally:
+                    os.close(descriptor)
+            except OSError as error:
+                raise UpdateError(
+                    "INVALID_ARTIFACT",
+                    f"Cannot safely restore verified payload permissions: {relative_path}",
+                ) from error
 
     @staticmethod
     def _normalize_payload(root: Path, executable_files: set[str]) -> None:
