@@ -112,6 +112,173 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
     )
 
 
+@pytest.mark.parametrize(
+    ("catalog_schema", "subject_name", "tag_prefix", "include_catalog_schema_version"),
+    [
+        (1, "component-catalog-v1.json", "catalog-", False),
+        (1, "component-catalog-v1.json", "catalog-", True),
+        (2, "component-catalog-v2.json", "catalog-v2-", True),
+    ],
+)
+def test_active_catalog_readback_accepts_exact_v1_and_v2_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    catalog_schema: int,
+    subject_name: str,
+    tag_prefix: str,
+    include_catalog_schema_version: bool,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    catalog_root = tmp_path / "active-catalogs"
+    catalog_root.mkdir()
+    pointer_path = tmp_path / "active-catalog-state.json"
+    source_commit = "a" * 40
+    catalog_bytes = json.dumps(
+        {"schemaVersion": catalog_schema, "generation": 15}, sort_keys=True
+    ).encode()
+    catalog_sha256 = hashlib.sha256(catalog_bytes).hexdigest()
+    catalog_digest = f"sha256:{catalog_sha256}"
+    catalog_file = f"catalog-{catalog_sha256}.json"
+    attestation_file = f"catalog-{catalog_sha256}-{source_commit}.attestation.jsonl"
+    metadata: dict[str, Any] = {
+        "schemaVersion": 1,
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml",
+        "channel": "preview",
+        "releaseId": f"{tag_prefix}preview-{source_commit}",
+        "sourceCommit": source_commit,
+        "sourceRef": "refs/heads/develop",
+        "catalogSha256": catalog_digest,
+        "generation": 15,
+        "subjectName": subject_name,
+        "attestationAssetName": f"{subject_name}.attestation.jsonl",
+    }
+    if include_catalog_schema_version:
+        metadata["catalogSchemaVersion"] = catalog_schema
+    (catalog_root / catalog_file).write_bytes(catalog_bytes)
+    (catalog_root / attestation_file).write_bytes(b"verified detached proof\n")
+    pointer_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "catalogFile": catalog_file,
+                "attestationFile": attestation_file,
+                "metadata": metadata,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updates, "ACTIVE_CATALOG_ROOT", catalog_root)
+    monkeypatch.setattr(updates, "ACTIVE_CATALOG_POINTER", pointer_path)
+    monkeypatch.setattr(updates, "_verify_root_protected_directory", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        updates,
+        "_read_root_catalog_object",
+        lambda path, _description: Path(path).read_bytes(),
+    )
+
+    active = updater._read_active_catalog()
+
+    assert active == (catalog_bytes, metadata)
+
+
+@pytest.mark.parametrize(
+    ("metadata_field", "bad_value"),
+    [
+        ("subjectName", "component-catalog-v1.json"),
+        ("releaseId", "catalog-preview-" + "a" * 40),
+    ],
+)
+def test_active_v2_catalog_readback_rejects_v1_identity_mix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_field: str,
+    bad_value: str,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    catalog_root = tmp_path / "active-catalogs"
+    catalog_root.mkdir()
+    pointer_path = tmp_path / "active-catalog-state.json"
+    source_commit = "a" * 40
+    catalog_bytes = json.dumps({"schemaVersion": 2, "generation": 15}, sort_keys=True).encode()
+    catalog_sha256 = hashlib.sha256(catalog_bytes).hexdigest()
+    catalog_file = f"catalog-{catalog_sha256}.json"
+    attestation_file = f"catalog-{catalog_sha256}-{source_commit}.attestation.jsonl"
+    metadata = {
+        "schemaVersion": 1,
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml",
+        "channel": "preview",
+        "releaseId": f"catalog-v2-preview-{source_commit}",
+        "sourceCommit": source_commit,
+        "sourceRef": "refs/heads/develop",
+        "catalogSha256": f"sha256:{catalog_sha256}",
+        "catalogSchemaVersion": 2,
+        "generation": 15,
+        "subjectName": "component-catalog-v2.json",
+        "attestationAssetName": "component-catalog-v2.json.attestation.jsonl",
+    }
+    metadata[metadata_field] = bad_value
+    (catalog_root / catalog_file).write_bytes(catalog_bytes)
+    (catalog_root / attestation_file).write_bytes(b"detached proof\n")
+    pointer_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "catalogFile": catalog_file,
+                "attestationFile": attestation_file,
+                "metadata": metadata,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(updates, "ACTIVE_CATALOG_ROOT", catalog_root)
+    monkeypatch.setattr(updates, "ACTIVE_CATALOG_POINTER", pointer_path)
+    monkeypatch.setattr(updates, "_verify_root_protected_directory", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        updates,
+        "_read_root_catalog_object",
+        lambda path, _description: Path(path).read_bytes(),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._read_active_catalog()
+
+    assert error.value.code == "INVALID_CATALOG"
+
+
+def test_validate_maintenance_hold_broker_request_includes_protocol_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    broker_path = tmp_path / "runtime-maintenance"
+    broker_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    broker_path.chmod(0o755)
+    monkeypatch.setattr(updater, "_resolve_broker_executable", lambda: broker_path)
+    captured: dict[str, Any] = {}
+
+    def runner(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        captured["payload"] = json.loads(kwargs["input"])
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps({"request_id": "first-core-request", "result": {}}) + "\n",
+            stderr="",
+        )
+
+    updater.runner = runner
+    updater._broker_request(
+        "ValidateMaintenanceHold",
+        {"plan_id": "plan-" + "a" * 32},
+        request_id="first-core-request",
+    )
+
+    payload = captured["payload"]
+    assert payload["protocol_version"] == "cyrene.runtime-maintenance.broker.v1"
+    assert payload["method"] == "ValidateMaintenanceHold"
+    assert payload["request_id"] == "first-core-request"
+
+
 def _service_bundle_archive(
     archive_path: Path,
     service_bundle: Any,

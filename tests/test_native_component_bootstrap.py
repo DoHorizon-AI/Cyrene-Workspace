@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import io
@@ -31,6 +32,9 @@ def _load(name: str, path: Path) -> Any:
 updates = _load("native_bootstrap_updates_test", ROOT / "packaging" / "component_updates.py")
 bootstrap = _load(
     "native_component_bootstrap_test", ROOT / "packaging" / "native_component_bootstrap.py"
+)
+binding_helper = _load(
+    "_cyrene_bootstrap_catalog_binding", ROOT / "packaging" / "bootstrap_catalog_binding.py"
 )
 
 
@@ -384,6 +388,239 @@ def test_first_bootstrap_activates_only_broker_and_recovers_interruption(tmp_pat
     assert recovered["artifactDigest"] == plan["artifactDigest"]
     assert recovered["activePointerTarget"].startswith("releases/1.2.3--")
     assert os.readlink(kernel_root / "active") == kernel_pointer
+
+
+def test_confirmed_bootstrap_reuses_only_a_live_outer_lock_lease(tmp_path: Path) -> None:
+    updater, values, target_id = _fixture(tmp_path)
+    plan = _call(updater, values, target_id)
+    lock_entries: list[str] = []
+    verified_subjects: list[str] = []
+    original_lock = updater._exclusive_update_lock
+    updater._verify_attestation = lambda _payload, **kwargs: verified_subjects.append(
+        kwargs["subject_name"]
+    )
+
+    @contextmanager
+    def record_lock():
+        with original_lock():
+            lock_entries.append("entered")
+            yield
+
+    updater._exclusive_update_lock = record_lock
+    with bootstrap.exclusive_update_lock(updater) as lock_lease:
+        result = bootstrap.bootstrap_verified_runtime_maintenance_under_lock(
+            updater,
+            **values,
+            channel="stable",
+            target_id=target_id,
+            confirm_plan_digest=plan["planDigest"],
+            lock_lease=lock_lease,
+        )
+        with bootstrap.exclusive_update_lock(updater) as nested_lease:
+            assert nested_lease is lock_lease
+        with pytest.raises(PermissionError, match="active updater lock lease"):
+            bootstrap.bootstrap_verified_runtime_maintenance_under_lock(
+                object(),
+                lock_lease=lock_lease,
+            )
+
+    assert lock_entries == ["entered"]
+    assert verified_subjects == ["component-release-index-v1.json", "broker.tar.gz"]
+    assert result["status"] == "activated"
+    with pytest.raises(PermissionError, match="active updater lock lease"):
+        bootstrap.bootstrap_verified_runtime_maintenance_under_lock(
+            updater,
+            lock_lease=lock_lease,
+        )
+    with pytest.raises(TypeError):
+        bootstrap.bootstrap_verified_runtime_maintenance(
+            updater,
+            **values,
+            channel="stable",
+            target_id=target_id,
+            confirm_plan_digest=plan["planDigest"],
+            _lock_lease=lock_lease,
+        )
+
+
+def test_first_core_bootstrap_binds_active_v2_to_compiled_v1_broker_authority(
+    tmp_path: Path,
+) -> None:
+    updater, values, target_id = _fixture(tmp_path)
+    plan = _call(updater, values, target_id)
+    assert plan["status"] == "confirmation_required"
+
+    active_bytes = (ROOT / "governance" / "component-catalog-v2.json").read_bytes()
+    active = json.loads(active_bytes)
+    active_digest = _digest(active_bytes)
+    metadata = {
+        "schemaVersion": 1,
+        "repository": "DoHorizon-AI/Cyrene-Workspace",
+        "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml",
+        "channel": "stable",
+        "releaseId": "catalog-stable-" + "b" * 40,
+        "sourceCommit": "b" * 40,
+        "sourceRef": "refs/heads/main",
+        "catalogSha256": active_digest,
+        "generation": 15,
+        "subjectName": "component-catalog-v2.json",
+        "attestationAssetName": "component-catalog-v2.json.attestation.jsonl",
+    }
+    updater._read_active_catalog = lambda: (active_bytes, metadata)
+    updater.catalog = active
+    updater.catalog_bytes = active_bytes
+    updater.catalog_digest = active_digest
+    updater.catalog_generation = 15
+    updater.catalog_source = metadata
+    updater.components = {row["componentId"]: row for row in active["components"]}
+    updater.targets = {row["id"]: row for row in active["targets"]}
+    updater.publishers = {row["repository"]: row for row in active["publishers"]}
+
+    assert updater.bootstrap_catalog_digest == bootstrap.COMPILED_CATALOG_DIGEST
+    assert updater.bootstrap_catalog_digest != updater.catalog_digest
+    assert updater.catalog_generation == 15
+    assert (
+        updater.bootstrap_catalog_bytes
+        == (ROOT / "packaging" / "component-catalog-bootstrap-v1.json").read_bytes()
+    )
+
+    with pytest.raises(ValueError, match="compiled trusted catalog"):
+        _call(
+            updater,
+            values,
+            target_id,
+            confirm_plan_digest=plan["planDigest"],
+        )
+
+    with bootstrap.exclusive_update_lock(updater) as lock_lease:
+        result = bootstrap.bootstrap_verified_runtime_maintenance_under_lock(
+            updater,
+            **values,
+            channel="stable",
+            target_id=target_id,
+            confirm_plan_digest=plan["planDigest"],
+            lock_lease=lock_lease,
+            active_catalog_digest=active_digest,
+        )
+
+    assert result["status"] == "activated"
+    assert result["componentId"] == "cyrene-runtime-maintenance"
+    assert result["manifestDigest"] == plan["manifestDigest"]
+    assert result["artifactDigest"] == plan["artifactDigest"]
+
+
+def test_packaged_v2_bootstrap_binding_uses_bundled_v1_baseline_without_active_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, values, target_id = _fixture(tmp_path)
+    plan = _call(updater, values, target_id)
+    assert plan["status"] == "confirmation_required"
+
+    package_root = tmp_path / "usr-share-cyrene"
+    package_root.mkdir(mode=0o755)
+    v2_catalog_path = package_root / "component-catalog-v2.json"
+    binding_path = package_root / "bootstrap-catalog-binding-v1.json"
+    baseline_path = package_root / "component-catalog-v1.json"
+    active_bytes = (ROOT / "governance" / "component-catalog-v2.json").read_bytes()
+    baseline_bytes = (ROOT / "packaging" / "component-catalog-bootstrap-v1.json").read_bytes()
+    active = json.loads(active_bytes)
+    active_digest = _digest(active_bytes)
+    v2_catalog_path.write_bytes(active_bytes)
+    v2_catalog_path.chmod(0o644)
+    baseline_path.write_bytes(baseline_bytes)
+    baseline_path.chmod(0o644)
+    commit = "b" * 40
+    binding = {
+        "schemaVersion": 1,
+        "catalog": {
+            "repository": "DoHorizon-AI/Cyrene-Workspace",
+            "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/component-catalog-release.yml",
+            "releaseId": "catalog-v2-stable-" + commit,
+            "source": {"ref": "refs/heads/main", "commit": commit},
+            "assetName": "component-catalog-v2.json",
+            "sha256": active_digest.removeprefix("sha256:"),
+            "attestationBundleSha256": "c" * 64,
+            "generation": active["generation"],
+        },
+    }
+    binding_path.write_text(json.dumps(binding, sort_keys=True), encoding="utf-8")
+    binding_path.chmod(0o644)
+
+    monkeypatch.setattr(binding_helper, "INSTALLED_BINDING_PATH", binding_path)
+    monkeypatch.setattr(binding_helper, "INSTALLED_CATALOG_PATHS", frozenset({v2_catalog_path}))
+    # /tmp is intentionally writable on test hosts; retain the real file identity,
+    # no-follow, ownership, and mode checks while isolating only the parent-path check.
+    monkeypatch.setattr(binding_helper, "_check_root_safe_path", lambda _path: None)
+    root_safe_reader = binding_helper._read_regular_file
+    helper_source_path = (
+        Path(bootstrap.__file__).resolve().with_name("bootstrap_catalog_binding.py")
+    )
+
+    def fixture_root_safe_reader(path: Path, label: str, *, require_root: bool) -> bytes:
+        assert require_root is True
+        if Path(path) == helper_source_path:
+            # The source checkout helper is not root-owned; production reads the
+            # fixed installed sibling through the original root-safe reader.
+            return helper_source_path.read_bytes()
+        return root_safe_reader(path, label, require_root=require_root)
+
+    monkeypatch.setattr(binding_helper, "_read_regular_file", fixture_root_safe_reader)
+    monkeypatch.setattr(bootstrap, "BUNDLED_V1_CATALOG_PATH", baseline_path)
+    validated_binding = binding_helper.load_bootstrap_catalog_binding(
+        binding_path, v2_catalog_path, require_root=True
+    )
+    updater._load_installed_bootstrap_catalog_binding = lambda: (
+        binding_helper.load_bootstrap_catalog_binding(
+            binding_path, v2_catalog_path, require_root=True
+        )
+    )
+    updater.bootstrap_catalog_binding = validated_binding
+    updater.bootstrap_catalog_authorized = True
+    updater.bootstrap_catalog_bytes = active_bytes
+    updater.bootstrap_catalog_digest = active_digest
+    updater.catalog = active
+    updater.catalog_bytes = active_bytes
+    updater.catalog_digest = active_digest
+    updater.catalog_generation = active["generation"]
+    updater.catalog_source = None
+    updater.components = {row["componentId"]: row for row in active["components"]}
+    updater.targets = {row["id"]: row for row in active["targets"]}
+    updater.publishers = {row["repository"]: row for row in active["publishers"]}
+    updater._read_active_catalog = lambda: None
+
+    assert updater.bootstrap_catalog_digest == active_digest
+    assert updater.bootstrap_catalog_digest != bootstrap.COMPILED_CATALOG_DIGEST
+    assert updater.catalog_generation == 15
+    assert json.loads(baseline_bytes)["generation"] == 13
+
+    binding_bytes = binding_path.read_bytes()
+    tampered_binding = copy.deepcopy(binding)
+    tampered_binding["catalog"]["sha256"] = "0" * 64
+    binding_path.write_text(json.dumps(tampered_binding, sort_keys=True), encoding="utf-8")
+    with pytest.raises(ValueError, match="binding could not be revalidated"):
+        bootstrap._require_active_v2_catalog_context(updater, active_digest)
+    binding_path.write_bytes(binding_bytes)
+
+    baseline_path.write_bytes(active_bytes)
+    with pytest.raises(ValueError, match="bundled V1 baseline bytes"):
+        bootstrap._require_active_v2_catalog_context(updater, active_digest)
+    baseline_path.write_bytes(baseline_bytes)
+
+    with bootstrap.exclusive_update_lock(updater) as lock_lease:
+        result = bootstrap.bootstrap_verified_runtime_maintenance_under_lock(
+            updater,
+            **values,
+            channel="stable",
+            target_id=target_id,
+            confirm_plan_digest=plan["planDigest"],
+            lock_lease=lock_lease,
+            active_catalog_digest=active_digest,
+        )
+
+    assert result["status"] == "activated"
+    assert result["componentId"] == "cyrene-runtime-maintenance"
+    assert result["manifestDigest"] == plan["manifestDigest"]
+    assert result["artifactDigest"] == plan["artifactDigest"]
 
 
 def test_completed_same_plan_can_be_read_only_reconfirmed(

@@ -23,13 +23,13 @@ sys.modules[SPEC.name] = bootstrap
 SPEC.loader.exec_module(bootstrap)
 
 
-def _catalog(generation: int = 9) -> dict[str, Any]:
+def _catalog(generation: int = 9, *, source_id: str = "cyrene-yield") -> dict[str, Any]:
     return {
         "schema_version": 1,
         "generation": generation,
         "sources": [
             {
-                "source_id": "cyrene-yield",
+                "source_id": source_id,
                 "uid": os.geteuid(),
                 "gid": os.getegid(),
                 "source_token_sha256": "a" * 64,
@@ -117,6 +117,67 @@ def test_authority_probe_authenticates_yield_and_checks_exact_readiness(
         "source_token": "private-source-token",
     }
     assert "private-source-token" not in json.dumps(proof)
+
+
+def test_authority_probe_accepts_explicit_zero_binding_workload_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    socket_path = tmp_path / "control.sock"
+    result = {
+        "authority": "platform_package_runtime",
+        "protocol_version": "cy-package-runtime.control.v1",
+        "catalog_generation": 9,
+        "capabilities": ["cy-package-runtime.binding-operation-admission.v1"],
+    }
+    server, requests, peer_credentials = _serve_once(socket_path, result)
+    _configure_runtime_socket_identity(monkeypatch)
+    monkeypatch.setattr(
+        bootstrap,
+        "_read_source_token",
+        lambda path, digest: (
+            "private-source-token"
+            if Path(path).name == "cyrene-catalyst.token" and digest == "a" * 64
+            else pytest.fail("the explicit workload source token was not selected")
+        ),
+    )
+    catalog = _catalog(source_id="cyrene-catalyst")
+    catalog["sources"][0]["binding_scopes"] = []
+
+    proof = bootstrap.probe_runtime_authority(
+        catalog,
+        expected_catalog_generation=9,
+        source_id="cyrene-catalyst",
+        expected_uid=os.geteuid(),
+        expected_gid=os.getegid(),
+        socket_path=socket_path,
+    )
+    server.join(timeout=2)
+
+    assert not server.is_alive()
+    assert peer_credentials[0][1:] == (os.geteuid(), os.getegid())
+    assert requests[0]["auth"] == {
+        "source_id": "cyrene-catalyst",
+        "source_token": "private-source-token",
+    }
+    assert proof["catalog_generation"] == 9
+    assert "private-source-token" not in json.dumps(proof)
+
+
+def test_authority_probe_rejects_explicit_source_principal_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bootstrap, "_read_source_token", lambda *_args: pytest.fail("token read"))
+    _configure_runtime_socket_identity(monkeypatch)
+
+    with pytest.raises(bootstrap.PackageRuntimeBootstrapError, match="principal differs"):
+        bootstrap.probe_runtime_authority(
+            _catalog(source_id="cyrene-catalyst"),
+            expected_catalog_generation=9,
+            source_id="cyrene-catalyst",
+            expected_uid=os.geteuid() + 1,
+            expected_gid=os.getegid(),
+            socket_path=tmp_path / "absent.sock",
+        )
 
 
 @pytest.mark.parametrize(

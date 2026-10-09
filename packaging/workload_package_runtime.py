@@ -108,6 +108,199 @@ class WorkloadSourceUpdate:
     required_hold_component_ids: tuple[str, ...]
 
 
+def initialize_first_core_activity_catalog(
+    *,
+    maintenance: Mapping[str, Any],
+    request_id: str,
+    source_policy: Mapping[str, Any],
+    selected_rows: Sequence[Mapping[str, Any]],
+    source_principals: Mapping[str, Mapping[str, Any]],
+    activity_catalog_path: Path = DEFAULT_ACTIVITY_CATALOG_PATH,
+    policy_path: Path = DEFAULT_POLICY_PATH,
+    token_directory: Path = DEFAULT_TOKEN_DIRECTORY,
+    command: Path = DEFAULT_CYRENE_COMMAND,
+    runner: Any = subprocess.run,
+) -> dict[str, Any]:
+    """Register one signed workload source under the fresh CoreBootstrap hold.
+
+    First-Core initialization derives the source and its zero-binding scopes from
+    the parent's signed ``sourcePolicy``. It only accepts the true generation-zero
+    state. If Broker committed generation one before an interruption, recovery
+    delegates to the existing source-update reconciler. It verifies the exact source,
+    token, and ownership metadata, and only repairs the matching policy CAS window;
+    it never reruns ``init-catalog`` or rotates the token.
+    中文：仅在真实gen0状态下初始化签名工作负载来源，精确重试只读核验。
+    """
+
+    _require_root()
+    _require_request_id(request_id)
+    hold = _validate_policy_update_hold(maintenance)
+    if (
+        hold["target_kind"] != "CORE_RUNTIME"
+        or hold["transaction_id"] != request_id
+        or hold["expected_catalog_generation"] != 0
+    ):
+        raise WorkloadPackageRuntimeError("CoreBootstrap hold is not bound to generation zero")
+
+    activity_catalog_path = Path(activity_catalog_path)
+    policy_path = Path(policy_path)
+    token_directory = Path(token_directory)
+    if any(
+        not path.is_absolute() for path in (activity_catalog_path, policy_path, token_directory)
+    ):
+        raise WorkloadPackageRuntimeError("First-Core Package Runtime paths must be absolute")
+    _validate_policy_parent(policy_path.parent, _effective_uid())
+    maintenance_gid = _maintenance_group_id()
+
+    catalog_missing = False
+    try:
+        activity_catalog_path.lstat()
+    except FileNotFoundError:
+        catalog_missing = True
+        activity_catalog = {"schema_version": 1, "generation": 0, "sources": []}
+    except OSError as error:
+        raise WorkloadPackageRuntimeError("Runtime activity catalog cannot be inspected") from error
+    else:
+        activity_catalog = _read_activity_catalog(activity_catalog_path)
+    generation, sources = _catalog_identity(activity_catalog, allow_uninitialized=True)
+    if generation not in {0, 1}:
+        raise WorkloadPackageRuntimeError("First-Core activity catalog generation is unexpected")
+    if generation == 0 and not catalog_missing:
+        raise WorkloadPackageRuntimeError(
+            "A generation-zero activity catalog file is not a fresh first-Core state"
+        )
+    if generation == 0 and sources:
+        raise WorkloadPackageRuntimeError("Generation-zero Runtime catalog must be empty")
+
+    policy_bytes = _read_policy_bytes_optional(
+        policy_path,
+        group_id=_runtime_group_id(),
+        owner_id=_effective_uid(),
+    )
+    if generation == 0 and policy_bytes is not None:
+        raise WorkloadPackageRuntimeError(
+            "An uninitialized activity catalog cannot adopt an existing Runtime policy"
+        )
+
+    owner_source_id, policy_source_ids = _source_policy(source_policy)
+    if len(policy_source_ids) != 1:
+        raise WorkloadPackageRuntimeError(
+            "First-Core workload source policy must declare exactly one source owner"
+        )
+    if not isinstance(source_principals, Mapping):
+        raise WorkloadPackageRuntimeError("First-Core source principal map is malformed")
+    owner_principal = _source_principal(source_principals.get(owner_source_id), owner_source_id)
+    if owner_principal["tokenPath"] != token_directory / f"{owner_source_id}.token":
+        raise WorkloadPackageRuntimeError(
+            "First-Core source token path differs from the official token directory"
+        )
+    if not isinstance(selected_rows, Sequence) or isinstance(selected_rows, (str, bytes)):
+        raise WorkloadPackageRuntimeError("First-Core selected plugin rows are malformed")
+    selected = tuple(selected_rows)
+    selected_component_ids: list[str] = []
+    for row in selected:
+        component_id = row.get("componentId") if isinstance(row, Mapping) else None
+        if not isinstance(component_id, str) or _COMPONENT_ID.fullmatch(component_id) is None:
+            raise WorkloadPackageRuntimeError("First-Core selected plugin identities are malformed")
+        selected_component_ids.append(component_id)
+    if len(set(selected_component_ids)) != len(selected_component_ids):
+        raise WorkloadPackageRuntimeError("First-Core selected plugin identities are malformed")
+    allow_empty_standalone_source = (
+        not selected_component_ids
+        and source_policy.get("mode") == "standaloneOperator"
+        and owner_source_id == "cyrene-plugin-standalone-operator"
+    )
+    if (
+        allow_empty_standalone_source
+        and "cy-package-runtime" not in hold["component_artifact_digests"]
+    ):
+        raise WorkloadPackageRuntimeError(
+            "Empty standalone source registration requires the held cy-package-runtime identity"
+        )
+    update = build_workload_source_update(
+        source_policy=source_policy,
+        selected_rows=selected,
+        installation_records={},
+        activity_catalog={"schema_version": 1, "generation": 0, "sources": []},
+        source_principals=source_principals,
+        runtime_policy=None,
+        remove_component_ids=tuple(selected_component_ids),
+        _allow_first_core_standalone_source=allow_empty_standalone_source,
+    )
+    if (
+        update.expected_generation != 1
+        or not update.changed
+        or update.previous_policy_digest is not None
+        or set(update.source_identity) != {owner_source_id}
+        or update.binding_scopes != {owner_source_id: []}
+        or update.runtime_bindings != {owner_source_id: []}
+        or (not update.required_hold_component_ids and not allow_empty_standalone_source)
+    ):
+        raise WorkloadPackageRuntimeError(
+            "First-Core source projection must register one owner with no package bindings"
+        )
+    held_digests = hold["component_artifact_digests"]
+    if any(
+        held_digests.get(component_id) != digest
+        for component_id, digest in update.component_artifact_digests.items()
+    ) or any(
+        component_id not in held_digests for component_id in update.required_hold_component_ids
+    ):
+        raise WorkloadPackageRuntimeError("First-Core source projection is outside the held plan")
+
+    if generation == 1:
+        _verify_first_core_catalog_metadata(activity_catalog_path, maintenance_gid)
+        result = reconcile_workload_source_update(
+            update,
+            maintenance=hold,
+            activity_catalog_path=activity_catalog_path,
+            policy_path=policy_path,
+            token_directory=token_directory,
+        )
+        if result is None:
+            raise WorkloadPackageRuntimeError(
+                "Generation-one Runtime catalog did not match the committed source update"
+            )
+        if len(result.get("sourceIdentities", [])) < 1:
+            raise WorkloadPackageRuntimeError("First-Core Runtime catalog has no workload source")
+        return result
+
+    result = apply_workload_source_update(
+        update,
+        maintenance=hold,
+        request_id=request_id,
+        expected_policy_digest=None,
+        activity_catalog_path=activity_catalog_path,
+        policy_path=policy_path,
+        token_directory=token_directory,
+        command=command,
+        runner=runner,
+        expected_catalog_gid=maintenance_gid,
+    )
+    _verify_first_core_catalog_metadata(activity_catalog_path, maintenance_gid)
+    if len(result.get("sourceIdentities", [])) < 1:
+        raise WorkloadPackageRuntimeError("First-Core Runtime catalog has no workload source")
+    return result
+
+
+def _verify_first_core_catalog_metadata(path: Path, maintenance_gid: int) -> None:
+    """Require the canonical root:maintenance-group mode-0640 catalog."""
+
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise WorkloadPackageRuntimeError("First-Core activity catalog is unavailable") from error
+    if (
+        path.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != 0
+        or info.st_gid != maintenance_gid
+        or stat.S_IMODE(info.st_mode) != 0o640
+        or info.st_nlink != 1
+    ):
+        raise WorkloadPackageRuntimeError("First-Core activity catalog ownership is unsafe")
+
+
 def _bootstrap_module() -> ModuleType:
     """Load the adjacent verified bootstrap implementation without copying it."""
 
@@ -781,6 +974,7 @@ def build_workload_source_update(
     source_principals: Mapping[str, Mapping[str, Any]],
     runtime_policy: Mapping[str, Any] | None = None,
     remove_component_ids: Sequence[str] = (),
+    _allow_first_core_standalone_source: bool = False,
 ) -> WorkloadSourceUpdate:
     """Project Catalog owners and actual InstallationRecords into both policies.
 
@@ -823,6 +1017,18 @@ def build_workload_source_update(
         raise WorkloadPackageRuntimeError("Package installation and removal sets overlap")
     if set(row_map) != set(installation_records) | set(remove_ids):
         raise WorkloadPackageRuntimeError("Every selected package must be installed or removed")
+    empty_first_core_standalone_source = (
+        _allow_first_core_standalone_source
+        and source_policy.get("mode") == "standaloneOperator"
+        and owner_source_id == "cyrene-plugin-standalone-operator"
+        and not row_map
+        and not remove_ids
+        and not installation_records
+    )
+    if _allow_first_core_standalone_source and not empty_first_core_standalone_source:
+        raise WorkloadPackageRuntimeError(
+            "Empty source registration is limited to the first-Core standalone operator"
+        )
 
     principals: dict[str, dict[str, Any]] = {}
     expected_ids = set(current_sources) | {owner_source_id}
@@ -1016,7 +1222,7 @@ def build_workload_source_update(
             )
         )
         required_hold_component_ids = product_component_ids or tuple(sorted(row_map))
-        if not required_hold_component_ids:
+        if not required_hold_component_ids and not empty_first_core_standalone_source:
             raise WorkloadPackageRuntimeError(
                 "New source registration has no held component identity"
             )
@@ -1045,12 +1251,22 @@ def apply_workload_source_update(
     token_directory: Path = DEFAULT_TOKEN_DIRECTORY,
     command: Path = DEFAULT_CYRENE_COMMAND,
     runner: Any = subprocess.run,
+    expected_catalog_gid: int | None = None,
 ) -> dict[str, Any]:
-    """Commit Broker scopes and a CAS-protected Runtime policy inside one hold."""
+    """Commit Broker scopes and a CAS-protected Runtime policy inside one hold.
+
+    When ``expected_catalog_gid`` is supplied, require the official Broker result
+    to be root-owned, group-readable by that GID, and mode 0640 before the policy
+    CAS can persist.
+    """
 
     _require_root()
     _require_request_id(request_id)
     hold = _validate_policy_update_hold(maintenance)
+    if expected_catalog_gid is not None and (
+        type(expected_catalog_gid) is not int or expected_catalog_gid <= 0
+    ):
+        raise WorkloadPackageRuntimeError("Expected activity catalog GID is invalid")
     if expected_policy_digest != update.previous_policy_digest:
         raise WorkloadPackageRuntimeError(
             "Expected policy digest differs from the projected prior policy"
@@ -1133,6 +1349,9 @@ def apply_workload_source_update(
     }
     _write_private_json(proof_path, proof)
     _write_private_json(scopes_path, update.binding_scopes)
+    catalog_gid = (
+        expected_catalog_gid if expected_catalog_gid is not None else _maintenance_group_id()
+    )
 
     # ── Phase 2: Ask the official broker helper to commit the exact scopes ──
     # 第二阶段：通过正式init-catalog在当前hold内登记来源与绑定范围。
@@ -1147,7 +1366,7 @@ def apply_workload_source_update(
         "--token-dir",
         str(token_directory),
         "--catalog-gid",
-        str(_maintenance_group_id()),
+        str(catalog_gid),
         "--binding-scopes-json",
         str(scopes_path),
         "--maintenance-proof-file",
@@ -1167,6 +1386,8 @@ def apply_workload_source_update(
         update,
         token_directory=token_directory,
     )
+    if expected_catalog_gid is not None:
+        _verify_first_core_catalog_metadata(activity_catalog_path, expected_catalog_gid)
 
     # ── Phase 3: Rebuild policy with token hashes from broker readback, then CAS ──
     # 第三阶段：用Broker回读的token摘要重建policy，并对旧digest做原子CAS。
