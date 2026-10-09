@@ -13,6 +13,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -443,6 +444,101 @@ def test_echo_uninstall_retention_uses_post_evaluation_artifact_baseline(tmp_pat
             after_evaluation,
             {"artifacts": {"fileCount": 1, "treeSha256": "before"}},
         )
+
+
+def test_trusted_prefix_lstat_records_owner_mode_and_does_not_follow_symlinks(
+    tmp_path: Path,
+) -> None:
+    """Prefix diagnostics use lstat so a link is not misreported as its target."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_trusted_prefix_lstat")
+    directory = tmp_path / "system-prefix"
+    directory.mkdir()
+    directory.chmod(0o755)
+    link = tmp_path / "system-prefix-link"
+    link.symlink_to(directory, target_is_directory=True)
+    missing = tmp_path / "missing-prefix"
+
+    result = module.trusted_prefix_lstat((str(directory), str(link), str(missing)))
+
+    assert result["method"] == "os.lstat"
+    assert result["followedSymlinks"] is False
+    directory_entry, link_entry, missing_entry = result["entries"]
+    assert directory_entry["entryType"] == "directory"
+    assert directory_entry["uid"] == os.geteuid()
+    assert directory_entry["gid"] == os.getegid()
+    assert directory_entry["modeOctal"] == "0755"
+    assert directory_entry["groupWorldWritable"] is False
+    assert link_entry["entryType"] == "symlink"
+    assert link_entry["symlinkTarget"] == str(directory)
+    assert missing_entry == {
+        "path": str(missing),
+        "status": "unavailable",
+        "errorType": "FileNotFoundError",
+    }
+
+
+def test_runner_identity_saves_trusted_prefix_lstat_before_native_deb_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pre-install runner evidence includes the fixed system-prefix metadata set."""
+    acceptance_root = tmp_path / "acceptance"
+    (acceptance_root / "evidence").mkdir(parents=True)
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "DoHorizon-AI/Cyrene-Workspace")
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/develop")
+    monkeypatch.setenv(
+        "GITHUB_WORKFLOW_REF",
+        "DoHorizon-AI/Cyrene-Workspace/.github/workflows/modular-distribution-acceptance.yml@refs/heads/develop",
+    )
+    monkeypatch.setenv("GITHUB_WORKFLOW_SHA", "a" * 40)
+    module = _load_driver_module(tmp_path, "acceptance_driver_runner_prefix_evidence")
+    prefixes = {
+        "method": "os.lstat",
+        "followedSymlinks": False,
+        "capturePoint": "before native DEB installation",
+        "entries": [
+            {"path": path, "status": "lstat-succeeded"} for path in module.TRUSTED_PREFIX_PATHS
+        ],
+    }
+    monkeypatch.setattr(module, "trusted_prefix_lstat", lambda: prefixes)
+    monkeypatch.setattr(module.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        module.platform,
+        "uname",
+        lambda: SimpleNamespace(_asdict=lambda: {"system": "Linux", "release": "test-kernel"}),
+    )
+    original_read_text = Path.read_text
+
+    def read_runner_identity_file(path: Path, *args: object, **kwargs: object) -> str:
+        if str(path) == "/etc/os-release":
+            return 'ID=ubuntu\nVERSION_ID="24.04"\n'
+        if str(path) == "/proc/1/comm":
+            return "systemd\n"
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_runner_identity_file)
+
+    def successful_probe(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command == ["gh", "--version"]:
+            return subprocess.CompletedProcess(command, 0, "gh version 2.102.0\n", "")
+        assert command == ["sudo", "-n", "true"]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(module, "run", successful_probe)
+
+    result = module.runner_identity()
+
+    saved = json.loads((acceptance_root / "evidence" / "runner-identity.json").read_text())
+    assert module.TRUSTED_PREFIX_PATHS == (
+        "/usr",
+        "/usr/share",
+        "/usr/lib",
+        "/opt",
+        "/etc",
+        "/var/lib",
+    )
+    assert result["trustedPrefixLstat"] == prefixes
+    assert saved["trustedPrefixLstat"] == prefixes
 
 
 @pytest.mark.parametrize(
