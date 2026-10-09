@@ -2180,6 +2180,55 @@ def test_product_python_target_selects_exact_host_profile(
     assert target["artifactKind"] == "python-bundle"
 
 
+@pytest.mark.parametrize(
+    ("runtime", "host_abi", "supported"),
+    [
+        ("node:24", "glibc-2.39", True),
+        ("node:25", "glibc-2.39", False),
+        ("node:24", "glibc-2.40", False),
+    ],
+)
+def test_control_native_binary_target_requires_catalog_node24_and_exact_host_abi(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+    host_abi: str,
+    supported: bool,
+) -> None:
+    catalog_path = WORKSPACE_ROOT / "governance" / "component-catalog-v2.json"
+    updater = updates.ComponentUpdater(
+        catalog_path=catalog_path,
+        activity_catalog_path=tmp_path / "activity-sources.json",
+        state_root=tmp_path / "update-state",
+        install_root=tmp_path / "install",
+        broker_path=tmp_path / "missing-broker",
+        release_lock_path=tmp_path / "missing-release-lock.json",
+        trusted_catalog_digest=None,
+        load_active_catalog=False,
+    )
+    control_target_id = "linux-ubuntu-24.04-x86_64-node-24"
+    updater.targets[control_target_id]["target"]["runtime"] = runtime
+    monkeypatch.setattr(
+        updates.platform, "freedesktop_os_release", lambda: {"ID": "ubuntu", "VERSION_ID": "24.04"}
+    )
+    monkeypatch.setattr(updates.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(
+        updates.platform, "libc_ver", lambda: ("glibc", host_abi.removeprefix("glibc-"))
+    )
+
+    target = updater._target_for(
+        updater.components["cyrene-client-workspace-control"], target_id=control_target_id
+    )
+
+    if supported:
+        assert target is not None
+        assert target["id"] == control_target_id
+        assert target["artifactKind"] == "native-binary"
+        assert target["target"]["runtime"] == "node:24"
+    else:
+        assert target is None
+
+
 def test_portable_data_target_remains_independent_of_ubuntu_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
