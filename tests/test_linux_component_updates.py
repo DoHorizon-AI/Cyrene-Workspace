@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import io
 import json
@@ -9,9 +10,11 @@ import os
 import stat
 import subprocess
 import sys
+import urllib.parse
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -171,6 +174,7 @@ def _install_release_discovery_fixtures(
     *,
     releases: list[dict[str, object]],
     asset_bodies: dict[str, bytes],
+    request_log: list[str] | None = None,
 ) -> None:
     updater.catalog = {
         "channels": {
@@ -178,11 +182,29 @@ def _install_release_discovery_fixtures(
             "stable": {"releasePrerelease": False, "sourceRefs": ["refs/heads/main"]},
         }
     }
-    monkeypatch.setattr(updater, "_get_json", lambda uri: releases)
+    first_asset_uri = next(
+        asset["browser_download_url"]
+        for release in releases
+        for asset in release.get("assets", [])
+        if isinstance(asset, dict) and isinstance(asset.get("browser_download_url"), str)
+    )
+    asset_path = urllib.parse.urlsplit(first_asset_uri).path.split("/")
+    repository = "/".join(asset_path[1:3])
+    release_list_uri = f"https://api.github.com/repos/{repository}/releases?per_page=100"
+    response_bodies = {
+        release_list_uri: json.dumps(releases, separators=(",", ":")).encode("utf-8"),
+        **asset_bodies,
+    }
+
+    def get_bytes(uri: str, **_kwargs: object) -> bytes:
+        if request_log is not None:
+            request_log.append(uri)
+        return response_bodies[uri]
+
     monkeypatch.setattr(
         updater,
         "_get_bytes",
-        lambda uri, **_kwargs: asset_bodies[uri],
+        get_bytes,
     )
     monkeypatch.setattr(updater, "_release_attestation_bundle", lambda **_kwargs: b"verified")
 
@@ -325,6 +347,550 @@ def test_release_discovery_cache_is_scoped_to_component_target(
     assert second_tag == "preview-" + "b" * 40
     assert second_index["releases"] == [{"componentId": "multi-target-service", "target": target_b}]
     assert len(updater._index_cache) == 2
+
+
+def test_release_list_cache_retains_unfiltered_raw_page_for_components_in_one_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    repository = "Example-Corp/Release-Assets"
+    workflow = f"{repository}/.github/workflows/publish.yml"
+    target = {"os": "linux", "architecture": "x86_64", "runtime": "systemd"}
+    publisher = {
+        "repository": repository,
+        "workflow": workflow,
+        "tagFormat": "source-sha",
+        "releaseDiscovery": {
+            "apiUri": f"https://api.github.com/repos/{repository}/releases?per_page=100",
+            "indexAssetName": "component-release-index-v1.json",
+        },
+    }
+    release_a, uri_a, bytes_a = _release_discovery_entry(
+        repository,
+        workflow,
+        "preview",
+        "a" * 40,
+        "2026-10-08T21:30:00Z",
+        [{"componentId": "component-a", "target": target}],
+    )
+    release_b, uri_b, bytes_b = _release_discovery_entry(
+        repository,
+        workflow,
+        "preview",
+        "b" * 40,
+        "2026-10-08T22:30:00Z",
+        [{"componentId": "component-b", "target": target}],
+    )
+    requests: list[str] = []
+    _install_release_discovery_fixtures(
+        updater,
+        monkeypatch,
+        releases=[release_a, release_b],
+        asset_bodies={uri_a: bytes_a, uri_b: bytes_b},
+        request_log=requests,
+    )
+
+    first = updater._channel_releases(
+        publisher,
+        "preview",
+        {"componentId": "component-a"},
+        {"id": "linux-u24", "target": target},
+    )
+    second = updater._channel_releases(
+        publisher,
+        "preview",
+        {"componentId": "component-b"},
+        {"id": "linux-u24", "target": target},
+    )
+
+    release_list_uri = publisher["releaseDiscovery"]["apiUri"]
+    assert first[3] == "preview-" + "a" * 40
+    assert second[3] == "preview-" + "b" * 40
+    assert requests.count(release_list_uri) == 1
+    cached_body = updater._release_list_cache[(repository, "preview", release_list_uri)]
+    cached_releases = json.loads(cached_body)
+    assert [item["tag_name"] for item in cached_releases] == [
+        "preview-" + "a" * 40,
+        "preview-" + "b" * 40,
+    ]
+
+
+def test_new_updater_refreshes_latest_and_stage_rejects_changed_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = "Example-Corp/Release-Assets"
+    workflow = f"{repository}/.github/workflows/publish.yml"
+    target = {"os": "linux", "architecture": "x86_64", "runtime": "systemd"}
+    publisher = {
+        "repository": repository,
+        "workflow": workflow,
+        "tagFormat": "source-sha",
+        "releaseDiscovery": {
+            "apiUri": f"https://api.github.com/repos/{repository}/releases?per_page=100",
+            "indexAssetName": "component-release-index-v1.json",
+        },
+    }
+
+    def make_release(commit: str, published_at: str):
+        return _release_discovery_entry(
+            repository,
+            workflow,
+            "preview",
+            commit,
+            published_at,
+            [{"componentId": "sample-service", "target": target}],
+        )
+
+    old_release = make_release("a" * 40, "2026-10-08T21:30:00Z")
+    first_updater = _empty_updater(tmp_path)
+    first_requests: list[str] = []
+    _install_release_discovery_fixtures(
+        first_updater,
+        monkeypatch,
+        releases=[old_release[0]],
+        asset_bodies={old_release[1]: old_release[2]},
+        request_log=first_requests,
+    )
+    old_candidate = first_updater._channel_releases(
+        publisher,
+        "preview",
+        {"componentId": "sample-service"},
+        {"id": "linux-u24", "target": target},
+    )
+
+    new_release = make_release("b" * 40, "2026-10-09T01:30:00Z")
+    next_updater = _empty_updater(tmp_path)
+    second_requests: list[str] = []
+    _install_release_discovery_fixtures(
+        next_updater,
+        monkeypatch,
+        releases=[new_release[0]],
+        asset_bodies={new_release[1]: new_release[2]},
+        request_log=second_requests,
+    )
+    new_candidate = next_updater._channel_releases(
+        publisher,
+        "preview",
+        {"componentId": "sample-service"},
+        {"id": "linux-u24", "target": target},
+    )
+
+    assert old_candidate[3] == "preview-" + "a" * 40
+    assert new_candidate[3] == "preview-" + "b" * 40
+    assert first_requests.count(publisher["releaseDiscovery"]["apiUri"]) == 1
+    assert second_requests.count(publisher["releaseDiscovery"]["apiUri"]) == 1
+
+    # The public check path calls this boundary on every protocol operation. Reusing
+    # the same updater object must still discard both raw-list and selected-index data.
+    third_release = make_release("c" * 40, "2026-10-09T02:30:00Z")
+    _install_release_discovery_fixtures(
+        next_updater,
+        monkeypatch,
+        releases=[third_release[0]],
+        asset_bodies={third_release[1]: third_release[2]},
+        request_log=second_requests,
+    )
+    next_updater._reload_catalog_for_operation()
+    third_candidate = next_updater._channel_releases(
+        publisher,
+        "preview",
+        {"componentId": "sample-service"},
+        {"id": "linux-u24", "target": target},
+    )
+    assert third_candidate[3] == "preview-" + "c" * 40
+    assert second_requests.count(publisher["releaseDiscovery"]["apiUri"]) == 2
+
+    # A newly discovered candidate changes the resolved plan and remains a hard
+    # stage boundary even when the checked plan was previously persisted.
+    next_updater._require_authorized_process = lambda: None
+    next_updater._require_workload_target = lambda workload_id, target_id: (
+        workload_id,
+        target_id,
+    )
+    old_digest = "sha256:" + "1" * 64
+    plan_id = "plan-" + old_digest.removeprefix("sha256:")[:32]
+    stored = {
+        "planKind": updates.WORKLOAD_PROTOCOL_VERSION,
+        "planId": plan_id,
+        "planDigest": old_digest,
+        "catalogDigest": next_updater.catalog_digest,
+        "catalogGeneration": next_updater.catalog_generation,
+        "workloadId": "catalyst",
+        "targetId": updates.WORKLOAD_HOST_TARGET,
+        "action": "install",
+        "channel": "preview",
+        "phase": "checked",
+        "selections": {},
+    }
+    updates._atomic_json(next_updater._workload_plan_directory() / f"{plan_id}.json", stored)
+    changed_resolution = {
+        "status": "ready",
+        "planDigest": "sha256:" + "2" * 64,
+        "action": "install",
+        "channel": "preview",
+        "selectedComponents": [],
+    }
+    next_updater._build_workload_plan = lambda *_args, **_kwargs: (
+        changed_resolution,
+        {},
+        {},
+    )
+    with pytest.raises(updates.UpdateError) as error:
+        next_updater.stage_workload(
+            "catalyst",
+            updates.WORKLOAD_HOST_TARGET,
+            plan_id,
+            old_digest,
+            action="install",
+            channel="preview",
+        )
+    assert error.value.code == "PLAN_CHANGED"
+    assert not next_updater._release_list_cache
+    assert not next_updater._index_cache
+
+
+def test_ten_component_check_stage_apply_coldflow_stays_under_rest_budget(
+    tmp_path: Path,
+) -> None:
+    repo_components = {
+        "DoHorizon-AI/Cyrene-Platform": [
+            "cy-package-runtime",
+            "cyrene-runtime-maintenance",
+            "cyrene-runtime-maintenance-sdk",
+        ],
+        "DoHorizon-AI/Cyrene-Plugins-Official": [
+            "cyrene-tools-dataset-preparation",
+            "cyrene-tools-document-parsing",
+            "cyrene-tools-dataset-generation",
+            "cyrene-tools-knowledge-preparation",
+        ],
+        "DoHorizon-AI/Cyrene-Client": [
+            "cyrene-client-workspace-web",
+            "cyrene-client-workspace-control",
+        ],
+        "DoHorizon-AI/Cyrene-Catalyst": ["cyrene-catalyst"],
+    }
+    release_lists: dict[str, bytes] = {}
+    index_assets: dict[str, bytes] = {}
+    sidecar_assets: dict[str, bytes] = {}
+    attestation_subjects: dict[tuple[str, str], dict[str, str]] = {}
+    publishers: dict[str, dict[str, object]] = {}
+    component_contexts: dict[str, tuple[str, str, str, str]] = {}
+    releases_by_repository: dict[str, dict[str, object]] = {}
+
+    def target_for(component_id: str) -> tuple[str, dict[str, str]]:
+        runtime = {
+            "cyrene-runtime-maintenance-sdk": "python:3.12",
+            "cyrene-client-workspace-web": "static-web",
+            "cyrene-client-workspace-control": "node:24",
+            "cyrene-tools-dataset-preparation": "python:3.12",
+            "cyrene-tools-document-parsing": "python:3.12",
+            "cyrene-tools-dataset-generation": "python:3.12",
+            "cyrene-tools-knowledge-preparation": "python:3.12",
+        }.get(component_id, "systemd")
+        target_id = f"linux-u24-{runtime.replace(':', '-')}"
+        return target_id, {
+            "os": "linux",
+            "osVersion": "24.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "runtime": runtime,
+        }
+
+    def sidecar_bundle(subject_name: str, digest: str) -> bytes:
+        statement = {
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [
+                {"name": subject_name, "digest": {"sha256": digest.removeprefix("sha256:")}}
+            ],
+        }
+        encoded = base64.b64encode(json.dumps(statement, separators=(",", ":")).encode()).decode()
+        bundle = {
+            "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.3",
+            "verificationMaterial": {},
+            "dsseEnvelope": {
+                "payloadType": "application/vnd.in-toto+json",
+                "payload": encoded,
+                "signatures": [],
+            },
+        }
+        return json.dumps(bundle, separators=(",", ":")).encode() + b"\n"
+
+    def add_sidecar(
+        release: dict[str, object], repository: str, subject_name: str, digest: str
+    ) -> None:
+        release_tag = str(release["tag_name"])
+        name = f"{subject_name}.attestation.jsonl"
+        uri = f"https://github.com/{repository}/releases/download/{release_tag}/{name}"
+        payload = sidecar_bundle(subject_name, digest)
+        release_assets = release["assets"]
+        assert isinstance(release_assets, list)
+        release_assets.append(
+            {
+                "name": name,
+                "browser_download_url": uri,
+                "size": len(payload),
+                "digest": "sha256:" + updates.hashlib.sha256(payload).hexdigest(),
+            }
+        )
+        sidecar_assets[uri] = payload
+
+    for index, (repository, component_ids) in enumerate(repo_components.items()):
+        workflow = f"{repository}/.github/workflows/release.yml"
+        commit = "abcdef0123456789"[index] * 40
+        rows = []
+        for component_id in component_ids:
+            target_id, target = target_for(component_id)
+            rows.append({"componentId": component_id, "target": target})
+            component_contexts[component_id] = (repository, workflow, commit, target_id)
+        release, index_uri, index_bytes = _release_discovery_entry(
+            repository,
+            workflow,
+            "preview",
+            commit,
+            f"2026-10-0{index + 1}T12:00:00Z",
+            rows,
+        )
+        list_uri = f"https://api.github.com/repos/{repository}/releases?per_page=100"
+        release_lists[list_uri] = json.dumps([release], separators=(",", ":")).encode()
+        index_assets[index_uri] = index_bytes
+        releases_by_repository[repository] = release
+        index_digest = "sha256:" + updates.hashlib.sha256(index_bytes).hexdigest()
+        attestation_subjects[(repository, index_digest)] = {
+            "subjectName": "component-release-index-v1.json",
+            "workflow": workflow,
+            "sourceRef": "refs/heads/develop",
+            "sourceCommit": commit,
+        }
+        if repository != "DoHorizon-AI/Cyrene-Platform":
+            add_sidecar(release, repository, "component-release-index-v1.json", index_digest)
+        publishers[repository] = {
+            "repository": repository,
+            "workflow": workflow,
+            "tagFormat": "source-sha",
+            "releaseDiscovery": {
+                "apiUri": list_uri,
+                "indexAssetName": "component-release-index-v1.json",
+            },
+        }
+
+    for repository, component_ids in repo_components.items():
+        if repository == "DoHorizon-AI/Cyrene-Platform":
+            continue  # The Platform fixture models publishers without detached sidecars.
+        release = releases_by_repository[repository]
+        for component_id in component_ids:
+            manifest_name = f"{component_id}-manifest-v2.json"
+            manifest_bytes = f"manifest:{component_id}".encode()
+            manifest_digest = "sha256:" + updates.hashlib.sha256(manifest_bytes).hexdigest()
+            add_sidecar(release, repository, manifest_name, manifest_digest)
+
+            payload_name = f"{component_id}-payload.tar.gz"
+            payload_bytes = f"payload:{component_id}".encode()
+            payload_digest = "sha256:" + updates.hashlib.sha256(payload_bytes).hexdigest()
+            add_sidecar(release, repository, payload_name, payload_digest)
+
+            if repository == "DoHorizon-AI/Cyrene-Plugins-Official":
+                for reference_name in (
+                    "descriptor.json",
+                    "requirements.lock",
+                    "release.json",
+                    "sbom.json",
+                ):
+                    subject_name = f"{component_id}-{reference_name}"
+                    subject_digest = (
+                        "sha256:"
+                        + updates.hashlib.sha256(
+                            f"{reference_name}:{component_id}".encode()
+                        ).hexdigest()
+                    )
+                    add_sidecar(release, repository, subject_name, subject_digest)
+        if repository == "DoHorizon-AI/Cyrene-Plugins-Official":
+            wheel_name = "cyrene_plugin_runtime-0.2.0-py3-none-any.whl"
+            wheel_digest = (
+                "sha256:" + updates.hashlib.sha256(b"shared-attested-preparer-wheel").hexdigest()
+            )
+            add_sidecar(release, repository, wheel_name, wheel_digest)
+        list_uri = f"https://api.github.com/repos/{repository}/releases?per_page=100"
+        release_lists[list_uri] = json.dumps([release], separators=(",", ":")).encode()
+
+    api_requests: list[tuple[str, str]] = []
+    sidecar_downloads: list[tuple[str, str]] = []
+    verifier_calls: list[list[str]] = []
+    current_phase = ""
+
+    def attestation_response(subject_name: str, digest: str) -> bytes:
+        statement = {
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [
+                {"name": subject_name, "digest": {"sha256": digest.removeprefix("sha256:")}}
+            ],
+        }
+        encoded = base64.b64encode(json.dumps(statement, separators=(",", ":")).encode()).decode()
+        bundle = {
+            "mediaType": "application/vnd.dev.sigstore.bundle+json;version=0.3",
+            "verificationMaterial": {},
+            "dsseEnvelope": {
+                "payloadType": "application/vnd.in-toto+json",
+                "payload": encoded,
+                "signatures": [],
+            },
+        }
+        record = {
+            "repository_id": 123,
+            "bundle_url": "https://attestations.example.invalid/bundle.json",
+            "initiator": "github",
+            "bundle": bundle,
+        }
+        return json.dumps({"attestations": [record]}, separators=(",", ":")).encode()
+
+    def get_bytes(uri: str, **_kwargs: object) -> bytes:
+        if uri in release_lists:
+            api_requests.append((current_phase, "release-list"))
+            return release_lists[uri]
+        if uri in index_assets:
+            return index_assets[uri]
+        if uri in sidecar_assets:
+            sidecar_downloads.append((current_phase, uri))
+            return sidecar_assets[uri]
+        parts = urllib.parse.urlsplit(uri)
+        if parts.hostname == "api.github.com" and "/attestations/" in parts.path:
+            api_requests.append((current_phase, "attestation"))
+            path_prefix, encoded_digest = parts.path.split("/attestations/", 1)
+            path_parts = path_prefix.split("/")
+            repository = "/".join(path_parts[2:4])
+            digest = urllib.parse.unquote(encoded_digest)
+            context = attestation_subjects[(repository, digest)]
+            return attestation_response(context["subjectName"], digest)
+        raise AssertionError(f"Unexpected fixture download: {uri}")
+
+    def runner(arguments: list[str], **_kwargs: object) -> SimpleNamespace:
+        verifier_calls.append(arguments)
+        bundle_path = Path(arguments[arguments.index("--bundle") + 1])
+        bundle = json.loads(bundle_path.read_bytes())
+        statement = json.loads(base64.b64decode(bundle["dsseEnvelope"]["payload"], validate=True))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([{"verificationResult": {"statement": statement}}]),
+            stderr="",
+        )
+
+    all_component_ids = [component_id for ids in repo_components.values() for component_id in ids]
+    plugin_ids = repo_components["DoHorizon-AI/Cyrene-Plugins-Official"]
+    release_contexts: dict[str, tuple[tuple[dict[str, object], ...], str]] = {}
+
+    def verify_reference(
+        updater: updates.ComponentUpdater,
+        component_id: str,
+        subject_name: str,
+        payload: bytes,
+    ) -> None:
+        repository, workflow, commit, _target_id = component_contexts[component_id]
+        subject_digest = "sha256:" + updates.hashlib.sha256(payload).hexdigest()
+        attestation_subjects[(repository, subject_digest)] = {
+            "subjectName": subject_name,
+            "workflow": workflow,
+            "sourceRef": "refs/heads/develop",
+            "sourceCommit": commit,
+        }
+        release_assets, release_tag = release_contexts[component_id]
+        updater._release_attestation_bundle(
+            payload=payload,
+            repository=repository,
+            digest=subject_digest,
+            workflow=workflow,
+            source_ref="refs/heads/develop",
+            source_commit=commit,
+            subject_name=subject_name,
+            release_assets=release_assets,
+            release_tag=release_tag,
+        )
+
+    for phase in ("check", "stage", "apply"):
+        current_phase = phase
+        updater = _empty_updater(tmp_path)
+        updater.catalog = {
+            "channels": {
+                "preview": {"releasePrerelease": True, "sourceRefs": ["refs/heads/develop"]}
+            }
+        }
+        updater._validate_index = lambda *_args, **_kwargs: None
+        updater._get_bytes = get_bytes
+        updater.runner = runner
+        for repository, component_ids in repo_components.items():
+            publisher = publishers[repository]
+            for component_id in component_ids:
+                target_id, target = target_for(component_id)
+                release_context = updater._channel_releases(
+                    publisher,
+                    "preview",
+                    {"componentId": component_id},
+                    {"id": target_id, "target": target},
+                )
+                release_contexts[component_id] = (release_context[2], release_context[3])
+        for component_id in all_component_ids:
+            verify_reference(
+                updater,
+                component_id,
+                f"{component_id}-manifest-v2.json",
+                f"manifest:{component_id}".encode(),
+            )
+        if phase == "stage":
+            for component_id in all_component_ids:
+                verify_reference(
+                    updater,
+                    component_id,
+                    f"{component_id}-payload.tar.gz",
+                    f"payload:{component_id}".encode(),
+                )
+            for component_id in plugin_ids:
+                for reference_name in (
+                    "descriptor.json",
+                    "requirements.lock",
+                    "release.json",
+                    "sbom.json",
+                ):
+                    verify_reference(
+                        updater,
+                        component_id,
+                        f"{component_id}-{reference_name}",
+                        f"{reference_name}:{component_id}".encode(),
+                    )
+            verify_reference(
+                updater,
+                plugin_ids[0],
+                "cyrene_plugin_runtime-0.2.0-py3-none-any.whl",
+                b"shared-attested-preparer-wheel",
+            )
+
+    # Each operation freshly lists four publisher releases. First-party sidecars cover
+    # Client, Plugins, and Catalyst proofs; Platform deliberately falls back to the
+    # attestation API. Apply re-verifies cached proofs without downloading them again.
+    request_counts = {
+        phase: {
+            endpoint: sum(
+                request_phase == phase and request_endpoint == endpoint
+                for request_phase, request_endpoint in api_requests
+            )
+            for endpoint in ("release-list", "attestation")
+        }
+        for phase in ("check", "stage", "apply")
+    }
+    assert request_counts == {
+        "check": {"release-list": 4, "attestation": 4},
+        "stage": {"release-list": 4, "attestation": 3},
+        "apply": {"release-list": 4, "attestation": 0},
+    }
+    sidecar_counts = {
+        phase: sum(request_phase == phase for request_phase, _uri in sidecar_downloads)
+        for phase in ("check", "stage", "apply")
+    }
+    assert sidecar_counts == {"check": 10, "stage": 24, "apply": 0}
+    assert len(api_requests) == 19
+    assert sum(counts["release-list"] for counts in request_counts.values()) == 12
+    assert sum(counts["attestation"] for counts in request_counts.values()) == 7
+    assert len(verifier_calls) == 87
+    assert len(api_requests) < 60
 
 
 def test_release_discovery_does_not_fallback_after_bad_matching_index(
@@ -1468,6 +2034,106 @@ def test_blocked_workload_check_echoes_digest_bound_channel() -> None:
     assert result["status"] == "blocked"
     assert result["channel"] == result["resolution"]["channel"] == "preview"
     assert result["resolution"]["planDigestMaterial"]["channel"] == "preview"
+
+
+def test_workload_candidate_failures_enrich_only_resolver_blockers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_path = WORKSPACE_ROOT / "governance" / "component-catalog-v2.json"
+    updater = updates.ComponentUpdater(
+        catalog_path=catalog_path,
+        activity_catalog_path=tmp_path / "activity-sources.json",
+        state_root=tmp_path / "update-state",
+        install_root=tmp_path / "install",
+        broker_path=tmp_path / "missing-broker",
+        release_lock_path=tmp_path / "missing-release-lock.json",
+        trusted_catalog_digest=None,
+        load_active_catalog=False,
+    )
+    optional_id = "cyrene-evaluation-exact-match"
+
+    def target_for(component: dict[str, Any], *, target_id: str | None = None) -> dict[str, Any]:
+        row = next(
+            item
+            for item in component["targets"]
+            if target_id is None or item["targetId"] == target_id
+        )
+        return {
+            **updater.targets[row["targetId"]],
+            "artifactKind": row["artifactKind"],
+        }
+
+    def candidate(
+        component: dict[str, Any],
+        _target: dict[str, Any],
+        _channel: str,
+        *,
+        release_id: str | None = None,
+    ):
+        if release_id is not None:
+            raise AssertionError("The workload candidate probe must use release discovery.")
+        component_id = component["componentId"]
+        if component_id == updates.WORKLOAD_SDK_COMPONENT_ID:
+            raise updates.UpdateError(
+                "ATTESTATION_INVALID", "The required SDK release attestation is invalid."
+            )
+        raise updates.UpdateError(
+            "NETWORK_ERROR", "The optional package release API is temporarily unavailable.", True
+        )
+
+    monkeypatch.setattr(updater, "_target_for", target_for)
+    monkeypatch.setattr(updater, "_candidate", candidate)
+    monkeypatch.setattr(
+        updater,
+        "_installed_workload_components",
+        lambda _component_ids, *, workload_id=None: (
+            {},
+            {"components": {}, "installationRecords": {}, "sourceBindings": []},
+        ),
+    )
+
+    resolution, candidates, _inventory = updater._build_workload_plan(
+        "plugins",
+        updates.WORKLOAD_HOST_TARGET,
+        {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}},
+        action="install",
+        channel="preview",
+    )
+
+    assert candidates == {}
+    sdk_blocker = next(
+        item
+        for item in resolution["blockers"]
+        if item["code"] == "MISSING_RELEASE"
+        and item["componentId"] == updates.WORKLOAD_SDK_COMPONENT_ID
+    )
+    assert sdk_blocker["retryable"] is False
+    assert sdk_blocker["details"]["candidateFailure"] == {
+        "code": "ATTESTATION_INVALID",
+        "message": "The required SDK release attestation is invalid.",
+        "retryable": False,
+    }
+    assert not any(item.get("componentId") == optional_id for item in resolution["blockers"])
+    assert not any(
+        item.get("details", {}).get("candidateFailure")
+        for item in resolution["blockers"]
+        if item.get("componentId") == optional_id
+    )
+    digest_material = resolution["planDigestMaterial"]
+    expected_digest = (
+        "sha256:"
+        + updates.hashlib.sha256(
+            updates.json.dumps(
+                digest_material,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+    )
+    assert resolution["planDigest"] == expected_digest
+    assert resolution["planId"] == "plan-" + expected_digest.removeprefix("sha256:")[:32]
 
 
 @pytest.mark.parametrize(

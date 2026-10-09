@@ -25,6 +25,7 @@ _DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERSION_RE = re.compile(
     r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\+sha\.[0-9a-f]{40})?$"
 )
+_OPAQUE_SHA_VERSION_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 _EXACT_RANGE_RE = re.compile(r"^=(\d+\.\d+\.\d+)$")
 _INTERVAL_RANGE_RE = re.compile(r"^>=(\d+\.\d+\.\d+), <(\d+\.\d+\.\d+)$")
 _BINDING_ID_RE = re.compile(r"^[a-z][a-z0-9._-]{0,159}$")
@@ -130,8 +131,12 @@ def _parse_semver(value: Any) -> tuple[int, int, int] | None:
 
 
 def _range_matches(version: Any, version_range: Any) -> bool:
-    """Match the exact SemVer subset already used by component update plans."""
+    """Match supported SemVer ranges or accept an unconstrained immutable SHA version."""
 
+    if version_range is None:
+        return _parse_semver(version) is not None or (
+            isinstance(version, str) and _OPAQUE_SHA_VERSION_RE.fullmatch(version) is not None
+        )
     parsed = _parse_semver(version)
     if parsed is None:
         return False

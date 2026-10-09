@@ -1388,6 +1388,41 @@ def test_semver_build_metadata_accepts_only_official_source_sha_suffix() -> None
     assert any(row["code"] == "VERSION_CONFLICT" for row in invalid["blockers"])
 
 
+def test_opaque_sha_version_is_valid_without_a_range_but_not_with_one() -> None:
+    catalyst_release_version = "cdbc66391cb43eee2c66248f1dfd07f2cf2cd09db4e079374bd24415f4b4b1ba"
+    catalog = _catalog()
+
+    unconstrained = _resolve(
+        catalog,
+        _release_envelopes(
+            catalog,
+            {"app", "runtime", "shared", "plugin-a", "plugin-b"},
+            versions={"app": catalyst_release_version},
+        ),
+    )
+    assert unconstrained["status"] == "ready"
+    selected_app = next(
+        row for row in unconstrained["selectedComponents"] if row["componentId"] == "app"
+    )
+    assert selected_app["version"] == catalyst_release_version
+
+    constrained = _resolve(
+        catalog,
+        _release_envelopes(
+            catalog,
+            {"app", "runtime", "shared", "plugin-a", "plugin-b"},
+            versions={"runtime": catalyst_release_version},
+        ),
+    )
+    assert constrained["status"] == "blocked"
+    runtime_blocker = next(
+        row
+        for row in constrained["blockers"]
+        if row["code"] == "VERSION_CONFLICT" and row["componentId"] == "runtime"
+    )
+    assert runtime_blocker["details"]["versionRanges"] == [">=1.0.0, <2.0.0"]
+
+
 def test_plugins_workload_requires_one_explicit_package_in_addition_to_sdk() -> None:
     metadata = _catalog_metadata_module()
     catalog = metadata._validate_catalog(
