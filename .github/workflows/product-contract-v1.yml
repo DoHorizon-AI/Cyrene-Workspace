@@ -105,6 +105,7 @@ jobs:
           tests/test_bootstrap_catalog_binding.py
           tests/test_native_updater_bootstrap_binding.py
           tests/test_native_legacy_rollback_health.py
+          tests/test_workload_first_core_bootstrap.py
       - name: Check component updater and bundle producer formatting
         run: >-
           uvx ruff==0.16.5 format --check
@@ -120,6 +121,7 @@ jobs:
           tests/test_bootstrap_catalog_binding.py
           tests/test_native_updater_bootstrap_binding.py
           tests/test_native_legacy_rollback_health.py
+          tests/test_workload_first_core_bootstrap.py
       - name: Test updater, identity, and bundle metadata paths
         run: >-
           uvx --from pytest==9.1.1 --with jsonschema==4.26.0 --with PyYAML==6.0.3 pytest -q
@@ -131,6 +133,7 @@ jobs:
           tests/test_bootstrap_catalog_binding.py
           tests/test_native_updater_bootstrap_binding.py
           tests/test_native_legacy_rollback_health.py
+          tests/test_workload_first_core_bootstrap.py
           tests/test_service_wheelhouse_export.py
       - name: Check package and privileged helper shell syntax
         run: |

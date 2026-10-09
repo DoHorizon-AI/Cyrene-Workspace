@@ -5,11 +5,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
 import subprocess
 import sys
+import tarfile
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -1219,6 +1221,243 @@ def _workload_updates_updater(tmp_path: Path) -> Any:
         trusted_catalog_digest=None,
         load_active_catalog=False,
     )
+
+
+def _first_core_candidate_set(
+    updater: Any, monkeypatch: pytest.MonkeyPatch, *, plan_digest: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build six locally staged native candidates with the catalog's exact C10 pins."""
+
+    group = next(
+        item
+        for item in updater.catalog["compatibilityGroups"]
+        if item["groupId"] == "package-runtime-native-v1"
+    )
+    target = updater.targets[updates.WORKLOAD_FIRST_CORE_TARGET_ID]["target"]
+    archive_by_uri: dict[str, bytes] = {}
+    candidates: dict[str, Any] = {}
+    selected_rows: list[dict[str, Any]] = []
+
+    for component_id in updates.WORKLOAD_FIRST_CORE_COMPONENT_IDS:
+        component = updater.components[component_id]
+        executable = f"bin/{component_id}"
+        unit_path = f"systemd/{component['systemdUnit']}"
+        payload_files = {
+            executable: f"#!/bin/sh\nexec /usr/bin/true # {component_id}\n".encode(),
+            unit_path: f"[Unit]\nDescription={component_id}\n".encode(),
+        }
+        archive_buffer = io.BytesIO()
+        with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+            for path, content in payload_files.items():
+                member = tarfile.TarInfo(path)
+                member.size = len(content)
+                member.mode = 0o755 if path == executable else 0o644
+                archive.addfile(member, io.BytesIO(content))
+        archive_bytes = archive_buffer.getvalue()
+        artifact_digest = "sha256:" + hashlib.sha256(archive_bytes).hexdigest()
+        tag = f"preview-{component_id}-" + "a" * 40
+        archive_name = f"{component_id}-ubuntu-24.04.tar.gz"
+        artifact_uri = (
+            "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/"
+            f"{tag}/{archive_name}"
+        )
+        file_map = {
+            path: "sha256:" + hashlib.sha256(content).hexdigest()
+            for path, content in payload_files.items()
+        }
+        manifest: dict[str, Any] = {
+            "schemaVersion": 2,
+            "componentId": component_id,
+            "version": "0.1.0",
+            "releaseId": tag,
+            "target": target,
+            "artifact": {
+                "kind": "native-binary",
+                "uri": artifact_uri,
+                "sha256": artifact_digest,
+                "sizeBytes": len(archive_bytes),
+                "entrypoint": executable,
+                "executableFiles": [executable],
+                "files": file_map,
+            },
+            "source": {
+                "repository": "DoHorizon-AI/Cyrene-Platform",
+                "ref": "refs/heads/develop",
+                "commit": "a" * 40,
+            },
+            "provenance": {"attestation": {"subjectName": archive_name}},
+        }
+        if component_id in {
+            "cyrene-runtime-maintenance",
+            "cyrene-kernel",
+            "cy-package-runtime",
+        }:
+            manifest["protocolVersion"] = component["protocolVersion"]
+            manifest["compatibility"] = {
+                "groupId": group["groupId"],
+                "groupVersion": group["groupVersion"],
+                "contractApiVersion": group["contractApiVersion"],
+                "wireApiVersion": group["wireApiVersion"],
+                "contractLock": group["contractLock"],
+            }
+        manifest["manifestDigest"] = updates._digest_json(manifest, "manifestDigest")
+        manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+        manifest_asset_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        index_identity = {
+            "assetName": "component-release-index-v1.json",
+            "assetDigest": _digest("c10-index-" + component_id),
+        }
+        publisher_identity = {
+            "id": "official-platform",
+            "repository": "DoHorizon-AI/Cyrene-Platform",
+        }
+        attestation_ref = {
+            "repository": "DoHorizon-AI/Cyrene-Platform",
+            "workflow": updater.publishers["DoHorizon-AI/Cyrene-Platform"]["workflow"],
+            "sourceCommit": "a" * 40,
+            "subjectName": archive_name,
+            "subjectDigest": artifact_digest,
+        }
+        selected_rows.append(
+            {
+                "componentId": component_id,
+                "version": manifest["version"],
+                "manifestDigest": manifest["manifestDigest"],
+                "manifestAssetDigest": manifest_asset_digest,
+                "artifactDigest": artifact_digest,
+                "digest": artifact_digest,
+                "targetId": updates.WORKLOAD_FIRST_CORE_TARGET_ID,
+                "releaseId": tag,
+                "indexIdentity": index_identity,
+                "publisherIdentity": publisher_identity,
+                "attestationRef": attestation_ref,
+            }
+        )
+        candidates[component_id] = updates.Candidate(
+            component=component,
+            manifest=manifest,
+            manifest_digest=manifest["manifestDigest"],
+            artifact_digest=artifact_digest,
+            manifest_uri=(
+                "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/"
+                f"{tag}/component-release-manifest-v2.json"
+            ),
+            index={},
+            index_uri=(
+                "https://github.com/DoHorizon-AI/Cyrene-Platform/releases/download/"
+                f"{tag}/component-release-index-v1.json"
+            ),
+            manifest_bytes=manifest_bytes,
+            release_tag=tag,
+            index_asset_name="component-release-index-v1.json",
+            index_asset_digest=index_identity["assetDigest"],
+            manifest_asset_digest=manifest_asset_digest,
+        )
+        archive_by_uri[artifact_uri] = archive_bytes
+
+    monkeypatch.setattr(
+        updater,
+        "_get_release_asset_bytes",
+        lambda _assets, uri, **_kwargs: archive_by_uri[uri],
+    )
+    # Candidate verification is an upstream precondition; exercise the installed payload
+    # revalidator below without making this local filesystem test claim signature evidence.
+    monkeypatch.setattr(updater, "_release_attestation_bundle", lambda **_kwargs: b"verified")
+    return (
+        {
+            **_public_first_core_block(),
+            "planId": PLAN_ID,
+            "planDigest": plan_digest,
+            "components": selected_rows,
+        },
+        candidates,
+    )
+
+
+def _simulate_root_owned_first_core_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Model root ownership only within this isolated temporary test tree."""
+
+    original_lstat = Path.lstat
+    original_fstat = os.fstat
+    test_root = tmp_path.resolve()
+
+    def root_owned_lstat(path: Path) -> os.stat_result:
+        metadata = original_lstat(path)
+        if not path.absolute().is_relative_to(test_root):
+            return metadata
+        fields = list(metadata)
+        fields[4] = 0
+        fields[5] = 0
+        return os.stat_result(fields)
+
+    def root_owned_fstat(descriptor: int) -> os.stat_result:
+        metadata = original_fstat(descriptor)
+        try:
+            descriptor_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+        except OSError:
+            return metadata
+        if not descriptor_path.absolute().is_relative_to(test_root):
+            return metadata
+        fields = list(metadata)
+        fields[4] = 0
+        fields[5] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(Path, "lstat", root_owned_lstat)
+    monkeypatch.setattr(updates.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "fstat", root_owned_fstat)
+
+
+@pytest.mark.parametrize("tamper_payload", [False, True])
+def test_first_core_revalidates_payload_with_native_component_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper_payload: bool
+) -> None:
+    _simulate_root_owned_first_core_tree(monkeypatch, tmp_path)
+    updater = _workload_updates_updater(tmp_path)
+    plan_digest = _digest("first-core-stage-payload-verifier")
+    plan_root = updater._private_state_directory("staged") / "workload-plans"
+    plan_root.mkdir(mode=0o700)
+    stage_root = plan_root / PLAN_ID
+    stage_root.mkdir(mode=0o700)
+    block, candidates = _first_core_candidate_set(updater, monkeypatch, plan_digest=plan_digest)
+
+    staged = updater._first_core_stage_items(
+        block,
+        candidates,
+        [],
+        stage_root,
+        plan_id=PLAN_ID,
+        plan_digest=plan_digest,
+    )
+    if tamper_payload:
+        release_path = Path(staged[0]["releasePath"])
+        entrypoint = release_path / "bin" / staged[0]["componentId"]
+        entrypoint.write_bytes(b"changed after the signed manifest was staged\n")
+
+    if not tamper_payload:
+        validated = updater._validate_first_core_stage_items(
+            block,
+            candidates,
+            staged,
+            plan_id=PLAN_ID,
+            plan_digest=plan_digest,
+            core_module=native_core,
+        )
+        assert validated == staged
+        return
+
+    with pytest.raises(updates.UpdateError, match="Staged C10 payload is unsafe") as error:
+        updater._validate_first_core_stage_items(
+            block,
+            candidates,
+            staged,
+            plan_id=PLAN_ID,
+            plan_digest=plan_digest,
+            core_module=native_core,
+        )
+    assert error.value.code == "INVALID_STAGE"
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "payload digest differs from the manifest" in str(error.value.__cause__)
 
 
 @pytest.mark.parametrize(

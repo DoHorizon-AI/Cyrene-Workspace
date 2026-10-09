@@ -6572,13 +6572,19 @@ class ComponentUpdater:
             or set(core_candidates) != set(WORKLOAD_FIRST_CORE_COMPONENT_IDS)
         ):
             raise UpdateError("INVALID_STAGE", "The staged first-Core cohort is malformed.")
-        helper = core_module or self._load_native_core_bootstrap()
+        core_helper = core_module or self._load_native_core_bootstrap()
         try:
-            helper._validate_staged_cohort(self, staged_components)
+            core_helper._validate_staged_cohort(self, staged_components)
         except Exception as error:
             raise UpdateError(
                 "INVALID_STAGE", "The staged C10 compatibility cohort is invalid."
             ) from error
+        component_helper = self._load_native_component_bootstrap()
+        payload_verifier = getattr(component_helper, "_verify_release_payload", None)
+        if not callable(payload_verifier):
+            raise UpdateError(
+                "HELPER_UNAVAILABLE", "The native component payload verifier is unavailable."
+            )
         selected_by_id = {row["componentId"]: row for row in block["components"]}
         staged_by_id = {row["componentId"]: row for row in staged_components}
         stage_root = self._private_state_directory("staged") / "workload-plans" / plan_id
@@ -6642,7 +6648,7 @@ class ComponentUpdater:
                 archive_info = archive_path.stat()
                 artifact = candidate.manifest["artifact"]
                 receipt = self._read_release_receipt(component_id, candidate.manifest_digest)
-                helper._verify_release_payload(self, release_path, candidate.manifest)
+                payload_verifier(self, release_path, candidate.manifest)
             except Exception as error:
                 raise UpdateError(
                     "INVALID_STAGE", f"Staged C10 payload is unsafe for {component_id}."
