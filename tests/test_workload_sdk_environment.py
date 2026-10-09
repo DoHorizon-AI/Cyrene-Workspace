@@ -37,6 +37,67 @@ def _sha(value: str) -> str:
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _published_platform_sdk_identity() -> dict[str, Any]:
+    """Build the resolver row shape from the checked-in published Platform SDK assets."""
+
+    fixture_root = ROOT / "tests/fixtures/workload-attestation-subjects/platform-sdk-1ec629"
+    manifest_path = fixture_root / "sdk-ubuntu24-manifest.json"
+    index_path = fixture_root / "component-release-index-v1.json"
+    manifest_bytes = manifest_path.read_bytes()
+    index_bytes = index_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    index = json.loads(index_bytes)
+    release = next(
+        item
+        for item in index["releases"]
+        if item["componentId"] == environment.WORKLOAD_SDK_COMPONENT_ID
+        and item["target"]["osVersion"] == "24.04"
+    )
+    source = manifest["source"]
+    artifact = manifest["artifact"]
+    provenance = manifest["provenance"]["attestation"]
+    repository = "DoHorizon-AI/Cyrene-Platform"
+    publisher_identity = {
+        "id": repository,
+        "repository": repository,
+        "workflow": provenance["workflow"],
+        "tagFormat": "source-sha",
+    }
+    release_tag = manifest["releaseId"]
+    release_base_uri = artifact["uri"].rsplit("/", 1)[0]
+    return {
+        "componentId": manifest["componentId"],
+        "artifactKind": artifact["kind"],
+        "targetId": environment.WORKLOAD_SDK_TARGET_ID,
+        "version": manifest["version"],
+        "releaseId": release_tag,
+        "digest": artifact["sha256"],
+        "manifestDigest": manifest["manifestDigest"],
+        "manifestAssetDigest": "sha256:" + hashlib.sha256(manifest_bytes).hexdigest(),
+        "manifestUri": release["manifestUri"],
+        "publisherIdentity": publisher_identity,
+        "indexIdentity": {
+            "publisherIdentity": publisher_identity,
+            "repository": repository,
+            "assetName": "component-release-index-v1.json",
+            "assetUri": f"{release_base_uri}/component-release-index-v1.json",
+            "assetDigest": "sha256:" + hashlib.sha256(index_bytes).hexdigest(),
+            "indexDigest": index["indexDigest"],
+            "channel": manifest["channel"],
+            "releaseTag": release_tag,
+        },
+        "attestationRef": {
+            "repository": provenance["repository"],
+            "workflow": provenance["workflow"],
+            "sourceCommit": source["commit"],
+            "sourceRef": source["ref"],
+            "subjectName": provenance["subjectName"],
+            "subjectDigest": artifact["sha256"],
+        },
+        "verification": {"identityAttested": True},
+    }
+
+
 class FakeCommandRunner:
     """Model subprocess boundaries without claiming a production SDK install."""
 
@@ -109,7 +170,8 @@ def sdk_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
     bundle_path.mkdir(parents=True)
     stage_root.chmod(0o755)
     bundle_path.chmod(0o755)
-    archive_path = stage_root / "runtime-maintenance-sdk.tar.gz"
+    component = _published_platform_sdk_identity()
+    archive_path = stage_root / component["attestationRef"]["subjectName"]
     archive_path.write_bytes(b"verified test archive")
     archive_path.chmod(0o644)
     (bundle_path / "sdk-release.json").write_text(
@@ -125,46 +187,6 @@ def sdk_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
     wheel_path = bundle_path / environment.WORKLOAD_SDK_WHEEL_NAME
     wheel_path.write_bytes(b"test-only wheel bytes")
     wheel_path.chmod(0o644)
-    component = {
-        "componentId": environment.WORKLOAD_SDK_COMPONENT_ID,
-        "artifactKind": environment.WORKLOAD_SDK_ARTIFACT_KIND,
-        "targetId": environment.WORKLOAD_SDK_TARGET_ID,
-        "version": "0.1.0",
-        "releaseId": "v0.1.0",
-        "digest": _sha("official archive identity"),
-        "manifestDigest": _sha("sdk release manifest"),
-        "manifestAssetDigest": _sha("sdk manifest asset"),
-        "manifestUri": "https://example.invalid/releases/v0.1.0/sdk-release.json",
-        "publisherIdentity": {
-            "id": "official-cyrene-workspace-sdk",
-            "repository": "DoHorizon-AI/Cyrene-Workspace",
-            "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/sdk.yml",
-            "tagFormat": "component-version",
-        },
-        "indexIdentity": {
-            "publisherIdentity": {
-                "id": "official-cyrene-workspace-sdk",
-                "repository": "DoHorizon-AI/Cyrene-Workspace",
-                "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/sdk.yml",
-                "tagFormat": "component-version",
-            },
-            "repository": "DoHorizon-AI/Cyrene-Workspace",
-            "assetName": "component-release-index-v1.json",
-            "assetUri": "https://example.invalid/releases/v0.1.0/component-release-index-v1.json",
-            "assetDigest": _sha("release index asset"),
-            "indexDigest": _sha("release index content"),
-            "channel": "stable",
-            "releaseTag": "v0.1.0",
-        },
-        "attestationRef": {
-            "repository": "DoHorizon-AI/Cyrene-Workspace",
-            "workflow": "DoHorizon-AI/Cyrene-Workspace/.github/workflows/sdk.yml",
-            "sourceCommit": "a" * 40,
-            "subjectName": "sdk-release.json",
-            "subjectDigest": _sha("sdk manifest asset"),
-        },
-        "verification": {"identityAttested": True},
-    }
     staged_identity = {
         "archivePath": str(archive_path),
         "bundlePath": str(bundle_path),
@@ -202,7 +224,17 @@ def _prepare_alternate_release(values: dict[str, Any], runner: FakeCommandRunner
     component["manifestAssetDigest"] = _sha("alternate SDK manifest asset")
     component["indexIdentity"]["assetDigest"] = _sha("alternate release index asset")
     component["indexIdentity"]["indexDigest"] = _sha("alternate release index content")
-    component["attestationRef"]["subjectDigest"] = component["manifestAssetDigest"]
+    source_commit = "b" * 40
+    release_tag = f"preview-{source_commit}"
+    prior_release_tag = component["indexIdentity"]["releaseTag"]
+    component["releaseId"] = release_tag
+    component["indexIdentity"]["releaseTag"] = release_tag
+    component["attestationRef"]["sourceCommit"] = source_commit
+    component["attestationRef"]["subjectDigest"] = component["digest"]
+    component["manifestUri"] = component["manifestUri"].replace(prior_release_tag, release_tag)
+    component["indexIdentity"]["assetUri"] = component["indexIdentity"]["assetUri"].replace(
+        prior_release_tag, release_tag
+    )
     staged_identity = json.loads(json.dumps(values["staged"]))
     staged_identity["planId"] = "plan-test-alternate"
     staged_identity["planDigest"] = _sha("alternate plan material")
@@ -240,6 +272,65 @@ def test_rejects_selected_sdk_without_explicit_attestation_result(
 
     assert runner.commands == []
     assert not (sdk_stage["operatorRoot"] / "current").is_symlink()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("repository", "DoHorizon-AI/Other"),
+        ("workflow", "DoHorizon-AI/Cyrene-Platform/.github/workflows/other.yml"),
+        ("sourceCommit", "f" * 40),
+        ("sourceRef", "refs/heads/main"),
+    ],
+)
+def test_rejects_archive_attestation_context_mismatch_before_install(
+    sdk_stage: dict[str, Any], field: str, value: str
+) -> None:
+    """The helper binds archive proof to the selected publisher and source identity."""
+
+    sdk_stage["component"]["attestationRef"][field] = value
+    runner = FakeCommandRunner(sdk_stage["privatePython"])
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="attestation"):
+        _prepare(sdk_stage, runner)
+
+    assert runner.commands == []
+    assert not (sdk_stage["operatorRoot"] / "current").is_symlink()
+
+
+def test_rejects_raw_manifest_digest_as_archive_attestation_subject(
+    sdk_stage: dict[str, Any],
+) -> None:
+    """The archive attestation slot cannot be populated with the raw manifest SHA."""
+
+    sdk_stage["component"]["attestationRef"]["subjectDigest"] = sdk_stage["component"][
+        "manifestAssetDigest"
+    ]
+    runner = FakeCommandRunner(sdk_stage["privatePython"])
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="archive attestation"):
+        _prepare(sdk_stage, runner)
+
+    assert runner.commands == []
+    assert not (sdk_stage["operatorRoot"] / "current").is_symlink()
+
+
+def test_rejects_archive_subject_name_that_differs_from_staged_path(
+    sdk_stage: dict[str, Any],
+) -> None:
+    """A valid archive attestation cannot authorize a different staged filename."""
+
+    wrong_archive = sdk_stage["staged"]["archivePath"].replace(
+        sdk_stage["component"]["attestationRef"]["subjectName"], "replacement.tar.gz"
+    )
+    Path(wrong_archive).write_bytes(Path(sdk_stage["staged"]["archivePath"]).read_bytes())
+    sdk_stage["staged"]["archivePath"] = wrong_archive
+    runner = FakeCommandRunner(sdk_stage["privatePython"])
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="subject"):
+        _prepare(sdk_stage, runner)
+
+    assert runner.commands == []
 
 
 def test_rejects_wheel_symlink_pollution(sdk_stage: dict[str, Any], tmp_path: Path) -> None:
@@ -344,7 +435,7 @@ def test_returns_exact_source_identity_receipt(sdk_stage: dict[str, Any]) -> Non
         "manifestDigest": sdk_stage["component"]["manifestDigest"],
         "manifestAssetDigest": sdk_stage["component"]["manifestAssetDigest"],
         "releaseId": sdk_stage["component"]["releaseId"],
-        "releaseTag": "v0.1.0",
+        "releaseTag": sdk_stage["component"]["releaseId"],
         "indexIdentity": sdk_stage["component"]["indexIdentity"],
         "publisherIdentity": sdk_stage["component"]["publisherIdentity"],
         "attestationRef": sdk_stage["component"]["attestationRef"],
@@ -354,6 +445,8 @@ def test_returns_exact_source_identity_receipt(sdk_stage: dict[str, Any]) -> Non
     assert result["schemaVersion"] == 1
     assert result["digest"] == sdk_stage["component"]["digest"]
     assert result["manifestAssetDigest"] == sdk_stage["component"]["manifestAssetDigest"]
+    assert result["attestationRef"]["subjectDigest"] == result["digest"]
+    assert result["attestationRef"]["subjectDigest"] != result["manifestAssetDigest"]
     assert result["wheelDigest"] == sdk_stage["staged"]["wheelDigest"]
     assert result["pythonPath"].endswith("/venv/bin/python")
     receipt = Path(result["releasePath"]) / environment.INSTALL_RECEIPT_NAME
@@ -370,7 +463,7 @@ def test_returns_exact_source_identity_receipt(sdk_stage: dict[str, Any]) -> Non
         "digest": sdk_stage["component"]["digest"],
         "artifactDigest": sdk_stage["component"]["digest"],
         "releaseIdentity": sdk_stage["component"]["manifestDigest"],
-        "releaseTag": "v0.1.0",
+        "releaseTag": sdk_stage["component"]["releaseId"],
         "indexIdentity": sdk_stage["component"]["indexIdentity"],
         "publisherIdentity": sdk_stage["component"]["publisherIdentity"],
         "attestationRef": sdk_stage["component"]["attestationRef"],
@@ -442,6 +535,25 @@ def test_read_helper_rejects_inconsistent_release_provenance(sdk_stage: dict[str
     receipt_path.chmod(0o444)
 
     with pytest.raises(environment.WorkloadSdkEnvironmentError, match="publisher identities"):
+        environment.read_workload_sdk_environment()
+
+
+def test_read_helper_rejects_receipt_archive_path_not_named_by_attestation(
+    sdk_stage: dict[str, Any],
+) -> None:
+    """Readback retains the selected archive subject to staged and receipt paths."""
+
+    installed = _prepare(sdk_stage, FakeCommandRunner(sdk_stage["privatePython"]))
+    receipt_path = Path(installed["releasePath"]) / environment.INSTALL_RECEIPT_NAME
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    changed_archive = str(Path(receipt["archivePath"]).with_name("replacement.tar.gz"))
+    receipt["archivePath"] = changed_archive
+    receipt["sourceIdentity"]["archivePath"] = changed_archive
+    receipt_path.chmod(0o644)
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    receipt_path.chmod(0o444)
+
+    with pytest.raises(environment.WorkloadSdkEnvironmentError, match="subject"):
         environment.read_workload_sdk_environment()
 
 
