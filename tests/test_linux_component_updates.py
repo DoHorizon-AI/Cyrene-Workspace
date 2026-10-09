@@ -3741,3 +3741,381 @@ def test_manifest_v2_dual_read_support() -> None:
     }
     manifest_v2["manifestDigest"] = updates._digest_json(manifest_v2, "manifestDigest")
     assert manifest_v2["manifestDigest"].startswith("sha256:")
+
+
+def _cached_plugin_stage_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    component_ids: tuple[str, ...] = (
+        "cyrene-tools-dataset-preparation",
+        "cyrene-tools-document-parsing",
+        "cyrene-tools-dataset-generation",
+        "cyrene-tools-knowledge-preparation",
+    ),
+) -> tuple[
+    updates.ComponentUpdater,
+    str,
+    str,
+    dict[str, Any],
+    dict[str, updates.Candidate],
+    Path,
+]:
+    updater = _empty_updater(tmp_path)
+
+    def verify_fixture_private_file(path: Path) -> None:
+        info = path.lstat()
+        assert stat.S_ISREG(info.st_mode)
+        assert stat.S_IMODE(info.st_mode) == 0o600
+        assert info.st_nlink == 1
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            opened = os.fstat(descriptor)
+            assert (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino)
+            assert stat.S_IMODE(opened.st_mode) == 0o600
+            assert opened.st_nlink == 1
+        finally:
+            os.close(descriptor)
+
+    # The production file verifier requires root ownership; this test process is
+    # unprivileged, so preserve its link/mode/TOCTOU checks and test content hashes.
+    monkeypatch.setattr(updates, "_verify_private_file", verify_fixture_private_file)
+    plan_id = "plan-" + "a" * 32
+    plan_digest = "sha256:" + "a" * 64
+    stage_parent = updater._private_state_directory("staged") / "workload-plans"
+    stage_parent.mkdir(mode=0o700)
+    stage_root = stage_parent / plan_id
+    stage_root.mkdir(mode=0o700)
+    selected_rows: list[dict[str, Any]] = []
+    candidates: dict[str, updates.Candidate] = {}
+    staged_rows: list[dict[str, Any]] = []
+    stored_candidates: dict[str, dict[str, Any]] = {}
+    asset_payloads: dict[tuple[str, str], bytes] = {}
+
+    for index, component_id in enumerate(component_ids):
+        commit = f"{index + 1:x}" * 40
+        version = "0.2.0"
+        package_id = f"org.cyrene.{component_id.replace('-', '.')}"
+        capability_id = f"{component_id.removeprefix('cyrene-tools-').replace('-', '.')}.v1"
+        publisher = {
+            "id": "official-cyrene-plugins",
+            "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+            "workflow": "DoHorizon-AI/Cyrene-Plugins-Official/.github/workflows/data-tools-package-release.yml",
+            "tagFormat": "component-version-source-sha",
+        }
+        release_id = f"preview-{component_id}-{version}-{commit}"
+        archive_bytes = f"archive:{component_id}".encode()
+        reference_payloads = {
+            "archive": archive_bytes,
+            "descriptor": f"descriptor:{component_id}".encode(),
+            "requirementsLock": f"lock:{component_id}".encode(),
+            "packageReleaseMetadata": f"metadata:{component_id}".encode(),
+            "preparerWheel0": f"wheel:{component_id}".encode(),
+            "sbom": f"sbom:{component_id}".encode(),
+        }
+        references: dict[str, dict[str, Any]] = {}
+        names = {
+            "archive": f"{component_id}.zip",
+            "descriptor": f"{component_id}-descriptor.json",
+            "requirementsLock": f"{component_id}-requirements.lock",
+            "packageReleaseMetadata": f"{component_id}-package-release.json",
+            "preparerWheel0": f"{component_id}-preparer.whl",
+            "sbom": f"{component_id}-sbom.json",
+        }
+        for label, payload in reference_payloads.items():
+            digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+            references[label] = {
+                "uri": f"https://github.com/releases/{release_id}/{names[label]}",
+                "sha256": digest,
+                "sizeBytes": len(payload),
+            }
+            asset_payloads[(component_id, label)] = payload
+
+        source_policy = {
+            "mode": "actualProduct",
+            "productComponentIds": ["cyrene-catalyst"],
+            "productSources": [{"componentId": "cyrene-catalyst", "sourceId": "cyrene-catalyst"}],
+            "operations": [
+                "activate",
+                "recover_binding",
+                "deactivate",
+                "runtime_status",
+                "get_installation",
+            ],
+        }
+        artifact_digest = references["archive"]["sha256"]
+        artifact = {
+            "kind": "plugin-package",
+            "packageId": package_id,
+            "capabilityId": capability_id,
+            "interfaceVersion": "1.0.0",
+            "archive": {
+                **references["archive"],
+                "files": {},
+                "maxEntries": 8,
+                "maxUncompressedBytes": 4096,
+            },
+            "descriptor": references["descriptor"],
+            "requirementsLock": references["requirementsLock"],
+            "packageReleaseMetadata": references["packageReleaseMetadata"],
+            "preparerWheels": [references["preparerWheel0"]],
+            "sbom": references["sbom"],
+        }
+        manifest: dict[str, Any] = {
+            "schemaVersion": 2,
+            "componentId": component_id,
+            "releaseId": release_id,
+            "version": version,
+            "source": {
+                "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+                "ref": "refs/heads/develop",
+                "commit": commit,
+            },
+            "artifact": artifact,
+        }
+        manifest_digest = updates._digest_json(manifest, "manifestDigest")
+        manifest["manifestDigest"] = manifest_digest
+        manifest_bytes = json.dumps(manifest, sort_keys=True).encode()
+        manifest_asset_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        manifest_uri = (
+            f"https://github.com/releases/{release_id}/component-release-manifest-v2.json"
+        )
+        index_identity = {
+            "assetName": "component-release-index-v1.json",
+            "assetUri": f"https://github.com/releases/{release_id}/component-release-index-v1.json",
+            "assetDigest": "sha256:" + str(index + 1) * 64,
+            "indexDigest": "sha256:" + str(index + 2) * 64,
+            "releaseTag": release_id,
+            "publisherIdentity": publisher,
+        }
+        attestation_ref = {
+            "repository": publisher["repository"],
+            "workflow": publisher["workflow"],
+            "sourceCommit": commit,
+            "subjectName": "component-release-manifest-v2.json",
+            "subjectDigest": manifest_asset_digest,
+        }
+        selected = {
+            "componentId": component_id,
+            "artifactKind": "plugin-package",
+            "version": version,
+            "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+            "releaseId": release_id,
+            "manifestUri": manifest_uri,
+            "manifestDigest": manifest_digest,
+            "manifestAssetDigest": manifest_asset_digest,
+            "digest": artifact_digest,
+            "indexIdentity": index_identity,
+            "publisherIdentity": publisher,
+            "attestationRef": attestation_ref,
+            "installed": False,
+            "installationId": None,
+            "installedIdentity": None,
+            "packageId": package_id,
+            "capabilityId": capability_id,
+            "bindingId": f"cyrene-plugin-owner-{component_id.removeprefix('cyrene-tools-')}",
+            "sourcePolicy": source_policy,
+        }
+        candidate = updates.Candidate(
+            component={
+                "componentId": component_id,
+                "publisher": publisher["repository"],
+                "publisherId": publisher["id"],
+            },
+            manifest=manifest,
+            manifest_digest=manifest_digest,
+            artifact_digest=artifact_digest,
+            manifest_uri=manifest_uri,
+            index={"indexDigest": index_identity["indexDigest"]},
+            index_uri=index_identity["assetUri"],
+            release_tag=release_id,
+            index_asset_name=index_identity["assetName"],
+            index_asset_digest=index_identity["assetDigest"],
+            manifest_asset_digest=manifest_asset_digest,
+        )
+        candidates[component_id] = candidate
+        selected_rows.append(selected)
+        stored_candidates[component_id] = {
+            "manifestUri": manifest_uri,
+            "manifestDigest": manifest_digest,
+            "manifestAssetDigest": manifest_asset_digest,
+            "artifactDigest": artifact_digest,
+            "releaseTag": release_id,
+            "targetId": selected["targetId"],
+        }
+
+    resolution = {
+        "status": "ready",
+        "action": "install",
+        "channel": "preview",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "selectedComponents": selected_rows,
+    }
+
+    def asset_bytes(candidate: updates.Candidate, reference: dict[str, Any], *, label: str):
+        component_id = candidate.component["componentId"]
+        payload = asset_payloads[(component_id, label)]
+        proof = f"proof:{component_id}:{label}".encode()
+        return payload, "sha256:" + hashlib.sha256(proof).hexdigest()
+
+    updater._workload_asset_bytes = asset_bytes
+    updater._extract_zip = lambda _archive, destination, **_kwargs: destination.mkdir(mode=0o700)
+    updater._parse_plugin_package_release_metadata = lambda candidate, _payload, _assets: {
+        "source": {"commit": candidate.manifest["source"]["commit"]},
+        "package": {},
+    }
+    updater._validate_workload_package_descriptor = (
+        lambda _payload, candidate, _artifact, _payload_root: {
+            "artifactDigest": "sha256:" + "d" * 64,
+            "archiveDigest": candidate.artifact_digest,
+            "dependencyLockDigest": candidate.manifest["artifact"]["requirementsLock"]["sha256"],
+        }
+    )
+    updater._validate_workload_package_source_policy = lambda _metadata, _policy: None
+    for selected in selected_rows:
+        staged_rows.append(
+            updater._stage_workload_plugin_package(
+                candidates[selected["componentId"]],
+                stage_root,
+                plan_id,
+                plan_digest,
+                resolution_component=selected,
+            )
+        )
+
+    plan_directory = updater._workload_plan_directory()
+    stored = {
+        "schemaVersion": 1,
+        "planKind": updates.WORKLOAD_PROTOCOL_VERSION,
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "catalogDigest": updater.catalog_digest,
+        "catalogGeneration": updater.catalog_generation,
+        "workloadId": "catalyst",
+        "targetId": updates.WORKLOAD_HOST_TARGET,
+        "action": "install",
+        "channel": "preview",
+        "selections": {},
+        "resolution": resolution,
+        "candidates": stored_candidates,
+        "phase": "staged",
+        "stagedComponents": staged_rows,
+    }
+    updates._atomic_json(plan_directory / f"{plan_id}.json", stored)
+    updater._require_authorized_process = lambda: None
+    updater._clear_release_discovery_caches = lambda: None
+    updater._validate_plan_identity = lambda *_args: None
+    updater._require_workload_target = lambda workload_id, target_id: (workload_id, target_id)
+    updater._resolve_channel = lambda channel: channel
+    updater._build_workload_plan = lambda *_args, **_kwargs: (
+        resolution,
+        candidates,
+        {"components": {}, "installationRecords": {}, "sourceBindings": []},
+    )
+    return updater, plan_id, plan_digest, resolution, candidates, plan_directory
+
+
+def test_workload_plugin_stage_projects_all_signed_resolution_identity_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, _plan_id, _plan_digest, resolution, candidates, _plan_directory = (
+        _cached_plugin_stage_fixture(
+            tmp_path, monkeypatch, component_ids=("cyrene-tools-dataset-preparation",)
+        )
+    )
+    selected = resolution["selectedComponents"][0]
+    fresh_stage = tmp_path / "fresh-stage"
+    fresh_stage.mkdir(mode=0o700)
+    staged = updater._stage_workload_plugin_package(
+        candidates[selected["componentId"]],
+        fresh_stage,
+        "plan-" + "b" * 32,
+        "sha256:" + "b" * 64,
+        resolution_component=selected,
+    )
+    assert {
+        field: staged[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS
+    } == {field: selected[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS}
+
+
+def test_workload_stage_backfills_legacy_plugin_identity_on_exact_cached_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, plan_id, plan_digest, resolution, _candidates, plan_directory = (
+        _cached_plugin_stage_fixture(tmp_path, monkeypatch)
+    )
+    plan_path = plan_directory / f"{plan_id}.json"
+    stored = json.loads(plan_path.read_text(encoding="utf-8"))
+    old_proofs = {
+        row["componentId"]: dict(row["assetAttestations"]) for row in stored["stagedComponents"]
+    }
+    for row in stored["stagedComponents"]:
+        for field in updates.WORKLOAD_STAGE_PLUGIN_BACKFILL_FIELDS:
+            row.pop(field)
+    updates._atomic_json(plan_path, stored)
+
+    result = updater.stage_workload(
+        "catalyst",
+        updates.WORKLOAD_HOST_TARGET,
+        plan_id,
+        plan_digest,
+        action="install",
+        channel="preview",
+    )
+
+    assert result["status"] == "staged"
+    assert result["planId"] == plan_id and result["planDigest"] == plan_digest
+    assert len(result["components"]) == 4
+    selected_by_id = {row["componentId"]: row for row in resolution["selectedComponents"]}
+    for row in result["components"]:
+        selected = selected_by_id[row["componentId"]]
+        assert {
+            field: row[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS
+        } == {field: selected[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS}
+        assert row["assetAttestations"] == old_proofs[row["componentId"]]
+    persisted = json.loads(plan_path.read_text(encoding="utf-8"))
+    assert persisted["phase"] == "staged"
+    assert persisted["stagedComponents"] == result["components"]
+
+
+@pytest.mark.parametrize("mismatch", ["plan", "source", "digest", "proof", "asset", "identity"])
+def test_workload_stage_rejects_legacy_plugin_mismatch_without_plan_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    updater, plan_id, plan_digest, _resolution, _candidates, plan_directory = (
+        _cached_plugin_stage_fixture(tmp_path, monkeypatch)
+    )
+    plan_path = plan_directory / f"{plan_id}.json"
+    stored = json.loads(plan_path.read_text(encoding="utf-8"))
+    row = stored["stagedComponents"][-1]
+    for field in updates.WORKLOAD_STAGE_PLUGIN_BACKFILL_FIELDS:
+        row.pop(field)
+    if mismatch == "plan":
+        row["stagedIdentity"]["planDigest"] = "sha256:" + "f" * 64
+    elif mismatch == "source":
+        row["sourceCommit"] = "f" * 40
+    elif mismatch == "digest":
+        row["digest"] = "sha256:" + "f" * 64
+    elif mismatch == "proof":
+        row["assetAttestations"].pop("archive")
+    elif mismatch == "asset":
+        archive_path = Path(row["stagedIdentity"]["assetPaths"]["archive"])
+        archive_path.write_bytes(b"tampered archive")
+    elif mismatch == "identity":
+        row["targetId"] = "linux-ubuntu-22.04-x86_64-python-3.12"
+    updates._atomic_json(plan_path, stored)
+    original = plan_path.read_bytes()
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater.stage_workload(
+            "catalyst",
+            updates.WORKLOAD_HOST_TARGET,
+            plan_id,
+            plan_digest,
+            action="install",
+            channel="preview",
+        )
+
+    assert error.value.code == "INVALID_STAGE"
+    assert plan_path.read_bytes() == original
