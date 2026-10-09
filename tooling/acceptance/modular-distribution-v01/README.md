@@ -21,10 +21,6 @@ The disposable runner must use GitHub CLI `gh` version 2.102.0 or newer for stri
 
 临时 runner 的 GitHub CLI `gh` 必须为 2.102.0 或更新版本，才能进行严格 provenance 验签。安装 Cyrene 前，driver 会记录 runner 原有版本；若镜像版本较旧，则读取 GitHub 官方 release API，并要求 `cli/cli` `v2.102.0` 为不可变发布且 source commit 精确为 `fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd`。driver 下载官方 amd64 DEB 与 checksum 文件，核对 API asset 摘要/大小、checksum 文件 SHA-256、DEB SHA-256、包版本和架构，再安装本地已验证的 DEB。provision 记录保留升级前后版本和发布资产身份；不会改动开发者共享 WSL 中的 CLI。发布物和 Catalog attestation 仍按精确 signer、source ref、source SHA、predicate 与 OIDC issuer 约束验签。
 
-The disposable runner must use GitHub CLI `gh` version 2.102.0 or newer for strict attestation verification. Before installing Cyrene, the driver records the initial CLI version; when the runner image is older, it reads GitHub's official release API and requires immutable `cli/cli` tag `v2.102.0` at commit `fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd`. It downloads the official amd64 DEB and checksum list, verifies their API asset digest/size, checksum-list SHA-256, exact DEB SHA-256, package version, and architecture, then installs that local verified DEB. The provision record captures the old/new versions and release asset identity. The workflow does not modify a developer's shared WSL CLI. Detached release and catalog attestations are still checked with exact signer, source ref, source SHA, predicate, and OIDC issuer constraints.
-
-临时 runner 的 GitHub CLI `gh` 必须为 2.102.0 或更新版本，才能进行严格 provenance 验签。安装 Cyrene 前，driver 会记录 runner 原有版本；若镜像版本较旧，则读取 GitHub 官方 release API，并要求 `cli/cli` `v2.102.0` 为不可变发布且 source commit 精确为 `fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd`。driver 下载官方 amd64 DEB 与 checksum 文件，核对 API asset 摘要/大小、checksum 文件 SHA-256、DEB SHA-256、包版本和架构，再安装本地已验证的 DEB。provision 记录保留升级前后版本和发布资产身份；不会改动开发者共享 WSL 中的 CLI。发布物和 Catalog attestation 仍按精确 signer、source ref、source SHA、predicate 与 OIDC issuer 约束验签。
-
 This workflow always runs the pinned Catalyst core, a non-mutating resolver
 check that proves a required component cannot be omitted, and a read-only
 version-conflict inspection of the exact signed Catalyst resolution. The latter

@@ -5150,6 +5150,7 @@ class ComponentUpdater:
             "components": identities,
             "installationRecords": result.get("installationRecords", {}),
             "sourceBindings": result.get("sourceBindings", []),
+            "catalogGeneration": activity_catalog["generation"],
             "sourcePrincipals": principals,
             "sourcePolicy": source_policy,
         }
@@ -9276,6 +9277,21 @@ class ComponentUpdater:
             raise UpdateError(
                 "PACKAGE_RUNTIME_OPERATION_FAILED", "Package Runtime receipt is malformed."
             )
+        completed = next(
+            (
+                entry
+                for entry in binding_ops
+                if isinstance(entry, dict) and entry.get("requestId") == request_id
+            ),
+            None,
+        )
+        if not isinstance(completed, dict):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package Runtime completion lost its durable intent."
+            )
+        completed["state"] = "completed"
+        completed["completedAt"] = int(time.time())
+        _atomic_json(transaction_path, transaction)
         return result
 
     def _write_workload_package_runtime_receipt(
@@ -11906,6 +11922,38 @@ class ComponentUpdater:
                 sorted(self._load_workload_resolver().potential_component_ids(self.catalog, "echo"))
             )
             package_inventory = self._read_workload_package_inventory("echo", package_ids)
+            inventory_generation = package_inventory.get("catalogGeneration")
+            if inventory_generation is None:
+                inventory_generation = activity_catalog.get("generation")
+            if (
+                type(inventory_generation) is not int
+                or inventory_generation < 1
+                or inventory_generation != activity_catalog.get("generation")
+            ):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Echo's authenticated owner inventory changed catalog generation.",
+                    retryable=True,
+                )
+            durable_generation = transaction.get("echoOwnerCatalogGeneration")
+            if durable_generation is None:
+                if container_removed or transaction.get("echoUninstallIntent") is True:
+                    container_receipt = echo_receipt.get("containerReceipt")
+                    durable_generation = (
+                        container_receipt.get("activityCatalogGeneration")
+                        if isinstance(container_receipt, dict)
+                        else None
+                    )
+                else:
+                    durable_generation = inventory_generation
+                transaction["echoOwnerCatalogGeneration"] = durable_generation
+                _atomic_json(transaction_path, transaction)
+            if type(durable_generation) is not int or durable_generation != inventory_generation:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Echo's owner catalog generation changed during uninstall recovery.",
+                    retryable=True,
+                )
             prior_runner_identity = echo_receipt.get("runnerIdentity")
             if isinstance(prior_runner_identity, dict):
                 if container_removed:
@@ -11985,6 +12033,180 @@ class ComponentUpdater:
                 and binding.get("sourceId") == source_id
                 and binding.get("state") == "RUNNING"
             ]
+            expected_runner_identity = transaction.get("echoRunnerIdentity")
+            if not isinstance(expected_runner_identity, dict):
+                expected_runner_identity = prior_runner_identity
+            if isinstance(expected_runner_identity, dict):
+                expected_source = expected_runner_identity.get("sourceId")
+                expected_binding = expected_runner_identity.get("bindingId")
+                expected_package = expected_runner_identity.get("packageId")
+                expected_installation = expected_runner_identity.get("installationId")
+                expected_component = expected_runner_identity.get("componentId")
+                expected_generation = transaction.get("echoOwnerCatalogGeneration")
+                if expected_generation is None:
+                    container_receipt = echo_receipt.get("containerReceipt")
+                    expected_generation = (
+                        container_receipt.get("activityCatalogGeneration")
+                        if isinstance(container_receipt, dict)
+                        else None
+                    )
+                if (
+                    expected_source != source_id
+                    or not all(
+                        isinstance(value, str) and value
+                        for value in (
+                            expected_binding,
+                            expected_package,
+                            expected_installation,
+                            expected_component,
+                        )
+                    )
+                    or type(expected_generation) is not int
+                    or expected_generation != activity_catalog.get("generation")
+                ):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Echo's durable owner identity or ActivitySource generation changed.",
+                        retryable=True,
+                    )
+                expected_owner = (
+                    expected_source,
+                    expected_binding,
+                    expected_package,
+                    expected_installation,
+                )
+                observed_owners = [
+                    (
+                        binding.get("sourceId"),
+                        binding.get("bindingId"),
+                        binding.get("packageId"),
+                        binding.get("activeInstallationId"),
+                    )
+                    for binding in active_echo_bindings
+                ]
+                if active_echo_bindings and observed_owners != [expected_owner]:
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "Echo's active Package Runtime owner changed after container removal.",
+                        retryable=True,
+                    )
+                if not active_echo_bindings:
+                    expected_request_id = (
+                        "cyrene-wop-"
+                        + plan_id.removeprefix("plan-")
+                        + "-dea-"
+                        + hashlib.sha256(expected_installation.encode("utf-8")).hexdigest()[:8]
+                        + "-"
+                        + expected_component
+                    )
+                    binding_operations = transaction.get("bindingOperations", [])
+                    if not isinstance(binding_operations, list):
+                        raise UpdateError(
+                            "INVALID_TRANSACTION", "Echo binding operation journal is malformed."
+                        )
+                    prior_deactivation = next(
+                        (
+                            operation
+                            for operation in binding_operations
+                            if isinstance(operation, dict)
+                            and operation.get("requestId") == expected_request_id
+                        ),
+                        None,
+                    )
+                    prior_scope = (
+                        prior_deactivation.get("scope")
+                        if isinstance(prior_deactivation, dict)
+                        else None
+                    )
+                    exact_prior_deactivation = (
+                        isinstance(prior_deactivation, dict)
+                        and prior_deactivation.get("operation") == "deactivate"
+                        and isinstance(prior_scope, dict)
+                        and prior_scope.get("source_id") == expected_source
+                        and prior_scope.get("binding_id") == expected_binding
+                        and prior_scope.get("package_id") == expected_package
+                        and prior_scope.get("installation_id") == expected_installation
+                    )
+                    if not exact_prior_deactivation:
+                        raise UpdateError(
+                            "COMPONENT_IN_USE",
+                            "Echo's expected owner disappeared without a durable deactivation record.",
+                            retryable=True,
+                        )
+                    if prior_deactivation.get("state") != "completed":
+                        if prior_deactivation.get("state") not in {
+                            "intent",
+                            "outcome",
+                            "reconciled",
+                        }:
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                "Echo's owner deactivation outcome cannot be reconciled safely.",
+                                retryable=True,
+                            )
+                        expected_owner_row = owner_by_binding.get(
+                            (expected_binding, expected_package)
+                        )
+                        if (
+                            not isinstance(expected_owner_row, dict)
+                            or expected_owner_row.get("componentId") != expected_component
+                        ):
+                            raise UpdateError(
+                                "SOURCE_BINDING_INVALID",
+                                "Echo's durable deactivation no longer matches signed ownership.",
+                            )
+                        activity_catalog, runtime_policy, principals, package_helper = (
+                            self._workload_source_state("echo")
+                        )
+                        if (
+                            runtime_policy is None
+                            or activity_catalog.get("generation") != expected_generation
+                        ):
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                "Echo's Package Runtime source generation changed during recovery.",
+                                retryable=True,
+                            )
+                        self._workload_binding_operation(
+                            transaction,
+                            transaction_path,
+                            operation="deactivate",
+                            component=expected_owner_row,
+                            installation_id=expected_installation,
+                            activity_catalog=activity_catalog,
+                            runtime_policy=runtime_policy,
+                            source_principals=principals,
+                            helper=package_helper,
+                        )
+                        package_inventory = self._read_workload_package_inventory(
+                            "echo", package_ids
+                        )
+                        source_bindings = package_inventory.get("sourceBindings", [])
+                        if not isinstance(source_bindings, list):
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                "Echo owner inventory is malformed after deactivation recovery.",
+                                retryable=True,
+                            )
+                        active_echo_bindings = [
+                            binding
+                            for binding in source_bindings
+                            if isinstance(binding, dict)
+                            and binding.get("sourceId") == source_id
+                            and binding.get("state") == "RUNNING"
+                        ]
+                        if active_echo_bindings:
+                            raise UpdateError(
+                                "COMPONENT_IN_USE",
+                                "A Package Runtime owner became active during Echo recovery.",
+                                retryable=True,
+                            )
+            elif active_echo_bindings:
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "An active Echo Package Runtime owner was not present in the installed receipt.",
+                    retryable=True,
+                )
             if len(active_echo_bindings) > 1:
                 raise UpdateError(
                     "COMPONENT_IN_USE",

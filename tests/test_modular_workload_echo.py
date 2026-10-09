@@ -498,8 +498,21 @@ def test_package_binding_journal_never_persists_connection_ref(
     assert json.loads(persisted)["bindingOperations"][0]["status"]["state"] == "RUNNING"
 
 
+@pytest.mark.parametrize(
+    "replace_echo_owner_after_remove",
+    [False, True],
+    ids=["same-owner-recovery", "replacement-owner-fails-closed"],
+)
+@pytest.mark.parametrize(
+    "advance_catalog_generation_before_uninstall",
+    [False, True],
+    ids=["original-catalog-generation", "fresh-uninstall-generation"],
+)
 def test_echo_apply_status_and_uninstall_keep_product_state_scoped_and_redacted(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replace_echo_owner_after_remove: bool,
+    advance_catalog_generation_before_uninstall: bool,
 ) -> None:
     """Apply/status/uninstall expose Echo identity while preserving Catalyst state and owners."""
 
@@ -637,6 +650,18 @@ def test_echo_apply_status_and_uninstall_keep_product_state_scoped_and_redacted(
     assert catalyst_receipt.read_bytes() == receipt_before
     assert catalyst_data.read_bytes() == data_before
 
+    source_generation = [13]
+    if advance_catalog_generation_before_uninstall:
+        source_generation[0] = 14
+
+        def current_activity_catalog() -> tuple[dict[str, Any], list[str]]:
+            catalog, sources = _activity_catalog()
+            catalog["generation"] = source_generation[0]
+            return catalog, sources
+
+        monkeypatch.setattr(updater, "_activity_catalog", current_activity_catalog)
+        inventory["catalogGeneration"] = source_generation[0]
+
     exact_owner = {
         "componentId": RUNNER_IDENTITY["componentId"],
         "bindingId": RUNNER_IDENTITY["bindingId"],
@@ -683,6 +708,7 @@ def test_echo_apply_status_and_uninstall_keep_product_state_scoped_and_redacted(
     inventory["sourceBindings"].append(foreign_echo_binding)
     runtime_status_reads: list[dict[str, Any]] = []
     deactivations: list[dict[str, Any]] = []
+    deactivation_requests: list[str] = []
     deactivate_attempts = 0
 
     def read_runner_identity(
@@ -711,12 +737,12 @@ def test_echo_apply_status_and_uninstall_keep_product_state_scoped_and_redacted(
         nonlocal deactivate_attempts
         assert operation == "deactivate"
         assert component == exact_owner
-        assert installation_id == RUNNER_IDENTITY["installationId"]
         assert transaction.get("echoContainerRemoved") is True
         assert all(
             hold.get("status") == "ended" for hold in transaction["maintenanceHolds"].values()
         )
         deactivate_attempts += 1
+        deactivation_requests.append(installation_id)
         if deactivate_attempts == 1:
             raise updates.UpdateError(
                 "PACKAGE_RUNTIME_OPERATION_FAILED",
@@ -790,7 +816,7 @@ def test_echo_apply_status_and_uninstall_keep_product_state_scoped_and_redacted(
         updater,
         "_workload_source_state",
         lambda *_args: (
-            _activity_catalog()[0],
+            updater._activity_catalog()[0],
             {"schemaVersion": 1},
             {ECHO_ID: {"uid": 1001, "gid": 1001}},
             object(),
@@ -899,6 +925,62 @@ def test_echo_apply_status_and_uninstall_keep_product_state_scoped_and_redacted(
         == "RUNNING"
     )
 
+    if replace_echo_owner_after_remove:
+        replacement_installation_id = "echo-exact-match-installation-2"
+        replacement_binding = next(
+            row
+            for row in inventory["sourceBindings"]
+            if row.get("sourceId") == ECHO_ID and row.get("bindingId") == exact_owner["bindingId"]
+        )
+        replacement_binding["activeInstallationId"] = replacement_installation_id
+        replacement_binding["installationIds"] = [replacement_installation_id]
+        replacement_record = {
+            **installation_record,
+            "installation_id": replacement_installation_id,
+        }
+        inventory["installationRecords"][exact_owner["componentId"]] = replacement_record
+
+        with pytest.raises(updates.UpdateError) as replacement_owner:
+            updater._apply_workload_locked(
+                "echo",
+                updates.WORKLOAD_HOST_TARGET,
+                uninstall_plan_id,
+                uninstall_digest,
+                confirmation,
+                action="uninstall",
+                channel="preview",
+            )
+
+        assert replacement_owner.value.code in {
+            "COMPONENT_IN_USE",
+            "PACKAGE_RUNTIME_READBACK_REQUIRED",
+        }
+        assert deactivate_attempts == 1
+        assert deactivation_requests == [RUNNER_IDENTITY["installationId"]]
+        assert not deactivations
+        assert remove_attempts == 2
+        assert replacement_binding["state"] == "RUNNING"
+        assert replacement_binding["activeInstallationId"] == replacement_installation_id
+        assert inventory["installationRecords"][exact_owner["componentId"]] == replacement_record
+        assert (
+            inventory["installationRecords"]["cyrene-catalyst-data-tools"] == catalyst_installation
+        )
+        assert updater._read_workload_echo_receipt() is None
+        assert catalyst_receipt.read_bytes() == receipt_before
+        assert catalyst_data.read_bytes() == data_before
+        replacement_journal = json.loads(uninstall_transaction_path.read_text(encoding="utf-8"))
+        assert replacement_journal["echoContainerRemoved"] is True
+        assert replacement_journal["echoRemovalReceipt"]["state"] == "not-installed"
+        assert replacement_journal["echoRunnerIdentity"] == RUNNER_IDENTITY
+        assert all(
+            hold.get("status") == "ended"
+            for hold in replacement_journal["maintenanceHolds"].values()
+        )
+        replacement_serialized = json.dumps(replacement_journal, sort_keys=True)
+        assert TOKEN not in replacement_serialized
+        assert CONNECTION_REF not in replacement_serialized
+        return
+
     result_uninstall = updater._apply_workload_locked(
         "echo",
         updates.WORKLOAD_HOST_TARGET,
@@ -913,6 +995,10 @@ def test_echo_apply_status_and_uninstall_keep_product_state_scoped_and_redacted(
     assert result_uninstall["sourceBindings"] == inventory["sourceBindings"]
     assert remove_attempts == 2
     assert deactivate_attempts == 2
+    assert deactivation_requests == [
+        RUNNER_IDENTITY["installationId"],
+        RUNNER_IDENTITY["installationId"],
+    ]
     assert len(calls["status"]) == status_calls_before + 1
     assert all(call[2] is True for call in calls["remove"])
     assert deactivations == [
