@@ -58,6 +58,7 @@ jobs:
           import platform
           import re
           import shutil
+          import stat
           import subprocess
           import sys
           import textwrap
@@ -74,6 +75,7 @@ jobs:
           SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
           WORKLOAD_PROTOCOL = "cyrene.workload-plan.v1"
           HOST_TARGET = "linux-ubuntu-24.04-x86_64"
+          TRUSTED_PREFIX_PATHS = ("/usr", "/usr/share", "/usr/lib", "/opt", "/etc", "/var/lib")
           PRIVATE_PYTHON = "/opt/cyrene/python/3.12.14/bin/python3.12"
           MINIMUM_GH_ATTESTATION_VERSION = (2, 102, 0)
           GH_RELEASE_TAG = "v2.102.0"
@@ -259,6 +261,58 @@ jobs:
                   )
               return version
 
+          def trusted_prefix_lstat(
+              paths: tuple[str, ...] = TRUSTED_PREFIX_PATHS,
+          ) -> dict[str, Any]:
+              """Capture metadata for trusted install prefixes without following links."""
+              entries = []
+              for raw_path in paths:
+                  try:
+                      info = os.lstat(raw_path)
+                  except OSError as error:
+                      entries.append(
+                          {
+                              "path": raw_path,
+                              "status": "unavailable",
+                              "errorType": type(error).__name__,
+                          }
+                      )
+                      continue
+                  if stat.S_ISDIR(info.st_mode):
+                      entry_type = "directory"
+                  elif stat.S_ISLNK(info.st_mode):
+                      entry_type = "symlink"
+                  elif stat.S_ISREG(info.st_mode):
+                      entry_type = "regular-file"
+                  else:
+                      entry_type = "other"
+                  mode = stat.S_IMODE(info.st_mode)
+                  entry = {
+                      "path": raw_path,
+                      "status": "lstat-succeeded",
+                      "entryType": entry_type,
+                      "device": info.st_dev,
+                      "inode": info.st_ino,
+                      "uid": info.st_uid,
+                      "gid": info.st_gid,
+                      "modeBits": mode,
+                      "modeOctal": f"{mode:04o}",
+                      "rootOwned": info.st_uid == 0,
+                      "groupWorldWritable": bool(mode & 0o022),
+                      "matchesServiceStagingDirectoryGuard": (
+                          entry_type == "directory" and info.st_uid == 0 and not mode & 0o022
+                      ),
+                  }
+                  if entry_type == "symlink":
+                      entry["symlinkTarget"] = os.readlink(raw_path)
+                  entries.append(entry)
+              return {
+                  "method": "os.lstat",
+                  "followedSymlinks": False,
+                  "capturePoint": "before native DEB installation",
+                  "entries": entries,
+              }
+
           def ensure_attestation_cli() -> dict[str, Any]:
               """Install the fixed official gh release only on this disposable runner when needed."""
               (root() / "evidence").mkdir(parents=True, exist_ok=True)
@@ -403,6 +457,7 @@ jobs:
                   "ghVersion": ".".join(str(part) for part in gh_version),
                   "attestationVerifier": "gh attestation verify",
                   "sudoNoninteractive": False,
+                  "trustedPrefixLstat": trusted_prefix_lstat(),
               }
               require(os_release.get("ID") == "ubuntu", "runner is not Ubuntu")
               require(os_release.get("VERSION_ID") == "24.04", "runner is not Ubuntu 24.04")
