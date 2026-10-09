@@ -45,6 +45,14 @@ WORKLOAD_IDS = frozenset({"catalyst", "echo", "plugins"})
 WORKLOAD_SDK_COMPONENT_ID = "cyrene-runtime-maintenance-sdk"
 WORKLOAD_SDK_TARGET_ID = "linux-ubuntu-24.04-x86_64-python-3.12-library"
 WORKLOAD_WEB_COMPONENT_ID = "cyrene-client-workspace-web"
+WORKLOAD_ECHO_COMPONENT_ID = "cyrene-echo"
+WORKLOAD_ECHO_TARGET_ID = "linux-ubuntu-24.04-x86_64-oci"
+WORKLOAD_ECHO_API_URL = "http://127.0.0.1:8094/"
+WORKLOAD_ECHO_HEALTH_PATH = "/healthz"
+WORKLOAD_ECHO_API_TOKEN_PATH = Path("/etc/cyrene/secrets/catalyst-api-token")
+WORKLOAD_ECHO_SOURCE_ID = "cyrene-echo"
+WORKLOAD_ECHO_IMAGE_REPOSITORY = "ghcr.io/dohorizon-ai/cyrene-echo"
+WORKLOAD_ECHO_RECEIPT_NAME = "oci-active.json"
 WORKLOAD_PACKAGE_RUNTIME_UNIT = "cyrene-package-runtime.service"
 PRODUCT_CONTRACT_ATTESTATION_WORKFLOW = "/.github/workflows/product-contract.yml"
 PRODUCT_POLICY_ATTESTATION_WORKFLOW = "/.github/workflows/product-policy-release.yml"
@@ -4175,6 +4183,63 @@ class ComponentUpdater:
             component = self.components.get(component_id)
             if not isinstance(component, dict):
                 continue
+            if component_id == WORKLOAD_ECHO_COMPONENT_ID:
+                try:
+                    echo_receipt = self._read_workload_echo_receipt()
+                except UpdateError as error:
+                    rows.append(
+                        {
+                            "componentId": component_id,
+                            "installed": False,
+                            "version": None,
+                            "releaseId": None,
+                            "targetId": WORKLOAD_ECHO_TARGET_ID,
+                            "manifestDigest": None,
+                            "manifestAssetDigest": None,
+                            "digest": None,
+                            "installationId": None,
+                            "verification": {"identityAttested": False},
+                            "blockers": [{"code": error.code, "message": str(error)[:500]}],
+                        }
+                    )
+                    host_metadata["echo"] = self._workload_echo_host_metadata(
+                        None, package_inventory, unavailable_reason=error.code
+                    )
+                    continue
+                if isinstance(echo_receipt, dict):
+                    rows.append(
+                        {
+                            "componentId": component_id,
+                            "installed": True,
+                            "version": echo_receipt["version"],
+                            "releaseId": echo_receipt["releaseId"],
+                            "targetId": echo_receipt["targetId"],
+                            "manifestDigest": echo_receipt["manifestDigest"],
+                            "manifestAssetDigest": echo_receipt["manifestAssetDigest"],
+                            "digest": echo_receipt["digest"],
+                            "installationId": None,
+                            "verification": echo_receipt["verification"],
+                        }
+                    )
+                else:
+                    rows.append(
+                        {
+                            "componentId": component_id,
+                            "installed": False,
+                            "version": None,
+                            "releaseId": None,
+                            "targetId": WORKLOAD_ECHO_TARGET_ID,
+                            "manifestDigest": None,
+                            "manifestAssetDigest": None,
+                            "digest": None,
+                            "installationId": None,
+                            "verification": {"identityAttested": False},
+                        }
+                    )
+                host_metadata["echo"] = self._workload_echo_host_metadata(
+                    echo_receipt, package_inventory
+                )
+                continue
             if component.get("kind") == "plugin-package":
                 identity = package_inventory.get("components", {}).get(component_id)
                 hint = self._read_workload_package_runtime_receipt(component_id)
@@ -4378,6 +4443,155 @@ class ComponentUpdater:
             **({"hostMetadata": host_metadata} if host_metadata else {}),
         }
 
+    def _workload_echo_host_metadata(
+        self,
+        receipt: dict[str, Any] | None,
+        package_inventory: dict[str, Any],
+        *,
+        unavailable_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Read a redacted Echo container receipt and loopback liveness probe."""
+
+        metadata: dict[str, Any] = {
+            "schemaVersion": 1,
+            "componentId": WORKLOAD_ECHO_COMPONENT_ID,
+            "installed": isinstance(receipt, dict),
+            "available": False,
+            "clientUrl": WORKLOAD_ECHO_API_URL,
+            "healthPath": WORKLOAD_ECHO_HEALTH_PATH,
+            "version": receipt.get("version") if isinstance(receipt, dict) else None,
+            "releaseId": receipt.get("releaseId") if isinstance(receipt, dict) else None,
+            "targetId": receipt.get("targetId") if isinstance(receipt, dict) else None,
+            "manifestDigest": receipt.get("manifestDigest") if isinstance(receipt, dict) else None,
+            "manifestAssetDigest": (
+                receipt.get("manifestAssetDigest") if isinstance(receipt, dict) else None
+            ),
+            "digest": receipt.get("digest") if isinstance(receipt, dict) else None,
+            "imageReference": receipt.get("imageReference") if isinstance(receipt, dict) else None,
+            "imageDigest": receipt.get("imageDigest") if isinstance(receipt, dict) else None,
+            "containerName": None,
+            "containerId": None,
+            "state": "not-installed",
+            "hostUid": None,
+            "hostGid": None,
+            "activitySourceId": WORKLOAD_ECHO_SOURCE_ID,
+            "activityCatalogGeneration": None,
+            "dataDirectory": "/var/lib/cyrene/echo",
+            "artifactDirectory": "/var/lib/cyrene/echo/artifacts",
+            "verification": (
+                receipt.get("verification", {"identityAttested": False})
+                if isinstance(receipt, dict)
+                else {"identityAttested": False}
+            ),
+            "probes": {"healthz": {"status": None}},
+        }
+        if unavailable_reason is not None:
+            metadata["blockers"] = [
+                {
+                    "code": "WORKLOAD_OCI_READBACK_REQUIRED",
+                    "message": f"Echo runtime receipt is unavailable ({unavailable_reason}).",
+                }
+            ]
+            return metadata
+        if receipt is None:
+            return metadata
+
+        prior_container = receipt["containerReceipt"]
+        metadata.update(
+            {
+                "containerName": prior_container.get("containerName"),
+                "containerId": prior_container.get("containerId"),
+                "state": prior_container.get("state"),
+                "hostUid": prior_container.get("hostUid"),
+                "hostGid": prior_container.get("hostGid"),
+                "activityCatalogGeneration": prior_container.get("activityCatalogGeneration"),
+            }
+        )
+        try:
+            activity_catalog, source, principal = self._workload_echo_source_identity()
+            token = self._read_workload_echo_api_token()
+            if token is None:
+                raise UpdateError(
+                    "WORKLOAD_ECHO_TOKEN_READBACK_REQUIRED",
+                    "The protected Echo API bearer is unavailable.",
+                )
+            prior_runner = receipt.get("runnerIdentity")
+            if isinstance(prior_runner, dict):
+                connection_ref, runner_identity = self._workload_echo_runner_identity(
+                    package_inventory, prior_identity=prior_runner
+                )
+                if connection_ref is None:
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Echo's installed Exact Match connection reference is unavailable.",
+                        retryable=True,
+                    )
+            else:
+                # The installed container may predate an optional plugin. Keep
+                # its original no-runner environment stable until explicitly
+                # reinstalled with a selected Package Runtime binding.
+                connection_ref, runner_identity = None, None
+            if runner_identity != prior_runner:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "The active Echo plugin identity differs from the container receipt.",
+                    retryable=True,
+                )
+            spec = self._workload_echo_container_spec(
+                {
+                    "componentId": receipt["componentId"],
+                    "artifactKind": "oci-image",
+                    "digest": receipt["digest"],
+                    "manifestDigest": receipt["manifestDigest"],
+                    "targetId": receipt["targetId"],
+                },
+                activity_catalog,
+                source,
+                principal,
+                api_token=token[0],
+                connection_ref=connection_ref,
+                activity_generation=activity_catalog.get("generation"),
+            )
+            helper = self._load_workload_oci_host()
+            observation = helper.container_status(spec, runner=self._workload_oci_runner)
+            if observation.state == "not-installed":
+                raise UpdateError(
+                    "WORKLOAD_OCI_READBACK_REQUIRED",
+                    "The Echo container receipt has no matching local container.",
+                    retryable=True,
+                )
+            health_status = (
+                self._workload_echo_health_status() if observation.state == "running" else None
+            )
+            metadata.update(observation.to_receipt_fields())
+            metadata["available"] = observation.state == "running" and health_status == 200
+            metadata["probes"] = {"healthz": {"status": health_status}}
+            if not metadata["available"]:
+                metadata["blockers"] = [
+                    {
+                        "code": "WORKLOAD_ECHO_NOT_READY",
+                        "message": "Echo is installed but its container or loopback health probe is not ready.",
+                    }
+                ]
+        except UpdateError as error:
+            metadata["blockers"] = [{"code": error.code, "message": str(error)[:500]}]
+        except (
+            ImportError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            KeyError,
+            subprocess.SubprocessError,
+        ):
+            metadata["blockers"] = [
+                {
+                    "code": "WORKLOAD_OCI_READBACK_REQUIRED",
+                    "message": "The installed Echo container could not be authenticated and read back.",
+                }
+            ]
+        return metadata
+
     def _workload_plan_directory(self) -> Path:
         root = self._private_state_directory("plans") / "workloads"
         try:
@@ -4451,6 +4665,30 @@ class ComponentUpdater:
         for component_id in component_ids:
             component = self.components.get(component_id)
             if not isinstance(component, dict):
+                continue
+            if component_id == WORKLOAD_ECHO_COMPONENT_ID:
+                receipt = self._read_workload_echo_receipt()
+                if isinstance(receipt, dict):
+                    installed[component_id] = {
+                        "installed": True,
+                        "version": receipt["version"],
+                        "releaseId": receipt["releaseId"],
+                        "manifestUri": receipt["manifestUri"],
+                        "manifestDigest": receipt["manifestDigest"],
+                        "manifestAssetDigest": receipt["manifestAssetDigest"],
+                        "digest": receipt["digest"],
+                        "targetId": receipt["targetId"],
+                        "installationId": None,
+                        "releaseIdentity": receipt["releaseId"],
+                        "imageDigest": receipt["imageDigest"],
+                        "imageReference": receipt["imageReference"],
+                        "imageIdentity": receipt["containerReceipt"],
+                        "containerReceipt": receipt["containerReceipt"],
+                        "indexIdentity": receipt["indexIdentity"],
+                        "publisherIdentity": receipt["publisherIdentity"],
+                        "attestationRef": receipt["attestationRef"],
+                        "verification": receipt["verification"],
+                    }
                 continue
             if isinstance(component.get("pluginPackage"), dict):
                 package_identity = package_identities.get(component_id)
@@ -4912,6 +5150,7 @@ class ComponentUpdater:
             "components": identities,
             "installationRecords": result.get("installationRecords", {}),
             "sourceBindings": result.get("sourceBindings", []),
+            "catalogGeneration": activity_catalog["generation"],
             "sourcePrincipals": principals,
             "sourcePolicy": source_policy,
         }
@@ -5036,6 +5275,16 @@ class ComponentUpdater:
         resolution, candidates, _package_inventory = self._build_workload_plan(
             workload_id, target_id, selections, action=action, channel=selected_channel
         )
+        host_blockers: list[dict[str, str]] = []
+        selected_rows = resolution.get("selectedComponents", [])
+        if resolution.get("status") == "ready" and any(
+            isinstance(row, dict) and row.get("artifactKind") == "oci-image"
+            for row in selected_rows
+        ):
+            try:
+                self._preflight_workload_oci_runtime()
+            except UpdateError as error:
+                host_blockers.append({"code": error.code, "message": str(error)[:500]})
         plan_id = resolution.get("planId")
         plan_digest = resolution.get("planDigest")
         if (
@@ -5046,7 +5295,7 @@ class ComponentUpdater:
             raise UpdateError(
                 "INVALID_RESOLUTION", "Workload resolver returned an invalid plan identity."
             )
-        if resolution.get("status") == "ready":
+        if resolution.get("status") == "ready" and not host_blockers:
             selected_ids = {row["componentId"] for row in resolution.get("selectedComponents", [])}
             plan = {
                 "schemaVersion": 1,
@@ -5081,7 +5330,7 @@ class ComponentUpdater:
             }
             _atomic_json(self._workload_plan_directory() / f"{plan_id}.json", plan)
         return {
-            "status": resolution.get("status"),
+            "status": "blocked" if host_blockers else resolution.get("status"),
             "planId": plan_id,
             "planDigest": plan_digest,
             "catalogDigest": self.catalog_digest,
@@ -5092,7 +5341,7 @@ class ComponentUpdater:
             "components": resolution.get("selectedComponents", []),
             "resolution": resolution,
             "warnings": resolution.get("warnings", []),
-            "blockers": resolution.get("blockers", []),
+            "blockers": [*resolution.get("blockers", []), *host_blockers],
         }
 
     def stage_workload(
@@ -5150,6 +5399,11 @@ class ComponentUpdater:
                 "Trusted workload releases changed; check again before staging.",
                 retryable=True,
             )
+        if any(
+            isinstance(row, dict) and row.get("artifactKind") == "oci-image"
+            for row in resolution.get("selectedComponents", [])
+        ):
+            self._preflight_workload_oci_runtime()
         if stored.get("phase") == "staged":
             return {
                 "status": "staged",
@@ -5307,6 +5561,13 @@ class ComponentUpdater:
                 plan_digest,
                 resolution_component=resolution_component,
             )
+        if kind == "oci-image":
+            return self._stage_workload_oci_image(
+                candidate,
+                plan_id,
+                plan_digest,
+                resolution_component=resolution_component,
+            )
         component = self._stage_candidate(
             candidate,
             stage_root,
@@ -5354,6 +5615,187 @@ class ComponentUpdater:
                 "bundleIdentity": component["bundleIdentity"],
             },
         }
+
+    def _stage_workload_oci_image(
+        self,
+        candidate: Candidate,
+        plan_id: str,
+        plan_digest: str,
+        *,
+        resolution_component: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Verify the signed Echo image subject and stage its immutable reference.
+
+        OCI images have no release-asset archive to download. The signed release
+        index binds the manifest, while GitHub's artifact verifier checks the exact
+        registry repository and image digest before the plan can be applied.
+        中文：OCI 镜像没有可下载归档；本阶段验证发布索引、manifest 与镜像 attestation。
+        """
+
+        if (
+            candidate.component.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or candidate.manifest.get("target")
+            != self.targets.get(WORKLOAD_ECHO_TARGET_ID, {}).get("target")
+            or not isinstance(resolution_component, dict)
+            or resolution_component.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or resolution_component.get("targetId") != WORKLOAD_ECHO_TARGET_ID
+        ):
+            raise UpdateError(
+                "UNSUPPORTED_TARGET",
+                "The OCI lifecycle adapter is restricted to Echo on Ubuntu 24.04.",
+            )
+        artifact = candidate.manifest.get("artifact")
+        if (
+            not isinstance(artifact, dict)
+            or artifact.get("kind") != "oci-image"
+            or artifact.get("repository") != "ghcr.io/dohorizon-ai/cyrene-echo"
+            or artifact.get("digest") != candidate.artifact_digest
+            or artifact.get("platform") != {"os": "linux", "architecture": "amd64"}
+            or not _valid_digest(candidate.artifact_digest)
+        ):
+            raise UpdateError(
+                "INVALID_MANIFEST", "Echo OCI image identity is not the trusted release tuple."
+            )
+        self._verify_workload_oci_attestation(candidate)
+        identity = self._workload_receipt_fields(candidate, resolution_component)
+        return {
+            "componentId": WORKLOAD_ECHO_COMPONENT_ID,
+            "status": "staged",
+            "artifactKind": "oci-image",
+            "version": candidate.manifest["version"],
+            "digest": candidate.artifact_digest,
+            "manifestDigest": candidate.manifest_digest,
+            "manifestAssetDigest": candidate.manifest_asset_digest,
+            "releaseId": identity["releaseId"],
+            "targetId": identity["targetId"],
+            "indexIdentity": identity["indexIdentity"],
+            "publisherIdentity": identity["publisherIdentity"],
+            "attestationRef": identity["attestationRef"],
+            "artifactAttestationVerified": True,
+            "stagedIdentity": {
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "imageReference": f"{artifact['repository']}@{artifact['digest']}",
+                "imageDigest": artifact["digest"],
+            },
+        }
+
+    def _verify_workload_oci_attestation(self, candidate: Candidate) -> None:
+        """Verify the exact OCI subject with the trusted publisher workflow."""
+
+        artifact = candidate.manifest.get("artifact")
+        publisher = self._publisher_for_component(candidate.component)
+        source = candidate.manifest.get("source")
+        if (
+            candidate.component.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or not isinstance(artifact, dict)
+            or artifact.get("kind") != "oci-image"
+            or not isinstance(publisher, dict)
+            or not isinstance(source, dict)
+            or not isinstance(source.get("ref"), str)
+            or not isinstance(source.get("commit"), str)
+            or not _valid_digest(artifact.get("digest"))
+            or artifact.get("repository") != "ghcr.io/dohorizon-ai/cyrene-echo"
+        ):
+            raise UpdateError("INVALID_ATTESTATION", "Echo OCI attestation identity is incomplete.")
+        gh = shutil.which("gh")
+        if gh is None:
+            raise UpdateError(
+                "ATTESTATION_VERIFIER_MISSING",
+                "GitHub CLI (`gh`) is required to verify Echo's OCI provenance.",
+            )
+        subject_uri = f"oci://{artifact['repository']}@{artifact['digest']}"
+        arguments = [
+            gh,
+            "attestation",
+            "verify",
+            subject_uri,
+            "--repo",
+            publisher["repository"],
+            "--signer-workflow",
+            publisher["workflow"],
+            "--source-ref",
+            source["ref"],
+            "--source-digest",
+            source["commit"],
+            "--predicate-type",
+            "https://slsa.dev/provenance/v1",
+            "--cert-oidc-issuer",
+            "https://token.actions.githubusercontent.com",
+            "--format",
+            "json",
+        ]
+        try:
+            completed = self.runner(
+                arguments,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise UpdateError(
+                "NETWORK_ERROR", "OCI attestation verification timed out.", retryable=True
+            ) from error
+        except OSError as error:
+            raise UpdateError(
+                "ATTESTATION_VERIFIER_MISSING", "GitHub CLI could not verify the OCI subject."
+            ) from error
+        if completed.returncode != 0:
+            detail = f"{completed.stderr} {completed.stdout}".lower()
+            if any(
+                marker in detail
+                for marker in (
+                    "network",
+                    "connection",
+                    "timed out",
+                    "timeout",
+                    "temporary failure",
+                    "dns",
+                )
+            ):
+                raise UpdateError(
+                    "NETWORK_ERROR",
+                    "OCI attestation verification is temporarily unavailable.",
+                    retryable=True,
+                )
+            raise UpdateError(
+                "ATTESTATION_INVALID",
+                "GitHub could not verify the pinned Echo OCI repository, workflow, source, and digest.",
+            )
+        try:
+            verification = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise UpdateError(
+                "ATTESTATION_INVALID", "GitHub CLI returned malformed OCI attestation JSON."
+            ) from error
+        if not isinstance(verification, list):
+            raise UpdateError(
+                "ATTESTATION_INVALID", "GitHub CLI returned an unexpected OCI verification shape."
+            )
+        raw_digest = artifact["digest"].removeprefix("sha256:")
+        subject_name = artifact["repository"]
+        matched_subject = any(
+            isinstance(result, dict)
+            and isinstance(result.get("verificationResult"), dict)
+            and isinstance(result["verificationResult"].get("statement"), dict)
+            and result["verificationResult"]["statement"].get("predicateType")
+            == "https://slsa.dev/provenance/v1"
+            and isinstance(result["verificationResult"]["statement"].get("subject"), list)
+            and any(
+                isinstance(subject, dict)
+                and subject.get("name") == subject_name
+                and isinstance(subject.get("digest"), dict)
+                and subject["digest"].get("sha256") == raw_digest
+                for subject in result["verificationResult"]["statement"]["subject"]
+            )
+            for result in verification
+        )
+        if not matched_subject:
+            raise UpdateError(
+                "ATTESTATION_SUBJECT_MISMATCH",
+                "The verified SLSA statement does not bind the pinned Echo OCI image digest.",
+            )
 
     def _workload_asset_bytes(
         self, candidate: Candidate, reference: dict[str, Any], *, label: str
@@ -6470,6 +6912,604 @@ class ComponentUpdater:
             )
         return module
 
+    def _load_workload_oci_host(self) -> Any:
+        """Load the adjacent fixed Echo OCI lifecycle helper."""
+
+        module_path = Path(__file__).with_name("workload_oci_host.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError("WORKLOAD_OCI_HOST_UNAVAILABLE", "The Echo OCI helper is missing.")
+        module_name = "_cyrene_workload_oci_host"
+        existing = sys.modules.get(module_name)
+        if existing is not None:
+            module = existing
+        else:
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                raise UpdateError(
+                    "WORKLOAD_OCI_HOST_UNAVAILABLE", "The Echo OCI helper cannot load."
+                )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception as error:
+                sys.modules.pop(module_name, None)
+                raise UpdateError(
+                    "WORKLOAD_OCI_HOST_UNAVAILABLE", "The Echo OCI helper failed to load."
+                ) from error
+        required = (
+            "OciHostSpec",
+            "pull_and_verify_image",
+            "start_container",
+            "container_status",
+            "stop_container",
+            "remove_container",
+        )
+        if any(not hasattr(module, name) for name in required):
+            raise UpdateError(
+                "WORKLOAD_OCI_HOST_UNAVAILABLE", "The Echo OCI helper API is incomplete."
+            )
+        return module
+
+    def _workload_echo_receipt_path(self) -> Path | None:
+        directory = self._installed_component_directory(WORKLOAD_ECHO_COMPONENT_ID)
+        return directory / WORKLOAD_ECHO_RECEIPT_NAME if directory is not None else None
+
+    def _read_workload_echo_receipt(self) -> dict[str, Any] | None:
+        """Read one redacted root-owned Echo OCI identity receipt."""
+
+        path = self._workload_echo_receipt_path()
+        if path is None or (not path.exists() and not path.is_symlink()):
+            return None
+        receipt = _read_object(path, "Echo OCI active receipt")
+        expected = {
+            "schemaVersion",
+            "componentId",
+            "installed",
+            "version",
+            "releaseId",
+            "manifestUri",
+            "targetId",
+            "manifestDigest",
+            "manifestAssetDigest",
+            "digest",
+            "imageReference",
+            "imageDigest",
+            "indexIdentity",
+            "publisherIdentity",
+            "attestationRef",
+            "verification",
+            "artifactAttestationVerified",
+            "runnerIdentity",
+            "containerReceipt",
+        }
+        if (
+            set(receipt) != expected
+            or receipt.get("schemaVersion") != 1
+            or receipt.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or receipt.get("installed") is not True
+            or receipt.get("targetId") != WORKLOAD_ECHO_TARGET_ID
+            or not isinstance(receipt.get("version"), str)
+            or VERSION_PATTERN.fullmatch(receipt["version"]) is None
+            or not isinstance(receipt.get("releaseId"), str)
+            or not isinstance(receipt.get("manifestUri"), str)
+            or not _valid_digest(receipt.get("manifestDigest"))
+            or not _valid_digest(receipt.get("manifestAssetDigest"))
+            or not _valid_digest(receipt.get("digest"))
+            or receipt.get("digest") != receipt.get("imageDigest")
+            or receipt.get("imageReference")
+            != f"{WORKLOAD_ECHO_IMAGE_REPOSITORY}@{receipt.get('imageDigest')}"
+            or not isinstance(receipt.get("indexIdentity"), dict)
+            or not isinstance(receipt.get("publisherIdentity"), dict)
+            or not isinstance(receipt.get("attestationRef"), dict)
+            or receipt.get("verification") != {"identityAttested": True}
+            or receipt.get("artifactAttestationVerified") is not True
+            or not isinstance(receipt.get("containerReceipt"), dict)
+            or receipt.get("runnerIdentity") is not None
+            and not isinstance(receipt.get("runnerIdentity"), dict)
+        ):
+            raise UpdateError("INVALID_INSTALLED_RELEASE", "Echo OCI receipt is malformed.")
+        container = receipt["containerReceipt"]
+        if (
+            container.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or container.get("targetId") != WORKLOAD_ECHO_TARGET_ID
+            or container.get("manifestDigest") != receipt["manifestDigest"]
+            or container.get("imageDigest") != receipt["imageDigest"]
+            or container.get("imageReference") != receipt["imageReference"]
+            or container.get("state") not in {"running", "created", "exited"}
+            or type(container.get("hostUid")) is not int
+            or type(container.get("hostGid")) is not int
+            or container.get("activitySourceId") != WORKLOAD_ECHO_SOURCE_ID
+            or type(container.get("activityCatalogGeneration")) is not int
+            or container.get("activityCatalogGeneration") < 1
+            or container.get("dataDirectory") != "/var/lib/cyrene/echo"
+            or container.get("artifactDirectory") != "/var/lib/cyrene/echo/artifacts"
+        ):
+            raise UpdateError("INVALID_INSTALLED_RELEASE", "Echo OCI receipt identity differs.")
+        runner_identity = receipt.get("runnerIdentity")
+        if runner_identity is not None and (
+            set(runner_identity)
+            != {"componentId", "sourceId", "bindingId", "packageId", "installationId"}
+            or runner_identity.get("componentId") != "cyrene-evaluation-exact-match"
+            or not all(
+                isinstance(runner_identity.get(field), str) and runner_identity[field]
+                for field in ("sourceId", "bindingId", "packageId", "installationId")
+            )
+        ):
+            raise UpdateError(
+                "INVALID_INSTALLED_RELEASE", "Echo runner owner receipt is malformed."
+            )
+        return receipt
+
+    def _write_workload_echo_receipt(
+        self,
+        selected: dict[str, Any],
+        container_receipt: dict[str, Any],
+        *,
+        runner_identity: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Persist exact release and redacted container identity, never env values."""
+
+        digest = selected.get("digest")
+        image_reference = f"{WORKLOAD_ECHO_IMAGE_REPOSITORY}@{digest}"
+        if (
+            selected.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or selected.get("artifactKind") != "oci-image"
+            or selected.get("targetId") != WORKLOAD_ECHO_TARGET_ID
+            or not _valid_digest(digest)
+            or selected.get("manifestDigest") != container_receipt.get("manifestDigest")
+            or container_receipt.get("imageDigest") != digest
+            or container_receipt.get("imageReference") != image_reference
+        ):
+            raise UpdateError(
+                "WORKLOAD_OCI_READBACK_REQUIRED", "Echo OCI runtime differs from its signed plan."
+            )
+        receipt = {
+            "schemaVersion": 1,
+            "componentId": WORKLOAD_ECHO_COMPONENT_ID,
+            "installed": True,
+            "version": selected["version"],
+            "releaseId": selected["releaseId"],
+            "manifestUri": selected["manifestUri"],
+            "targetId": selected["targetId"],
+            "manifestDigest": selected["manifestDigest"],
+            "manifestAssetDigest": selected["manifestAssetDigest"],
+            "digest": digest,
+            "imageReference": image_reference,
+            "imageDigest": digest,
+            "indexIdentity": selected["indexIdentity"],
+            "publisherIdentity": selected["publisherIdentity"],
+            "attestationRef": selected["attestationRef"],
+            "verification": {"identityAttested": True},
+            "artifactAttestationVerified": True,
+            "runnerIdentity": runner_identity,
+            "containerReceipt": container_receipt,
+        }
+        directory = self._installed_component_directory(WORKLOAD_ECHO_COMPONENT_ID, create=True)
+        assert directory is not None
+        _atomic_json(directory / WORKLOAD_ECHO_RECEIPT_NAME, receipt)
+        return receipt
+
+    def _clear_workload_echo_receipt(self, image_digest: str) -> None:
+        """Clear only the receipt for the exact Echo image removed by this plan."""
+
+        path = self._workload_echo_receipt_path()
+        if path is None or (not path.exists() and not path.is_symlink()):
+            return
+        receipt = self._read_workload_echo_receipt()
+        if receipt is not None and receipt.get("imageDigest") != image_digest:
+            raise UpdateError("UNINSTALL_CONFLICT", "A different Echo image replaced this plan.")
+        if path.is_symlink():
+            raise UpdateError("UNSAFE_STATE", "Echo OCI receipt became a symbolic link.")
+        path.unlink(missing_ok=True)
+        self._fsync_directory(path.parent)
+
+    def _read_workload_echo_api_token(self) -> tuple[str, str, int, int] | None:
+        """Read the Echo API bearer only into memory from its fixed protected file."""
+
+        try:
+            user_id = pwd.getpwnam("cyrene").pw_uid
+            group_id = grp.getgrnam("cyrene").gr_gid
+        except KeyError as error:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT", "Cyrene account is unavailable."
+            ) from error
+        raw = self._read_workload_protected_file(
+            WORKLOAD_ECHO_API_TOKEN_PATH,
+            allowed_identities={(0, group_id, 0o640), (user_id, group_id, 0o600)},
+            maximum_bytes=4096,
+        )
+        if raw is None:
+            return None
+        try:
+            token = raw.rstrip(b"\r\n").decode("ascii")
+        except UnicodeDecodeError as error:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT", "Echo API bearer is invalid."
+            ) from error
+        self._validate_workload_api_token(token)
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        return token, digest, user_id, group_id
+
+    def _ensure_workload_echo_api_token(
+        self, transaction: dict[str, Any], transaction_path: Path
+    ) -> str:
+        """Create or reuse the stable root-protected Echo API bearer without Catalyst projection."""
+
+        selected = self._workload_catalyst_token_configuration(generate=True)
+        if selected is None or selected[1] != WORKLOAD_ECHO_API_TOKEN_PATH:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Existing API bearer configuration is outside the fixed Echo secret path.",
+            )
+        token, token_path, group_id = selected
+        token_content = (self._validate_workload_api_token(token) + "\n").encode("ascii")
+        digest = self._write_workload_managed_config(
+            transaction,
+            transaction_path,
+            path=token_path,
+            content=token_content,
+            group_id=group_id,
+            mode=0o640,
+            entry_kind="catalyst-api-token",
+        )
+        transaction["echoApiTokenIdentity"] = {
+            "path": str(token_path),
+            "sha256": digest,
+            "ownerUid": 0,
+            "ownerGid": group_id,
+            "mode": 0o640,
+        }
+        _atomic_json(transaction_path, transaction)
+        return token
+
+    def _workload_echo_source_identity(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Read the signed Echo source mapping and its exact active host principal."""
+
+        workload = next(
+            (
+                row
+                for row in self.catalog.get("workloads", [])
+                if isinstance(row, dict) and row.get("workloadId") == "echo"
+            ),
+            None,
+        )
+        policy = workload.get("sourcePolicy") if isinstance(workload, dict) else None
+        mappings = policy.get("productSources") if isinstance(policy, dict) else None
+        matches = [
+            row
+            for row in mappings or []
+            if isinstance(row, dict) and row.get("componentId") == WORKLOAD_ECHO_COMPONENT_ID
+        ]
+        if len(matches) != 1 or matches[0].get("sourceId") != WORKLOAD_ECHO_SOURCE_ID:
+            raise UpdateError(
+                "SOURCE_BINDING_INVALID", "Signed Echo source mapping is unavailable."
+            )
+        activity_catalog, _ = self._activity_catalog()
+        sources = [
+            row
+            for row in activity_catalog.get("sources", [])
+            if isinstance(row, dict) and row.get("source_id") == WORKLOAD_ECHO_SOURCE_ID
+        ]
+        if len(sources) != 1:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_SOURCE_UNAVAILABLE",
+                "The signed Echo ActivitySource is not registered in the active broker catalog.",
+                retryable=True,
+            )
+        source = sources[0]
+        if (
+            type(source.get("uid")) is not int
+            or source["uid"] <= 0
+            or type(source.get("gid")) is not int
+            or source["gid"] <= 0
+            or not isinstance(source.get("source_token_sha256"), str)
+        ):
+            raise UpdateError("GATE_UNKNOWN", "Echo ActivitySource identity is malformed.")
+        token_digest = source["source_token_sha256"].removeprefix("sha256:")
+        if re.fullmatch(r"[0-9a-f]{64}", token_digest) is None:
+            raise UpdateError("GATE_UNKNOWN", "Echo ActivitySource token digest is malformed.")
+        return (
+            activity_catalog,
+            source,
+            {
+                "uid": source["uid"],
+                "gid": source["gid"],
+                "tokenPath": DEFAULT_ACTIVITY_TOKEN_DIRECTORY / f"{WORKLOAD_ECHO_SOURCE_ID}.token",
+                "tokenDigest": token_digest,
+            },
+        )
+
+    def _workload_echo_runner_identity(
+        self,
+        package_inventory: dict[str, Any],
+        *,
+        prior_identity: dict[str, Any] | None = None,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Read the selected Exact Match connection ref through its scoped SDK owner."""
+
+        component_id = "cyrene-evaluation-exact-match"
+        component = self.components.get(component_id)
+        plugin = component.get("pluginPackage") if isinstance(component, dict) else None
+        if not isinstance(plugin, dict):
+            return None, None
+        source_policy, plugin_rows = self._workload_plugin_owner_rows(
+            "echo",
+            tuple(
+                sorted(self._load_workload_resolver().potential_component_ids(self.catalog, "echo"))
+            ),
+        )
+        row = next((item for item in plugin_rows if item.get("componentId") == component_id), None)
+        if not isinstance(row, dict) or not isinstance(source_policy, dict):
+            return None, None
+        records = package_inventory.get("installationRecords", {})
+        installation = records.get(component_id) if isinstance(records, dict) else None
+        if not isinstance(installation, dict):
+            return (None, prior_identity) if prior_identity is not None else (None, None)
+        installation_id = installation.get("installation_id")
+        if not isinstance(installation_id, str):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED", "Exact Match installation ID is missing."
+            )
+        binding_id = row.get("bindingId")
+        package_id = row.get("packageId")
+        source_id = self._workload_policy_source_id(source_policy)
+        if not all(
+            isinstance(value, str) and value for value in (binding_id, package_id, source_id)
+        ):
+            raise UpdateError("SOURCE_BINDING_INVALID", "Exact Match owner mapping is incomplete.")
+        runner_identity = {
+            "componentId": component_id,
+            "sourceId": source_id,
+            "bindingId": binding_id,
+            "packageId": package_id,
+            "installationId": installation_id,
+        }
+        source_bindings = package_inventory.get("sourceBindings", [])
+        active = next(
+            (
+                item
+                for item in source_bindings
+                if isinstance(item, dict)
+                and item.get("sourceId") == source_id
+                and item.get("bindingId") == binding_id
+                and item.get("packageId") == package_id
+                and item.get("activeInstallationId") == installation_id
+                and item.get("state") == "RUNNING"
+            ),
+            None,
+        )
+        if not isinstance(active, dict):
+            if prior_identity is not None and prior_identity == runner_identity:
+                # Runtime credentials are never recovered from the updater
+                # journal. An inactive owner cannot launch the Echo consumer.
+                return None, runner_identity
+            return None, None
+        if prior_identity is not None and prior_identity != runner_identity:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Echo's active Exact Match binding differs from its installed receipt.",
+                retryable=True,
+            )
+        activity_catalog, runtime_policy, principals, helper = self._workload_source_state("echo")
+        if runtime_policy is None:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED", "Exact Match source policy is unavailable."
+            )
+        principal = principals.get(source_id)
+        try:
+            sdk_environment = self._load_workload_sdk_environment().read_workload_sdk_environment()
+        except Exception as error:
+            raise UpdateError(
+                "WORKLOAD_SDK_READBACK_REQUIRED", "Operator SDK interpreter is unavailable."
+            ) from error
+        sdk_python = (
+            Path(sdk_environment["pythonPath"])
+            if isinstance(sdk_environment, dict)
+            and sdk_environment.get("installed") is True
+            and isinstance(sdk_environment.get("pythonPath"), str)
+            else None
+        )
+        if not isinstance(principal, dict) or sdk_python is None or not sdk_python.is_absolute():
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Exact Match owner credentials are unavailable.",
+            )
+        request_id = "cyrene-echo-status-" + uuid.uuid4().hex
+        try:
+            result = helper.run_package_binding_operation(
+                operation="runtime_status",
+                source_id=source_id,
+                uid=principal["uid"],
+                gid=principal["gid"],
+                token_path=principal["tokenPath"],
+                binding_id=binding_id,
+                package_id=package_id,
+                installation_ids=[installation_id],
+                catalog_generation=activity_catalog["generation"],
+                request_id=request_id,
+                sdk_python=sdk_python,
+                activity_catalog=activity_catalog,
+                runtime_policy=runtime_policy,
+                source_principals=principals,
+            )
+        except Exception as error:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Exact Match runtime status is unavailable.",
+                retryable=True,
+            ) from error
+        status = result.get("status") if isinstance(result, dict) else None
+        connection_ref = status.get("connection_ref") if isinstance(status, dict) else None
+        if (
+            not isinstance(status, dict)
+            or status.get("binding_id") != binding_id
+            or status.get("installation_id") != installation_id
+            or status.get("state") != "RUNNING"
+            or type(status.get("generation")) is not int
+            or status.get("generation") != activity_catalog.get("generation")
+            or not isinstance(connection_ref, str)
+            or not connection_ref
+            or len(connection_ref) > 2048
+            or any(ord(character) < 32 for character in connection_ref)
+        ):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Exact Match owner has no matching active connection reference.",
+                retryable=True,
+            )
+        return connection_ref, runner_identity
+
+    def _workload_echo_container_spec(
+        self,
+        selected: dict[str, Any],
+        activity_catalog: dict[str, Any],
+        source: dict[str, Any],
+        principal: dict[str, Any],
+        *,
+        api_token: str | None,
+        connection_ref: str | None,
+        activity_generation: int | None = None,
+    ) -> Any:
+        """Build the host helper input from signed release, broker, and UDS facts."""
+
+        helper = self._load_workload_oci_host()
+        digest = selected.get("digest")
+        manifest_digest = selected.get("manifestDigest")
+        if (
+            selected.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or selected.get("targetId") != WORKLOAD_ECHO_TARGET_ID
+            or selected.get("artifactKind") != "oci-image"
+            or not _valid_digest(digest)
+            or not _valid_digest(manifest_digest)
+            or type(principal.get("uid")) is not int
+            or type(principal.get("gid")) is not int
+        ):
+            raise UpdateError("INVALID_STAGE", "Echo OCI host identity is incomplete.")
+        token_digest = source.get("source_token_sha256")
+        if not isinstance(token_digest, str):
+            raise UpdateError("GATE_UNKNOWN", "Echo ActivitySource digest is unavailable.")
+        token_digest = token_digest.removeprefix("sha256:")
+        if re.fullmatch(r"[0-9a-f]{64}", token_digest) is None:
+            raise UpdateError("GATE_UNKNOWN", "Echo ActivitySource digest is malformed.")
+        if api_token is not None:
+            api_token = self._validate_workload_api_token(api_token)
+        environment: dict[str, str] = {}
+        if api_token is not None:
+            environment["CYRENE_DATA_TOOLS_TOKEN"] = api_token
+        if connection_ref is not None:
+            if (
+                not connection_ref
+                or len(connection_ref) > 2048
+                or any(ord(character) < 32 for character in connection_ref)
+            ):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED", "Echo runner reference is invalid."
+                )
+            environment["CYRENE_EVALUATION_RUNNER_CONNECTION_REF"] = connection_ref
+        generation = (
+            activity_generation
+            if activity_generation is not None
+            else activity_catalog.get("generation")
+        )
+        if type(generation) is not int or generation < 1:
+            raise UpdateError("GATE_UNKNOWN", "Echo ActivitySource generation is invalid.")
+        image_hex = digest.removeprefix("sha256:")
+        mapping = {
+            "schemaVersion": 1,
+            "componentId": WORKLOAD_ECHO_COMPONENT_ID,
+            "targetId": WORKLOAD_ECHO_TARGET_ID,
+            "target": helper.ECHO_TARGET,
+            "manifestDigest": manifest_digest,
+            "imageRepository": WORKLOAD_ECHO_IMAGE_REPOSITORY,
+            "imageDigest": digest,
+            "platform": helper.ECHO_PLATFORM,
+            "containerName": "cyrene-echo-" + image_hex[:12],
+            "hostUid": principal["uid"],
+            "hostGid": principal["gid"],
+            "hostPort": 8094,
+            "activitySourceId": WORKLOAD_ECHO_SOURCE_ID,
+            "activityCatalogGeneration": generation,
+            "activityTokenDigest": token_digest,
+            "activityTokenPath": str(principal["tokenPath"]),
+            "maintenanceSocketPath": str(DEFAULT_SOCKET),
+            "dataDirectory": "/var/lib/cyrene/echo",
+            "artifactDirectory": "/var/lib/cyrene/echo/artifacts",
+            "environment": environment,
+        }
+        try:
+            return helper.OciHostSpec.from_mapping(mapping)
+        except Exception as error:
+            raise UpdateError(
+                "WORKLOAD_OCI_HOST_UNAVAILABLE", "Echo OCI spec failed validation."
+            ) from error
+
+    def _workload_oci_runner(self, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        """Adapt the updater runner to the OCI helper's fixed Docker command API."""
+
+        return self.runner(
+            ["/usr/bin/docker", "--host", "unix:///var/run/docker.sock", *arguments],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+
+    def _preflight_workload_oci_runtime(self) -> None:
+        """Require the fixed Docker daemon before changing workload or broker state."""
+
+        docker = Path("/usr/bin/docker")
+        if docker.is_symlink() or not docker.is_file() or not os.access(docker, os.X_OK):
+            raise UpdateError(
+                "OCI_RUNTIME_UNAVAILABLE",
+                "Echo installation requires the managed Docker CLI at /usr/bin/docker.",
+            )
+        try:
+            completed = self.runner(
+                [
+                    str(docker),
+                    "--host",
+                    "unix:///var/run/docker.sock",
+                    "info",
+                    "--format",
+                    "{{.ServerVersion}}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise UpdateError(
+                "OCI_RUNTIME_UNAVAILABLE",
+                "The root-managed Docker daemon could not be queried.",
+                retryable=True,
+            ) from error
+        if completed.returncode != 0 or not completed.stdout.strip():
+            raise UpdateError(
+                "OCI_RUNTIME_UNAVAILABLE",
+                "Echo installation requires a running root-managed Docker daemon.",
+                retryable=True,
+            )
+
+    def _workload_echo_health_status(self) -> int | None:
+        """Read the unauthenticated Echo liveness status without collecting response data."""
+
+        request = urllib.request.Request(
+            WORKLOAD_ECHO_API_URL.rstrip("/") + WORKLOAD_ECHO_HEALTH_PATH,
+            method="GET",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+        except (OSError, urllib.error.URLError, TimeoutError):
+            return None
+
     @staticmethod
     def _workload_hold_echo(transaction: dict[str, Any]) -> dict[str, Any]:
         """Project one active workload maintenance hold for the official package helper."""
@@ -6505,6 +7545,7 @@ class ComponentUpdater:
             "core-runtime-install",
             "package-only",
             "core-runtime-activate",
+            "core-runtime-echo-quiesce",
             "core-runtime-uninstall",
         }:
             raise UpdateError("INVALID_TRANSACTION", "Workload maintenance phase is invalid.")
@@ -8184,10 +9225,17 @@ class ComponentUpdater:
                 raise UpdateError(
                     "INVALID_TRANSACTION", "Package Runtime outcome has no durable intent."
                 )
+            journal_status = None
+            if isinstance(status, Mapping):
+                # Package Runtime status may contain an opaque connection_ref.
+                # Keep that value in memory for the caller, never in this journal.
+                journal_status = {
+                    key: value for key, value in status.items() if key != "connection_ref"
+                }
             existing.update(
                 {
                     "state": state,
-                    "status": dict(status) if isinstance(status, Mapping) else None,
+                    "status": journal_status,
                     "installation": dict(installation)
                     if isinstance(installation, Mapping)
                     else None,
@@ -8229,6 +9277,21 @@ class ComponentUpdater:
             raise UpdateError(
                 "PACKAGE_RUNTIME_OPERATION_FAILED", "Package Runtime receipt is malformed."
             )
+        completed = next(
+            (
+                entry
+                for entry in binding_ops
+                if isinstance(entry, dict) and entry.get("requestId") == request_id
+            ),
+            None,
+        )
+        if not isinstance(completed, dict):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Package Runtime completion lost its durable intent."
+            )
+        completed["state"] = "completed"
+        completed["completedAt"] = int(time.time())
+        _atomic_json(transaction_path, transaction)
         return result
 
     def _write_workload_package_runtime_receipt(
@@ -8823,6 +9886,7 @@ class ComponentUpdater:
         plugin_rows: list[dict[str, Any]] = []
         native_components: list[dict[str, Any]] = []
         web_components: list[dict[str, Any]] = []
+        oci_components: list[dict[str, Any]] = []
         sdk_entry: tuple[dict[str, Any], dict[str, Any]] | None = None
         for row in rows:
             if not isinstance(row, dict):
@@ -8837,6 +9901,53 @@ class ComponentUpdater:
                 continue
             if component_id == WORKLOAD_SDK_COMPONENT_ID:
                 sdk_entry = (row, staged)
+                continue
+            if artifact_kind == "oci-image":
+                if component_id != WORKLOAD_ECHO_COMPONENT_ID:
+                    raise UpdateError(
+                        "WORKLOAD_ARTIFACT_UNAVAILABLE",
+                        f"No installed OCI supervisor is configured for {component_id}.",
+                    )
+                receipt = self._read_workload_echo_receipt()
+                if staged.get("status") == "current":
+                    if (
+                        not isinstance(receipt, dict)
+                        or receipt.get("digest") != row.get("digest")
+                        or receipt.get("manifestDigest") != row.get("manifestDigest")
+                        or receipt.get("releaseId") != row.get("releaseId")
+                    ):
+                        raise UpdateError(
+                            "WORKLOAD_OCI_READBACK_REQUIRED",
+                            "The current Echo image receipt differs from the selected signed release.",
+                            retryable=True,
+                        )
+                    item = dict(row)
+                    item["artifactAttestationVerified"] = (
+                        receipt.get("artifactAttestationVerified") is True
+                    )
+                else:
+                    candidate = candidates.get(component_id)
+                    identity = staged.get("stagedIdentity")
+                    if (
+                        candidate is None
+                        or not isinstance(identity, dict)
+                        or identity.get("planId") != plan_id
+                        or identity.get("planDigest") != plan_digest
+                        or staged.get("artifactAttestationVerified") is not True
+                    ):
+                        raise UpdateError(
+                            "INVALID_STAGE", "Echo image attestation is not bound to this plan."
+                        )
+                    item = dict(row)
+                    item["manifest"] = candidate.manifest
+                    item["artifactAttestationVerified"] = True
+                if (
+                    not _valid_digest(item.get("digest"))
+                    or not _valid_digest(item.get("manifestDigest"))
+                    or item.get("targetId") != WORKLOAD_ECHO_TARGET_ID
+                ):
+                    raise UpdateError("INVALID_STAGE", "Echo image identity is incomplete.")
+                oci_components.append(item)
                 continue
             if staged.get("status") == "current":
                 continue
@@ -8881,6 +9992,12 @@ class ComponentUpdater:
                     f"No installed Ubuntu supervisor is configured for {component_id} ({artifact_kind}).",
                     retryable=True,
                 )
+
+        if oci_components:
+            # Do the read-only host check before preparing the operator
+            # environment or changing a pointer. A missing runtime must not
+            # leave an otherwise unrelated SDK installation behind.
+            self._preflight_workload_oci_runtime()
 
         component_artifact_digests = self._workload_component_artifact_map(
             rows, staged_by_id, package_inventory
@@ -8942,12 +10059,13 @@ class ComponentUpdater:
             "phase": "applying",
             "components": native_components,
             "webComponents": web_components,
+            "ociComponents": oci_components,
             "selectedComponents": rows,
             "selectedPluginRows": plugin_rows,
             "stagedComponents": staged_rows,
             "resolution": resolution,
             "sourcePolicy": source_policy,
-            "requiresRestart": bool(service_units),
+            "requiresRestart": bool(service_units or oci_components),
             "previous": self._capture_active_versions(native_components),
             "previousWeb": [
                 self._capture_workload_web_identity(item["componentId"]) for item in web_components
@@ -8971,12 +10089,26 @@ class ComponentUpdater:
                 transaction["packageInstallations"].setdefault(component_id, record)
         transaction["components"] = native_components
         transaction["webComponents"] = web_components
+        transaction["ociComponents"] = oci_components
         transaction["previous"] = transaction.get("previous") or self._capture_active_versions(
             native_components
         )
         transaction["previousWeb"] = transaction.get("previousWeb") or [
             self._capture_workload_web_identity(item["componentId"]) for item in web_components
         ]
+        if oci_components:
+            prior_echo_receipt = self._read_workload_echo_receipt()
+            transaction.setdefault("previousEchoReceipt", prior_echo_receipt)
+            if isinstance(prior_echo_receipt, dict) and any(
+                prior_echo_receipt.get("digest") != item.get("digest")
+                or prior_echo_receipt.get("manifestDigest") != item.get("manifestDigest")
+                for item in oci_components
+            ):
+                raise UpdateError(
+                    "WORKLOAD_OCI_UPGRADE_UNAVAILABLE",
+                    "Replacing an installed Echo image requires a separately verified rollback plan.",
+                    retryable=True,
+                )
         _atomic_json(transaction_path, transaction)
 
         if sdk_entry is not None:
@@ -9024,6 +10156,8 @@ class ComponentUpdater:
             # Credential and unit conflicts are a check-time host preflight. Do
             # not discover them after APT, pointer, or maintenance changes begin.
             self._workload_catalyst_token_configuration(generate=False)
+        if oci_components and "echoApiTokenIdentity" not in transaction:
+            self._ensure_workload_echo_api_token(transaction, transaction_path)
 
         # Fresh, authenticated owner status is the preflight before any service or
         # daemon is stopped. Selected old bindings are deactivated by their owner;
@@ -9032,6 +10166,9 @@ class ComponentUpdater:
             row.get("artifactKind") == "plugin-package"
             and staged_by_id[row["componentId"]].get("status") != "current"
             for row in rows
+        )
+        oci_changed = any(
+            staged_by_id[item["componentId"]].get("status") != "current" for item in oci_components
         )
         activity_catalog, _activity_source_ids = self._activity_catalog()
         source_ids = {
@@ -9051,7 +10188,7 @@ class ComponentUpdater:
             catalyst_auth_selected and not self._workload_catalyst_auth_is_configured()
         )
         core_install_needed = (
-            bool(native_components or web_components)
+            bool(native_components or web_components or oci_changed)
             or source_registration_needed
             or catalyst_auth_needed
         )
@@ -9198,6 +10335,48 @@ class ComponentUpdater:
                 _atomic_json(transaction_path, transaction)
                 self._recover_workload_apply(transaction, transaction_path, failure=error)
                 raise
+
+        if oci_changed:
+            selected_echo = next(
+                (
+                    item
+                    for item in oci_components
+                    if item.get("componentId") == WORKLOAD_ECHO_COMPONENT_ID
+                ),
+                None,
+            )
+            if not isinstance(selected_echo, dict):
+                raise UpdateError("INVALID_STAGE", "The Echo OCI plan identity is missing.")
+            activity_catalog, source, principal = self._workload_echo_source_identity()
+            api_token = self._read_workload_echo_api_token()
+            if api_token is None:
+                raise UpdateError(
+                    "WORKLOAD_ECHO_TOKEN_READBACK_REQUIRED",
+                    "The stable Echo API bearer was not persisted before image staging.",
+                    retryable=True,
+                )
+            spec = self._workload_echo_container_spec(
+                selected_echo,
+                activity_catalog,
+                source,
+                principal,
+                api_token=api_token[0],
+                connection_ref=None,
+                activity_generation=activity_catalog.get("generation"),
+            )
+            try:
+                helper = self._load_workload_oci_host()
+                image_identity = helper.pull_and_verify_image(
+                    spec, runner=self._workload_oci_runner
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "OCI_IMAGE_UNAVAILABLE",
+                    "The verified Echo image could not be fetched and checked by the installed OCI runtime.",
+                    retryable=True,
+                ) from error
+            transaction["echoImageIdentity"] = image_identity
+            _atomic_json(transaction_path, transaction)
 
         if package_changed:
             package_inventory = self._quiesce_workload_bindings(
@@ -9424,20 +10603,23 @@ class ComponentUpdater:
                         retryable=True,
                     )
 
-        core_activation_needed = bool(service_units) and (
-            core_install_needed
-            or any(
-                self._package_product_unit_state(service["unit"]) != "active"
-                for service in service_units
+        core_activation_needed = (
+            bool(service_units)
+            and (
+                core_install_needed
+                or any(
+                    self._package_product_unit_state(service["unit"]) != "active"
+                    for service in service_units
+                )
             )
-        )
+        ) or bool(oci_components)
         web_selected = any(row.get("artifactKind") == "static-web" for row in rows)
         if (core_activation_needed or web_selected) and self._ensure_workload_phase(
             transaction,
             transaction_path,
             phase="core-runtime-activate",
             target_kind="CORE_RUNTIME",
-            requires_restart=bool(service_units),
+            requires_restart=bool(service_units or oci_components),
         ):
             try:
                 for service in service_units:
@@ -9465,6 +10647,98 @@ class ComponentUpdater:
                             "The selected Client Web host did not become ready.",
                             retryable=True,
                         ) from error
+                if oci_components:
+                    selected_echo = next(
+                        (
+                            item
+                            for item in oci_components
+                            if item.get("componentId") == WORKLOAD_ECHO_COMPONENT_ID
+                        ),
+                        None,
+                    )
+                    if not isinstance(selected_echo, dict):
+                        raise UpdateError(
+                            "INVALID_STAGE", "The Echo OCI activation identity is missing."
+                        )
+                    activity_catalog, source, principal = self._workload_echo_source_identity()
+                    api_token = self._read_workload_echo_api_token()
+                    if api_token is None:
+                        raise UpdateError(
+                            "WORKLOAD_ECHO_TOKEN_READBACK_REQUIRED",
+                            "The protected Echo API bearer is unavailable during activation.",
+                            retryable=True,
+                        )
+                    echo_package_inventory = self._read_workload_package_inventory(
+                        "echo",
+                        tuple(
+                            sorted(
+                                self._load_workload_resolver().potential_component_ids(
+                                    self.catalog, "echo"
+                                )
+                            )
+                        ),
+                    )
+                    package_inventory = echo_package_inventory
+                    prior_echo = transaction.get("previousEchoReceipt")
+                    prior_runner = (
+                        prior_echo.get("runnerIdentity") if isinstance(prior_echo, dict) else None
+                    )
+                    connection_ref, runner_identity = self._workload_echo_runner_identity(
+                        echo_package_inventory,
+                        prior_identity=prior_runner if isinstance(prior_runner, dict) else None,
+                    )
+                    transaction["echoContainerIntent"] = {
+                        "componentId": WORKLOAD_ECHO_COMPONENT_ID,
+                        "planId": plan_id,
+                        "planDigest": plan_digest,
+                        "imageDigest": selected_echo["digest"],
+                        "manifestDigest": selected_echo["manifestDigest"],
+                        "activityCatalogGeneration": activity_catalog.get("generation"),
+                    }
+                    transaction["echoRunnerIdentity"] = runner_identity
+                    _atomic_json(transaction_path, transaction)
+                    spec = self._workload_echo_container_spec(
+                        selected_echo,
+                        activity_catalog,
+                        source,
+                        principal,
+                        api_token=api_token[0],
+                        connection_ref=connection_ref,
+                        activity_generation=activity_catalog.get("generation"),
+                    )
+                    try:
+                        helper = self._load_workload_oci_host()
+                        observation = helper.start_container(spec, runner=self._workload_oci_runner)
+                    except Exception as error:
+                        raise UpdateError(
+                            "WORKLOAD_OCI_START_FAILED",
+                            "The verified Echo image did not start under its restricted host policy.",
+                            retryable=True,
+                        ) from error
+                    if observation.state != "running":
+                        raise UpdateError(
+                            "WORKLOAD_ECHO_NOT_READY",
+                            "The Echo OCI runtime did not report a running container.",
+                            retryable=True,
+                        )
+                    echo_receipt = self._write_workload_echo_receipt(
+                        selected_echo,
+                        observation.to_receipt_fields(),
+                        runner_identity=runner_identity,
+                    )
+                    echo_metadata = self._workload_echo_host_metadata(
+                        echo_receipt, echo_package_inventory
+                    )
+                    if echo_metadata.get("available") is not True:
+                        raise UpdateError(
+                            "WORKLOAD_ECHO_NOT_READY",
+                            "Echo failed its authenticated container identity or loopback liveness readback.",
+                            retryable=True,
+                        )
+                    transaction["echoReceipt"] = echo_receipt
+                    transaction["echoHostMetadata"] = echo_metadata
+                    transaction["echoContainerStarted"] = True
+                    _atomic_json(transaction_path, transaction)
                 self._end_workload_hold(
                     transaction, transaction_path, outcome="SUCCESS", healthy=True
                 )
@@ -9474,9 +10748,14 @@ class ComponentUpdater:
                 self._recover_workload_apply(transaction, transaction_path, failure=error)
                 raise
 
+        host_metadata: dict[str, Any] = {}
+        if isinstance(transaction.get("hostMetadata"), dict):
+            host_metadata["web"] = transaction["hostMetadata"]
+        if isinstance(transaction.get("echoHostMetadata"), dict):
+            host_metadata["echo"] = transaction["echoHostMetadata"]
         result = {
             "status": "activated"
-            if (service_units or plugin_rows or web_selected)
+            if (service_units or plugin_rows or web_selected or oci_components)
             else "installed",
             "action": "install",
             "planId": plan_id,
@@ -9488,11 +10767,7 @@ class ComponentUpdater:
             "components": rows,
             "resolution": resolution,
             "sourceBindings": package_inventory.get("sourceBindings", []),
-            **(
-                {"hostMetadata": {"web": transaction.get("hostMetadata")}}
-                if isinstance(transaction.get("hostMetadata"), dict)
-                else {}
-            ),
+            **({"hostMetadata": host_metadata} if host_metadata else {}),
         }
         transaction["result"] = result
         transaction["phase"] = "succeeded"
@@ -9997,15 +11272,22 @@ class ComponentUpdater:
         messages: list[str] = []
         healthy = True
         try:
-            self._restore_workload_package_bindings(transaction, transaction_path)
-        except RuntimeError as error:
+            self._rollback_workload_echo_container(transaction, transaction_path)
+        except (OSError, RuntimeError, ValueError) as error:
             healthy = False
-            messages.append(f"Package Runtime owner rollback could not be verified: {error}")
-        try:
-            self._restore_workload_sdk_environment(transaction, transaction_path)
-        except UpdateError as error:
-            healthy = False
-            messages.append(f"Operator SDK rollback could not be verified: {error}")
+            messages.append(f"Echo OCI rollback could not be verified: {error}")
+        defer_owner_recovery = bool(transaction.get("maintenanceToken"))
+        if not defer_owner_recovery:
+            try:
+                self._restore_workload_package_bindings(transaction, transaction_path)
+            except RuntimeError as error:
+                healthy = False
+                messages.append(f"Package Runtime owner rollback could not be verified: {error}")
+            try:
+                self._restore_workload_sdk_environment(transaction, transaction_path)
+            except UpdateError as error:
+                healthy = False
+                messages.append(f"Operator SDK rollback could not be verified: {error}")
         try:
             self._restore_workload_service_units(transaction)
         except UpdateError as error:
@@ -10066,6 +11348,32 @@ class ComponentUpdater:
             except UpdateError as error:
                 healthy = False
                 messages.append(f"Maintenance completion is pending: {error}")
+        if (
+            defer_owner_recovery
+            and healthy
+            and not transaction.get("maintenanceToken")
+            and transaction.get("packageRuntimeStarted") is not True
+            and transaction.get("packageRuntimePriorState") == "active"
+        ):
+            try:
+                self._workload_runtime_daemon("start", wait_active=True)
+                transaction["packageRuntimeStarted"] = True
+                _atomic_json(transaction_path, transaction)
+            except UpdateError as error:
+                healthy = False
+                messages.append(f"Package Runtime service recovery is pending: {error}")
+        if defer_owner_recovery and healthy and not transaction.get("maintenanceToken"):
+            try:
+                self._restore_workload_package_bindings(transaction, transaction_path)
+            except RuntimeError as error:
+                healthy = False
+                messages.append(f"Package Runtime owner rollback could not be verified: {error}")
+            if healthy:
+                try:
+                    self._restore_workload_sdk_environment(transaction, transaction_path)
+                except UpdateError as error:
+                    healthy = False
+                    messages.append(f"Operator SDK rollback could not be verified: {error}")
         transaction["phase"] = "rolled_back" if healthy else "rollback_required"
         transaction["rollbackMessage"] = (
             "; ".join(messages) or "No workload pointer change required recovery."
@@ -10073,6 +11381,93 @@ class ComponentUpdater:
         transaction.pop("maintenanceToken", None)
         _atomic_json(transaction_path, transaction)
         return healthy, transaction["rollbackMessage"]
+
+    def _rollback_workload_echo_container(
+        self, transaction: dict[str, Any], transaction_path: Path
+    ) -> None:
+        """Remove only a first-install Echo container started by this journal."""
+
+        intent = transaction.get("echoContainerIntent")
+        if not isinstance(intent, dict) or transaction.get("previousEchoReceipt") is not None:
+            return
+        selected = next(
+            (
+                row
+                for row in transaction.get("ociComponents", [])
+                if isinstance(row, dict) and row.get("componentId") == WORKLOAD_ECHO_COMPONENT_ID
+            ),
+            None,
+        )
+        if (
+            not isinstance(selected, dict)
+            or intent.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or intent.get("planId") != transaction.get("planId")
+            or intent.get("planDigest") != transaction.get("planDigest")
+            or intent.get("imageDigest") != selected.get("digest")
+            or intent.get("manifestDigest") != selected.get("manifestDigest")
+            or type(intent.get("activityCatalogGeneration")) is not int
+        ):
+            raise UpdateError("INVALID_TRANSACTION", "Echo rollback intent is malformed.")
+        current = self._read_workload_echo_receipt()
+        if isinstance(current, dict) and current.get("imageDigest") != intent["imageDigest"]:
+            raise UpdateError(
+                "UNINSTALL_CONFLICT", "A different Echo image replaced this workload transaction."
+            )
+        activity_catalog, source, principal = self._workload_echo_source_identity()
+        if activity_catalog.get("generation") != intent["activityCatalogGeneration"]:
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Echo ActivitySource generation changed during container rollback.",
+                retryable=True,
+            )
+        api_token = self._read_workload_echo_api_token()
+        if api_token is None:
+            raise UpdateError(
+                "WORKLOAD_ECHO_TOKEN_READBACK_REQUIRED",
+                "The protected Echo API bearer is unavailable for rollback.",
+                retryable=True,
+            )
+        runner_identity = transaction.get("echoRunnerIdentity")
+        connection_ref: str | None = None
+        if isinstance(runner_identity, dict):
+            package_ids = tuple(
+                sorted(self._load_workload_resolver().potential_component_ids(self.catalog, "echo"))
+            )
+            package_inventory = self._read_workload_package_inventory("echo", package_ids)
+            connection_ref, recovered_identity = self._workload_echo_runner_identity(
+                package_inventory,
+                prior_identity=runner_identity,
+            )
+            if recovered_identity != runner_identity or connection_ref is None:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Echo's selected runner reference cannot be recovered safely.",
+                    retryable=True,
+                )
+        spec = self._workload_echo_container_spec(
+            selected,
+            activity_catalog,
+            source,
+            principal,
+            api_token=api_token[0],
+            connection_ref=connection_ref,
+            activity_generation=intent["activityCatalogGeneration"],
+        )
+        helper = self._load_workload_oci_host()
+        removal = helper.remove_container(
+            spec,
+            runner=self._workload_oci_runner,
+            remove_runtime_credentials=True,
+        )
+        if removal.state != "not-installed":
+            raise UpdateError(
+                "WORKLOAD_OCI_REMOVE_FAILED",
+                "Echo container rollback did not confirm the exact container removal.",
+                retryable=True,
+            )
+        self._clear_workload_echo_receipt(intent["imageDigest"])
+        transaction["echoContainerRemovedOnRollback"] = True
+        _atomic_json(transaction_path, transaction)
 
     def _restore_workload_package_bindings(
         self, transaction: dict[str, Any], transaction_path: Path
@@ -10277,6 +11672,7 @@ class ComponentUpdater:
                 isinstance(uninstall_hold, dict)
                 and uninstall_hold.get("status") == "ended"
                 and transaction.get("packageRuntimeStarted") is not True
+                and transaction.get("offlineUninstallIntent") is True
             ):
                 self._workload_runtime_daemon("start", wait_active=True)
                 transaction["packageRuntimeStarted"] = True
@@ -10291,7 +11687,10 @@ class ComponentUpdater:
         )
         rows = resolution.get("selectedComponents") if isinstance(resolution, dict) else None
         staged_rows = stored.get("stagedComponents")
-        if transaction is not None and transaction.get("offlineUninstallIntent") is True:
+        if transaction is not None and (
+            transaction.get("offlineUninstallIntent") is True
+            or transaction.get("echoUninstallIntent") is True
+        ):
             rows = [transaction.get("selectedRow")]
             staged_rows = [transaction.get("stagedRow")]
             resolution = transaction["resolution"]
@@ -10308,8 +11707,11 @@ class ComponentUpdater:
                 transaction is None
                 or not isinstance(transaction.get("selectedRow"), dict)
                 or not isinstance(transaction.get("stagedRow"), dict)
-                or not isinstance(transaction.get("installation"), dict)
-                or transaction.get("offlineUninstallIntent") is not True
+                or not (
+                    transaction.get("offlineUninstallIntent") is True
+                    and isinstance(transaction.get("installation"), dict)
+                    or transaction.get("echoUninstallIntent") is True
+                )
             ):
                 raise UpdateError(
                     "PLAN_CHANGED",
@@ -10330,7 +11732,11 @@ class ComponentUpdater:
                 "INVALID_STAGE", "The selected uninstall identity differs from its staged plan."
             )
         if resolution.get("status") != "ready" and not (
-            transaction is not None and transaction.get("offlineUninstallIntent") is True
+            transaction is not None
+            and (
+                transaction.get("offlineUninstallIntent") is True
+                or transaction.get("echoUninstallIntent") is True
+            )
         ):
             raise UpdateError(
                 "WORKLOAD_UNINSTALL_BLOCKED",
@@ -10348,6 +11754,7 @@ class ComponentUpdater:
         if not isinstance(component_id, str) or artifact_kind not in {
             "plugin-package",
             "static-web",
+            "oci-image",
         }:
             raise UpdateError(
                 "WORKLOAD_UNINSTALL_UNAVAILABLE",
@@ -10355,11 +11762,23 @@ class ComponentUpdater:
                 retryable=True,
             )
 
+        component_digest = row.get("digest")
+        if transaction is not None and artifact_kind == "oci-image":
+            component_digests = transaction.get("componentArtifactDigests")
+            if (
+                not isinstance(component_digests, dict)
+                or component_digests.get(component_id) != component_digest
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Echo uninstall digest differs from its durable transaction identity.",
+                )
         if transaction is None:
             component_digest = row.get("digest")
             package_identity = row.get("installedIdentity")
             installation: dict[str, Any] | None = None
             source_id: str | None = None
+            echo_receipt: dict[str, Any] | None = None
             if artifact_kind == "plugin-package":
                 if not isinstance(package_identity, dict):
                     raise UpdateError(
@@ -10390,6 +11809,33 @@ class ComponentUpdater:
                     raise UpdateError(
                         "SOURCE_BINDING_INVALID", "Uninstall package owner mapping is incomplete."
                     )
+            elif artifact_kind == "oci-image":
+                if component_id != WORKLOAD_ECHO_COMPONENT_ID:
+                    raise UpdateError(
+                        "WORKLOAD_UNINSTALL_UNAVAILABLE",
+                        "No OCI uninstall adapter is registered for this component.",
+                    )
+                echo_receipt = self._read_workload_echo_receipt()
+                installed_identity = row.get("installedIdentity")
+                if (
+                    not isinstance(echo_receipt, dict)
+                    or not isinstance(installed_identity, dict)
+                    or echo_receipt.get("digest") != row.get("digest")
+                    or echo_receipt.get("manifestDigest") != row.get("manifestDigest")
+                    or echo_receipt.get("releaseId") != row.get("releaseId")
+                    or installed_identity.get("imageDigest") != echo_receipt.get("imageDigest")
+                    or not _valid_digest(component_digest)
+                ):
+                    raise UpdateError(
+                        "WORKLOAD_OCI_READBACK_REQUIRED",
+                        "Fresh Echo receipt differs from the selected uninstall identity.",
+                        retryable=True,
+                    )
+                source_id = self._workload_policy_source_id(row.get("sourcePolicy", {}))
+                if source_id != WORKLOAD_ECHO_SOURCE_ID:
+                    raise UpdateError(
+                        "SOURCE_BINDING_INVALID", "Echo uninstall has no signed source owner."
+                    )
             if not _valid_digest(component_digest):
                 raise UpdateError(
                     "INVALID_STAGE", "Uninstall digest is missing from the selected identity."
@@ -10410,8 +11856,11 @@ class ComponentUpdater:
                 "selectedRow": row,
                 "stagedRow": staged,
                 "installation": installation,
+                "echoReceipt": echo_receipt,
+                "echoUninstallIntent": False,
                 "sourceId": source_id,
                 "sourcePolicy": row.get("sourcePolicy"),
+                "echoPriorReceipt": echo_receipt,
                 "componentId": component_id,
                 "resolution": resolution,
                 "maintenanceHolds": {},
@@ -10420,6 +11869,595 @@ class ComponentUpdater:
                 "phaseStartedAt": int(time.time()),
             }
             _atomic_json(transaction_path, transaction)
+        if artifact_kind == "oci-image":
+            if component_id != WORKLOAD_ECHO_COMPONENT_ID:
+                raise UpdateError(
+                    "WORKLOAD_UNINSTALL_UNAVAILABLE",
+                    "No OCI uninstall adapter is registered for this component.",
+                )
+            echo_receipt = transaction.get("echoPriorReceipt")
+            if not isinstance(echo_receipt, dict):
+                echo_receipt = self._read_workload_echo_receipt()
+            if (
+                not isinstance(echo_receipt, dict)
+                or echo_receipt.get("digest") != component_digest
+                or echo_receipt.get("manifestDigest") != row.get("manifestDigest")
+                or echo_receipt.get("releaseId") != row.get("releaseId")
+            ) and transaction.get("echoUninstallIntent") is not True:
+                raise UpdateError(
+                    "WORKLOAD_OCI_READBACK_REQUIRED",
+                    "The Echo uninstall receipt differs from the selected plan.",
+                    retryable=True,
+                )
+            source_policy = row.get("sourcePolicy")
+            if not isinstance(source_policy, dict):
+                raise UpdateError(
+                    "SOURCE_POLICY_INVALID", "Echo uninstall has no signed owner policy."
+                )
+            source_id = self._workload_policy_source_id(source_policy)
+            if source_id != WORKLOAD_ECHO_SOURCE_ID:
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID",
+                    "Echo uninstall owner differs from the signed catalog.",
+                )
+            container_removed = transaction.get("echoContainerRemoved") is True
+            if not container_removed:
+                self._preflight_workload_oci_runtime()
+            if not isinstance(echo_receipt, dict):
+                raise UpdateError(
+                    "WORKLOAD_OCI_READBACK_REQUIRED",
+                    "The redacted Echo runtime receipt is unavailable for recovery.",
+                    retryable=True,
+                )
+
+            activity_catalog, source, principal = self._workload_echo_source_identity()
+            api_token = None if container_removed else self._read_workload_echo_api_token()
+            if not container_removed and api_token is None:
+                raise UpdateError(
+                    "WORKLOAD_ECHO_TOKEN_READBACK_REQUIRED",
+                    "The protected Echo API bearer is unavailable; uninstall was not applied.",
+                    retryable=True,
+                )
+            package_ids = tuple(
+                sorted(self._load_workload_resolver().potential_component_ids(self.catalog, "echo"))
+            )
+            package_inventory = self._read_workload_package_inventory("echo", package_ids)
+            inventory_generation = package_inventory.get("catalogGeneration")
+            if inventory_generation is None:
+                inventory_generation = activity_catalog.get("generation")
+            if (
+                type(inventory_generation) is not int
+                or inventory_generation < 1
+                or inventory_generation != activity_catalog.get("generation")
+            ):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Echo's authenticated owner inventory changed catalog generation.",
+                    retryable=True,
+                )
+            durable_generation = transaction.get("echoOwnerCatalogGeneration")
+            if durable_generation is None:
+                if container_removed or transaction.get("echoUninstallIntent") is True:
+                    container_receipt = echo_receipt.get("containerReceipt")
+                    durable_generation = (
+                        container_receipt.get("activityCatalogGeneration")
+                        if isinstance(container_receipt, dict)
+                        else None
+                    )
+                else:
+                    durable_generation = inventory_generation
+                transaction["echoOwnerCatalogGeneration"] = durable_generation
+                _atomic_json(transaction_path, transaction)
+            if type(durable_generation) is not int or durable_generation != inventory_generation:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Echo's owner catalog generation changed during uninstall recovery.",
+                    retryable=True,
+                )
+            prior_runner_identity = echo_receipt.get("runnerIdentity")
+            if isinstance(prior_runner_identity, dict):
+                if container_removed:
+                    # Removal is already durable, so retry no longer needs the
+                    # private connection reference that authorized this container.
+                    connection_ref, runner_identity = None, prior_runner_identity
+                else:
+                    connection_ref, runner_identity = self._workload_echo_runner_identity(
+                        package_inventory, prior_identity=prior_runner_identity
+                    )
+                    if connection_ref is None:
+                        raise UpdateError(
+                            "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                            "Echo's prior exact-match connection reference cannot be recovered safely.",
+                            retryable=True,
+                        )
+            else:
+                connection_ref, runner_identity = None, None
+            if isinstance(prior_runner_identity, dict) and runner_identity != prior_runner_identity:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    "Echo's exact-match owner differs from its installed receipt.",
+                    retryable=True,
+                )
+            transaction["echoRunnerIdentity"] = runner_identity
+            _atomic_json(transaction_path, transaction)
+            helper = self._load_workload_oci_host()
+            spec = None
+            if not container_removed:
+                spec = self._workload_echo_container_spec(
+                    row,
+                    activity_catalog,
+                    source,
+                    principal,
+                    api_token=api_token[0] if api_token is not None else None,
+                    connection_ref=connection_ref,
+                    activity_generation=echo_receipt["containerReceipt"].get(
+                        "activityCatalogGeneration"
+                    ),
+                )
+            if spec is not None and transaction.get("echoUninstallIntent") is not True:
+                try:
+                    observed = helper.container_status(spec, runner=self._workload_oci_runner)
+                except Exception as error:
+                    raise UpdateError(
+                        "WORKLOAD_OCI_READBACK_REQUIRED",
+                        "The installed Echo container could not be authenticated before uninstall.",
+                        retryable=True,
+                    ) from error
+                if observed.state == "not-installed":
+                    raise UpdateError(
+                        "WORKLOAD_OCI_READBACK_REQUIRED",
+                        "The installed Echo receipt has no matching container.",
+                        retryable=True,
+                    )
+                transaction["echoUninstallIntent"] = True
+                transaction["echoPriorReceipt"] = echo_receipt
+                _atomic_json(transaction_path, transaction)
+
+            # Only deactivate bindings explicitly owned by Echo. A different
+            # Product/source owner is never stopped as part of Echo removal.
+            echo_policy, owner_rows = self._workload_plugin_owner_rows("echo", package_ids)
+            if not isinstance(echo_policy, dict):
+                raise UpdateError("SOURCE_POLICY_INVALID", "Echo plugin owner policy is missing.")
+            owner_by_binding = {
+                (owner.get("bindingId"), owner.get("packageId")): owner for owner in owner_rows
+            }
+            source_bindings = package_inventory.get("sourceBindings", [])
+            if not isinstance(source_bindings, list):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED", "Echo owner inventory is malformed."
+                )
+            active_echo_bindings = [
+                binding
+                for binding in source_bindings
+                if isinstance(binding, dict)
+                and binding.get("sourceId") == source_id
+                and binding.get("state") == "RUNNING"
+            ]
+            expected_runner_identity = transaction.get("echoRunnerIdentity")
+            if not isinstance(expected_runner_identity, dict):
+                expected_runner_identity = prior_runner_identity
+            if isinstance(expected_runner_identity, dict):
+                expected_source = expected_runner_identity.get("sourceId")
+                expected_binding = expected_runner_identity.get("bindingId")
+                expected_package = expected_runner_identity.get("packageId")
+                expected_installation = expected_runner_identity.get("installationId")
+                expected_component = expected_runner_identity.get("componentId")
+                expected_generation = transaction.get("echoOwnerCatalogGeneration")
+                if expected_generation is None:
+                    container_receipt = echo_receipt.get("containerReceipt")
+                    expected_generation = (
+                        container_receipt.get("activityCatalogGeneration")
+                        if isinstance(container_receipt, dict)
+                        else None
+                    )
+                if (
+                    expected_source != source_id
+                    or not all(
+                        isinstance(value, str) and value
+                        for value in (
+                            expected_binding,
+                            expected_package,
+                            expected_installation,
+                            expected_component,
+                        )
+                    )
+                    or type(expected_generation) is not int
+                    or expected_generation != activity_catalog.get("generation")
+                ):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Echo's durable owner identity or ActivitySource generation changed.",
+                        retryable=True,
+                    )
+                expected_owner = (
+                    expected_source,
+                    expected_binding,
+                    expected_package,
+                    expected_installation,
+                )
+                observed_owners = [
+                    (
+                        binding.get("sourceId"),
+                        binding.get("bindingId"),
+                        binding.get("packageId"),
+                        binding.get("activeInstallationId"),
+                    )
+                    for binding in active_echo_bindings
+                ]
+                if active_echo_bindings and observed_owners != [expected_owner]:
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "Echo's active Package Runtime owner changed after container removal.",
+                        retryable=True,
+                    )
+                if not active_echo_bindings:
+                    expected_request_id = (
+                        "cyrene-wop-"
+                        + plan_id.removeprefix("plan-")
+                        + "-dea-"
+                        + hashlib.sha256(expected_installation.encode("utf-8")).hexdigest()[:8]
+                        + "-"
+                        + expected_component
+                    )
+                    binding_operations = transaction.get("bindingOperations", [])
+                    if not isinstance(binding_operations, list):
+                        raise UpdateError(
+                            "INVALID_TRANSACTION", "Echo binding operation journal is malformed."
+                        )
+                    prior_deactivation = next(
+                        (
+                            operation
+                            for operation in binding_operations
+                            if isinstance(operation, dict)
+                            and operation.get("requestId") == expected_request_id
+                        ),
+                        None,
+                    )
+                    prior_scope = (
+                        prior_deactivation.get("scope")
+                        if isinstance(prior_deactivation, dict)
+                        else None
+                    )
+                    exact_prior_deactivation = (
+                        isinstance(prior_deactivation, dict)
+                        and prior_deactivation.get("operation") == "deactivate"
+                        and isinstance(prior_scope, dict)
+                        and prior_scope.get("source_id") == expected_source
+                        and prior_scope.get("binding_id") == expected_binding
+                        and prior_scope.get("package_id") == expected_package
+                        and prior_scope.get("installation_id") == expected_installation
+                    )
+                    if not exact_prior_deactivation:
+                        raise UpdateError(
+                            "COMPONENT_IN_USE",
+                            "Echo's expected owner disappeared without a durable deactivation record.",
+                            retryable=True,
+                        )
+                    if prior_deactivation.get("state") != "completed":
+                        if prior_deactivation.get("state") not in {
+                            "intent",
+                            "outcome",
+                            "reconciled",
+                        }:
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                "Echo's owner deactivation outcome cannot be reconciled safely.",
+                                retryable=True,
+                            )
+                        expected_owner_row = owner_by_binding.get(
+                            (expected_binding, expected_package)
+                        )
+                        if (
+                            not isinstance(expected_owner_row, dict)
+                            or expected_owner_row.get("componentId") != expected_component
+                        ):
+                            raise UpdateError(
+                                "SOURCE_BINDING_INVALID",
+                                "Echo's durable deactivation no longer matches signed ownership.",
+                            )
+                        activity_catalog, runtime_policy, principals, package_helper = (
+                            self._workload_source_state("echo")
+                        )
+                        if (
+                            runtime_policy is None
+                            or activity_catalog.get("generation") != expected_generation
+                        ):
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                "Echo's Package Runtime source generation changed during recovery.",
+                                retryable=True,
+                            )
+                        self._workload_binding_operation(
+                            transaction,
+                            transaction_path,
+                            operation="deactivate",
+                            component=expected_owner_row,
+                            installation_id=expected_installation,
+                            activity_catalog=activity_catalog,
+                            runtime_policy=runtime_policy,
+                            source_principals=principals,
+                            helper=package_helper,
+                        )
+                        package_inventory = self._read_workload_package_inventory(
+                            "echo", package_ids
+                        )
+                        source_bindings = package_inventory.get("sourceBindings", [])
+                        if not isinstance(source_bindings, list):
+                            raise UpdateError(
+                                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                                "Echo owner inventory is malformed after deactivation recovery.",
+                                retryable=True,
+                            )
+                        active_echo_bindings = [
+                            binding
+                            for binding in source_bindings
+                            if isinstance(binding, dict)
+                            and binding.get("sourceId") == source_id
+                            and binding.get("state") == "RUNNING"
+                        ]
+                        if active_echo_bindings:
+                            raise UpdateError(
+                                "COMPONENT_IN_USE",
+                                "A Package Runtime owner became active during Echo recovery.",
+                                retryable=True,
+                            )
+            elif active_echo_bindings:
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "An active Echo Package Runtime owner was not present in the installed receipt.",
+                    retryable=True,
+                )
+            if len(active_echo_bindings) > 1:
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "More than one active package binding owns the Echo Product source.",
+                    retryable=True,
+                )
+            installations = package_inventory.get("installationRecords", {})
+            validated_echo_owners: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            for binding in active_echo_bindings:
+                owner = owner_by_binding.get((binding.get("bindingId"), binding.get("packageId")))
+                if not isinstance(owner, dict):
+                    raise UpdateError(
+                        "COMPONENT_IN_USE",
+                        "An unrecognized active Package Runtime binding owns the Echo source.",
+                        retryable=True,
+                    )
+                owner_installation = (
+                    installations.get(owner["componentId"])
+                    if isinstance(installations, dict)
+                    else None
+                )
+                if not isinstance(owner_installation, dict) or owner_installation.get(
+                    "installation_id"
+                ) != binding.get("activeInstallationId"):
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Echo's active plugin owner differs from its authenticated installation.",
+                        retryable=True,
+                    )
+                validated_echo_owners.append((binding, owner))
+                previous_rows = transaction.setdefault("previousPackageBindings", [])
+                if not isinstance(previous_rows, list):
+                    raise UpdateError(
+                        "INVALID_TRANSACTION", "Echo owner rollback journal is malformed."
+                    )
+                if not any(
+                    isinstance(previous, dict)
+                    and previous.get("bindingId") == binding.get("bindingId")
+                    and previous.get("sourceId") == source_id
+                    for previous in previous_rows
+                ):
+                    previous_rows.append(
+                        {
+                            "componentId": owner["componentId"],
+                            "sourceId": source_id,
+                            "bindingId": binding["bindingId"],
+                            "packageId": binding["packageId"],
+                            "state": "RUNNING",
+                            "activeInstallationId": binding["activeInstallationId"],
+                        }
+                    )
+                transaction["selectedPluginRows"] = [owner]
+            if validated_echo_owners and not isinstance(transaction.get("sdkEnvironment"), dict):
+                sdk_reader = getattr(
+                    self._load_workload_sdk_environment(),
+                    "read_workload_sdk_environment",
+                    None,
+                )
+                sdk_identity = sdk_reader() if callable(sdk_reader) else None
+                if not isinstance(sdk_identity, dict) or sdk_identity.get("installed") is not True:
+                    raise UpdateError(
+                        "WORKLOAD_SDK_READBACK_REQUIRED",
+                        "The operator SDK is needed to deactivate Echo's package owner.",
+                        retryable=True,
+                    )
+                transaction["sdkEnvironment"] = sdk_identity
+            _atomic_json(transaction_path, transaction)
+
+            # Stop Echo before deactivating its optional Package Runtime owner.
+            # This is a separate CORE_RUNTIME hold because SDK mutations require
+            # normal Broker admission after all maintenance holds have closed.
+            if (
+                not container_removed
+                and not self._workload_phase_is_ended(transaction, "core-runtime-echo-quiesce")
+                and (
+                    self._ensure_workload_phase(
+                        transaction,
+                        transaction_path,
+                        phase="core-runtime-echo-quiesce",
+                        target_kind="CORE_RUNTIME",
+                        requires_restart=True,
+                    )
+                )
+            ):
+                transaction["echoContainerStopIntent"] = True
+                _atomic_json(transaction_path, transaction)
+                try:
+                    assert spec is not None
+                    stopped = helper.stop_container(spec, runner=self._workload_oci_runner)
+                except Exception as error:
+                    raise UpdateError(
+                        "WORKLOAD_OCI_STOP_FAILED",
+                        "The exact Echo container could not be stopped safely.",
+                        retryable=True,
+                    ) from error
+                if stopped.state not in {"exited", "created"}:
+                    raise UpdateError(
+                        "WORKLOAD_OCI_STOP_FAILED",
+                        "Echo did not reach a stopped container state before owner deactivation.",
+                        retryable=True,
+                    )
+                transaction["echoStoppedReceipt"] = stopped.to_receipt_fields()
+                _atomic_json(transaction_path, transaction)
+                self._end_workload_hold(
+                    transaction, transaction_path, outcome="SUCCESS", healthy=True
+                )
+
+            # Remove the stopped container while the exact signed owner is still
+            # readable. The connection_ref is intentionally never journaled; doing
+            # cleanup before deactivation keeps interrupted retries recoverable.
+            if not self._workload_phase_is_ended(transaction, "core-runtime-uninstall") and (
+                self._ensure_workload_phase(
+                    transaction,
+                    transaction_path,
+                    phase="core-runtime-uninstall",
+                    target_kind="CORE_RUNTIME",
+                    requires_restart=True,
+                )
+            ):
+                if transaction.get("echoContainerRemoved") is not True:
+                    if spec is None:
+                        raise UpdateError(
+                            "INVALID_TRANSACTION",
+                            "Echo container removal lost its authenticated runtime specification.",
+                        )
+                    transaction["echoContainerRemovalIntent"] = True
+                    _atomic_json(transaction_path, transaction)
+                    try:
+                        removal = helper.remove_container(
+                            spec,
+                            runner=self._workload_oci_runner,
+                            remove_runtime_credentials=True,
+                        )
+                    except Exception as error:
+                        raise UpdateError(
+                            "WORKLOAD_OCI_REMOVE_FAILED",
+                            "The exact Echo container could not be removed safely.",
+                            retryable=True,
+                        ) from error
+                    if removal.state != "not-installed":
+                        raise UpdateError(
+                            "WORKLOAD_OCI_REMOVE_FAILED",
+                            "The Echo OCI runtime did not confirm container removal.",
+                            retryable=True,
+                        )
+                    transaction["echoRemovalReceipt"] = removal.to_receipt_fields()
+                    self._clear_workload_echo_receipt(component_digest)
+                    transaction["echoContainerRemoved"] = True
+                    _atomic_json(transaction_path, transaction)
+                self._end_workload_hold(
+                    transaction, transaction_path, outcome="SUCCESS", healthy=True
+                )
+
+            package_inventory = self._read_workload_package_inventory("echo", package_ids)
+            refreshed_echo_bindings = [
+                binding
+                for binding in package_inventory.get("sourceBindings", [])
+                if isinstance(binding, dict)
+                and binding.get("sourceId") == source_id
+                and binding.get("state") == "RUNNING"
+            ]
+            expected_echo_bindings = [
+                (
+                    binding.get("bindingId"),
+                    binding.get("packageId"),
+                    binding.get("activeInstallationId"),
+                )
+                for binding in active_echo_bindings
+            ]
+            actual_echo_bindings = [
+                (
+                    binding.get("bindingId"),
+                    binding.get("packageId"),
+                    binding.get("activeInstallationId"),
+                )
+                for binding in refreshed_echo_bindings
+            ]
+            if actual_echo_bindings != expected_echo_bindings:
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "Echo Package Runtime ownership changed during container quiescence.",
+                    retryable=True,
+                )
+
+            if active_echo_bindings:
+                for binding, owner in validated_echo_owners:
+                    activity_catalog, runtime_policy, principals, package_helper = (
+                        self._workload_source_state("echo")
+                    )
+                    if runtime_policy is None:
+                        raise UpdateError(
+                            "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                            "Echo's Package Runtime policy is unavailable.",
+                            retryable=True,
+                        )
+                    self._workload_binding_operation(
+                        transaction,
+                        transaction_path,
+                        operation="deactivate",
+                        component=owner,
+                        installation_id=binding["activeInstallationId"],
+                        activity_catalog=activity_catalog,
+                        runtime_policy=runtime_policy,
+                        source_principals=principals,
+                        helper=package_helper,
+                    )
+                    package_inventory = self._read_workload_package_inventory("echo", package_ids)
+                    still_active = any(
+                        isinstance(current, dict)
+                        and current.get("sourceId") == source_id
+                        and current.get("state") == "RUNNING"
+                        for current in package_inventory.get("sourceBindings", [])
+                    )
+                    if still_active:
+                        raise UpdateError(
+                            "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                            "Echo's Package Runtime owner remained active after deactivation.",
+                            retryable=True,
+                        )
+                    # One mutation per exact selected binding. Re-read after each
+                    # admission so an unexpected additional owner is not ignored.
+                    break
+
+            if any(
+                isinstance(binding, dict)
+                and binding.get("sourceId") == source_id
+                and binding.get("state") == "RUNNING"
+                for binding in package_inventory.get("sourceBindings", [])
+            ):
+                raise UpdateError(
+                    "COMPONENT_IN_USE",
+                    "An active Package Runtime owner still uses the Echo Product source.",
+                    retryable=True,
+                )
+
+            result = {
+                "status": "uninstalled",
+                "action": "uninstall",
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "catalogDigest": stored["catalogDigest"],
+                "workloadId": workload_id,
+                "targetId": target_id,
+                "channel": stored["channel"],
+                "components": [dict(row)],
+                "resolution": resolution,
+                "sourceBindings": package_inventory.get("sourceBindings", []),
+                "hostMetadata": {
+                    "echo": self._workload_echo_host_metadata(None, package_inventory)
+                },
+            }
         else:
             component_digest = transaction.get("componentArtifactDigests", {}).get(component_id)
             installation = transaction.get("installation")
@@ -10652,7 +12690,7 @@ class ComponentUpdater:
                 "resolution": resolution,
                 "sourceBindings": latest_inventory.get("sourceBindings", []),
             }
-        else:
+        elif artifact_kind == "static-web":
             web_host = self._load_workload_web_host()
             expected_identity = row.get("installedIdentity")
             if not isinstance(expected_identity, dict):
@@ -11697,8 +13735,17 @@ class ComponentUpdater:
                 entry.get("artifactKind") == "data-bundle"
                 and entry.get("targetId") == "portable-contract-data-v1"
             )
+            echo_oci_target = (
+                entry.get("artifactKind") == "oci-image"
+                and component.get("componentId") == WORKLOAD_ECHO_COMPONENT_ID
+                and entry.get("targetId") == WORKLOAD_ECHO_TARGET_ID
+                and spec.get("runtime") == "oci"
+            )
             if portable_data_target:
                 if architecture != spec.get("architecture"):
+                    continue
+            elif echo_oci_target:
+                if host.get("ID") != "ubuntu" or host_version != "24.04":
                     continue
             elif (
                 host.get("ID") != "ubuntu"
@@ -11728,6 +13775,8 @@ class ComponentUpdater:
             if entry.get("artifactKind") == "native-binary" and spec.get("runtime") != "systemd":
                 continue
             if entry.get("artifactKind") == "static-web" and spec.get("runtime") != "static-web":
+                continue
+            if entry.get("artifactKind") == "oci-image" and not echo_oci_target:
                 continue
             if entry.get("artifactKind") == "plugin-package":
                 profile = self.native_python_profiles.get(entry.get("targetId"))
@@ -15181,9 +17230,20 @@ class ComponentUpdater:
                 "UNSUPPORTED_ARTIFACT",
                 f"Artifact kind is not supported for {component['componentId']} at this target.",
             )
-        if artifact["kind"] == "oci-image":
+        oci_image = artifact.get("kind") == "oci-image"
+        if oci_image and (
+            schema_version != 1
+            or component.get("componentId") != WORKLOAD_ECHO_COMPONENT_ID
+            or target.get("id") != WORKLOAD_ECHO_TARGET_ID
+            or component.get("ociImageRepository") != "ghcr.io/dohorizon-ai/cyrene-echo"
+            or set(artifact) != {"kind", "repository", "digest", "platform"}
+            or artifact.get("repository") != "ghcr.io/dohorizon-ai/cyrene-echo"
+            or not _valid_digest(artifact.get("digest"))
+            or artifact.get("platform") != {"os": "linux", "architecture": "amd64"}
+        ):
             raise UpdateError(
-                "UNSUPPORTED_TARGET", "Linux native updater does not recreate OCI containers."
+                "INVALID_MANIFEST",
+                "OCI workload identity is outside the exact signed Echo Ubuntu target.",
             )
         plugin_package = artifact.get("kind") == "plugin-package"
         archive = artifact.get("archive") if plugin_package else None
@@ -15193,7 +17253,7 @@ class ComponentUpdater:
         artifact_size = (
             archive.get("sizeBytes") if isinstance(archive, dict) else artifact.get("sizeBytes")
         )
-        if (
+        if not oci_image and (
             not _valid_digest(artifact_sha256)
             or not isinstance(artifact_size, int)
             or isinstance(artifact_size, bool)
@@ -15309,18 +17369,25 @@ class ComponentUpdater:
         artifact_uri = artifact.get("uri")
         if plugin_package:
             artifact_uri = archive.get("uri") if isinstance(archive, dict) else None
-        if not isinstance(artifact_uri, str):
-            raise UpdateError(
-                "INVALID_MANIFEST",
-                f"Artifact download URI is missing for {component['componentId']}.",
-            )
-        self._require_github_asset_uri(artifact_uri, publisher["repository"])
         subject_name = manifest.get("provenance", {}).get("attestation", {}).get("subjectName")
-        if subject_name != PurePosixPath(urllib.parse.urlsplit(artifact_uri).path).name:
-            raise UpdateError(
-                "UNTRUSTED_ATTESTATION_SUBJECT",
-                f"Attestation subject differs from artifact basename for {component['componentId']}.",
-            )
+        if oci_image:
+            if subject_name != artifact.get("repository"):
+                raise UpdateError(
+                    "UNTRUSTED_ATTESTATION_SUBJECT",
+                    "Echo OCI provenance subject differs from the exact image repository.",
+                )
+        else:
+            if not isinstance(artifact_uri, str):
+                raise UpdateError(
+                    "INVALID_MANIFEST",
+                    f"Artifact download URI is missing for {component['componentId']}.",
+                )
+            self._require_github_asset_uri(artifact_uri, publisher["repository"])
+            if subject_name != PurePosixPath(urllib.parse.urlsplit(artifact_uri).path).name:
+                raise UpdateError(
+                    "UNTRUSTED_ATTESTATION_SUBJECT",
+                    f"Attestation subject differs from artifact basename for {component['componentId']}.",
+                )
         restart = manifest.get("restart")
         expected_restart = component.get("restart", {})
         if (
