@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib.util
 import json
 import os
+import stat
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -594,6 +596,44 @@ def _fake_proc(
         except FileExistsError:
             pass
     return root
+
+
+def _configure_gpu_inventory(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pci_vendors: tuple[str, ...] = ("0x8086",),
+) -> dict[str, Path]:
+    """Install isolated sysfs/dev paths for the first-Core GPU classifier."""
+
+    pci_root = root / "pci-devices"
+    pci_root.mkdir(parents=True)
+    for index, vendor in enumerate(pci_vendors):
+        device = pci_root / f"0000:00:{index:02x}.0"
+        device.mkdir()
+        (device / "vendor").write_text(vendor, encoding="ascii")
+    device_root = root / "dev"
+    device_root.mkdir()
+    proc_driver_root = root / "proc-driver"
+    proc_driver_root.mkdir()
+    pci_driver_root = root / "pci-drivers"
+    pci_driver_root.mkdir()
+    module_root = root / "modules"
+    module_root.mkdir()
+    roots = {
+        "pci": pci_root,
+        "dev": device_root,
+        "proc_driver": proc_driver_root,
+        "pci_driver": pci_driver_root,
+        "modules": module_root,
+    }
+    monkeypatch.setattr(bootstrap, "PCI_DEVICES_ROOT", pci_root)
+    monkeypatch.setattr(bootstrap, "DEVICE_ROOT", device_root)
+    monkeypatch.setattr(bootstrap, "PROC_DRIVER_ROOT", proc_driver_root)
+    monkeypatch.setattr(bootstrap, "PCI_DRIVERS_ROOT", pci_driver_root)
+    monkeypatch.setattr(bootstrap, "MODULE_ROOT", module_root)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _command: None)
+    return roots
 
 
 def _check_plan(updater: FakeUpdater, tmp_path: Path) -> dict[str, Any]:
@@ -1521,6 +1561,175 @@ def test_check_rejects_nonfresh_catalog_target_and_gpu_resources(tmp_path: Path)
     updater.gpu_output = "1234"
     with pytest.raises(ValueError, match="GPU compute resources"):
         bootstrap.check(updater, proc_root=_fake_proc(tmp_path / "proc-gpu-busy"))
+
+
+def test_cpu_only_inventory_requires_complete_readable_absence_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots = _configure_gpu_inventory(tmp_path / "cpu-only", monkeypatch)
+    assert bootstrap._confirmed_cpu_only_host()
+
+    cases = (
+        ("nvidia-pci", "0x10de"),
+        ("unknown-pci", "vendor-unknown"),
+        ("empty-pci", ""),
+    )
+    for name, vendor in cases:
+        case_roots = _configure_gpu_inventory(
+            tmp_path / name,
+            monkeypatch,
+            pci_vendors=() if name == "empty-pci" else ("0x8086",),
+        )
+        if vendor:
+            device = next(case_roots["pci"].iterdir())
+            (device / "vendor").write_text(vendor, encoding="ascii")
+        assert not bootstrap._confirmed_cpu_only_host(), name
+
+    marker_cases = (
+        ("dev", "nvidia0"),
+        ("dev", "dxg"),
+        ("proc_driver", "nvidia"),
+        ("pci_driver", "nvidia"),
+        ("modules", "nvidia"),
+    )
+    for index, (root_name, marker) in enumerate(marker_cases):
+        case_roots = _configure_gpu_inventory(tmp_path / f"marker-{index}", monkeypatch)
+        (case_roots[root_name] / marker).mkdir()
+        assert not bootstrap._confirmed_cpu_only_host(), marker
+
+    roots = _configure_gpu_inventory(tmp_path / "unreadable", monkeypatch)
+    vendor_path = next(roots["pci"].iterdir()) / "vendor"
+    original_read_text = Path.read_text
+
+    def unreadable_vendor(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == vendor_path:
+            raise PermissionError(errno.EACCES, "permission denied", str(path))
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_vendor)
+    assert not bootstrap._confirmed_cpu_only_host()
+
+    roots = _configure_gpu_inventory(tmp_path / "installed-tool", monkeypatch)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _command: "/usr/bin/nvidia-smi")
+    assert not bootstrap._confirmed_cpu_only_host()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_message"),
+    [
+        ("nvidia-present", "inventory is unavailable"),
+        ("permission", "inventory is unavailable"),
+        ("timeout", "inventory is unavailable"),
+        ("nonzero", "inventory failed"),
+        ("busy", "GPU compute resources"),
+    ],
+)
+def test_assert_fresh_only_accepts_missing_gpu_utility_on_proven_cpu_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    expected_message: str,
+) -> None:
+    pci_vendors = ("0x10de",) if failure == "nvidia-present" else ("0x8086",)
+    _configure_gpu_inventory(tmp_path / "inventory", monkeypatch, pci_vendors=pci_vendors)
+    updater = FakeUpdater(tmp_path / "updater")
+    original_runner = updater.runner
+
+    def runner(argv: list[str], **kwargs: Any) -> Any:
+        if argv and argv[0] == "nvidia-smi":
+            if failure == "nvidia-present":
+                raise FileNotFoundError(errno.ENOENT, "nvidia-smi is unavailable", argv[0])
+            if failure == "timeout":
+                raise bootstrap.subprocess.TimeoutExpired("nvidia-smi", timeout=10)
+            if failure == "nonzero":
+                return SimpleNamespace(returncode=1, stdout="")
+            if failure == "busy":
+                return SimpleNamespace(returncode=0, stdout="1234\n")
+        return original_runner(argv, **kwargs)
+
+    monkeypatch.setattr(updater, "runner", runner)
+    if failure == "nvidia-present":
+        with pytest.raises(RuntimeError, match=expected_message):
+            bootstrap._assert_fresh(updater, proc_root=_fake_proc(tmp_path / "proc-nvidia"))
+    elif failure == "permission":
+        # A real permission failure is never reclassified as a missing executable.
+        def permission_runner(argv: list[str], **kwargs: Any) -> Any:
+            if argv and argv[0] == "nvidia-smi":
+                raise PermissionError(errno.EACCES, "permission denied", argv[0])
+            return original_runner(argv, **kwargs)
+
+        monkeypatch.setattr(updater, "runner", permission_runner)
+        with pytest.raises(RuntimeError, match=expected_message):
+            bootstrap._assert_fresh(updater, proc_root=_fake_proc(tmp_path / "proc-permission"))
+    elif failure == "timeout":
+        with pytest.raises(RuntimeError, match=expected_message):
+            bootstrap._assert_fresh(updater, proc_root=_fake_proc(tmp_path / "proc-timeout"))
+    elif failure == "nonzero":
+        with pytest.raises(RuntimeError, match=expected_message):
+            bootstrap._assert_fresh(updater, proc_root=_fake_proc(tmp_path / "proc-nonzero"))
+    else:
+        with pytest.raises(ValueError, match=expected_message):
+            bootstrap._assert_fresh(updater, proc_root=_fake_proc(tmp_path / "proc-busy"))
+
+
+def test_assert_fresh_accepts_absent_nvidia_smi_with_positive_cpu_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _configure_gpu_inventory(tmp_path / "inventory", monkeypatch)
+    updater = FakeUpdater(tmp_path / "updater")
+    original_runner = updater.runner
+
+    def runner(argv: list[str], **kwargs: Any) -> Any:
+        if argv and argv[0] == "nvidia-smi":
+            raise FileNotFoundError(errno.ENOENT, "nvidia-smi is unavailable", argv[0])
+        return original_runner(argv, **kwargs)
+
+    monkeypatch.setattr(updater, "runner", runner)
+    assert (
+        bootstrap._assert_fresh(updater, proc_root=_fake_proc(tmp_path / "proc-cpu-only")) is None
+    )
+
+
+def test_failed_preinstall_freshness_is_recorded_in_private_hold_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = FakeUpdater(tmp_path)
+    token = "t" * 40
+    transaction = {
+        "phase": "hold_required",
+        "progress": "catalog_initialized",
+        "maintenanceToken": token,
+    }
+    path = updater.state_root / "native-first-bootstrap" / "first-core-bootstrap.json"
+    cause = FileNotFoundError(errno.ENOENT, f"missing {token}", "nvidia-smi")
+
+    def fail_freshness(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError(f"GPU probe failed for {token}") from cause
+
+    monkeypatch.setattr(bootstrap, "_assert_fresh", fail_freshness)
+    with pytest.raises(RuntimeError, match="GPU probe failed"):
+        bootstrap._assert_fresh_with_recovery_record(
+            updater,
+            transaction,
+            path,
+            proc_root=tmp_path / "unused-proc",
+            planned_components=[],
+            require_empty_kernel_state=True,
+            expected_bootstrap_broker={},
+        )
+
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert stat.S_IMODE(path.lstat().st_mode) == 0o600
+    assert persisted["phase"] == "hold_required"
+    assert persisted["progress"] == "catalog_initialized"
+    assert persisted["maintenanceToken"] == token
+    assert persisted["failure"] == "GPU probe failed for [REDACTED]"
+    chain = persisted["preInstallFreshnessError"]["chain"]
+    assert [entry["type"] for entry in chain] == ["RuntimeError", "FileNotFoundError"]
+    assert chain[0]["message"] == "GPU probe failed for [REDACTED]"
+    assert chain[1]["message"] == "[Errno 2] missing [REDACTED]: 'nvidia-smi'"
+    assert chain[1]["errno"] == errno.ENOENT
+    assert token not in json.dumps(persisted["preInstallFreshnessError"])
 
 
 def test_confirmation_binds_full_plan_and_rejects_tampering(
