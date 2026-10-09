@@ -14,6 +14,7 @@ import sys
 import tarfile
 import urllib.parse
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1885,6 +1886,233 @@ def test_static_web_release_guard_rejects_cyrene_owned_var_lib_ancestor(
 
     assert error.value.code == "UNSAFE_WEB_ROOT"
     assert service_owned.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("content_digest_case", "accepted"),
+    [("absent", True), ("null", True), ("matching", True), ("mismatching", False)],
+)
+def test_workload_sdk_stage_honors_optional_v1_content_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content_digest_case: str,
+    accepted: bool,
+) -> None:
+    component_id = updates.WORKLOAD_SDK_COMPONENT_ID
+    release_tag = "preview-" + "7e0fae9aae987e95ec42039bc96f7603c36771b6"
+    archive_name = (
+        "cyrene-runtime-maintenance-sdk-linux-ubuntu-24.04-x86_64-python-3.12-library.tar.gz"
+    )
+    wheel_name = "cyrene_runtime_maintenance-0.1.0-py3-none-any.whl"
+    distribution = "cyrene-runtime-maintenance"
+    dist_info = "cyrene_runtime_maintenance-0.1.0.dist-info"
+    wheel_members = {
+        "cyrene_runtime_maintenance/__init__.py": b'__version__ = "0.1.0"\n',
+        f"{dist_info}/METADATA": (
+            b"Metadata-Version: 2.1\nName: cyrene-runtime-maintenance\nVersion: 0.1.0\n"
+        ),
+        f"{dist_info}/WHEEL": (
+            b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+    }
+    record_rows = []
+    for name, payload in sorted(wheel_members.items()):
+        digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).decode().rstrip("=")
+        record_rows.append(f"{name},sha256={digest},{len(payload)}\n")
+    record_rows.append(f"{dist_info}/RECORD,,\n")
+    wheel_members[f"{dist_info}/RECORD"] = "".join(record_rows).encode("utf-8")
+    wheel_buffer = io.BytesIO()
+    with zipfile.ZipFile(wheel_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as wheel:
+        for name, payload in sorted(wheel_members.items()):
+            wheel.writestr(name, payload)
+    wheel_bytes = wheel_buffer.getvalue()
+    wheel_digest = "sha256:" + hashlib.sha256(wheel_bytes).hexdigest()
+    release_metadata = {
+        "distribution": distribution,
+        "version": "0.1.0",
+        "wheel": wheel_name,
+        "wheelSha256": wheel_digest,
+    }
+    sdk_metadata_bytes = json.dumps(release_metadata, sort_keys=True).encode("utf-8") + b"\n"
+    archive_members = {"sdk-release.json": sdk_metadata_bytes, wheel_name: wheel_bytes}
+    file_map = {
+        name: "sha256:" + hashlib.sha256(payload).hexdigest()
+        for name, payload in sorted(archive_members.items())
+    }
+    archive_buffer = io.BytesIO()
+    with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+        for name, payload in sorted(archive_members.items()):
+            entry = tarfile.TarInfo(name)
+            entry.mode = 0o644
+            entry.size = len(payload)
+            archive.addfile(entry, io.BytesIO(payload))
+    archive_bytes = archive_buffer.getvalue()
+    artifact_digest = "sha256:" + hashlib.sha256(archive_bytes).hexdigest()
+    repository = "DoHorizon-AI/Cyrene-Platform"
+    publisher_id = "official-platform-sdk"
+    workflow = f"{repository}/.github/workflows/component-release.yml"
+    artifact_uri = f"https://github.com/{repository}/releases/download/{release_tag}/{archive_name}"
+    artifact = {
+        "kind": "python-bundle",
+        "format": "tar.gz",
+        "uri": artifact_uri,
+        "sha256": artifact_digest,
+        "sizeBytes": len(archive_bytes),
+        "files": file_map,
+    }
+    manifest: dict[str, Any] = {
+        "schemaVersion": 1,
+        "releaseId": release_tag,
+        "componentId": component_id,
+        "version": "0.1.0",
+        "channel": "preview",
+        "target": {
+            "os": "linux",
+            "osVersion": "24.04",
+            "distribution": "ubuntu",
+            "distributionVersion": "24.04",
+            "architecture": "x86_64",
+            "abi": "glibc-2.39",
+            "runtime": "python:3.12",
+        },
+        "artifact": artifact,
+        "dependencies": [],
+        "restart": {"group": "none"},
+        "source": {
+            "repository": f"https://github.com/{repository}",
+            "ref": "refs/heads/develop",
+            "commit": release_tag.removeprefix("preview-"),
+        },
+        "provenance": {
+            "attestation": {
+                "repository": repository,
+                "workflow": workflow,
+                "subjectName": archive_name,
+            }
+        },
+    }
+    if content_digest_case == "null":
+        manifest["contentDigest"] = None
+    elif content_digest_case == "matching":
+        manifest["contentDigest"] = artifact_digest
+    elif content_digest_case == "mismatching":
+        manifest["contentDigest"] = "sha256:" + "f" * 64
+    manifest_digest = updates._digest_json(manifest, "manifestDigest")
+    manifest["manifestDigest"] = manifest_digest
+    component = {
+        "componentId": component_id,
+        "publisher": repository,
+        "publisherId": publisher_id,
+    }
+    candidate = updates.Candidate(
+        component=component,
+        manifest=manifest,
+        manifest_digest=manifest_digest,
+        artifact_digest=artifact_digest,
+        manifest_uri=(
+            f"https://github.com/{repository}/releases/download/{release_tag}/"
+            "cyrene-runtime-maintenance-sdk-linux-ubuntu-24-04-x86-64-glibc-2-39-python-3-12.manifest.json"
+        ),
+        index={},
+        index_uri=(
+            f"https://github.com/{repository}/releases/download/{release_tag}/"
+            "component-release-index-v1.json"
+        ),
+        release_assets=(
+            {
+                "name": archive_name,
+                "browser_download_url": artifact_uri,
+                "digest": artifact_digest,
+                "size": len(archive_bytes),
+            },
+        ),
+        release_tag=release_tag,
+        index_asset_name="component-release-index-v1.json",
+        index_asset_digest="sha256:" + "a" * 64,
+        manifest_asset_digest="sha256:" + "b" * 64,
+    )
+    resolution_component = {
+        "componentId": component_id,
+        "releaseId": release_tag,
+        "targetId": updates.WORKLOAD_SDK_TARGET_ID,
+        "indexIdentity": {
+            "assetName": "component-release-index-v1.json",
+            "assetDigest": candidate.index_asset_digest,
+        },
+        "publisherIdentity": {
+            "id": publisher_id,
+            "repository": repository,
+            "workflow": workflow,
+            "tagFormat": "source-sha",
+        },
+        "attestationRef": {
+            "repository": repository,
+            "workflow": workflow,
+            "sourceCommit": release_tag.removeprefix("preview-"),
+            "subjectName": archive_name,
+            "subjectDigest": artifact_digest,
+        },
+    }
+    stage_root = tmp_path / "staged"
+    stage_root.mkdir(mode=0o700)
+    updater = _empty_updater(tmp_path)
+    updater.publisher_ids = {
+        publisher_id: {
+            "id": publisher_id,
+            "repository": repository,
+            "workflow": workflow,
+            "tagFormat": "source-sha",
+        }
+    }
+    fetched: list[str] = []
+
+    def get_archive(uri: str, **_kwargs: object) -> bytes:
+        fetched.append(uri)
+        assert uri == artifact_uri
+        return archive_bytes
+
+    proof_calls: list[dict[str, Any]] = []
+
+    def verify_attestation(**kwargs: Any) -> bytes:
+        proof_calls.append(kwargs)
+        return b"verified-test-proof"
+
+    monkeypatch.setattr(updater, "_get_bytes", get_archive)
+    monkeypatch.setattr(updater, "_release_attestation_bundle", verify_attestation)
+
+    if not accepted:
+        with pytest.raises(updates.UpdateError) as error:
+            updater._stage_workload_sdk(
+                candidate,
+                stage_root,
+                "plan-" + "1" * 32,
+                "sha256:" + "1" * 64,
+                resolution_component,
+            )
+        assert error.value.code == "SDK_RELEASE_INVALID"
+        assert fetched == [artifact_uri]
+        assert len(proof_calls) == 1
+        return
+
+    staged = updater._stage_workload_sdk(
+        candidate,
+        stage_root,
+        "plan-" + "1" * 32,
+        "sha256:" + "1" * 64,
+        resolution_component,
+    )
+    staged_identity = staged["stagedIdentity"]
+    assert staged["digest"] == artifact_digest
+    assert staged["wheelDigest"] == wheel_digest
+    assert fetched == [artifact_uri]
+    assert len(proof_calls) == 1
+    assert proof_calls[0]["repository"] == repository
+    assert proof_calls[0]["workflow"] == workflow
+    assert proof_calls[0]["source_commit"] == release_tag.removeprefix("preview-")
+    assert proof_calls[0]["subject_name"] == archive_name
+    assert proof_calls[0]["digest"] == artifact_digest
+    assert Path(staged_identity["archivePath"]).read_bytes() == archive_bytes
+    assert Path(staged_identity["wheelPath"]).read_bytes() == wheel_bytes
 
 
 def test_static_web_workload_uses_opt_root_through_uninstall_and_preserves_user_state(
