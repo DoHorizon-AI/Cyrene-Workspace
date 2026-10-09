@@ -2939,7 +2939,7 @@ jobs:
               result={"data":tree(data,uid,gid),"artifacts":tree(artifacts,uid,gid),"sourceToken":source,"apiBearer":bearer,"stagedCredentialPresent":staged_present}
               expected=supplied.get("expected")
               if expected is not None:
-                  if result["sourceToken"].get("sha256Internal")!=expected.get("sourceTokenSha256Internal") or result["apiBearer"].get("sha256Internal")!=expected.get("apiBearerSha256Internal"):
+                  if result["sourceToken"].get("sha256Internal")!=expected.get("sourceToken",{}).get("sha256Internal") or result["apiBearer"].get("sha256Internal")!=expected.get("apiBearer",{}).get("sha256Internal"):
                       fail("Echo protected credential identity changed during uninstall")
                   for name in ("data","artifacts"):
                       if (result[name].get("device"),result[name].get("inode"),result[name].get("uid"),result[name].get("gid"))!=(expected[name].get("device"),expected[name].get("inode"),expected[name].get("uid"),expected[name].get("gid")):
@@ -2960,6 +2960,25 @@ jobs:
               )
               result = json.loads(completed.stdout)
               return result
+
+          def echo_artifact_retention_readback(
+              before: dict[str, Any], after_evaluation: dict[str, Any], after_uninstall: dict[str, Any]
+          ) -> dict[str, Any]:
+              """Prove the API-created artifact survives only-Echo uninstall. | 验证 API 新建产物在仅卸载 Echo 后仍保留。"""
+              before_tree = before.get("artifacts")
+              evaluation_tree = after_evaluation.get("artifacts")
+              uninstall_tree = after_uninstall.get("artifacts")
+              require(isinstance(before_tree, dict) and isinstance(evaluation_tree, dict) and isinstance(uninstall_tree, dict), "Echo artifact tree readback is malformed")
+              require(evaluation_tree.get("fileCount", 0) > before_tree.get("fileCount", 0), "Echo API evaluation did not add a persistent artifact")
+              require(uninstall_tree.get("treeSha256") == evaluation_tree.get("treeSha256"), "Echo user artifacts were not preserved by uninstall")
+              return {
+                  "filesBeforeEvaluation": before_tree["fileCount"],
+                  "filesAfterEvaluation": evaluation_tree["fileCount"],
+                  "filesAfterUninstall": uninstall_tree["fileCount"],
+                  "artifactTreeSha256": evaluation_tree["treeSha256"],
+                  "evaluationArtifactAdded": True,
+                  "evaluationArtifactsPreserved": True,
+              }
 
           def echo_product_evaluation(host: dict[str, Any]) -> dict[str, Any]:
               """Run the installed Echo Product API using only its protected in-memory bearer. | 使用受保护的内存 bearer 验收已安装 Echo API。"""
@@ -3307,8 +3326,8 @@ jobs:
               assert_installed_components(retained_rows, [sdk_pin, exact_pin], "Echo uninstall retained Runtime SDK and exact-match installation")
               storage_after = echo_storage_probe(installed_status["hostMetadata"]["echo"], expected=storage_after_evaluation)
               require(storage_after.get("stagedCredentialPresent") is False, "Echo staged ActivitySource credential was not removed")
-              require(storage_after["artifacts"].get("treeSha256") == storage_before["artifacts"].get("treeSha256"), "Echo user artifacts were not preserved by uninstall")
               require(storage_after["data"].get("entryCount", 0) > 0, "Echo product data was removed by uninstall")
+              artifact_retention = echo_artifact_retention_readback(storage_before, storage_after_evaluation, storage_after)
 
               catalyst = pins()["workloads"]["catalyst"]
               catalyst_after = workload_request("status", workloadId="catalyst")
@@ -3332,7 +3351,7 @@ jobs:
                   "install": {"planId": checked["planId"], "planDigest": checked["planDigest"], "status": applied["status"], "identity": installed_identity},
                   "evaluation": evaluation,
                   "uninstall": {"planId": uninstall_check["planId"], "planDigest": uninstall_check["planDigest"], "directMemberIds": ["cyrene-echo"], "status": uninstalled["status"], "installed": False},
-                  "persistentData": {"dataDirectoryRetained": True, "artifactDirectoryRetained": True, "artifactTreeSha256": storage_after_evaluation["artifacts"]["treeSha256"], "artifactFileCount": storage_after_evaluation["artifacts"]["fileCount"], "activitySourceTokenRetained": storage_after["sourceToken"].get("present") is True, "apiBearerStatePreserved": storage_after["apiBearer"].get("present") is storage_after_evaluation["apiBearer"].get("present"), "stagedActivitySourceCredentialRemoved": storage_after.get("stagedCredentialPresent") is False},
+                  "persistentData": {"dataDirectoryRetained": True, "artifactDirectoryRetained": True, **artifact_retention, "activitySourceTokenRetained": storage_after["sourceToken"].get("present") is True, "apiBearerStatePreserved": storage_after["apiBearer"].get("present") is storage_after_evaluation["apiBearer"].get("present"), "stagedActivitySourceCredentialRemoved": storage_after.get("stagedCredentialPresent") is False},
                   "catalystPreserved": {"catalogDigest": catalyst_after["catalogDigest"], "installedComponentCount": len(catalyst["selectedComponents"]), "healthStatus": health["status"]},
                   "catalystBindingCountPreserved": len(catalyst_bindings),
                   "resourceIdsStored": False,

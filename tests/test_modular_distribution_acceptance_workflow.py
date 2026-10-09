@@ -6,8 +6,11 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import stat
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -314,6 +317,132 @@ def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: 
     )
     assert '"--cert-oidc-issuer", "https://token.actions.githubusercontent.com"' in source
     assert "Runnable Catalyst core" in source
+
+
+def test_echo_storage_probe_compares_nested_secret_identity_without_retaining_raw_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real probe shape keeps internal hashes nested and withholds child output."""
+    owner_uid = os.geteuid()
+    owner_gid = os.getegid()
+    assert owner_uid > 0
+    root = tmp_path / "echo"
+    data = root / "data"
+    artifacts = data / "artifacts"
+    data.mkdir(parents=True)
+    artifacts.mkdir()
+    (data / "state.json").write_text('{"fixture":true}\n', encoding="utf-8")
+    source_token = root / "source-token"
+    api_bearer = root / "api-bearer"
+    source_token.write_bytes(b"source-token-fixture\n")
+    source_token.chmod(stat.S_IRUSR)
+    api_bearer.write_bytes(b"api-bearer-fixture\n")
+    api_bearer.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    staged_root = root / "staged"
+    staged = staged_root / "echo-test" / "activity-token"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(b"staged-token-fixture\n")
+    staged.chmod(stat.S_IRUSR)
+    host = {
+        "hostUid": owner_uid,
+        "hostGid": owner_gid,
+        "dataDirectory": str(data),
+        "artifactDirectory": str(artifacts),
+        "containerName": "echo-test",
+    }
+    module = _load_driver_module(tmp_path, "acceptance_driver_echo_storage_probe")
+    observed_calls: list[dict[str, object]] = []
+
+    def run_fake_probe(
+        command: list[str], *, label: str, input_text: str | None = None, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        assert label == "echo-persistent-data-and-credential-probe"
+        assert kwargs.get("retain_output") is False
+        assert input_text is not None
+        for secret in ("source-token-fixture", "api-bearer-fixture", "staged-token-fixture"):
+            assert secret not in input_text
+        code = command[-1]
+        path_replacements = {
+            '"/var/lib/cyrene/echo"': json.dumps(str(data)),
+            '"/var/lib/cyrene/echo/artifacts"': json.dumps(str(artifacts)),
+            '"/etc/cyrene/runtime-activity-source-tokens/cyrene-echo.token"': json.dumps(
+                str(source_token)
+            ),
+            '"/etc/cyrene/secrets/catalyst-api-token"': json.dumps(str(api_bearer)),
+            '"/var/lib/cyrene/runtime-activity-source-tokens/oci"': json.dumps(str(staged_root)),
+            "[(0,0,0o400)]": "[(os.geteuid(),os.getegid(),0o400)]",
+            'cyrene=pwd.getpwnam("cyrene")': (
+                'cyrene=type("CyreneIdentity",(),{"pw_uid":os.geteuid(),"pw_gid":os.getegid()})()'
+            ),
+        }
+        for original, replacement in path_replacements.items():
+            assert original in code
+            code = code.replace(original, replacement)
+        child = subprocess.run(
+            [sys.executable, "-s", "-c", code],
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        observed_calls.append(
+            {"retainOutput": kwargs.get("retain_output"), "returnCode": child.returncode}
+        )
+        if child.returncode != 0:
+            raise RuntimeError("Echo probe failed; raw output withheld")
+        return child
+
+    monkeypatch.setattr(module, "run", run_fake_probe)
+
+    before = module.echo_storage_probe(host)
+    assert (
+        before["sourceToken"]["sha256Internal"]
+        == hashlib.sha256(b"source-token-fixture").hexdigest()
+    )
+    assert (
+        before["apiBearer"]["sha256Internal"] == hashlib.sha256(b"api-bearer-fixture").hexdigest()
+    )
+
+    (artifacts / "evaluation-fixture.zip").write_bytes(b"synthetic-evaluation-artifact")
+    after_evaluation = module.echo_storage_probe(host)
+    staged.unlink()
+    after_uninstall = module.echo_storage_probe(host, expected=after_evaluation)
+
+    assert (
+        after_uninstall["sourceToken"]["sha256Internal"] == before["sourceToken"]["sha256Internal"]
+    )
+    assert (
+        after_uninstall["apiBearer"]["sha256Internal"]
+        == after_evaluation["apiBearer"]["sha256Internal"]
+    )
+    assert all(call["retainOutput"] is False and call["returnCode"] == 0 for call in observed_calls)
+    wrong_expected = json.loads(json.dumps(after_evaluation))
+    wrong_expected["sourceToken"]["sha256Internal"] = "0" * 64
+    with pytest.raises(RuntimeError, match="raw output withheld"):
+        module.echo_storage_probe(host, expected=wrong_expected)
+
+
+def test_echo_uninstall_retention_uses_post_evaluation_artifact_baseline(tmp_path: Path) -> None:
+    """Uninstall must preserve the new API artifact, not compare to the older tree."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_echo_artifact_retention")
+    before = {"artifacts": {"fileCount": 1, "treeSha256": "before"}}
+    after_evaluation = {"artifacts": {"fileCount": 2, "treeSha256": "after-evaluation"}}
+
+    evidence = module.echo_artifact_retention_readback(
+        before,
+        after_evaluation,
+        {"artifacts": {"fileCount": 2, "treeSha256": "after-evaluation"}},
+    )
+
+    assert evidence["evaluationArtifactAdded"] is True
+    assert evidence["evaluationArtifactsPreserved"] is True
+    assert evidence["filesAfterUninstall"] == 2
+    with pytest.raises(RuntimeError, match="not preserved"):
+        module.echo_artifact_retention_readback(
+            before,
+            after_evaluation,
+            {"artifacts": {"fileCount": 1, "treeSha256": "before"}},
+        )
 
 
 @pytest.mark.parametrize(
