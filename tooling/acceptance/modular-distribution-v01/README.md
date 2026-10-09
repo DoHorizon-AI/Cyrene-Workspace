@@ -131,14 +131,22 @@ ActivitySource mutation scopes 和经认证的 Platform UDS 状态，并要求�
 
 `release-pins-v1.schema.json` constrains the root-supplied expected identities. Pins do
 not choose a “latest” release and do not provide artifact bytes or runtime state.
-The resolver's `check` response must select exactly the pinned component set and
-preserve each pinned target, version, release tag, manifest digest, artifact digest,
-publisher workflow, index digest, and attestation source commit before `stage` or
-`apply` can run.
+Each workload separates direct roots in `selectedComponents` from dependency-only
+identities in `dependencyComponents`. Before `stage` or `apply`, the driver derives
+the direct selection and full transitive closure from the already verified signed
+Catalog, compares every `closureReasons` edge with the resolver response, and
+requires both pin arrays to partition that exact closure. The resolver's check and
+stage rows must then match all pinned target, version, release tag, manifest and
+artifact digests, publisher workflow, index digest, and attestation source identities.
+Shared dependencies may have several distinct closure reasons but are pinned once;
+build-only dependencies are excluded as they are by the resolver.
 
 `release-pins-v1.schema.json` 约束 root 提供的预期身份。pins 不选择“latest”版本，也不提供制品字节或运行时状态。
-`check` 必须在 `stage` 或 `apply` 前返回与 pins 完全相同的组件集合、target、版本、release tag、manifest/artifact
-摘要、publisher workflow、index 摘要和 attestation source commit。
+每个 workload 将直接根组件放在 `selectedComponents`，将仅由依赖到达的身份放在 `dependencyComponents`。
+`stage` 或 `apply` 前，驱动会根据已验签的 Catalog 推导直接选择和完整传递闭包，逐条对照 resolver 返回的
+`closureReasons`，并要求两组 pins 恰好划分该闭包。随后要求 `check` 与 `stage` 行中的全部 pinned target、版本、
+release tag、manifest/artifact 摘要、publisher workflow、index 摘要及 attestation source 身份完全一致。共享依赖可有多条
+不同 closure reason，但只 pin 一次；与 resolver 一样，build-only 依赖不进入闭包。
 
 ## Evidence and phase semantics / 证据与阶段状态
 

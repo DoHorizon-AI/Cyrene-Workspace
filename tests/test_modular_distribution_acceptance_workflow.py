@@ -123,6 +123,10 @@ def _valid_pins() -> dict[str, object]:
         component("cyrene-tools-document-parsing", "linux-ubuntu-24.04-x86_64-python-3.12"),
         component("cyrene-tools-knowledge-preparation", "linux-ubuntu-24.04-x86_64-python-3.12"),
     ]
+    dependency_components = [
+        component("cy-package-runtime", "linux-ubuntu-24.04-x86_64-python-3.12"),
+        component("cyrene-runtime-maintenance", "linux-ubuntu-24.04-x86_64-python-3.12"),
+    ]
     return {
         "schemaVersion": 1,
         "nativeInstaller": {
@@ -162,6 +166,7 @@ def _valid_pins() -> dict[str, object]:
                     "healthPath": "/healthz",
                 },
                 "selectedComponents": selected_components,
+                "dependencyComponents": dependency_components,
             }
         },
     }
@@ -185,6 +190,7 @@ def _with_exact_match_plugins(pins: dict[str, object]) -> dict[str, object]:
             rows["cyrene-runtime-maintenance-sdk"],
             exact_match,
         ],
+        "dependencyComponents": json.loads(json.dumps(catalyst["dependencyComponents"])),
     }
     return pins
 
@@ -240,6 +246,247 @@ def _verified_catalyst_catalog() -> dict[str, object]:
             }
         ],
     }
+
+
+def _dependency_closure_catalog() -> dict[str, object]:
+    """Build a signed-catalog graph with shared and transitive dependency paths."""
+    return {
+        "schemaVersion": 2,
+        "generation": 15,
+        "components": [
+            {
+                "componentId": "required-root",
+                "dependencies": [
+                    {"componentId": "shared-runtime", "versionRange": ">=1.0.0"},
+                    {"componentId": "build-helper", "versionRange": None},
+                ],
+            },
+            {
+                "componentId": "recommended-root",
+                "dependencies": [{"componentId": "shared-runtime", "versionRange": "=1.0.0"}],
+            },
+            {"componentId": "optional-root", "dependencies": []},
+            {"componentId": "choice-root", "dependencies": []},
+            {
+                "componentId": "shared-runtime",
+                "dependencies": [{"componentId": "leaf-runtime", "versionRange": "<2.0.0"}],
+            },
+            {"componentId": "leaf-runtime", "dependencies": []},
+            {"componentId": "build-helper", "role": "build-dependency", "dependencies": []},
+        ],
+        "workloads": [
+            {
+                "workloadId": "catalyst",
+                "requiredComponents": ["required-root"],
+                "recommendedComponents": ["recommended-root"],
+                "optionalComponents": ["optional-root"],
+                "choiceGroups": [{"choiceId": "provider", "componentIds": ["choice-root"]}],
+            }
+        ],
+    }
+
+
+def _dependency_closure_workload() -> dict[str, object]:
+    """Build direct and dependency-only identity pins for the closure fixture."""
+    root_ids = ["required-root", "recommended-root", "optional-root", "choice-root"]
+    dependency_ids = ["leaf-runtime", "shared-runtime"]
+
+    def identity(component_id: str) -> dict[str, str]:
+        return {"componentId": component_id, "targetId": "linux-test"}
+
+    return {
+        "workloadId": "catalyst",
+        "selectedComponents": [identity(component_id) for component_id in root_ids],
+        "dependencyComponents": [identity(component_id) for component_id in dependency_ids],
+    }
+
+
+def _plugin_dependency_catalog() -> dict[str, object]:
+    """Build the exact-match -> package runtime -> runtime maintenance dependency closure."""
+    return {
+        "schemaVersion": 2,
+        "generation": 15,
+        "components": [
+            {"componentId": "cyrene-runtime-maintenance-sdk", "dependencies": []},
+            {
+                "componentId": "cyrene-evaluation-exact-match",
+                "dependencies": [
+                    {"componentId": "cy-package-runtime", "versionRange": ">=0.1.0, <0.2.0"}
+                ],
+            },
+            {
+                "componentId": "cy-package-runtime",
+                "dependencies": [
+                    {"componentId": "cyrene-runtime-maintenance", "versionRange": ">=0.1.0, <0.2.0"}
+                ],
+            },
+            {"componentId": "cyrene-runtime-maintenance", "dependencies": []},
+        ],
+        "workloads": [
+            {
+                "workloadId": "plugins",
+                "requiredComponents": ["cyrene-runtime-maintenance-sdk"],
+                "recommendedComponents": [],
+                "optionalComponents": ["cyrene-evaluation-exact-match"],
+                "choiceGroups": [],
+            }
+        ],
+    }
+
+
+def _write_verified_catalog_fixture(
+    module: object,
+    evidence_root: Path,
+    pins: dict[str, object],
+    catalog: dict[str, object],
+) -> None:
+    """Write a test Catalog under the same verified-release path consumed by the driver."""
+    raw = json.dumps(catalog, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    catalog_pin = pins["catalog"]
+    catalog_pin["sha256"] = hashlib.sha256(raw).hexdigest()
+    catalog_pin["sizeBytes"] = len(raw)
+    for workload in pins["workloads"].values():
+        workload["catalogDigest"] = "sha256:" + catalog_pin["sha256"]
+    catalog_path = evidence_root / "downloads" / "official-catalog-v2" / catalog_pin["assetName"]
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_path.write_bytes(raw)
+    module.write_json(evidence_root / "release-pins-v1.json", pins)
+
+
+def _ready_pinned_workload_check(
+    module: object,
+    workload: dict[str, object],
+    catalog: dict[str, object],
+    selections: dict[str, object],
+) -> dict[str, object]:
+    """Build one synthetic ready response whose rows/reasons match the Catalog closure."""
+    closure = module.derive_catalog_workload_closure(catalog, workload["workloadId"], selections)
+    identity_rows = module.workload_component_pins(workload)
+    return {
+        "status": "ready",
+        "workloadId": workload["workloadId"],
+        "targetId": workload["targetId"],
+        "channel": workload["channel"],
+        "action": "install",
+        "catalogDigest": workload["catalogDigest"],
+        "planId": "plan-" + "5" * 32,
+        "planDigest": "sha256:" + "6" * 64,
+        "components": identity_rows,
+        "resolution": {
+            "catalogDigest": workload["catalogDigest"],
+            "channel": workload["channel"],
+            "planDigestMaterial": {"channel": workload["channel"]},
+            "selectionBinding": closure["normalizedSelections"],
+            "closureReasons": closure["closureReasons"],
+            "selectedComponents": identity_rows,
+        },
+    }
+
+
+def test_catalog_closure_pins_cover_transitive_shared_dependencies_and_skip_build_only(
+    tmp_path: Path,
+) -> None:
+    """Catalog graph and resolver reasons account for dependencies without hard-coded closure size."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_catalog_closure")
+    selections = {
+        "includeComponentIds": ["optional-root"],
+        "excludeComponentIds": [],
+        "choices": {"provider": "choice-root"},
+    }
+    closure = module.derive_catalog_workload_closure(
+        _dependency_closure_catalog(), "catalyst", selections
+    )
+    workload = _dependency_closure_workload()
+
+    assert closure["directComponentIds"] == [
+        "choice-root",
+        "optional-root",
+        "recommended-root",
+        "required-root",
+    ]
+    assert closure["closureComponentIds"] == [
+        "choice-root",
+        "leaf-runtime",
+        "optional-root",
+        "recommended-root",
+        "required-root",
+        "shared-runtime",
+    ]
+    assert closure["dependencyComponentIds"] == ["leaf-runtime", "shared-runtime"]
+    assert "build-helper" not in closure["closureComponentIds"]
+    shared_reasons = [
+        row for row in closure["closureReasons"] if row["componentId"] == "shared-runtime"
+    ]
+    assert {row["rootComponentId"] for row in shared_reasons} == {
+        "recommended-root",
+        "required-root",
+    }
+    assert len(shared_reasons) == 2
+    assert module.assert_workload_pins_match_closure(workload, closure, "closure fixture") == [
+        *workload["selectedComponents"],
+        *workload["dependencyComponents"],
+    ]
+
+
+def test_catalog_closure_rejects_missing_transitive_or_unreachable_identity_pins(
+    tmp_path: Path,
+) -> None:
+    """A dependency pin must cover the complete transitive closure and nothing outside it."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_catalog_closure_pins")
+    closure = module.derive_catalog_workload_closure(
+        _dependency_closure_catalog(),
+        "catalyst",
+        {
+            "includeComponentIds": ["optional-root"],
+            "excludeComponentIds": [],
+            "choices": {"provider": "choice-root"},
+        },
+    )
+    workload = _dependency_closure_workload()
+    workload["dependencyComponents"].remove(
+        next(
+            row for row in workload["dependencyComponents"] if row["componentId"] == "leaf-runtime"
+        )
+    )
+    with pytest.raises(
+        RuntimeError, match="dependency pin set differs from transitive Catalog closure"
+    ):
+        module.assert_workload_pins_match_closure(workload, closure, "missing transitive pin")
+
+    workload = _dependency_closure_workload()
+    workload["dependencyComponents"].append(
+        {"componentId": "unreachable-extra", "targetId": "linux-test"}
+    )
+    with pytest.raises(
+        RuntimeError, match="dependency pin set differs from transitive Catalog closure"
+    ):
+        module.assert_workload_pins_match_closure(workload, closure, "unreachable extra pin")
+
+
+def test_resolver_closure_reasons_preserve_multiple_paths_and_reject_duplicate_rows(
+    tmp_path: Path,
+) -> None:
+    """Shared dependencies retain one reason per distinct root path, not duplicate records."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_closure_reasons")
+    closure = module.derive_catalog_workload_closure(
+        _dependency_closure_catalog(),
+        "catalyst",
+        {
+            "includeComponentIds": ["optional-root"],
+            "excludeComponentIds": [],
+            "choices": {"provider": "choice-root"},
+        },
+    )
+    reasons = closure["closureReasons"]
+    module.assert_exact_closure_reasons(reasons, reasons, "valid shared dependency closure")
+    shared = next(row for row in reasons if row["componentId"] == "shared-runtime")
+
+    with pytest.raises(RuntimeError, match="closureReasons differ"):
+        module.assert_exact_closure_reasons(reasons[:-1], reasons, "missing dependency path")
+    with pytest.raises(RuntimeError, match="closureReasons differ"):
+        module.assert_exact_closure_reasons(
+            [*reasons, shared], reasons, "duplicate dependency reason"
+        )
 
 
 def test_workflow_has_no_source_checkout_and_compiles_embedded_driver(tmp_path: Path) -> None:
@@ -1098,6 +1345,9 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
             catalyst_rows["cyrene-runtime-maintenance-sdk"],
             exact_match,
         ],
+        "dependencyComponents": json.loads(
+            json.dumps(pins["workloads"]["catalyst"]["dependencyComponents"])
+        ),
     }
     jsonschema.Draft202012Validator(schema).validate(pins)
     module.validate_pin_shape(pins)
@@ -1782,7 +2032,7 @@ def test_offline_stage_failure_resumes_and_repeats_the_same_exact_plan(
         "planDigest": "sha256:" + "2" * 64,
         "channel": workload["channel"],
     }
-    selected = workload["selectedComponents"]
+    selected = module.workload_component_pins(workload)
     staged_rows = [{**row, "status": "staged"} for row in selected]
     staged_result = {
         "status": "staged",
@@ -1871,7 +2121,9 @@ def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
         "targetId": workload["targetId"],
         "channel": workload["channel"],
         "action": "install",
-        "components": [{**row, "status": "staged"} for row in workload["selectedComponents"]],
+        "components": [
+            {**row, "status": "staged"} for row in module.workload_component_pins(workload)
+        ],
     }
 
     def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
@@ -1880,7 +2132,7 @@ def test_isolated_cached_stage_is_recorded_without_claiming_retry_recovery(
                 "status": "ready",
                 "components": [
                     {"componentId": row["componentId"], "installed": False}
-                    for row in workload["selectedComponents"]
+                    for row in module.workload_component_pins(workload)
                 ],
             }
         assert operation == "stage"
@@ -1913,31 +2165,25 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
     monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
     module = _load_driver_module(tmp_path, "acceptance_driver_exact_match_fallback")
     pins = _with_exact_match_plugins(_valid_pins())
-    module.write_json(evidence_root / "release-pins-v1.json", pins)
     catalyst = pins["workloads"]["catalyst"]
     plugins = pins["workloads"]["plugins"]
+    catalog = _plugin_dependency_catalog()
+    _write_verified_catalog_fixture(module, evidence_root, pins, catalog)
     catalyst_check = {
         "planId": "plan-" + "3" * 32,
         "planDigest": "sha256:" + "4" * 64,
         "channel": catalyst["channel"],
     }
-    plugin_check = {
-        "status": "ready",
-        "workloadId": "plugins",
-        "targetId": plugins["targetId"],
-        "channel": plugins["channel"],
-        "action": "install",
-        "catalogDigest": plugins["catalogDigest"],
-        "planId": "plan-" + "5" * 32,
-        "planDigest": "sha256:" + "6" * 64,
-        "components": plugins["selectedComponents"],
-        "resolution": {
-            "catalogDigest": plugins["catalogDigest"],
-            "channel": plugins["channel"],
-            "planDigestMaterial": {"channel": plugins["channel"]},
-            "selectedComponents": plugins["selectedComponents"],
+    plugin_check = _ready_pinned_workload_check(
+        module,
+        plugins,
+        catalog,
+        {
+            "includeComponentIds": ["cyrene-evaluation-exact-match"],
+            "excludeComponentIds": [],
+            "choices": {},
         },
-    }
+    )
     plugin_staged = {
         "status": "staged",
         "planId": plugin_check["planId"],
@@ -1947,7 +2193,9 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
         "targetId": plugins["targetId"],
         "channel": plugins["channel"],
         "action": "install",
-        "components": [{**row, "status": "staged"} for row in plugins["selectedComponents"]],
+        "components": [
+            {**row, "status": "staged"} for row in module.workload_component_pins(plugins)
+        ],
     }
     catalyst_staged = {
         "status": "staged",
@@ -1958,7 +2206,9 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
         "targetId": catalyst["targetId"],
         "channel": catalyst["channel"],
         "action": "install",
-        "components": [{**row, "status": "staged"} for row in catalyst["selectedComponents"]],
+        "components": [
+            {**row, "status": "staged"} for row in module.workload_component_pins(catalyst)
+        ],
     }
     plugin_status = {
         "status": "ready",
@@ -1976,7 +2226,7 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
                 "installationId": None,
                 "verification": {"identityAttested": False},
             }
-            for row in plugins["selectedComponents"]
+            for row in module.workload_component_pins(plugins)
         ],
     }
     calls: list[tuple[str, dict[str, object]]] = []
@@ -2000,7 +2250,7 @@ def test_cached_catalyst_stage_uses_independent_exact_match_plugin_retry_without
                 "status": "ready",
                 "components": [
                     {"componentId": row["componentId"], "installed": False}
-                    for row in catalyst["selectedComponents"]
+                    for row in module.workload_component_pins(catalyst)
                 ],
             }
         assert operation == "stage"
@@ -2067,31 +2317,25 @@ def test_exact_match_plugin_fallback_reports_cache_without_claiming_failure_reco
     monkeypatch.setenv("ACCEPTANCE_ROOT", str(evidence_root))
     module = _load_driver_module(tmp_path, "acceptance_driver_exact_match_cached")
     pins = _with_exact_match_plugins(_valid_pins())
-    module.write_json(evidence_root / "release-pins-v1.json", pins)
     catalyst = pins["workloads"]["catalyst"]
     plugins = pins["workloads"]["plugins"]
+    catalog = _plugin_dependency_catalog()
+    _write_verified_catalog_fixture(module, evidence_root, pins, catalog)
     catalyst_checked = {
         "planId": "plan-" + "3" * 32,
         "planDigest": "sha256:" + "4" * 64,
         "channel": catalyst["channel"],
     }
-    plugin_checked = {
-        "status": "ready",
-        "workloadId": "plugins",
-        "targetId": plugins["targetId"],
-        "channel": plugins["channel"],
-        "action": "install",
-        "catalogDigest": plugins["catalogDigest"],
-        "planId": "plan-" + "5" * 32,
-        "planDigest": "sha256:" + "6" * 64,
-        "components": plugins["selectedComponents"],
-        "resolution": {
-            "catalogDigest": plugins["catalogDigest"],
-            "channel": plugins["channel"],
-            "planDigestMaterial": {"channel": plugins["channel"]},
-            "selectedComponents": plugins["selectedComponents"],
+    plugin_checked = _ready_pinned_workload_check(
+        module,
+        plugins,
+        catalog,
+        {
+            "includeComponentIds": ["cyrene-evaluation-exact-match"],
+            "excludeComponentIds": [],
+            "choices": {},
         },
-    }
+    )
     staged_by_id = {}
     for workload_id, workload, checked in (
         ("catalyst", catalyst, catalyst_checked),
@@ -2106,7 +2350,9 @@ def test_exact_match_plugin_fallback_reports_cache_without_claiming_failure_reco
             "targetId": workload["targetId"],
             "channel": workload["channel"],
             "action": "install",
-            "components": [{**row, "status": "staged"} for row in workload["selectedComponents"]],
+            "components": [
+                {**row, "status": "staged"} for row in module.workload_component_pins(workload)
+            ],
         }
 
     def fake_workload_request(operation: str, **fields: object) -> dict[str, object]:
@@ -2132,7 +2378,7 @@ def test_exact_match_plugin_fallback_reports_cache_without_claiming_failure_reco
                         "installationId": None,
                         "verification": {"identityAttested": False},
                     }
-                    for row in workload["selectedComponents"]
+                    for row in module.workload_component_pins(workload)
                 ],
             }
         assert operation == "stage"
