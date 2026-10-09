@@ -122,6 +122,95 @@ def _maintenance(*, request_id: str = REQUEST_ID) -> dict[str, Any]:
     }
 
 
+@pytest.mark.parametrize(
+    ("gate_generation", "eligible", "expected", "require_eligible", "uncertain", "accepted"),
+    [
+        (0, True, 0, True, False, True),
+        (0, True, None, True, False, False),
+        (0, False, 0, True, False, False),
+        (0, True, 0, False, False, False),
+        (True, True, 0, True, False, False),
+        (-1, True, 0, True, False, False),
+        (1, True, 0, True, False, False),
+        (1, True, True, True, False, False),
+        (1, False, 1, False, False, True),
+        (1, True, None, True, False, True),
+        (0, True, 0, False, True, True),
+        (1, False, 0, False, True, True),
+        (0, False, 0, False, True, False),
+        (1, True, 0, False, True, False),
+        (2, False, 0, False, True, False),
+        (0, True, 0, True, True, False),
+    ],
+)
+def test_fresh_core_broker_health_generation_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    gate_generation: int | bool,
+    eligible: Any,
+    expected: int | bool | None,
+    require_eligible: bool,
+    uncertain: bool,
+    accepted: bool,
+) -> None:
+    manifest_digest = _digest("health-broker-manifest")
+    artifact_digest = _digest("health-broker-archive")
+    broker_row = {
+        "version": "1.2.3",
+        "manifestDigest": manifest_digest,
+        "artifactDigest": artifact_digest,
+    }
+    broker_identity = {
+        "pointerIdentity": f"1.2.3--{manifest_digest.removeprefix('sha256:')}",
+        "manifestDigest": manifest_digest,
+        "artifactDigest": artifact_digest,
+    }
+    health = {
+        "status": "SERVING",
+        "protocol_version": "cyrene.runtime-maintenance.broker.v1",
+        "catalog_generation": 0,
+        "gate_generation": gate_generation,
+        "core_bootstrap_eligible": eligible,
+        "capabilities": [
+            "cyrene.runtime-maintenance.state.v2",
+            "cyrene.runtime-maintenance.binding-operations.v1",
+        ],
+    }
+    updater = SimpleNamespace(
+        _broker_request=lambda method, params: (
+            health
+            if method == "Health" and params == {}
+            else pytest.fail("Health validation issued an unexpected Broker request")
+        )
+    )
+    monkeypatch.setattr(
+        native_core,
+        "_verified_running_c10_broker",
+        lambda _updater, _proc_root: broker_identity,
+    )
+
+    if accepted:
+        broker, result = native_core._fresh_workload_core_broker_health(
+            updater,
+            broker_row,
+            proc_root=Path("/proc"),
+            expected_gate_generation=expected,
+            require_eligible=require_eligible,
+            allow_begin_result_uncertain=uncertain,
+        )
+        assert broker is broker_identity
+        assert result is health
+    else:
+        with pytest.raises(RuntimeError, match="does not prove generation-zero eligibility"):
+            native_core._fresh_workload_core_broker_health(
+                updater,
+                broker_row,
+                proc_root=Path("/proc"),
+                expected_gate_generation=expected,
+                require_eligible=require_eligible,
+                allow_begin_result_uncertain=uncertain,
+            )
+
+
 def _source_principals(token_path: Path) -> dict[str, dict[str, Any]]:
     return {SOURCE_ID: {"uid": SOURCE_UID, "gid": SOURCE_GID, "tokenPath": token_path}}
 
@@ -863,18 +952,24 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
             yield
 
         def _broker_request(
-            self, method: str, _params: dict[str, Any], *, request_id: str | None = None
+            self, method: str, params: dict[str, Any], *, request_id: str | None = None
         ) -> dict[str, Any]:
             events.append(f"broker:{method}")
             if method == "Health":
+                events.append("broker-health")
                 return {
                     "status": "SERVING",
                     "protocol_version": "cyrene.runtime-maintenance.broker.v1",
                     "catalog_generation": 0,
-                    "gate_generation": 1,
+                    "gate_generation": 0,
                     "core_bootstrap_eligible": True,
+                    "capabilities": [
+                        "cyrene.runtime-maintenance.state.v2",
+                        "cyrene.runtime-maintenance.binding-operations.v1",
+                    ],
                 }
             if method == "BeginCoreBootstrap":
+                assert params["expected_gate_generation"] == 0
                 return {
                     "status": "MAINTENANCE_ACTIVE",
                     "maintenance_origin": "CORE_BOOTSTRAP",
@@ -886,18 +981,19 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
             if method == "EndMaintenance":
                 assert request_id is not None
                 return {"status": "READY", "unlocked": True}
+
             if method == "ValidateMaintenanceHold":
                 return {
                     "valid": True,
-                    "request_id": _params["request_id"],
-                    "target_kind": _params["target_kind"],
-                    "plan_id": _params["plan_id"],
-                    "plan_digest": _params["plan_digest"],
-                    "component_artifact_digests": _params["component_artifact_digests"],
-                    "component_id": _params["component_id"],
-                    "artifact_digest": _params["artifact_digest"],
-                    "gate_generation": _params["expected_gate_generation"],
-                    "catalog_generation": _params["expected_catalog_generation"],
+                    "request_id": params["request_id"],
+                    "target_kind": params["target_kind"],
+                    "plan_id": params["plan_id"],
+                    "plan_digest": params["plan_digest"],
+                    "component_artifact_digests": params["component_artifact_digests"],
+                    "component_id": params["component_id"],
+                    "artifact_digest": params["artifact_digest"],
+                    "gate_generation": params["expected_gate_generation"],
+                    "catalog_generation": params["expected_catalog_generation"],
                 }
             raise AssertionError(method)
 
@@ -1059,35 +1155,23 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
         native_core, "_fresh_workload_core_check_empty_host", lambda *_args, **_kwargs: None
     )
 
-    def fresh_broker_health(*_args: Any, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-        events.append("broker-health")
-        return (
-            {
-                "componentId": "cyrene-runtime-maintenance",
-                "targetId": target_id,
-                "version": "1.2.3",
-                "manifestDigest": staged_components[3]["manifestDigest"],
-                "artifactDigest": archive_digest,
-                "pointerIdentity": (
-                    f"1.2.3--{staged_components[3]['manifestDigest'].removeprefix('sha256:')}"
-                ),
-                "mainPid": "42",
-                "executable": "/usr/lib/cyrene/fake-broker",
-            },
-            {
-                "status": "SERVING",
-                "protocol_version": "cyrene.runtime-maintenance.broker.v1",
-                "catalog_generation": 0,
-                "gate_generation": 1,
-                "core_bootstrap_eligible": True,
-                "capabilities": [
-                    "cyrene.runtime-maintenance.state.v2",
-                    "cyrene.runtime-maintenance.binding-operations.v1",
-                ],
-            },
-        )
-
-    monkeypatch.setattr(native_core, "_fresh_workload_core_broker_health", fresh_broker_health)
+    broker_identity = {
+        "componentId": "cyrene-runtime-maintenance",
+        "targetId": target_id,
+        "version": "1.2.3",
+        "manifestDigest": staged_components[3]["manifestDigest"],
+        "artifactDigest": archive_digest,
+        "pointerIdentity": (
+            f"1.2.3--{staged_components[3]['manifestDigest'].removeprefix('sha256:')}"
+        ),
+        "mainPid": "42",
+        "executable": "/usr/lib/cyrene/fake-broker",
+    }
+    monkeypatch.setattr(
+        native_core,
+        "_verified_running_c10_broker",
+        lambda _updater, _proc_root: broker_identity,
+    )
     monkeypatch.setattr(native_core, "_assert_fresh", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         native_core,
