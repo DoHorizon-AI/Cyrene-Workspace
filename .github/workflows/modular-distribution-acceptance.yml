@@ -103,6 +103,27 @@ jobs:
                   "cyrene-tools-knowledge-preparation",
               }
           )
+          FIRST_CORE_BOOTSTRAP_COMPONENT_IDS = (
+              "cyrene-linux-sys-adapter",
+              "cyrene-nvidia-adapter",
+              "cyrene-sandboxd",
+              "cyrene-runtime-maintenance",
+              "cyrene-kernel",
+              "cy-package-runtime",
+          )
+          FIRST_CORE_BOOTSTRAP_TARGET = "linux-ubuntu-24.04-x86_64-systemd"
+          FIRST_CORE_HOLD_ARTIFACT_KINDS = frozenset(
+              {"native-binary", "oci-image", "python-bundle", "static-web"}
+          )
+          FIRST_CORE_CATALOG_GROUP_ID = "package-runtime-native-v1"
+          FIRST_CORE_CATALOG_GROUP_MEMBERS = {
+              "cyrene-runtime-maintenance": "cyrene.runtime-maintenance.broker.v1",
+              "cyrene-kernel": "cyrene.runtime-maintenance.state.v2",
+              "cy-package-runtime": "cy-package-runtime.control.v1",
+          }
+          FIRST_CORE_CLOSURE_OVERLAP_IDS = frozenset(
+              {"cyrene-runtime-maintenance", "cy-package-runtime"}
+          )
           WORKLOAD_REQUEST_SEQUENCE = 0
           PREFLIGHT_STAGE = "native_release_metadata"
           PHASES = (
@@ -1077,10 +1098,41 @@ jobs:
                   },
               )
 
+          def validate_component_identity_pin(row: Any, context: str, channel: str) -> None:
+              """Validate one complete immutable component release identity pin."""
+              required_component_fields = {
+                  "componentId", "targetId", "version", "releaseId", "manifestDigest",
+                  "manifestAssetDigest", "digest", "publisherIdentity", "indexIdentity",
+                  "attestationRef",
+              }
+              require(isinstance(row, dict) and set(row) == required_component_fields, f"{context} component pin has unexpected fields")
+              require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}", str(row["version"])) is not None, f"{context} {row['componentId']} version is not a safe immutable path segment")
+              for digest_field in ("manifestDigest", "manifestAssetDigest", "digest"):
+                  require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(row[digest_field])) is not None, f"{context} {row['componentId']} has malformed {digest_field}")
+              publisher = row["publisherIdentity"]
+              require(isinstance(publisher, dict) and {"repository", "workflow"} <= set(publisher) <= {"id", "repository", "workflow", "tagFormat"}, f"{context} {row['componentId']} publisher pin is malformed")
+              index = row["indexIdentity"]
+              index_fields = {"publisherIdentity", "repository", "assetName", "assetUri", "assetDigest", "indexDigest", "channel", "releaseTag"}
+              require(isinstance(index, dict) and {"repository", "assetName", "assetDigest", "indexDigest", "channel", "releaseTag"} <= set(index) <= index_fields, f"{context} {row['componentId']} index pin is malformed")
+              channel_message = (
+                  "index channel differs from the workload plan channel"
+                  if context != "firstCoreBootstrap"
+                  else "index channel differs from the pinned preview channel"
+              )
+              require(index.get("channel") == channel, f"{context} {row['componentId']} {channel_message}")
+              require(index["assetName"] == "component-release-index-v1.json", f"{context} {row['componentId']} index asset is not canonical")
+              for digest_field in ("assetDigest", "indexDigest"):
+                  require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(index[digest_field])) is not None, f"{context} {row['componentId']} has malformed index {digest_field}")
+              proof = row["attestationRef"]
+              proof_fields = {"repository", "workflow", "sourceCommit", "subjectDigest", "subjectName", "sourceRef", "predicateType"}
+              require(isinstance(proof, dict) and {"repository", "workflow", "sourceCommit", "subjectDigest"} <= set(proof) <= proof_fields, f"{context} {row['componentId']} attestation pin is malformed")
+              require(re.fullmatch(r"[0-9a-f]{40}", str(proof["sourceCommit"])) is not None, f"{context} {row['componentId']} attestation source commit is malformed")
+              require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(proof["subjectDigest"])) is not None, f"{context} {row['componentId']} attestation subject digest is malformed")
+
           def validate_pin_shape(value: Any) -> None:
               """Fail before mutation if required exact identity assertions are missing."""
               require(isinstance(value, dict) and value.get("schemaVersion") == 1, "pins schemaVersion must be 1")
-              require(set(value) == {"schemaVersion", "nativeInstaller", "catalog", "workloads"}, "pins top-level fields differ from schema")
+              require(set(value) == {"schemaVersion", "nativeInstaller", "catalog", "firstCoreBootstrap", "workloads"}, "pins top-level fields differ from schema")
               native = value["nativeInstaller"]
               expected_native_fields = {
                   "releaseId", "sourceRepository", "sourceRef", "sourceCommit", "workflow",
@@ -1197,29 +1249,43 @@ jobs:
                               f"standalone plugins pin target differs for {component_id}",
                           )
                   for row in [*rows, *dependency_rows]:
-                      required_component_fields = {
-                          "componentId", "targetId", "version", "releaseId", "manifestDigest",
-                          "manifestAssetDigest", "digest", "publisherIdentity", "indexIdentity",
-                          "attestationRef",
-                      }
-                      require(set(row) == required_component_fields, f"{workload_id} component pin has unexpected fields")
-                      require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}", str(row["version"])) is not None, f"{workload_id} {row['componentId']} version is not a safe immutable path segment")
-                      for digest_field in ("manifestDigest", "manifestAssetDigest", "digest"):
-                          require(re.fullmatch(r"sha256:[0-9a-f]{64}", row[digest_field]) is not None, f"{workload_id} {row['componentId']} has malformed {digest_field}")
-                      publisher = row["publisherIdentity"]
-                      require(isinstance(publisher, dict) and {"repository", "workflow"} <= set(publisher) <= {"id", "repository", "workflow", "tagFormat"}, f"{workload_id} {row['componentId']} publisher pin is malformed")
-                      index = row["indexIdentity"]
-                      index_fields = {"publisherIdentity", "repository", "assetName", "assetUri", "assetDigest", "indexDigest", "channel", "releaseTag"}
-                      require(isinstance(index, dict) and {"repository", "assetName", "assetDigest", "indexDigest", "channel", "releaseTag"} <= set(index) <= index_fields, f"{workload_id} {row['componentId']} index pin is malformed")
-                      require(index.get("channel") == workload["channel"], f"{workload_id} {row['componentId']} index channel differs from the workload plan channel")
-                      require(index["assetName"] == "component-release-index-v1.json", f"{workload_id} {row['componentId']} index asset is not canonical")
-                      for digest_field in ("assetDigest", "indexDigest"):
-                          require(re.fullmatch(r"sha256:[0-9a-f]{64}", index[digest_field]) is not None, f"{workload_id} {row['componentId']} has malformed index {digest_field}")
-                      proof = row["attestationRef"]
-                      proof_fields = {"repository", "workflow", "sourceCommit", "subjectDigest", "subjectName", "sourceRef", "predicateType"}
-                      require(isinstance(proof, dict) and {"repository", "workflow", "sourceCommit", "subjectDigest"} <= set(proof) <= proof_fields, f"{workload_id} {row['componentId']} attestation pin is malformed")
-                      require(re.fullmatch(r"[0-9a-f]{40}", proof["sourceCommit"]) is not None, f"{workload_id} {row['componentId']} attestation source commit is malformed")
-                      require(re.fullmatch(r"sha256:[0-9a-f]{64}", proof["subjectDigest"]) is not None, f"{workload_id} {row['componentId']} attestation subject digest is malformed")
+                      validate_component_identity_pin(row, workload_id, workload["channel"])
+              bootstrap_pin = value["firstCoreBootstrap"]
+              require(
+                  isinstance(bootstrap_pin, dict)
+                  and set(bootstrap_pin) == {"schemaVersion", "cohortId", "catalogDigest", "targetId", "components"},
+                  "firstCoreBootstrap pin shape differs from schema",
+              )
+              require(bootstrap_pin["schemaVersion"] == 1 and bootstrap_pin["cohortId"] == "C10", "firstCoreBootstrap must pin the C10 cohort schema")
+              require(bootstrap_pin["catalogDigest"] == "sha256:" + catalog["sha256"], "firstCoreBootstrap Catalog digest pin differs from signed Catalog bytes")
+              require(bootstrap_pin["targetId"] == FIRST_CORE_BOOTSTRAP_TARGET, "firstCoreBootstrap target pin is invalid")
+              core_rows = bootstrap_pin["components"]
+              require(isinstance(core_rows, list) and len(core_rows) == len(FIRST_CORE_BOOTSTRAP_COMPONENT_IDS), "firstCoreBootstrap must pin all six C10 component identities")
+              core_ids = [row.get("componentId") for row in core_rows if isinstance(row, dict)]
+              require(
+                  len(core_ids) == len(core_rows)
+                  and len(core_ids) == len(set(core_ids))
+                  and set(core_ids) == set(FIRST_CORE_BOOTSTRAP_COMPONENT_IDS),
+                  "firstCoreBootstrap component pins differ from the exact six-member C10 cohort",
+              )
+              for row in core_rows:
+                  require(row.get("targetId") == FIRST_CORE_BOOTSTRAP_TARGET, f"firstCoreBootstrap {row.get('componentId')} target pin differs from the C10 systemd target")
+                  validate_component_identity_pin(row, "firstCoreBootstrap", "preview")
+              catalyst_rows = {
+                  row["componentId"]: row
+                  for row in workload_component_pins(workloads["catalyst"])
+              }
+              core_rows_by_id = {row["componentId"]: row for row in core_rows}
+              require(
+                  FIRST_CORE_CLOSURE_OVERLAP_IDS <= set(catalyst_rows)
+                  and FIRST_CORE_CLOSURE_OVERLAP_IDS <= set(core_rows_by_id),
+                  "firstCoreBootstrap must overlap the ordinary Catalyst closure at the two shared Platform identities",
+              )
+              for component_id in FIRST_CORE_CLOSURE_OVERLAP_IDS:
+                  require(
+                      catalyst_rows[component_id] == core_rows_by_id[component_id],
+                      f"firstCoreBootstrap identity differs from the ordinary Catalyst closure for {component_id}",
+                  )
               catalyst = workloads["catalyst"]
               require(catalyst.get("service") == {
                   "unit": "cyrene-catalyst.service",
@@ -1447,8 +1513,9 @@ jobs:
                       catalog_pin["sourceCommit"],
                       "workspace-catalog-v2",
                   )
+                  c10 = assert_first_core_catalog_matches_pins(load_json(official_catalog))
                   write_json(root() / "evidence" / "workspace-catalog-v2-release-api.json", official_catalog_release)
-                  return {"subject": official_catalog.name, "bundle": official_bundle.name, "status": "verified", "releaseId": official_catalog_release["tag_name"], "immutable": official_catalog_release["immutable"]}
+                  return {"subject": official_catalog.name, "bundle": official_bundle.name, "status": "verified", "releaseId": official_catalog_release["tag_name"], "immutable": official_catalog_release["immutable"], "firstCoreBootstrap": c10}
               phase("catalog_provenance", lambda: {
                   "releaseId": catalog_pin["releaseId"],
                   "repository": catalog_pin["repository"],
@@ -1691,6 +1758,251 @@ jobs:
               require(len(ids) == len(rows) and len(ids) == len(set(ids)), "workload component identity pins are malformed or duplicated")
               return rows
 
+          def canonical_json_digest(value: Any) -> str:
+              """Hash one resolver JSON value using its canonical sorted-key encoding."""
+              encoded = json.dumps(
+                  value,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ).encode("utf-8")
+              return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+          def first_core_bootstrap_pin() -> dict[str, Any]:
+              """Return the separate exact C10 pin block, outside the Catalyst closure."""
+              return pins()["firstCoreBootstrap"]
+
+          def first_core_immutable_projection(block: dict[str, Any]) -> dict[str, Any]:
+              """Return the immutable child-plan identity included in the parent digest."""
+              fields = (
+                  "schemaVersion",
+                  "cohortId",
+                  "planId",
+                  "planDigest",
+                  "catalogDigest",
+                  "targetId",
+                  "components",
+                  "componentArtifactDigests",
+                  "maintenanceComponentArtifactDigests",
+              )
+              require(all(field in block for field in fields), "firstCoreBootstrap immutable plan projection is incomplete")
+              return {field: block[field] for field in fields}
+
+          def expected_first_core_artifact_digests() -> dict[str, str]:
+              """Build the exact C10 artifact map from the six separately pinned identities."""
+              rows = first_core_bootstrap_pin()["components"]
+              return {row["componentId"]: row["digest"] for row in rows}
+
+          def expected_maintenance_artifact_digests(workload: dict[str, Any]) -> dict[str, str]:
+              """Build the Core-phase hold from C10 and signed non-plugin parent artifacts."""
+              expected: dict[str, str] = {}
+              catalog = verified_catalog_document()
+              catalog_rows = catalog.get("components")
+              require(isinstance(catalog_rows, list), "verified Catalog has no component rows for the Core maintenance hold")
+              components = {
+                  row.get("componentId"): row
+                  for row in catalog_rows
+                  if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+              }
+              require(len(components) == len(catalog_rows), "verified Catalog component rows are malformed or duplicated for the Core maintenance hold")
+
+              def add_hold(row: dict[str, Any], *, from_core_cohort: bool = False) -> None:
+                  component_id = row["componentId"]
+                  digest = row["digest"]
+                  if not from_core_cohort:
+                      component = components.get(component_id)
+                      require(isinstance(component, dict), f"verified Catalog is missing parent hold component {component_id}")
+                      targets = component.get("targets")
+                      require(isinstance(targets, list), f"verified Catalog targets are malformed for parent hold component {component_id}")
+                      matching_targets = [
+                          target for target in targets
+                          if isinstance(target, dict)
+                          and target.get("targetId") == row["targetId"]
+                          and target.get("support") == "supported"
+                      ]
+                      require(len(matching_targets) == 1, f"verified Catalog does not define exactly one supported pinned target for parent hold component {component_id}")
+                      artifact_kind = matching_targets[0].get("artifactKind")
+                      if artifact_kind == "plugin-package":
+                          return
+                      require(
+                          artifact_kind in FIRST_CORE_HOLD_ARTIFACT_KINDS,
+                          f"verified Catalog has an unsupported Core hold artifact kind for {component_id}: {artifact_kind}",
+                      )
+                  require(
+                      component_id not in expected or expected[component_id] == digest,
+                      f"maintenance artifact digest pins conflict for {component_id}",
+                  )
+                  expected[component_id] = digest
+
+              for row in workload_component_pins(workload):
+                  add_hold(row)
+              for row in first_core_bootstrap_pin()["components"]:
+                  add_hold(row, from_core_cohort=True)
+              return dict(sorted(expected.items()))
+
+          def assert_first_core_bootstrap_block(
+              block: Any,
+              workload: dict[str, Any],
+              checked: dict[str, Any],
+              expected_status: str,
+              context: str,
+          ) -> dict[str, Any]:
+              """Verify the C10 block, exact maps, and unchanged child plan identity."""
+              require(isinstance(block, dict), f"{context} has no firstCoreBootstrap block")
+              require(expected_status in {"required", "staged", "installed"}, f"{context} firstCoreBootstrap expected status is invalid")
+              common_fields = {
+                  "schemaVersion", "cohortId", "status", "planId", "planDigest",
+                  "catalogDigest", "targetId", "components", "componentArtifactDigests",
+                  "maintenanceComponentArtifactDigests",
+              }
+              phase_fields = {
+                  "staged": {"stagedComponents"},
+                  "installed": {"readiness", "componentStatuses"},
+              }.get(expected_status, set())
+              expected_fields = common_fields | phase_fields
+              require(set(block) == expected_fields, f"{context} firstCoreBootstrap fields differ from the public contract")
+              pin = first_core_bootstrap_pin()
+              require(block["schemaVersion"] == pin["schemaVersion"] and block["cohortId"] == pin["cohortId"], f"{context} firstCoreBootstrap C10 schema/cohort differs from pins")
+              require(block["status"] == expected_status, f"{context} firstCoreBootstrap status is not {expected_status}")
+              require(block["catalogDigest"] == pin["catalogDigest"] == workload["catalogDigest"], f"{context} firstCoreBootstrap Catalog digest differs from pins")
+              require(block["targetId"] == pin["targetId"] == FIRST_CORE_BOOTSTRAP_TARGET, f"{context} firstCoreBootstrap target differs from the pinned Core systemd target")
+              require(re.fullmatch(r"plan-[0-9a-f]{32}", str(block["planId"])) is not None, f"{context} firstCoreBootstrap plan ID is malformed")
+              require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(block["planDigest"])) is not None, f"{context} firstCoreBootstrap plan digest is malformed")
+              require(block["planId"] == "plan-" + block["planDigest"].removeprefix("sha256:")[:32], f"{context} firstCoreBootstrap plan ID does not derive from its digest")
+              assert_selected_components(block["components"], pin["components"], f"{context} firstCoreBootstrap rows")
+              expected_core_digests = expected_first_core_artifact_digests()
+              require(block["componentArtifactDigests"] == expected_core_digests, f"{context} firstCoreBootstrap componentArtifactDigests differ from exact release pins")
+              require(
+                  block["maintenanceComponentArtifactDigests"] == expected_maintenance_artifact_digests(workload),
+                  f"{context} firstCoreBootstrap maintenanceComponentArtifactDigests differ from the exact non-plugin Core hold map",
+              )
+              if expected_status == "staged":
+                  staged_rows = block["stagedComponents"]
+                  assert_selected_components(
+                      staged_rows, pin["components"], f"{context} firstCoreBootstrap stagedComponents"
+                  )
+                  require(
+                      all(row.get("status") in {"staged", "current"} for row in staged_rows),
+                      f"{context} firstCoreBootstrap has a component outside staged/current state",
+                  )
+              checked_block = checked.get("firstCoreBootstrap")
+              require(isinstance(checked_block, dict), f"{context} has no checked firstCoreBootstrap identity to preserve")
+              require(
+                  first_core_immutable_projection(block) == first_core_immutable_projection(checked_block),
+                  f"{context} changed the immutable firstCoreBootstrap identity after check",
+              )
+              if expected_status == "installed":
+                  readiness = block["readiness"]
+                  require(
+                      isinstance(readiness, dict)
+                      and set(readiness) == {"status", "catalogGeneration"}
+                      and readiness.get("status") == "READY"
+                      and type(readiness.get("catalogGeneration")) is int
+                      and readiness["catalogGeneration"] > 0,
+                      f"{context} firstCoreBootstrap did not prove READY with a positive activity Catalog generation",
+                  )
+                  statuses = block["componentStatuses"]
+                  require(isinstance(statuses, list), f"{context} firstCoreBootstrap componentStatuses are malformed")
+                  status_by_id = {
+                      row.get("componentId"): row
+                      for row in statuses
+                      if isinstance(row, dict) and set(row) == {"componentId", "status"}
+                  }
+                  require(
+                      len(status_by_id) == len(statuses)
+                      and set(status_by_id) == set(FIRST_CORE_BOOTSTRAP_COMPONENT_IDS)
+                      and all(row.get("status") == "active" for row in status_by_id.values()),
+                      f"{context} firstCoreBootstrap did not report exactly six active C10 components",
+                  )
+              return first_core_immutable_projection(block)
+
+          def assert_first_core_parent_digest(checked: dict[str, Any], context: str) -> None:
+              """Recompute the parent resolver digest over its immutable C10 block projection."""
+              resolution = checked.get("resolution")
+              require(isinstance(resolution, dict), f"{context} has no resolver resolution for C10 digest binding")
+              material = resolution.get("planDigestMaterial")
+              require(isinstance(material, dict), f"{context} has no planDigestMaterial for C10 digest binding")
+              block = checked.get("firstCoreBootstrap")
+              require(isinstance(block, dict), f"{context} has no firstCoreBootstrap block for parent digest binding")
+              projection = first_core_immutable_projection(block)
+              require(
+                  material.get("firstCoreBootstrap") == projection,
+                  f"{context} parent plan digest material does not bind the immutable firstCoreBootstrap projection",
+              )
+              actual_digest = canonical_json_digest(material)
+              require(
+                  resolution.get("planDigest") == checked.get("planDigest") == actual_digest,
+                  f"{context} parent plan digest does not match canonical planDigestMaterial including firstCoreBootstrap",
+              )
+              actual_plan_id = "plan-" + actual_digest.removeprefix("sha256:")[:32]
+              require(
+                  resolution.get("planId") == checked.get("planId") == actual_plan_id,
+                  f"{context} parent plan ID does not derive from the digest-bound plan material",
+              )
+
+          def assert_first_core_catalog_matches_pins(catalog: dict[str, Any]) -> dict[str, Any]:
+              """Require the six pinned rows to match the signed Catalog C10 cohort."""
+              pin = first_core_bootstrap_pin()
+              groups = catalog.get("compatibilityGroups")
+              require(isinstance(groups, list), "signed Catalog has no compatibilityGroups list for C10 validation")
+              matching_groups = [
+                  group for group in groups
+                  if isinstance(group, dict) and group.get("groupId") == FIRST_CORE_CATALOG_GROUP_ID
+              ]
+              require(len(matching_groups) == 1, "signed Catalog must contain exactly one C10 Package Runtime compatibility group")
+              group = matching_groups[0]
+              expected_members = [
+                  {"componentId": component_id, "requiredForAdoption": True, "protocolVersion": protocol}
+                  for component_id, protocol in FIRST_CORE_CATALOG_GROUP_MEMBERS.items()
+              ]
+              require(
+                  group.get("groupVersion") == "2"
+                  and group.get("contractApiVersion") == "0.1.0"
+                  and group.get("wireApiVersion") == "cyrene.runtime-maintenance.binding-operations.v1"
+                  and group.get("members") == expected_members,
+                  "signed Catalog Package Runtime group differs from the exact C10 contract",
+              )
+              rows = catalog.get("components")
+              require(isinstance(rows, list), "signed Catalog has no component list for C10 validation")
+              components = {
+                  row.get("componentId"): row
+                  for row in rows
+                  if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+              }
+              require(len(components) == len(rows), "signed Catalog component rows are malformed or duplicated during C10 validation")
+              pin_rows = {row["componentId"]: row for row in pin["components"]}
+              require(set(pin_rows) == set(FIRST_CORE_BOOTSTRAP_COMPONENT_IDS), "firstCoreBootstrap pins differ from the fixed six-member C10 cohort")
+              for component_id in FIRST_CORE_BOOTSTRAP_COMPONENT_IDS:
+                  component = components.get(component_id)
+                  pinned = pin_rows[component_id]
+                  require(isinstance(component, dict), f"signed Catalog C10 component is missing: {component_id}")
+                  targets = component.get("targets")
+                  require(isinstance(targets, list), f"signed Catalog C10 targets are malformed: {component_id}")
+                  supported_targets = [
+                      row for row in targets
+                      if isinstance(row, dict)
+                      and row.get("targetId") == pin["targetId"]
+                      and row.get("artifactKind") == "native-binary"
+                      and row.get("support") == "supported"
+                  ]
+                  require(len(supported_targets) == 1, f"signed Catalog does not support the pinned C10 native target: {component_id}")
+                  require(pinned["publisherIdentity"]["repository"] == component.get("publisher"), f"C10 publisher pin differs from signed Catalog for {component_id}")
+                  if component_id in FIRST_CORE_CATALOG_GROUP_MEMBERS:
+                      require(
+                          component.get("compatibilityGroup") == FIRST_CORE_CATALOG_GROUP_ID
+                          and component.get("protocolVersion") == FIRST_CORE_CATALOG_GROUP_MEMBERS[component_id],
+                          f"signed Catalog C10 member contract differs for {component_id}",
+                      )
+              return {
+                  "cohortId": pin["cohortId"],
+                  "targetId": pin["targetId"],
+                  "catalogDigest": pin["catalogDigest"],
+                  "componentIds": sorted(pin_rows),
+                  "groupId": FIRST_CORE_CATALOG_GROUP_ID,
+                  "status": "verified",
+              }
+
           def verified_catalog_document() -> dict[str, Any]:
               """Load the exact Catalog bytes already verified against the official release pin."""
               catalog_pin = pins()["catalog"]
@@ -1891,6 +2203,11 @@ jobs:
               assert_selected_components(
                   resolution.get("selectedComponents"), identity_pins, f"{context} resolver rows"
               )
+              if workload.get("workloadId") == "catalyst":
+                  assert_first_core_bootstrap_block(
+                      checked.get("firstCoreBootstrap"), workload, checked, "required", context
+                  )
+                  assert_first_core_parent_digest(checked, context)
               return closure
 
           def assert_staged_plan(staged: Any, workload: dict[str, Any], checked: dict[str, Any], context: str) -> None:
@@ -1909,6 +2226,10 @@ jobs:
                   all(row.get("status") in {"staged", "current"} for row in staged_rows),
                   f"{context} has a component outside the staged/current states",
               )
+              if workload.get("workloadId") == "catalyst" and isinstance(checked.get("firstCoreBootstrap"), dict):
+                  assert_first_core_bootstrap_block(
+                      staged.get("firstCoreBootstrap"), workload, checked, "staged", context
+                  )
 
           def version_conflict_readonly_check(checked: dict[str, Any], workload: dict[str, Any]) -> dict[str, Any]:
               """Confirm the exact signed resolution has no version-conflict blocker before staging."""
@@ -2694,6 +3015,9 @@ jobs:
                   require(applied.get("planId") == checked["planId"], "Catalyst apply returned a different or missing plan ID")
                   require(applied.get("planDigest") == checked["planDigest"], "Catalyst apply returned a different or missing plan digest")
                   assert_selected_components(applied.get("components"), workload_component_pins(workload), "Catalyst apply result")
+                  assert_first_core_bootstrap_block(
+                      applied.get("firstCoreBootstrap"), workload, checked, "installed", "Catalyst apply"
+                  )
                   return applied
               phase("catalyst_workload_apply", apply_gate)
 

@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://cyrene.dev/schemas/modular-distribution-v01/release-pins-v1.schema.json",
   "title": "Cyrene modular distribution clean-host release pins",
-  "description": "Expected official identities for one fresh-host acceptance run. Catalyst is required. Each workload separates direct roots in selectedComponents from dependency-only identities in dependencyComponents; the acceptance driver verifies both sets against the exact closure and reasons derived from the signed Catalog. The installed workload plan explicitly uses the signed preview channel; pins assert resolver identities and do not select or replace runtime authority. Optional standalone exact-match plugin pins enable an independent offline-stage retry when Catalyst staging is fully cache-backed. Optional Echo pins enable the separately gated installed OCI lifecycle and exact-match evaluation.",
+  "description": "Expected official identities for one fresh-host acceptance run. Catalyst is required. Each workload separates direct roots in selectedComponents from dependency-only identities in dependencyComponents; the acceptance driver verifies both sets against the exact closure and reasons derived from the signed Catalog. A separate firstCoreBootstrap pin covers the signed C10 cohort without adding its non-overlapping Core rows to the ordinary Catalyst closure. The Core-phase maintenance hold contains C10 plus parent identities whose signed target artifactKind is native-binary, oci-image, python-bundle, or static-web; plugin-package archive identities remain in the ordinary parent plan and use their stage-derived package aggregate during the later package-only hold. The installed workload plan explicitly uses the signed preview channel; pins assert resolver identities and do not select or replace runtime authority. Optional standalone exact-match plugin pins enable an independent offline-stage retry when Catalyst staging is fully cache-backed. Optional Echo pins enable the separately gated installed OCI lifecycle and exact-match evaluation.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "nativeInstaller", "catalog", "workloads"],
+  "required": ["schemaVersion", "nativeInstaller", "catalog", "firstCoreBootstrap", "workloads"],
   "properties": {
     "schemaVersion": { "const": 1 },
     "nativeInstaller": {
@@ -77,6 +77,32 @@
         "attestationSha256": { "$ref": "#/$defs/rawSha256" },
         "schemaVersion": { "const": 2 },
         "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "firstCoreBootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "cohortId", "catalogDigest", "targetId", "components"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "cohortId": { "const": "C10" },
+        "catalogDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "targetId": { "const": "linux-ubuntu-24.04-x86_64-systemd" },
+        "components": {
+          "description": "Exact six-member signed C10 first-Core cohort identities; the two identities shared with the Catalyst closure must match byte-for-byte.",
+          "type": "array",
+          "minItems": 6,
+          "maxItems": 6,
+          "items": { "$ref": "#/$defs/selectedComponent" },
+          "allOf": [
+            { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-linux-sys-adapter" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-systemd" } }, "required": ["componentId", "targetId"] } },
+            { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-nvidia-adapter" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-systemd" } }, "required": ["componentId", "targetId"] } },
+            { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-sandboxd" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-systemd" } }, "required": ["componentId", "targetId"] } },
+            { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-runtime-maintenance" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-systemd" } }, "required": ["componentId", "targetId"] } },
+            { "contains": { "type": "object", "properties": { "componentId": { "const": "cyrene-kernel" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-systemd" } }, "required": ["componentId", "targetId"] } },
+            { "contains": { "type": "object", "properties": { "componentId": { "const": "cy-package-runtime" }, "targetId": { "const": "linux-ubuntu-24.04-x86_64-systemd" } }, "required": ["componentId", "targetId"] } }
+          ]
+        }
       }
     },
     "workloads": {

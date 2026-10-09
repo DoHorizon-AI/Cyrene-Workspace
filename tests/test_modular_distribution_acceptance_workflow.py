@@ -124,9 +124,30 @@ def _valid_pins() -> dict[str, object]:
         component("cyrene-tools-document-parsing", "linux-ubuntu-24.04-x86_64-python-3.12"),
         component("cyrene-tools-knowledge-preparation", "linux-ubuntu-24.04-x86_64-python-3.12"),
     ]
+    first_core_component_ids = [
+        "cyrene-linux-sys-adapter",
+        "cyrene-nvidia-adapter",
+        "cyrene-sandboxd",
+        "cyrene-runtime-maintenance",
+        "cyrene-kernel",
+        "cy-package-runtime",
+    ]
+    first_core_components = [
+        component(component_id, "linux-ubuntu-24.04-x86_64-systemd")
+        for component_id in first_core_component_ids
+    ]
+    for row in first_core_components:
+        platform_publisher = {
+            "repository": "DoHorizon-AI/Cyrene-Platform",
+            "workflow": "DoHorizon-AI/Cyrene-Platform/.github/workflows/component-release.yml",
+        }
+        row["publisherIdentity"] = platform_publisher
+        row["attestationRef"]["repository"] = platform_publisher["repository"]
+        row["attestationRef"]["workflow"] = platform_publisher["workflow"]
+    first_core_by_id = {row["componentId"]: row for row in first_core_components}
     dependency_components = [
-        component("cy-package-runtime", "linux-ubuntu-24.04-x86_64-python-3.12"),
-        component("cyrene-runtime-maintenance", "linux-ubuntu-24.04-x86_64-python-3.12"),
+        first_core_by_id["cy-package-runtime"],
+        first_core_by_id["cyrene-runtime-maintenance"],
     ]
     return {
         "schemaVersion": 1,
@@ -154,6 +175,13 @@ def _valid_pins() -> dict[str, object]:
             "attestationSha256": "5" * 64,
             "schemaVersion": 2,
             "generation": 15,
+        },
+        "firstCoreBootstrap": {
+            "schemaVersion": 1,
+            "cohortId": "C10",
+            "catalogDigest": "sha256:" + catalog_sha,
+            "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+            "components": first_core_components,
         },
         "workloads": {
             "catalyst": {
@@ -469,10 +497,108 @@ def _write_verified_catalog_fixture(
     catalog_pin["sizeBytes"] = len(raw)
     for workload in pins["workloads"].values():
         workload["catalogDigest"] = "sha256:" + catalog_pin["sha256"]
+    pins["firstCoreBootstrap"]["catalogDigest"] = "sha256:" + catalog_pin["sha256"]
     catalog_path = evidence_root / "downloads" / "official-catalog-v2" / catalog_pin["assetName"]
     catalog_path.parent.mkdir(parents=True, exist_ok=True)
     catalog_path.write_bytes(raw)
     module.write_json(evidence_root / "release-pins-v1.json", pins)
+
+
+def _first_core_catalog(pins: dict[str, object]) -> dict[str, object]:
+    """Build a signed-Catalog-shaped fixture with the exact C10 group and Catalyst closure."""
+    bootstrap = pins["firstCoreBootstrap"]
+    workload = pins["workloads"]["catalyst"]
+    component_pins = {
+        row["componentId"]: row
+        for row in [
+            *workload["selectedComponents"],
+            *workload["dependencyComponents"],
+            *bootstrap["components"],
+        ]
+    }
+    components = []
+    for component_id, pin in component_pins.items():
+        if component_id in {
+            "cyrene-tools-dataset-generation",
+            "cyrene-tools-dataset-preparation",
+            "cyrene-tools-document-parsing",
+            "cyrene-tools-knowledge-preparation",
+        }:
+            artifact_kind = "plugin-package"
+        elif pin["targetId"].endswith("-web"):
+            artifact_kind = "static-web"
+        elif "python-" in pin["targetId"]:
+            artifact_kind = "python-bundle"
+        else:
+            artifact_kind = "native-binary"
+        row: dict[str, object] = {
+            "componentId": component_id,
+            "publisher": pin["publisherIdentity"]["repository"],
+            "dependencies": [],
+            "targets": [
+                {
+                    "targetId": pin["targetId"],
+                    "artifactKind": artifact_kind,
+                    "support": "supported",
+                }
+            ],
+        }
+        if component_id in {
+            "cyrene-runtime-maintenance",
+            "cyrene-kernel",
+            "cy-package-runtime",
+        }:
+            protocols = {
+                "cyrene-runtime-maintenance": "cyrene.runtime-maintenance.broker.v1",
+                "cyrene-kernel": "cyrene.runtime-maintenance.state.v2",
+                "cy-package-runtime": "cy-package-runtime.control.v1",
+            }
+            row["compatibilityGroup"] = "package-runtime-native-v1"
+            row["protocolVersion"] = protocols[component_id]
+        if component_id == "cyrene-catalyst":
+            row["dependencies"] = [{"componentId": "cy-package-runtime"}]
+        elif component_id == "cyrene-sandboxd":
+            row["dependencies"] = [{"componentId": "cyrene-linux-sys-adapter"}]
+        elif component_id == "cy-package-runtime":
+            row["dependencies"] = [{"componentId": "cyrene-runtime-maintenance"}]
+        components.append(row)
+    members = [
+        {
+            "componentId": component_id,
+            "requiredForAdoption": True,
+            "protocolVersion": protocol,
+        }
+        for component_id, protocol in (
+            ("cyrene-runtime-maintenance", "cyrene.runtime-maintenance.broker.v1"),
+            ("cyrene-kernel", "cyrene.runtime-maintenance.state.v2"),
+            ("cy-package-runtime", "cy-package-runtime.control.v1"),
+        )
+    ]
+    return {
+        "schemaVersion": 2,
+        "generation": pins["catalog"]["generation"],
+        "components": components,
+        "compatibilityGroups": [
+            {
+                "groupId": "package-runtime-native-v1",
+                "groupVersion": "2",
+                "contractApiVersion": "0.1.0",
+                "wireApiVersion": "cyrene.runtime-maintenance.binding-operations.v1",
+                "members": members,
+            }
+        ],
+        "workloads": [
+            {
+                "workloadId": "catalyst",
+                "requiredComponents": [
+                    row["componentId"] for row in workload["selectedComponents"]
+                ],
+                "recommendedComponents": [],
+                "optionalComponents": [],
+                "choiceGroups": [],
+            }
+        ],
+    }
 
 
 def _ready_pinned_workload_check(
@@ -503,6 +629,240 @@ def _ready_pinned_workload_check(
             "selectedComponents": identity_rows,
         },
     }
+
+
+def test_first_core_bootstrap_pins_match_the_signed_c10_catalog_and_catalyst_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The separate C10 pins are exact while shared rows remain identical to Catalyst closure pins."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_first_core_catalog")
+    pins = _valid_pins()
+    acceptance_root = tmp_path / "acceptance"
+    acceptance_root.mkdir()
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    monkeypatch.setenv("NATIVE_RELEASE_ID", pins["nativeInstaller"]["releaseId"])
+    module.write_json(acceptance_root / "release-pins-v1.json", pins)
+    schema = json.loads(PINS_SCHEMA.read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(pins)
+    module.validate_pin_shape(pins)
+
+    catalog = _first_core_catalog(pins)
+    evidence = module.assert_first_core_catalog_matches_pins(catalog)
+    assert evidence["cohortId"] == "C10"
+    assert evidence["componentIds"] == sorted(
+        row["componentId"] for row in pins["firstCoreBootstrap"]["components"]
+    )
+    assert evidence["targetId"] == "linux-ubuntu-24.04-x86_64-systemd"
+
+    missing_first_core_pins = json.loads(json.dumps(pins))
+    missing_first_core_pins.pop("firstCoreBootstrap")
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(missing_first_core_pins)
+
+    changed_overlap = json.loads(json.dumps(pins))
+    next(
+        row
+        for row in changed_overlap["firstCoreBootstrap"]["components"]
+        if row["componentId"] == "cyrene-runtime-maintenance"
+    )["digest"] = "sha256:" + "0" * 64
+    with pytest.raises(RuntimeError, match="identity differs from the ordinary Catalyst closure"):
+        module.validate_pin_shape(changed_overlap)
+
+    changed_group = json.loads(json.dumps(catalog))
+    changed_group["compatibilityGroups"][0]["members"][1]["protocolVersion"] = "wrong.v1"
+    with pytest.raises(RuntimeError, match="exact C10 contract"):
+        module.assert_first_core_catalog_matches_pins(changed_group)
+
+    unsupported_target = json.loads(json.dumps(catalog))
+    sandbox = next(
+        row
+        for row in unsupported_target["components"]
+        if row["componentId"] == "cyrene-sandboxd"
+    )
+    sandbox["targets"][0]["support"] = "contract-only"
+    with pytest.raises(RuntimeError, match="does not support the pinned C10 native target"):
+        module.assert_first_core_catalog_matches_pins(unsupported_target)
+
+
+def test_catalyst_first_core_block_is_digest_bound_across_check_stage_and_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Check, stage, and apply preserve one pinned C10 block; apply must prove active readiness."""
+    module = _load_driver_module(tmp_path, "acceptance_driver_first_core_plan")
+    acceptance_root = tmp_path / "acceptance"
+    evidence_root = acceptance_root / "evidence"
+    evidence_root.mkdir(parents=True)
+    monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
+    pins = _valid_pins()
+    monkeypatch.setenv("NATIVE_RELEASE_ID", pins["nativeInstaller"]["releaseId"])
+    selections = {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}}
+    catalog = _first_core_catalog(pins)
+    _write_verified_catalog_fixture(module, acceptance_root, pins, catalog)
+    workload = pins["workloads"]["catalyst"]
+    closure = module.derive_catalog_workload_closure(catalog, "catalyst", selections)
+    identity_rows = module.workload_component_pins(workload)
+    core_rows = json.loads(json.dumps(pins["firstCoreBootstrap"]["components"]))
+    core_artifacts = {row["componentId"]: row["digest"] for row in core_rows}
+    maintenance_artifacts = module.expected_maintenance_artifact_digests(workload)
+    plugin_ids = {
+        "cyrene-tools-dataset-generation",
+        "cyrene-tools-dataset-preparation",
+        "cyrene-tools-document-parsing",
+        "cyrene-tools-knowledge-preparation",
+    }
+    expected_hold_ids = {
+        "cyrene-catalyst",
+        "cyrene-client-workspace-control",
+        "cyrene-client-workspace-web",
+        "cyrene-runtime-maintenance-sdk",
+        "cyrene-runtime-maintenance",
+        "cy-package-runtime",
+        "cyrene-linux-sys-adapter",
+        "cyrene-nvidia-adapter",
+        "cyrene-sandboxd",
+        "cyrene-kernel",
+    }
+    assert set(maintenance_artifacts) == expected_hold_ids
+    assert plugin_ids.isdisjoint(maintenance_artifacts)
+    assert maintenance_artifacts["cyrene-catalyst"] == next(
+        row["digest"] for row in identity_rows if row["componentId"] == "cyrene-catalyst"
+    )
+    assert set(core_artifacts) <= set(maintenance_artifacts)
+    core_child_digest = "sha256:" + "7" * 64
+    core_block = {
+        "schemaVersion": 1,
+        "cohortId": "C10",
+        "status": "required",
+        "planId": "plan-" + "7" * 32,
+        "planDigest": core_child_digest,
+        "catalogDigest": workload["catalogDigest"],
+        "targetId": "linux-ubuntu-24.04-x86_64-systemd",
+        "components": core_rows,
+        "componentArtifactDigests": core_artifacts,
+        "maintenanceComponentArtifactDigests": dict(sorted(maintenance_artifacts.items())),
+    }
+    core_projection = {
+        key: value
+        for key, value in core_block.items()
+        if key not in {"status"}
+    }
+    material = {
+        "schemaVersion": 1,
+        "action": "install",
+        "channel": workload["channel"],
+        "catalogDigest": workload["catalogDigest"],
+        "workloadId": workload["workloadId"],
+        "targetId": workload["targetId"],
+        "selectionBinding": closure["normalizedSelections"],
+        "selectedComponents": identity_rows,
+        "closureReasons": closure["closureReasons"],
+        "warnings": [],
+        "blockers": [],
+        "firstCoreBootstrap": core_projection,
+    }
+    parent_digest = module.canonical_json_digest(material)
+    parent_id = "plan-" + parent_digest.removeprefix("sha256:")[:32]
+    checked = {
+        "status": "ready",
+        "workloadId": "catalyst",
+        "targetId": workload["targetId"],
+        "channel": workload["channel"],
+        "action": "install",
+        "catalogDigest": workload["catalogDigest"],
+        "planId": parent_id,
+        "planDigest": parent_digest,
+        "components": identity_rows,
+        "firstCoreBootstrap": core_block,
+        "resolution": {
+            "catalogDigest": workload["catalogDigest"],
+            "channel": workload["channel"],
+            "planId": parent_id,
+            "planDigest": parent_digest,
+            "planDigestMaterial": material,
+            "selectionBinding": closure["normalizedSelections"],
+            "closureReasons": closure["closureReasons"],
+            "selectedComponents": identity_rows,
+        },
+    }
+    assert {row["componentId"] for row in material["selectedComponents"]} >= plugin_ids
+    assert module.assert_pinned_workload_check(
+        checked, workload, selections, "Catalyst C10 check fixture"
+    ) == closure
+    plugin_in_core_hold = json.loads(json.dumps(core_block))
+    plugin_in_core_hold["maintenanceComponentArtifactDigests"][
+        "cyrene-tools-document-parsing"
+    ] = next(
+        row["digest"] for row in identity_rows
+        if row["componentId"] == "cyrene-tools-document-parsing"
+    )
+    with pytest.raises(RuntimeError, match="exact non-plugin Core hold map"):
+        module.assert_first_core_bootstrap_block(
+            plugin_in_core_hold, workload, checked, "required", "C10 hold with plugin archive"
+        )
+    missing_block = json.loads(json.dumps(checked))
+    missing_block.pop("firstCoreBootstrap")
+    with pytest.raises(RuntimeError, match="no firstCoreBootstrap block"):
+        module.assert_pinned_workload_check(
+            missing_block, workload, selections, "Catalyst check without C10"
+        )
+
+    staged_block = json.loads(json.dumps(core_block))
+    staged_block["status"] = "staged"
+    staged_block["stagedComponents"] = [dict(row, status="staged") for row in core_rows]
+    staged = {
+        "status": "staged",
+        "planId": parent_id,
+        "planDigest": parent_digest,
+        "catalogDigest": workload["catalogDigest"],
+        "workloadId": "catalyst",
+        "targetId": workload["targetId"],
+        "channel": workload["channel"],
+        "action": "install",
+        "components": [dict(row, status="staged") for row in identity_rows],
+        "firstCoreBootstrap": staged_block,
+    }
+    module.assert_staged_plan(staged, workload, checked, "Catalyst C10 stage fixture")
+
+    installed_block = json.loads(json.dumps(core_block))
+    installed_block.update(
+        status="installed",
+        readiness={"status": "READY", "catalogGeneration": 1},
+        componentStatuses=[
+            {"componentId": row["componentId"], "status": "active"}
+            for row in pins["firstCoreBootstrap"]["components"]
+        ],
+    )
+    module.assert_first_core_bootstrap_block(
+        installed_block, workload, checked, "installed", "Catalyst C10 apply fixture"
+    )
+
+    altered_stage = json.loads(json.dumps(staged))
+    altered_stage["firstCoreBootstrap"]["componentArtifactDigests"][
+        "cyrene-kernel"
+    ] = "sha256:" + "0" * 64
+    with pytest.raises(RuntimeError, match="componentArtifactDigests differ"):
+        module.assert_staged_plan(altered_stage, workload, checked, "altered C10 stage")
+
+    altered_material = json.loads(json.dumps(checked))
+    altered_material["resolution"]["planDigestMaterial"]["firstCoreBootstrap"][
+        "planDigest"
+    ] = "sha256:" + "8" * 64
+    with pytest.raises(RuntimeError, match="does not bind the immutable firstCoreBootstrap"):
+        module.assert_first_core_parent_digest(altered_material, "altered C10 parent plan")
+
+    unready_apply = json.loads(json.dumps(installed_block))
+    unready_apply["readiness"]["status"] = "UNKNOWN"
+    with pytest.raises(RuntimeError, match="did not prove READY"):
+        module.assert_first_core_bootstrap_block(
+            unready_apply, workload, checked, "installed", "unready C10 apply"
+        )
+
+    inactive_apply = json.loads(json.dumps(installed_block))
+    inactive_apply["componentStatuses"][0]["status"] = "staged"
+    with pytest.raises(RuntimeError, match="exactly six active C10 components"):
+        module.assert_first_core_bootstrap_block(
+            inactive_apply, workload, checked, "installed", "inactive C10 apply"
+        )
 
 
 def test_catalog_closure_pins_cover_transitive_shared_dependencies_and_skip_build_only(
