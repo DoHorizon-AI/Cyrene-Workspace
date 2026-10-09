@@ -508,14 +508,6 @@ def _first_core_catalog(pins: dict[str, object]) -> dict[str, object]:
     """Build a signed-Catalog-shaped fixture with the exact C10 group and Catalyst closure."""
     bootstrap = pins["firstCoreBootstrap"]
     workload = pins["workloads"]["catalyst"]
-    core_ids = {
-        "cyrene-linux-sys-adapter",
-        "cyrene-nvidia-adapter",
-        "cyrene-sandboxd",
-        "cyrene-runtime-maintenance",
-        "cyrene-kernel",
-        "cy-package-runtime",
-    }
     component_pins = {
         row["componentId"]: row
         for row in [
@@ -526,6 +518,19 @@ def _first_core_catalog(pins: dict[str, object]) -> dict[str, object]:
     }
     components = []
     for component_id, pin in component_pins.items():
+        if component_id in {
+            "cyrene-tools-dataset-generation",
+            "cyrene-tools-dataset-preparation",
+            "cyrene-tools-document-parsing",
+            "cyrene-tools-knowledge-preparation",
+        }:
+            artifact_kind = "plugin-package"
+        elif pin["targetId"].endswith("-web"):
+            artifact_kind = "static-web"
+        elif "python-" in pin["targetId"]:
+            artifact_kind = "python-bundle"
+        else:
+            artifact_kind = "native-binary"
         row: dict[str, object] = {
             "componentId": component_id,
             "publisher": pin["publisherIdentity"]["repository"],
@@ -533,9 +538,7 @@ def _first_core_catalog(pins: dict[str, object]) -> dict[str, object]:
             "targets": [
                 {
                     "targetId": pin["targetId"],
-                    "artifactKind": "native-binary"
-                    if component_id in core_ids
-                    else "plugin-package",
+                    "artifactKind": artifact_kind,
                     "support": "supported",
                 }
             ],
@@ -700,10 +703,31 @@ def test_catalyst_first_core_block_is_digest_bound_across_check_stage_and_apply(
     identity_rows = module.workload_component_pins(workload)
     core_rows = json.loads(json.dumps(pins["firstCoreBootstrap"]["components"]))
     core_artifacts = {row["componentId"]: row["digest"] for row in core_rows}
-    maintenance_artifacts = {
-        row["componentId"]: row["digest"]
-        for row in [*identity_rows, *core_rows]
+    maintenance_artifacts = module.expected_maintenance_artifact_digests(workload)
+    plugin_ids = {
+        "cyrene-tools-dataset-generation",
+        "cyrene-tools-dataset-preparation",
+        "cyrene-tools-document-parsing",
+        "cyrene-tools-knowledge-preparation",
     }
+    expected_hold_ids = {
+        "cyrene-catalyst",
+        "cyrene-client-workspace-control",
+        "cyrene-client-workspace-web",
+        "cyrene-runtime-maintenance-sdk",
+        "cyrene-runtime-maintenance",
+        "cy-package-runtime",
+        "cyrene-linux-sys-adapter",
+        "cyrene-nvidia-adapter",
+        "cyrene-sandboxd",
+        "cyrene-kernel",
+    }
+    assert set(maintenance_artifacts) == expected_hold_ids
+    assert plugin_ids.isdisjoint(maintenance_artifacts)
+    assert maintenance_artifacts["cyrene-catalyst"] == next(
+        row["digest"] for row in identity_rows if row["componentId"] == "cyrene-catalyst"
+    )
+    assert set(core_artifacts) <= set(maintenance_artifacts)
     core_child_digest = "sha256:" + "7" * 64
     core_block = {
         "schemaVersion": 1,
@@ -760,9 +784,21 @@ def test_catalyst_first_core_block_is_digest_bound_across_check_stage_and_apply(
             "selectedComponents": identity_rows,
         },
     }
+    assert {row["componentId"] for row in material["selectedComponents"]} >= plugin_ids
     assert module.assert_pinned_workload_check(
         checked, workload, selections, "Catalyst C10 check fixture"
     ) == closure
+    plugin_in_core_hold = json.loads(json.dumps(core_block))
+    plugin_in_core_hold["maintenanceComponentArtifactDigests"][
+        "cyrene-tools-document-parsing"
+    ] = next(
+        row["digest"] for row in identity_rows
+        if row["componentId"] == "cyrene-tools-document-parsing"
+    )
+    with pytest.raises(RuntimeError, match="exact non-plugin Core hold map"):
+        module.assert_first_core_bootstrap_block(
+            plugin_in_core_hold, workload, checked, "required", "C10 hold with plugin archive"
+        )
     missing_block = json.loads(json.dumps(checked))
     missing_block.pop("firstCoreBootstrap")
     with pytest.raises(RuntimeError, match="no firstCoreBootstrap block"):

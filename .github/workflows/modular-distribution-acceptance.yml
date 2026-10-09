@@ -112,6 +112,9 @@ jobs:
               "cy-package-runtime",
           )
           FIRST_CORE_BOOTSTRAP_TARGET = "linux-ubuntu-24.04-x86_64-systemd"
+          FIRST_CORE_HOLD_ARTIFACT_KINDS = frozenset(
+              {"native-binary", "oci-image", "python-bundle", "static-web"}
+          )
           FIRST_CORE_CATALOG_GROUP_ID = "package-runtime-native-v1"
           FIRST_CORE_CATALOG_GROUP_MEMBERS = {
               "cyrene-runtime-maintenance": "cyrene.runtime-maintenance.broker.v1",
@@ -1792,16 +1795,50 @@ jobs:
               return {row["componentId"]: row["digest"] for row in rows}
 
           def expected_maintenance_artifact_digests(workload: dict[str, Any]) -> dict[str, str]:
-              """Build the exact shared maintenance hold map from parent and C10 pins."""
+              """Build the Core-phase hold from C10 and signed non-plugin parent artifacts."""
               expected: dict[str, str] = {}
-              for row in [*workload_component_pins(workload), *first_core_bootstrap_pin()["components"]]:
+              catalog = verified_catalog_document()
+              catalog_rows = catalog.get("components")
+              require(isinstance(catalog_rows, list), "verified Catalog has no component rows for the Core maintenance hold")
+              components = {
+                  row.get("componentId"): row
+                  for row in catalog_rows
+                  if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+              }
+              require(len(components) == len(catalog_rows), "verified Catalog component rows are malformed or duplicated for the Core maintenance hold")
+
+              def add_hold(row: dict[str, Any], *, from_core_cohort: bool = False) -> None:
                   component_id = row["componentId"]
                   digest = row["digest"]
+                  if not from_core_cohort:
+                      component = components.get(component_id)
+                      require(isinstance(component, dict), f"verified Catalog is missing parent hold component {component_id}")
+                      targets = component.get("targets")
+                      require(isinstance(targets, list), f"verified Catalog targets are malformed for parent hold component {component_id}")
+                      matching_targets = [
+                          target for target in targets
+                          if isinstance(target, dict)
+                          and target.get("targetId") == row["targetId"]
+                          and target.get("support") == "supported"
+                      ]
+                      require(len(matching_targets) == 1, f"verified Catalog does not define exactly one supported pinned target for parent hold component {component_id}")
+                      artifact_kind = matching_targets[0].get("artifactKind")
+                      if artifact_kind == "plugin-package":
+                          return
+                      require(
+                          artifact_kind in FIRST_CORE_HOLD_ARTIFACT_KINDS,
+                          f"verified Catalog has an unsupported Core hold artifact kind for {component_id}: {artifact_kind}",
+                      )
                   require(
                       component_id not in expected or expected[component_id] == digest,
                       f"maintenance artifact digest pins conflict for {component_id}",
                   )
                   expected[component_id] = digest
+
+              for row in workload_component_pins(workload):
+                  add_hold(row)
+              for row in first_core_bootstrap_pin()["components"]:
+                  add_hold(row, from_core_cohort=True)
               return dict(sorted(expected.items()))
 
           def assert_first_core_bootstrap_block(
@@ -1838,7 +1875,7 @@ jobs:
               require(block["componentArtifactDigests"] == expected_core_digests, f"{context} firstCoreBootstrap componentArtifactDigests differ from exact release pins")
               require(
                   block["maintenanceComponentArtifactDigests"] == expected_maintenance_artifact_digests(workload),
-                  f"{context} firstCoreBootstrap maintenanceComponentArtifactDigests differ from the exact parent and C10 identity union",
+                  f"{context} firstCoreBootstrap maintenanceComponentArtifactDigests differ from the exact non-plugin Core hold map",
               )
               if expected_status == "staged":
                   staged_rows = block["stagedComponents"]
