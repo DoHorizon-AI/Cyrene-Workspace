@@ -1425,12 +1425,12 @@ jobs:
               receipt = load_json(root() / "evidence" / "native-source-receipt.json")
               baseline_generation = receipt["releaseInputs"]["workspaceCatalogs"]["baselineV1"]["generation"]
               code = textwrap.dedent(r'''
-                  import hashlib
-                  import importlib.util
-                  import json
-                  import os
-                  import re
-                  import stat
+              import hashlib
+              import importlib.util
+              import json
+              import os
+              import re
+              import stat
               import sys
               from pathlib import Path
               module_spec=importlib.util.spec_from_file_location("bootstrap_catalog_binding", "/usr/lib/cyrene/scripts/bootstrap_catalog_binding.py")
