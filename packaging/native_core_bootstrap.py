@@ -2850,25 +2850,25 @@ def _fresh_workload_core_broker_health(
     ):
         raise RuntimeError("Started maintenance Broker differs from the signed C10 candidate")
     health = updater._broker_request("Health", {})
+    if not isinstance(health, dict):
+        raise TypeError("Fresh C10 Broker Health response is malformed")
+    gate_generation = health.get("gate_generation")
     required_capabilities = {
         "cyrene.runtime-maintenance.state.v2",
         "cyrene.runtime-maintenance.binding-operations.v1",
     }
     capabilities = health.get("capabilities")
     if (
-        not isinstance(health, dict)
-        or health.get("status") != "SERVING"
+        health.get("status") != "SERVING"
         or health.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
         or type(health.get("catalog_generation")) is not int
         or health.get("catalog_generation") != 0
-        or type(health.get("gate_generation")) is not int
-        or health.get("gate_generation") < 1
+        or not isinstance(gate_generation, int)
+        or isinstance(gate_generation, bool)
+        or gate_generation < 1
         or type(health.get("core_bootstrap_eligible")) is not bool
         or (require_eligible and health.get("core_bootstrap_eligible") is not True)
-        or (
-            expected_gate_generation is not None
-            and health.get("gate_generation") != expected_gate_generation
-        )
+        or (expected_gate_generation is not None and gate_generation != expected_gate_generation)
         or not isinstance(capabilities, list)
         or any(not isinstance(value, str) or not value for value in capabilities)
         or len(capabilities) != len(set(capabilities))
@@ -3483,6 +3483,7 @@ def apply_fresh_workload_first_core(
             transaction["progress"] = "begin_result_uncertain"
             _write_private_json(updater, journal_path, transaction)
             raise RuntimeError("Platform returned no durable CoreBootstrap hold identity")
+        gate_generation = response.get("gate_generation")
         if (
             response.get("status") != "MAINTENANCE_ACTIVE"
             or response.get("maintenance_origin") != "CORE_BOOTSTRAP"
@@ -3490,14 +3491,15 @@ def apply_fresh_workload_first_core(
             or response.get("held") is not True
             or not isinstance(response.get("maintenance_token"), str)
             or not response.get("maintenance_token", "").strip()
-            or type(response.get("gate_generation")) is not int
-            or response.get("gate_generation") < 1
+            or not isinstance(gate_generation, int)
+            or isinstance(gate_generation, bool)
+            or gate_generation < 1
         ):
             transaction["progress"] = "begin_result_uncertain"
             _write_private_json(updater, journal_path, transaction)
             raise RuntimeError("Platform did not confirm a durable generation-zero Core hold")
         transaction["maintenanceToken"] = response["maintenance_token"]
-        transaction["maintenanceGateGeneration"] = response["gate_generation"]
+        transaction["maintenanceGateGeneration"] = gate_generation
         transaction["phase"] = "hold_required"
         transaction["progress"] = "held"
         transaction.pop("failure", None)
@@ -3619,13 +3621,15 @@ def apply_fresh_workload_first_core(
         source_uid=source_uid,
         source_gid=source_gid,
     )
-    broker_identity = transaction.get("bootstrapBroker")
-    if not isinstance(broker_identity, dict):
+    stored_broker_identity = transaction.get("bootstrapBroker")
+    if not isinstance(stored_broker_identity, dict):
         broker_identity, _broker_health = _fresh_workload_core_broker_health(
             updater, broker_row, proc_root=PROC_ROOT
         )
         transaction["bootstrapBroker"] = broker_identity
         _write_private_json(updater, journal_path, transaction)
+    else:
+        broker_identity = stored_broker_identity
     current_progress = transaction.get("progress")
     if current_progress in (
         _FRESH_WORKLOAD_CORE_EMPTY_PROGRESS | _FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS
