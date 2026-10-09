@@ -1231,6 +1231,7 @@ def test_sdk_python_accepts_only_a_root_controlled_final_venv_symlink() -> None:
             runtime._validate_sdk_python(alias / "bin" / "python")
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="requires the Linux memfd seals ABI")
 def test_source_token_memfd_is_sealed_before_sdk_handoff() -> None:
     import fcntl
 
@@ -1241,13 +1242,83 @@ def test_source_token_memfd_is_sealed_before_sdk_handoff() -> None:
         assert info.st_gid == os.getegid()
         assert stat.S_IMODE(info.st_mode) == 0o400
         assert os.read(descriptor, 64) == b"private-test-token"
-        seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
-        required = fcntl.F_SEAL_SEAL | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE
+        seals = fcntl.fcntl(
+            descriptor,
+            getattr(fcntl, "F_GET_SEALS", runtime._LINUX_SEAL_FCNTL_VALUES["F_GET_SEALS"]),
+        )
+        required = (
+            getattr(fcntl, "F_SEAL_SEAL", runtime._LINUX_SEAL_FCNTL_VALUES["F_SEAL_SEAL"])
+            | getattr(fcntl, "F_SEAL_SHRINK", runtime._LINUX_SEAL_FCNTL_VALUES["F_SEAL_SHRINK"])
+            | getattr(fcntl, "F_SEAL_GROW", runtime._LINUX_SEAL_FCNTL_VALUES["F_SEAL_GROW"])
+            | getattr(fcntl, "F_SEAL_WRITE", runtime._LINUX_SEAL_FCNTL_VALUES["F_SEAL_WRITE"])
+        )
         assert seals & required == required
         with pytest.raises(OSError):
             os.write(descriptor, b"x")
     finally:
         os.close(descriptor)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires the Linux memfd seals ABI")
+def test_source_token_memfd_uses_linux_uapi_when_python_omits_seal_constants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl as host_fcntl
+
+    calls: list[tuple[int, tuple[int, ...]]] = []
+
+    def invoke_fcntl(descriptor: int, operation: int, *arguments: int) -> int:
+        calls.append((operation, arguments))
+        return host_fcntl.fcntl(descriptor, operation, *arguments)
+
+    fcntl_without_seal_constants = SimpleNamespace(fcntl=invoke_fcntl)
+    assert not any(
+        hasattr(fcntl_without_seal_constants, name) for name in runtime._LINUX_SEAL_FCNTL_VALUES
+    )
+    monkeypatch.setitem(sys.modules, "fcntl", fcntl_without_seal_constants)
+
+    descriptor = runtime._create_token_memfd("private-test-token")
+    try:
+        assert (1033, (15,)) in calls
+        assert (1034, ()) in calls
+        assert host_fcntl.fcntl(descriptor, 1034) & 15 == 15
+        with pytest.raises(OSError):
+            os.write(descriptor, b"x")
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("failure_mode", ["unsupported-add", "incomplete-readback"])
+@pytest.mark.skipif(sys.platform != "linux", reason="requires the Linux memfd seals ABI")
+def test_source_token_memfd_closes_if_kernel_cannot_confirm_required_seals(
+    failure_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl as host_fcntl
+
+    captured: dict[str, int] = {}
+    memfd_create = os.memfd_create
+
+    def capture_memfd_create(*args: Any, **kwargs: Any) -> int:
+        descriptor = memfd_create(*args, **kwargs)
+        captured["descriptor"] = descriptor
+        return descriptor
+
+    def unsupported_fcntl(descriptor: int, operation: int, *arguments: int) -> int:
+        if failure_mode == "unsupported-add" and operation == 1033:
+            raise OSError(22, "seals are unsupported")
+        if failure_mode == "incomplete-readback" and operation == 1034:
+            return 0
+        return host_fcntl.fcntl(descriptor, operation, *arguments)
+
+    monkeypatch.setattr(os, "memfd_create", capture_memfd_create)
+    monkeypatch.setitem(sys.modules, "fcntl", SimpleNamespace(fcntl=unsupported_fcntl))
+
+    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="sealed descriptor"):
+        runtime._create_token_memfd("private-test-token")
+
+    with pytest.raises(OSError):
+        os.fstat(captured["descriptor"])
 
 
 def test_uninstall_uses_exact_udS_installation_record_and_hold(
