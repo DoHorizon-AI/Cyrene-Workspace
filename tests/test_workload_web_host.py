@@ -127,7 +127,7 @@ def test_nginx_contract_is_loopback_only_and_preserves_same_origin_control_heade
     assert "listen 127.0.0.1:8100;" in config
     assert "listen 0.0.0.0" not in config
     assert "listen 80;" not in config
-    assert "root /var/lib/cyrene/workloads/web/cyrene-client-workspace-web/current;" in config
+    assert "root /opt/cyrene/workloads/web/cyrene-client-workspace-web/current;" in config
     assert "proxy_pass http://127.0.0.1:5182;" in config
     for header in (
         "Host $http_host",

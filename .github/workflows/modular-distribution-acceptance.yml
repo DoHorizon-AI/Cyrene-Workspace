@@ -61,6 +61,7 @@ jobs:
           import stat
           import subprocess
           import sys
+          import tarfile
           import tempfile
           import textwrap
           import time
@@ -674,6 +675,89 @@ jobs:
               """Raise a readable acceptance failure when an identity does not match."""
               if not condition:
                   raise RuntimeError(message)
+
+          def deb_member_identity(path: Path, member_path: str) -> dict[str, Any]:
+              """Hash one regular file directly from a DEB's filesystem tar stream."""
+              process = subprocess.Popen(
+                  ["dpkg-deb", "--fsys-tarfile", str(path)],
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+              )
+              require(process.stdout is not None, "dpkg-deb payload stream is unavailable")
+              require(process.stderr is not None, "dpkg-deb error stream is unavailable")
+              matches = 0
+              identity: dict[str, Any] | None = None
+              try:
+                  with tarfile.open(fileobj=process.stdout, mode="r|*") as archive:
+                      for member in archive:
+                          name = member.name[2:] if member.name.startswith("./") else member.name
+                          if name != member_path:
+                              continue
+                          matches += 1
+                          require(matches == 1, "verified DEB repeats the native helper path")
+                          require(member.isreg(), "verified DEB native helper is not a regular file")
+                          payload = archive.extractfile(member)
+                          require(payload is not None, "verified DEB native helper payload is unreadable")
+                          digest = hashlib.sha256()
+                          observed_size = 0
+                          with payload:
+                              while chunk := payload.read(1024 * 1024):
+                                  digest.update(chunk)
+                                  observed_size += len(chunk)
+                          require(
+                              observed_size == member.size,
+                              "verified DEB native helper size differs from its tar header",
+                          )
+                          identity = {
+                              "sha256": digest.hexdigest(),
+                              "sizeBytes": observed_size,
+                          }
+                  process.stdout.close()
+                  process.stderr.read()
+                  returncode = process.wait(timeout=120)
+                  require(returncode == 0, "dpkg-deb could not inspect the verified payload")
+                  require(matches == 1 and identity is not None, "verified DEB native helper is missing")
+                  return identity
+              except BaseException:
+                  if process.poll() is None:
+                      process.kill()
+                      process.wait()
+                  raise
+              finally:
+                  if process.stdout is not None:
+                      process.stdout.close()
+                  if process.stderr is not None:
+                      process.stderr.close()
+
+          def installed_file_identity(path: Path) -> dict[str, Any]:
+              """Hash an installed regular file without following its final symlink."""
+              try:
+                  descriptor = os.open(
+                      path,
+                      os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                  )
+              except OSError as error:
+                  raise RuntimeError("installed native helper is unavailable or unsafe") from error
+              try:
+                  before = os.fstat(descriptor)
+                  require(stat.S_ISREG(before.st_mode), "installed native helper is not a regular file")
+                  digest = hashlib.sha256()
+                  observed_size = 0
+                  while chunk := os.read(descriptor, 1024 * 1024):
+                      digest.update(chunk)
+                      observed_size += len(chunk)
+                  after = os.fstat(descriptor)
+                  require(
+                      (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                      == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+                      "installed native helper changed while being verified",
+                  )
+                  require(observed_size == after.st_size, "installed native helper size changed while read")
+                  return {"sha256": digest.hexdigest(), "sizeBytes": observed_size}
+              finally:
+                  os.close(descriptor)
+
+          INSTALLED_NATIVE_HELPER = Path("/usr/lib/cyrene/scripts/component_updates.py")
 
           def parse_gh_cli_version(
               output: str, *, require_supported: bool = True
@@ -1412,14 +1496,26 @@ jobs:
               require(package == "cyrene", "verified DEB control package name differs")
               require(version == manifest.get("version"), "verified DEB version differs from the attested native manifest")
               require(architecture == "amd64", "verified DEB architecture is not amd64")
-              run(["sudo", "-n", "apt", "install", "--yes", str(path)], label="apt-install-native-deb", timeout=1800)
+              helper_path = "usr/lib/cyrene/scripts/component_updates.py"
+              expected_helper = deb_member_identity(path, helper_path)
+              run(["sudo", "-n", "apt", "install", "--reinstall", "--yes", str(path)], label="apt-install-native-deb", timeout=1800)
               installed = run(["dpkg-query", "-W", "-f=${Status}\t${Version}\t${Architecture}", "cyrene"], label="dpkg-native-status", timeout=60).stdout.strip().split("\t")
               require(installed == ["install ok installed", version, "amd64"], "dpkg status/version/architecture differs from the verified DEB")
+              installed_helper = installed_file_identity(INSTALLED_NATIVE_HELPER)
+              require(
+                  installed_helper == expected_helper,
+                  "installed component_updates.py differs from the exact verified DEB payload",
+              )
               write_json(root() / "evidence" / "native-deb-installed.json", {
                   "releaseId": pins()["nativeInstaller"]["releaseId"],
                   "sourceCommit": pins()["nativeInstaller"]["sourceCommit"],
                   "debSha256": pins()["nativeInstaller"]["debSha256"],
                   "dpkg": {"status": installed[0], "version": installed[1], "architecture": installed[2]},
+                  "componentUpdates": {
+                      "path": str(INSTALLED_NATIVE_HELPER),
+                      "sha256": installed_helper["sha256"],
+                      "sizeBytes": installed_helper["sizeBytes"],
+                  },
               })
 
           def static_binding_readback() -> dict[str, Any]:
@@ -2459,7 +2555,7 @@ jobs:
                       static=updater._installed_static_web({"componentId":component_id})
                       if static.get("active") is not True or static.get("manifestDigest")!=pin["manifestDigest"] or static.get("artifactDigest")!=pin["digest"]:
                           raise SystemExit("static Web pointer/tree does not match its verified installed receipt")
-                      web_root=Path("/var/lib/cyrene/workloads/web")/component_id
+                      web_root=Path("/opt/cyrene/workloads/web")/component_id
                       pointer=web_root/"current"
                       pointer_target=os.readlink(pointer)
                       if pointer_target!="releases/"+receipt["pointerIdentity"]:
@@ -3030,7 +3126,7 @@ jobs:
               require(metadata.get("releaseIdentity") == web_pin["manifestDigest"], "Client Web host receipt release identity differs from exact manifest pin")
               require(metadata.get("sourceReceiptDigest") == "sha256:" + web_receipt["immutableReceiptSha256"], "Client Web source receipt digest differs from the verified immutable receipt")
               require(metadata.get("activeReceiptDigest") == "sha256:" + web_receipt["activeReceiptSha256"], "Client Web active receipt digest differs from the verified active receipt")
-              require(metadata.get("documentRoot") == "/var/lib/cyrene/workloads/web/cyrene-client-workspace-web/current", "Client Web document root differs from the installed current pointer")
+              require(metadata.get("documentRoot") == "/opt/cyrene/workloads/web/cyrene-client-workspace-web/current", "Client Web document root differs from the installed current pointer")
               require(metadata.get("clientUrl") == "http://127.0.0.1:8100/", "Client Web public URL differs from the loopback-only contract")
               require(metadata.get("listenerAddress") == "127.0.0.1" and metadata.get("listenerPort") == 8100, "Client Web listener is not the exact loopback address")
               require(metadata.get("configPath") == "/etc/cyrene/workloads/web/nginx.conf", "Client Web Nginx config path differs from the managed service contract")
