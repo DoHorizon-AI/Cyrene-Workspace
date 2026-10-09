@@ -106,6 +106,50 @@ def _empty_updater(tmp_path: Path) -> updates.ComponentUpdater:
     )
 
 
+def test_workload_status_adapts_web_host_environment_for_subprocess_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    web_component_id = "cyrene-client-workspace-web"
+    updater.catalog = {"schemaVersion": 2}
+    updater.catalog_generation = 14
+    updater.catalog_digest = "sha256:" + "a" * 64
+    updater.components = {web_component_id: {"componentId": web_component_id, "kind": "static-web"}}
+    monkeypatch.setattr(updater, "_reload_catalog_for_operation", lambda: None)
+    monkeypatch.setattr(
+        updater,
+        "_load_workload_resolver",
+        lambda: SimpleNamespace(
+            potential_component_ids=lambda _catalog, _workload: (web_component_id,)
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_package_inventory",
+        lambda _workload_id, _component_ids: {"components": {}, "sourceBindings": []},
+    )
+    monkeypatch.setattr(
+        updater,
+        "_installed_static_web",
+        lambda _component: {"active": False, "activeVersion": None, "artifactDigest": None},
+    )
+
+    class WebHostStatusProbe:
+        def read_web_host_status(self, *, expected_source_receipt, runner):
+            assert expected_source_receipt is None
+            # Exercise the real subprocess.run signature through the web-host
+            # CommandRunner contract (argv plus environment mapping).
+            completed = runner(["/usr/bin/true"], {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+            return {"installed": False, "probeReturnCode": completed.returncode}
+
+    monkeypatch.setattr(updater, "_load_workload_web_host", lambda: WebHostStatusProbe())
+
+    status = updater.workload_status("catalyst")
+
+    assert status["status"] == "ready"
+    assert status["hostMetadata"]["web"] == {"installed": False, "probeReturnCode": 0}
+
+
 def test_verified_release_index_separates_manifest_bytes_from_archive_attestation() -> None:
     fixture_root = (
         WORKSPACE_ROOT / "tests" / "fixtures" / "workload-attestation-subjects" / "catalyst-4ad950"
