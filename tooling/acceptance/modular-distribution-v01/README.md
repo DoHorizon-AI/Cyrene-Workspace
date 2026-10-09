@@ -15,7 +15,7 @@ Workspace、Product、Platform、Plugins 或 Client 源码。工作流输入的 
 Run `.github/workflows/modular-distribution-acceptance.yml` with:
 
 - `native_release_id`: the exact official `native-installer-preview-<40 lowercase hex>` tag.
-- `release_pins_json`: a JSON document matching `release-pins-v1.schema.json`. Each workload pin must state `channel: "preview"`, and each component's index identity must name that same signed channel. It must pin the same native tag, Workspace source SHA and workflow, Ubuntu 24.04 amd64 DEB asset digest/size, v2 catalog release identity/digest, Catalyst catalog digest, and exact release identities for Catalyst, Node 24 Client Control, the Client Web host, Runtime Maintenance SDK, and all four Platform-supervised data plugins. Optional `workloads.plugins` pins contain exactly the official `cyrene-evaluation-exact-match` and Runtime SDK identities. They enable an independent stage-only offline retry if Catalyst's isolated stage is fully cache-backed and do not depend on Echo OCI. Optional Echo pins remain separate and are rejected before native installation until Workspace publishes the supported OCI install/evaluate/uninstall path. The workflow rejects incomplete Catalyst pins before native installation. It verifies the attested source receipt before install, then reads back dpkg state and the DEB-installed catalogs, active v2 binding, and static stage-only package contract; it does not expect a per-host native transaction receipt.
+- `release_pins_json`: a JSON document matching `release-pins-v1.schema.json`. Each workload pin must state `channel: "preview"`, and each component's index identity must name that same signed channel. It must pin the same native tag, Workspace source SHA and workflow, Ubuntu 24.04 amd64 DEB asset digest/size, v2 catalog release identity/digest, Catalyst catalog digest, and exact release identities for Catalyst, Node 24 Client Control, the Client Web host, Runtime Maintenance SDK, and all four Platform-supervised data plugins. Optional `workloads.plugins` pins contain exactly the official `cyrene-evaluation-exact-match` and Runtime SDK identities. They enable an independent stage-only offline retry if Catalyst's isolated stage is fully cache-backed and do not depend on Echo OCI. Optional `workloads.echo` pins contain the official Echo OCI image, Runtime SDK, and exact-match plugin identities. When present, the workflow runs a separate installed Echo check/stage/apply, exact-match Product API evaluation, and supported uninstall lifecycle after Catalyst core acceptance. These pins remain assertions against official signed resolver identities; they do not install Echo from source or synthesize a Plugin connection reference. The workflow rejects incomplete Catalyst pins before native installation. It verifies the attested source receipt before install, then reads back dpkg state and the DEB-installed catalogs, active v2 binding, and static stage-only package contract; it does not expect a per-host native transaction receipt.
 
 The disposable runner must use GitHub CLI `gh` version 2.102.0 or newer for strict attestation verification. Before installing Cyrene, the driver records the initial CLI version; when the runner image is older, it reads GitHub's official release API and requires immutable `cli/cli` tag `v2.102.0` at commit `fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd`. It downloads the official amd64 DEB and checksum list, verifies their API asset digest/size, checksum-list SHA-256, exact DEB SHA-256, package version, and architecture, then installs that local verified DEB. The provision record captures the old/new versions and release asset identity. The workflow does not modify a developer's shared WSL CLI. Detached release and catalog attestations are still checked with exact signer, source ref, source SHA, predicate, and OIDC issuer constraints.
 
@@ -217,16 +217,18 @@ operation is not implemented. Dispatch requires the exact native tag, v2 catalog
 binding, and exact Catalyst, Platform-supervised Plugin, Runtime SDK, and Client
 release pins. Optional standalone `workloads.plugins` identities are exact-match
 plus Runtime SDK pins for the independent stage-only offline retry. Optional Echo
-identities are schema-validated but are rejected before
-native installation until the signed OCI installer path and installed evaluator
-contract are executable. Additional Echo, interrupted-transaction, and whole-host
-reboot gates remain required for a full-distribution pass. Do not substitute the earlier first-product
+identities are independently pinned and, when supplied, invoke the installed Echo
+OCI lifecycle and exact-match evaluation gate; missing, blocked, or failed commands
+fail that optional gate. Mid-install fault injection remains `NOT_RUN` until an
+official deferred-transaction recovery contract is published, and the hosted VM is
+not rebooted by this workflow. Do not substitute the earlier first-product
 cohort receipt, a source checkout, a privileged container, or a different native
 tag to make a phase pass.
 
 工作流遇到未实现的 API 或安装操作会严格失败。必须等 exact native tag、v2 catalog binding、Catalyst、四个受监管插件、
 Runtime SDK 和 Client 的官方发布 pins 都准备好后，才能运行验收。可选 `workloads.plugins` pins 精确包含 exact-match
-plugin 与 Runtime SDK，用于独立 stage/retry fallback，不会 apply。可选 Echo pins 必须精确包含官方 OCI Product、Runtime
-SDK 和 exact-match plugin；当前驱动会在任何 native 安装前拒绝这些 pins，直到签名 OCI 安装及已安装评估/卸载流程具备
-可执行契约。完整发行验收仍要求 Echo、事务中断恢复和整机重启 gate。
+plugin 与 Runtime SDK，用于独立 stage/retry fallback，不会 apply。可选 Echo pins 精确包含官方 OCI Product、Runtime
+SDK 和 exact-match plugin；提供这些 pins 后，工作流在 Catalyst 核心验收后执行已安装 OCI 生命周期、真实 exact-match
+评测和受支持的卸载验证，不会从源码启动 Echo 或伪造 Plugin connection reference。中断安装故障注入在官方恢复契约
+发布前保持 `NOT_RUN`，本工作流不会重启托管 VM。
 不得用旧 first-product cohort receipt、源码 checkout、privileged 容器或其他 native tag 来替代并制造 PASS。

@@ -497,8 +497,10 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
     catalyst_rows = {
         row["componentId"]: row for row in pins["workloads"]["catalyst"]["selectedComponents"]
     }
-    echo_product = dict(catalyst_rows["cyrene-catalyst"])
+    echo_product = json.loads(json.dumps(catalyst_rows["cyrene-catalyst"]))
     echo_product.update(componentId="cyrene-echo", targetId="linux-ubuntu-24.04-x86_64-oci")
+    echo_product["attestationRef"]["subjectName"] = "ghcr.io/example/cyrene-echo"
+    echo_product["attestationRef"]["subjectDigest"] = echo_product["digest"]
     exact_match = dict(catalyst_rows["cyrene-tools-dataset-generation"])
     exact_match.update(
         componentId="cyrene-evaluation-exact-match",
@@ -518,14 +520,39 @@ def test_release_pins_schema_and_embedded_preflight_reject_identity_drift(
     jsonschema.Draft202012Validator(schema).validate(pins)
     module.validate_pin_shape(pins)
 
+    missing_oci_subject = json.loads(json.dumps(pins))
+    missing_oci_subject["workloads"]["echo"]["selectedComponents"][0]["attestationRef"].pop(
+        "subjectName"
+    )
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft202012Validator(schema).validate(missing_oci_subject)
+    with pytest.raises(RuntimeError, match="must name its attested image repository"):
+        module.validate_pin_shape(missing_oci_subject)
+
+    mismatched_oci_subject_digest = json.loads(json.dumps(pins))
+    mismatched_oci_subject_digest["workloads"]["echo"]["selectedComponents"][0]["attestationRef"][
+        "subjectDigest"
+    ] = "sha256:" + "0" * 64
+    with pytest.raises(RuntimeError, match="subject digest must equal the pinned image digest"):
+        module.validate_pin_shape(mismatched_oci_subject_digest)
+
     acceptance_root = tmp_path / "echo-dispatch"
     monkeypatch.setenv("ACCEPTANCE_ROOT", str(acceptance_root))
     monkeypatch.setenv("RELEASE_PINS_JSON", json.dumps(pins))
-    with pytest.raises(RuntimeError, match="cannot execute the installed Echo lifecycle"):
-        module.init()
+    monkeypatch.setattr(module, "ensure_attestation_cli", lambda: {"testOnly": True})
+    monkeypatch.setattr(module, "runner_identity", lambda: {"testOnly": True})
+
+    module.init()
+
     ledger = json.loads((acceptance_root / "phase-ledger.json").read_text(encoding="utf-8"))
-    assert ledger["phases"]["echo_exact_match_evaluate_uninstall"]["status"] == "FAIL"
-    assert ledger["phases"]["runner_identity"]["status"] == "NOT_RUN"
+    assert ledger["phases"]["release_pins_validation"]["status"] == "PASS"
+    assert ledger["phases"]["runner_identity"]["status"] == "PASS"
+    assert ledger["phases"]["echo_exact_match_evaluate_uninstall"]["status"] == "NOT_RUN"
+    saved_pins = json.loads((acceptance_root / "release-pins-v1.json").read_text(encoding="utf-8"))
+    assert (
+        saved_pins["workloads"]["echo"]["selectedComponents"]
+        == pins["workloads"]["echo"]["selectedComponents"]
+    )
 
     wrong_echo_workload_id = json.loads(json.dumps(pins))
     wrong_echo_workload_id["workloads"]["catalyst"]["workloadId"] = "echo"

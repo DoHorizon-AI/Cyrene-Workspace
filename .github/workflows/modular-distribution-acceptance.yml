@@ -439,13 +439,6 @@ jobs:
               phase("release_pins_validation", lambda: (
                   validate_pin_shape(load_json(pins_path)) or {"schemaVersion": 1, "status": "valid"}
               ))
-              if "echo" in load_json(pins_path)["workloads"]:
-                  record(
-                      "echo_exact_match_evaluate_uninstall",
-                      "FAIL",
-                      "optional Echo pins are not executable until the signed OCI installer, installed evaluator, and safe uninstall contracts are integrated",
-                  )
-                  raise RuntimeError("Echo pins are schema-valid but this workflow revision cannot execute the installed Echo lifecycle")
               phase("attestation_cli_provision", ensure_attestation_cli)
               phase("runner_identity", runner_identity)
               record("host_reboot_recovery", "NOT_RUN", "the disposable GitHub-hosted VM is not rebooted by this job")
@@ -453,7 +446,13 @@ jobs:
               record("offline_retry_gate", "NOT_RUN", "runs after the exact workload plan is checked using a network-isolated stage subprocess")
               record("installer_interrupted_transaction_recovery", "NOT_RUN", "no official deferred-transaction fault-injection and resume contract is published; acceptance never edits installer journals")
               record("client_static_web_http", "NOT_RUN", "runs after the selected static-Web release has been installed and its exact host receipt is available")
-              record("echo_exact_match_evaluate_uninstall", "NOT_RUN", "no exact Echo OCI, Runtime SDK, and exact-match plugin pins are supplied")
+              record(
+                  "echo_exact_match_evaluate_uninstall",
+                  "NOT_RUN",
+                  "exact Echo OCI, Runtime SDK, and exact-match plugin pins are absent"
+                  if "echo" not in load_json(pins_path)["workloads"]
+                  else "exact Echo pins are present; the installed Echo lifecycle step has not run yet",
+              )
               record("plugins_platform_supervision", "NOT_RUN", "runs after exact Package Runtime policy and Platform UDS binding readback")
               record("client_release_integration", "NOT_RUN", "Client publication/integration gate is not yet supplied")
               record(
@@ -558,6 +557,15 @@ jobs:
                               echo_rows[component_id].get("targetId") == target_id,
                               f"Echo pin target differs for {component_id}",
                           )
+                      echo_proof = echo_rows["cyrene-echo"]["attestationRef"]
+                      require(
+                          isinstance(echo_proof.get("subjectName"), str) and bool(echo_proof["subjectName"]),
+                          "Echo OCI pin must name its attested image repository",
+                      )
+                      require(
+                          echo_proof.get("subjectDigest") == echo_rows["cyrene-echo"]["digest"],
+                          "Echo OCI attestation subject digest must equal the pinned image digest",
+                      )
                   if workload_id == "plugins":
                       plugin_targets = {
                           "cyrene-evaluation-exact-match": "linux-ubuntu-24.04-x86_64-python-3.12",
@@ -1519,6 +1527,7 @@ jobs:
               import importlib.util
               import json
               import os
+              import pwd
               import stat
               import sys
               from pathlib import Path
@@ -2806,6 +2815,268 @@ jobs:
               write_json(root() / "evidence" / "client-catalyst-curation-proxy-mutation.json", evidence)
               return evidence
 
+          def echo_storage_probe(
+              host: dict[str, Any], *, expected: dict[str, Any] | None = None
+          ) -> dict[str, Any]:
+              """Read Echo persistence and credential metadata without returning secret bytes. | 脱敏读取 Echo 持久化与凭据元数据。"""
+              code = textwrap.dedent(r'''
+              import hashlib
+              import json
+              import os
+              import pwd
+              import stat
+              import sys
+              from pathlib import Path
+              def fail(message): raise SystemExit(message)
+              def tree(path, uid, gid):
+                  root=Path(path)
+                  info=root.lstat()
+                  if not stat.S_ISDIR(info.st_mode) or info.st_uid!=uid or info.st_gid!=gid:
+                      fail("Echo persistent directory has unexpected type or owner")
+                  digest=hashlib.sha256()
+                  entries=files=total=0
+                  directories=[]
+                  for current,dirs,names in os.walk(root,topdown=True,followlinks=False):
+                      dirs.sort(); names.sort()
+                      current_path=Path(current)
+                      current_info=current_path.lstat()
+                      if not stat.S_ISDIR(current_info.st_mode) or (current_info.st_uid,current_info.st_gid)!=(uid,gid):
+                          fail("Echo persistent subdirectory has unexpected type or owner")
+                      directories.append((current_path,(current_info.st_dev,current_info.st_ino,current_info.st_uid,current_info.st_gid,current_info.st_mtime_ns,current_info.st_ctime_ns)))
+                      for name in list(dirs):
+                          target=current_path/name
+                          meta=target.lstat()
+                          if (meta.st_uid,meta.st_gid)!=(uid,gid): fail("Echo persistent entry has unexpected owner")
+                          relative=target.relative_to(root).as_posix().encode()
+                          if stat.S_ISLNK(meta.st_mode):
+                              dirs.remove(name)
+                              payload=os.readlink(target).encode()
+                              kind=b"link"
+                              entries+=1
+                          elif stat.S_ISDIR(meta.st_mode):
+                              payload=b""
+                              kind=b"dir"
+                              entries+=1
+                          else: fail("Echo persistent tree contains an unsupported entry")
+                          digest.update(kind+b"\0"+len(relative).to_bytes(4,"big")+relative+hashlib.sha256(payload).digest())
+                      for name in names:
+                          target=current_path/name
+                          meta=target.lstat()
+                          if (meta.st_uid,meta.st_gid)!=(uid,gid): fail("Echo persistent entry has unexpected owner")
+                          relative=target.relative_to(root).as_posix().encode()
+                          if stat.S_ISLNK(meta.st_mode):
+                              payload=os.readlink(target).encode()
+                              kind=b"link"
+                          elif stat.S_ISREG(meta.st_mode):
+                              descriptor=os.open(target,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0))
+                              try:
+                                  before=os.fstat(descriptor)
+                                  if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or (before.st_uid,before.st_gid)!=(uid,gid): fail("Echo persistent file has unexpected type, owner, or hard links")
+                                  file_hash=hashlib.sha256(); size=0
+                                  while True:
+                                      block=os.read(descriptor,1048576)
+                                      if not block: break
+                                      size+=len(block); total+=len(block); file_hash.update(block)
+                                  after=os.fstat(descriptor)
+                                  if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns) or size!=before.st_size:
+                                      fail("Echo persistent file changed while being read")
+                              finally: os.close(descriptor)
+                              payload=file_hash.digest(); kind=b"file"; files+=1
+                          else: fail("Echo persistent tree contains a special file")
+                          entries+=1
+                          digest.update(kind+b"\0"+len(relative).to_bytes(4,"big")+relative+hashlib.sha256(payload).digest())
+                  after_root=root.lstat()
+                  if (info.st_dev,info.st_ino,info.st_uid,info.st_gid)!=(after_root.st_dev,after_root.st_ino,after_root.st_uid,after_root.st_gid):
+                      fail("Echo persistent directory changed while being read")
+                  for directory,identity in directories:
+                      current=directory.lstat()
+                      if (current.st_dev,current.st_ino,current.st_uid,current.st_gid,current.st_mtime_ns,current.st_ctime_ns)!=identity:
+                          fail("Echo persistent directory changed while being read")
+                  return {"device":info.st_dev,"inode":info.st_ino,"uid":info.st_uid,"gid":info.st_gid,"mode":stat.S_IMODE(info.st_mode),"entryCount":entries,"fileCount":files,"totalBytes":total,"treeSha256":digest.hexdigest()}
+              def protected_file(path, allowed_owners, optional=False):
+                  target=Path(path)
+                  try: info=target.lstat()
+                  except FileNotFoundError:
+                      if optional: return {"present":False}
+                      fail("Echo required protected source token is missing")
+                  if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)) not in allowed_owners:
+                      fail("Echo protected credential has unexpected type, owner, or mode")
+                  descriptor=os.open(target,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0))
+                  try:
+                      before=os.fstat(descriptor); raw=b""
+                      if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or (before.st_dev,before.st_ino,before.st_uid,before.st_gid,stat.S_IMODE(before.st_mode))!=(info.st_dev,info.st_ino,info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)):
+                          fail("Echo protected credential changed before it was opened")
+                      while True:
+                          block=os.read(descriptor,4096)
+                          if not block: break
+                          raw+=block
+                          if len(raw)>65536: fail("Echo protected credential exceeds its size limit")
+                      after=os.fstat(descriptor)
+                      if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+                          fail("Echo protected credential changed while being read")
+                  finally: os.close(descriptor)
+                  if not raw: fail("Echo protected credential is empty")
+                  return {"present":True,"device":info.st_dev,"inode":info.st_ino,"sizeBytes":len(raw),"uid":info.st_uid,"gid":info.st_gid,"mode":stat.S_IMODE(info.st_mode),"sha256Internal":hashlib.sha256(raw.rstrip(b"\n")).hexdigest()}
+              supplied=json.load(sys.stdin)
+              host=supplied["host"]
+              uid=host.get("hostUid"); gid=host.get("hostGid")
+              if type(uid) is not int or type(gid) is not int or uid<1 or gid<1: fail("Echo host UID/GID is missing")
+              data=host.get("dataDirectory"); artifacts=host.get("artifactDirectory")
+              if data!="/var/lib/cyrene/echo" or artifacts!="/var/lib/cyrene/echo/artifacts": fail("Echo persistent paths differ from the installed contract")
+              source=protected_file("/etc/cyrene/runtime-activity-source-tokens/cyrene-echo.token",[(0,0,0o400)])
+              cyrene=pwd.getpwnam("cyrene")
+              bearer=protected_file("/etc/cyrene/secrets/catalyst-api-token",[(0,cyrene.pw_gid,0o640),(cyrene.pw_uid,cyrene.pw_gid,0o600)],optional=True)
+              container=host.get("containerName")
+              if not isinstance(container,str) or not container or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for ch in container): fail("Echo managed container name is malformed")
+              staged_path=Path("/var/lib/cyrene/runtime-activity-source-tokens/oci")/container/"activity-token"
+              try:
+                  staged_info=staged_path.lstat()
+                  staged_present=stat.S_ISREG(staged_info.st_mode) and staged_info.st_uid==uid and staged_info.st_gid==gid and stat.S_IMODE(staged_info.st_mode)==0o400 and staged_info.st_nlink==1
+                  if not staged_present: fail("Echo staged ActivitySource credential is unsafe")
+              except FileNotFoundError: staged_present=False
+              if not supplied.get("afterUninstall") and not staged_present: fail("Echo staged ActivitySource credential was not present while installed")
+              if supplied.get("afterUninstall") and staged_present: fail("Echo staged ActivitySource credential remains after uninstall")
+              result={"data":tree(data,uid,gid),"artifacts":tree(artifacts,uid,gid),"sourceToken":source,"apiBearer":bearer,"stagedCredentialPresent":staged_present}
+              expected=supplied.get("expected")
+              if expected is not None:
+                  if result["sourceToken"].get("sha256Internal")!=expected.get("sourceTokenSha256Internal") or result["apiBearer"].get("sha256Internal")!=expected.get("apiBearerSha256Internal"):
+                      fail("Echo protected credential identity changed during uninstall")
+                  for name in ("data","artifacts"):
+                      if (result[name].get("device"),result[name].get("inode"),result[name].get("uid"),result[name].get("gid"))!=(expected[name].get("device"),expected[name].get("inode"),expected[name].get("uid"),expected[name].get("gid")):
+                          fail("Echo persistent directory identity changed during uninstall")
+                  if result["artifacts"].get("treeSha256")!=expected["artifacts"].get("treeSha256"):
+                      fail("Echo artifact data changed during uninstall")
+              print(json.dumps(result,separators=(",",":")))
+              ''').strip()
+              completed = run(
+                  ["sudo", "-n", "python3", "-s", "-c", code],
+                  label="echo-persistent-data-and-credential-probe",
+                  timeout=120,
+                  input_text=json.dumps(
+                      {"host": host, "afterUninstall": expected is not None, "expected": expected},
+                      separators=(",", ":"),
+                  ),
+                  retain_output=False,
+              )
+              result = json.loads(completed.stdout)
+              return result
+
+          def echo_product_evaluation(host: dict[str, Any]) -> dict[str, Any]:
+              """Run the installed Echo Product API using only its protected in-memory bearer. | 使用受保护的内存 bearer 验收已安装 Echo API。"""
+              code = textwrap.dedent(r'''
+              import hashlib
+              import json
+              import os
+              import pwd
+              import stat
+              import sys
+              import time
+              import urllib.error
+              import urllib.request
+              from pathlib import Path
+              from urllib.parse import urlsplit
+              from uuid import uuid4
+              def fail(message): raise SystemExit(message)
+              def read_bearer():
+                  path=Path("/etc/cyrene/secrets/catalyst-api-token")
+                  try: info=path.lstat()
+                  except FileNotFoundError: return None
+                  cyrene=pwd.getpwnam("cyrene")
+                  allowed={(0,cyrene.pw_gid,0o640),(cyrene.pw_uid,cyrene.pw_gid,0o600)}
+                  if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)) not in allowed: fail("Echo API bearer file has unsafe ownership or mode")
+                  descriptor=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)|getattr(os,"O_CLOEXEC",0))
+                  try:
+                      before=os.fstat(descriptor); raw=b""
+                      if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or (before.st_dev,before.st_ino,before.st_uid,before.st_gid,stat.S_IMODE(before.st_mode))!=(info.st_dev,info.st_ino,info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode)): fail("Echo API bearer changed before it was opened")
+                      while True:
+                          block=os.read(descriptor,4096)
+                          if not block: break
+                          raw+=block
+                          if len(raw)>65536: fail("Echo API bearer exceeds its size limit")
+                      after=os.fstat(descriptor)
+                      if (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns): fail("Echo API bearer changed while being read")
+                  finally: os.close(descriptor)
+                  token=raw.rstrip(b"\r\n").decode("utf-8","strict")
+                  if not token or "\n" in token or "\r" in token: fail("Echo API bearer is empty or malformed")
+                  return token
+              class DenyRedirect(urllib.request.HTTPRedirectHandler):
+                  def redirect_request(self,*_args,**_kwargs): return None
+              supplied=json.load(sys.stdin)
+              base=supplied.get("clientUrl")
+              parsed=urlsplit(base or "")
+              if (parsed.scheme,parsed.hostname,parsed.port,parsed.path,parsed.query,parsed.fragment)!=("http","127.0.0.1",8094,"/","",""): fail("Echo API URL differs from the fixed loopback endpoint")
+              origin="http://127.0.0.1:8094"
+              token=read_bearer()
+              opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),DenyRedirect())
+              def request(method,path,*,body=None,content_type=None,expected_status=200,idempotency_key=None,authenticated=True):
+                  url=origin+path
+                  headers={"Accept":"application/json"}
+                  if content_type: headers["Content-Type"]=content_type
+                  if idempotency_key: headers["Idempotency-Key"]=idempotency_key
+                  if authenticated and token is not None: headers["Authorization"]="Bearer "+token
+                  wire=body
+                  if isinstance(body,dict):
+                      wire=json.dumps(body,separators=(",",":"),ensure_ascii=False).encode("utf-8")
+                      headers.setdefault("Content-Type","application/json")
+                  request=urllib.request.Request(url,data=wire,headers=headers,method=method)
+                  try: response=opener.open(request,timeout=20)
+                  except urllib.error.HTTPError as error: response=error
+                  except (urllib.error.URLError,TimeoutError): fail("Echo Product loopback request failed")
+                  with response:
+                      raw=response.read(4*1024*1024+1)
+                      if len(raw)>4*1024*1024: fail("Echo Product response exceeded the size limit")
+                      if response.geturl()!=url: fail("Echo Product request changed route")
+                      if int(response.status)!=expected_status: fail("Echo Product "+method+" "+path+" returned HTTP "+str(response.status))
+                  try: value=json.loads(raw.decode("utf-8"))
+                  except (UnicodeDecodeError,json.JSONDecodeError): fail("Echo Product response was not JSON")
+                  return value,raw
+              health,_=request("GET","/healthz",authenticated=False)
+              if health.get("status")!="ok": fail("Echo health endpoint did not report ready")
+              fixture=(
+                  b'{"sampleId":"installed-match","expected":"same","actual":"same"}\n'
+                  b'{"sampleId":"installed-mismatch","expected":"expected","actual":"observed"}\n'
+              )
+              artifact,_=request("POST","/api/v1/session-artifacts",body=fixture,content_type="application/jsonl",expected_status=201)
+              if not isinstance(artifact,dict) or not {"uri","digest","sizeBytes","kind"}<=set(artifact): fail("Echo artifact upload response is not an ArtifactRef")
+              digest=artifact.get("digest")
+              if not isinstance(digest,str) or len(digest)!=71 or not digest.startswith("sha256:") or artifact.get("uri")!="artifact://sha256/"+digest[7:] or artifact.get("sizeBytes")!=len(fixture) or artifact.get("kind")!="dataset": fail("Echo artifact identity differs from the fixed JSONL payload")
+              suite,_=request("POST","/api/v1/evaluation-suites",body={"name":"installed-exact-match","evaluator":"exact_match.v1","expectedField":"expected","actualField":"actual","threshold":0.5},expected_status=201,idempotency_key=str(uuid4()))
+              suite_id=suite.get("id") if isinstance(suite,dict) else None
+              if not isinstance(suite_id,str) or not suite_id: fail("Echo suite create response has no ID")
+              created,_=request("POST","/api/v1/evaluation-runs",body={"suiteId":suite_id,"inputArtifact":artifact,"engineBindingId":"exact-match-plugin"},expected_status=201,idempotency_key=str(uuid4()))
+              run_id=created.get("id") if isinstance(created,dict) else None
+              if not isinstance(run_id,str) or not run_id: fail("Echo evaluation run response has no ID")
+              current=created
+              deadline=time.monotonic()+180
+              while current.get("state")=="RUNNING" and time.monotonic()<deadline:
+                  time.sleep(2)
+                  current,_=request("GET","/api/v1/evaluation-runs/"+run_id)
+              if current.get("state")!="SUCCEEDED": fail("Echo evaluation run did not reach SUCCEEDED")
+              result_id=current.get("resultId"); gate_id=current.get("gateId")
+              if not isinstance(result_id,str) or not result_id or not isinstance(gate_id,str) or not gate_id: fail("Echo successful run omitted result or gate identity")
+              result,_=request("GET","/api/v1/evaluation-results/"+result_id)
+              gate,_=request("GET","/api/v1/gate-decisions/"+gate_id)
+              samples,_=request("GET","/api/v1/evaluation-runs/"+run_id+"/samples")
+              if result.get("recordCount")!=2 or result.get("passedCount")!=1 or result.get("score")!=0.5 or result.get("metrics",{}).get("exact_match")!=0.5 or result.get("inputDigest")!=digest: fail("Echo result readback differs from the two-row exact-match fixture")
+              if gate.get("outcome")!="PASS" or gate.get("observedScore")!=0.5 or gate.get("threshold")!=0.5: fail("Echo gate readback differs from the expected 0.5 threshold")
+              if not isinstance(samples,list) or len(samples)!=2 or sum(1 for row in samples if isinstance(row,dict) and row.get("passed") is True)!=1: fail("Echo sample readback differs from one passing row")
+              summary={"healthStatus":200,"healthBodyStatus":"ok","fixtureSha256":hashlib.sha256(fixture).hexdigest(),"fixtureSizeBytes":len(fixture),"artifactDigest":digest,"artifactSizeBytes":artifact["sizeBytes"],"artifactKind":artifact["kind"],"suiteStatus":201,"runStatus":201,"runState":"SUCCEEDED","resultRecordCount":result["recordCount"],"resultPassedCount":result["passedCount"],"score":result["score"],"metricExactMatch":result["metrics"]["exact_match"],"inputDigestMatches":True,"gateOutcome":gate["outcome"],"gateThreshold":gate["threshold"],"sampleCount":len(samples),"samplePassedCount":1,"idempotencyKeysFresh":True,"httpBearerConfigured":token is not None,"httpBearerStored":False,"responseRecordsStored":False,"resourceIdsStored":False}
+              print(json.dumps(summary,separators=(",",":")))
+              ''').strip()
+              result = run(
+                  ["sudo", "-n", "python3", "-s", "-c", code],
+                  label="installed-echo-exact-match-product-acceptance",
+                  timeout=240,
+                  input_text=json.dumps({"clientUrl": host["clientUrl"]}, separators=(",", ":")),
+                  retain_output=False,
+              )
+              summary = json.loads(result.stdout)
+              require(summary.get("runState") == "SUCCEEDED", "installed Echo exact-match run did not complete")
+              require(summary.get("score") == 0.5 and summary.get("gateOutcome") == "PASS", "installed Echo exact-match score/gate differs")
+              require(summary.get("httpBearerStored") is False and summary.get("responseRecordsStored") is False, "Echo API evidence retained a credential or response records")
+              write_json(root() / "evidence" / "echo-installed-exact-match.json", summary)
+              return summary
+
           def product_acceptance() -> None:
               """Exercise installed Catalyst APIs and independently validate the generated ZIP."""
               service = pins()["workloads"]["catalyst"]["service"]
@@ -2856,6 +3127,222 @@ jobs:
                   return evidence
               phase("catalyst_independent_bundle_consumer", consumer_gate)
               # Only the consumer-verified fixed synthetic ZIP is copied to uploadable evidence.
+
+          def echo_exact_match_evaluate_uninstall() -> dict[str, Any]:
+              """Install, evaluate, and uninstall only the exact pinned Echo workload. | 安装、评估并只卸载精确 pins 的 Echo workload。"""
+              workload = pins()["workloads"]["echo"]
+              echo_pin = next(row for row in workload["selectedComponents"] if row["componentId"] == "cyrene-echo")
+              sdk_pin = next(row for row in workload["selectedComponents"] if row["componentId"] == "cyrene-runtime-maintenance-sdk")
+              exact_pin = next(row for row in workload["selectedComponents"] if row["componentId"] == "cyrene-evaluation-exact-match")
+
+              def validate_workload_response(value: dict[str, Any], action: str, expected_status: str, context: str) -> None:
+                  require(value.get("status") == expected_status, f"{context} returned unexpected status")
+                  require(value.get("action") == action, f"{context} changed workload action")
+                  require(value.get("workloadId") == "echo" and value.get("targetId") == workload["targetId"], f"{context} changed workload/target identity")
+                  require(value.get("catalogDigest") == workload["catalogDigest"], f"{context} changed signed Catalog digest")
+                  require(value.get("channel") == workload["channel"] == "preview", f"{context} changed the pinned preview channel")
+
+              def assert_host_metadata(status: dict[str, Any], context: str) -> dict[str, Any]:
+                  require(status.get("status") == "ready", f"{context} Echo status is not ready")
+                  require(status.get("catalogDigest") == workload["catalogDigest"], f"{context} Echo status Catalog differs")
+                  assert_installed_components(status.get("components", []), workload["selectedComponents"], context)
+                  rows = {row["componentId"]: row for row in status["components"]}
+                  echo_row = rows["cyrene-echo"]
+                  require(echo_row.get("installationId") is None, f"{context} OCI Product unexpectedly reports a Package Runtime installation ID")
+                  require(echo_row.get("verification", {}).get("identityAttested") is True, f"{context} Echo row is not identity-attested")
+                  host_metadata = status.get("hostMetadata")
+                  require(isinstance(host_metadata, dict), f"{context} has no hostMetadata projection")
+                  host = host_metadata.get("echo")
+                  require(isinstance(host, dict), f"{context} has no installed hostMetadata.echo receipt")
+                  require(host.get("schemaVersion") == 1 and host.get("componentId") == "cyrene-echo", f"{context} Echo host receipt schema/component differs")
+                  require(host.get("installed") is True and host.get("available") is True, f"{context} Echo is not installed and available")
+                  for field in ("version", "releaseId", "targetId", "manifestDigest", "manifestAssetDigest", "digest"):
+                      require(host.get(field) == echo_pin[field], f"{context} Echo host receipt {field} differs from exact pins")
+                  require(host.get("clientUrl") == "http://127.0.0.1:8094/" and host.get("healthPath") == "/healthz", f"{context} Echo listener differs from the loopback contract")
+                  require(host.get("imageDigest") == echo_pin["digest"], f"{context} Echo image digest differs from exact pins")
+                  subject = echo_pin["attestationRef"]["subjectName"]
+                  expected_image = subject if "@sha256:" in subject else f"{subject}@{echo_pin['digest']}"
+                  require(expected_image.endswith(echo_pin["digest"]), f"{context} Echo OCI image pin is malformed")
+                  require(host.get("imageReference") == expected_image, f"{context} Echo image reference differs from the attested OCI subject")
+                  require(isinstance(host.get("containerName"), str) and host["containerName"], f"{context} Echo managed container name is missing")
+                  require(isinstance(host.get("containerId"), str) and host["containerId"], f"{context} Echo container ID is missing")
+                  require(host.get("state") == "running", f"{context} Echo container is not running")
+                  require(type(host.get("hostUid")) is int and host["hostUid"] > 0 and type(host.get("hostGid")) is int and host["hostGid"] > 0, f"{context} Echo installer UID/GID readback is malformed")
+                  require(host.get("activitySourceId") == "cyrene-echo" and type(host.get("activityCatalogGeneration")) is int and host["activityCatalogGeneration"] > 0, f"{context} Echo ActivitySource identity/generation is missing")
+                  require(host.get("dataDirectory") == "/var/lib/cyrene/echo" and host.get("artifactDirectory") == "/var/lib/cyrene/echo/artifacts", f"{context} Echo data paths differ from the installed contract")
+                  require(host.get("verification", {}).get("identityAttested") is True, f"{context} Echo host receipt is not identity-attested")
+                  require(host.get("probes", {}).get("healthz", {}).get("status") == 200, f"{context} Echo health probe receipt is not HTTP 200")
+                  exact_row = rows["cyrene-evaluation-exact-match"]
+                  installation_id = exact_row.get("installationId")
+                  require(isinstance(installation_id, str) and installation_id, f"{context} exact-match installation ID is missing from authenticated UDS readback")
+                  bindings = status.get("sourceBindings")
+                  require(isinstance(bindings, list), f"{context} has no Package Runtime sourceBindings readback")
+                  owners = [
+                      row for row in bindings
+                      if isinstance(row, dict) and row.get("sourceId") == "cyrene-echo"
+                      and row.get("activeInstallationId") == installation_id
+                  ]
+                  require(len(owners) == 1, f"{context} has no unique active exact-match owner under cyrene-echo")
+                  owner = owners[0]
+                  require(isinstance(owner.get("bindingId"), str) and owner["bindingId"], f"{context} Echo source binding ID is missing")
+                  require(isinstance(owner.get("packageId"), str) and owner["packageId"], f"{context} Echo source binding package identity is missing")
+                  owner_installations = owner.get("installationIds")
+                  require(isinstance(owner_installations, list) and owner_installations.count(installation_id) == 1 and owner.get("state") == "RUNNING" and owner.get("failureCode") is None, f"{context} exact-match owner is not RUNNING under the Echo source")
+                  safe_host = json.dumps(host, sort_keys=True, separators=(",", ":")).lower()
+                  require(not any(secret in safe_host for secret in ("cyrene_data_tools_token", "cyrene_evaluation_runner_connection_ref", "connection_ref", "sourcetoken", "tokenhash")), f"{context} Echo host receipt contains secret material")
+                  health_status, _health_headers, health_body = request_loopback(
+                      host["clientUrl"] + "healthz", {"Accept": "application/json"}
+                  )
+                  require(health_status == 200, f"{context} Echo healthz returned HTTP {health_status}")
+                  try:
+                      health = json.loads(health_body.decode("utf-8"))
+                  except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                      raise RuntimeError(f"{context} Echo healthz response is not JSON") from error
+                  require(isinstance(health, dict) and health.get("status") == "ok", f"{context} Echo healthz response is not ready")
+                  return {
+                      "componentId": "cyrene-echo",
+                      "version": echo_pin["version"],
+                      "releaseId": echo_pin["releaseId"],
+                      "targetId": echo_pin["targetId"],
+                      "manifestDigest": echo_pin["manifestDigest"],
+                      "manifestAssetDigest": echo_pin["manifestAssetDigest"],
+                      "imageDigest": host["imageDigest"],
+                      "containerName": host["containerName"],
+                      "containerId": host["containerId"],
+                      "state": host["state"],
+                      "hostUid": host["hostUid"],
+                      "hostGid": host["hostGid"],
+                      "activityCatalogGeneration": host["activityCatalogGeneration"],
+                      "sourceBinding": {"sourceId": "cyrene-echo", "bindingId": owner["bindingId"], "packageId": owner["packageId"], "installationId": installation_id, "state": owner["state"]},
+                      "health": {"status": health_status, "bodyStatus": health["status"]},
+                      "dataDirectory": host["dataDirectory"],
+                      "artifactDirectory": host["artifactDirectory"],
+                  }
+
+              before_status = workload_request("status", workloadId="echo")
+              before_host = before_status.get("hostMetadata", {}).get("echo") if isinstance(before_status.get("hostMetadata"), dict) else None
+              require(before_status.get("catalogDigest") == workload["catalogDigest"], "fresh Echo inventory Catalog digest differs from pins")
+              require(not any(row.get("componentId") == "cyrene-echo" and row.get("installed") is True for row in before_status.get("components", []) if isinstance(row, dict)), "fresh hosted runner already has Echo installed")
+              if isinstance(before_host, dict):
+                  require(before_host.get("installed") is False and before_host.get("state") == "not-installed", "fresh Echo host receipt is already installed")
+              require(not any(row.get("sourceId") == "cyrene-echo" and row.get("activeInstallationId") for row in before_status.get("sourceBindings", []) if isinstance(row, dict)), "fresh hosted runner already has an active Echo source binding")
+
+              selected_ids = [row["componentId"] for row in workload["selectedComponents"]]
+              install_selection = {"includeComponentIds": selected_ids, "excludeComponentIds": [], "choices": {}}
+              checked = workload_request(
+                  "check", preserve_read_token=True, workloadId="echo", targetId=workload["targetId"],
+                  channel=workload["channel"], action="install", selections=install_selection,
+              )
+              require(checked.get("status") == "ready", f"Echo install check is blocked: {checked.get('blockers')}")
+              validate_workload_response(checked, "install", "ready", "Echo install check")
+              assert_selected_components(checked.get("components"), workload["selectedComponents"], "Echo install check")
+              resolution = checked.get("resolution")
+              require(isinstance(resolution, dict) and resolution.get("channel") == workload["channel"] and resolution.get("catalogDigest") == workload["catalogDigest"], "Echo install resolution does not bind the pinned Catalog/channel")
+              require(resolution.get("planDigestMaterial", {}).get("channel") == workload["channel"], "Echo install plan digest material is not channel-bound")
+              assert_selected_components(resolution.get("selectedComponents"), workload["selectedComponents"], "Echo resolver install resolution")
+              require(re.fullmatch(r"plan-[0-9a-f]{32}", str(checked.get("planId", ""))) is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", str(checked.get("planDigest", ""))) is not None, "Echo install check returned malformed plan identity")
+              write_json(root() / "evidence" / "echo-install-checked-plan.json", checked)
+
+              plan_fields = {
+                  "workloadId": "echo", "targetId": workload["targetId"], "channel": workload["channel"],
+                  "action": "install", "planId": checked["planId"], "planDigest": checked["planDigest"],
+              }
+              staged = workload_request("stage", preserve_read_token=True, **plan_fields)
+              assert_staged_plan(staged, workload, checked, "Echo install stage")
+              applied = workload_request(
+                  "apply", **plan_fields,
+                  confirmation={"planId": checked["planId"], "planDigest": checked["planDigest"], "confirmed": True},
+              )
+              validate_workload_response(applied, "install", "activated", "Echo install apply")
+              require(applied.get("planId") == checked["planId"] and applied.get("planDigest") == checked["planDigest"], "Echo install apply changed the checked plan")
+              assert_selected_components(applied.get("components"), workload["selectedComponents"], "Echo install apply result")
+              applied_metadata = applied.get("hostMetadata", {}).get("echo") if isinstance(applied.get("hostMetadata"), dict) else None
+              require(isinstance(applied_metadata, dict) and applied_metadata.get("installed") is True, "Echo apply did not return its installed host receipt")
+              installed_status = workload_request("status", workloadId="echo")
+              installed_identity = assert_host_metadata(installed_status, "installed Echo readback")
+              storage_before = echo_storage_probe(installed_status["hostMetadata"]["echo"])
+              require(storage_before["data"].get("entryCount", 0) > 0, "Echo data directory contains no persistent service state")
+
+              evaluation = echo_product_evaluation(installed_status["hostMetadata"]["echo"])
+              storage_after_evaluation = echo_storage_probe(installed_status["hostMetadata"]["echo"])
+              require(storage_after_evaluation["artifacts"].get("fileCount", 0) > 0, "Echo exact-match evaluation did not persist its uploaded artifact")
+
+              uninstall_selection = {"includeComponentIds": ["cyrene-echo"], "excludeComponentIds": [], "choices": {}}
+              uninstall_check = workload_request(
+                  "check", preserve_read_token=True, workloadId="echo", targetId=workload["targetId"],
+                  channel=workload["channel"], action="uninstall", selections=uninstall_selection,
+              )
+              validate_workload_response(uninstall_check, "uninstall", "ready", "Echo uninstall check")
+              uninstall_rows = uninstall_check.get("components")
+              require(isinstance(uninstall_rows, list) and len(uninstall_rows) == 1 and uninstall_rows[0].get("componentId") == "cyrene-echo", "Echo uninstall must select only the exact direct member")
+              uninstall_identity = uninstall_rows[0].get("installedIdentity", uninstall_rows[0])
+              for field in ("componentId", "version", "releaseId", "targetId", "manifestDigest", "manifestAssetDigest", "digest"):
+                  require(uninstall_identity.get(field) == echo_pin[field], f"Echo uninstall plan {field} differs from the installed pin")
+              uninstall_resolution = uninstall_check.get("resolution")
+              require(isinstance(uninstall_resolution, dict) and uninstall_resolution.get("channel") == workload["channel"] and uninstall_resolution.get("catalogDigest") == workload["catalogDigest"], "Echo uninstall plan does not bind the exact signed Catalog/channel")
+              require(re.fullmatch(r"plan-[0-9a-f]{32}", str(uninstall_check.get("planId", ""))) is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", str(uninstall_check.get("planDigest", ""))) is not None, "Echo uninstall check returned malformed plan identity")
+              write_json(root() / "evidence" / "echo-uninstall-checked-plan.json", uninstall_check)
+              uninstall_fields = {
+                  "workloadId": "echo", "targetId": workload["targetId"], "channel": workload["channel"],
+                  "action": "uninstall", "planId": uninstall_check["planId"], "planDigest": uninstall_check["planDigest"],
+              }
+              uninstall_staged = workload_request("stage", preserve_read_token=True, **uninstall_fields)
+              validate_workload_response(uninstall_staged, "uninstall", "staged", "Echo uninstall stage")
+              staged_uninstall_rows = uninstall_staged.get("components")
+              require(isinstance(staged_uninstall_rows, list) and len(staged_uninstall_rows) == 1 and staged_uninstall_rows[0].get("componentId") == "cyrene-echo" and staged_uninstall_rows[0].get("status") == "planned-for-uninstall", "Echo uninstall stage did not preserve the exact direct-member plan")
+              uninstalled = workload_request(
+                  "apply", **uninstall_fields,
+                  confirmation={"planId": uninstall_check["planId"], "planDigest": uninstall_check["planDigest"], "confirmed": True},
+              )
+              validate_workload_response(uninstalled, "uninstall", "uninstalled", "Echo uninstall apply")
+              require(uninstalled.get("planId") == uninstall_check["planId"] and uninstalled.get("planDigest") == uninstall_check["planDigest"], "Echo uninstall apply changed the checked plan")
+              final_echo = workload_request("status", workloadId="echo")
+              require(final_echo.get("status") == "ready" and final_echo.get("catalogDigest") == workload["catalogDigest"], "Echo post-uninstall status/catalog is unavailable")
+              final_host = final_echo.get("hostMetadata", {}).get("echo") if isinstance(final_echo.get("hostMetadata"), dict) else None
+              require(isinstance(final_host, dict) and final_host.get("installed") is False and final_host.get("state") == "not-installed", "Echo host receipt still reports an installed container after uninstall")
+              require(not any(row.get("componentId") == "cyrene-echo" and row.get("installed") is True for row in final_echo.get("components", []) if isinstance(row, dict)), "Echo component remains installed after uninstall")
+              require(not any(row.get("sourceId") == "cyrene-echo" and row.get("activeInstallationId") for row in final_echo.get("sourceBindings", []) if isinstance(row, dict)), "Echo ActivitySource still has an active Plugin owner after uninstall")
+              retained_ids = {"cyrene-runtime-maintenance-sdk", "cyrene-evaluation-exact-match"}
+              retained_rows = [row for row in final_echo.get("components", []) if isinstance(row, dict) and row.get("componentId") in retained_ids]
+              assert_installed_components(retained_rows, [sdk_pin, exact_pin], "Echo uninstall retained Runtime SDK and exact-match installation")
+              storage_after = echo_storage_probe(installed_status["hostMetadata"]["echo"], expected=storage_after_evaluation)
+              require(storage_after.get("stagedCredentialPresent") is False, "Echo staged ActivitySource credential was not removed")
+              require(storage_after["artifacts"].get("treeSha256") == storage_before["artifacts"].get("treeSha256"), "Echo user artifacts were not preserved by uninstall")
+              require(storage_after["data"].get("entryCount", 0) > 0, "Echo product data was removed by uninstall")
+
+              catalyst = pins()["workloads"]["catalyst"]
+              catalyst_after = workload_request("status", workloadId="catalyst")
+              require(catalyst_after.get("status") == "ready" and catalyst_after.get("catalogDigest") == catalyst["catalogDigest"], "Catalyst was affected by Echo uninstall")
+              assert_installed_components(catalyst_after.get("components", []), catalyst["selectedComponents"], "Catalyst after Echo uninstall")
+              catalyst_bindings = assert_catalyst_source_bindings(
+                  catalyst_after.get("sourceBindings"),
+                  expected_catalyst_bindings(catalyst["selectedComponents"]),
+                  "Catalyst Package Runtime UDS readback after Echo uninstall",
+              )
+              health = request_http(catalyst["service"]["baseUrl"], catalyst["service"]["healthPath"])
+              catalyst_health = json.loads(health["body"])
+              require(health["status"] == 200 and catalyst_health.get("status") == "ok", "Catalyst Product did not remain healthy after Echo uninstall")
+
+              evidence = {
+                  "workloadId": "echo",
+                  "targetId": workload["targetId"],
+                  "channel": workload["channel"],
+                  "catalogDigest": workload["catalogDigest"],
+                  "selectedComponentIds": selected_ids,
+                  "install": {"planId": checked["planId"], "planDigest": checked["planDigest"], "status": applied["status"], "identity": installed_identity},
+                  "evaluation": evaluation,
+                  "uninstall": {"planId": uninstall_check["planId"], "planDigest": uninstall_check["planDigest"], "directMemberIds": ["cyrene-echo"], "status": uninstalled["status"], "installed": False},
+                  "persistentData": {"dataDirectoryRetained": True, "artifactDirectoryRetained": True, "artifactTreeSha256": storage_after_evaluation["artifacts"]["treeSha256"], "artifactFileCount": storage_after_evaluation["artifacts"]["fileCount"], "activitySourceTokenRetained": storage_after["sourceToken"].get("present") is True, "apiBearerStatePreserved": storage_after["apiBearer"].get("present") is storage_after_evaluation["apiBearer"].get("present"), "stagedActivitySourceCredentialRemoved": storage_after.get("stagedCredentialPresent") is False},
+                  "catalystPreserved": {"catalogDigest": catalyst_after["catalogDigest"], "installedComponentCount": len(catalyst["selectedComponents"]), "healthStatus": health["status"]},
+                  "catalystBindingCountPreserved": len(catalyst_bindings),
+                  "resourceIdsStored": False,
+                  "apiBearerStored": False,
+                  "activitySourceTokenStored": False,
+                  "connectionRefStored": False,
+                  "containerInspectionUsed": False,
+              }
+              write_json(root() / "evidence" / "echo-lifecycle-acceptance.json", evidence)
+              return evidence
 
           def restart_recovery() -> None:
               """Restart only the pinned Catalyst unit and prove it returns to HTTP service."""
@@ -2962,7 +3449,7 @@ jobs:
           def main() -> int:
               """Dispatch one workflow phase without accessing repository source."""
               parser = argparse.ArgumentParser()
-              parser.add_argument("command", choices=("init", "preflight", "deb-install", "static-readback", "catalyst-core", "catalyst-products", "missing-selection", "finalize"))
+              parser.add_argument("command", choices=("init", "preflight", "deb-install", "static-readback", "catalyst-core", "catalyst-products", "missing-selection", "echo-lifecycle", "finalize"))
               arguments = parser.parse_args()
               try:
                   if arguments.command == "init":
@@ -2979,6 +3466,15 @@ jobs:
                       core_products()
                   elif arguments.command == "missing-selection":
                       phase("missing_selection_gate", missing_required_selection)
+                  elif arguments.command == "echo-lifecycle":
+                      if "echo" in pins()["workloads"]:
+                          phase("echo_exact_match_evaluate_uninstall", echo_exact_match_evaluate_uninstall)
+                      else:
+                          record(
+                              "echo_exact_match_evaluate_uninstall",
+                              "NOT_RUN",
+                              "no exact optional Echo OCI, Runtime SDK, and exact-match plugin pins were supplied",
+                          )
                   else:
                       finalize()
               except Exception as error:  # noqa: BLE001 - the phase ledger is the durable failure record.
@@ -3033,6 +3529,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" missing-selection
+
+      - name: Run optional installed Echo exact-match and uninstall acceptance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 "$ACCEPTANCE_ROOT/acceptance_driver.py" echo-lifecycle
 
       - name: Finalize phase ledger
         if: always()
