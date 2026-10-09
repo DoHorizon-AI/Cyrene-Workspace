@@ -1035,7 +1035,7 @@ jobs:
               require(isinstance(workloads, dict) and "catalyst" in workloads, "Catalyst workload pins are required")
               require(set(workloads) <= {"catalyst", "plugins", "echo"}, "workload pins contain an unsupported workload")
               for workload_id, workload in workloads.items():
-                  required_workload_fields = {"workloadId", "targetId", "catalogDigest", "channel", "selectedComponents"}
+                  required_workload_fields = {"workloadId", "targetId", "catalogDigest", "channel", "selectedComponents", "dependencyComponents"}
                   if workload_id == "catalyst":
                       required_workload_fields.add("service")
                   require(isinstance(workload, dict) and set(workload) == required_workload_fields, f"{workload_id} workload pin shape differs from schema")
@@ -1047,6 +1047,11 @@ jobs:
                   require(isinstance(rows, list) and rows, f"{workload_id} has no selected component identity pins")
                   component_ids = [row.get("componentId") for row in rows if isinstance(row, dict)]
                   require(len(component_ids) == len(rows) and len(component_ids) == len(set(component_ids)), f"{workload_id} component pins are malformed or duplicated")
+                  dependency_rows = workload.get("dependencyComponents")
+                  require(isinstance(dependency_rows, list), f"{workload_id} dependency identity pins are malformed")
+                  dependency_ids = [row.get("componentId") for row in dependency_rows if isinstance(row, dict)]
+                  require(len(dependency_ids) == len(dependency_rows) and len(dependency_ids) == len(set(dependency_ids)), f"{workload_id} dependency pins are malformed or duplicated")
+                  require(not (set(component_ids) & set(dependency_ids)), f"{workload_id} direct and dependency identity pins overlap")
                   if workload_id == "catalyst":
                       required_components = {
                           "cyrene-catalyst",
@@ -1107,7 +1112,7 @@ jobs:
                               plugin_rows[component_id].get("targetId") == target_id,
                               f"standalone plugins pin target differs for {component_id}",
                           )
-                  for row in rows:
+                  for row in [*rows, *dependency_rows]:
                       required_component_fields = {
                           "componentId", "targetId", "version", "releaseId", "manifestDigest",
                           "manifestAssetDigest", "digest", "publisherIdentity", "indexIdentity",
@@ -1576,9 +1581,221 @@ jobs:
               actual = {row.get("componentId"): row for row in actual_rows if isinstance(row, dict)}
               expected = {row["componentId"]: row for row in expected_rows}
               require(len(actual) == len(actual_rows), f"{context} has malformed or duplicate component rows")
-              require(set(actual) == set(expected), f"{context} selected component set differs from root pins")
+              require(set(actual) == set(expected), f"{context} selected component set differs from exact identity pins")
               for component_id, pin in expected.items():
                   compare_nested(actual[component_id], pin, f"{context}.{component_id}")
+
+          def workload_component_pins(workload: dict[str, Any]) -> list[dict[str, Any]]:
+              """Return direct workload identity pins plus dependency-only identity pins."""
+              roots = workload.get("selectedComponents")
+              dependencies = workload.get("dependencyComponents")
+              require(isinstance(roots, list) and isinstance(dependencies, list), "workload component identity pins are malformed")
+              rows = [*roots, *dependencies]
+              ids = [row.get("componentId") for row in rows if isinstance(row, dict)]
+              require(len(ids) == len(rows) and len(ids) == len(set(ids)), "workload component identity pins are malformed or duplicated")
+              return rows
+
+          def verified_catalog_document() -> dict[str, Any]:
+              """Load the exact Catalog bytes already verified against the official release pin."""
+              catalog_pin = pins()["catalog"]
+              path = root() / "downloads" / "official-catalog-v2" / catalog_pin["assetName"]
+              require(path.is_file() and not path.is_symlink(), "verified official Catalog bytes are unavailable for workload closure derivation")
+              require(path.stat().st_size == catalog_pin["sizeBytes"] and sha256(path) == catalog_pin["sha256"], "workload closure Catalog bytes differ from official release pins")
+              catalog = load_json(path)
+              require(catalog.get("schemaVersion") == 2 and catalog.get("generation") == catalog_pin["generation"], "workload closure Catalog schema/generation differs from official pins")
+              return catalog
+
+          def derive_catalog_workload_closure(
+              catalog: dict[str, Any], workload_id: str, selections: dict[str, Any]
+          ) -> dict[str, Any]:
+              """Derive direct selections and dependency reasons from the verified Catalog graph."""
+              workloads = [
+                  row for row in catalog.get("workloads", [])
+                  if isinstance(row, dict) and row.get("workloadId") == workload_id
+              ]
+              require(len(workloads) == 1, f"verified Catalog must define exactly one {workload_id} workload")
+              catalog_workload = workloads[0]
+              components_list = catalog.get("components")
+              require(isinstance(components_list, list), "verified Catalog has no component list")
+              components = {
+                  row.get("componentId"): row
+                  for row in components_list
+                  if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+              }
+              require(len(components) == len(components_list), "verified Catalog component rows are malformed or duplicated")
+
+              normalized: dict[str, Any] = {}
+              for key in ("includeComponentIds", "excludeComponentIds"):
+                  values = selections.get(key, [])
+                  require(isinstance(values, list) and all(isinstance(item, str) for item in values), f"{workload_id} {key} selection is malformed")
+                  require(len(values) == len(set(values)), f"{workload_id} {key} selection contains duplicates")
+                  normalized[key] = sorted(values)
+              choices = selections.get("choices", {})
+              require(isinstance(choices, dict) and all(isinstance(key, str) and isinstance(value, str) for key, value in choices.items()), f"{workload_id} choice selection is malformed")
+              normalized["choices"] = dict(sorted(choices.items()))
+
+              required = set(catalog_workload.get("requiredComponents", []))
+              recommended = set(catalog_workload.get("recommendedComponents", []))
+              optional = set(catalog_workload.get("optionalComponents", []))
+              groups = catalog_workload.get("choiceGroups", [])
+              require(isinstance(groups, list), f"{workload_id} Catalog choice groups are malformed")
+              group_members: dict[str, set[str]] = {}
+              for group in groups:
+                  require(isinstance(group, dict) and isinstance(group.get("choiceId"), str), f"{workload_id} Catalog choice group is malformed")
+                  members = group.get("componentIds", [])
+                  require(isinstance(members, list) and all(isinstance(item, str) for item in members), f"{workload_id} Catalog choice members are malformed")
+                  require(group["choiceId"] not in group_members, f"{workload_id} Catalog has duplicate choice IDs")
+                  group_members[group["choiceId"]] = set(members)
+              choice_components = set().union(*group_members.values()) if group_members else set()
+              selectable = required | recommended | optional | choice_components
+              includes = set(normalized["includeComponentIds"])
+              excludes = set(normalized["excludeComponentIds"])
+              require(not (required & excludes), f"{workload_id} selection excludes a required Catalog component")
+              require(includes <= selectable, f"{workload_id} selection includes a component outside its Catalog workload")
+              require(excludes <= (recommended | optional | choice_components), f"{workload_id} selection excludes a non-excludable Catalog component")
+
+              direct: dict[str, str] = {}
+              for component_id in required:
+                  direct[component_id] = "workload-required"
+              for component_id in recommended - excludes:
+                  direct[component_id] = "workload-recommended"
+              for component_id in optional & includes:
+                  direct[component_id] = "workload-optional"
+              for component_id in (recommended | optional) & excludes:
+                  direct.pop(component_id, None)
+              for choice_id, component_id in normalized["choices"].items():
+                  require(choice_id in group_members, f"{workload_id} selection uses an unknown Catalog choice")
+                  require(component_id in group_members[choice_id], f"{workload_id} selection uses a component outside its Catalog choice")
+                  require(component_id not in excludes, f"{workload_id} selection both chooses and excludes a Catalog component")
+                  direct[component_id] = "workload-choice"
+              require(set(normalized["choices"]) == set(group_members), f"{workload_id} selection does not satisfy every Catalog choice group")
+              for component_id in includes & recommended:
+                  if component_id not in excludes:
+                      direct.setdefault(component_id, "workload-recommended")
+              require(direct, f"{workload_id} Catalog selection has no direct components")
+              require(set(direct) <= set(components), f"{workload_id} Catalog selection references a missing component")
+
+              reasons: list[dict[str, Any]] = []
+              incoming: list[dict[str, Any]] = []
+              closure_ids = set(direct)
+              for component_id, reason_code in direct.items():
+                  reasons.append({
+                      "componentId": component_id,
+                      "reasonCode": reason_code,
+                      "fromComponentId": None,
+                      "rootComponentId": component_id,
+                      "versionRange": None,
+                      "depth": 0,
+                  })
+
+              for root_id in sorted(direct):
+                  visited_for_root: set[str] = set()
+                  visiting: set[str] = set()
+
+                  def visit(component_id: str, depth: int) -> None:
+                      require(component_id not in visiting, f"{workload_id} Catalog dependency graph contains a cycle at {component_id}")
+                      if component_id in visited_for_root:
+                          return
+                      visited_for_root.add(component_id)
+                      visiting.add(component_id)
+                      component = components[component_id]
+                      dependencies = component.get("dependencies", [])
+                      require(isinstance(dependencies, list), f"Catalog dependencies are malformed for {component_id}")
+                      for dependency in dependencies:
+                          require(isinstance(dependency, dict), f"Catalog dependency row is malformed for {component_id}")
+                          dependency_id = dependency.get("componentId")
+                          require(isinstance(dependency_id, str) and dependency_id in components, f"Catalog dependency is missing for {component_id}")
+                          if components[dependency_id].get("role") == "build-dependency":
+                              continue
+                          version_range = dependency.get("versionRange")
+                          require(version_range is None or isinstance(version_range, str), f"Catalog dependency version range is malformed for {component_id}")
+                          incoming.append({
+                              "componentId": dependency_id,
+                              "reasonCode": "dependency",
+                              "fromComponentId": component_id,
+                              "rootComponentId": root_id,
+                              "versionRange": version_range,
+                              "depth": depth + 1,
+                          })
+                          closure_ids.add(dependency_id)
+                          visit(dependency_id, depth + 1)
+                      visiting.remove(component_id)
+
+                  visit(root_id, 0)
+              reasons.extend(incoming)
+              reasons.sort(key=lambda row: (
+                  row["componentId"], row["depth"], row["rootComponentId"] or "",
+                  row["fromComponentId"] or "", row["reasonCode"],
+              ))
+              return {
+                  "normalizedSelections": normalized,
+                  "directComponentIds": sorted(direct),
+                  "closureComponentIds": sorted(closure_ids),
+                  "dependencyComponentIds": sorted(closure_ids - set(direct)),
+                  "closureReasons": reasons,
+              }
+
+          def assert_workload_pins_match_closure(
+              workload: dict[str, Any], closure: dict[str, Any], context: str
+          ) -> list[dict[str, Any]]:
+              """Require direct and dependency identity pins to partition the exact Catalog closure."""
+              roots = workload.get("selectedComponents")
+              dependencies = workload.get("dependencyComponents")
+              require(isinstance(roots, list) and isinstance(dependencies, list), f"{context} component pins are malformed")
+              root_ids = [row.get("componentId") for row in roots if isinstance(row, dict)]
+              dependency_ids = [row.get("componentId") for row in dependencies if isinstance(row, dict)]
+              require(len(root_ids) == len(roots) and len(root_ids) == len(set(root_ids)), f"{context} direct pins are malformed or duplicated")
+              require(len(dependency_ids) == len(dependencies) and len(dependency_ids) == len(set(dependency_ids)), f"{context} dependency pins are malformed or duplicated")
+              require(not (set(root_ids) & set(dependency_ids)), f"{context} direct and dependency pins overlap")
+              require(set(root_ids) == set(closure["directComponentIds"]), f"{context} direct pin set differs from Catalog workload selection")
+              require(set(dependency_ids) == set(closure["dependencyComponentIds"]), f"{context} dependency pin set differs from transitive Catalog closure")
+              expected_ids = set(closure["closureComponentIds"])
+              require(set(root_ids) | set(dependency_ids) == expected_ids, f"{context} identity pins do not exactly cover the Catalog closure")
+              return [*roots, *dependencies]
+
+          def assert_exact_closure_reasons(actual: Any, expected: Any, context: str) -> None:
+              """Reject missing, extra, or duplicate dependency paths in resolver closure evidence."""
+              require(isinstance(actual, list) and isinstance(expected, list), f"{context} closure reasons are malformed")
+              fields = {
+                  "componentId", "reasonCode", "fromComponentId", "rootComponentId",
+                  "versionRange", "depth",
+              }
+              require(
+                  all(isinstance(row, dict) and set(row) == fields for row in actual),
+                  f"{context} closure reasons contain malformed rows",
+              )
+              sort_key = lambda row: (
+                  row.get("componentId", ""), row.get("depth", -1),
+                  row.get("rootComponentId") or "", row.get("fromComponentId") or "",
+                  row.get("reasonCode", ""),
+              )
+              actual_sorted = sorted(actual, key=sort_key)
+              expected_sorted = sorted(expected, key=sort_key)
+              require(actual_sorted == expected_sorted, f"{context} closureReasons differ from the signed Catalog dependency graph")
+
+          def assert_pinned_workload_check(
+              checked: dict[str, Any], workload: dict[str, Any], selections: dict[str, Any], context: str
+          ) -> dict[str, Any]:
+              """Match a ready resolver result, complete identity pins, and signed Catalog closure."""
+              require(checked.get("status") == "ready", f"{context} must be ready before its plan can be pinned")
+              resolution = checked.get("resolution")
+              require(isinstance(resolution, dict), f"{context} has no resolver resolution")
+              closure = derive_catalog_workload_closure(
+                  verified_catalog_document(), workload["workloadId"], selections
+              )
+              identity_pins = assert_workload_pins_match_closure(workload, closure, context)
+              require(
+                  resolution.get("selectionBinding") == closure["normalizedSelections"],
+                  f"{context} selection binding differs from the requested Catalog selection",
+              )
+              assert_exact_closure_reasons(
+                  resolution.get("closureReasons"), closure["closureReasons"], context
+              )
+              assert_selected_components(checked.get("components"), identity_pins, f"{context} component rows")
+              assert_selected_components(
+                  resolution.get("selectedComponents"), identity_pins, f"{context} resolver rows"
+              )
+              return closure
 
           def assert_staged_plan(staged: Any, workload: dict[str, Any], checked: dict[str, Any], context: str) -> None:
               """Require a staged response to preserve the checked plan and exact pinned set."""
@@ -1591,7 +1808,7 @@ jobs:
               require(staged.get("channel") == checked["channel"] == workload["channel"], f"{context} changed the checked release channel")
               require(staged.get("action") == "install", f"{context} changed the checked action")
               staged_rows = staged.get("components")
-              assert_selected_components(staged_rows, workload["selectedComponents"], context)
+              assert_selected_components(staged_rows, workload_component_pins(workload), context)
               require(
                   all(row.get("status") in {"staged", "current"} for row in staged_rows),
                   f"{context} has a component outside the staged/current states",
@@ -1617,7 +1834,7 @@ jobs:
                   "planId": checked.get("planId"),
                   "planDigest": checked.get("planDigest"),
                   "catalogDigest": workload["catalogDigest"],
-                  "selectedComponentIds": [row["componentId"] for row in workload["selectedComponents"]],
+                  "selectedComponentIds": [row["componentId"] for row in workload_component_pins(workload)],
                   "versionConflictBlockerCount": 0,
                   "mutatingRequestsSent": 0,
                   "scope": "read-only exact selected workload resolution",
@@ -1643,7 +1860,7 @@ jobs:
               def active_selected_components() -> list[str]:
                   inventory = workload_request("status", workloadId="catalyst")
                   require(inventory.get("status") == "ready", "workload inventory failed after isolated stage attempt")
-                  expected_ids = {item["componentId"] for item in workload["selectedComponents"]}
+                  expected_ids = {item["componentId"] for item in workload_component_pins(workload)}
                   return sorted(
                       row.get("componentId")
                       for row in inventory.get("components", [])
@@ -1668,7 +1885,7 @@ jobs:
                       "offlineStageStatus": cached["status"],
                       "repeatStageStatus": repeated["status"],
                       "repeatStageStable": True,
-                      "selectedComponentIds": [row["componentId"] for row in workload["selectedComponents"]],
+                      "selectedComponentIds": [row["componentId"] for row in workload_component_pins(workload)],
                   }
                   return {**safe_evidence, "stagedResult": cached}
               error = failed.get("error")
@@ -1698,7 +1915,7 @@ jobs:
                   "retryStatus": resumed["status"],
                   "repeatStageStatus": repeated["status"],
                   "repeatStageStable": True,
-                  "selectedComponentIds": [row["componentId"] for row in workload["selectedComponents"]],
+                  "selectedComponentIds": [row["componentId"] for row in workload_component_pins(workload)],
               }
               return {**safe_evidence, "stagedResult": resumed}
 
@@ -1707,7 +1924,7 @@ jobs:
               inventory = workload_request("status", workloadId="plugins")
               require(inventory.get("status") == "ready", f"{context} plugin inventory is not ready")
               require(inventory.get("catalogDigest") == workload["catalogDigest"], f"{context} plugin catalog digest differs from pins")
-              expected = {row["componentId"]: row for row in workload["selectedComponents"]}
+              expected = {row["componentId"]: row for row in workload_component_pins(workload)}
               rows = {
                   row.get("componentId"): row
                   for row in inventory.get("components", [])
@@ -1753,6 +1970,7 @@ jobs:
                       "selectedComponentIds": [],
                   }
               expected_rows = workload["selectedComponents"]
+              identity_rows = workload_component_pins(workload)
               plugin_id = "cyrene-evaluation-exact-match"
               require(plugin_id in {row["componentId"] for row in expected_rows}, "standalone plugins pins omit exact-match")
               checked = workload_request(
@@ -1773,13 +1991,17 @@ jobs:
               require(checked.get("catalogDigest") == workload["catalogDigest"], "standalone exact-match check catalog digest differs from pins")
               require(checked.get("channel") == workload["channel"] == "preview", "standalone exact-match check did not bind the pinned preview channel")
               require(checked.get("action") == "install", "standalone exact-match check action is not install")
-              assert_selected_components(checked.get("components"), expected_rows, "standalone exact-match check")
               resolution = checked.get("resolution")
               require(isinstance(resolution, dict), "standalone exact-match check has no resolver resolution")
               require(resolution.get("catalogDigest") == workload["catalogDigest"], "standalone exact-match resolution catalog digest differs")
               require(resolution.get("channel") == workload["channel"], "standalone exact-match resolution channel differs from pins")
               require(resolution.get("planDigestMaterial", {}).get("channel") == workload["channel"], "standalone exact-match plan digest material is not bound to the pinned channel")
-              assert_selected_components(resolution.get("selectedComponents"), expected_rows, "standalone exact-match resolution")
+              assert_pinned_workload_check(
+                  checked,
+                  workload,
+                  {"includeComponentIds": [plugin_id], "excludeComponentIds": [], "choices": {}},
+                  "standalone exact-match check",
+              )
               require(re.fullmatch(r"plan-[0-9a-f]{32}", str(checked.get("planId", ""))) is not None, "standalone exact-match plan ID is malformed")
               require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(checked.get("planDigest", ""))) is not None, "standalone exact-match plan digest is malformed")
               plan_identity = {
@@ -1789,12 +2011,13 @@ jobs:
                   "catalogDigest": workload["catalogDigest"],
                   "planId": checked["planId"],
                   "planDigest": checked["planDigest"],
-                  "selectedComponentIds": [row["componentId"] for row in expected_rows],
+                  "selectedComponentIds": [row["componentId"] for row in identity_rows],
                   "applied": False,
               }
               write_json(root() / "evidence" / "exact-match-plugins-checked-plan.json", {
                   **plan_identity,
                   "selectedComponents": expected_rows,
+                  "dependencyComponents": workload["dependencyComponents"],
               })
               baseline = plugin_status_snapshot(workload, "before isolated exact-match stage")
               fields = {
@@ -2310,17 +2533,26 @@ jobs:
                   return checked
               checked = phase("catalyst_workload_check", check_gate)
               def exact_plan() -> dict[str, Any]:
-                  assert_selected_components(checked.get("components"), workload["selectedComponents"], "Catalyst check")
                   resolution = checked.get("resolution")
                   require(isinstance(resolution, dict), "Catalyst check has no resolver resolution")
                   require(resolution.get("catalogDigest") == workload["catalogDigest"], "Catalyst resolution catalog digest differs")
                   require(resolution.get("channel") == workload["channel"], "Catalyst resolution channel differs from pins")
                   require(resolution.get("planDigestMaterial", {}).get("channel") == workload["channel"], "Catalyst plan digest material is not bound to the pinned channel")
-                  assert_selected_components(resolution.get("selectedComponents"), workload["selectedComponents"], "Catalyst resolver resolution")
+                  closure = assert_pinned_workload_check(
+                      checked, workload, selection, "Catalyst resolver resolution"
+                  )
                   require(re.fullmatch(r"plan-[0-9a-f]{32}", str(checked.get("planId", ""))) is not None, "Catalyst plan ID is malformed")
                   require(re.fullmatch(r"sha256:[0-9a-f]{64}", str(checked.get("planDigest", ""))) is not None, "Catalyst plan digest is malformed")
                   write_json(root() / "evidence" / "catalyst-checked-plan.json", checked)
-                  return {"channel": workload["channel"], "selectedComponents": workload["selectedComponents"], "planId": checked["planId"], "planDigest": checked["planDigest"]}
+                  return {
+                      "channel": workload["channel"],
+                      "selectedComponents": workload["selectedComponents"],
+                      "dependencyComponents": workload["dependencyComponents"],
+                      "closureComponentIds": closure["closureComponentIds"],
+                      "closureReasonCount": len(closure["closureReasons"]),
+                      "planId": checked["planId"],
+                      "planDigest": checked["planDigest"],
+                  }
               phase("catalyst_exact_plan_pins", exact_plan)
               phase(
                   "version_conflict_gate",
@@ -2351,7 +2583,7 @@ jobs:
                   require(applied.get("workloadId") == "catalyst" and applied.get("targetId") == workload["targetId"], "Catalyst apply returned a different workload or target")
                   require(applied.get("planId") == checked["planId"], "Catalyst apply returned a different or missing plan ID")
                   require(applied.get("planDigest") == checked["planDigest"], "Catalyst apply returned a different or missing plan digest")
-                  assert_selected_components(applied.get("components"), workload["selectedComponents"], "Catalyst apply result")
+                  assert_selected_components(applied.get("components"), workload_component_pins(workload), "Catalyst apply result")
                   return applied
               phase("catalyst_workload_apply", apply_gate)
 
@@ -2369,7 +2601,7 @@ jobs:
               phase(
                   "catalyst_active_receipt_readback",
                   lambda: active_receipt_readback(
-                      workload["selectedComponents"], staged.get("components")
+                      workload_component_pins(workload), staged.get("components")
                   ),
               )
 
@@ -2378,7 +2610,7 @@ jobs:
                   require(current.get("status") == "ready", "Catalyst installed status is not ready")
                   require(current.get("catalogDigest") == workload["catalogDigest"], "Catalyst status catalog digest differs from pins")
                   rows_now = current.get("components", [])
-                  assert_installed_components(rows_now, workload["selectedComponents"], "Catalyst installed status")
+                  assert_installed_components(rows_now, workload_component_pins(workload), "Catalyst installed status")
                   return {"catalogDigest": current["catalogDigest"], "components": rows_now}
               phase("catalyst_installed_status_readback", readback)
 
@@ -2386,8 +2618,8 @@ jobs:
                   command = run(["sudo", "-n", "cyrene", "workload", "install", "catalyst", "--channel", workload["channel"], "--yes"], label="public-catalyst-repeat-install", timeout=1800)
                   after = workload_request("status", workloadId="catalyst")
                   require(after.get("catalogDigest") == workload["catalogDigest"], "repeat install changed the active catalog identity")
-                  assert_installed_components(after.get("components", []), workload["selectedComponents"], "Catalyst repeated install readback")
-                  receipt_after = active_receipt_readback(workload["selectedComponents"], staged.get("components"))
+                  assert_installed_components(after.get("components", []), workload_component_pins(workload), "Catalyst repeated install readback")
+                  receipt_after = active_receipt_readback(workload_component_pins(workload), staged.get("components"))
                   receipt_before = load_json(root() / "evidence" / "installed-workload-receipt-identities.json")
                   require(receipt_after == receipt_before, "repeated install changed active or immutable receipt identities")
                   return {"publicCommand": f"sudo cyrene workload install catalyst --channel {workload['channel']} --yes", "channel": workload["channel"], "stdoutBytes": len(command.stdout.encode("utf-8")), "catalogDigest": after["catalogDigest"], "componentCount": len(after["components"]), "receiptIdentitiesUnchanged": True}
@@ -2887,7 +3119,7 @@ jobs:
               require(status.get("status") == "ready", "installed Control workload status is unavailable")
               require(status.get("catalogDigest") == workload["catalogDigest"], "installed Control status uses a different Catalog")
               assert_installed_components(
-                  status.get("components", []), workload["selectedComponents"], "Client Control integration status"
+                  status.get("components", []), workload_component_pins(workload), "Client Control integration status"
               )
               installed = load_json(root() / "evidence" / "installed-workload-receipt-identities.json")
               control_rows = [
@@ -3694,7 +3926,7 @@ jobs:
               def assert_host_metadata(status: dict[str, Any], context: str) -> dict[str, Any]:
                   require(status.get("status") == "ready", f"{context} Echo status is not ready")
                   require(status.get("catalogDigest") == workload["catalogDigest"], f"{context} Echo status Catalog differs")
-                  assert_installed_components(status.get("components", []), workload["selectedComponents"], context)
+                  assert_installed_components(status.get("components", []), workload_component_pins(workload), context)
                   rows = {row["componentId"]: row for row in status["components"]}
                   echo_row = rows["cyrene-echo"]
                   require(echo_row.get("installationId") is None, f"{context} OCI Product unexpectedly reports a Package Runtime installation ID")
@@ -3784,11 +4016,12 @@ jobs:
               )
               require(checked.get("status") == "ready", f"Echo install check is blocked: {checked.get('blockers')}")
               validate_workload_response(checked, "install", "ready", "Echo install check")
-              assert_selected_components(checked.get("components"), workload["selectedComponents"], "Echo install check")
               resolution = checked.get("resolution")
               require(isinstance(resolution, dict) and resolution.get("channel") == workload["channel"] and resolution.get("catalogDigest") == workload["catalogDigest"], "Echo install resolution does not bind the pinned Catalog/channel")
               require(resolution.get("planDigestMaterial", {}).get("channel") == workload["channel"], "Echo install plan digest material is not channel-bound")
-              assert_selected_components(resolution.get("selectedComponents"), workload["selectedComponents"], "Echo resolver install resolution")
+              assert_pinned_workload_check(
+                  checked, workload, install_selection, "Echo resolver install resolution"
+              )
               require(re.fullmatch(r"plan-[0-9a-f]{32}", str(checked.get("planId", ""))) is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", str(checked.get("planDigest", ""))) is not None, "Echo install check returned malformed plan identity")
               write_json(root() / "evidence" / "echo-install-checked-plan.json", checked)
 
@@ -3804,7 +4037,7 @@ jobs:
               )
               validate_workload_response(applied, "install", "activated", "Echo install apply")
               require(applied.get("planId") == checked["planId"] and applied.get("planDigest") == checked["planDigest"], "Echo install apply changed the checked plan")
-              assert_selected_components(applied.get("components"), workload["selectedComponents"], "Echo install apply result")
+              assert_selected_components(applied.get("components"), workload_component_pins(workload), "Echo install apply result")
               applied_metadata = applied.get("hostMetadata", {}).get("echo") if isinstance(applied.get("hostMetadata"), dict) else None
               require(isinstance(applied_metadata, dict) and applied_metadata.get("installed") is True, "Echo apply did not return its installed host receipt")
               installed_status = workload_request("status", workloadId="echo")
@@ -3862,7 +4095,7 @@ jobs:
               catalyst = pins()["workloads"]["catalyst"]
               catalyst_after = workload_request("status", workloadId="catalyst")
               require(catalyst_after.get("status") == "ready" and catalyst_after.get("catalogDigest") == catalyst["catalogDigest"], "Catalyst was affected by Echo uninstall")
-              assert_installed_components(catalyst_after.get("components", []), catalyst["selectedComponents"], "Catalyst after Echo uninstall")
+              assert_installed_components(catalyst_after.get("components", []), workload_component_pins(catalyst), "Catalyst after Echo uninstall")
               catalyst_bindings = assert_catalyst_source_bindings(
                   catalyst_after.get("sourceBindings"),
                   expected_catalyst_bindings(catalyst["selectedComponents"]),
@@ -3906,7 +4139,7 @@ jobs:
                           write_json(root() / "evidence" / "catalyst-post-restart-healthz.json", health)
                           status = workload_request("status", workloadId="catalyst")
                           require(status.get("catalogDigest") == pins()["workloads"]["catalyst"]["catalogDigest"], "Catalyst catalog changed across service restart")
-                          assert_installed_components(status.get("components", []), pins()["workloads"]["catalyst"]["selectedComponents"], "Catalyst post-restart status")
+                          assert_installed_components(status.get("components", []), workload_component_pins(pins()["workloads"]["catalyst"]), "Catalyst post-restart status")
                           return {"unit": service["unit"], "systemdActive": True, "healthStatus": health["status"], "catalogDigest": status["catalogDigest"]}
                   except Exception as error:  # noqa: BLE001 - continue the bounded recovery wait.
                       last_error = str(error)
