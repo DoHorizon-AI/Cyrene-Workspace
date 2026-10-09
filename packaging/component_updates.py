@@ -8073,9 +8073,10 @@ class ComponentUpdater:
                 "INVALID_TRANSACTION",
                 "Only initial workload installation can initialize a catalog.",
             )
-        activity_catalog, activity_sources = self._activity_catalog(
-            allow_uninitialized=allow_uninitialized_catalog
-        )
+        if allow_uninitialized_catalog:
+            activity_catalog, activity_sources = self._activity_catalog(allow_uninitialized=True)
+        else:
+            activity_catalog, activity_sources = self._activity_catalog()
         begin_from_uninitialized_catalog = (
             allow_uninitialized_catalog and activity_catalog["generation"] == 0
         )
@@ -8302,9 +8303,10 @@ class ComponentUpdater:
             raise UpdateError(
                 "SOURCE_POLICY_INVALID", "Signed workload sourcePolicy is unavailable."
             )
-        activity_catalog, _activity_sources = self._activity_catalog(
-            allow_uninitialized=allow_uninitialized_catalog
-        )
+        if allow_uninitialized_catalog:
+            activity_catalog, _activity_sources = self._activity_catalog(allow_uninitialized=True)
+        else:
+            activity_catalog, _activity_sources = self._activity_catalog()
         principals = self._workload_source_principals(policy, activity_catalog)
         runtime_policy: dict[str, Any] | None = None
         if DEFAULT_PACKAGE_RUNTIME_POLICY.exists() or DEFAULT_PACKAGE_RUNTIME_POLICY.is_symlink():
@@ -11378,9 +11380,12 @@ class ComponentUpdater:
                 )
             )
         )
-        activity_catalog, _activity_source_ids = self._activity_catalog(
-            allow_uninitialized=can_initialize_catalog
-        )
+        if can_initialize_catalog:
+            activity_catalog, _activity_source_ids = self._activity_catalog(
+                allow_uninitialized=True
+            )
+        else:
+            activity_catalog, _activity_source_ids = self._activity_catalog()
         catalog_uninitialized = activity_catalog["generation"] == 0
         if catalog_uninitialized and (
             DEFAULT_PACKAGE_RUNTIME_POLICY.exists() or DEFAULT_PACKAGE_RUNTIME_POLICY.is_symlink()
@@ -16974,9 +16979,10 @@ class ComponentUpdater:
         catalog: dict[str, Any] | None = None
         sources: list[str] = []
         if method in {"GetUpdateReadiness", "BeginMaintenance"}:
-            catalog, sources = self._activity_catalog(
-                allow_uninitialized=allow_uninitialized_catalog
-            )
+            if allow_uninitialized_catalog:
+                catalog, sources = self._activity_catalog(allow_uninitialized=True)
+            else:
+                catalog, sources = self._activity_catalog()
         broker_path = self._resolve_broker_executable()
         if not broker_path.is_file() or not os.access(broker_path, os.X_OK):
             raise UpdateError(
@@ -17330,9 +17336,12 @@ class ComponentUpdater:
         if not force and not allow_uninitialized_catalog and key in self._readiness_cache:
             return self._readiness_cache[key]
         try:
-            activity_catalog, activity_sources = self._activity_catalog(
-                allow_uninitialized=allow_uninitialized_catalog
-            )
+            if allow_uninitialized_catalog:
+                activity_catalog, activity_sources = self._activity_catalog(
+                    allow_uninitialized=True
+                )
+            else:
+                activity_catalog, activity_sources = self._activity_catalog()
             readiness_params = {
                 "target_kind": target_kind,
                 "requires_restart": requires_restart,
