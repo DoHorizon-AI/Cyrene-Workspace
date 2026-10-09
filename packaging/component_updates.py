@@ -227,6 +227,20 @@ class UpdateError(RuntimeError):
         self.maintenance_not_acquired = maintenance_not_acquired
 
 
+class _FirstCoreCandidateError(UpdateError):
+    """Keep the C10 identity attached to an unchanged candidate failure."""
+
+    def __init__(self, error: UpdateError, *, component_id: str, target_id: str) -> None:
+        super().__init__(
+            error.code,
+            str(error),
+            error.retryable,
+            maintenance_not_acquired=error.maintenance_not_acquired,
+        )
+        self.component_id = component_id
+        self.target_id = target_id
+
+
 @dataclass(frozen=True)
 class Candidate:
     """One verified manifest selected by a trusted channel index."""
@@ -5414,9 +5428,9 @@ class ComponentUpdater:
                 blockers.append(
                     {
                         "code": error.code,
-                        "componentId": None,
+                        "componentId": getattr(error, "component_id", None),
                         "requiredness": "required",
-                        "targetId": WORKLOAD_FIRST_CORE_TARGET_ID,
+                        "targetId": getattr(error, "target_id", WORKLOAD_FIRST_CORE_TARGET_ID),
                         "message": " ".join(str(error).split())[:500],
                         "retryable": error.retryable,
                         "details": {"phase": "firstCoreBootstrap"},
@@ -5778,7 +5792,14 @@ class ComponentUpdater:
                 )
             candidate = candidates.get(component_id)
             if candidate is None or candidate.manifest.get("target") != target.get("target"):
-                candidate = self._candidate(component, target, channel)
+                try:
+                    candidate = self._candidate(component, target, channel)
+                except UpdateError as error:
+                    raise _FirstCoreCandidateError(
+                        error,
+                        component_id=component_id,
+                        target_id=WORKLOAD_FIRST_CORE_TARGET_ID,
+                    ) from error
             core_candidates[component_id] = candidate
 
         unique_candidates: dict[tuple[str, str, str], Candidate] = {}

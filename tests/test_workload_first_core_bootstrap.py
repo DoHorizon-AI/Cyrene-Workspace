@@ -1221,6 +1221,108 @@ def _workload_updates_updater(tmp_path: Path) -> Any:
     )
 
 
+@pytest.mark.parametrize(
+    ("error_code", "message", "retryable"),
+    [
+        (
+            "ATTESTATION_INVALID",
+            "No acceptable GitHub attestation bundle was returned.",
+            False,
+        ),
+        ("NETWORK_ERROR", "The signed release endpoint is unavailable.", True),
+    ],
+)
+def test_first_core_candidate_failure_keeps_component_identity_in_check_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: str,
+    message: str,
+    retryable: bool,
+) -> None:
+    updater = _workload_updates_updater(tmp_path)
+    target_id = updates.WORKLOAD_FIRST_CORE_TARGET_ID
+    failing_component_id = "cyrene-kernel"
+    plan_digest = _digest("first-core-candidate-failure")
+    ready_resolution = {
+        "status": "ready",
+        "planId": "plan-" + plan_digest.removeprefix("sha256:")[:32],
+        "planDigest": plan_digest,
+        "action": "install",
+        "channel": "preview",
+        "selectedComponents": [],
+        "warnings": [],
+        "blockers": [],
+        "planDigestMaterial": {"action": "install", "blockers": []},
+    }
+
+    resolver = SimpleNamespace(
+        potential_component_ids=lambda *_args: ("cyrene-catalyst",),
+        resolve_workload=lambda *_args, **_kwargs: SimpleNamespace(
+            to_dict=lambda: copy.deepcopy(ready_resolution)
+        ),
+    )
+
+    def candidate(
+        component: dict[str, Any],
+        target: dict[str, Any],
+        _channel: str,
+        *,
+        release_id: str | None = None,
+    ) -> SimpleNamespace:
+        assert release_id is None
+        component_id = component["componentId"]
+        if component_id == failing_component_id:
+            raise updates.UpdateError(error_code, message, retryable)
+        return SimpleNamespace(manifest={"target": target["target"]})
+
+    monkeypatch.setattr(updater, "_reload_catalog_for_operation", lambda: None)
+    monkeypatch.setattr(updater, "_ensure_state_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        updater, "_require_workload_target", lambda workload, target: (workload, target)
+    )
+    monkeypatch.setattr(updater, "_resolve_channel", lambda _channel: "preview")
+    monkeypatch.setattr(updater, "_load_workload_resolver", lambda: resolver)
+    monkeypatch.setattr(
+        updater, "_workload_target_preference", lambda *_args: updates.WORKLOAD_HOST_TARGET
+    )
+    monkeypatch.setattr(
+        updater,
+        "_target_for",
+        lambda _component, *, target_id=None: {"id": target_id, "target": target_id},
+    )
+    monkeypatch.setattr(updater, "_candidate", candidate)
+    monkeypatch.setattr(updater, "_trusted_release_indexes", lambda _candidates: {"indexes": []})
+    monkeypatch.setattr(
+        updater,
+        "_installed_workload_components",
+        lambda _component_ids, *, workload_id=None: (
+            {},
+            {"components": {}, "installationRecords": {}, "sourceBindings": []},
+        ),
+    )
+    monkeypatch.setattr(updater, "_first_core_host_is_unprovisioned", lambda: True)
+    monkeypatch.setattr(
+        updater,
+        "_load_native_core_bootstrap",
+        lambda: SimpleNamespace(_validate_package_runtime_group=lambda _updater: None),
+    )
+
+    result = updater.check_workload(
+        "catalyst",
+        updates.WORKLOAD_HOST_TARGET,
+        {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}},
+        channel="preview",
+    )
+
+    blocker = next(item for item in result["blockers"] if item["code"] == error_code)
+    assert result["status"] == "blocked"
+    assert blocker["componentId"] == failing_component_id
+    assert blocker["targetId"] == target_id
+    assert blocker["message"] == message
+    assert blocker["retryable"] is retryable
+    assert blocker["details"] == {"phase": "firstCoreBootstrap"}
+
+
 def test_first_core_public_projection_keeps_nine_fields_and_adds_check_stage_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
