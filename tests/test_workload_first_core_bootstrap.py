@@ -2473,6 +2473,454 @@ def test_public_apply_initializes_first_core_before_sdk_prepare_and_normal_readi
     assert events.index("first-core") < events.index("normal-core-readiness")
 
 
+def _held_sdk_recovery_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: str = "pending",
+    current_sdk: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one exact staged held transaction for SDK-ordering recovery tests."""
+
+    updater = _workload_updates_updater(tmp_path)
+    block = _public_first_core_block()
+    plan_id = block["planId"]
+    plan_digest = block["planDigest"]
+    policy = {
+        "mode": "actualProduct",
+        "productComponentIds": ["cyrene-catalyst"],
+        "productSources": [{"componentId": "cyrene-catalyst", "sourceId": "cyrene-catalyst"}],
+        "operations": [],
+    }
+    updater.catalog = {"workloads": [{"workloadId": "catalyst", "sourcePolicy": policy}]}
+    sdk_id = updates.WORKLOAD_SDK_COMPONENT_ID
+    target_id = updates.WORKLOAD_SDK_TARGET_ID
+    archive = tmp_path / "sdk.tar.gz"
+    archive.write_bytes(b"verified SDK archive")
+    bundle = tmp_path / "sdk-bundle"
+    bundle.mkdir()
+    wheel = bundle / "cyrene_runtime_maintenance-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"verified SDK wheel")
+    sdk_row = {
+        "componentId": sdk_id,
+        "artifactKind": "python-bundle",
+        "version": "0.1.0",
+        "manifestDigest": _digest("sdk-manifest"),
+        "manifestAssetDigest": _digest("sdk-manifest-asset"),
+        "digest": updates._file_digest(archive),
+        "releaseId": "sdk-release-1",
+        "targetId": target_id,
+        "indexIdentity": {"releaseTag": "sdk-release-1"},
+        "publisherIdentity": {"repository": "DoHorizon-AI/Cyrene-Workspace"},
+        "attestationRef": {"subjectName": archive.name},
+        "manifestUri": "https://example.invalid/sdk-release.json",
+        "requiredness": "required",
+    }
+    sdk_stage_identity = {
+        "archivePath": str(archive),
+        "bundlePath": str(bundle),
+        "wheelPath": str(wheel),
+        "wheelDigest": _digest("sdk-wheel"),
+        "planId": plan_id,
+        "planDigest": plan_digest,
+    }
+    sdk_stage = {
+        **{field: sdk_row[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS},
+        "componentId": sdk_id,
+        "status": "staged",
+        "artifactKind": "python-bundle",
+        "stagedIdentity": sdk_stage_identity,
+    }
+    plugin_id = "cyrene-plugin-document-parsing"
+    plugin_row = {
+        "componentId": plugin_id,
+        "artifactKind": "plugin-package",
+        "version": "0.2.0",
+        "digest": _digest("plugin-release"),
+        "manifestDigest": _digest("plugin-manifest"),
+        "manifestAssetDigest": _digest("plugin-manifest-asset"),
+        "releaseId": "plugin-release-1",
+        "targetId": "linux-ubuntu-24.04-x86_64-plugin",
+        "indexIdentity": {"releaseTag": "plugin-release-1"},
+        "publisherIdentity": {"repository": "DoHorizon-AI/Cyrene-Plugins-Official"},
+        "attestationRef": {"subjectName": "plugin.json"},
+        "sourcePolicy": policy,
+        "requiredness": "recommended",
+    }
+    plugin_stage = {
+        **{field: plugin_row[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS},
+        "componentId": plugin_id,
+        "status": "staged",
+        "artifactKind": "plugin-package",
+        "packageArtifactDigest": _digest("plugin-package-aggregate"),
+    }
+    selected_rows = [plugin_row, sdk_row]
+    staged_rows = [plugin_stage, sdk_stage]
+    resolution = {
+        "status": "ready",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "action": "install",
+        "channel": "stable",
+        "selectedComponents": copy.deepcopy(selected_rows),
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "sourcePolicy": copy.deepcopy(policy),
+        "planDigestMaterial": {"firstCoreBootstrap": copy.deepcopy(block)},
+    }
+    stored = {
+        "planKind": updates.WORKLOAD_PROTOCOL_VERSION,
+        "phase": "staged",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "targetId": block["targetId"],
+        "action": "install",
+        "channel": "stable",
+        "catalogDigest": updater.catalog_digest,
+        "catalogGeneration": updater.catalog_generation,
+        "selections": {},
+        "candidates": {
+            sdk_id: {
+                "manifestUri": sdk_row["manifestUri"],
+                "manifestDigest": sdk_row["manifestDigest"],
+                "manifestAssetDigest": sdk_row["manifestAssetDigest"],
+                "artifactDigest": sdk_row["digest"],
+                "releaseTag": sdk_row["releaseId"],
+                "targetId": target_id,
+            }
+        },
+        "resolution": copy.deepcopy(resolution),
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "stagedComponents": copy.deepcopy(staged_rows),
+        "firstCoreBootstrapStage": {
+            "schemaVersion": 1,
+            "parentPlanId": plan_id,
+            "parentPlanDigest": plan_digest,
+            "stagedComponents": [{"componentId": "cyrene-runtime-maintenance"}],
+            "brokerProofs": {},
+        },
+    }
+    component_digests = updater._workload_component_artifact_map(
+        selected_rows, {row["componentId"]: row for row in staged_rows}, {"components": {}}
+    )
+    result = {
+        "status": "installed",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "catalogGeneration": 1,
+        "readiness": {"status": "READY", "catalogGeneration": 1},
+        "componentStatuses": [],
+    }
+    transaction = {
+        "transactionKind": "workload-assembly.v1",
+        "action": "install",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "targetId": block["targetId"],
+        "catalogDigest": updater.catalog_digest,
+        "channel": "stable",
+        "componentArtifactDigests": component_digests,
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "firstCoreBootstrapStatus": status,
+        "firstCoreBootstrapResult": copy.deepcopy(result) if status == "installed" else None,
+        "resolution": copy.deepcopy(resolution),
+        "selectedComponents": copy.deepcopy(selected_rows),
+        "stagedComponents": copy.deepcopy(staged_rows),
+        "sourcePolicy": copy.deepcopy(policy),
+        "sdkEnvironment": None,
+        "phase": "applying",
+    }
+    transaction_path = tmp_path / "transactions" / f"{plan_id}.json"
+    transaction_path.parent.mkdir()
+    transaction_path.parent.chmod(0o700)
+    updates._atomic_json(transaction_path, transaction)
+    events: list[str] = []
+    core_candidate = updates.Candidate(
+        component={"componentId": "cyrene-runtime-maintenance"},
+        manifest={},
+        manifest_digest=_digest("broker-manifest"),
+        artifact_digest=_digest("broker-artifact"),
+        manifest_uri="https://example.invalid/broker.json",
+        index={},
+        index_uri="https://example.invalid/index.json",
+    )
+    core_journal = {
+        "mode": "fresh-workload-first-core",
+        "planId": block["planId"],
+        "planDigest": block["planDigest"],
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "componentArtifactDigests": copy.deepcopy(block["maintenanceComponentArtifactDigests"]),
+        "phase": "hold_required" if status == "pending" else "succeeded",
+        "progress": "catalog_initialized" if status == "pending" else "complete",
+    }
+    sdk_candidate = updates.Candidate(
+        component={"componentId": sdk_id},
+        manifest={"version": sdk_row["version"], "target": {"platform": "linux"}},
+        manifest_digest=sdk_row["manifestDigest"],
+        artifact_digest=sdk_row["digest"],
+        manifest_uri=sdk_row["manifestUri"],
+        index={},
+        index_uri="https://example.invalid/sdk-index.json",
+        release_tag=sdk_row["releaseId"],
+        manifest_asset_digest=sdk_row["manifestAssetDigest"],
+    )
+    sdk_state: dict[str, Any] = {"identity": current_sdk}
+    sdk_module = SimpleNamespace(
+        WORKLOAD_OPERATOR_ROOT=tmp_path / "missing-operator-root",
+        read_workload_sdk_environment=lambda: sdk_state["identity"],
+        _validate_candidate=lambda _selected, identity: {
+            "archivePath": Path(identity["archivePath"]),
+            "bundlePath": Path(identity["bundlePath"]),
+            "wheelPath": Path(identity["wheelPath"]),
+            "wheelDigest": identity["wheelDigest"],
+        },
+        _require_root_file=lambda *_args, **_kwargs: None,
+        _require_root_directory=lambda *_args, **_kwargs: None,
+        _require_root_directory_chain=lambda *_args, **_kwargs: None,
+        _read_verified_wheel=lambda *_args, **_kwargs: None,
+    )
+
+    def prepare(_component: dict[str, Any], _identity: dict[str, Any]) -> None:
+        events.append("sdk-prepare")
+        sdk_state["identity"] = {"installed": True}
+
+    sdk_module.prepare_workload_sdk_environment = prepare
+    monkeypatch.setattr(updater, "_load_workload_sdk_environment", lambda: sdk_module)
+    monkeypatch.setattr(
+        updater,
+        "_load_native_core_bootstrap",
+        lambda: SimpleNamespace(
+            _journal_path=lambda _updater: tmp_path / "first-core-bootstrap.json",
+            _read_private_json=lambda _path: core_journal,
+        ),
+    )
+    monkeypatch.setattr(updater, "_candidate", lambda *_args, **_kwargs: sdk_candidate)
+    monkeypatch.setattr(
+        updater,
+        "_first_core_resolution_projection",
+        lambda projected, _candidates, **_kwargs: (
+            (projected["firstCoreBootstrap"], {"cyrene-runtime-maintenance": core_candidate})
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_validate_first_core_stage_items",
+        lambda *_args, **_kwargs: [{"componentId": "cyrene-runtime-maintenance"}],
+    )
+    monkeypatch.setattr(updater, "_read_first_core_broker_release", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        updater, "_activity_catalog", lambda **_kwargs: ({"generation": 1, "sources": []}, [])
+    )
+    monkeypatch.setattr(updater, "_workload_source_principals", lambda *_args: {})
+    monkeypatch.setattr(
+        updater,
+        "_run_fresh_workload_first_core",
+        lambda *_args, **_kwargs: events.append("core-resume") or copy.deepcopy(result),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_workload_sdk_matches_selected",
+        lambda _selected, installed: (
+            isinstance(installed, dict) and installed.get("installed") is True
+        ),
+    )
+    atomic_json = updates._atomic_json
+
+    def record_atomic_json(path: Path, value: dict[str, Any], **kwargs: Any) -> None:
+        intent = value.get("sdkPrepareIntent")
+        if isinstance(intent, dict) and intent.get("status") == "pending":
+            events.append("sdk-intent")
+        atomic_json(path, value, **kwargs)
+
+    monkeypatch.setattr(updates, "_atomic_json", record_atomic_json)
+    monkeypatch.setattr(updates, "DEFAULT_PACKAGE_RUNTIME_POLICY", tmp_path / "runtime-policy.json")
+    updates.DEFAULT_PACKAGE_RUNTIME_POLICY.write_text("{}", encoding="utf-8")
+    updater.components[sdk_id] = {"componentId": sdk_id}
+    updater.targets[target_id] = {"id": target_id, "target": {"platform": "linux"}}
+    return {
+        "updater": updater,
+        "block": block,
+        "resolution": resolution,
+        "stored": stored,
+        "transaction": transaction,
+        "transaction_path": transaction_path,
+        "policy": policy,
+        "events": events,
+        "result": result,
+        "sdk_row": sdk_row,
+        "sdk_stage": sdk_stage,
+    }
+
+
+@pytest.mark.parametrize("status", ["pending", "installed"])
+def test_preinventory_resume_recovers_pending_and_post_core_pre_intent_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch, status=status)
+    updater = case["updater"]
+
+    result, sdk_prepared = updater._resume_first_core_before_workload_inventory(
+        case["stored"],
+        case["transaction"],
+        case["transaction_path"],
+        lock_lease=object(),
+        bootstrap_module=object(),
+    )
+
+    assert result == case["result"]
+    assert sdk_prepared is True
+    assert case["events"] == ["core-resume", "sdk-intent", "sdk-prepare"]
+    saved = updates._read_object(case["transaction_path"], "transaction")
+    assert saved["firstCoreBootstrapStatus"] == "installed"
+    assert saved["sdkPrepareIntent"]["status"] == "prepared"
+
+
+@pytest.mark.parametrize("mutation", ["plan", "staged_sdk", "component_map", "source", "hold"])
+def test_preinventory_resume_rejects_changed_authority_before_core_or_sdk_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch)
+    if mutation == "plan":
+        case["transaction"]["planDigest"] = _digest("changed-plan")
+    elif mutation == "staged_sdk":
+        case["stored"]["stagedComponents"][1]["stagedIdentity"]["planDigest"] = _digest(
+            "changed-sdk-stage"
+        )
+    elif mutation == "component_map":
+        case["transaction"]["componentArtifactDigests"][updates.WORKLOAD_SDK_COMPONENT_ID] = (
+            _digest("changed-component-map")
+        )
+    elif mutation == "source":
+        case["transaction"]["sourcePolicy"] = {"mode": "tampered"}
+    else:
+        case["transaction"]["firstCoreBootstrap"]["planDigest"] = _digest("changed-hold")
+
+    with pytest.raises(updates.UpdateError):
+        case["updater"]._resume_first_core_before_workload_inventory(
+            case["stored"],
+            case["transaction"],
+            case["transaction_path"],
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert case["events"] == []
+
+
+def test_preinventory_resume_does_not_replace_ambiguous_sdk_root_without_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch)
+    operator_root = case["updater"]._load_workload_sdk_environment().WORKLOAD_OPERATOR_ROOT
+    operator_root.mkdir()
+
+    with pytest.raises(updates.UpdateError, match="without its durable prepare intent"):
+        case["updater"]._resume_first_core_before_workload_inventory(
+            case["stored"],
+            case["transaction"],
+            case["transaction_path"],
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert case["events"] == []
+
+
+def test_invalid_existing_sdk_readback_still_reaches_authoritative_inventory_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invalid_sdk = {"installed": True, "componentId": updates.WORKLOAD_SDK_COMPONENT_ID}
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch, current_sdk=invalid_sdk)
+    result, sdk_prepared = case["updater"]._resume_first_core_before_workload_inventory(
+        case["stored"],
+        case["transaction"],
+        case["transaction_path"],
+        lock_lease=object(),
+        bootstrap_module=object(),
+    )
+    assert result is None
+    assert sdk_prepared is False
+    assert case["events"] == []
+
+    policy_path = tmp_path / "authenticated-runtime-policy.json"
+    policy_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(updates, "DEFAULT_PACKAGE_RUNTIME_POLICY", policy_path)
+    updater = case["updater"]
+    monkeypatch.setattr(
+        updater,
+        "_workload_plugin_owner_rows",
+        lambda *_args: (case["policy"], [{"componentId": "cyrene-plugin-document-parsing"}]),
+    )
+    monkeypatch.setattr(updater, "_read_workload_package_runtime_receipt", lambda *_args: None)
+    monkeypatch.setattr(
+        updater, "_activity_catalog", lambda **_kwargs: ({"generation": 1, "sources": []}, [])
+    )
+    monkeypatch.setattr(updater, "_workload_source_principals", lambda *_args: {})
+    monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: object())
+
+    with pytest.raises(
+        updates.UpdateError, match="operator SDK interpreter is not verified"
+    ) as error:
+        updater._read_workload_package_inventory("catalyst", ("cyrene-plugin-document-parsing",))
+    assert error.value.code == "WORKLOAD_SDK_READBACK_REQUIRED"
+
+
+def test_same_plan_recovery_precedes_ordinary_workload_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _workload_updates_updater(tmp_path)
+    block = _public_first_core_block()
+    events: list[str] = []
+    transaction_root = tmp_path / "transactions"
+    transaction_root.mkdir(mode=0o700)
+    transaction_path = transaction_root / f"{block['planId']}.json"
+    prior = {
+        "transactionKind": "workload-assembly.v1",
+        "action": "install",
+        "planId": block["planId"],
+        "planDigest": block["planDigest"],
+        "workloadId": "catalyst",
+        "phase": "applying",
+        "maintenanceHolds": {},
+    }
+    updates._atomic_json(transaction_path, prior)
+    stored = {
+        "planId": block["planId"],
+        "planDigest": block["planDigest"],
+        "workloadId": "catalyst",
+        "targetId": block["targetId"],
+        "channel": "stable",
+        "selections": {},
+    }
+    monkeypatch.setattr(updates, "_running_as_root", lambda: True)
+    monkeypatch.setattr(updater, "_private_state_directory", lambda _name: transaction_root)
+    monkeypatch.setattr(
+        updater,
+        "_resume_first_core_before_workload_inventory",
+        lambda *_args, **_kwargs: events.append("held-core-and-sdk-resume") or ({}, True),
+    )
+
+    class InventoryReached(Exception):
+        pass
+
+    def build_workload_plan(*_args: Any, **_kwargs: Any) -> Any:
+        events.append("ordinary-authoritative-inventory")
+        raise InventoryReached
+
+    monkeypatch.setattr(updater, "_build_workload_plan", build_workload_plan)
+
+    with pytest.raises(InventoryReached):
+        updater._apply_workload_install_assembled(
+            stored,
+            {"planId": block["planId"], "planDigest": block["planDigest"], "confirmed": True},
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert events == ["held-core-and-sdk-resume", "ordinary-authoritative-inventory"]
+
+
 def test_validate_maintenance_hold_uses_v1_wire_protocol(
     tmp_path: Path,
 ) -> None:
