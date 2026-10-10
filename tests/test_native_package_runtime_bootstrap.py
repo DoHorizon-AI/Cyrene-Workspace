@@ -1252,7 +1252,8 @@ def test_first_core_installs_and_resumes_the_attested_plugin_preparer_offline(
             owner_gid=os.getegid(),
         ),
     )
-    test_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+    project_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+    test_python = project_python if project_python.exists() else Path(sys.executable)
     test_python_version = subprocess.run(
         [
             str(test_python),
