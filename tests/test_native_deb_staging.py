@@ -53,9 +53,18 @@ def test_deb_product_units_require_the_platform_broker_in_unit_section() -> None
         end = script.index("\nEOF\n", start)
         unit = script[start:end]
         unit_section, service_section = unit.split("\n[Service]\n", maxsplit=1)
+        after_dependencies = [
+            dependency
+            for directive in unit_section.splitlines()
+            if directive.startswith("After=")
+            for dependency in directive.removeprefix("After=").split()
+        ]
 
         assert unit_section.splitlines().count(broker_requires) == 1
         assert unit_section.splitlines().count(broker_after) == 1
+        assert "cyrene-runtime-maintenance.service" in after_dependencies
+        if service == "catalyst":
+            assert "cyrene-package-runtime.service" in after_dependencies
         assert broker_requires not in service_section
         assert broker_after not in service_section
 
