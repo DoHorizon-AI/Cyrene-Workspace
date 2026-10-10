@@ -4983,6 +4983,227 @@ def test_workload_stage_backfills_legacy_plugin_identity_on_exact_cached_plan(
     assert persisted["stagedComponents"] == result["components"]
 
 
+def test_workload_stage_reports_allowlisted_blockers_without_provider_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    component_id = "cyrene-tools-document-parsing"
+    updater, plan_id, plan_digest, resolution, _candidates, plan_directory = (
+        _cached_plugin_stage_fixture(tmp_path, monkeypatch, component_ids=(component_id,))
+    )
+    additional_component_ids = (
+        "cyrene-tools-dataset-preparation",
+        "cyrene-tools-dataset-generation",
+        "cyrene-tools-knowledge-preparation",
+    )
+    for known_component_id in (component_id, *additional_component_ids):
+        updater.components[known_component_id] = {"componentId": known_component_id}
+    resolution["status"] = "blocked"
+    resolution["blockers"] = [
+        {
+            "componentId": "bearer-token-must-not-appear",
+            "code": ["malformed", "blocker-code"],
+            "details": {
+                "candidateFailure": {
+                    "code": {"credential": "provider-secret-must-not-appear"},
+                    "message": "raw provider response must not appear",
+                }
+            },
+        },
+        {
+            "componentId": component_id,
+            "code": "MISSING_RELEASE",
+            "message": "provider token=raw-provider-secret",
+            "details": {
+                "candidateFailure": {
+                    "code": "ATTESTATION_INVALID",
+                    "message": "raw-provider-metadata-secret",
+                }
+            },
+        },
+    ]
+    resolution["blockers"].extend(
+        {"componentId": known_component_id, "code": "MISSING_RELEASE"}
+        for known_component_id in additional_component_ids
+    )
+    plan_path = plan_directory / f"{plan_id}.json"
+    original = plan_path.read_bytes()
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater.stage_workload(
+            "catalyst",
+            updates.WORKLOAD_HOST_TARGET,
+            plan_id,
+            plan_digest,
+            action="install",
+            channel="preview",
+        )
+
+    message = str(error.value)
+    assert error.value.code == "PLAN_CHANGED"
+    assert error.value.retryable is True
+    assert f"{component_id}:MISSING_RELEASE/ATTESTATION_INVALID" in message
+    assert all(
+        secret not in message
+        for secret in (
+            "bearer-token-must-not-appear",
+            "provider-secret-must-not-appear",
+            "raw provider response",
+            "raw-provider-secret",
+            "raw-provider-metadata-secret",
+        )
+    )
+    assert message.count("MISSING_RELEASE") == updates._WORKLOAD_STAGE_DIAGNOSTIC_MAX_BLOCKERS
+    assert additional_component_ids[-1] not in message
+    assert len(message) <= updates._WORKLOAD_STAGE_DIAGNOSTIC_MAX_LENGTH
+    assert plan_path.read_bytes() == original
+
+
+def test_workload_stage_reports_first_core_candidate_blocker_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, plan_id, plan_digest, resolution, _candidates, _plan_directory = (
+        _cached_plugin_stage_fixture(
+            tmp_path, monkeypatch, component_ids=("cyrene-tools-document-parsing",)
+        )
+    )
+    component_id = "cyrene-kernel"
+    updater.components[component_id] = {"componentId": component_id}
+    resolution["status"] = "blocked"
+    resolution["blockers"] = [
+        {
+            "componentId": component_id,
+            "code": "ATTESTATION_INVALID",
+            "details": {"phase": "firstCoreBootstrap"},
+        }
+    ]
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater.stage_workload(
+            "catalyst",
+            updates.WORKLOAD_HOST_TARGET,
+            plan_id,
+            plan_digest,
+            action="install",
+            channel="preview",
+        )
+
+    assert error.value.code == "PLAN_CHANGED"
+    assert error.value.retryable is True
+    assert f"{component_id}:ATTESTATION_INVALID" in str(error.value)
+
+
+def test_workload_stage_omits_malformed_and_untrusted_blocker_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, plan_id, plan_digest, resolution, _candidates, plan_directory = (
+        _cached_plugin_stage_fixture(
+            tmp_path, monkeypatch, component_ids=("cyrene-tools-document-parsing",)
+        )
+    )
+    resolution["status"] = {"token": "untrusted-status-secret"}
+    resolution["blockers"] = [
+        {
+            "componentId": "component-secret-must-not-appear",
+            "code": "UNTRUSTED_PROVIDER_ERROR",
+            "details": {
+                "candidateFailure": {
+                    "code": "credential-secret-must-not-appear",
+                    "message": "raw provider payload must not appear",
+                }
+            },
+        },
+        {
+            "componentId": ["malformed-component-secret"],
+            "code": {"provider": "malformed-code-secret"},
+            "details": ["malformed-details-secret"],
+        },
+    ]
+    plan_path = plan_directory / f"{plan_id}.json"
+    original = plan_path.read_bytes()
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater.stage_workload(
+            "catalyst",
+            updates.WORKLOAD_HOST_TARGET,
+            plan_id,
+            plan_digest,
+            action="install",
+            channel="preview",
+        )
+
+    message = str(error.value)
+    assert error.value.code == "PLAN_CHANGED"
+    assert error.value.retryable is True
+    assert "Resolution blockers:" not in message
+    assert all(
+        secret not in message
+        for secret in (
+            "untrusted-status-secret",
+            "component-secret-must-not-appear",
+            "credential-secret-must-not-appear",
+            "raw provider payload",
+            "malformed-component-secret",
+            "malformed-code-secret",
+            "malformed-details-secret",
+        )
+    )
+    assert plan_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("changed_field", ["planDigest", "action", "channel", "firstCoreBootstrap"])
+def test_workload_stage_reports_changed_identity_fields_and_still_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed_field: str
+) -> None:
+    updater, plan_id, plan_digest, resolution, _candidates, plan_directory = (
+        _cached_plugin_stage_fixture(
+            tmp_path, monkeypatch, component_ids=("cyrene-tools-document-parsing",)
+        )
+    )
+    plan_path = plan_directory / f"{plan_id}.json"
+    stored = json.loads(plan_path.read_text(encoding="utf-8"))
+    changed_value = ""
+    if changed_field == "planDigest":
+        changed_value = "sha256:" + "f" * 64
+        resolution["planDigest"] = changed_value
+    elif changed_field == "action":
+        changed_value = "uninstall"
+        resolution["action"] = changed_value
+    elif changed_field == "channel":
+        changed_value = "stable"
+        resolution["channel"] = changed_value
+    else:
+        stored["firstCoreBootstrap"] = {
+            "planId": "plan-" + "b" * 32,
+            "planDigest": "sha256:" + "b" * 64,
+            "componentId": "cyrene-kernel",
+        }
+        resolution["firstCoreBootstrap"] = {
+            "planId": "plan-" + "c" * 32,
+            "planDigest": "sha256:" + "c" * 64,
+            "componentId": "cyrene-kernel",
+        }
+        changed_value = "plan-" + "c" * 32
+        updates._atomic_json(plan_path, stored)
+    original = plan_path.read_bytes()
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater.stage_workload(
+            "catalyst",
+            updates.WORKLOAD_HOST_TARGET,
+            plan_id,
+            plan_digest,
+            action="install",
+            channel="preview",
+        )
+
+    message = str(error.value)
+    assert error.value.code == "PLAN_CHANGED"
+    assert error.value.retryable is True
+    assert f"Changed checked-plan fields: {changed_field}." in message
+    assert changed_value not in message
+    assert plan_path.read_bytes() == original
+
+
 @pytest.mark.parametrize("mismatch", ["plan", "source", "digest", "proof", "asset", "identity"])
 def test_workload_stage_rejects_legacy_plugin_mismatch_without_plan_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
