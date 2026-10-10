@@ -66,7 +66,7 @@ class StartupUpdater:
             active = self.active_states[unit]
             substate = "running" if active == "active" else "dead"
             pid = self.unit_pids[unit] if active == "active" else "0"
-            values = f"{active}\n{substate}\n{pid}\n0"
+            values = f"ActiveState={active}\nSubState={substate}\nMainPID={pid}\nControlPID=0"
             self.events.append(("show", "unit-state", unit, values))
             return _completed(values)
         property_name = next(
