@@ -87,6 +87,7 @@ WORKLOAD_FIRST_CORE_COMPONENT_IDS = (
 WORKLOAD_FIRST_CORE_HOLD_ARTIFACT_KINDS = frozenset(
     {"native-binary", "oci-image", "python-bundle", "static-web"}
 )
+WORKLOAD_FIRST_CORE_INITIAL_SOURCE_ARTIFACT_KINDS = frozenset({"native-binary", "python-bundle"})
 _WORKLOAD_STAGE_RESOLUTION_BLOCKER_CODES = frozenset(
     {
         "CATALOG_COMPONENT_MISSING",
@@ -5708,14 +5709,51 @@ class ComponentUpdater:
                 "The signed first-Core bootstrap did not complete; its durable transaction must be resumed.",
                 retryable=True,
             ) from error
+        if not isinstance(result, dict):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The first-Core helper did not return the exact completed C10 identity and readiness.",
+                retryable=True,
+            )
+        block = parent_plan.get("firstCoreBootstrap")
+        if not isinstance(block, dict):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The first-Core parent plan has no exact C10 identity.",
+                retryable=True,
+            )
+        initial_source_ref = block.get("initialSourceArtifactRef")
+        validate_public_result = getattr(core, "_fresh_workload_core_public_result", None)
+        if callable(validate_public_result):
+            try:
+                result = validate_public_result(
+                    {
+                        "planId": block.get("planId"),
+                        "planDigest": block.get("planDigest"),
+                        "initialSourceArtifactRef": initial_source_ref,
+                    },
+                    result,
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "FIRST_CORE_READBACK_REQUIRED",
+                    "The first-Core helper result differs from its validated public contract.",
+                    retryable=True,
+                ) from error
+        elif initial_source_ref is not None:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "A source-bound first-Core result requires the helper public-result validator.",
+                retryable=True,
+            )
+        expected_readiness = "UNKNOWN" if initial_source_ref is not None else "READY"
         if (
-            not isinstance(result, dict)
-            or result.get("status") != "installed"
-            or result.get("planId") != parent_plan["firstCoreBootstrap"].get("planId")
-            or result.get("planDigest") != parent_plan["firstCoreBootstrap"].get("planDigest")
+            result.get("status") != "installed"
+            or result.get("planId") != block.get("planId")
+            or result.get("planDigest") != block.get("planDigest")
             or result.get("catalogGeneration") != 1
             or not isinstance(result.get("readiness"), dict)
-            or result["readiness"].get("status") != "READY"
+            or result["readiness"].get("status") != expected_readiness
             or result["readiness"].get("catalogGeneration") != 1
             or not isinstance(result.get("componentStatuses"), list)
         ):
@@ -6010,7 +6048,7 @@ class ComponentUpdater:
                     for row in parent_rows
                     if isinstance(row, dict)
                     and row.get("componentId") == product_component_id
-                    and row.get("artifactKind") == "native-binary"
+                    and row.get("artifactKind") in WORKLOAD_FIRST_CORE_INITIAL_SOURCE_ARTIFACT_KINDS
                 ]
                 if selected_product_rows:
                     if (
@@ -10389,7 +10427,7 @@ class ComponentUpdater:
                 for row in selected_rows
                 if isinstance(row, dict)
                 and row.get("componentId") == reference["componentId"]
-                and row.get("artifactKind") == "native-binary"
+                and row.get("artifactKind") in WORKLOAD_FIRST_CORE_INITIAL_SOURCE_ARTIFACT_KINDS
                 and row.get("digest") == reference["artifactDigest"]
             ]
             if isinstance(selected_rows, list)

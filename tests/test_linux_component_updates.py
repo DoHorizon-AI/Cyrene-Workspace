@@ -3997,7 +3997,9 @@ def test_initial_workload_hold_moves_from_missing_gen_zero_to_live_generation_on
     ]
 
 
-def _initial_catalyst_source_transaction(tmp_path: Path) -> dict[str, Any]:
+def _initial_catalyst_source_transaction(
+    tmp_path: Path, *, artifact_kind: str = "native-binary"
+) -> dict[str, Any]:
     updater = _empty_updater(tmp_path)
     c10_plan_digest = "sha256:" + "c" * 64
     c10_plan_id = "plan-" + "c" * 32
@@ -4027,7 +4029,7 @@ def _initial_catalyst_source_transaction(tmp_path: Path) -> dict[str, Any]:
         "selectedComponents": [
             {
                 "componentId": updates.CATALYST_COMPONENT_ID,
-                "artifactKind": "native-binary",
+                "artifactKind": artifact_kind,
                 "digest": product_digest,
             }
         ],
@@ -4057,6 +4059,8 @@ def _initial_catalyst_source_transaction(tmp_path: Path) -> dict[str, Any]:
     }
     updater.components[updates.CATALYST_COMPONENT_ID] = {
         "componentId": updates.CATALYST_COMPONENT_ID,
+        "kind": "python-bundle",
+        "pythonBundleService": "catalyst",
         "systemdUnit": updates.CATALYST_SERVICE_UNIT,
     }
     return {"updater": updater, "transaction": transaction, "reference": reference}
@@ -4262,10 +4266,11 @@ def test_first_catalyst_start_failure_preserves_special_hold_for_same_plan_retry
     )
 
 
+@pytest.mark.parametrize("artifact_kind", ["native-binary", "python-bundle"])
 def test_first_catalyst_source_uses_signed_parent_and_product_identity_for_begin(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, artifact_kind: str
 ) -> None:
-    case = _initial_catalyst_source_transaction(tmp_path)
+    case = _initial_catalyst_source_transaction(tmp_path, artifact_kind=artifact_kind)
     updater = case["updater"]
     transaction = case["transaction"]
     reference = case["reference"]

@@ -47,6 +47,7 @@ C10_FIRST_CORE_COMPONENT_IDS = (
     "cyrene-kernel",
     "cy-package-runtime",
 )
+_FRESH_WORKLOAD_CORE_INITIAL_SOURCE_ARTIFACT_KINDS = frozenset({"native-binary", "python-bundle"})
 _PACKAGE_RUNTIME_PROTOCOLS = {
     "cyrene-runtime-maintenance": "cyrene.runtime-maintenance.broker.v1",
     "cyrene-kernel": "cyrene.runtime-maintenance.state.v2",
@@ -2688,7 +2689,7 @@ def _fresh_workload_core_plan(
                 for row in selected_parent_rows
                 if isinstance(row, dict)
                 and row.get("componentId") == component_id
-                and row.get("artifactKind") == "native-binary"
+                and row.get("artifactKind") in _FRESH_WORKLOAD_CORE_INITIAL_SOURCE_ARTIFACT_KINDS
             ]
             if selected_products:
                 selected_product = selected_products[0]
