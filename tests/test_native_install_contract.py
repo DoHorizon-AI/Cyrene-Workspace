@@ -341,6 +341,6 @@ def test_postinst_rejects_root_kernel_service_account_without_repair(tmp_path: P
     result = _run_kernel_service_account_block(tmp_path, account_state)
 
     assert result.returncode != 0
-    assert "Kernel service cannot run as root" in result.stderr
+    assert "cyrene-kernel account must not use UID 0" in result.stderr
     assert account_state.read_text(encoding="utf-8") == root_account
     assert not (tmp_path / "useradd.log").exists()

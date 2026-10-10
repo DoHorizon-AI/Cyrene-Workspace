@@ -661,7 +661,7 @@ case "${KERNEL_SERVICE_UID}" in
         ;;
 esac
 if [ "${KERNEL_SERVICE_UID}" = "0" ]; then
-    echo "ERROR: Kernel service cannot run as root." >&2
+    echo "ERROR: cyrene-kernel account must not use UID 0." >&2
     exit 1
 fi
 
