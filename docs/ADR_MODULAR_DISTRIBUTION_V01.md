@@ -114,10 +114,12 @@ an installable verified component. Record the exact Platform release and
 verification receipt before preparing the follow-on Native preview.
 
 The published 0e Native release is immutable and its tag is derived from the
-Workspace source SHA. Do not overwrite or retarget it. After the corrected
-Platform release is strictly verified, pin that exact Platform identity in a
-small Workspace documentation PR. The merge SHA of that PR is the source for
-the next Native preview, using the existing
+Workspace source SHA. Do not overwrite or retarget it. This interim
+documentation PR establishes the next Workspace source, W; it does not change
+the source Catalog or dependency lock. After the corrected Platform release
+P passes strict verification, dispatch the existing Native producer from W
+with `release_inputs_json.platformReleaseId=preview-P`. The producer will
+create the next immutable Native preview using the existing
 `native-installer-preview-<Workspace-SHA>` tag convention. Keep the existing
 `0.1.0-rc.1` package version, active-v2 Catalog generation 15, and all other
 frozen Product, component, and profile identities; this checkpoint does not
@@ -134,7 +136,7 @@ Broker state by hand or infer runtime success from package signatures.
 
 针对冻结的 Platform 源码 `daabf9ff561b4ab9296094d8198fd1fa3418b32b` 进行的只读诊断确认了参数契约不匹配：signed unit 和 managed runtime 以命名形式传递 sandbox peer UID/GID（`sandboxd=0` 与 `sandboxd=992`），而 Kernel parser 要求 unsigned integer scalar。修正已在 [Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100) 合并至 `2bbd40b3b30cd9401127a033dd33cf6902378536`，required CI 已通过。该修改把 shipped Kernel unit 和 managed runtime 的 sandbox peer UID/GID 参数改为 unsigned scalar，并增加 shipped unit 参数解析和拒绝 adapter-named 参数的回归覆盖。2026-10-10 09:04 UTC checkpoint 回读时，正式 Platform 发行流程 [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155) 第 1 次尝试仍在运行：Catalog 验证已成功，Ubuntu 22.04 和 24.04 原生构建 job 仍在执行。尚未发布 P 的 release，也未运行严格发行验证，因此该源码提交还不是可安装且已验证的组件。准备后续 Native 预览版前，必须记录确切 Platform release 和验证 receipt。
 
-已发布的 0e Native release 不可变，且 tag 由 Workspace source SHA 派生。不得覆盖或重定向。Platform 修正版通过严格验证后，应通过一个小型 Workspace 文档 PR 固定确切 Platform 身份。该 PR 的 merge SHA 将作为下一个 Native preview 的源码，并沿用现有 `native-installer-preview-<Workspace-SHA>` tag 规则。保留 `0.1.0-rc.1` 包版本、active-v2 Catalog generation 15 及其他已冻结的 Product、component、profile identity；本 checkpoint 不引入新的 Catalog、tag scheme 或版本变更。本 checkpoint 不宣称安装成功：Core runtime、Catalyst product 激活、Client 访问、SFT producer 与独立 consumer、restart/reboot 恢复、plugin supervision 和 Echo lifecycle 均为 NOT_RUN。只有后续不可变预览版上的对应 gate 通过后，才能报告这些结果。owner 完成后续验收前，保留失败主机及其 receipts；不要手工修改 Broker 状态，也不要根据包签名推断 runtime 成功。
+已发布的 0e Native release 不可变，且 tag 由 Workspace source SHA 派生。不得覆盖或重定向。本次阶段文档 PR 合并后会建立新的 Workspace source W；它不会修改 source Catalog 或 dependency lock。Platform 修正版 P 通过严格验证后，再从 W 调用现有 Native producer，并在 `release_inputs_json.platformReleaseId` 中设置 `preview-P`。Producer 沿用现有 `native-installer-preview-<Workspace-SHA>` tag 规则创建新的不可变 Native 预览版。保留 `0.1.0-rc.1` 包版本、active-v2 Catalog generation 15 及其他已冻结的 Product、component、profile identity；本 checkpoint 不引入新的 Catalog、tag scheme 或版本变更。本 checkpoint 不宣称安装成功：Core runtime、Catalyst product 激活、Client 访问、SFT producer 与独立 consumer、restart/reboot 恢复、plugin supervision 和 Echo lifecycle 均为 NOT_RUN。只有后续不可变预览版上的对应 gate 通过后，才能报告这些结果。owner 完成后续验收前，保留失败主机及其 receipts；不要手工修改 Broker 状态，也不要根据包签名推断 runtime 成功。
 
 ## Operational contract / 运行契约
 
