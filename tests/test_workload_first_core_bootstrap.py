@@ -1821,12 +1821,12 @@ def test_held_broker_start_failure_keeps_redacted_recoverable_journal(
     assert len(error_text) < 1000
 
 
-def _public_first_core_block() -> dict[str, Any]:
+def _public_first_core_block(*, initial_source_ref: dict[str, str] | None = None) -> dict[str, Any]:
     """Return the immutable public projection used by workload-plan tests."""
 
     component_ids = list(native_core.C10_FIRST_CORE_COMPONENT_IDS)
     component_digests = {component_id: _digest(component_id) for component_id in component_ids}
-    return {
+    block = {
         "schemaVersion": 1,
         "cohortId": "C10",
         "planId": PLAN_ID,
@@ -1846,6 +1846,51 @@ def _public_first_core_block() -> dict[str, Any]:
         "componentArtifactDigests": component_digests,
         "maintenanceComponentArtifactDigests": component_digests,
     }
+    if initial_source_ref is not None:
+        block["initialSourceArtifactRef"] = initial_source_ref
+    return block
+
+
+def _public_first_core_result(
+    plan: dict[str, Any], *, readiness_status: str, source_ref: dict[str, str] | None = None
+) -> dict[str, Any]:
+    """Return the exact helper completion shape expected by the caller validator."""
+
+    result = {
+        "status": "installed",
+        "planId": plan["planId"],
+        "planDigest": plan["planDigest"],
+        "catalogGeneration": 1,
+        "componentStatuses": [
+            {"componentId": component_id, "status": "active"}
+            for component_id in native_core.C10_FIRST_CORE_COMPONENT_IDS
+        ],
+        "readiness": {
+            "status": readiness_status,
+            "catalogGeneration": 1,
+            "gateGeneration": 2,
+            "activeTaskCount": 0,
+            "inflightRuntimeAdmissionCount": 0,
+            "activeWorkerCount": 0,
+            "activeAllocationCount": 0,
+            "blockerCodes": ["ACTIVITY_SOURCE_UNKNOWN"] if source_ref else [],
+            "unknownActivitySources": [source_ref["sourceId"]] if source_ref else [],
+        },
+        "authority": {
+            "authority": "platform_package_runtime",
+            "protocol_version": "cy-package-runtime.control.v1",
+            "catalog_generation": 1,
+            "capabilities": ["cy-package-runtime.binding-operation-admission.v1"],
+        },
+    }
+    if source_ref is not None:
+        result["sourceActivation"] = {
+            "status": "pending",
+            "sourceId": source_ref["sourceId"],
+            "componentId": source_ref["componentId"],
+            "artifactDigest": source_ref["artifactDigest"],
+        }
+    return result
 
 
 def test_first_core_child_digest_binds_separate_signed_product_source_context(
@@ -1913,7 +1958,7 @@ def test_first_core_child_digest_binds_separate_signed_product_source_context(
         "selectedComponents": [
             {
                 "componentId": updates.CATALYST_COMPONENT_ID,
-                "artifactKind": "native-binary",
+                "artifactKind": "python-bundle",
                 "digest": product_digest,
             }
         ],
@@ -2010,6 +2055,24 @@ def test_first_core_child_digest_binds_separate_signed_product_source_context(
     with pytest.raises(ValueError, match="unstarted Product source as unknown"):
         native_core._fresh_workload_core_public_result(plan, dishonest_ready_result)
 
+    invalid_result_changes = (
+        lambda result: result["sourceActivation"].update(sourceId="another-source"),
+        lambda result: result["sourceActivation"].update(componentId="another-component"),
+        lambda result: result["sourceActivation"].update(artifactDigest=_digest("wrong-product")),
+        lambda result: result["readiness"]["blockerCodes"].append("ACTIVE_TASKS_PRESENT"),
+        lambda result: result["readiness"].update(unknownActivitySources=["another-source"]),
+        lambda result: result.update(planId="plan-" + "f" * 32),
+        lambda result: result.update(planDigest=_digest("wrong-child-plan")),
+        lambda result: result.update(status="failed"),
+        lambda result: result.update(catalogGeneration=2),
+        lambda result: result["componentStatuses"][0].update(status="inactive"),
+    )
+    for change in invalid_result_changes:
+        invalid_result = copy.deepcopy(c10_result)
+        change(invalid_result)
+        with pytest.raises(ValueError):
+            native_core._fresh_workload_core_public_result(plan, invalid_result)
+
     wrong_ref = {**reference, "artifactDigest": _digest("different-product")}
     wrong_resolution = copy.deepcopy(resolution)
     wrong_resolution["selectedComponents"][0]["digest"] = wrong_ref["artifactDigest"]
@@ -2027,6 +2090,109 @@ def test_first_core_child_digest_binds_separate_signed_product_source_context(
             "stable",
             bootstrap,
         )
+
+
+def test_first_core_projection_binds_selected_python_bundle_as_initial_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _workload_updates_updater(tmp_path)
+    target_id = updates.WORKLOAD_FIRST_CORE_TARGET_ID
+    target = {"targetId": target_id, "target": {"platform": "linux", "arch": "x86_64"}}
+    source_ref = {
+        "sourceId": "cyrene-catalyst",
+        "componentId": updates.CATALYST_COMPONENT_ID,
+        "artifactDigest": _digest("selected-python-catalyst"),
+    }
+    source_policy = {
+        "mode": "actualProduct",
+        "productComponentIds": [updates.CATALYST_COMPONENT_ID],
+        "productSources": [
+            {"componentId": updates.CATALYST_COMPONENT_ID, "sourceId": source_ref["sourceId"]}
+        ],
+    }
+    updater.catalog = {"workloads": [{"workloadId": "catalyst", "sourcePolicy": source_policy}]}
+    updater.catalog_digest = _digest("projection-catalog")
+    updater.targets = {target_id: target}
+    updater.components = {
+        component_id: {"componentId": component_id}
+        for component_id in (
+            *updates.WORKLOAD_FIRST_CORE_COMPONENT_IDS,
+            updates.CATALYST_COMPONENT_ID,
+        )
+    }
+    candidates: dict[str, Any] = {}
+    core_rows: dict[str, dict[str, Any]] = {}
+    for component_id in (*updates.WORKLOAD_FIRST_CORE_COMPONENT_IDS, updates.CATALYST_COMPONENT_ID):
+        kind = "python-bundle" if component_id == updates.CATALYST_COMPONENT_ID else "native-binary"
+        digest = (
+            source_ref["artifactDigest"]
+            if component_id == updates.CATALYST_COMPONENT_ID
+            else _digest(component_id)
+        )
+        candidate = SimpleNamespace(
+            component={"componentId": component_id},
+            manifest={"target": target["target"]},
+            manifest_digest=_digest(component_id + "-manifest"),
+            artifact_digest=digest,
+        )
+        candidates[component_id] = candidate
+        if component_id in updates.WORKLOAD_FIRST_CORE_COMPONENT_IDS:
+            core_rows[component_id] = {
+                "componentId": component_id,
+                "artifactKind": kind,
+                "digest": digest,
+                "targetId": target_id,
+            }
+
+    resolver = SimpleNamespace(
+        _expected_artifact_kind=lambda component, _target: (
+            "native-binary"
+            if component["componentId"] in updates.WORKLOAD_FIRST_CORE_COMPONENT_IDS
+            else "python-bundle"
+        ),
+        _candidate_rows=lambda _indexes, _catalog, component, _target_id, _kind, _blockers, **_kwargs: [
+            core_rows[component["componentId"]]
+        ],
+    )
+    monkeypatch.setattr(updater, "_first_core_host_is_unprovisioned", lambda: True)
+    monkeypatch.setattr(
+        updater,
+        "_load_native_core_bootstrap",
+        lambda: SimpleNamespace(_validate_package_runtime_group=lambda _updater: None),
+    )
+    monkeypatch.setattr(updater, "_target_for", lambda _component, *, target_id: target)
+    monkeypatch.setattr(updater, "_trusted_release_indexes", lambda _candidates: {})
+    monkeypatch.setattr(updater, "_load_workload_resolver", lambda: resolver)
+    monkeypatch.setattr(
+        updater,
+        "_first_core_broker_plan_digest",
+        lambda *_args, **_kwargs: _digest("broker-bootstrap"),
+    )
+    resolution = {
+        "action": "install",
+        "selectedComponents": [
+            {
+                "componentId": updates.CATALYST_COMPONENT_ID,
+                "artifactKind": "python-bundle",
+                "digest": source_ref["artifactDigest"],
+            }
+        ],
+        "planDigestMaterial": {},
+    }
+
+    block, _core_candidates = updater._first_core_resolution_projection(
+        resolution, candidates, workload_id="catalyst", channel="stable"
+    )
+
+    assert block is not None
+    assert block["initialSourceArtifactRef"] == source_ref
+    assert resolution["firstCoreBootstrap"]["initialSourceArtifactRef"] == source_ref
+    assert (
+        resolution["planDigestMaterial"]["firstCoreBootstrapInternal"]["childPlanDigestMaterial"][
+            "initialSourceArtifactRef"
+        ]
+        == source_ref
+    )
 
 
 def _workload_updates_updater(tmp_path: Path) -> Any:
@@ -2384,11 +2550,16 @@ def test_first_core_candidate_failure_keeps_component_identity_in_check_blocker(
     assert blocker["details"] == {"phase": "firstCoreBootstrap"}
 
 
-def test_first_core_public_projection_keeps_nine_fields_and_adds_check_stage_status(
+def test_first_core_public_projection_carries_source_ref_through_check_and_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     updater = _workload_updates_updater(tmp_path)
-    block = _public_first_core_block()
+    source_ref = {
+        "sourceId": "cyrene-catalyst",
+        "componentId": updates.CATALYST_COMPONENT_ID,
+        "artifactDigest": _digest("selected-python-product"),
+    }
+    block = _public_first_core_block(initial_source_ref=source_ref)
     public_fields = set(block)
     assert public_fields == {
         "schemaVersion",
@@ -2400,6 +2571,7 @@ def test_first_core_public_projection_keeps_nine_fields_and_adds_check_stage_sta
         "components",
         "componentArtifactDigests",
         "maintenanceComponentArtifactDigests",
+        "initialSourceArtifactRef",
     }
     plan_id = block["planId"]
     plan_digest = block["planDigest"]
@@ -2510,7 +2682,12 @@ def test_public_apply_initializes_first_core_before_sdk_prepare_and_normal_readi
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     updater = _workload_updates_updater(tmp_path)
-    block = _public_first_core_block()
+    source_ref = {
+        "sourceId": "cyrene-catalyst",
+        "componentId": updates.CATALYST_COMPONENT_ID,
+        "artifactDigest": _digest("selected-python-catalyst"),
+    }
+    block = _public_first_core_block(initial_source_ref=source_ref)
     events: list[str] = []
     lease = object()
     atomic_json = updates._atomic_json
@@ -2665,31 +2842,30 @@ def test_public_apply_initializes_first_core_before_sdk_prepare_and_normal_readi
 
     monkeypatch.setattr(updates, "_atomic_json", record_atomic_json)
 
-    def run_first_core(
-        parent_plan: dict[str, Any],
-        _staged_components: list[dict[str, Any]],
-        _broker_release: dict[str, Any],
-        _source_policy: dict[str, Any],
-        _source_principals: dict[str, dict[str, Any]],
+    helper_result = _public_first_core_result(
+        block, readiness_status="UNKNOWN", source_ref=source_ref
+    )
+
+    def apply_first_core(
+        _updater: Any,
         *,
+        parent_plan: dict[str, Any],
         lock_lease: Any,
         bootstrap_module: Any,
+        **_kwargs: Any,
     ) -> dict[str, Any]:
         assert lock_lease is lease
         assert bootstrap_module is updater._load_native_component_bootstrap()
         assert set(parent_plan["firstCoreBootstrap"]) == set(block)
         assert parent_plan["preparerWheelIdentity"] == preparer_identity
         events.append("first-core")
-        return {
-            "status": "installed",
-            "planId": block["planId"],
-            "planDigest": block["planDigest"],
-            "catalogGeneration": 1,
-            "readiness": {"status": "READY", "catalogGeneration": 1},
-            "componentStatuses": [],
-        }
+        return copy.deepcopy(helper_result)
 
-    monkeypatch.setattr(updater, "_run_fresh_workload_first_core", run_first_core)
+    core_module = SimpleNamespace(
+        apply_fresh_workload_first_core=apply_first_core,
+        _fresh_workload_core_public_result=native_core._fresh_workload_core_public_result,
+    )
+    monkeypatch.setattr(updater, "_load_native_core_bootstrap", lambda: core_module)
     monkeypatch.setattr(
         updater,
         "_load_workload_sdk_environment",
@@ -2731,6 +2907,72 @@ def test_public_apply_initializes_first_core_before_sdk_prepare_and_normal_readi
     assert events.index("durable-first-core-intent") < events.index("first-core")
     assert events.index("first-core") < events.index("sdk-prepare")
     assert events.index("first-core") < events.index("normal-core-readiness")
+
+
+def test_first_core_caller_rejects_unknown_readiness_without_source_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _workload_updates_updater(tmp_path)
+    block = _public_first_core_block()
+    helper_result = _public_first_core_result(block, readiness_status="UNKNOWN")
+    core_module = SimpleNamespace(
+        apply_fresh_workload_first_core=lambda *_args, **_kwargs: copy.deepcopy(helper_result),
+        _fresh_workload_core_public_result=native_core._fresh_workload_core_public_result,
+    )
+    monkeypatch.setattr(updater, "_load_native_core_bootstrap", lambda: core_module)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._run_fresh_workload_first_core(
+            {
+                "channel": "stable",
+                "firstCoreBootstrap": block,
+            },
+            [],
+            {},
+            {},
+            {},
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert error.value.code == "FIRST_CORE_READBACK_REQUIRED"
+
+
+def test_first_core_caller_rejects_wrong_readiness_generation_for_bound_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _workload_updates_updater(tmp_path)
+    source_ref = {
+        "sourceId": "cyrene-catalyst",
+        "componentId": updates.CATALYST_COMPONENT_ID,
+        "artifactDigest": _digest("selected-python-catalyst"),
+    }
+    block = _public_first_core_block(initial_source_ref=source_ref)
+    helper_result = _public_first_core_result(
+        block, readiness_status="UNKNOWN", source_ref=source_ref
+    )
+    helper_result["readiness"]["catalogGeneration"] = 2
+    core_module = SimpleNamespace(
+        apply_fresh_workload_first_core=lambda *_args, **_kwargs: copy.deepcopy(helper_result),
+        _fresh_workload_core_public_result=native_core._fresh_workload_core_public_result,
+    )
+    monkeypatch.setattr(updater, "_load_native_core_bootstrap", lambda: core_module)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._run_fresh_workload_first_core(
+            {
+                "channel": "stable",
+                "firstCoreBootstrap": block,
+            },
+            [],
+            {},
+            {},
+            {},
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert error.value.code == "FIRST_CORE_READBACK_REQUIRED"
 
 
 def test_fresh_core_binds_attested_preparer_to_the_exact_selected_echo_plugin(
