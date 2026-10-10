@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -187,7 +188,6 @@ def test_fresh_core_broker_health_generation_boundaries(
         "_verified_running_c10_broker",
         lambda _updater, _proc_root: broker_identity,
     )
-
     if accepted:
         broker, result = native_core._fresh_workload_core_broker_health(
             updater,
@@ -1172,6 +1172,11 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
         "_verified_running_c10_broker",
         lambda _updater, _proc_root: broker_identity,
     )
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_core_recover_held_broker",
+        lambda *_args, **_kwargs: events.append("held-broker-recovery"),
+    )
     monkeypatch.setattr(native_core, "_assert_fresh", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         native_core,
@@ -1259,9 +1264,499 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
     assert result["status"] == "installed"
     assert events.index("broker-health") < events.index("broker:BeginCoreBootstrap")
     assert events.index("broker:BeginCoreBootstrap") < events.index("init-catalog")
+    assert events.index("init-catalog") < events.index("held-broker-recovery")
+    assert events.index("held-broker-recovery") < events.index("broker:ValidateMaintenanceHold")
     assert events.index("init-catalog") < events.index("write-unit:cyrene-kernel")
     assert events.index("init-catalog") < events.index("start:cyrene-kernel")
     assert events.index("start:cyrene-kernel") < events.index("authority-probe")
+
+
+def _held_broker_recovery_case(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    initial_state: tuple[str, str, str, str] = ("inactive", "dead", "0", "0"),
+    startup_failure: bool = False,
+    orphan_process: bool = False,
+) -> dict[str, Any]:
+    """Build a held first-Core journal with seams for exact Broker resume tests."""
+
+    broker_id = "cyrene-runtime-maintenance"
+    target_id = "linux-ubuntu-24.04-x86_64-systemd"
+    manifest_digest = _digest("held-broker-manifest")
+    artifact_digest = _digest("held-broker-artifact")
+    pointer = f"1.2.3--{manifest_digest.removeprefix('sha256:')}"
+    unit = f"{broker_id}.service"
+    executable = "/usr/lib/cyrene/releases/held-broker"
+    previous_identity = {
+        "componentId": broker_id,
+        "pointerIdentity": pointer,
+        "version": "1.2.3",
+        "manifestDigest": manifest_digest,
+        "artifactDigest": artifact_digest,
+        "systemdUnit": unit,
+        "mainPid": "42" if initial_state[0] == "active" else "41",
+        "executable": executable,
+    }
+    plan_digest = _digest("held-first-core-plan")
+    broker_plan_digest = _digest("held-offline-broker-plan")
+    source_id = STANDALONE_SOURCE_ID
+    source_uid = 12004
+    source_gid = 12005
+    full_digests = {
+        component_id: _digest(component_id)
+        for component_id in native_core.C10_FIRST_CORE_COMPONENT_IDS
+    }
+    full_digests.update(
+        {f"test-plugin-{index}": _digest(f"test-plugin-{index}") for index in range(4)}
+    )
+    plan = {
+        "planId": "plan-" + plan_digest.removeprefix("sha256:")[:32],
+        "planDigest": plan_digest,
+        "requestId": "first-core-bootstrap-held-test",
+        "brokerBootstrapPlanDigest": broker_plan_digest,
+        "firstCoreBootstrap": {
+            "targetId": target_id,
+            "catalogDigest": _digest("held-compiled-catalog"),
+        },
+    }
+    transaction = {
+        "phase": "hold_required",
+        "progress": "catalog_initialized",
+        "maintenanceToken": "private-held-token-123",
+        "maintenanceGateGeneration": 1,
+        "bootstrapBroker": dict(previous_identity),
+    }
+    broker_row = {
+        "componentId": broker_id,
+        "targetId": target_id,
+        "version": "1.2.3",
+        "manifestDigest": manifest_digest,
+        "artifactDigest": artifact_digest,
+    }
+    events: list[Any] = []
+    current = {"active": initial_state[0] == "active"}
+    current_pid = {"value": initial_state[2] if initial_state[0] == "active" else "4243"}
+    proc_root = tmp_path / "proc"
+    for pid in {previous_identity["mainPid"], "4243"}:
+        process = proc_root / pid
+        process.mkdir(parents=True)
+        (process / "status").write_text(
+            "Name:\tcyrene-runtime-maintenance\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n",
+            encoding="ascii",
+        )
+    journal_path = tmp_path / "private" / "first-core.json"
+    written: list[dict[str, Any]] = []
+
+    def broker_request(
+        method: str, params: dict[str, Any], *, request_id: str | None = None
+    ) -> dict[str, Any]:
+        events.append(("broker", method, params))
+        if method == "Health":
+            return {
+                "status": "SERVING",
+                "protocol_version": "cyrene.runtime-maintenance.broker.v1",
+                "catalog_generation": 1,
+                "gate_generation": 1,
+                "core_bootstrap_eligible": False,
+                "capabilities": [
+                    "cyrene.runtime-maintenance.state.v2",
+                    "cyrene.runtime-maintenance.binding-operations.v1",
+                ],
+            }
+        if method == "ValidateMaintenanceHold":
+            return {
+                "valid": True,
+                "request_id": params["request_id"],
+                "target_kind": params["target_kind"],
+                "plan_id": params["plan_id"],
+                "plan_digest": params["plan_digest"],
+                "component_artifact_digests": params["component_artifact_digests"],
+                "component_id": params["component_id"],
+                "artifact_digest": params["artifact_digest"],
+                "gate_generation": params["expected_gate_generation"],
+                "catalog_generation": params["expected_catalog_generation"],
+            }
+        raise AssertionError(method)
+
+    def run_systemctl(operation: str, actual_unit: str) -> None:
+        events.append(("start", operation, actual_unit))
+        assert operation == "start" and actual_unit == unit
+        if startup_failure:
+            raise RuntimeError(f"systemctl failure includes {transaction['maintenanceToken']}")
+        current["active"] = True
+
+    updater = SimpleNamespace(
+        components={broker_id: {"componentId": broker_id, "systemdUnit": unit}},
+        install_root=tmp_path / "install",
+        _active_native_pointer_identity=lambda _component: pointer,
+        _activity_catalog=lambda **_kwargs: (
+            {
+                "generation": 1,
+                "sources": [
+                    {
+                        "source_id": source_id,
+                        "uid": source_uid,
+                        "gid": source_gid,
+                        "binding_scopes": [],
+                    }
+                ],
+            },
+            [source_id],
+        ),
+        _broker_request=broker_request,
+        _run_systemctl=run_systemctl,
+        _wait_unit_active=lambda actual_unit: events.append(("wait", actual_unit)),
+    )
+    activation = {
+        "status": "activated",
+        "planDigest": broker_plan_digest,
+        "releasePath": str(updater.install_root / "components" / broker_id / "releases" / pointer),
+        "componentId": broker_id,
+        "targetId": target_id,
+        "version": "1.2.3",
+        "manifestDigest": manifest_digest,
+        "artifactDigest": artifact_digest,
+    }
+    monkeypatch.setattr(
+        native_core,
+        "_candidate_executable",
+        lambda *_args: Path(executable),
+    )
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_core_verify_broker_activation",
+        lambda *_args, **_kwargs: events.append("activation-proof") or activation,
+    )
+    monkeypatch.setattr(
+        native_core,
+        "_prove_candidate_unit_loaded",
+        lambda _updater, _row, **kwargs: (
+            events.append(("unit-proof", kwargs["restore_missing"])) or unit
+        ),
+    )
+    monkeypatch.setattr(
+        native_core, "_candidate_startup_clock", lambda _updater: (time.monotonic, time.sleep)
+    )
+
+    def unit_state(_updater: Any, actual_unit: str, **_kwargs: Any) -> tuple[str, str, str, str]:
+        assert actual_unit == unit
+        if current["active"]:
+            return "active", "running", current_pid["value"], "0"
+        return initial_state
+
+    monkeypatch.setattr(native_core, "_candidate_unit_state", unit_state)
+    monkeypatch.setattr(
+        native_core,
+        "_systemd_unit_property",
+        lambda _updater, _unit, property_name, **_kwargs: (
+            "root" if property_name in {"User", "Group"} else ""
+        ),
+    )
+
+    def verified_broker(_updater: Any, _proc_root: Path) -> dict[str, Any]:
+        return {
+            **{key: value for key, value in previous_identity.items() if key != "mainPid"},
+            "mainPid": current_pid["value"],
+        }
+
+    monkeypatch.setattr(native_core, "_verified_running_c10_broker", verified_broker)
+    monkeypatch.setattr(
+        native_core,
+        "_write_private_json",
+        lambda _updater, _path, value: written.append(copy.deepcopy(value)),
+    )
+    bootstrap_module = SimpleNamespace(
+        _broker_process_exists=lambda _root: events.append("process-table") or orphan_process
+    )
+    return {
+        "activation": activation,
+        "bootstrap_module": bootstrap_module,
+        "broker_inputs": {},
+        "broker_row": broker_row,
+        "events": events,
+        "full_digests": full_digests,
+        "journal_path": journal_path,
+        "plan": plan,
+        "previous_identity": previous_identity,
+        "proc_root": proc_root,
+        "source_gid": source_gid,
+        "source_id": source_id,
+        "source_uid": source_uid,
+        "transaction": transaction,
+        "updater": updater,
+        "written": written,
+    }
+
+
+def _transaction_validation_case() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build the original generation-zero Begin binding with its held generation one."""
+
+    source_id = STANDALONE_SOURCE_ID
+    source_policy = {"mode": "standaloneOperator", "sourceId": source_id}
+    source_principals = {source_id: {"uid": 12004, "gid": 12005}}
+    component_digests = {"cyrene-runtime-maintenance": _digest("held-broker")}
+    block = {"schemaVersion": 1, "cohortId": "C10", "catalogDigest": _digest("catalog")}
+    plan = {
+        "planId": "plan-held-validation",
+        "planDigest": _digest("parent-held-validation"),
+        "requestId": "first-core-bootstrap-held-validation",
+        "gateGeneration": 0,
+        "catalogGeneration": 0,
+        "activitySources": [],
+        "componentArtifactDigests": component_digests,
+        "firstCoreBootstrap": block,
+        "components": [],
+        "brokerBootstrapPlanDigest": _digest("nested-broker-plan"),
+    }
+    transaction = {
+        "mode": "fresh-workload-first-core",
+        "planId": plan["planId"],
+        "planDigest": plan["planDigest"],
+        "requestId": plan["requestId"],
+        "expectedCatalogGeneration": 0,
+        "expectedActivitySources": [],
+        "componentArtifactDigests": component_digests,
+        "firstCoreBootstrap": block,
+        "components": [],
+        "sourcePolicy": source_policy,
+        "selectedPluginRows": [],
+        "sourcePrincipalIdentities": source_principals,
+        "brokerBootstrapPlanDigest": plan["brokerBootstrapPlanDigest"],
+        "expectedGateGeneration": 0,
+        "beginRequest": native_core._core_bootstrap_begin_request(plan),
+        "phase": "hold_required",
+        "progress": "catalog_initialized",
+        "maintenanceGateGeneration": 1,
+    }
+    return (
+        plan,
+        transaction,
+        {
+            "source_policy": source_policy,
+            "source_principals": source_principals,
+        },
+    )
+
+
+def test_held_transaction_accepts_original_zero_begin_and_generation_one_hold() -> None:
+    plan, transaction, inputs = _transaction_validation_case()
+
+    native_core._fresh_workload_core_validate_transaction(
+        transaction,
+        plan,
+        source_policy=inputs["source_policy"],
+        selected_plugin_rows=[],
+        source_principals=inputs["source_principals"],
+    )
+
+    assert plan["gateGeneration"] == 0
+    assert transaction["expectedGateGeneration"] == 0
+    assert transaction["maintenanceGateGeneration"] == 1
+    assert transaction["beginRequest"] == native_core._core_bootstrap_begin_request(plan)
+
+
+@pytest.mark.parametrize("mutation", ["negative", "boolean", "begin-request"])
+def test_held_transaction_rejects_invalid_zero_begin_binding(mutation: str) -> None:
+    plan, transaction, inputs = _transaction_validation_case()
+    if mutation == "negative":
+        transaction["expectedGateGeneration"] = -1
+    elif mutation == "boolean":
+        transaction["expectedGateGeneration"] = True
+    else:
+        transaction["beginRequest"]["expected_gate_generation"] = 1
+
+    with pytest.raises(ValueError, match="live gate snapshot"):
+        native_core._fresh_workload_core_validate_transaction(
+            transaction,
+            plan,
+            source_policy=inputs["source_policy"],
+            selected_plugin_rows=[],
+            source_principals=inputs["source_principals"],
+        )
+
+
+def test_held_resume_validates_only_after_recovery_and_recovers_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_broker_recovery_case(monkeypatch, tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_core_recover_held_broker",
+        lambda *_args, **_kwargs: events.append("recover"),
+    )
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_core_validate_maintenance_hold",
+        lambda *_args, **_kwargs: events.append("validate"),
+    )
+    arguments = {
+        "source_id": case["source_id"],
+        "source_uid": case["source_uid"],
+        "source_gid": case["source_gid"],
+        "lock_lease": object(),
+        "proc_root": case["proc_root"],
+        "journal_path": case["journal_path"],
+    }
+    recovered = native_core._fresh_workload_core_validate_held_transaction(
+        case["updater"],
+        case["bootstrap_module"],
+        case["plan"],
+        case["transaction"],
+        case["broker_row"],
+        case["broker_inputs"],
+        case["full_digests"],
+        **arguments,
+        recover_broker=True,
+    )
+    native_core._fresh_workload_core_validate_held_transaction(
+        case["updater"],
+        case["bootstrap_module"],
+        case["plan"],
+        case["transaction"],
+        case["broker_row"],
+        case["broker_inputs"],
+        case["full_digests"],
+        **arguments,
+        recover_broker=not recovered,
+    )
+
+    assert recovered is True
+    assert events == ["recover", "validate", "validate"]
+
+
+def test_held_broker_recovery_starts_exact_inactive_unit_and_reuses_same_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_broker_recovery_case(monkeypatch, tmp_path)
+    identity = native_core._fresh_workload_core_recover_held_broker(
+        case["updater"],
+        case["bootstrap_module"],
+        case["plan"],
+        case["transaction"],
+        case["broker_row"],
+        case["broker_inputs"],
+        lock_lease=object(),
+        proc_root=case["proc_root"],
+        journal_path=case["journal_path"],
+    )
+    catalog_generation = native_core._fresh_workload_core_validate_maintenance_hold(
+        case["updater"],
+        case["plan"],
+        case["transaction"],
+        case["full_digests"],
+        source_id=case["source_id"],
+        source_uid=case["source_uid"],
+        source_gid=case["source_gid"],
+    )
+
+    requests = [
+        event for event in case["events"] if isinstance(event, tuple) and event[0] == "broker"
+    ]
+    validations = [event[2] for event in requests if event[1] == "ValidateMaintenanceHold"]
+    assert identity["mainPid"] == "4243"
+    assert catalog_generation == 1
+    assert case["transaction"]["phase"] == "hold_required"
+    assert case["transaction"]["progress"] == "catalog_initialized"
+    assert case["transaction"]["maintenanceToken"] == "private-held-token-123"
+    assert [
+        event[:2] for event in case["events"] if isinstance(event, tuple) and event[0] == "start"
+    ] == [("start", "start")]
+    assert len(validations) == len(case["full_digests"]) == 10
+    assert {request["component_id"] for request in validations} == set(case["full_digests"])
+    assert all(request["request_id"] == case["plan"]["requestId"] for request in validations)
+    assert all(request["plan_id"] == case["plan"]["planId"] for request in validations)
+    assert all(request["plan_digest"] == case["plan"]["planDigest"] for request in validations)
+    assert all(request["maintenance_token"] == "private-held-token-123" for request in validations)
+    assert all(request["expected_gate_generation"] == 1 for request in validations)
+    assert all(request["expected_catalog_generation"] == 1 for request in validations)
+    assert all(
+        request["component_artifact_digests"] == case["full_digests"] for request in validations
+    )
+    assert not any(event[1] == "BeginCoreBootstrap" for event in requests)
+    assert case["written"][-1]["bootstrapBroker"]["mainPid"] == "4243"
+    assert "brokerRecoveryError" not in case["written"][-1]
+
+
+def test_held_broker_recovery_leaves_exact_active_broker_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    active = ("active", "running", "42", "0")
+    case = _held_broker_recovery_case(monkeypatch, tmp_path, initial_state=active)
+    identity = native_core._fresh_workload_core_recover_held_broker(
+        case["updater"],
+        case["bootstrap_module"],
+        case["plan"],
+        case["transaction"],
+        case["broker_row"],
+        case["broker_inputs"],
+        lock_lease=object(),
+        proc_root=case["proc_root"],
+        journal_path=case["journal_path"],
+    )
+
+    assert identity == case["previous_identity"]
+    assert not any(isinstance(event, tuple) and event[0] == "start" for event in case["events"])
+    assert "process-table" not in case["events"]
+    assert case["transaction"]["maintenanceToken"] == "private-held-token-123"
+
+
+@pytest.mark.parametrize("mismatch", ["journal", "pointer"])
+def test_held_broker_recovery_refuses_mismatched_identity_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    case = _held_broker_recovery_case(monkeypatch, tmp_path)
+    if mismatch == "journal":
+        case["transaction"]["bootstrapBroker"]["artifactDigest"] = _digest("tampered")
+    else:
+        case["updater"]._active_native_pointer_identity = lambda _component: "different-pointer"
+
+    with pytest.raises(RuntimeError, match="exact maintenance hold remains available"):
+        native_core._fresh_workload_core_recover_held_broker(
+            case["updater"],
+            case["bootstrap_module"],
+            case["plan"],
+            case["transaction"],
+            case["broker_row"],
+            case["broker_inputs"],
+            lock_lease=object(),
+            proc_root=case["proc_root"],
+            journal_path=case["journal_path"],
+        )
+
+    assert not any(isinstance(event, tuple) and event[0] == "start" for event in case["events"])
+    assert case["transaction"]["phase"] == "hold_required"
+    assert case["transaction"]["progress"] == "catalog_initialized"
+    assert case["transaction"]["maintenanceToken"] == "private-held-token-123"
+
+
+def test_held_broker_start_failure_keeps_redacted_recoverable_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_broker_recovery_case(monkeypatch, tmp_path, startup_failure=True)
+
+    with pytest.raises(RuntimeError, match="exact maintenance hold remains available"):
+        native_core._fresh_workload_core_recover_held_broker(
+            case["updater"],
+            case["bootstrap_module"],
+            case["plan"],
+            case["transaction"],
+            case["broker_row"],
+            case["broker_inputs"],
+            lock_lease=object(),
+            proc_root=case["proc_root"],
+            journal_path=case["journal_path"],
+        )
+
+    saved = case["written"][-1]
+    error_text = json.dumps(saved["brokerRecoveryError"])
+    assert case["transaction"]["phase"] == "hold_required"
+    assert case["transaction"]["progress"] == "catalog_initialized"
+    assert case["transaction"]["maintenanceToken"] == "private-held-token-123"
+    assert "private-held-token-123" not in error_text
+    assert "[REDACTED]" in error_text
+    assert len(error_text) < 1000
 
 
 def _public_first_core_block() -> dict[str, Any]:
