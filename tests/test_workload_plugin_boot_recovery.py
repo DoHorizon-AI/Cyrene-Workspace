@@ -148,7 +148,8 @@ def test_catalyst_unit_runs_root_recovery_after_runtime_without_stop_coupling() 
     unit = source[start:end]
 
     assert "Wants=cyrene-package-runtime.service" in unit
-    assert "After=cyrene-runtime-maintenance.service cyrene-package-runtime.service" in unit
+    assert "After=cyrene-runtime-maintenance.service" in unit
+    assert "After=cyrene-package-runtime.service" in unit
     assert "Requires=cyrene-package-runtime.service" not in unit
     assert "BindsTo=cyrene-package-runtime.service" not in unit
     assert (

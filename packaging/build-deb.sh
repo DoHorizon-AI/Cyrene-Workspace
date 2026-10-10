@@ -604,7 +604,8 @@ Description=Cyrene Catalyst Dataset Preparation Service
 After=network.target
 Wants=cyrene-package-runtime.service
 Requires=cyrene-runtime-maintenance.service
-After=cyrene-runtime-maintenance.service cyrene-package-runtime.service
+After=cyrene-runtime-maintenance.service
+After=cyrene-package-runtime.service
 
 [Service]
 Type=simple
