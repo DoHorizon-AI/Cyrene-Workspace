@@ -14,15 +14,15 @@ not passed acceptance. The Platform source correction is merged in
 [Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100)
 at `2bbd40b3b30cd9401127a033dd33cf6902378536`, and required CI passed. The
 official Platform release [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155),
-attempt 1, was still building Ubuntu 22.04 and 24.04 packages at the checkpoint
-time of 2026-10-10 09:04 UTC. The catalog-verification job succeeded and both
-Ubuntu native-build jobs remained in progress. No release for P was published
-and strict release verification had not run. This is an interim checkpoint,
+attempt 1, was still in progress at the 2026-10-10 09:09 UTC checkpoint.
+Catalog verification and both Ubuntu native-build jobs had succeeded, and
+`component-release` was running `Run release test gates`. No release for P was
+published and strict release verification remained pending. This is an interim checkpoint,
 not final host-acceptance evidence; a verified Platform release and a new
 immutable Native preview must pass the remaining gates before this candidate
 can be accepted for a customer trial.
 
-状态：Workspace 源码 `0e8d8f56cc3bb827320a85671fff43220d0a4551` 对应的不可变 Ubuntu 24.04 amd64 Native 预览版已发布并通过独立验证。Producer workflow 的四个 job 全部成功。严格验证通过 18 项资产、21 个绑定 tuple、7 个 verifier 源文件和 20 条发行证据，未跳过检查；独立 root 回读也通过。Ubuntu 24.04.5 主机 2234 的 34 项全新主机验收以 15 项通过、1 项失败、18 项未运行结束。`catalyst_workload_apply` 因 first-Core Kernel 服务拒绝 sandbox peer UID/GID 参数而以可重试的 `FIRST_CORE_BOOTSTRAP_FAILED` 失败。Platform 源码修正已合并于 PR #100（`2bbd40b3b30cd9401127a033dd33cf6902378536`），required CI 已通过。2026-10-10 09:04 UTC checkpoint 回读时，正式 Platform 发行流程 [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155) 第 1 次尝试仍在运行：Catalog 验证已成功，Ubuntu 22.04 和 24.04 原生构建 job 仍在执行。尚未发布 P 的 release，也未运行严格发行验证。本文是阶段 checkpoint，不是最终主机验收证据；正式 Platform 发行验证和新的不可变 Native 预览版通过剩余验收后，才能接受该候选版本用于客户试用。Catalyst runtime 激活、Client 访问、SFT 生成与独立加载、Echo lifecycle 均未通过验收。
+状态：Workspace 源码 `0e8d8f56cc3bb827320a85671fff43220d0a4551` 对应的不可变 Ubuntu 24.04 amd64 Native 预览版已发布并通过独立验证。Producer workflow 的四个 job 全部成功。严格验证通过 18 项资产、21 个绑定 tuple、7 个 verifier 源文件和 20 条发行证据，未跳过检查；独立 root 回读也通过。Ubuntu 24.04.5 主机 2234 的 34 项全新主机验收以 15 项通过、1 项失败、18 项未运行结束。`catalyst_workload_apply` 因 first-Core Kernel 服务拒绝 sandbox peer UID/GID 参数而以可重试的 `FIRST_CORE_BOOTSTRAP_FAILED` 失败。Platform 源码修正已合并于 PR #100（`2bbd40b3b30cd9401127a033dd33cf6902378536`），required CI 已通过。2026-10-10 09:09 UTC checkpoint 回读时，正式 Platform 发行流程 [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155) 第 1 次尝试仍在运行：Catalog 验证与 Ubuntu 22.04/24.04 原生构建均已成功，`component-release` job 正在执行 `Run release test gates`。尚未发布 P 的 release，严格发行验证仍待完成。本文是阶段 checkpoint，不是最终主机验收证据；正式 Platform 发行验证和新的不可变 Native 预览版通过剩余验收后，才能接受该候选版本用于客户试用。Catalyst runtime 激活、Client 访问、SFT 生成与独立加载、Echo lifecycle 均未通过验收。
 
 ## Decision / 决策
 
@@ -106,10 +106,10 @@ the shipped Kernel unit and managed-runtime sandbox peer UID/GID arguments to
 unsigned scalar values and adds regression coverage for parsing the shipped
 unit arguments and rejecting adapter-named values. The official Platform
 release [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155),
-attempt 1, was still building Ubuntu 22.04 and 24.04 packages at the checkpoint
-time of 2026-10-10 09:04 UTC. The catalog-verification job succeeded and both
-Ubuntu native-build jobs remained in progress. No release for P was published
-and strict release verification had not run, so this source commit was not yet
+attempt 1, was still in progress at the 2026-10-10 09:09 UTC checkpoint.
+Catalog verification and both Ubuntu native-build jobs had succeeded, and
+`component-release` was running `Run release test gates`. No release for P was
+published and strict release verification remained pending, so this source commit was not yet
 an installable verified component. Record the exact Platform release and
 verification receipt before preparing the follow-on Native preview.
 
@@ -134,7 +134,7 @@ Broker state by hand or infer runtime success from package signatures.
 
 全新 Ubuntu 24.04.5 主机 2234 的终态 ledger 共包含 34 个已知 gate：15 项 PASS、1 项 FAIL、18 项 NOT_RUN，且没有未知 gate。唯一失败项是 `catalyst_workload_apply`，返回可重试的 `FIRST_CORE_BOOTSTRAP_FAILED`。first-Core transaction 在 `cohort_starting` 阶段进入 `hold_required`，原因是 `cyrene-kernel.service` 以状态码 1 退出。
 
-针对冻结的 Platform 源码 `daabf9ff561b4ab9296094d8198fd1fa3418b32b` 进行的只读诊断确认了参数契约不匹配：signed unit 和 managed runtime 以命名形式传递 sandbox peer UID/GID（`sandboxd=0` 与 `sandboxd=992`），而 Kernel parser 要求 unsigned integer scalar。修正已在 [Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100) 合并至 `2bbd40b3b30cd9401127a033dd33cf6902378536`，required CI 已通过。该修改把 shipped Kernel unit 和 managed runtime 的 sandbox peer UID/GID 参数改为 unsigned scalar，并增加 shipped unit 参数解析和拒绝 adapter-named 参数的回归覆盖。2026-10-10 09:04 UTC checkpoint 回读时，正式 Platform 发行流程 [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155) 第 1 次尝试仍在运行：Catalog 验证已成功，Ubuntu 22.04 和 24.04 原生构建 job 仍在执行。尚未发布 P 的 release，也未运行严格发行验证，因此该源码提交还不是可安装且已验证的组件。准备后续 Native 预览版前，必须记录确切 Platform release 和验证 receipt。
+针对冻结的 Platform 源码 `daabf9ff561b4ab9296094d8198fd1fa3418b32b` 进行的只读诊断确认了参数契约不匹配：signed unit 和 managed runtime 以命名形式传递 sandbox peer UID/GID（`sandboxd=0` 与 `sandboxd=992`），而 Kernel parser 要求 unsigned integer scalar。修正已在 [Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100) 合并至 `2bbd40b3b30cd9401127a033dd33cf6902378536`，required CI 已通过。该修改把 shipped Kernel unit 和 managed runtime 的 sandbox peer UID/GID 参数改为 unsigned scalar，并增加 shipped unit 参数解析和拒绝 adapter-named 参数的回归覆盖。2026-10-10 09:09 UTC checkpoint 回读时，正式 Platform 发行流程 [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155) 第 1 次尝试仍在运行：Catalog 验证与 Ubuntu 22.04/24.04 原生构建均已成功，`component-release` job 正在执行 `Run release test gates`。尚未发布 P 的 release，严格发行验证仍待完成，因此该源码提交还不是可安装且已验证的组件。准备后续 Native 预览版前，必须记录确切 Platform release 和验证 receipt。
 
 已发布的 0e Native release 不可变，且 tag 由 Workspace source SHA 派生。不得覆盖或重定向。本次阶段文档 PR 合并后会建立新的 Workspace source W；它不会修改 source Catalog 或 dependency lock。Platform 修正版 P 通过严格验证后，再从 W 调用现有 Native producer，并在 `release_inputs_json.platformReleaseId` 中设置 `preview-P`。Producer 沿用现有 `native-installer-preview-<Workspace-SHA>` tag 规则创建新的不可变 Native 预览版。保留 `0.1.0-rc.1` 包版本、active-v2 Catalog generation 15 及其他已冻结的 Product、component、profile identity；本 checkpoint 不引入新的 Catalog、tag scheme 或版本变更。本 checkpoint 不宣称安装成功：Core runtime、Catalyst product 激活、Client 访问、SFT producer 与独立 consumer、restart/reboot 恢复、plugin supervision 和 Echo lifecycle 均为 NOT_RUN。只有后续不可变预览版上的对应 gate 通过后，才能报告这些结果。owner 完成后续验收前，保留失败主机及其 receipts；不要手工修改 Broker 状态，也不要根据包签名推断 runtime 成功。
 
