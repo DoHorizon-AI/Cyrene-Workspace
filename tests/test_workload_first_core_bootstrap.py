@@ -51,6 +51,10 @@ updates = _load_module(
     "workload_first_core_component_updates_test",
     ROOT / "packaging" / "component_updates.py",
 )
+package_runtime_bootstrap = _load_module(
+    "workload_first_core_native_package_runtime_test",
+    ROOT / "packaging" / "native_package_runtime_bootstrap.py",
+)
 
 SOURCE_ID = "cyrene-catalyst"
 SOURCE_UID = 12001
@@ -875,6 +879,23 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
         staged_components.append(row)
 
     full_digests = {row["componentId"]: row["artifactDigest"] for row in staged_components}
+    preparer_identity = {
+        "schemaVersion": 1,
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "componentId": "cyrene-tools-document-parsing",
+        "componentArtifactDigest": _digest("plugin-artifact"),
+        "manifestDigest": _digest("plugin-manifest"),
+        "manifestAssetDigest": _digest("plugin-manifest-asset"),
+        "packageId": "cyrene.tools.document-parsing",
+        "packageVersion": "0.2.0",
+        "releaseId": "preview-document-parsing-1",
+        "releaseTag": "preview-document-parsing-1",
+        "sourceCommit": "a" * 40,
+        "publisherIdentity": {"repository": "DoHorizon-AI/Cyrene-Plugins-Official"},
+        "attestationRef": {"sourceCommit": "a" * 40},
+        "wheel": {"sha256": _digest("preparer-wheel")},
+    }
     block = {
         "schemaVersion": 1,
         "cohortId": "C10",
@@ -908,6 +929,7 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
         "components": staged_components,
         "componentArtifactDigests": full_digests,
         "firstCoreBootstrap": block,
+        "preparerWheelIdentity": preparer_identity,
         "brokerBootstrapPlanDigest": broker_plan_digest,
     }
     parent_plan = {
@@ -1012,6 +1034,23 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
             updater = self
 
             class Probe:
+                def _require_preparer_identity(self, identity: dict[str, Any]) -> dict[str, Any]:
+                    return identity
+
+                def install_workload_preparer(
+                    self, identity: dict[str, Any], *, runner: Any
+                ) -> dict[str, str]:
+                    assert identity == preparer_identity
+                    assert runner == updater.runner
+                    events.append("install-preparer")
+                    return {
+                        "wheelDigest": identity["wheel"]["sha256"],
+                        "releasePath": "/opt/cyrene/plugin-preparer/releases/test",
+                        "pythonPath": "/opt/cyrene/plugin-preparer/releases/test/venv/bin/python",
+                        "commandPath": "/usr/libexec/cyrene-plugin-python-preparer",
+                        "commandDigest": _digest("preparer-command"),
+                    }
+
                 def probe_runtime_authority(
                     self,
                     catalog: dict[str, Any],
@@ -1269,6 +1308,7 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
     assert events.index("init-catalog") < events.index("write-unit:cyrene-kernel")
     assert events.index("init-catalog") < events.index("start:cyrene-kernel")
     assert events.index("start:cyrene-kernel") < events.index("authority-probe")
+    assert events.index("install-preparer") < events.index("start:cy-package-runtime")
 
 
 def _held_broker_recovery_case(
@@ -2378,6 +2418,22 @@ def test_public_apply_initializes_first_core_before_sdk_prepare_and_normal_readi
         "_build_workload_plan",
         lambda *_args, **_kwargs: (resolution, {sdk_id: sdk_candidate}, inventory),
     )
+    preparer_identity = {
+        "planId": block["planId"],
+        "planDigest": block["planDigest"],
+        "componentId": "cyrene-tools-document-parsing",
+        "wheel": {"sha256": _digest("preparer-wheel")},
+    }
+    monkeypatch.setattr(
+        updater,
+        "_validate_cached_workload_stage_rows",
+        lambda stored_plan, *_args, **_kwargs: (stored_plan["stagedComponents"], False),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_workload_first_core_preparer_identity",
+        lambda *_args, **_kwargs: copy.deepcopy(preparer_identity),
+    )
     monkeypatch.setattr(updates, "_running_as_root", lambda: True)
     monkeypatch.setattr(updater, "_private_state_directory", lambda name: tmp_path / name)
     monkeypatch.setattr(updater, "_capture_active_versions", lambda *_args: [])
@@ -2419,6 +2475,7 @@ def test_public_apply_initializes_first_core_before_sdk_prepare_and_normal_readi
         assert lock_lease is lease
         assert bootstrap_module is updater._load_native_component_bootstrap()
         assert set(parent_plan["firstCoreBootstrap"]) == set(block)
+        assert parent_plan["preparerWheelIdentity"] == preparer_identity
         events.append("first-core")
         return {
             "status": "installed",
@@ -2473,19 +2530,100 @@ def test_public_apply_initializes_first_core_before_sdk_prepare_and_normal_readi
     assert events.index("first-core") < events.index("normal-core-readiness")
 
 
+def test_fresh_core_binds_attested_preparer_to_the_exact_selected_echo_plugin(
+    tmp_path: Path,
+) -> None:
+    parent_plan_digest = "sha256:" + "a741d55dfce45a1ea0cc929d7f4a1e3a" + "0" * 32
+    parent_plan_id = "plan-" + parent_plan_digest.split(":", 1)[1][:32]
+    component_id = "cyrene-evaluation-exact-match"
+    repository = "DoHorizon-AI/Cyrene-Plugins-Official"
+    release_id = "preview-exact-match-1"
+    wheel_name = package_runtime_bootstrap.ASSET_NAMES["preparer_wheel"]
+    wheel_path = tmp_path / "staged" / "workload-plans" / parent_plan_id / component_id / wheel_name
+    source_commit = "b" * 40
+    publisher = {"repository": repository}
+    attestation_ref = {"sourceCommit": source_commit}
+    identity = {
+        "schemaVersion": 1,
+        "planId": parent_plan_id,
+        "planDigest": parent_plan_digest,
+        "componentId": component_id,
+        "componentArtifactDigest": _digest("echo-plugin-artifact"),
+        "manifestDigest": _digest("echo-plugin-manifest"),
+        "manifestAssetDigest": _digest("echo-plugin-manifest-asset"),
+        "packageId": "cyrene.evaluation.exact-match",
+        "packageVersion": "0.1.0",
+        "releaseId": release_id,
+        "releaseTag": release_id,
+        "sourceCommit": source_commit,
+        "publisherIdentity": publisher,
+        "attestationRef": attestation_ref,
+        "wheel": {
+            "name": wheel_name,
+            "path": str(wheel_path),
+            "uri": f"https://github.com/{repository}/releases/download/{release_id}/{wheel_name}",
+            "sha256": _digest("wheel-bytes"),
+            "sizeBytes": 100,
+            "attestationBundleDigest": _digest("wheel-attestation"),
+        },
+    }
+    selected = {
+        "componentId": component_id,
+        "artifactKind": "plugin-package",
+        "version": identity["packageVersion"],
+        "digest": identity["componentArtifactDigest"],
+        "manifestDigest": identity["manifestDigest"],
+        "manifestAssetDigest": identity["manifestAssetDigest"],
+        "releaseId": release_id,
+        "publisherIdentity": publisher,
+        "attestationRef": attestation_ref,
+    }
+    updater = SimpleNamespace(
+        state_root=tmp_path,
+        _load_native_package_runtime_bootstrap=lambda: package_runtime_bootstrap,
+    )
+    parent_plan = {
+        "planId": parent_plan_id,
+        "planDigest": parent_plan_digest,
+        "preparerWheelIdentity": identity,
+        "resolution": {"selectedComponents": [selected]},
+    }
+
+    assert (
+        native_core._fresh_workload_preparer_identity(
+            updater,
+            parent_plan,
+        )
+        == identity
+    )
+
+    changed_plan = copy.deepcopy(parent_plan)
+    changed_plan["resolution"]["selectedComponents"][0]["digest"] = _digest("other-plugin")
+    with pytest.raises(ValueError, match="selected Plugin"):
+        native_core._fresh_workload_preparer_identity(
+            updater,
+            changed_plan,
+        )
+
+
 def _held_sdk_recovery_case(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     status: str = "pending",
     current_sdk: dict[str, Any] | None = None,
+    core_progress: str | None = None,
 ) -> dict[str, Any]:
     """Build one exact staged held transaction for SDK-ordering recovery tests."""
 
     updater = _workload_updates_updater(tmp_path)
     block = _public_first_core_block()
-    plan_id = block["planId"]
-    plan_digest = block["planDigest"]
+    block["planDigest"] = _digest("child-c10-plan")
+    block["planId"] = "plan-" + block["planDigest"].split(":", 1)[1][:32]
+    plan_digest = _digest("parent-workload-plan")
+    plan_id = "plan-" + plan_digest.split(":", 1)[1][:32]
+    assert plan_id != block["planId"]
+    assert plan_digest != block["planDigest"]
     policy = {
         "mode": "actualProduct",
         "productComponentIds": ["cyrene-catalyst"],
@@ -2554,6 +2692,17 @@ def _held_sdk_recovery_case(
         "artifactKind": "plugin-package",
         "packageArtifactDigest": _digest("plugin-package-aggregate"),
     }
+    preparer_identity = {
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "componentId": plugin_id,
+        "wheel": {"sha256": _digest("preparer-wheel")},
+    }
+    monkeypatch.setattr(
+        updater,
+        "_workload_first_core_preparer_identity",
+        lambda *_args, **_kwargs: copy.deepcopy(preparer_identity),
+    )
     selected_rows = [plugin_row, sdk_row]
     staged_rows = [plugin_stage, sdk_stage]
     resolution = {
@@ -2605,8 +2754,8 @@ def _held_sdk_recovery_case(
     )
     result = {
         "status": "installed",
-        "planId": plan_id,
-        "planDigest": plan_digest,
+        "planId": block["planId"],
+        "planDigest": block["planDigest"],
         "catalogGeneration": 1,
         "readiness": {"status": "READY", "catalogGeneration": 1},
         "componentStatuses": [],
@@ -2652,7 +2801,13 @@ def _held_sdk_recovery_case(
         "firstCoreBootstrap": copy.deepcopy(block),
         "componentArtifactDigests": copy.deepcopy(block["maintenanceComponentArtifactDigests"]),
         "phase": "hold_required" if status == "pending" else "succeeded",
-        "progress": "catalog_initialized" if status == "pending" else "complete",
+        "progress": (
+            core_progress
+            if core_progress is not None
+            else "catalog_initialized"
+            if status == "pending"
+            else "complete"
+        ),
     }
     sdk_candidate = updates.Candidate(
         component={"componentId": sdk_id},
@@ -2943,6 +3098,159 @@ def test_preinventory_resume_recovers_pending_and_post_core_pre_intent_windows(
     saved = updates._read_object(case["transaction_path"], "transaction")
     assert saved["firstCoreBootstrapStatus"] == "installed"
     assert saved["sdkPrepareIntent"]["status"] == "prepared"
+
+
+def test_preinventory_resume_recovers_exact_cohort_starting_hold_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_sdk_recovery_case(
+        tmp_path,
+        monkeypatch,
+        status="pending",
+        core_progress="cohort_starting",
+    )
+
+    result, sdk_prepared = case["updater"]._resume_first_core_before_workload_inventory(
+        case["stored"],
+        case["transaction"],
+        case["transaction_path"],
+        lock_lease=object(),
+        bootstrap_module=object(),
+    )
+
+    assert result == case["result"]
+    assert sdk_prepared is True
+    assert case["events"] == ["core-resume", "sdk-intent", "sdk-prepare"]
+
+
+def test_apply_uses_exact_saved_stage_when_fresh_resolution_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An offline retry reuses only the attested stage bound to its parent plan."""
+
+    updater = _workload_updates_updater(tmp_path)
+    parent_digest = _digest("offline-parent-workload-plan")
+    parent_id = "plan-" + parent_digest.split(":", 1)[1][:32]
+    block = _public_first_core_block()
+    block["planDigest"] = _digest("offline-child-c10-plan")
+    block["planId"] = "plan-" + block["planDigest"].split(":", 1)[1][:32]
+    assert parent_id != block["planId"]
+    assert parent_digest != block["planDigest"]
+
+    plugin_id = "cyrene-tools-document-parsing"
+    sdk_id = updates.WORKLOAD_SDK_COMPONENT_ID
+    target_id = block["targetId"]
+    plugin_row = {
+        "componentId": plugin_id,
+        "artifactKind": "plugin-package",
+        "version": "0.2.0",
+        "digest": _digest("plugin-release"),
+        "manifestDigest": _digest("plugin-manifest"),
+        "manifestAssetDigest": _digest("plugin-manifest-asset"),
+        "releaseId": "plugin-release-1",
+        "targetId": "linux-ubuntu-24.04-x86_64-plugin",
+        "manifestUri": "https://example.invalid/plugin.json",
+        "attestationRef": {"sourceCommit": "b" * 40},
+    }
+    sdk_row = {
+        "componentId": sdk_id,
+        "artifactKind": "python-bundle",
+        "version": "0.1.0",
+        "digest": _digest("sdk-release"),
+    }
+    selected_rows = [plugin_row, sdk_row]
+    staged_rows = [
+        {**plugin_row, "status": "staged"},
+        {**sdk_row, "status": "staged"},
+    ]
+    resolution = {
+        "status": "ready",
+        "planId": parent_id,
+        "planDigest": parent_digest,
+        "action": "install",
+        "channel": "stable",
+        "selectedComponents": selected_rows,
+        "firstCoreBootstrap": block,
+    }
+    stored = {
+        "planId": parent_id,
+        "planDigest": parent_digest,
+        "workloadId": "catalyst",
+        "targetId": target_id,
+        "action": "install",
+        "channel": "stable",
+        "selections": {},
+        "resolution": copy.deepcopy(resolution),
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "stagedComponents": copy.deepcopy(staged_rows),
+    }
+    prior_transaction = {
+        "transactionKind": "workload-assembly.v1",
+        "action": "install",
+        "planId": parent_id,
+        "planDigest": parent_digest,
+        "workloadId": "catalyst",
+        "phase": "applying",
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "resolution": copy.deepcopy(resolution),
+        "maintenanceHolds": {},
+    }
+    state_root = tmp_path / "state"
+    transaction_dir = state_root / "transactions"
+    transaction_dir.mkdir(parents=True)
+    state_root.chmod(0o700)
+    transaction_dir.chmod(0o700)
+    transaction_path = transaction_dir / f"{parent_id}.json"
+    updates._atomic_json(transaction_path, prior_transaction)
+
+    monkeypatch.setattr(updates, "_running_as_root", lambda: True)
+    monkeypatch.setattr(updater, "_private_state_directory", lambda name: state_root / name)
+    monkeypatch.setattr(updates, "_read_object", lambda *_args, **_kwargs: prior_transaction)
+    monkeypatch.setattr(
+        updater,
+        "_resume_first_core_before_workload_inventory",
+        lambda *_args, **_kwargs: (None, False),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_build_workload_plan",
+        lambda *_args, **_kwargs: (
+            {"status": "blocked", "planDigest": _digest("offline-rebuild")},
+            {},
+            {"firstCoreCandidates": {}},
+        ),
+    )
+    local_stage_checks: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        updater,
+        "_workload_first_core_preparer_identity",
+        lambda _stored, _resolution, _rows, *, plan_id, plan_digest: (
+            local_stage_checks.append((plan_id, plan_digest))
+            or {"planId": plan_id, "planDigest": plan_digest}
+        ),
+    )
+
+    def reject_fresh_candidate_validation(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("saved-resolution recovery must use the persisted attested stage")
+
+    monkeypatch.setattr(
+        updater, "_validate_cached_workload_stage_rows", reject_fresh_candidate_validation
+    )
+
+    class ReachedArtifactMap(Exception):
+        pass
+
+    def stop_after_saved_stage_validation(*_args: Any, **_kwargs: Any) -> Any:
+        raise ReachedArtifactMap
+
+    monkeypatch.setattr(
+        updater, "_workload_component_artifact_map", stop_after_saved_stage_validation
+    )
+
+    with pytest.raises(ReachedArtifactMap):
+        updater._apply_workload_install_assembled(stored, {"confirmed": True})
+
+    assert local_stage_checks == [(parent_id, parent_digest)]
 
 
 @pytest.mark.parametrize("mutation", ["plan", "staged_sdk", "component_map", "source", "hold"])
