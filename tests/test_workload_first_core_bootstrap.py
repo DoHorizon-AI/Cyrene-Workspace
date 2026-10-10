@@ -1027,6 +1027,25 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
             value = json.loads(catalog_path.read_text(encoding="utf-8"))
             return value, [row["source_id"] for row in value["sources"]]
 
+        def _readiness_for(
+            self, _target_kind: str, *, requires_restart: bool, force: bool
+        ) -> dict[str, Any]:
+            assert requires_restart is True and force is True
+            events.append("post-end-readiness")
+            return {
+                "status": "UNKNOWN",
+                "gate_generation": 2,
+                "install_catalog_generation": 1,
+                "active_task_count": 0,
+                "active_tasks": [],
+                "unknown_activity_sources": [STANDALONE_SOURCE_ID],
+                "active_worker_count": 0,
+                "active_allocation_count": 0,
+                "inflight_runtime_admission_count": 0,
+                "blocker_codes": ["ACTIVITY_SOURCE_UNKNOWN"],
+                "requires_restart_confirmation": True,
+            }
+
         def _load_workload_package_runtime(self) -> Any:
             return runtime
 
@@ -1301,6 +1320,9 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
 
     assert lock_entries == ["acquired"]
     assert result["status"] == "installed"
+    assert result["readiness"]["status"] == "UNKNOWN"
+    assert result["readiness"]["unknownActivitySources"] == [STANDALONE_SOURCE_ID]
+    assert events.index("broker:EndMaintenance") < events.index("post-end-readiness")
     assert events.index("broker-health") < events.index("broker:BeginCoreBootstrap")
     assert events.index("broker:BeginCoreBootstrap") < events.index("init-catalog")
     assert events.index("init-catalog") < events.index("held-broker-recovery")
@@ -1824,6 +1846,187 @@ def _public_first_core_block() -> dict[str, Any]:
         "componentArtifactDigests": component_digests,
         "maintenanceComponentArtifactDigests": component_digests,
     }
+
+
+def test_first_core_child_digest_binds_separate_signed_product_source_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog_digest = _digest("active-v2-catalog")
+    target_id = "linux-ubuntu-24.04-x86_64-systemd"
+    child_rows = [
+        {
+            "componentId": component_id,
+            "version": "1.2.3",
+            "manifestDigest": _digest(component_id + "-manifest"),
+            "artifactDigest": _digest(component_id + "-artifact"),
+            "targetId": target_id,
+        }
+        for component_id in native_core.C10_FIRST_CORE_COMPONENT_IDS
+    ]
+    child_digests = {row["componentId"]: row["artifactDigest"] for row in child_rows}
+    product_digest = _digest("signed-catalyst-product")
+    source_policy = {
+        "mode": "actualProduct",
+        "productComponentIds": [updates.CATALYST_COMPONENT_ID],
+        "productSources": [
+            {"componentId": updates.CATALYST_COMPONENT_ID, "sourceId": "cyrene-catalyst"}
+        ],
+    }
+    reference = {
+        "sourceId": "cyrene-catalyst",
+        "componentId": updates.CATALYST_COMPONENT_ID,
+        "artifactDigest": product_digest,
+    }
+    full_digests = {**child_digests, updates.CATALYST_COMPONENT_ID: product_digest}
+    broker_digest = _digest("broker-bootstrap")
+    child_material = {
+        "schemaVersion": 1,
+        "cohortId": "C10",
+        "channel": "stable",
+        "catalogDigest": catalog_digest,
+        "targetId": target_id,
+        "sourcePolicy": source_policy,
+        "components": child_rows,
+        "componentArtifactDigests": child_digests,
+        "maintenanceComponentArtifactDigests": full_digests,
+        "brokerBootstrapPlanDigest": broker_digest,
+        "initialSourceArtifactRef": reference,
+    }
+    child_plan_digest = _digest(json.dumps(child_material, sort_keys=True, separators=(",", ":")))
+    child_plan_id = "plan-" + child_plan_digest.removeprefix("sha256:")[:32]
+    parent_plan_id = "plan-" + "e" * 32
+    parent_plan_digest = "sha256:" + "e" * 64
+    block = {
+        "schemaVersion": 1,
+        "cohortId": "C10",
+        "planId": child_plan_id,
+        "planDigest": child_plan_digest,
+        "targetId": target_id,
+        "catalogDigest": catalog_digest,
+        "components": child_rows,
+        "componentArtifactDigests": child_digests,
+        "maintenanceComponentArtifactDigests": full_digests,
+        "initialSourceArtifactRef": reference,
+    }
+    resolution = {
+        "sourcePolicy": source_policy,
+        "selectedComponents": [
+            {
+                "componentId": updates.CATALYST_COMPONENT_ID,
+                "artifactKind": "native-binary",
+                "digest": product_digest,
+            }
+        ],
+        "planDigestMaterial": {
+            "firstCoreBootstrapInternal": {
+                "childPlanDigestMaterial": child_material,
+                "brokerBootstrapPlanDigest": broker_digest,
+            }
+        },
+    }
+    staged = [dict(row) for row in child_rows]
+    updater = SimpleNamespace(catalog_digest=catalog_digest)
+    monkeypatch.setattr(native_core, "_validate_package_runtime_group", lambda _updater: object())
+    monkeypatch.setattr(
+        native_core,
+        "_validate_staged_cohort",
+        lambda _updater, _staged: native_core.C10_FIRST_CORE_COMPONENT_IDS,
+    )
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_preparer_identity",
+        lambda *_args, **_kwargs: {"planId": parent_plan_id, "planDigest": parent_plan_digest},
+    )
+    bootstrap = SimpleNamespace(_require_active_v2_catalog_context=lambda _updater, _digest: None)
+
+    plan, returned_block, returned_digests = native_core._fresh_workload_core_plan(
+        updater,
+        {
+            "planId": parent_plan_id,
+            "planDigest": parent_plan_digest,
+            "channel": "stable",
+            "firstCoreBootstrap": block,
+            "resolution": resolution,
+        },
+        staged,
+        "stable",
+        bootstrap,
+    )
+
+    assert returned_block["componentArtifactDigests"] == child_digests
+    assert updates.CATALYST_COMPONENT_ID not in returned_block["componentArtifactDigests"]
+    assert returned_block["maintenanceComponentArtifactDigests"][updates.CATALYST_COMPONENT_ID] == (
+        product_digest
+    )
+    assert returned_block["initialSourceArtifactRef"] == reference
+    assert plan["planId"] == child_plan_id != parent_plan_id
+    assert returned_digests == full_digests
+    assert native_core._core_bootstrap_begin_request(plan)["initial_source_artifact_ref"] == {
+        "source_id": "cyrene-catalyst",
+        "component_id": updates.CATALYST_COMPONENT_ID,
+        "artifact_digest": product_digest,
+    }
+    c10_result = {
+        "status": "installed",
+        "planId": child_plan_id,
+        "planDigest": child_plan_digest,
+        "catalogGeneration": 1,
+        "componentStatuses": [
+            {"componentId": component_id, "status": "active"}
+            for component_id in native_core.C10_FIRST_CORE_COMPONENT_IDS
+        ],
+        "readiness": {
+            "status": "UNKNOWN",
+            "catalogGeneration": 1,
+            "gateGeneration": 2,
+            "activeTaskCount": 0,
+            "inflightRuntimeAdmissionCount": 0,
+            "activeWorkerCount": 0,
+            "activeAllocationCount": 0,
+            "blockerCodes": ["ACTIVITY_SOURCE_UNKNOWN"],
+            "unknownActivitySources": ["cyrene-catalyst"],
+        },
+        "sourceActivation": {
+            "status": "pending",
+            "sourceId": "cyrene-catalyst",
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "artifactDigest": product_digest,
+        },
+        "authority": {
+            "authority": "platform_package_runtime",
+            "protocol_version": "cy-package-runtime.control.v1",
+            "catalog_generation": 1,
+            "capabilities": ["cy-package-runtime.binding-operation-admission.v1"],
+        },
+    }
+    assert (
+        native_core._fresh_workload_core_public_result(plan, c10_result)["readiness"]["status"]
+        == "UNKNOWN"
+    )
+    dishonest_ready_result = copy.deepcopy(c10_result)
+    dishonest_ready_result["readiness"]["status"] = "READY"
+    dishonest_ready_result["readiness"]["blockerCodes"] = []
+    dishonest_ready_result["readiness"]["unknownActivitySources"] = []
+    with pytest.raises(ValueError, match="unstarted Product source as unknown"):
+        native_core._fresh_workload_core_public_result(plan, dishonest_ready_result)
+
+    wrong_ref = {**reference, "artifactDigest": _digest("different-product")}
+    wrong_resolution = copy.deepcopy(resolution)
+    wrong_resolution["selectedComponents"][0]["digest"] = wrong_ref["artifactDigest"]
+    with pytest.raises(ValueError, match="differs from the signed selected Product"):
+        native_core._fresh_workload_core_plan(
+            updater,
+            {
+                "planId": parent_plan_id,
+                "planDigest": parent_plan_digest,
+                "channel": "stable",
+                "firstCoreBootstrap": block,
+                "resolution": wrong_resolution,
+            },
+            staged,
+            "stable",
+            bootstrap,
+        )
 
 
 def _workload_updates_updater(tmp_path: Path) -> Any:

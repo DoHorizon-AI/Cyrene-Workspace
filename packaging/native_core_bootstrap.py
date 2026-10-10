@@ -2459,7 +2459,7 @@ def _remove_candidate_pointers_and_units(updater: Any, components: list[dict[str
 def _core_bootstrap_begin_request(plan: dict[str, Any]) -> dict[str, Any]:
     """Build the exact idempotency payload persisted with a Core bootstrap plan."""
 
-    return {
+    request = {
         "request_id": plan["requestId"],
         "target_kind": "CORE_RUNTIME",
         "requires_restart": True,
@@ -2471,6 +2471,20 @@ def _core_bootstrap_begin_request(plan: dict[str, Any]) -> dict[str, Any]:
         "plan_digest": plan["planDigest"],
         "component_artifact_digests": plan["componentArtifactDigests"],
     }
+    initial_source_ref = plan.get("initialSourceArtifactRef")
+    if initial_source_ref is not None:
+        if not isinstance(initial_source_ref, dict) or set(initial_source_ref) != {
+            "sourceId",
+            "componentId",
+            "artifactDigest",
+        }:
+            raise ValueError("Fresh workload initial source artifact identity is malformed")
+        request["initial_source_artifact_ref"] = {
+            "source_id": initial_source_ref["sourceId"],
+            "component_id": initial_source_ref["componentId"],
+            "artifact_digest": initial_source_ref["artifactDigest"],
+        }
+    return request
 
 
 _FRESH_WORKLOAD_CORE_SOURCE_IDENTITY_FIELDS = (
@@ -2521,6 +2535,7 @@ def _fresh_workload_core_plan(
         "componentArtifactDigests",
         "maintenanceComponentArtifactDigests",
     }
+    allowed_block_fields = required_block_fields | {"initialSourceArtifactRef"}
     forbidden_block_fields = {
         "requestId",
         "brokerBootstrapPlanDigest",
@@ -2530,7 +2545,8 @@ def _fresh_workload_core_plan(
     }
     if (
         not isinstance(block, dict)
-        or set(block) != required_block_fields
+        or not required_block_fields.issubset(block)
+        or set(block) - allowed_block_fields
         or forbidden_block_fields.intersection(block)
         or type(block.get("schemaVersion")) is not int
         or block.get("schemaVersion") != 1
@@ -2642,6 +2658,60 @@ def _fresh_workload_core_plan(
         raise TypeError("Fresh workload plan material has no exact C10 child digest projection")
     resolution = parent_plan.get("resolution")
     source_policy = resolution.get("sourcePolicy") if isinstance(resolution, dict) else None
+    initial_source_ref = block.get("initialSourceArtifactRef")
+    expected_initial_source_ref: dict[str, str] | None = None
+    if isinstance(source_policy, dict) and source_policy.get("mode") == "actualProduct":
+        product_sources = source_policy.get("productSources")
+        product_component_ids = source_policy.get("productComponentIds")
+        selected_parent_rows = (
+            resolution.get("selectedComponents") if isinstance(resolution, dict) else None
+        )
+        if (
+            not isinstance(product_sources, list)
+            or not isinstance(product_component_ids, list)
+            or not isinstance(selected_parent_rows, list)
+        ):
+            raise ValueError("Fresh workload actual-product source projection is malformed")
+        mapped_sources = [
+            row
+            for row in product_sources
+            if isinstance(row, dict) and row.get("componentId") in product_component_ids
+        ]
+        if len(mapped_sources) > 1:
+            raise ValueError("Fresh first-Core activation requires one exact product source")
+        if mapped_sources:
+            source_row = mapped_sources[0]
+            component_id = source_row.get("componentId")
+            source_id = source_row.get("sourceId")
+            selected_products = [
+                row
+                for row in selected_parent_rows
+                if isinstance(row, dict)
+                and row.get("componentId") == component_id
+                and row.get("artifactKind") == "native-binary"
+            ]
+            if selected_products:
+                selected_product = selected_products[0]
+                digest = selected_product.get("digest")
+                if (
+                    len(selected_products) != 1
+                    or not isinstance(component_id, str)
+                    or not component_id
+                    or not isinstance(source_id, str)
+                    or not source_id
+                    or not isinstance(digest, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+                ):
+                    raise ValueError("Fresh product source artifact identity is malformed")
+                expected_initial_source_ref = {
+                    "sourceId": source_id,
+                    "componentId": component_id,
+                    "artifactDigest": digest,
+                }
+    if initial_source_ref != expected_initial_source_ref:
+        raise ValueError(
+            "Fresh first-Core initial source ref differs from the signed selected Product"
+        )
     if (
         child_material.get("schemaVersion") != 1
         or child_material.get("cohortId") != "C10"
@@ -2653,6 +2723,7 @@ def _fresh_workload_core_plan(
         or child_material.get("componentArtifactDigests") != child_digests
         or child_material.get("maintenanceComponentArtifactDigests") != full_digests
         or child_material.get("brokerBootstrapPlanDigest") != bootstrap_digest
+        or child_material.get("initialSourceArtifactRef") != expected_initial_source_ref
     ):
         raise ValueError(
             "Fresh workload child digest material differs from its immutable C10 block"
@@ -2684,6 +2755,7 @@ def _fresh_workload_core_plan(
         "components": staged_components,
         "componentArtifactDigests": dict(full_digests),
         "firstCoreBootstrap": block,
+        "initialSourceArtifactRef": initial_source_ref,
         "preparerWheelIdentity": preparer_identity,
         "brokerBootstrapPlanDigest": bootstrap_digest,
     }
@@ -3701,14 +3773,6 @@ def _fresh_workload_core_public_result(plan: dict[str, Any], result: Any) -> dic
             {"componentId": component_id, "status": "active"}
             for component_id in C10_FIRST_CORE_COMPONENT_IDS
         ],
-        "readiness": {
-            "status": "READY",
-            "catalogGeneration": 1,
-            "activeTaskCount": 0,
-            "inflightRuntimeAdmissionCount": 0,
-            "activeWorkerCount": 0,
-            "activeAllocationCount": 0,
-        },
         "authority": {
             "authority": "platform_package_runtime",
             "protocol_version": "cy-package-runtime.control.v1",
@@ -3721,14 +3785,19 @@ def _fresh_workload_core_public_result(plan: dict[str, Any], result: Any) -> dic
     readiness = result.get("readiness")
     if (
         not isinstance(readiness, dict)
+        or not isinstance(readiness.get("status"), str)
         or type(result.get("catalogGeneration")) is not int
-        or type(readiness.get("catalogGeneration")) is not int
+        or (
+            readiness.get("catalogGeneration") is not None
+            and type(readiness.get("catalogGeneration")) is not int
+        )
     ):
         raise ValueError("Fresh workload Core journal has an invalid public completion result")
     authority = result.get("authority")
     if (
         any(
-            type(readiness.get(field)) is not int
+            readiness.get(field) is not None
+            and (type(readiness.get(field)) is not int or readiness[field] < 0)
             for field in (
                 "activeTaskCount",
                 "inflightRuntimeAdmissionCount",
@@ -3736,12 +3805,97 @@ def _fresh_workload_core_public_result(plan: dict[str, Any], result: Any) -> dic
                 "activeAllocationCount",
             )
         )
+        or (
+            readiness.get("status") == "READY"
+            and any(
+                type(readiness.get(field)) is not int
+                for field in (
+                    "activeTaskCount",
+                    "inflightRuntimeAdmissionCount",
+                    "activeWorkerCount",
+                    "activeAllocationCount",
+                )
+            )
+        )
         or not isinstance(authority, dict)
         or type(authority.get("catalog_generation")) is not int
-        or result != expected
+        or any(result.get(key) != value for key, value in expected.items())
+        or not isinstance(readiness.get("blockerCodes"), list)
+        or any(not isinstance(code, str) for code in readiness["blockerCodes"])
+        or not isinstance(readiness.get("unknownActivitySources"), list)
+        or any(not isinstance(source_id, str) for source_id in readiness["unknownActivitySources"])
+        or any(
+            field in readiness
+            and readiness[field] is not None
+            and (type(readiness[field]) is not int or readiness[field] < 0)
+            for field in (
+                "gateGeneration",
+                "activeTaskCount",
+                "inflightRuntimeAdmissionCount",
+                "activeWorkerCount",
+                "activeAllocationCount",
+            )
+        )
     ):
         raise ValueError("Fresh workload Core journal has an invalid public completion result")
+    initial_source_ref = plan.get("initialSourceArtifactRef")
+    if initial_source_ref is not None:
+        pending = result.get("sourceActivation")
+        if (
+            not isinstance(initial_source_ref, dict)
+            or not isinstance(pending, dict)
+            or pending
+            != {
+                "status": "pending",
+                "sourceId": initial_source_ref.get("sourceId"),
+                "componentId": initial_source_ref.get("componentId"),
+                "artifactDigest": initial_source_ref.get("artifactDigest"),
+            }
+        ):
+            raise ValueError("Fresh workload Core source activation receipt is malformed")
+        if (
+            readiness.get("status") != "UNKNOWN"
+            or readiness.get("unknownActivitySources") != [initial_source_ref["sourceId"]]
+            or readiness.get("blockerCodes") != ["ACTIVITY_SOURCE_UNKNOWN"]
+        ):
+            raise ValueError(
+                "Fresh workload Core did not report its unstarted Product source as unknown"
+            )
     return result
+
+
+def _fresh_workload_core_post_end_readiness(
+    updater: Any, plan: dict[str, Any], result: Any
+) -> dict[str, Any]:
+    """Record real unlocked Broker readiness without claiming the Product is ready."""
+
+    if not isinstance(result, dict):
+        raise TypeError("Fresh workload Core completion result is malformed")
+    readiness = updater._readiness_for("CORE_RUNTIME", requires_restart=True, force=True)
+    blockers = readiness.get("blocker_codes")
+    unknown_sources = readiness.get("unknown_activity_sources")
+    public_readiness = {
+        "status": readiness.get("status", "UNKNOWN"),
+        "catalogGeneration": readiness.get("install_catalog_generation"),
+        "gateGeneration": readiness.get("gate_generation"),
+        "activeTaskCount": readiness.get("active_task_count"),
+        "inflightRuntimeAdmissionCount": readiness.get("inflight_runtime_admission_count"),
+        "activeWorkerCount": readiness.get("active_worker_count"),
+        "activeAllocationCount": readiness.get("active_allocation_count"),
+        "blockerCodes": blockers if isinstance(blockers, list) else ["GATE_UNKNOWN"],
+        "unknownActivitySources": unknown_sources if isinstance(unknown_sources, list) else [],
+    }
+    completed = dict(result)
+    completed["readiness"] = public_readiness
+    initial_source_ref = plan.get("initialSourceArtifactRef")
+    if initial_source_ref is not None:
+        completed["sourceActivation"] = {
+            "status": "pending",
+            "sourceId": initial_source_ref["sourceId"],
+            "componentId": initial_source_ref["componentId"],
+            "artifactDigest": initial_source_ref["artifactDigest"],
+        }
+    return _fresh_workload_core_public_result(plan, completed)
 
 
 def _finish_fresh_workload_core_transaction(
@@ -3906,7 +4060,6 @@ def apply_fresh_workload_first_core(
     held_broker_recovered = False
     if transaction.get("phase") == "end_call_pending":
         token = transaction.get("maintenanceToken")
-        result = _fresh_workload_core_public_result(plan, transaction.get("publicResult"))
         expected_end_request_id = "bootstrap-end-" + plan["planDigest"].split(":", 1)[1][:32]
         expected_end_request = {
             "request_id": plan["requestId"],
@@ -3938,6 +4091,11 @@ def apply_fresh_workload_first_core(
             transaction["endError"] = "Platform did not confirm the durable gate release"
             _write_private_json(updater, journal_path, transaction)
             raise RuntimeError("Platform did not confirm first-Core gate release")
+        result = _fresh_workload_core_post_end_readiness(
+            updater, plan, transaction.get("publicResult")
+        )
+        transaction["publicResult"] = result
+        _write_private_json(updater, journal_path, transaction)
         return _finish_fresh_workload_core_transaction(updater, journal_path, transaction, result)
 
     # ── Phase 1: Activate and start only the signed Broker before Kernel exists.
@@ -4304,7 +4462,7 @@ def apply_fresh_workload_first_core(
     # 第三阶段：真实Kernel计数与来源认证均通过后，才按原请求释放门禁。
     try:
         _verify_live_core_cohort(updater, transaction, runtime_plan, probe_package_runtime=False)
-        readiness = _require_core_ready(updater, runtime_plan)
+        _require_core_ready(updater, runtime_plan)
         authority = _fresh_workload_core_package_runtime_authority(
             updater,
             catalog,
@@ -4316,14 +4474,6 @@ def apply_fresh_workload_first_core(
             {"componentId": component_id, "status": "active"}
             for component_id in C10_FIRST_CORE_COMPONENT_IDS
         ]
-        public_readiness = {
-            "status": "READY",
-            "catalogGeneration": 1,
-            "activeTaskCount": readiness["active_task_count"],
-            "inflightRuntimeAdmissionCount": readiness["inflight_runtime_admission_count"],
-            "activeWorkerCount": readiness["active_worker_count"],
-            "activeAllocationCount": readiness["active_allocation_count"],
-        }
         _fresh_workload_core_validate_maintenance_hold(
             updater,
             plan,
@@ -4351,7 +4501,6 @@ def apply_fresh_workload_first_core(
             "planDigest": plan["planDigest"],
             "catalogGeneration": 1,
             "componentStatuses": component_statuses,
-            "readiness": public_readiness,
             "authority": authority,
         }
         _write_private_json(updater, journal_path, transaction)
@@ -4379,11 +4528,16 @@ def apply_fresh_workload_first_core(
         transaction["endError"] = "Platform did not confirm the durable gate release"
         _write_private_json(updater, journal_path, transaction)
         raise RuntimeError("Platform did not confirm first-Core gate release")
+    public_result = _fresh_workload_core_post_end_readiness(
+        updater, plan, transaction.get("publicResult")
+    )
+    transaction["publicResult"] = public_result
+    _write_private_json(updater, journal_path, transaction)
     return _finish_fresh_workload_core_transaction(
         updater,
         journal_path,
         transaction,
-        _fresh_workload_core_public_result(plan, transaction.get("publicResult")),
+        public_result,
     )
 
 

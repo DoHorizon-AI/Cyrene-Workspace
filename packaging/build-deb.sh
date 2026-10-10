@@ -309,6 +309,26 @@ cp "${SCRIPT_DIR}/service_bundle.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/servic
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
 cp "${SCRIPT_DIR}/component_updates.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
+cp "${SCRIPT_DIR}/workload_plugin_boot_recovery.py" \
+    "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_plugin_boot_recovery.py"
+chmod 755 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_plugin_boot_recovery.py"
+BOOT_RECOVERY_SOURCE_SHA256="$(sha256sum "${SCRIPT_DIR}/workload_plugin_boot_recovery.py" | cut -d' ' -f1)"
+if [[ ! "${BOOT_RECOVERY_SOURCE_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "ERROR: Catalyst boot recovery source hash is malformed." >&2
+    exit 2
+fi
+cat <<EOF > "${STAGE_DIR}/usr/share/cyrene/workload-plugin-boot-recovery-v1.json"
+{
+  "schemaVersion": 1,
+  "manifestSourceFiles": {
+    "packaging/workload_plugin_boot_recovery.py": {
+      "installedPath": "usr/lib/cyrene/scripts/workload_plugin_boot_recovery.py",
+      "sha256": "sha256:${BOOT_RECOVERY_SOURCE_SHA256}"
+    }
+  }
+}
+EOF
+chmod 644 "${STAGE_DIR}/usr/share/cyrene/workload-plugin-boot-recovery-v1.json"
 cp "${SCRIPT_DIR}/component_placement.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_placement.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_placement.py"
 cp "${SCRIPT_DIR}/workload_resolver.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_resolver.py"
@@ -582,8 +602,9 @@ cat <<'EOF' > "${STAGE_DIR}/lib/systemd/system/cyrene-catalyst.service"
 [Unit]
 Description=Cyrene Catalyst Dataset Preparation Service
 After=network.target
+Wants=cyrene-package-runtime.service
 Requires=cyrene-runtime-maintenance.service
-After=cyrene-runtime-maintenance.service
+After=cyrene-runtime-maintenance.service cyrene-package-runtime.service
 
 [Service]
 Type=simple
@@ -597,6 +618,7 @@ Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
 LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-catalyst.token
 PrivateMounts=yes
+ExecStartPre=+/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/workload_plugin_boot_recovery.py --workload catalyst
 ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run catalyst
 Restart=on-failure
 RestartSec=5
