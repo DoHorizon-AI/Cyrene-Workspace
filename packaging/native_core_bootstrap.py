@@ -2019,7 +2019,6 @@ def _candidate_unit_state(
                 "systemctl",
                 "show",
                 "--property=ActiveState,SubState,MainPID,ControlPID",
-                "--value",
                 unit,
             ],
             capture_output=True,
@@ -2032,10 +2031,25 @@ def _candidate_unit_state(
     _quiesce_remaining(clock, deadline, unit)
     if completed.returncode != 0:
         raise RuntimeError(f"Cannot confirm {unit} state during quiesce")
-    values = completed.stdout.splitlines()
-    if len(values) != 4:
+    properties = {"ActiveState", "SubState", "MainPID", "ControlPID"}
+    values: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        name, separator, value = line.partition("=")
+        if (
+            not separator
+            or line.count("=") != 1
+            or name not in properties
+            or name in values
+            or not value
+        ):
+            raise RuntimeError(f"Cannot parse coherent systemd state for {unit}")
+        values[name] = value
+    if values.keys() != properties:
         raise RuntimeError(f"Cannot parse coherent systemd state for {unit}")
-    active, substate, main_pid, control_pid = values
+    active = values["ActiveState"]
+    substate = values["SubState"]
+    main_pid = values["MainPID"]
+    control_pid = values["ControlPID"]
     if (
         not main_pid.isascii()
         or not main_pid.isdecimal()

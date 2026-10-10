@@ -440,7 +440,12 @@ class FakeUpdater:
                 pid = self.unit_pids.get(unit, "0")
                 active = "active" if pid != "0" and unit not in self.stopped_units else "inactive"
                 substate = "running" if active == "active" else "dead"
-                stdout = f"{active}\n{substate}\n{pid if active == 'active' else '0'}\n0"
+                stdout = (
+                    f"ActiveState={active}\n"
+                    f"SubState={substate}\n"
+                    f"MainPID={pid if active == 'active' else '0'}\n"
+                    "ControlPID=0"
+                )
             elif property_arg.startswith("--property=FragmentPath"):
                 stdout = str(self.systemd_unit_dirs[0] / unit)
             elif property_arg.startswith("--property=DropInPaths"):
@@ -2357,3 +2362,94 @@ def test_fresh_workload_resume_state_depends_on_durable_cohort_progress(
 def test_fresh_workload_resume_rejects_unknown_held_progress() -> None:
     with pytest.raises(ValueError, match="unsupported held progress"):
         bootstrap._fresh_workload_core_requires_empty_kernel_state("unknown")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        (
+            "ActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\n",
+            ("inactive", "dead", "0", "0"),
+        ),
+        (
+            "ControlPID=0\nMainPID=731\nSubState=running\nActiveState=active\n",
+            ("active", "running", "731", "0"),
+        ),
+    ],
+)
+def test_candidate_unit_state_reads_named_properties_in_any_order(
+    stdout: str, expected: tuple[str, str, str, str]
+) -> None:
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def runner(command: list[str], **kwargs: Any) -> Any:
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=stdout)
+
+    result = bootstrap._candidate_unit_state(
+        SimpleNamespace(runner=runner),
+        "cyrene-runtime-maintenance.service",
+        deadline=2.0,
+        clock=lambda: 0.0,
+    )
+
+    assert result == expected
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert command == [
+        "systemctl",
+        "show",
+        "--property=ActiveState,SubState,MainPID,ControlPID",
+        "cyrene-runtime-maintenance.service",
+    ]
+    assert "--value" not in command
+    assert 0 < kwargs["timeout"] <= 2.0
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "ActiveState=inactive\nSubState=dead\nMainPID=0\n",
+        "ActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nControlPID=0\n",
+        "ActiveState=inactive\nSubState=dead\nMainPID=0\nUnexpected=0\n",
+        "ActiveState=inactive\nSubState=dead\nMainPID\nControlPID=0\n",
+        "ActiveState=inactive\nSubState=dead\nMainPID=0=extra\nControlPID=0\n",
+        "ActiveState=inactive\nSubState=\nMainPID=0\nControlPID=0\n",
+    ],
+)
+def test_candidate_unit_state_rejects_malformed_or_incoherent_properties(stdout: str) -> None:
+    updater = SimpleNamespace(
+        runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout)
+    )
+
+    with pytest.raises(RuntimeError, match="Cannot parse coherent systemd state"):
+        bootstrap._candidate_unit_state(
+            updater,
+            "cyrene-runtime-maintenance.service",
+            deadline=2.0,
+            clock=lambda: 0.0,
+        )
+
+
+@pytest.mark.parametrize("property_name", ["MainPID", "ControlPID"])
+@pytest.mark.parametrize("pid", ["12x", "١٢", "-1"])
+def test_candidate_unit_state_rejects_non_ascii_decimal_pids(property_name: str, pid: str) -> None:
+    values = {
+        "ActiveState": "active",
+        "SubState": "running",
+        "MainPID": "731",
+        "ControlPID": "0",
+    }
+    values[property_name] = pid
+    stdout = "\n".join(f"{name}={value}" for name, value in values.items())
+    updater = SimpleNamespace(
+        runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout)
+    )
+
+    with pytest.raises(RuntimeError, match="Cannot prove systemd PIDs"):
+        bootstrap._candidate_unit_state(
+            updater,
+            "cyrene-runtime-maintenance.service",
+            deadline=2.0,
+            clock=lambda: 0.0,
+        )

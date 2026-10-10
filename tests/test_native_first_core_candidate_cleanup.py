@@ -101,7 +101,14 @@ class UnitUpdater:
         ]:
             unit = command[-1]
             values = self.states[unit]
-            stdout = "\n".join(values)
+            stdout = "\n".join(
+                f"{name}={value}"
+                for name, value in zip(
+                    ("ActiveState", "SubState", "MainPID", "ControlPID"),
+                    values,
+                    strict=True,
+                )
+            )
             self.events.append(("state", unit, values))
         elif command == ["systemctl", "show", "--property=UnitPath", "--value"]:
             stdout = " ".join(str(path) for path in self.unit_search_path)
@@ -476,9 +483,15 @@ def test_held_recovery_unit_mismatch_preserves_pointers_and_does_not_end_hold(
                 if current_unit == unit
                 else ("inactive", "dead", "0", "0")
             )
-            return type(
-                "Completed", (), {"returncode": 0, "stdout": "\n".join(values), "stderr": ""}
-            )()
+            stdout = "\n".join(
+                f"{name}={value}"
+                for name, value in zip(
+                    ("ActiveState", "SubState", "MainPID", "ControlPID"),
+                    values,
+                    strict=True,
+                )
+            )
+            return type("Completed", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
         if (
             command[:2] == ["systemctl", "show"]
             and command[2] == "--property=FragmentPath"
