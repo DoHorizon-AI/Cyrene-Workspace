@@ -2673,6 +2673,7 @@ def _fresh_workload_core_plan(
         ) from error
     if child_material_digest != plan_digest:
         raise ValueError("Fresh workload child plan digest differs from its checked material")
+    preparer_identity = _fresh_workload_preparer_identity(updater, parent_plan)
     plan = {
         "planId": plan_id,
         "planDigest": plan_digest,
@@ -2683,9 +2684,76 @@ def _fresh_workload_core_plan(
         "components": staged_components,
         "componentArtifactDigests": dict(full_digests),
         "firstCoreBootstrap": block,
+        "preparerWheelIdentity": preparer_identity,
         "brokerBootstrapPlanDigest": bootstrap_digest,
     }
     return plan, block, dict(full_digests)
+
+
+def _fresh_workload_preparer_identity(
+    updater: Any,
+    parent_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the preparer asset to its parent workload plan and selected Plugin."""
+
+    resolution = parent_plan.get("resolution")
+    resolution_rows = resolution.get("selectedComponents") if isinstance(resolution, dict) else None
+    identity = parent_plan.get("preparerWheelIdentity")
+    parent_plan_id = parent_plan.get("planId")
+    parent_plan_digest = parent_plan.get("planDigest")
+    if (
+        not isinstance(resolution_rows, list)
+        or not isinstance(identity, dict)
+        or not isinstance(parent_plan_id, str)
+        or not isinstance(parent_plan_digest, str)
+    ):
+        raise TypeError("Fresh workload plan has no staged Plugin preparer identity")
+    runtime = updater._load_native_package_runtime_bootstrap()
+    validator = getattr(runtime, "_require_preparer_identity", None)
+    if not callable(validator):
+        raise TypeError("Fresh workload plan has no preparer identity validator")
+    try:
+        identity = validator(identity)
+    except Exception as error:
+        raise ValueError("Fresh workload Plugin preparer identity is malformed") from error
+    selected_plugins = [
+        row
+        for row in resolution_rows
+        if isinstance(row, dict)
+        and row.get("componentId") == identity.get("componentId")
+        and row.get("artifactKind") == "plugin-package"
+    ]
+    if (
+        len(selected_plugins) != 1
+        or identity.get("planId") != parent_plan_id
+        or identity.get("planDigest") != parent_plan_digest
+    ):
+        raise ValueError("Fresh workload preparer is not bound to one selected Plugin")
+    selected = selected_plugins[0]
+    if any(
+        identity.get(identity_field) != selected.get(resolution_field)
+        for identity_field, resolution_field in (
+            ("packageVersion", "version"),
+            ("componentArtifactDigest", "digest"),
+            ("manifestDigest", "manifestDigest"),
+            ("manifestAssetDigest", "manifestAssetDigest"),
+            ("releaseId", "releaseId"),
+            ("publisherIdentity", "publisherIdentity"),
+            ("attestationRef", "attestationRef"),
+        )
+    ) or identity.get("sourceCommit") != selected.get("attestationRef", {}).get("sourceCommit"):
+        raise ValueError("Fresh workload preparer source differs from the selected Plugin")
+    expected_wheel_path = (
+        updater.state_root
+        / "staged"
+        / "workload-plans"
+        / parent_plan_id
+        / identity["componentId"]
+        / identity["wheel"]["name"]
+    )
+    if Path(identity["wheel"]["path"]) != expected_wheel_path:
+        raise ValueError("Fresh workload preparer path is outside the selected Plugin stage")
+    return identity
 
 
 def _fresh_workload_core_source_inputs(
@@ -3174,6 +3242,16 @@ def _fresh_workload_core_validate_transaction(
     }
     if any(transaction.get(key) != value for key, value in immutable.items()):
         raise ValueError("Fresh workload Core journal differs from the exact staged parent plan")
+    if transaction.get("preparerWheelIdentity") not in (None, plan.get("preparerWheelIdentity")):
+        raise ValueError("Fresh workload Core journal preparer identity changed")
+    preparer_result = transaction.get("preparerBootstrapResult")
+    if preparer_result is not None and (
+        not isinstance(preparer_result, dict)
+        or preparer_result.get("wheelDigest")
+        != plan.get("preparerWheelIdentity", {}).get("wheel", {}).get("sha256")
+        or preparer_result.get("commandPath") != "/usr/libexec/cyrene-plugin-python-preparer"
+    ):
+        raise ValueError("Fresh workload Core journal preparer receipt changed")
     gate_generation = transaction.get("expectedGateGeneration")
     begin_request = transaction.get("beginRequest")
     if gate_generation is not None:
@@ -3778,6 +3856,7 @@ def apply_fresh_workload_first_core(
             "expectedActivitySources": [],
             "componentArtifactDigests": full_digests,
             "firstCoreBootstrap": block,
+            "preparerWheelIdentity": plan["preparerWheelIdentity"],
             "brokerBootstrapPlanDigest": plan["brokerBootstrapPlanDigest"],
             "components": staged_components,
             "previous": updater._capture_active_versions(staged_components),
@@ -3814,6 +3893,15 @@ def apply_fresh_workload_first_core(
             "end_call_pending",
         }:
             raise ValueError("Fresh workload Core journal has an unsupported recovery phase")
+    saved_preparer_identity = transaction.get("preparerWheelIdentity")
+    if saved_preparer_identity is None:
+        # Older held plans did not persist this derived sibling receipt. Bind it
+        # now from the same immutable plan and staged Plugin row without changing
+        # the original firstCoreBootstrap block or its digest.
+        transaction["preparerWheelIdentity"] = plan["preparerWheelIdentity"]
+        _write_private_json(updater, journal_path, transaction)
+    elif saved_preparer_identity != plan["preparerWheelIdentity"]:
+        raise ValueError("Fresh workload Core journal preparer identity changed")
 
     held_broker_recovered = False
     if transaction.get("phase") == "end_call_pending":
@@ -4175,6 +4263,26 @@ def apply_fresh_workload_first_core(
             if item["componentId"] == component_id
         ]
         for item in ordered_remaining:
+            if item["componentId"] == "cy-package-runtime":
+                preparer_module = updater._load_native_package_runtime_bootstrap()
+                install_preparer = getattr(preparer_module, "install_workload_preparer", None)
+                if not callable(install_preparer):
+                    raise RuntimeError(
+                        "The official Package Runtime preparer installer is unavailable"
+                    )
+                preparer_result = install_preparer(
+                    plan["preparerWheelIdentity"], runner=updater.runner
+                )
+                previous_preparer_result = transaction.get("preparerBootstrapResult")
+                if (
+                    previous_preparer_result is not None
+                    and previous_preparer_result != preparer_result
+                ):
+                    raise RuntimeError(
+                        "The installed Package Runtime preparer differs from its journal"
+                    )
+                transaction["preparerBootstrapResult"] = preparer_result
+                _write_private_json(updater, journal_path, transaction)
             unit = updater.components[item["componentId"]]["systemdUnit"]
             updater._run_systemctl("start", unit)
             updater._wait_unit_active(unit)

@@ -12190,6 +12190,273 @@ class ComponentUpdater:
         transaction["packageRuntimeStarted"] = True
         _atomic_json(transaction_path, transaction)
 
+    def _workload_first_core_preparer_identity(
+        self,
+        stored: dict[str, Any],
+        resolution: dict[str, Any],
+        staged_rows: list[dict[str, Any]],
+        *,
+        plan_id: str,
+        plan_digest: str,
+    ) -> dict[str, Any]:
+        """Project one staged, attested Plugin wheel into the exact Core plan.
+
+        The wheel is selected from the same immutable Plugin rows as the
+        workload. This keeps first-Core startup independent of a Product-built
+        helper or a separate package cache.
+        中文：从同一工作负载的插件暂存记录选择已验签的运行时准备器。
+        """
+
+        selected_rows = resolution.get("selectedComponents")
+        stored_candidates = stored.get("candidates")
+        if not isinstance(selected_rows, list) or not isinstance(stored_candidates, dict):
+            raise UpdateError("INVALID_STAGE", "First-Core Plugin stage identity is incomplete.")
+        staged_by_id = {
+            row.get("componentId"): row
+            for row in staged_rows
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        stage_root = self._private_state_directory("staged") / "workload-plans" / plan_id
+        try:
+            _verify_private_directory(stage_root)
+        except UpdateError as error:
+            raise UpdateError("INVALID_STAGE", "First-Core Plugin stage root is unsafe.") from error
+
+        runtime = self._load_native_package_runtime_bootstrap()
+        expected_wheel_name = runtime.ASSET_NAMES.get("preparer_wheel")
+        if not isinstance(expected_wheel_name, str):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_BOOTSTRAP_MISSING", "Preparer wheel identity is unavailable."
+            )
+        plugin_rows = sorted(
+            (
+                row
+                for row in selected_rows
+                if isinstance(row, dict) and row.get("artifactKind") == "plugin-package"
+            ),
+            key=lambda row: row.get("componentId", ""),
+        )
+        if not plugin_rows:
+            raise UpdateError(
+                "INVALID_STAGE", "First-Core workload has no selected Plugin preparer wheel."
+            )
+        preparer_identity: dict[str, Any] | None = None
+        selected_wheel_identity: tuple[str, str, int] | None = None
+        for selected in plugin_rows:
+            component_id = selected.get("componentId")
+            cached = staged_by_id.get(component_id) if isinstance(component_id, str) else None
+            candidate_snapshot = (
+                stored_candidates.get(component_id) if isinstance(component_id, str) else None
+            )
+            if (
+                not isinstance(cached, dict)
+                or cached.get("status") != "staged"
+                or cached.get("artifactKind") != "plugin-package"
+                or not isinstance(candidate_snapshot, dict)
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Selected Plugin stage is missing for {component_id}."
+                )
+            staged_identity = cached.get("stagedIdentity")
+            paths = staged_identity.get("assetPaths") if isinstance(staged_identity, dict) else None
+            proofs = cached.get("assetAttestations")
+            if any(
+                cached.get(field) != selected.get(field)
+                for field in WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Plugin stage identity differs for {component_id}."
+                )
+            if (
+                not isinstance(staged_identity, dict)
+                or staged_identity.get("planId") != plan_id
+                or staged_identity.get("planDigest") != plan_digest
+                or not isinstance(paths, dict)
+                or not isinstance(proofs, dict)
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Plugin stage identity differs for {component_id}."
+                )
+
+            metadata_value = paths.get("packageReleaseMetadata")
+            wheel_value = paths.get("preparerWheel0")
+            if not isinstance(metadata_value, str) or not isinstance(wheel_value, str):
+                raise UpdateError(
+                    "INVALID_STAGE",
+                    f"Plugin preparer asset paths are malformed for {component_id}.",
+                )
+            metadata_path = Path(metadata_value)
+            wheel_path = Path(wheel_value)
+            component_root = stage_root / component_id
+            try:
+                _verify_private_directory(component_root)
+            except UpdateError as error:
+                raise UpdateError(
+                    "INVALID_STAGE", "First-Core Plugin component stage is unsafe."
+                ) from error
+            if (
+                metadata_path.parent != component_root
+                or wheel_path.parent != component_root
+                or metadata_path.is_symlink()
+                or wheel_path.is_symlink()
+                or not metadata_path.is_file()
+                or not wheel_path.is_file()
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Plugin preparer assets are unsafe for {component_id}."
+                )
+            try:
+                _verify_private_file(metadata_path)
+                _verify_private_file(wheel_path)
+                metadata_bytes = metadata_path.read_bytes()
+                actual_metadata_digest = "sha256:" + hashlib.sha256(metadata_bytes).hexdigest()
+                actual_wheel_size = wheel_path.stat().st_size
+                actual_wheel_digest = _file_digest(wheel_path)
+            except (OSError, UpdateError) as error:
+                raise UpdateError(
+                    "INVALID_STAGE", "A staged preparer asset failed readback."
+                ) from error
+            if (
+                actual_metadata_digest != cached.get("packageReleaseDigest")
+                or wheel_path.name != expected_wheel_name
+                or not _valid_digest(actual_wheel_digest)
+                or not _valid_digest(proofs.get("packageReleaseMetadata"))
+                or not _valid_digest(proofs.get("preparerWheel0"))
+                or candidate_snapshot.get("manifestUri") != selected.get("manifestUri")
+                or candidate_snapshot.get("manifestDigest") != selected.get("manifestDigest")
+                or candidate_snapshot.get("manifestAssetDigest")
+                != selected.get("manifestAssetDigest")
+                or candidate_snapshot.get("artifactDigest") != selected.get("digest")
+                or candidate_snapshot.get("releaseTag") != selected.get("releaseId")
+                or candidate_snapshot.get("targetId") != selected.get("targetId")
+                or not isinstance(selected.get("attestationRef"), dict)
+                or cached.get("sourceCommit") != selected["attestationRef"].get("sourceCommit")
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Plugin preparer identity changed for {component_id}."
+                )
+
+            try:
+                metadata = json.loads(metadata_bytes, object_pairs_hook=_unique_json_object)
+            except (UnicodeDecodeError, json.JSONDecodeError, UpdateError) as error:
+                raise UpdateError("INVALID_STAGE", "Plugin release metadata is invalid.") from error
+            source = metadata.get("source") if isinstance(metadata, dict) else None
+            package = metadata.get("package") if isinstance(metadata, dict) else None
+            policy = metadata.get("attestation_policy") if isinstance(metadata, dict) else None
+            assets = metadata.get("assets") if isinstance(metadata, dict) else None
+            wheel = assets.get("preparer_wheel") if isinstance(assets, dict) else None
+            subjects = policy.get("subject_assets") if isinstance(policy, dict) else None
+            publisher = selected.get("publisherIdentity")
+            attestation_ref = selected.get("attestationRef")
+            source_commit = cached.get("sourceCommit")
+            release_id = candidate_snapshot.get("releaseTag")
+            artifact_uri = metadata.get("artifact_uri")
+            parsed_artifact_uri = (
+                urllib.parse.urlsplit(artifact_uri) if isinstance(artifact_uri, str) else None
+            )
+            publisher_repository = (
+                publisher.get("repository") if isinstance(publisher, dict) else None
+            )
+            artifact_path_parts = (
+                parsed_artifact_uri.path.split("/") if parsed_artifact_uri is not None else []
+            )
+            metadata_assets = metadata.get("assets")
+            package_asset = (
+                metadata_assets.get("package") if isinstance(metadata_assets, dict) else None
+            )
+            if (
+                not isinstance(source, dict)
+                or not isinstance(package, dict)
+                or not isinstance(policy, dict)
+                or not isinstance(wheel, dict)
+                or not isinstance(subjects, list)
+                or not isinstance(publisher, dict)
+                or not isinstance(attestation_ref, dict)
+                or metadata.get("record_type") != "cyrene.plugin.package.release.v1"
+                or metadata.get("publication_status") != "PUBLISHED"
+                or metadata.get("release_tag") != release_id
+                or package.get("id") != cached.get("packageId")
+                or package.get("version") != cached.get("version")
+                or package.get("component_id") != component_id
+                or source.get("commit") != source_commit
+                or policy.get("source_commit") != source_commit
+                or policy.get("provider") != "github-actions"
+                or policy.get("workflow") != publisher.get("workflow")
+                or not isinstance(publisher_repository, str)
+                or parsed_artifact_uri is None
+                or parsed_artifact_uri.scheme != "https"
+                or parsed_artifact_uri.netloc != "github.com"
+                or artifact_path_parts[:3] != ["", *publisher_repository.split("/")]
+                or artifact_path_parts[3:6] != ["releases", "download", release_id]
+                or not isinstance(package_asset, dict)
+                or not artifact_path_parts
+                or artifact_path_parts[-1] != package_asset.get("name")
+                or attestation_ref.get("sourceCommit") != source_commit
+                or wheel.get("name") != expected_wheel_name
+                or wheel.get("sha256") != actual_wheel_digest
+                or wheel.get("format") != "wheel"
+                or wheel.get("package") != "cyrene-plugin-runtime"
+                or wheel.get("version") != runtime.WORKLOAD_PREPARER_VERSION
+                or wheel.get("entrypoint") != runtime.WORKLOAD_PREPARER_ENTRYPOINT
+                or wheel.get("target") != "py3-none-any"
+                or not any(
+                    isinstance(subject, dict)
+                    and subject.get("name") == expected_wheel_name
+                    and subject.get("sha256") == actual_wheel_digest
+                    for subject in subjects
+                )
+            ):
+                raise UpdateError(
+                    "INVALID_STAGE", f"Plugin preparer source proof differs for {component_id}."
+                )
+            try:
+                runtime._inspect_workload_preparer_wheel(wheel_path.read_bytes())
+            except Exception as error:
+                raise UpdateError(
+                    "INVALID_STAGE", "Staged Plugin wheel has no supported preparer CLI."
+                ) from error
+            wheel_identity = (wheel["name"], actual_wheel_digest, actual_wheel_size)
+            if selected_wheel_identity is not None and selected_wheel_identity != wheel_identity:
+                raise UpdateError(
+                    "INVALID_STAGE",
+                    "Selected Plugins provide conflicting Package Runtime preparer wheels.",
+                )
+            selected_wheel_identity = wheel_identity
+            current_identity = {
+                "schemaVersion": 1,
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "componentId": component_id,
+                "componentArtifactDigest": selected.get("digest"),
+                "manifestDigest": selected.get("manifestDigest"),
+                "manifestAssetDigest": selected.get("manifestAssetDigest"),
+                "packageId": cached.get("packageId"),
+                "packageVersion": cached.get("version"),
+                "releaseId": release_id,
+                "releaseTag": release_id,
+                "sourceCommit": source_commit,
+                "publisherIdentity": publisher,
+                "attestationRef": attestation_ref,
+                "wheel": {
+                    "name": wheel["name"],
+                    "path": str(wheel_path),
+                    "uri": (
+                        f"https://github.com/{publisher['repository']}/releases/download/"
+                        f"{release_id}/{wheel['name']}"
+                    ),
+                    "sha256": actual_wheel_digest,
+                    "sizeBytes": actual_wheel_size,
+                    "attestationBundleDigest": proofs["preparerWheel0"],
+                },
+            }
+            if preparer_identity is None:
+                preparer_identity = current_identity
+        if preparer_identity is None:
+            raise UpdateError(
+                "INVALID_STAGE", "First-Core workload has no selected Plugin preparer wheel."
+            )
+        return preparer_identity
+
     def _resume_first_core_before_workload_inventory(
         self,
         stored: dict[str, Any],
@@ -12296,6 +12563,14 @@ class ComponentUpdater:
             ) from error
         if current_sdk is not None:
             return None, False
+
+        preparer_identity = self._workload_first_core_preparer_identity(
+            stored,
+            resolution,
+            staged_rows,
+            plan_id=plan_id,
+            plan_digest=plan_digest,
+        )
 
         intent = transaction.get("sdkPrepareIntent")
         if status == "pending":
@@ -12543,8 +12818,10 @@ class ComponentUpdater:
                 retryable=True,
             ) from error
         phase_is_exact = isinstance(core_journal, dict) and (
-            core_journal.get("phase") == "hold_required"
-            and core_journal.get("progress") == "catalog_initialized"
+            (
+                core_journal.get("phase") == "hold_required"
+                and core_journal.get("progress") in {"catalog_initialized", "cohort_starting"}
+            )
             or core_journal.get("phase") == "succeeded"
         )
         if (
@@ -12576,6 +12853,7 @@ class ComponentUpdater:
             "catalogDigest": stored["catalogDigest"],
             "channel": stored["channel"],
             "firstCoreBootstrap": block,
+            "preparerWheelIdentity": preparer_identity,
             "resolution": projected_resolution,
         }
         result = self._run_fresh_workload_first_core(
@@ -12684,6 +12962,7 @@ class ComponentUpdater:
                 else None
             ),
         )
+        used_saved_resolution = False
         if (
             (resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest)
             and isinstance(prior_transaction, dict)
@@ -12694,6 +12973,12 @@ class ComponentUpdater:
                 raise UpdateError(
                     "INVALID_TRANSACTION", "Durable workload plan identity is malformed."
                 )
+            if stored.get("resolution") != resolution:
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Durable workload resolution differs from its staged plan.",
+                )
+            used_saved_resolution = True
         elif resolution.get("status") != "ready" or resolution.get("planDigest") != plan_digest:
             raise UpdateError(
                 "PLAN_CHANGED",
@@ -12704,6 +12989,34 @@ class ComponentUpdater:
         staged_rows = stored.get("stagedComponents")
         if not isinstance(rows, list) or not isinstance(staged_rows, list) or not rows:
             raise UpdateError("INVALID_STAGE", "The staged workload component set is malformed.")
+        first_core_block = resolution.get("firstCoreBootstrap")
+        preparer_identity: dict[str, Any] | None = None
+        if isinstance(first_core_block, dict):
+            if used_saved_resolution:
+                preparer_identity = self._workload_first_core_preparer_identity(
+                    stored,
+                    resolution,
+                    staged_rows,
+                    plan_id=plan_id,
+                    plan_digest=plan_digest,
+                )
+            else:
+                staged_rows, _changed = self._validate_cached_workload_stage_rows(
+                    stored,
+                    resolution,
+                    candidates,
+                    plan_id=plan_id,
+                    plan_digest=plan_digest,
+                    action="install",
+                )
+                stored["stagedComponents"] = staged_rows
+                preparer_identity = self._workload_first_core_preparer_identity(
+                    stored,
+                    resolution,
+                    staged_rows,
+                    plan_id=plan_id,
+                    plan_digest=plan_digest,
+                )
         staged_by_id = {
             row.get("componentId"): row
             for row in staged_rows
@@ -13015,6 +13328,7 @@ class ComponentUpdater:
                 "catalogDigest": stored["catalogDigest"],
                 "channel": stored["channel"],
                 "firstCoreBootstrap": first_core_block,
+                "preparerWheelIdentity": preparer_identity,
                 "resolution": resolution,
             }
             if first_core_result is None:

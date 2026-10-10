@@ -4943,6 +4943,177 @@ def test_workload_plugin_stage_projects_all_signed_resolution_identity_fields(
     } == {field: selected[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS}
 
 
+@pytest.mark.parametrize("conflicting_wheels", [False, True])
+def test_first_core_preparer_requires_all_selected_plugins_to_share_one_wheel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    conflicting_wheels: bool,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    monkeypatch.setattr(updates, "_verify_private_directory", lambda _path: None)
+    monkeypatch.setattr(updates, "_verify_private_file", lambda _path: None)
+    wheel_name = "cyrene_plugin_runtime-0.2.0-py3-none-any.whl"
+    runtime = SimpleNamespace(
+        ASSET_NAMES={"preparer_wheel": wheel_name},
+        WORKLOAD_PREPARER_VERSION="0.2.0",
+        WORKLOAD_PREPARER_ENTRYPOINT="cyrene-plugin-python-preparer",
+        _inspect_workload_preparer_wheel=lambda _contents: None,
+    )
+    updater._load_native_package_runtime_bootstrap = lambda: runtime
+    plan_id = "plan-" + "a" * 32
+    plan_digest = "sha256:" + "a" * 64
+    stage_root = updater._private_state_directory("staged") / "workload-plans" / plan_id
+    stage_root.mkdir(mode=0o700, parents=True)
+    selected_rows: list[dict[str, Any]] = []
+    staged_rows: list[dict[str, Any]] = []
+    stored_candidates: dict[str, dict[str, Any]] = {}
+
+    for index, component_id in enumerate(
+        ("cyrene-tools-dataset-preparation", "cyrene-tools-document-parsing")
+    ):
+        source_commit = f"{index + 1:x}" * 40
+        release_id = f"preview-{component_id}-{index}"
+        publisher = {
+            "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+            "workflow": "DoHorizon-AI/Cyrene-Plugins-Official/.github/workflows/plugin.yml",
+        }
+        attestation_ref = {"sourceCommit": source_commit}
+        digest = "sha256:" + hashlib.sha256(component_id.encode()).hexdigest()
+        manifest_digest = (
+            "sha256:" + hashlib.sha256(f"manifest:{component_id}".encode()).hexdigest()
+        )
+        manifest_asset_digest = (
+            "sha256:" + hashlib.sha256(f"manifest-asset:{component_id}".encode()).hexdigest()
+        )
+        archive_name = f"{component_id}.zip"
+        wheel_bytes = (
+            b"shared preparer wheel"
+            if not conflicting_wheels or index == 0
+            else b"different preparer wheel"
+        )
+        wheel_digest = "sha256:" + hashlib.sha256(wheel_bytes).hexdigest()
+        component_root = stage_root / component_id
+        component_root.mkdir(mode=0o700)
+        wheel_path = component_root / wheel_name
+        wheel_path.write_bytes(wheel_bytes)
+        metadata = {
+            "record_type": "cyrene.plugin.package.release.v1",
+            "publication_status": "PUBLISHED",
+            "release_tag": release_id,
+            "artifact_uri": (
+                "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/releases/download/"
+                f"{release_id}/{archive_name}"
+            ),
+            "source": {"commit": source_commit},
+            "package": {
+                "id": f"org.cyrene.{component_id}",
+                "version": "0.2.0",
+                "component_id": component_id,
+            },
+            "attestation_policy": {
+                "provider": "github-actions",
+                "workflow": publisher["workflow"],
+                "source_commit": source_commit,
+                "subject_assets": [{"name": wheel_name, "sha256": wheel_digest}],
+            },
+            "assets": {
+                "package": {"name": archive_name},
+                "preparer_wheel": {
+                    "name": wheel_name,
+                    "sha256": wheel_digest,
+                    "format": "wheel",
+                    "package": "cyrene-plugin-runtime",
+                    "version": "0.2.0",
+                    "entrypoint": "cyrene-plugin-python-preparer",
+                    "target": "py3-none-any",
+                },
+            },
+        }
+        metadata_bytes = json.dumps(metadata, sort_keys=True).encode()
+        metadata_path = component_root / f"{component_id}-release.json"
+        metadata_path.write_bytes(metadata_bytes)
+        selected = {
+            "componentId": component_id,
+            "manifestUri": "unused",
+            "version": "0.2.0",
+            "manifestDigest": manifest_digest,
+            "manifestAssetDigest": manifest_asset_digest,
+            "digest": digest,
+            "releaseId": release_id,
+            "targetId": "linux-ubuntu-24.04-x86_64-plugin",
+            "publisherIdentity": publisher,
+            "indexIdentity": {"releaseTag": release_id},
+            "attestationRef": attestation_ref,
+            "artifactKind": "plugin-package",
+        }
+        selected_rows.append(selected)
+        stored_candidates[component_id] = {
+            "manifestUri": "unused",
+            "manifestDigest": manifest_digest,
+            "manifestAssetDigest": manifest_asset_digest,
+            "artifactDigest": digest,
+            "releaseTag": release_id,
+            "targetId": selected["targetId"],
+        }
+        staged_rows.append(
+            {
+                **selected,
+                "status": "staged",
+                "packageId": metadata["package"]["id"],
+                "packageArtifactDigest": digest,
+                "packageReleaseDigest": "sha256:" + hashlib.sha256(metadata_bytes).hexdigest(),
+                "sourceCommit": source_commit,
+                "assetAttestations": {
+                    "packageReleaseMetadata": "sha256:" + "1" * 64,
+                    "preparerWheel0": "sha256:" + "2" * 64,
+                },
+                "stagedIdentity": {
+                    "assetPaths": {
+                        "packageReleaseMetadata": str(metadata_path),
+                        "preparerWheel0": str(wheel_path),
+                    },
+                    "planId": plan_id,
+                    "planDigest": plan_digest,
+                },
+            }
+        )
+
+    stored = {"candidates": stored_candidates}
+    resolution = {"selectedComponents": selected_rows}
+    if conflicting_wheels:
+        with pytest.raises(
+            updates.UpdateError, match="conflicting Package Runtime preparer wheels"
+        ):
+            updater._workload_first_core_preparer_identity(
+                stored,
+                resolution,
+                staged_rows,
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+    else:
+        identity = updater._workload_first_core_preparer_identity(
+            stored,
+            resolution,
+            staged_rows,
+            plan_id=plan_id,
+            plan_digest=plan_digest,
+        )
+        assert identity["componentId"] == selected_rows[0]["componentId"]
+        assert (
+            identity["wheel"]["sha256"]
+            == "sha256:" + hashlib.sha256(b"shared preparer wheel").hexdigest()
+        )
+        with pytest.raises(updates.UpdateError, match="Selected Plugin stage is missing"):
+            updater._workload_first_core_preparer_identity(
+                stored,
+                resolution,
+                staged_rows[:1],
+                plan_id=plan_id,
+                plan_digest=plan_digest,
+            )
+
+
 def test_workload_stage_backfills_legacy_plugin_identity_on_exact_cached_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

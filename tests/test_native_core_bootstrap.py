@@ -2222,11 +2222,28 @@ def test_fresh_workload_plan_delegates_active_v2_authority_validation(
         "componentArtifactDigests": digests,
         "maintenanceComponentArtifactDigests": full_digests,
     }
+    parent_plan_digest = "sha256:" + "a741d55dfce45a1ea0cc929d7f4a1e3a" + "0" * 32
+    parent_plan_id = "plan-" + parent_plan_digest.split(":", 1)[1][:32]
     parent_plan = {
+        "planId": parent_plan_id,
+        "planDigest": parent_plan_digest,
         "channel": "stable",
         "firstCoreBootstrap": block,
         "resolution": {
             "sourcePolicy": source_policy,
+            "selectedComponents": [
+                {
+                    "componentId": "cyrene-plugin-example",
+                    "artifactKind": "plugin-package",
+                    "version": "0.1.0",
+                    "digest": full_digests["cyrene-plugin-example"],
+                    "manifestDigest": _digest(b"example plugin manifest"),
+                    "manifestAssetDigest": _digest(b"example plugin manifest asset"),
+                    "releaseId": "preview-example-1",
+                    "publisherIdentity": {"repository": "DoHorizon-AI/Cyrene-Plugins-Official"},
+                    "attestationRef": {"sourceCommit": "b" * 40},
+                }
+            ],
             "planDigestMaterial": {
                 "firstCoreBootstrapInternal": {
                     "brokerBootstrapPlanDigest": broker_digest,
@@ -2235,6 +2252,45 @@ def test_fresh_workload_plan_delegates_active_v2_authority_validation(
             },
         },
     }
+    wheel_name = "cyrene_plugin_runtime-0.2.0-py3-none-any.whl"
+    preparer_identity = {
+        "schemaVersion": 1,
+        "planId": parent_plan_id,
+        "planDigest": parent_plan_digest,
+        "componentId": "cyrene-plugin-example",
+        "componentArtifactDigest": full_digests["cyrene-plugin-example"],
+        "manifestDigest": _digest(b"example plugin manifest"),
+        "manifestAssetDigest": _digest(b"example plugin manifest asset"),
+        "packageId": "cyrene.tools.example",
+        "packageVersion": "0.1.0",
+        "releaseId": "preview-example-1",
+        "releaseTag": "preview-example-1",
+        "sourceCommit": "b" * 40,
+        "publisherIdentity": {"repository": "DoHorizon-AI/Cyrene-Plugins-Official"},
+        "attestationRef": {"sourceCommit": "b" * 40},
+        "wheel": {
+            "name": wheel_name,
+            "path": str(
+                updater.state_root
+                / "staged"
+                / "workload-plans"
+                / parent_plan_id
+                / "cyrene-plugin-example"
+                / wheel_name
+            ),
+            "uri": (
+                "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/releases/download/"
+                f"preview-example-1/{wheel_name}"
+            ),
+            "sha256": _digest(b"wheel"),
+            "sizeBytes": 100,
+            "attestationBundleDigest": _digest(b"wheel attestation"),
+        },
+    }
+    parent_plan["preparerWheelIdentity"] = preparer_identity
+    updater._load_native_package_runtime_bootstrap = lambda: SimpleNamespace(
+        _require_preparer_identity=lambda identity: identity
+    )
 
     validated_catalogs: list[str] = []
 
@@ -2252,9 +2308,14 @@ def test_fresh_workload_plan_delegates_active_v2_authority_validation(
 
     assert checked_block == block
     assert validated_catalogs == [active_digest]
+    assert plan["planId"] == block["planId"]
+    assert plan["planDigest"] == block["planDigest"]
     assert plan["requestId"] == "first-core-bootstrap-" + block["planId"].removeprefix("plan-")
     assert plan["brokerBootstrapPlanDigest"] == broker_digest
     assert plan["componentArtifactDigests"] == block["maintenanceComponentArtifactDigests"]
+    assert plan["preparerWheelIdentity"] == preparer_identity
+    assert preparer_identity["planId"] == parent_plan_id
+    assert preparer_identity["planId"] != plan["planId"]
     assert full_digests == block["maintenanceComponentArtifactDigests"]
 
 

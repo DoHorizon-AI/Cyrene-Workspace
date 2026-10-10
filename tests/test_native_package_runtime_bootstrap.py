@@ -7,9 +7,11 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,50 @@ def _digest(data: bytes) -> str:
 
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _preparer_wheel() -> bytes:
+    """Build one dependency-free CLI wheel for a real offline install probe."""
+
+    from base64 import urlsafe_b64encode
+
+    members = {
+        "cyrene_plugin_runtime/__init__.py": b"",
+        "cyrene_plugin_runtime/dependency_preparer.py": (
+            b"from argparse import ArgumentParser\n"
+            b"def main():\n"
+            b"    parser = ArgumentParser(prog='cyrene-plugin-python-preparer')\n"
+            b"    parser.add_argument('--uv')\n"
+            b"    parser.add_argument('--python')\n"
+            b"    parser.parse_args()\n"
+            b"if __name__ == '__main__':\n"
+            b"    main()\n"
+        ),
+        "cyrene_plugin_runtime-0.2.0.dist-info/METADATA": (
+            b"Metadata-Version: 2.1\nName: cyrene-plugin-runtime\nVersion: 0.2.0\n"
+            b"Requires-Python: >=3.11\n\n"
+        ),
+        "cyrene_plugin_runtime-0.2.0.dist-info/WHEEL": (
+            b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+        "cyrene_plugin_runtime-0.2.0.dist-info/entry_points.txt": (
+            b"[console_scripts]\n"
+            b"cyrene-plugin-python-preparer = cyrene_plugin_runtime.dependency_preparer:main\n"
+        ),
+    }
+    record_rows = []
+    for name, content in members.items():
+        digest = urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
+        record_rows.append(f"{name},sha256={digest},{len(content)}")
+    record_rows.append("cyrene_plugin_runtime-0.2.0.dist-info/RECORD,,")
+    members["cyrene_plugin_runtime-0.2.0.dist-info/RECORD"] = (
+        "\n".join(record_rows) + "\n"
+    ).encode()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
 
 
 def _write_release(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -1130,3 +1176,146 @@ def test_workload_uninstall_request_requires_exact_catalog_and_installation_iden
             },
             installation=installation,
         )
+
+
+def test_first_core_installs_and_resumes_the_attested_plugin_preparer_offline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel_bytes = _preparer_wheel()
+    wheel_path = tmp_path / bootstrap.ASSET_NAMES["preparer_wheel"]
+    wheel_path.write_bytes(wheel_bytes)
+    wheel_digest = _digest(wheel_bytes)
+    plan_digest = _digest(b"first-core-plan")
+    plan_id = "plan-" + plan_digest.split(":", 1)[1][:32]
+    identity = {
+        "schemaVersion": 1,
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "componentId": "cyrene-evaluation-exact-match",
+        "componentArtifactDigest": _digest(b"plugin artifact"),
+        "manifestDigest": _digest(b"manifest"),
+        "manifestAssetDigest": _digest(b"manifest asset"),
+        "packageId": "cyrene.evaluation.exact-match",
+        "packageVersion": "0.1.0",
+        "releaseId": "preview-exact-match-1",
+        "releaseTag": "preview-exact-match-1",
+        "sourceCommit": "a" * 40,
+        "publisherIdentity": {
+            "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+        },
+        "attestationRef": {"sourceCommit": "a" * 40},
+        "wheel": {
+            "name": wheel_path.name,
+            "path": str(wheel_path),
+            "uri": (
+                "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official/releases/download/"
+                f"preview-exact-match-1/{wheel_path.name}"
+            ),
+            "sha256": wheel_digest,
+            "sizeBytes": len(wheel_bytes),
+            "attestationBundleDigest": _digest(b"verified wheel attestation"),
+        },
+    }
+    preparer_root = Path(tempfile.mkdtemp(prefix="cyrene-preparer-", dir="/tmp"))
+    command_path = preparer_root / "libexec" / "cyrene-plugin-python-preparer"
+    command_path.parent.mkdir(mode=0o755)
+
+    def ensure_directory(
+        path: Path, mode: int, *, parent: Path | None = None, group_id: int = 0
+    ) -> None:
+        del parent, group_id
+        path.mkdir(mode=mode, parents=True, exist_ok=True)
+        path.chmod(mode)
+
+    def write_file(path: Path, contents: bytes, mode: int, *, group_id: int = 0) -> None:
+        del group_id
+        with path.open("xb") as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        path.chmod(mode)
+
+    publish = bootstrap._publish_workload_preparer_command
+    monkeypatch.setattr(bootstrap, "_require_root", lambda: None)
+    monkeypatch.setattr(bootstrap, "_require_root_directory_chain", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap, "_require_root_file", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bootstrap, "_ensure_root_directory", ensure_directory)
+    monkeypatch.setattr(bootstrap, "_write_root_file", write_file)
+    monkeypatch.setattr(bootstrap.os, "chown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        bootstrap,
+        "_publish_workload_preparer_command",
+        lambda contents, digest: publish(
+            contents,
+            digest,
+            owner_uid=os.geteuid(),
+            owner_gid=os.getegid(),
+        ),
+    )
+    test_python = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+    test_python_version = subprocess.run(
+        [
+            str(test_python),
+            "-I",
+            "-c",
+            "import sys; print('.'.join(map(str, sys.version_info[:3])))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    monkeypatch.setattr(bootstrap, "PACKAGE_PREPARER_PYTHON", test_python)
+    monkeypatch.setattr(bootstrap, "PACKAGE_PREPARER_UV", test_python)
+    monkeypatch.setattr(bootstrap, "WORKLOAD_PREPARER_PYTHON_VERSION", test_python_version)
+    monkeypatch.setattr(bootstrap, "WORKLOAD_PREPARER_ROOT", preparer_root)
+    monkeypatch.setattr(bootstrap, "WORKLOAD_PREPARER_RELEASES", preparer_root / "releases")
+    monkeypatch.setattr(bootstrap, "PACKAGE_PREPARER_COMMAND", command_path)
+
+    try:
+        first = bootstrap.install_workload_preparer(identity)
+        second = bootstrap.install_workload_preparer(identity)
+        assert first == second
+        final_python = Path(first["pythonPath"])
+        installed_command = Path(first["commandPath"])
+        assert installed_command.is_file() and os.access(installed_command, os.X_OK)
+        shebang = installed_command.read_bytes().splitlines()[0]
+        assert shebang == b"#!" + os.fsencode(final_python)
+        assert len(shebang) <= 125
+        production_shebang = (
+            b"#!/opt/cyrene/plugin-preparer/releases/" + b"a" * 64 + b"/venv/bin/python"
+        )
+        assert len(production_shebang) == 119
+        completed = subprocess.run(
+            [str(installed_command), "--help"], capture_output=True, text=True, check=False
+        )
+        assert completed.returncode == 0
+        assert "usage:" in completed.stdout.lower()
+        assert not list(command_path.parent.glob("*.pending"))
+        assert command_path.stat().st_nlink == 1
+    finally:
+        shutil.rmtree(preparer_root)
+
+
+def test_preparer_command_publication_recovers_after_link_before_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command_dir = tmp_path / "libexec"
+    command_dir.mkdir(mode=0o755)
+    final_path = command_dir / "cyrene-plugin-python-preparer"
+    digest_hex = hashlib.sha256(b"#!/usr/bin/python\npass\n").hexdigest()
+    pending_path = command_dir / f".{final_path.name}.{digest_hex}.pending"
+    pending_path.write_bytes(b"#!/usr/bin/python\npass\n")
+    pending_path.chmod(0o555)
+    os.link(pending_path, final_path)
+    monkeypatch.setattr(bootstrap, "PACKAGE_PREPARER_COMMAND", final_path)
+
+    bootstrap._publish_workload_preparer_command(
+        pending_path.read_bytes(),
+        digest_hex,
+        owner_uid=os.geteuid(),
+        owner_gid=os.getegid(),
+    )
+
+    assert final_path.is_file()
+    assert final_path.stat().st_nlink == 1
+    assert not pending_path.exists()

@@ -12,16 +12,19 @@ from __future__ import annotations
 import grp
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pwd
 import re
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import zipfile
 from dataclasses import dataclass
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +69,17 @@ PACKAGE_PREPARER_ARGS = (
     "--python",
     "/opt/cyrene/python/3.12.14/bin/python3.12",
 )
+PACKAGE_PREPARER_PYTHON = Path(PACKAGE_PREPARER_ARGS[3])
+PACKAGE_PREPARER_UV = Path(PACKAGE_PREPARER_ARGS[1])
+WORKLOAD_PREPARER_ROOT = Path("/opt/cyrene/plugin-preparer")
+WORKLOAD_PREPARER_RELEASES = WORKLOAD_PREPARER_ROOT / "releases"
+WORKLOAD_PREPARER_VERSION = "0.2.0"
+WORKLOAD_PREPARER_PYTHON_VERSION = "3.12.14"
+WORKLOAD_PREPARER_MODULE = "cyrene_plugin_runtime.dependency_preparer"
+WORKLOAD_PREPARER_ENTRYPOINT = "cyrene-plugin-python-preparer"
+WORKLOAD_PREPARER_ENTRYPOINT_TARGET = "cyrene_plugin_runtime.dependency_preparer:main"
+WORKLOAD_PREPARER_MAX_WHEEL_BYTES = 64 * 1024 * 1024
+WORKLOAD_PREPARER_MAX_WHEEL_FILES = 4096
 PACKAGE_RUNTIME_COMMAND = Path("/usr/bin/cy-package-runtime")
 PACKAGE_POLICY_SCHEMA_VERSION = 1
 PACKAGE_RUNTIME_GROUP = "cyrene"
@@ -1690,6 +1704,547 @@ def _safe_source_bytes(path: Path, expected_digest: str, limit: int) -> bytes:
             "Verified Package Runtime asset changed after attestation"
         )
     return content
+
+
+def _require_root_directory_chain(path: Path, label: str) -> None:
+    """Require an absolute root-owned path with no writable or linked directory."""
+
+    if not path.is_absolute():
+        raise PackageRuntimeBootstrapError(f"{label} path must be absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise PackageRuntimeBootstrapError(f"{label} path is unavailable") from error
+        mode = stat.S_IMODE(info.st_mode)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != 0
+            or (mode & 0o022 and not mode & stat.S_ISVTX)
+        ):
+            raise PackageRuntimeBootstrapError(f"{label} path is unsafe")
+
+
+def _require_root_file(path: Path, label: str, *, executable: bool = False) -> os.stat_result:
+    """Require a single-link root-owned regular file with a stable mode."""
+
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise PackageRuntimeBootstrapError(f"{label} is unavailable") from error
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_uid != 0
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) & 0o022
+        or not info.st_mode & 0o400
+        or (executable and not info.st_mode & 0o100)
+    ):
+        raise PackageRuntimeBootstrapError(f"{label} metadata is unsafe")
+    return info
+
+
+def _require_preparer_identity(value: Any) -> dict[str, Any]:
+    """Validate the selected Plugin wheel identity before using its staged bytes."""
+
+    expected = {
+        "schemaVersion",
+        "planId",
+        "planDigest",
+        "componentId",
+        "componentArtifactDigest",
+        "manifestDigest",
+        "manifestAssetDigest",
+        "packageId",
+        "packageVersion",
+        "releaseId",
+        "releaseTag",
+        "sourceCommit",
+        "publisherIdentity",
+        "attestationRef",
+        "wheel",
+    }
+    if not isinstance(value, dict) or set(value) != expected or value.get("schemaVersion") != 1:
+        raise PackageRuntimeBootstrapError("First-Core preparer wheel identity is malformed")
+    for field in ("planDigest", "componentArtifactDigest", "manifestDigest", "manifestAssetDigest"):
+        if TYPED_SHA256.fullmatch(str(value.get(field, ""))) is None:
+            raise PackageRuntimeBootstrapError("First-Core preparer plan digest is malformed")
+    if (
+        re.fullmatch(r"plan-[0-9a-f]{32}", str(value.get("planId", ""))) is None
+        or value.get("planId") != "plan-" + value["planDigest"].split(":", 1)[1][:32]
+        or not isinstance(value.get("componentId"), str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,127}", value["componentId"]) is None
+        or not isinstance(value.get("packageId"), str)
+        or not isinstance(value.get("packageVersion"), str)
+        or value.get("releaseTag") != value.get("releaseId")
+        or not isinstance(value.get("releaseId"), str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", value["releaseId"]) is None
+        or re.fullmatch(r"[0-9a-f]{40}", str(value.get("sourceCommit", ""))) is None
+        or not isinstance(value.get("publisherIdentity"), dict)
+        or not isinstance(value.get("attestationRef"), dict)
+        or value["attestationRef"].get("sourceCommit") != value.get("sourceCommit")
+    ):
+        raise PackageRuntimeBootstrapError("First-Core preparer wheel source differs from its plan")
+    wheel = value.get("wheel")
+    publisher = value.get("publisherIdentity")
+    repository = publisher.get("repository") if isinstance(publisher, dict) else None
+    if (
+        not isinstance(repository, str)
+        or re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is None
+        or not isinstance(wheel, dict)
+        or set(wheel) != {"name", "path", "uri", "sha256", "sizeBytes", "attestationBundleDigest"}
+        or not isinstance(wheel.get("name"), str)
+        or re.fullmatch(r"[A-Za-z0-9_.+-]{1,200}\.whl", wheel["name"]) is None
+        or not isinstance(wheel.get("path"), str)
+        or not Path(wheel["path"]).is_absolute()
+        or Path(wheel["path"]).name != wheel["name"]
+        or not isinstance(wheel.get("uri"), str)
+        or wheel.get("uri")
+        != f"https://github.com/{repository}/releases/download/{value.get('releaseId')}/{wheel.get('name')}"
+        or not isinstance(wheel.get("sizeBytes"), int)
+        or isinstance(wheel.get("sizeBytes"), bool)
+        or wheel["sizeBytes"] < 1
+        or wheel["sizeBytes"] > WORKLOAD_PREPARER_MAX_WHEEL_BYTES
+        or TYPED_SHA256.fullmatch(str(wheel.get("sha256", ""))) is None
+        or TYPED_SHA256.fullmatch(str(wheel.get("attestationBundleDigest", ""))) is None
+    ):
+        raise PackageRuntimeBootstrapError("First-Core preparer wheel asset is malformed")
+    return value
+
+
+def _inspect_workload_preparer_wheel(contents: bytes) -> None:
+    """Confirm the attested wheel declares the Package Runtime preparer CLI."""
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(contents)) as archive:
+            infos = archive.infolist()
+            names = [info.filename for info in infos]
+            if (
+                not infos
+                or len(infos) > WORKLOAD_PREPARER_MAX_WHEEL_FILES
+                or len(names) != len(set(names))
+                or sum(info.file_size for info in infos) > WORKLOAD_PREPARER_MAX_WHEEL_BYTES
+                or any(
+                    not name
+                    or name.startswith("/")
+                    or "\\" in name
+                    or ".." in Path(name).parts
+                    or stat.S_ISLNK(info.external_attr >> 16)
+                    for name, info in zip(names, infos, strict=True)
+                )
+            ):
+                raise PackageRuntimeBootstrapError("Preparer wheel archive layout is unsafe")
+            metadata_paths = [name for name in names if name.endswith(".dist-info/METADATA")]
+            if len(metadata_paths) != 1:
+                raise PackageRuntimeBootstrapError(
+                    "Preparer wheel has no unique distribution metadata"
+                )
+            metadata_path = metadata_paths[0]
+            dist_info = metadata_path.rsplit("/", 1)[0]
+            metadata = BytesParser().parsebytes(archive.read(metadata_path))
+            entry_points = archive.read(f"{dist_info}/entry_points.txt").decode("utf-8")
+            wheel_metadata = archive.read(f"{dist_info}/WHEEL").decode("utf-8")
+    except (OSError, UnicodeError, ValueError, zipfile.BadZipFile, KeyError) as error:
+        if isinstance(error, PackageRuntimeBootstrapError):
+            raise
+        raise PackageRuntimeBootstrapError("Preparer wheel metadata cannot be read") from error
+
+    normalized_name = str(metadata.get("Name", "")).lower().replace("_", "-")
+    if (
+        normalized_name != "cyrene-plugin-runtime"
+        or metadata.get("Version") != WORKLOAD_PREPARER_VERSION
+    ):
+        raise PackageRuntimeBootstrapError("Preparer wheel distribution identity is unsupported")
+    in_console_scripts = False
+    matching_entrypoints = []
+    for line in entry_points.splitlines():
+        item = line.strip()
+        if item.startswith("[") and item.endswith("]"):
+            in_console_scripts = item == "[console_scripts]"
+        elif in_console_scripts and "=" in item:
+            name, target = (part.strip() for part in item.split("=", 1))
+            if name == WORKLOAD_PREPARER_ENTRYPOINT:
+                matching_entrypoints.append(target)
+    tags = [
+        line.removeprefix("Tag: ").strip()
+        for line in wheel_metadata.splitlines()
+        if line.startswith("Tag: ")
+    ]
+    if matching_entrypoints != [WORKLOAD_PREPARER_ENTRYPOINT_TARGET] or "py3-none-any" not in tags:
+        raise PackageRuntimeBootstrapError("Preparer wheel entrypoint or ABI is unsupported")
+
+
+def _run_preparer_bootstrap(
+    command: list[str], runner: Any | None, *, label: str
+) -> subprocess.CompletedProcess[str]:
+    """Run one fixed preparer bootstrap command without user or network config."""
+
+    environment = {
+        "HOME": "/root",
+        "PATH": "/usr/bin:/bin",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    try:
+        result = (runner or subprocess.run)(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise PackageRuntimeBootstrapError(f"{label} could not run") from error
+    if result.returncode != 0:
+        raise PackageRuntimeBootstrapError(f"{label} failed")
+    return result
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _read_workload_preparer_receipt(release_path: Path) -> dict[str, Any]:
+    receipt_path = release_path / "preparer-install.json"
+    _require_root_file(receipt_path, "Package Runtime preparer receipt")
+    try:
+        value = json.loads(receipt_path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PackageRuntimeBootstrapError("Package Runtime preparer receipt is invalid") from error
+    if not isinstance(value, dict):
+        raise PackageRuntimeBootstrapError("Package Runtime preparer receipt is malformed")
+    return value
+
+
+def _publish_workload_preparer_command(
+    script_bytes: bytes,
+    digest_hex: str,
+    *,
+    owner_uid: int = 0,
+    owner_gid: int = 0,
+) -> None:
+    """Publish the fixed CLI atomically and reconcile only its exact pending link."""
+
+    final_path = PACKAGE_PREPARER_COMMAND
+    pending_path = final_path.parent / f".{final_path.name}.{digest_hex}.pending"
+
+    def inspect(path: Path, *, allowed_links: set[int]) -> os.stat_result:
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise PackageRuntimeBootstrapError(
+                "Package Runtime preparer command is unavailable"
+            ) from error
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != owner_uid
+            or info.st_gid != owner_gid
+            or stat.S_IMODE(info.st_mode) != 0o555
+            or info.st_nlink not in allowed_links
+        ):
+            raise PackageRuntimeBootstrapError(
+                "Package Runtime preparer command metadata is unsafe"
+            )
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            with os.fdopen(descriptor, "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)
+                    or opened.st_nlink not in allowed_links
+                    or opened.st_size > 1024 * 1024
+                    or opened.st_mode != info.st_mode
+                ):
+                    raise PackageRuntimeBootstrapError(
+                        "Package Runtime preparer command changed while opening"
+                    )
+                content = stream.read(1024 * 1024 + 1)
+        except OSError as error:
+            raise PackageRuntimeBootstrapError(
+                "Package Runtime preparer command cannot be read"
+            ) from error
+        if content != script_bytes:
+            raise PackageRuntimeBootstrapError(
+                "Package Runtime preparer command differs from its release"
+            )
+        return info
+
+    final_exists = final_path.exists() or final_path.is_symlink()
+    pending_exists = pending_path.exists() or pending_path.is_symlink()
+    pending_info: os.stat_result | None = None
+    if pending_exists:
+        pending_info = inspect(pending_path, allowed_links={1, 2})
+
+    if final_exists:
+        final_info = inspect(final_path, allowed_links={1, 2})
+        if final_info.st_nlink == 2:
+            if (
+                pending_info is None
+                or pending_info.st_nlink != 2
+                or (pending_info.st_dev, pending_info.st_ino)
+                != (final_info.st_dev, final_info.st_ino)
+            ):
+                raise PackageRuntimeBootstrapError("Preparer command has an unaccounted hard link")
+            pending_path.unlink()
+            _fsync_directory(final_path.parent)
+            final_info = inspect(final_path, allowed_links={1})
+        elif pending_info is not None:
+            if pending_info.st_nlink != 1:
+                raise PackageRuntimeBootstrapError("Preparer command has an unrelated pending file")
+            pending_path.unlink()
+            _fsync_directory(final_path.parent)
+            final_info = inspect(final_path, allowed_links={1})
+        else:
+            inspect(final_path, allowed_links={1})
+        return
+
+    if pending_info is None:
+        _write_root_file(pending_path, script_bytes, 0o555)
+        pending_info = inspect(pending_path, allowed_links={1})
+    try:
+        os.link(pending_path, final_path, follow_symlinks=False)
+    except FileExistsError:
+        final_info = inspect(final_path, allowed_links={1, 2})
+        if final_info.st_nlink == 1:
+            if pending_info.st_nlink != 1:
+                raise PackageRuntimeBootstrapError("Preparer command raced with another release")
+            pending_path.unlink()
+            _fsync_directory(final_path.parent)
+            inspect(final_path, allowed_links={1})
+            return
+        if final_info.st_nlink == 2:
+            if pending_info.st_nlink != 2 or (pending_info.st_dev, pending_info.st_ino) != (
+                final_info.st_dev,
+                final_info.st_ino,
+            ):
+                raise PackageRuntimeBootstrapError("Preparer command raced with another release")
+        else:
+            raise PackageRuntimeBootstrapError("Preparer command has an unexpected link count")
+    final_info = inspect(final_path, allowed_links={2})
+    pending_info = inspect(pending_path, allowed_links={2})
+    if (pending_info.st_dev, pending_info.st_ino) != (final_info.st_dev, final_info.st_ino):
+        raise PackageRuntimeBootstrapError("Preparer command pending link differs from its release")
+    pending_path.unlink()
+    _fsync_directory(final_path.parent)
+    inspect(final_path, allowed_links={1})
+
+
+def install_workload_preparer(staged_identity: Any, *, runner: Any | None = None) -> dict[str, str]:
+    """Install the exact staged preparer wheel before starting Package Runtime.
+
+    The caller supplies a Plugin asset already bound to the checked workload
+    plan and verified through the Plugin release contract. This function
+    rechecks the wheel bytes, installs no dependencies or network packages,
+    and publishes only the generated console entrypoint at the fixed unit path.
+    """
+
+    _require_root()
+    identity = _require_preparer_identity(staged_identity)
+    wheel = identity["wheel"]
+    wheel_path = Path(wheel["path"])
+    _require_root_directory_chain(wheel_path.parent, "staged preparer wheel parent")
+    _require_root_file(wheel_path, "staged preparer wheel")
+    contents = _safe_source_bytes(
+        wheel_path,
+        wheel["sha256"],
+        WORKLOAD_PREPARER_MAX_WHEEL_BYTES,
+    )
+    if len(contents) != wheel["sizeBytes"]:
+        raise PackageRuntimeBootstrapError("Staged preparer wheel size differs from its release")
+    _inspect_workload_preparer_wheel(contents)
+
+    _require_root_directory_chain(PACKAGE_PREPARER_PYTHON.parent, "locked CPython path")
+    _require_root_file(PACKAGE_PREPARER_PYTHON, "locked CPython", executable=True)
+    python_version = _run_preparer_bootstrap(
+        [
+            str(PACKAGE_PREPARER_PYTHON),
+            "-B",
+            "-I",
+            "-c",
+            "import sys; print('.'.join(map(str, sys.version_info[:3])))",
+        ],
+        runner,
+        label="Locked CPython version probe",
+    )
+    if python_version.stdout.strip() != WORKLOAD_PREPARER_PYTHON_VERSION:
+        raise PackageRuntimeBootstrapError("Locked CPython version differs from the Plugin SDK")
+    _require_root_directory_chain(PACKAGE_PREPARER_UV.parent, "locked uv path")
+    _require_root_file(PACKAGE_PREPARER_UV, "locked uv", executable=True)
+    _require_root_directory_chain(WORKLOAD_PREPARER_ROOT.parent, "preparer runtime parent")
+    _ensure_root_directory(WORKLOAD_PREPARER_ROOT, 0o755, parent=WORKLOAD_PREPARER_ROOT.parent)
+    _ensure_root_directory(WORKLOAD_PREPARER_RELEASES, 0o755, parent=WORKLOAD_PREPARER_ROOT)
+    _require_root_directory_chain(PACKAGE_PREPARER_COMMAND.parent, "preparer command parent")
+
+    digest_hex = wheel["sha256"].removeprefix("sha256:")
+    release_path = WORKLOAD_PREPARER_RELEASES / digest_hex
+    venv_path = release_path / "venv"
+    venv_python = venv_path / "bin" / "python"
+    runtime_script = release_path / WORKLOAD_PREPARER_ENTRYPOINT
+    if release_path.exists() or release_path.is_symlink():
+        if release_path.is_symlink() or not release_path.is_dir():
+            raise PackageRuntimeBootstrapError("Preparer release directory is unsafe")
+        receipt = _read_workload_preparer_receipt(release_path)
+        if (
+            receipt.get("schemaVersion") != 1
+            or receipt.get("wheelDigest") != wheel["sha256"]
+            or receipt.get("wheelSizeBytes") != wheel["sizeBytes"]
+            or receipt.get("entrypoint") != WORKLOAD_PREPARER_ENTRYPOINT
+            or receipt.get("entrypointTarget") != WORKLOAD_PREPARER_ENTRYPOINT_TARGET
+            or receipt.get("pythonPath") != str(venv_python)
+            or receipt.get("commandPath") != str(PACKAGE_PREPARER_COMMAND)
+        ):
+            raise PackageRuntimeBootstrapError("Existing preparer release differs from this wheel")
+        _require_root_directory_chain(venv_path / "bin", "preparer venv path")
+        _require_root_file(venv_python, "preparer venv Python", executable=True)
+        _require_root_file(runtime_script, "preparer release command", executable=True)
+        script_bytes = _safe_source_bytes(
+            runtime_script, "sha256:" + str(receipt.get("entrypointSha256", "")), 1024 * 1024
+        )
+        command_sha = "sha256:" + hashlib.sha256(script_bytes).hexdigest()
+        if command_sha != "sha256:" + str(receipt.get("entrypointSha256", "")):
+            raise PackageRuntimeBootstrapError("Preparer release command changed after install")
+    else:
+        if PACKAGE_PREPARER_COMMAND.exists() or PACKAGE_PREPARER_COMMAND.is_symlink():
+            raise PackageRuntimeBootstrapError(
+                "An unmanaged Package Runtime preparer already exists"
+            )
+        temporary_path = Path(tempfile.mkdtemp(prefix=".pp-", dir=WORKLOAD_PREPARER_ROOT))
+        try:
+            os.chmod(temporary_path, 0o755, follow_symlinks=False)
+            os.chown(temporary_path, 0, 0, follow_symlinks=False)
+            staged_wheel = temporary_path / wheel["name"]
+            _write_root_file(staged_wheel, contents, 0o444)
+            temporary_venv = temporary_path / "venv"
+            _run_preparer_bootstrap(
+                [
+                    str(PACKAGE_PREPARER_PYTHON),
+                    "-I",
+                    "-m",
+                    "venv",
+                    "--copies",
+                    str(temporary_venv),
+                ],
+                runner,
+                label="Locked CPython venv creation",
+            )
+            temporary_python = temporary_venv / "bin" / "python"
+            _require_root_directory_chain(temporary_venv / "bin", "preparer venv path")
+            _require_root_file(temporary_python, "preparer venv Python", executable=True)
+            _run_preparer_bootstrap(
+                [
+                    str(temporary_python),
+                    "-I",
+                    "-m",
+                    "pip",
+                    "install",
+                    "--isolated",
+                    "--no-deps",
+                    "--no-index",
+                    "--no-cache-dir",
+                    "--disable-pip-version-check",
+                    "--no-input",
+                    str(staged_wheel),
+                ],
+                runner,
+                label="Offline preparer wheel installation",
+            )
+            _run_preparer_bootstrap(
+                [
+                    str(temporary_python),
+                    "-I",
+                    "-m",
+                    WORKLOAD_PREPARER_MODULE,
+                    "--help",
+                ],
+                runner,
+                label="Preparer package import probe",
+            )
+            generated_script = temporary_venv / "bin" / WORKLOAD_PREPARER_ENTRYPOINT
+            _require_root_file(generated_script, "generated preparer entrypoint", executable=True)
+            script_bytes = _safe_source_bytes(
+                generated_script,
+                "sha256:" + hashlib.sha256(generated_script.read_bytes()).hexdigest(),
+                1024 * 1024,
+            )
+            first_line, separator, remainder = script_bytes.partition(b"\n")
+            expected_shebang = b"#!" + os.fsencode(temporary_python)
+            if not separator or first_line != expected_shebang:
+                raise PackageRuntimeBootstrapError("Generated preparer has an unexpected shebang")
+            final_shebang = b"#!" + os.fsencode(venv_python)
+            if len(final_shebang) > 125:
+                raise PackageRuntimeBootstrapError("Preparer Python path exceeds the shebang limit")
+            script_bytes = final_shebang + b"\n" + remainder
+            command_digest = "sha256:" + hashlib.sha256(script_bytes).hexdigest()
+            release_receipt = {
+                "schemaVersion": 1,
+                "wheelDigest": wheel["sha256"],
+                "wheelSizeBytes": wheel["sizeBytes"],
+                "entrypoint": WORKLOAD_PREPARER_ENTRYPOINT,
+                "entrypointTarget": WORKLOAD_PREPARER_ENTRYPOINT_TARGET,
+                "entrypointSha256": command_digest.removeprefix("sha256:"),
+                "pythonPath": str(venv_python),
+                "commandPath": str(PACKAGE_PREPARER_COMMAND),
+            }
+            _write_root_file(
+                temporary_path / WORKLOAD_PREPARER_ENTRYPOINT,
+                script_bytes,
+                0o555,
+            )
+            _write_root_file(
+                temporary_path / "preparer-install.json",
+                (json.dumps(release_receipt, sort_keys=True, separators=(",", ":")) + "\n").encode(
+                    "utf-8"
+                ),
+                0o444,
+            )
+            os.replace(temporary_path, release_path)
+            _fsync_directory(WORKLOAD_PREPARER_RELEASES)
+        except Exception:
+            if temporary_path.exists() and not temporary_path.is_symlink():
+                shutil.rmtree(temporary_path)
+            raise
+        receipt = release_receipt
+        runtime_script = release_path / WORKLOAD_PREPARER_ENTRYPOINT
+        script_bytes = _safe_source_bytes(
+            runtime_script,
+            "sha256:" + receipt["entrypointSha256"],
+            1024 * 1024,
+        )
+        command_sha = "sha256:" + receipt["entrypointSha256"]
+
+    _publish_workload_preparer_command(script_bytes, digest_hex)
+
+    _require_root_directory_chain(venv_path / "bin", "preparer venv path")
+    _require_root_file(venv_python, "preparer venv Python", executable=True)
+    _require_root_file(
+        PACKAGE_PREPARER_COMMAND, "Package Runtime preparer command", executable=True
+    )
+    _run_preparer_bootstrap(
+        [str(PACKAGE_PREPARER_COMMAND), "--help"],
+        runner,
+        label="Installed preparer CLI import probe",
+    )
+    return {
+        "wheelDigest": wheel["sha256"],
+        "releasePath": str(release_path),
+        "pythonPath": str(venv_python),
+        "commandPath": str(PACKAGE_PREPARER_COMMAND),
+        "commandDigest": command_sha,
+    }
 
 
 def _ensure_root_directory(
