@@ -1,53 +1,91 @@
 # Modular Distribution v0.1: Ubuntu installation / Ubuntu 安装指南
 
-**Status:** This is an interim checkpoint, not final host-acceptance evidence. The immutable Ubuntu 24.04 amd64 preview from Workspace source `0e8d8f56cc3bb827320a85671fff43220d0a4551` is published and independently verified. Its fresh-host acceptance on Ubuntu 24.04.5 guest 2234 ended with 15 of 34 gates passing, one failure, and 18 not run. `catalyst_workload_apply` failed with `FIRST_CORE_BOOTSTRAP_FAILED` when the first-Core Kernel service rejected its sandbox peer UID/GID arguments. The Platform source correction is merged in [PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100) at `2bbd40b3b30cd9401127a033dd33cf6902378536`, and required CI passed. At the 2026-10-10 09:09 UTC checkpoint readback, the official Platform release [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155), attempt 1, was in progress: catalog verification and both Ubuntu 22.04/24.04 native build jobs had succeeded; `component-release` was running `Run release test gates`. No release for P was published, and strict release verification remained pending. Catalyst runtime activation, Client access, SFT production and independent loading, and Echo lifecycle have not passed acceptance. The corrected official Platform release and a new immutable Native preview must complete the remaining checks before the product is ready for customer trial. See the [ADR](ADR_MODULAR_DISTRIBUTION_V01.md) for the exact result and correction path.
+**Status (Stage71 source correction):** The previously published immutable Native preview W `670dcc640c7716484edacf5c0f77dd7ec93b5fea` (18 assets, bound to the previously verified Platform release P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`) remains unchanged. On Host 2238, the exact Stage70 Catalyst plan passed staging, but `BeginCoreBootstrap` was rejected with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`; the original transaction and guest state were preserved, and runtime source activation did not begin. Platform PR #103 is merged at `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4`; its focused tests passed 61 total (50 library and 11 binary). The natural official release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) is pending publication and strict asset verification at this checkpoint. Do not retry the old W/P pair or describe installation as successful. Client/browser, Plugin invocation, SFT, Echo, reboot, and clean-host acceptance remain **PENDING / NOT_RUN**.
 
-**状态：** 本文是阶段 checkpoint，不是最终主机验收证据。Workspace 源码 `0e8d8f56cc3bb827320a85671fff43220d0a4551` 对应的不可变 Ubuntu 24.04 amd64 预览版已发布并通过独立发行物验证。Ubuntu 24.04.5 主机 2234 的全新主机验收共 34 项：15 项通过、1 项失败、18 项未运行。`catalyst_workload_apply` 在 first-Core Kernel 服务拒绝 sandbox peer UID/GID 参数后以 `FIRST_CORE_BOOTSTRAP_FAILED` 失败。Platform 源码修正已在 [PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100) 合并，SHA 为 `2bbd40b3b30cd9401127a033dd33cf6902378536`，required CI 已通过。2026-10-10 09:09 UTC checkpoint 回读时，正式 Platform 发行流程 [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155) 第 1 次尝试仍在运行：Catalog 验证与 Ubuntu 22.04/24.04 原生构建均已成功，`component-release` job 正在执行 `Run release test gates`。尚未发布 P 的 release，严格发行验证仍待完成。Catalyst runtime 激活、Client 访问、SFT 生成与独立加载、Echo lifecycle 均未通过验收。正式 Platform 修正版完成发行验证并发布新的不可变 Native 预览版、通过剩余验收后，才能将其作为客户试用版本。确切结果和修正路径见 [ADR](ADR_MODULAR_DISTRIBUTION_V01.md)。
+**状态（Stage71 源码修正）：** 此前发布的不可变 Native 预览版 W `670dcc640c7716484edacf5c0f77dd7ec93b5fea`（18 项资产，绑定此前已验证的 Platform release P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`）保持原样。Host 2238 上的 Stage70 Catalyst 精确计划已通过 staging，但 `BeginCoreBootstrap` 返回 `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`；原 transaction 与 guest 状态均已保留，runtime source activation 尚未开始。Platform PR #103 已正常合并至 `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4`；相关定向测试共 61 项通过（library 50 项、binary 11 项）。截至本文记录时，正式 release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) 尚待发布和严格资产验证。不要重试旧 W/P 发行对，也不要将安装描述为成功。Client/browser、Plugin invoke、SFT、Echo、重启和全新主机验收仍为 **PENDING / NOT_RUN**。
 
 ## Start here / 快速开始
 
-Use a stock Ubuntu 24.04 x86_64 host, an administrator account with `sudo`, and an internet connection. Echo is optional and requires Docker; Catalyst does not.
+Use a stock Ubuntu 24.04 x86_64 host, an administrator account with `sudo`, and an internet connection. Catalyst does not require Docker. The last published Native release is immutable W `670dcc640c7716484edacf5c0f77dd7ec93b5fea`, bound to the previously published Platform P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`; its first-Core admission was blocked on Host 2238. The corrected Platform source is merged, but its official release and a new Workspace-bound Native release have not been verified. Do not run the install commands below against the old pair.
 
-使用标准 Ubuntu 24.04 x86_64 主机、具备 `sudo` 的管理员账户及网络连接。Echo 为可选项且需要 Docker；Catalyst 不需要 Docker。
+使用标准 Ubuntu 24.04 x86_64 主机、具备 `sudo` 的管理员账户及网络连接。Catalyst 不需要 Docker。最近发布的 Native release 是不可变的 W `670dcc640c7716484edacf5c0f77dd7ec93b5fea`，绑定此前发布的 Platform P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`；它在 Host 2238 的 first-Core admission 被阻止。Platform 修正源码已合并，但正式 release 和绑定新 Workspace SHA 的 Native release 尚未验证。不要对下方命令所示旧发行对执行 workload install。
 
-| Item | Official preview identity |
+| Item | Immutable identity or acceptance state |
 | --- | --- |
-| Native release | [`native-installer-preview-0e8d8f56cc3bb827320a85671fff43220d0a4551`](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-0e8d8f56cc3bb827320a85671fff43220d0a4551) |
-| Producer | [Run 38034438591](https://github.com/DoHorizon-AI/Cyrene-Workspace/actions/runs/38034438591), attempt 2; all four jobs succeeded; release API ID `408779397` |
-| Workspace source | `0e8d8f56cc3bb827320a85671fff43220d0a4551` (`refs/heads/develop`; PR #135 merge) |
-| Ubuntu 24.04 amd64 DEB | SHA-256 `ddb6548d824fd6cdc40ca3635e43e60a648bd43100661f4f5e0d26124d7b2280` (155,106,734 bytes) |
-| Release manifest / source receipt | `native-installer-release-v2.json`: `85a0153696140d54ebb9c5c552ffc7434fa92414c942ed7b5a56c59768e481ca`; `native-installer-source-receipt-v2.json`: `ba5d91023be13429f57c298baf7c92cad88b3399b4d2bd3f4b66bc9bd531a8ce` |
-| Active Catalog v2 | `catalog-v2-preview-18455255cdf8b87dd8cd48ceb25e5ea411a622ad`, generation 15, source `18455255cdf8b87dd8cd48ceb25e5ea411a622ad`, SHA-256 `9356861a377e18d1b6ed586d7ee8316de7d7d11c5e7543269d3cbd5d456f314d`, attestation bundle SHA-256 `37762cbdabe99c5e62fa9494531ff7e16962b241d2cff47bf920530a33585e85` |
-| Independent release verification | Strict full-envelope verification passed; root independent asset/source readback SHA-256 `a8e0396cc98cea109f0c7fd736ac41b2dc2586468afb6e02dde8ede0762a3f0f` |
-| Frozen component identities | Platform `preview-daabf9ff561b4ab9296094d8198fd1fa3418b32b`; Catalyst `preview-4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b`; Plugins Official source `443da5e071c9d7e82e7f28788cc04777e0bea1b9`; Client Web `preview-cyrene-client-workspace-web-b3c3f964540e3aa761612371891e3bb6a3f7ad59` |
-| Follow-on Platform source correction | [PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100), merge `2bbd40b3b30cd9401127a033dd33cf6902378536`; required CI passed. At the 2026-10-10 09:09 UTC checkpoint readback, official release [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155), attempt 1, was in progress: catalog verification and the Ubuntu 22.04/24.04 native builds had succeeded, and `component-release` was running `Run release test gates`. No release for P was published and strict verification remained pending; this source commit was not yet an installable verified release. |
-| Fresh-host acceptance | Ubuntu 24.04.5 guest 2234; 34-gate terminal ledger: 15 PASS, 1 FAIL (`catalyst_workload_apply`), 18 NOT_RUN. The apply failure stopped all later runtime, Client, SFT-consumer, and Echo checks. |
-| Client static Web | `preview-cyrene-client-workspace-web-b3c3f964540e3aa761612371891e3bb6a3f7ad59` (static payload; not a server or host-acceptance result) |
+| Previously published Platform release | [`preview-64e4b58eb1dedc5ea328c07c9b07df55d2f38590`](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-64e4b58eb1dedc5ea328c07c9b07df55d2f38590); source P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`; run `38071761850`; release API ID `409115567`; 52 assets, 24 manifests, 6 raw subjects, strict no-skip verification passed. This is the P bound to old Native W670. |
+| Platform source correction | [PR #103](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/103), merge `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4`; 61 focused tests passed (50 library, 11 binary); official release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) pending; no new release identity or verified assets yet |
+| Previously published Native release | [`native-installer-preview-670dcc640c7716484edacf5c0f77dd7ec93b5fea`](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-670dcc640c7716484edacf5c0f77dd7ec93b5fea); source W `670dcc640c7716484edacf5c0f77dd7ec93b5fea`; bound Platform source P above; run `38083070781` attempt 1; release API ID `409187818`; 18 assets and strict no-skip verification passed. Immutable but not accepted for install after the Stage70 first-Core block. |
+| Ubuntu 24.04 amd64 DEB | [`Download DEB`](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/download/native-installer-preview-670dcc640c7716484edacf5c0f77dd7ec93b5fea/cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb); SHA-256 `4c0fc9f03054f8feb2154c893f5f3fd95ce71650340b099b83571c18bcad9deb`; 155,125,684 bytes |
+| Native manifest / source receipt | Manifest SHA-256 `ca1c1d274427fd855d2424e943bc36950c185969e68bf5af9c9b0fc34703c89a`; source receipt SHA-256 `c83a5366c3a55d52386a22fe101ef744305f8459f26295aee12760a53b7fa8d5`; strict verifier bound exact `refs/heads/develop` source W and Platform release P |
+| Active Catalog v2 | [`catalog-v2-preview-18455255cdf8b87dd8cd48ceb25e5ea411a622ad`](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/catalog-v2-preview-18455255cdf8b87dd8cd48ceb25e5ea411a622ad), generation 15; SHA-256 `9356861a377e18d1b6ed586d7ee8316de7d7d11c5e7543269d3cbd5d456f314d` |
+| Host 2238 Stage70 | Catalyst staging **PASS**; first-Core `BeginCoreBootstrap` blocked with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`; no runtime source activation; original guest/transaction preserved |
+| Remaining acceptance | Catalyst installation/apply, actual Plugin invocation, SFT export/load, Client/browser, Echo, reboot recovery, and independent full-host acceptance **PENDING / NOT_RUN** |
 
-The published envelope is immutable and passed strict verification for all 18 assets, 21 bound tuples, seven verifier source blobs, and 20 evidence records with no skipped checks. Independent root readback and the exact release-pin source/schema checks also passed. Runtime acceptance is separate: the 2234 run passed 15 gates, failed at Catalyst apply, and left 18 later gates not run. The ADR records the diagnosed argument-contract mismatch and the required follow-on release.
+The procedure below records how to verify the last published immutable Native release. It uses public assets and needs no source clone, build environment, GitHub login, private pins file, or private release URL. The old W670/P64 pair is known to stop at first-Core admission; do not install it as a trial candidate. A follow-on Native tag requires a new Workspace source SHA. Do not substitute `latest`; verify the eventual release source ref, source SHA, manifest, source receipt, Catalog, checksums, and detached attestations before installation.
 
-已发布发行包不可变；严格验证通过全部 18 项资产、21 个绑定 tuple、7 个 verifier 源文件及 20 条 evidence，且未跳过检查。独立 root 回读和精确 release-pin source/schema 校验也通过。运行验收是独立门禁：2234 主机共 15 项通过、Catalyst apply 失败、后续 18 项未运行。ADR 记录了参数契约不匹配的诊断和后续发行要求。
+以下流程记录如何验证最近发布的不可变 Native release。它使用公开发行资产，无需 clone 源码、构建环境、GitHub 登录、私有 pins 文件或私有发行 URL。旧 W670/P64 发行对已知会在 first-Core admission 停止，不要将其作为试用候选安装。后续 Native tag 必须绑定新的 Workspace source SHA。不要替换为 `latest`；安装未来发行物前应验证其 source ref、source SHA、manifest、source receipt、Catalog、checksum 和 detached attestation。
 
+## Stage70 Workspace lifecycle and Stage71 Platform correction / Stage70 Workspace 生命周期与 Stage71 Platform 修正
 
-The verified CLI accepts an optional `--channel`; the signed active Catalog defaults to `stable`, while the published 0e preview uses `preview`. After installing that package, this command requests Catalyst workload installation; the candidate has not passed fresh-host apply acceptance:
+Workspace [PR #140](https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/140) merged W source `670dcc640c7716484edacf5c0f77dd7ec93b5fea`; post-merge run [38082850380](https://github.com/DoHorizon-AI/Cyrene-Workspace/actions/runs/38082850380) succeeded. Its source fix recognizes signed `python-bundle` Product artifacts when deriving the first source-owner context, keeping the selected Catalyst bundle identity separate from the six-member Core map. The paired published Platform release was P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`. Host 2238 staging passed, but the first `BeginCoreBootstrap` was blocked with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`; original transaction and guest state were retained and runtime source activation did not begin. Platform PR #103 is merged at `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4` (head `d5126f96059124be36af533e357438d388366099`); its focused suites passed 61 tests (50 library, 11 binary). Natural official release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) is pending publication and strict verification; no new P release identity is available yet.
 
-已验证 CLI 支持可选 `--channel`；签名 active Catalog 默认使用 `stable`，已发布的 0e 预览版使用 `preview`。安装该包后，此命令会请求安装 Catalyst workload；该候选版本尚未通过全新主机 apply 验收：
+The initial activity source is bound to the exact signed Product owner and artifact digest separately from the six-member Core component map. Workspace carries generic `initial_source_artifact_ref` in the first Core bootstrap context. The Stage70 published Platform P64 rejected `BeginCoreBootstrap` against the empty generation-0 catalog, so Host 2238 did not reach the later Product startup phase; the new Platform source in PR #103 adds the guarded generation-0-to-generation-1 contract.
+
+With the corrected Platform release, the first-install order starts the verified Product under the narrow initial-source hold so its authenticated `TasksReconciled` event establishes real source freshness. The Stage70 P64 release did not reach this phase. After that first-source hold ends, Workspace uses the existing package-only Plugin installation and binding flow, projects selected refs into the separate root-owned `root:cyrene` mode `0640` protected `catalyst-plugin-refs.env`, and runs the normal Core-runtime activation/restart so Catalyst reads actual refs. Raw refs are not stored in the journal. Same-plan recovery reconciles exact Begin/End receipts and preserves the hold token after an unsuccessful startup.
+
+At service boot, the packaged Workspace helper calls `ComponentUpdater.recover_workload_runtime_connections("catalyst")` before Catalyst starts. When a successful managed Catalyst transaction owns bindings, it uses the official Package Runtime `recover_binding` and `runtime_status` path to re-establish each binding, reads the current connection refs, and atomically projects the protected environment file. Catalyst is ordered after Package Runtime with start ordering that does not propagate Package Runtime stops to Catalyst. The hook skips only when there is no managed Catalyst owner or an exact installer-controlled restart intent proves the updater currently owns the relevant lock; unrelated lock conflicts and recovery failures fail closed. This protects dynamic runtime endpoints across host restarts without manually writing refs or installing helpers.
+
+## Platform first-source contract / Platform 首次 source 契约
+
+Platform [PR #103](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/103) merged as `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4` (head `d5126f96059124be36af533e357438d388366099`). Its focused tests passed 61 tests: 50 library and 11 binary tests. The source change is merged; natural official release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) has not yet produced a release verified by this guide. No release ID, asset digest, or attestation result is claimed.
+
+The generic initial-source path has three guards:
+
+1. The exact successful `BeginCoreBootstrap` parent may reserve `initial_source_artifact_ref = {source_id, component_id, artifact_digest}` from a verified signed Product identity, outside the six-member Core component digest map.
+2. With that matching hold proof, the initial activity-source catalog may transition only from generation 0 with no registered sources or prior activity to generation 1 containing exactly the reserved source with zero binding scopes. Wrong owners, extra sources, bindings, or repeat initial writes are rejected.
+3. `BeginInitialSourceActivation` must match the successful parent/source and a child `CORE_RUNTIME` plan carrying the same Product digest. Only a never-active source is eligible; ordinary readiness and active/stale-source checks remain fail-closed. `EndMaintenance` requires fresh authenticated source state and quiescent activity while the hold is active; missing or stale freshness does not unlock it.
+
+The Platform path does not fabricate activity. The Product's authenticated `TasksReconciled` event establishes persisted freshness; periodic heartbeats continue through the normal SDK lifecycle. Catalog generation 15 and existing Product/Plugin pins remain unchanged. A new Native release needs a new Workspace SHA because the immutable tag is Workspace-source-specific; this documentation source update is intended to provide that identity after the Platform release is verified.
+
+Platform [PR #103](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/103) 已于 `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4` 合并（PR head `d5126f96059124be36af533e357438d388366099`）。定向测试共 61 项通过：library 50 项、binary 11 项。源码已合并；正式 release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) 尚未产生经本文核验的 release，因此这里不声明 release ID、资产摘要或 attestation 结果。
+
+通用首次 source 路径有三项守卫：
+
+1. 精确成功的 `BeginCoreBootstrap` parent 可从已验证的签名 Product identity 保留 `initial_source_artifact_ref = {source_id, component_id, artifact_digest}`，并与六成员 Core component digest map 分开保存。
+2. 持有匹配的 maintenance proof 时，初始 activity-source catalog 只能从 generation 0（无已注册 source、无既有 activity）转到 generation 1，且只含与预留 identity 完全一致、binding scope 为空的单个 source。错误 owner、多余 source、已有 binding 或重复初始写入都会被拒绝。
+3. `BeginInitialSourceActivation` 必须匹配成功 parent/source，并要求 child `CORE_RUNTIME` plan 携带相同 Product digest。只有从未活动的 source 符合条件；普通 readiness 与已有/过期 source 检查保持 fail closed。`EndMaintenance` 在 hold 仍有效时要求真实认证 source 状态新鲜且 activity 静止；freshness 缺失或过期时不会解锁。
+
+Platform 路径不会伪造 activity。Product 的认证 `TasksReconciled` event 建立持久化 freshness；周期 heartbeat 继续由正常 SDK 生命周期发送。Catalog generation 15 和现有 Product/Plugin pins 保持不变。由于不可变 Native tag 由 Workspace source SHA 确定，新 Native release 必须使用新的 Workspace SHA；本次文档 source 更新计划在 Platform release 通过验证后提供该身份。
+
+**Stage70 acceptance status:** The immutable old Platform/Native releases and exact pins remain strictly verified; Workspace post-merge CI **PASS**. Host 2238 Catalyst staging **PASS**, but first-Core `BeginCoreBootstrap` was blocked with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`; runtime source activation did not begin and original state was preserved. The new Platform P release and all later Catalyst/runtime, Plugin invocation, SFT, Client/browser, Echo, reboot, and independent-host gates remain **PENDING / NOT_RUN**.
+
+命令语法沿用已发布 preview CLI，可用于当前 Stage70 精确不可变 release 的后续验收；本节仅记录语法，不代表这些命令已经在 Host 2238 上完成：
 
 ```bash
 sudo cyrene workload install catalyst --channel preview --yes
+sudo cyrene workload install echo --channel preview --yes
+printf '%s\n' \
+  '{"protocolVersion":"cyrene.workload-plan.v1","operation":"status","workloadId":"catalyst"}' \
+  | sudo cyrene workload --json | jq .
 ```
 
-Only after Catalyst and Client activation should the user open `http://127.0.0.1:8100/` on the Ubuntu host. For remote use, replace `user@ubuntu-host` with the actual account and host, create an approved SSH local forward, and open the same address locally:
+Workspace [PR #140](https://github.com/DoHorizon-AI/Cyrene-Workspace/pull/140) merged W source `670dcc640c7716484edacf5c0f77dd7ec93b5fea`; post-merge run [38082850380](https://github.com/DoHorizon-AI/Cyrene-Workspace/actions/runs/38082850380) succeeded. Its source fix recognizes signed `python-bundle` Product artifacts when deriving the first source-owner context, keeping the selected Catalyst bundle identity separate from the six-member Core map. The paired published Platform release was P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`. Host 2238 staging passed, but the first `BeginCoreBootstrap` was blocked with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`; original transaction and guest state were retained and runtime source activation did not begin. Platform PR #103 is merged at `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4` (head `d5126f96059124be36af533e357438d388366099`); its focused suites passed 61 tests (50 library, 11 binary). Natural official release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) is pending publication and strict verification; no new P release identity is available yet.
 
-只有 Catalyst 和 Client 激活后，才在 Ubuntu 主机打开 `http://127.0.0.1:8100/`。远程访问时，将 `user@ubuntu-host` 替换为实际账户和主机，通过获准的 SSH 本地转发连接，再在本机浏览器打开相同地址：
+首次 activity source 与精确签名 Product owner 和 artifact digest 绑定，并与六成员 Core component map 分开。Workspace 将通用 `initial_source_artifact_ref` 放入 first Core bootstrap context 和精确 parent transaction。Stage70 的已发布 Platform P64 在空 generation-0 catalog 上拒绝了 `BeginCoreBootstrap`，所以 Host 2238 未进入后续 Product 启动阶段；PR #103 的新 Platform source 才增加受守卫的 generation-0-to-generation-1 契约。
+
+使用修正后的 Platform release 时，首次安装会在范围狭窄的 initial-source hold 内启动已验签 Product，由其认证 `TasksReconciled` 建立真实 source freshness。Stage70 的 P64 release 未能进入此阶段。该 hold 结束后，Workspace 使用既有 package-only Plugin 安装和 binding 流程，将选中 connection ref 投影到 root-owned `root:cyrene`、权限 `0640` 的受保护 `catalyst-plugin-refs.env`，再执行普通 Core-runtime activation/restart，使 Catalyst 读取实际 refs。原始 ref 不写入 journal。同 plan 恢复对账精确 Begin/End receipt，并在启动失败后保留 hold token。
+
+系统启动时，打包在 Workspace 中的 helper 会在 Catalyst 启动前调用 `ComponentUpdater.recover_workload_runtime_connections("catalyst")`。存在受管 Catalyst transaction 和 binding 时，它通过官方 Package Runtime recovery/status 路径重新建立 binding、读取当前 connection ref，并原子投影受保护环境文件。Catalyst 的启动顺序在 Package Runtime 之后，但 Package Runtime 停止不会传递停止 Catalyst。只有在没有受管 Catalyst owner，或精确 installer-controlled restart intent 证明 updater 正持有相关锁时，hook 才会 skip；其他锁冲突和恢复错误均 fail closed。该机制用于主机重启后恢复动态 runtime endpoint，不需要手工写 refs 或安装 helper。
+
+**Stage70 验收状态：** 旧 Platform/Native 不可变发行和精确 pins 仍通过严格验证；Workspace 合并后 CI **PASS**。Host 2238 Catalyst staging **PASS**，但 first-Core `BeginCoreBootstrap` 因 `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED` 被阻止；runtime source activation 未开始，原状态已保留。新的 Platform P release 及后续 Catalyst/runtime、Plugin invoke、SFT、Client/browser、Echo、重启和独立主机门禁仍为 **PENDING / NOT_RUN**。
+
+Only after Catalyst and Client activation should the user open `http://127.0.0.1:8100/` on the Ubuntu host. For remote use, keep the service bound to loopback, replace `user@ubuntu-host` with the actual account and host, and use an approved SSH local forward:
 
 ```bash
 ssh -L 8100:127.0.0.1:8100 user@ubuntu-host
 ```
 
-Keep the service bound to loopback. Do not expose the Client or Control listener on `0.0.0.0`; do not put installation tokens in shell commands.
-
-服务应保持 loopback 绑定。不要将 Client 或 Control listener 暴露到 `0.0.0.0`，也不要把安装 token 写入 shell 命令。
+只有 Catalyst 和 Client 激活后，才在 Ubuntu 主机打开 `http://127.0.0.1:8100/`。服务应保持 loopback 绑定；远程访问时，将 `user@ubuntu-host` 替换为实际账户和主机，通过获准的 SSH 本地转发连接。
 
 ### Host prerequisites / 主机前置条件
 
@@ -110,11 +148,11 @@ manifest, receipt, and Catalog checks below intact.
 此流程无需 `gh auth login`：它通过 HTTPS 下载公开发行物，并使用本地 detached attestation bundle 验证每个 subject。
 以下官方 signer-workflow、source-ref、source-SHA、manifest、receipt 和 Catalog 校验必须完整保留。
 
-## 1. Published 0e8 preview (fresh-host apply failed) / 已发布的 0e8 预览版（全新主机 apply 失败）
+## 1. Current Native preview and verified downloads / 当前 Native 预览版与验签下载
 
-The immutable 0e8 package passed release verification, but its first fresh-host Catalyst apply failed during signed first-Core bootstrap. The Platform source fix is merged as PR #100 at `2bbd40b3b30cd9401127a033dd33cf6902378536`, with required CI passed; its official preview release and strict verification are pending. Do not treat this candidate as accepted for a customer trial. This interim documentation PR establishes the next Workspace source W without changing the source Catalog or dependency lock. After Platform release `preview-P` passes strict verification, dispatch the existing Native producer from W with `release_inputs_json.platformReleaseId=preview-P`; the producer will create a new immutable Native preview under the existing tag convention. The commands below describe the exact currently published 0e package and installation protocol.
+The current immutable Native release is Workspace W `670dcc640c7716484edacf5c0f77dd7ec93b5fea` ([release page](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-670dcc640c7716484edacf5c0f77dd7ec93b5fea)), bound to the strictly verified Platform P release [`preview-64e4b58eb1dedc5ea328c07c9b07df55d2f38590`](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-64e4b58eb1dedc5ea328c07c9b07df55d2f38590). Native run [38083070781](https://github.com/DoHorizon-AI/Cyrene-Workspace/actions/runs/38083070781) attempt 1 completed all four jobs successfully; immutable release API ID `409187818` contains 18 actual assets. Strict no-skip verification bound 21 source tuples and 8 exact source-verifier files to W/P. The Ubuntu 24.04 DEB is 155,125,684 bytes, SHA-256 `4c0fc9f03054f8feb2154c893f5f3fd95ce71650340b099b83571c18bcad9deb`; manifest SHA-256 is `ca1c1d274427fd855d2424e943bc36950c185969e68bf5af9c9b0fc34703c89a`, and source receipt SHA-256 is `c83a5366c3a55d52386a22fe101ef744305f8459f26295aee12760a53b7fa8d5`. The bound Platform release has 52 verified assets, 24 manifests, and 6 raw manifest subjects. Release publication and pins verification do not prove Host 2238 product acceptance; Stage70 first-Core admission was blocked and all later gate results remain pending.
 
-不可变的 0e8 发行包通过了发行验证，但首次全新主机 Catalyst apply 在 signed first-Core bootstrap 阶段失败。Platform 源码修正已通过 PR #100 合并至 `2bbd40b3b30cd9401127a033dd33cf6902378536`，required CI 已通过；正式 preview 发行和严格验证仍待完成。该候选版本尚未通过客户试用验收。本次阶段文档 PR 合并后会建立新的 Workspace source W，且不会修改 source Catalog 或 dependency lock。Platform release `preview-P` 通过严格验证后，再从 W 调用现有 Native producer，并在 `release_inputs_json.platformReleaseId` 中设置 `preview-P`；producer 将按现有 tag 规则创建新的不可变 Native 预览版。下方命令用于说明当前已发布的 0e 包身份和安装协议。
+当前不可变 Native release 基于 Workspace W `670dcc640c7716484edacf5c0f77dd7ec93b5fea` （[发行页](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-670dcc640c7716484edacf5c0f77dd7ec93b5fea)），绑定已严格验证的 Platform P release [`preview-64e4b58eb1dedc5ea328c07c9b07df55d2f38590`](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-64e4b58eb1dedc5ea328c07c9b07df55d2f38590)。Native run [38083070781](https://github.com/DoHorizon-AI/Cyrene-Workspace/actions/runs/38083070781) attempt 1 的四个 job 全部成功；不可变 release API ID `409187818` 含 18 个实际资产。严格无跳过验证将 21 个 source tuple 和 8 个精确源码 verifier 文件绑定到 W/P。Ubuntu 24.04 DEB 大小为 155,125,684 字节，SHA-256 为 `4c0fc9f03054f8feb2154c893f5f3fd95ce71650340b099b83571c18bcad9deb`；manifest SHA-256 为 `ca1c1d274427fd855d2424e943bc36950c185969e68bf5af9c9b0fc34703c89a`，source receipt SHA-256 为 `c83a5366c3a55d52386a22fe101ef744305f8459f26295aee12760a53b7fa8d5`。绑定的 Platform release 有 52 个已验证资产、24 个 manifest 和 6 个原始 manifest subject。发行发布与 pins 验证不能代替 Host 2238 产品验收；Stage70 first-Core admission 已被阻止，其余 gate 结果仍待完成。
 
 Use an Ubuntu 24.04 amd64 host. The values below pin the published native
 release and the active-v2 Catalog recorded in its verified source receipt. Do
@@ -126,9 +164,9 @@ Catalog。不得用 `latest` 代替，也不得在未验证确切不可变发行
 
 ```bash
 WORKSPACE_REPOSITORY='DoHorizon-AI/Cyrene-Workspace'
-NATIVE_RELEASE_ID='native-installer-preview-0e8d8f56cc3bb827320a85671fff43220d0a4551'
+NATIVE_RELEASE_ID='native-installer-preview-670dcc640c7716484edacf5c0f77dd7ec93b5fea'
 NATIVE_SOURCE_REF='refs/heads/develop'
-NATIVE_SOURCE_SHA='0e8d8f56cc3bb827320a85671fff43220d0a4551'
+NATIVE_SOURCE_SHA='670dcc640c7716484edacf5c0f77dd7ec93b5fea'
 NATIVE_DEB_ASSET='cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb'
 NATIVE_MANIFEST_ASSET='native-installer-release-v2.json'
 NATIVE_SOURCE_RECEIPT_ASSET='native-installer-source-receipt-v2.json'
@@ -198,9 +236,9 @@ gh attestation verify SHA256SUMS \
 
 sha256sum --check --strict --ignore-missing SHA256SUMS
 printf '%s  %s\n' \
-  'ddb6548d824fd6cdc40ca3635e43e60a648bd43100661f4f5e0d26124d7b2280' "$NATIVE_DEB_ASSET" \
-  '85a0153696140d54ebb9c5c552ffc7434fa92414c942ed7b5a56c59768e481ca' "$NATIVE_MANIFEST_ASSET" \
-  'ba5d91023be13429f57c298baf7c92cad88b3399b4d2bd3f4b66bc9bd531a8ce' "$NATIVE_SOURCE_RECEIPT_ASSET" \
+  '4c0fc9f03054f8feb2154c893f5f3fd95ce71650340b099b83571c18bcad9deb' "$NATIVE_DEB_ASSET" \
+  'ca1c1d274427fd855d2424e943bc36950c185969e68bf5af9c9b0fc34703c89a' "$NATIVE_MANIFEST_ASSET" \
+  'c83a5366c3a55d52386a22fe101ef744305f8459f26295aee12760a53b7fa8d5' "$NATIVE_SOURCE_RECEIPT_ASSET" \
   | sha256sum --check --strict
 test -s "$NATIVE_DEB_ASSET"
 test -s "$NATIVE_DEB_ASSET.attestation.jsonl"
@@ -290,6 +328,10 @@ printf '%s\n' \
   | sudo cyrene workload --json | jq .
 ```
 
+**Stage70 host-acceptance gate:** The old Native release and pins are verified as immutable artifacts, but Host 2238 staging passed and first-Core `BeginCoreBootstrap` was blocked with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`. Do not run the install/apply command below against old W670/P64. Remaining gates are **PENDING / NOT_RUN**.
+
+**Stage70 主机验收门禁：** 旧 Native release 和 pins 已作为不可变发行物完成核验；Host 2238 staging 通过，但 first-Core `BeginCoreBootstrap` 因 `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED` 被阻止。不要对旧 W670/P64 执行下方 install/apply 命令。后续门禁仍为 **PENDING / NOT_RUN**。
+
 The guided command checks the Catalog, displays the resolved component identities,
 stages that exact plan, and applies it only with its matching plan ID and digest.
 `--yes` confirms the plan produced by that invocation; it does not skip check,
@@ -308,74 +350,28 @@ Maintenance SDK, plus four recommended data plugins:
 - `cyrene-tools-dataset-generation`
 - `cyrene-tools-knowledge-preparation`
 
-On a fresh host, the normal checked Catalyst workload plan also performs the
+On a fresh host, the normal checked Catalyst workload plan performs the
 official first-Core bootstrap during `apply`: it initializes the missing
-activity-source catalog and starts the required Core components from the exact
-verified plan. Do not manually import or create the activity-source catalog,
-run a separate Core recovery command, or set `PYTHONPATH`. Review the check and
-staged component identities; if bootstrap reports a blocker, keep the receipt
-and error details and stop rather than editing runtime state by hand.
+activity-source catalog and starts required Core components from the exact
+verified plan. The signed Plugin release provisions a generic preparer from a
+selected Plugin wheel in that same plan, after checking the staged release
+identity, digest, and attestation. The Stage70 source fix also recognizes signed `python-bundle` Product artifacts
+when binding the first activity source owner, so the selected Catalyst bundle
+carries its exact component and artifact digest. The preparer identity stays
+bound to the parent workload plan while the C10 child bootstrap identity
+remains distinct;
+an interrupted apply can continue through the saved-resolution path for that
+exact plan. No manual helper installation, separate Core recovery command,
+source checkout, or `PYTHONPATH` is required. Review the check and staged
+component identities; if bootstrap reports a blocker, keep the receipt and
+error details and stop rather than editing runtime state by hand. This source
+path is merged, while host acceptance is still in progress.
 
-The fresh Ubuntu 24.04.5 guest 2234 completed its 34-gate run with 15 PASS, 1 FAIL, and 18 NOT_RUN. `catalyst_workload_apply` returned retryable `FIRST_CORE_BOOTSTRAP_FAILED`; the first-Core Kernel service exited with status 1 after receiving a named sandbox peer UID/GID value where its parser requires an unsigned integer. The durable transaction entered `hold_required` at `cohort_starting`. Read-only diagnosis identified the mismatch in the frozen Platform source `daabf9ff561b4ab9296094d8198fd1fa3418b32b`. The source correction is merged in [Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100) at `2bbd40b3b30cd9401127a033dd33cf6902378536`; required CI passed. The official Platform preview release and strict verification are pending. Catalyst runtime activation and all later runtime, Client, SFT producer/consumer, reboot, plugin-supervision, and Echo gates remain unverified. This interim Workspace documentation PR establishes source W and does not change the source Catalog or dependency lock. After Platform release `preview-P` passes strict verification, dispatch the existing Native producer from W with `release_inputs_json.platformReleaseId=preview-P`; its resulting immutable preview can then receive the follow-on host acceptance. Do not replace or retarget the 0e release. Preserve the failed host evidence and transaction state until the follow-up acceptance is completed. Do not edit Broker state by hand or infer workload success from signed package verification.
+全新主机上的 Catalyst 正常 checked workload plan 会在 `apply` 期间执行官方 first-Core bootstrap：基于精确核验的 plan 初始化缺失的 activity-source catalog，并启动必需的 Core 组件。Workspace 会在校验 staged release identity、digest 和 attestation 后，从同一 plan 所选 Plugin 的 wheel 配置通用 preparer。Stage70 源码修复还将已签名的 `python-bundle` Product 纳入首次 activity source owner 绑定，使所选 Catalyst bundle 保留精确的 component 与 artifact digest。preparer 身份绑定 parent workload plan，C10 child bootstrap 身份保持独立；apply 中断后可通过 saved-resolution path 继续同一个精确 plan。无需手工安装 helper、运行单独的 Core 恢复命令、checkout 源码或设置 `PYTHONPATH`。检查 check 和 staged component 身份；若 bootstrap 报告 blocker，应保留 receipt 与错误详情并停止，不要手工修改 runtime state。该源码路径已合并；主机验收仍在进行。
 
-全新 Ubuntu 24.04.5 主机 2234 已完成 34 项验收：15 项通过、1 项失败、18 项未运行。`catalyst_workload_apply` 返回可重试的 `FIRST_CORE_BOOTSTRAP_FAILED`；first-Core Kernel 服务收到 parser 不接受的命名 sandbox peer UID/GID 值后以状态码 1 退出，而 parser 要求 unsigned integer。durable transaction 停在 `hold_required` / `cohort_starting`。只读诊断在冻结的 Platform 源码 `daabf9ff561b4ab9296094d8198fd1fa3418b32b` 中确认了参数契约不匹配。源码修正已在 [Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100) 合并至 `2bbd40b3b30cd9401127a033dd33cf6902378536`，required CI 已通过；正式 Platform preview 发行和严格验证仍待完成。Catalyst runtime 激活及所有后续 runtime、Client、SFT producer/consumer、reboot、plugin supervision 和 Echo 门禁仍未验证。本次阶段 Workspace 文档 PR 合并后会建立新的 source W，且不会修改 source Catalog 或 dependency lock。Platform release `preview-P` 通过严格验证后，再从 W 调用现有 Native producer 并设置 `release_inputs_json.platformReleaseId=preview-P`，再对产出的不可变预览版继续做主机验收。不要替换或重定向 0e release。保留失败主机证据与事务状态，直至后续验收完成。不要手工修改 Broker 状态，也不要把签名包验证当作 workload 成功。
+The Host 2238 Stage70 attempt used only Workspace W `670dcc640c7716484edacf5c0f77dd7ec93b5fea`, Platform P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`, and their bound immutable Native release. Actual status: Catalyst staging **PASS**; first-Core `BeginCoreBootstrap` blocked with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`; original guest/transaction preserved; runtime source activation and all later runtime/product gates **PENDING / NOT_RUN**. Platform PR #103 is merged, but its official release remains pending.
 
-To inspect an already installed workload, use the read-only status request:
-
-若需检查已安装 workload，使用以下只读 status 请求：
-
-```bash
-sudo cyrene workload --json <<'JSON' | jq .
-{"protocolVersion":"cyrene.workload-plan.v1","operation":"status","workloadId":"catalyst"}
-JSON
-```
-
-Required components cannot be excluded. If a required component is excluded,
-`check` returns a blocker and no plan may proceed to stage or apply. Recommended
-components are selected by default and may be explicitly excluded in `check`.
-For example, to omit only Document Parsing, check with `channel` set to
-`preview`; use that same value in the resulting stage and apply requests:
-
-必需组件不能取消；若排除必需组件，`check` 会返回 blocker，计划不得进入 stage 或 apply。推荐组件默认纳入，
-可在 `check` 中显式排除。以下示例只取消 Document Parsing，并将 channel 设为 `preview`；之后的 stage/apply 请求也要
-使用相同值：
-
-```bash
-sudo cyrene workload --json <<'JSON' | jq .
-{"protocolVersion":"cyrene.workload-plan.v1","operation":"check","workloadId":"catalyst","channel":"preview","targetId":"linux-ubuntu-24.04-x86_64","action":"install","selections":{"includeComponentIds":[],"excludeComponentIds":["cyrene-tools-document-parsing"],"choices":{}}}
-JSON
-```
-
-Proceed only when the returned `result.status` is `ready` and the selected rows
-match the intended choices. Copy that response's exact `planId`, `planDigest`,
-and `channel` into the stage request:
-
-只有在返回的 `result.status` 为 `ready` 且所选组件符合预期时才继续。将该响应中的精确 `planId` 与
-`planDigest` 填入 stage 请求，并保留相同的 `channel`：
-
-```bash
-sudo cyrene workload --json <<'JSON' | jq .
-{"protocolVersion":"cyrene.workload-plan.v1","operation":"stage","workloadId":"catalyst","channel":"preview","targetId":"linux-ubuntu-24.04-x86_64","action":"install","planId":"<planId-from-check>","planDigest":"sha256:<64-lowercase-hex-from-check>"}
-JSON
-```
-
-Review the staged rows and only then apply the same action, channel, plan ID,
-and digest:
-
-检查 stage 返回的组件行；确认后才用相同 action、channel、plan ID 和 digest 执行 apply：
-
-```bash
-sudo cyrene workload --json <<'JSON' | jq .
-{"protocolVersion":"cyrene.workload-plan.v1","operation":"apply","workloadId":"catalyst","channel":"preview","targetId":"linux-ubuntu-24.04-x86_64","action":"install","planId":"<same-planId>","planDigest":"sha256:<same-64-hex>","confirmation":{"planId":"<same-planId>","planDigest":"sha256:<same-64-hex>","confirmed":true}}
-JSON
-```
-
-An omitted plugin remains a missing capability; do not claim its feature is
-available or silently substitute another package. Use the capability response
-from the Product/Client API to explain which optional function is unavailable.
-
-未安装的插件仍表示对应 capability 缺失；不得宣称其功能可用，也不得静默替换其他包。应依据 Product/Client
-API 的 capability 响应说明具体不可用的可选功能。
+Host 2238 的 Stage70 尝试仅使用 Workspace W `670dcc640c7716484edacf5c0f77dd7ec93b5fea`、Platform P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590` 及其绑定的不可变 Native release。实际状态：Catalyst staging **PASS**；first-Core `BeginCoreBootstrap` 因 `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED` 被阻止；原 guest/transaction 已保留；runtime source activation 及所有后续 runtime/product 门禁 **PENDING / NOT_RUN**。Platform PR #103 已合并，但正式 release 仍待完成。
 
 ## 3. Install one standalone plugin / 单独安装一个插件
 
@@ -416,9 +412,7 @@ index/manifest/attestation chain.
 
 Echo is a separate optional workload; its Linux OCI preview release is listed
 above. Catalyst uses a native bundle and does **not** require Docker. Selecting
-Echo requires the official [Docker Engine for Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
-with an active daemon and the standard Unix socket available to the privileged
-workload operation. Check the host before selecting Echo:
+Echo requires Docker Engine installed using Docker's official Ubuntu instructions; use its supported APT repository procedure, review any existing conflicting packages before changing them, and avoid the convenience script for production hosts. Keep the daemon active and the standard Unix socket available to the privileged workload operation. After following the [official installation guide](https://docs.docker.com/engine/install/ubuntu/), verify the service and a test container before selecting Echo:
 
 Echo 是单独的可选 workload，其 Linux OCI 预览发行物见上表。Catalyst 使用原生 bundle，**不需要 Docker**。
 选择 Echo 需要安装官方 [Ubuntu Docker Engine](https://docs.docker.com/engine/install/ubuntu/)，并确保 daemon 正在
@@ -427,6 +421,7 @@ Echo 是单独的可选 workload，其 Linux OCI 预览发行物见上表。Cata
 ```bash
 sudo systemctl is-active docker
 sudo docker info
+sudo docker run --rm hello-world
 test -S /var/run/docker.sock
 ```
 
@@ -460,12 +455,11 @@ sudo cyrene workload uninstall cyrene-echo --workload echo --channel preview --y
 To omit the evaluator, use the same check/stage/apply protocol with workload
 `echo`, `channel: "preview"`, and
 `excludeComponentIds: ["cyrene-evaluation-exact-match"]`; repeat the same
-channel for stage and apply. The release and signed Catalog path are available;
-Final evidence for Echo installation, evaluation, and lifecycle acceptance has not been recorded.
+channel for stage and apply. The official release and signed Catalog path are available; source-matched host evidence for Echo installation, evaluation, and lifecycle acceptance is pending.
 
 若不安装 evaluator，使用相同的 check/stage/apply 协议并设置 workload `echo`、`channel: "preview"` 与
-`excludeComponentIds: ["cyrene-evaluation-exact-match"]`；stage 和 apply 重复相同 channel。发行物和签名 Catalog
-路径已就绪；Echo 安装、评测与 lifecycle 尚无可核验的最终验收结果。
+`excludeComponentIds: ["cyrene-evaluation-exact-match"]`；stage 和 apply 重复相同 channel。官方发行物和签名 Catalog
+路径已就绪；匹配源码的 Echo 安装、评测与 lifecycle 主机证据仍待完成。
 
 ## 5. Data, secrets, and acceptance / 数据、凭据与验收
 
@@ -484,14 +478,22 @@ Workload 安装采用增量方式，默认保留用户 Dataset、Artifact、审�
 Catalyst environment/drop-in，重复安装复用该受保护 token。不要自行创建、粘贴、轮换 Control token，也不要将其写入
 命令行或本文。Control 保持 loopback 绑定；Web 通过同源 Nginx 路由和已有且获准的 SSH 转发访问。
 
-### Acceptance boundary and host limitations / 验收边界与主机限制
+### Rollback and retained data / 回滚与数据保留
 
-The official 0e8 release and its signatures are verified, but the 2234 fresh-host apply failed before Core activation. Its terminal ledger records 15 PASS, 1 FAIL, and 18 NOT_RUN. Do not describe Core startup, Client access, SFT export/independent loading, or Echo lifecycle as passed until the corrected immutable preview completes those gates. See the ADR for the diagnosed cause and acceptance boundary.
+The preview CLI documents workload install and uninstall; it does not expose a user-selected release downgrade command. The Platform package runtime can roll back a managed maintenance transaction, but that mechanism is not a promise that an operator can select any prior workload release. On failure, keep the plan, receipts, and transaction journal, stop on the reported blocker, and use the supported maintenance path; do not edit Broker/runtime state or manually replace package files. Workload uninstall removes the selected workload, not its user data. The default lifecycle preserves datasets, artifacts, review history, and backups, but retention is not a substitute for an independently maintained backup.
 
-官方 0e8 发行版及签名已验证，但 2234 全新主机 apply 在 Core 激活前失败。终态 ledger 记录 15 项通过、1 项失败、18 项未运行。只有修正后的不可变预览版通过相应门禁，才能报告 Core 启动、Client 访问、SFT 导出/独立加载或 Echo lifecycle 通过。诊断原因与验收边界见 ADR。
+此预览 CLI 文档提供 workload install 与 uninstall，没有面向用户的指定发行版本降级命令。Platform package runtime 可回滚受管理的 maintenance transaction，但这不表示操作者可以任意选择过去的 workload 版本。发生失败时保留 plan、receipt 与 transaction journal，按报告的 blocker 停止并使用受支持的 maintenance 流程；不要编辑 Broker/runtime 状态，也不要手动替换包文件。卸载 workload 会移除所选 workload，不会删除用户数据。默认生命周期保留 Dataset、Artifact、审核历史和备份，但这不能替代单独维护的备份。
 
-The resolver currently uses the public GitHub API without a supported authenticated download path. A temporary API quota limit can return retryable `NETWORK_ERROR` before stage/apply; keep the plan and receipts, wait for the quota window to reset, then retry. Do not inject `GH_TOKEN` or edit local runtime state.
+### Acceptance status / 验收状态
 
-当前 resolver 通过公开 GitHub API 获取元数据，尚无受支持的认证下载入口。临时 API 配额限制可能在 stage/apply 前返回可重试的 `NETWORK_ERROR`；保留 plan 和 receipt，等待配额窗口恢复后重试。不要注入 `GH_TOKEN` 或手工修改本机 runtime 状态。
+The previously published P64 and W670 releases remain immutable and strictly verified. On Host 2238, Catalyst staging **PASS** but first-Core Begin was blocked with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`; original transaction and guest state were preserved, and runtime source activation did not begin. Platform PR #103 is merged, but its official release is still pending. Actual Catalyst runtime, Plugin invocation, boot-time binding recovery/restart, Client/browser, SFT, Echo, and full independent-host acceptance remain **PENDING / NOT_RUN**. Do not infer acceptance from release signatures, package installation, service health, or handoff readiness.
+
+此前发布的 P64 与 W670 release 仍是针对精确源码身份严格验证过的不可变资产。Host 2238 的 Catalyst staging **PASS**，但首次 Core Begin 因 `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED` 被阻止；原 transaction 与 guest 状态已保留，runtime source activation 未开始。Platform PR #103 已合并，正式 release 仍待完成。Catalyst runtime、Plugin invoke、启动时 binding 恢复/重启、Client/browser、SFT、Echo 和全新主机验收仍为 **PENDING / NOT_RUN**。不得仅凭发行签名、包安装、服务健康或交接就绪推断验收通过。
+
+### Previous W2 release / 较早的 W2 发行版本
+
+The earlier immutable W2 Native release [`native-installer-preview-8187111d7d7e6849404cd780b6bc9f23609865bb`](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-8187111d7d7e6849404cd780b6bc9f23609865bb) is superseded. It predates the current source pair and is not the current installation target or acceptance evidence.
+
+此前不可变的 W2 Native release [`native-installer-preview-8187111d7d7e6849404cd780b6bc9f23609865bb`](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-8187111d7d7e6849404cd780b6bc9f23609865bb) 已被取代。它早于当前源码对，不是当前安装目标或验收证据。
 
 The [ADR](ADR_MODULAR_DISTRIBUTION_V01.md) records the accepted architecture, exact release evidence, and current acceptance boundary.
