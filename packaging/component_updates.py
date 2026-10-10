@@ -12034,6 +12034,425 @@ class ComponentUpdater:
         transaction["packageRuntimeStarted"] = True
         _atomic_json(transaction_path, transaction)
 
+    def _resume_first_core_before_workload_inventory(
+        self,
+        stored: dict[str, Any],
+        transaction: dict[str, Any] | None,
+        transaction_path: Path,
+        *,
+        lock_lease: Any | None,
+        bootstrap_module: Any | None,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Resume an exact held Core transaction before SDK-gated inventory.
+
+        A held first install can persist Package Runtime policy before it has
+        persisted its Core result or SDK prepare intent. Resume only the same
+        signed/staged transaction, then use the existing durable SDK path.
+        中文：首装可能先持久化 Package Runtime 策略，再写入 Core 结果或 SDK 意图；
+        这里只恢复同一份已签名、已暂存的事务，并复用现有 SDK 持久化流程。
+        """
+
+        if not isinstance(transaction, dict):
+            return None, False
+        status = transaction.get("firstCoreBootstrapStatus")
+        if status not in {"pending", "installed"} or transaction.get("phase") in {
+            "succeeded",
+            "rolled_back",
+        }:
+            return None, False
+        plan_id = stored.get("planId")
+        plan_digest = stored.get("planDigest")
+        workload_id = stored.get("workloadId")
+        block = stored.get("firstCoreBootstrap")
+        resolution = stored.get("resolution")
+        if (
+            not isinstance(block, dict)
+            or not isinstance(resolution, dict)
+            or transaction.get("transactionKind") != "workload-assembly.v1"
+            or transaction.get("action") != "install"
+            or transaction.get("planId") != plan_id
+            or transaction.get("planDigest") != plan_digest
+            or transaction.get("workloadId") != workload_id
+            or transaction.get("targetId") != stored.get("targetId")
+            or stored.get("action") != "install"
+            or stored.get("channel") not in {"stable", "preview"}
+            or transaction.get("firstCoreBootstrap") != block
+            or transaction.get("resolution") != resolution
+            or transaction.get("selectedComponents") != resolution.get("selectedComponents")
+            or transaction.get("stagedComponents") != stored.get("stagedComponents")
+            or transaction.get("catalogDigest") != stored.get("catalogDigest")
+            or transaction.get("channel") != stored.get("channel")
+            or resolution.get("status") != "ready"
+            or resolution.get("planId") != plan_id
+            or resolution.get("planDigest") != plan_digest
+            or resolution.get("firstCoreBootstrap") != block
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "The held first-Core workload identity is inconsistent."
+            )
+
+        selected_rows = resolution.get("selectedComponents")
+        staged_rows = stored.get("stagedComponents")
+        if not isinstance(selected_rows, list) or not isinstance(staged_rows, list):
+            raise UpdateError("INVALID_STAGE", "The held workload component rows are malformed.")
+        selected_by_id = {
+            row.get("componentId"): row
+            for row in selected_rows
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        staged_by_id = {
+            row.get("componentId"): row
+            for row in staged_rows
+            if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+        }
+        if (
+            len(selected_by_id) != len(selected_rows)
+            or len(staged_by_id) != len(staged_rows)
+            or set(selected_by_id) != set(staged_by_id)
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "The held workload rows differ from the staged plan."
+            )
+
+        sdk_id = WORKLOAD_SDK_COMPONENT_ID
+        sdk_row = selected_by_id.get(sdk_id)
+        sdk_stage = staged_by_id.get(sdk_id)
+        plugin_rows = [
+            row
+            for row in selected_rows
+            if isinstance(row, dict) and row.get("artifactKind") == "plugin-package"
+        ]
+        if not isinstance(sdk_row, dict) or not isinstance(sdk_stage, dict) or not plugin_rows:
+            return None, False
+        if not (
+            DEFAULT_PACKAGE_RUNTIME_POLICY.exists() or DEFAULT_PACKAGE_RUNTIME_POLICY.is_symlink()
+        ):
+            return None, False
+
+        sdk_module = self._load_workload_sdk_environment()
+        try:
+            current_sdk = sdk_module.read_workload_sdk_environment()
+        except Exception as error:
+            raise UpdateError(
+                "WORKLOAD_SDK_READBACK_REQUIRED",
+                "The operator SDK state cannot be verified before held recovery.",
+                retryable=True,
+            ) from error
+        if current_sdk is not None:
+            return None, False
+
+        intent = transaction.get("sdkPrepareIntent")
+        if status == "pending":
+            if transaction.get("firstCoreBootstrapResult") is not None:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "A pending first-Core transaction has a saved result."
+                )
+            if intent is not None:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "SDK preparation started before first-Core completed."
+                )
+        elif not isinstance(transaction.get("firstCoreBootstrapResult"), dict):
+            raise UpdateError("INVALID_TRANSACTION", "The completed first-Core result is missing.")
+
+        staged_identity = sdk_stage.get("stagedIdentity")
+        if (
+            sdk_stage.get("status") != "staged"
+            or sdk_stage.get("artifactKind") != "python-bundle"
+            or not isinstance(staged_identity, dict)
+            or staged_identity.get("planId") != plan_id
+            or staged_identity.get("planDigest") != plan_digest
+            or any(
+                sdk_stage.get(field) != sdk_row.get(field)
+                for field in WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS
+            )
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "The staged SDK identity differs from the confirmed plan."
+            )
+        if intent is None:
+            if (
+                transaction.get("phase") != "applying"
+                or transaction.get("sdkEnvironment") is not None
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "The SDK prepare intent is missing from an ambiguous transaction.",
+                )
+            operator_root = getattr(sdk_module, "WORKLOAD_OPERATOR_ROOT", None)
+            if not isinstance(operator_root, Path):
+                raise UpdateError(
+                    "WORKLOAD_SDK_UNAVAILABLE", "The operator SDK root is unavailable."
+                )
+            try:
+                operator_root.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise UpdateError(
+                    "WORKLOAD_SDK_READBACK_REQUIRED", "The operator SDK root cannot be inspected."
+                ) from error
+            else:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "The SDK root exists without its durable prepare intent."
+                )
+        elif (
+            not isinstance(intent, dict)
+            or intent.get("schemaVersion") != 1
+            or intent.get("planId") != plan_id
+            or intent.get("planDigest") != plan_digest
+            or intent.get("componentId") != sdk_id
+            or intent.get("selectedIdentity") != sdk_row
+            or intent.get("stagedIdentity") != staged_identity
+            or intent.get("priorIdentity") is not None
+            or intent.get("status") != "pending"
+            or transaction.get("phase") != "operator_sdk_prepare_pending"
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "The pending SDK intent differs from this plan."
+            )
+
+        current_workload = next(
+            (
+                row
+                for row in self.catalog.get("workloads", [])
+                if isinstance(row, dict) and row.get("workloadId") == workload_id
+            ),
+            None,
+        )
+        source_policy = (
+            current_workload.get("sourcePolicy") if isinstance(current_workload, dict) else None
+        )
+        if (
+            not isinstance(source_policy, dict)
+            or resolution.get("sourcePolicy") != source_policy
+            or transaction.get("sourcePolicy") != source_policy
+            or stored.get("catalogDigest") != self.catalog_digest
+            or transaction.get("componentArtifactDigests")
+            != self._workload_component_artifact_map(
+                selected_rows, staged_by_id, {"components": {}}
+            )
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "The held workload source or staged digest map changed."
+            )
+
+        sdk_component = self.components.get(sdk_id)
+        sdk_target_id = sdk_row.get("targetId")
+        if not isinstance(sdk_component, dict) or not isinstance(sdk_target_id, str):
+            raise UpdateError("INVALID_STAGE", "The signed SDK component or target is unavailable.")
+        sdk_target = self._target_for(sdk_component, target_id=sdk_target_id)
+        if not isinstance(sdk_target, dict):
+            raise UpdateError(
+                "UNSUPPORTED_TARGET", "The signed SDK target is unavailable on this host."
+            )
+        if (
+            sdk_target.get("artifactKind") != "python-bundle"
+            or sdk_row.get("artifactKind") != "python-bundle"
+        ):
+            raise UpdateError(
+                "UNSUPPORTED_ARTIFACT",
+                "The signed SDK target does not resolve to the required Python bundle artifact.",
+            )
+        candidate = self._candidate(
+            sdk_component,
+            sdk_target,
+            stored["channel"],
+            release_id=sdk_row.get("releaseId"),
+        )
+        if (
+            candidate.release_tag != sdk_row.get("releaseId")
+            or candidate.manifest_uri != sdk_row.get("manifestUri")
+            or candidate.manifest_digest != sdk_row.get("manifestDigest")
+            or candidate.manifest_asset_digest != sdk_row.get("manifestAssetDigest")
+            or candidate.artifact_digest != sdk_row.get("digest")
+            or candidate.manifest.get("version") != sdk_row.get("version")
+            or candidate.manifest.get("target") != sdk_target.get("target")
+        ):
+            raise UpdateError(
+                "PLAN_CHANGED",
+                "The staged SDK no longer matches its signed release.",
+                retryable=True,
+            )
+        stored_candidates = stored.get("candidates")
+        candidate_projection = (
+            stored_candidates.get(sdk_id) if isinstance(stored_candidates, dict) else None
+        )
+        if not isinstance(candidate_projection, dict) or any(
+            candidate_projection.get(field) != value
+            for field, value in {
+                "manifestUri": candidate.manifest_uri,
+                "manifestDigest": candidate.manifest_digest,
+                "manifestAssetDigest": candidate.manifest_asset_digest,
+                "artifactDigest": candidate.artifact_digest,
+                "releaseTag": candidate.release_tag,
+                "targetId": sdk_row.get("targetId"),
+            }.items()
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", "The durable SDK candidate differs from its signed release."
+            )
+
+        sdk_validate = getattr(sdk_module, "_validate_candidate", None)
+        sdk_require_file = getattr(sdk_module, "_require_root_file", None)
+        sdk_require_directory = getattr(sdk_module, "_require_root_directory", None)
+        sdk_require_chain = getattr(sdk_module, "_require_root_directory_chain", None)
+        sdk_read_wheel = getattr(sdk_module, "_read_verified_wheel", None)
+        if not all(
+            callable(item)
+            for item in (
+                sdk_validate,
+                sdk_require_file,
+                sdk_require_directory,
+                sdk_require_chain,
+                sdk_read_wheel,
+            )
+        ):
+            raise UpdateError("WORKLOAD_SDK_UNAVAILABLE", "The SDK stage verifier is incomplete.")
+        try:
+            verified_stage = sdk_validate(
+                {**sdk_row, "verification": {"identityAttested": True}}, staged_identity
+            )
+            sdk_require_file(verified_stage["archivePath"], "SDK archive")
+            sdk_require_chain(verified_stage["archivePath"].parent, "SDK archive path")
+            sdk_require_chain(verified_stage["bundlePath"], "SDK bundle path")
+            sdk_require_directory(verified_stage["bundlePath"], "SDK bundle", exact_mode=None)
+            if _file_digest(verified_stage["archivePath"]) != sdk_row.get("digest"):
+                raise ValueError("staged SDK archive digest differs from the selected release")
+            sdk_read_wheel(verified_stage["wheelPath"], verified_stage["wheelDigest"])
+        except Exception as error:
+            raise UpdateError("INVALID_STAGE", "The staged SDK payload failed readback.") from error
+
+        projected_resolution = json.loads(json.dumps(resolution))
+        projected_block, core_candidates = self._first_core_resolution_projection(
+            projected_resolution,
+            {},
+            workload_id=workload_id,
+            channel=stored["channel"],
+            expected_block=block,
+        )
+        if (
+            projected_block != block
+            or projected_resolution.get("planId") != plan_id
+            or projected_resolution.get("planDigest") != plan_digest
+        ):
+            raise UpdateError(
+                "PLAN_CHANGED",
+                "The signed first-Core hold no longer matches this plan.",
+                retryable=True,
+            )
+        if lock_lease is None or bootstrap_module is None:
+            raise UpdateError(
+                "HELPER_UNAVAILABLE", "Held first-Core recovery requires the active updater lock."
+            )
+        stage_record = stored.get("firstCoreBootstrapStage")
+        if (
+            not isinstance(stage_record, dict)
+            or stage_record.get("schemaVersion") != 1
+            or stage_record.get("parentPlanId") != plan_id
+            or stage_record.get("parentPlanDigest") != plan_digest
+        ):
+            raise UpdateError("INVALID_STAGE", "The held first-Core stage binding is malformed.")
+        staged_core = self._validate_first_core_stage_items(
+            block,
+            core_candidates,
+            stage_record.get("stagedComponents"),
+            plan_id=plan_id,
+            plan_digest=plan_digest,
+        )
+        broker_candidate = core_candidates.get(BROKER_COMPONENT_ID)
+        broker_stage = next(row for row in staged_core if row["componentId"] == BROKER_COMPONENT_ID)
+        if not isinstance(broker_candidate, Candidate):
+            raise UpdateError("INVALID_STAGE", "The staged Broker candidate is unavailable.")
+        broker_release = self._read_first_core_broker_release(
+            broker_candidate,
+            broker_stage,
+            stage_record.get("brokerProofs"),
+            projected_resolution,
+            plan_id=plan_id,
+            plan_digest=plan_digest,
+        )
+        core_module = self._load_native_core_bootstrap()
+        journal_path_reader = getattr(core_module, "_journal_path", None)
+        journal_reader = getattr(core_module, "_read_private_json", None)
+        if not callable(journal_path_reader) or not callable(journal_reader):
+            raise UpdateError(
+                "HELPER_UNAVAILABLE", "The first-Core recovery journal reader is unavailable."
+            )
+        try:
+            core_journal = journal_reader(journal_path_reader(self))
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The exact first-Core journal cannot be read safely.",
+                retryable=True,
+            ) from error
+        phase_is_exact = isinstance(core_journal, dict) and (
+            core_journal.get("phase") == "hold_required"
+            and core_journal.get("progress") == "catalog_initialized"
+            or core_journal.get("phase") == "succeeded"
+        )
+        if (
+            not phase_is_exact
+            or core_journal.get("mode") != "fresh-workload-first-core"
+            or core_journal.get("planId") != block.get("planId")
+            or core_journal.get("planDigest") != block.get("planDigest")
+            or core_journal.get("firstCoreBootstrap") != block
+            or core_journal.get("componentArtifactDigests")
+            != block.get("maintenanceComponentArtifactDigests")
+            or (status == "installed" and core_journal.get("phase") != "succeeded")
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "Held recovery requires the exact existing C10 journal and hold progress.",
+                retryable=True,
+            )
+        activity_catalog, _source_ids = self._activity_catalog(allow_uninitialized=True)
+        if activity_catalog.get("generation") != 1:
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Held first-Core recovery requires catalog generation one.",
+                retryable=True,
+            )
+        source_principals = self._workload_source_principals(source_policy, activity_catalog)
+        parent_plan = {
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "catalogDigest": stored["catalogDigest"],
+            "channel": stored["channel"],
+            "firstCoreBootstrap": block,
+            "resolution": projected_resolution,
+        }
+        result = self._run_fresh_workload_first_core(
+            parent_plan,
+            staged_core,
+            broker_release,
+            source_policy,
+            source_principals,
+            lock_lease=lock_lease,
+            bootstrap_module=bootstrap_module,
+        )
+        if status == "installed":
+            if transaction.get("firstCoreBootstrapResult") != result:
+                raise UpdateError(
+                    "FIRST_CORE_READBACK_REQUIRED",
+                    "The completed first-Core result changed during recovery.",
+                    retryable=True,
+                )
+        else:
+            transaction["firstCoreBootstrapResult"] = result
+            transaction["firstCoreBootstrapStatus"] = "installed"
+            _atomic_json(transaction_path, transaction)
+        self._prepare_workload_sdk_durably(
+            transaction,
+            transaction_path,
+            sdk_module,
+            sdk_row,
+            sdk_stage,
+            plan_id=plan_id,
+            plan_digest=plan_digest,
+        )
+        return result, True
+
     def _apply_workload_install_assembled(
         self,
         stored: dict[str, Any],
@@ -12044,6 +12463,10 @@ class ComponentUpdater:
     ) -> dict[str, Any]:
         """Apply one signed workload using the existing journal and separated holds."""
 
+        if not _running_as_root():
+            raise UpdateError(
+                "PRIVILEGE_REQUIRED", "Applying a workload requires the root-owned update helper."
+            )
         plan_id = stored["planId"]
         plan_digest = stored["planDigest"]
         workload_id = stored["workloadId"]
@@ -12066,6 +12489,16 @@ class ComponentUpdater:
                 )
             if prior_transaction.get("phase") == "succeeded":
                 return prior_transaction["result"]
+        preinventory_first_core_result, preinventory_sdk_prepared = (
+            self._resume_first_core_before_workload_inventory(
+                stored,
+                prior_transaction,
+                transaction_path,
+                lock_lease=lock_lease,
+                bootstrap_module=bootstrap_module,
+            )
+        )
+        if isinstance(prior_transaction, dict):
             holds = prior_transaction.get("maintenanceHolds", {})
             package_hold = holds.get("package-only") if isinstance(holds, dict) else None
             if (
@@ -12125,10 +12558,6 @@ class ComponentUpdater:
         }:
             raise UpdateError(
                 "INVALID_STAGE", "The staged workload component set differs from the signed plan."
-            )
-        if not _running_as_root():
-            raise UpdateError(
-                "PRIVILEGE_REQUIRED", "Applying a workload requires the root-owned update helper."
             )
 
         plugin_rows: list[dict[str, Any]] = []
@@ -12379,7 +12808,7 @@ class ComponentUpdater:
                 )
         _atomic_json(transaction_path, transaction)
 
-        first_core_result: dict[str, Any] | None = None
+        first_core_result: dict[str, Any] | None = preinventory_first_core_result
         if isinstance(first_core_block, dict):
             if lock_lease is None or bootstrap_module is None:
                 raise UpdateError(
@@ -12432,22 +12861,23 @@ class ComponentUpdater:
                 "firstCoreBootstrap": first_core_block,
                 "resolution": resolution,
             }
-            transaction["firstCoreBootstrapStatus"] = "pending"
-            _atomic_json(transaction_path, transaction)
-            first_core_result = self._run_fresh_workload_first_core(
-                first_core_parent_plan,
-                staged_core,
-                broker_release,
-                source_policy_for_core,
-                source_principals,
-                lock_lease=lock_lease,
-                bootstrap_module=bootstrap_module,
-            )
-            transaction["firstCoreBootstrapResult"] = first_core_result
-            transaction["firstCoreBootstrapStatus"] = "installed"
-            _atomic_json(transaction_path, transaction)
+            if first_core_result is None:
+                transaction["firstCoreBootstrapStatus"] = "pending"
+                _atomic_json(transaction_path, transaction)
+                first_core_result = self._run_fresh_workload_first_core(
+                    first_core_parent_plan,
+                    staged_core,
+                    broker_release,
+                    source_policy_for_core,
+                    source_principals,
+                    lock_lease=lock_lease,
+                    bootstrap_module=bootstrap_module,
+                )
+                transaction["firstCoreBootstrapResult"] = first_core_result
+                transaction["firstCoreBootstrapStatus"] = "installed"
+                _atomic_json(transaction_path, transaction)
 
-        if sdk_entry is not None:
+        if sdk_entry is not None and not preinventory_sdk_prepared:
             selected_sdk, staged_sdk = sdk_entry
             self._prepare_workload_sdk_durably(
                 transaction,

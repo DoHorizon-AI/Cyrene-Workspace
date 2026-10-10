@@ -1406,6 +1406,25 @@ def test_installer_script_scan_allows_only_stage_bootstrap_and_unit_reload(tmp_p
         module._static_installer_activation_check(control)
 
 
+def test_deb_builder_maintainer_scripts_pass_release_activation_scan(tmp_path: Path) -> None:
+    module = _module()
+    build_script = (WORKSPACE_ROOT / "packaging/build-deb.sh").read_text(encoding="utf-8")
+    control = tmp_path / "DEBIAN"
+    control.mkdir()
+
+    for name in module.MAINTAINER_SCRIPT_NAMES:
+        start = f"cat <<'EOF' > \"${{STAGE_DIR}}/DEBIAN/{name}\"\n"
+        end = f'\nEOF\nchmod 755 "${{STAGE_DIR}}/DEBIAN/{name}"'
+        assert start in build_script
+        rendered = build_script.split(start, 1)[1].split(end, 1)[0]
+        (control / name).write_text(rendered + "\n", encoding="utf-8")
+
+    script_hashes = module._static_installer_activation_check(control)
+
+    assert set(script_hashes) == set(module.MAINTAINER_SCRIPT_NAMES)
+    assert all(len(digest) == 64 for digest in script_hashes.values())
+
+
 def _runtime_state_staging_block() -> str:
     return """RUNTIME_STATE_DIR=/var/lib/cyrene/runtime
 if ! getent group cyrene-runtime-maintenance >/dev/null 2>&1; then

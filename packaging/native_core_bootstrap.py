@@ -70,6 +70,12 @@ CORE_EXECUTABLE_NAMES = frozenset(
 PROC_ROOT = Path("/proc")
 CORE_RUNTIME_ROOT = Path("/var/lib/cyrene/runtime")
 CORE_RUN_ROOT = Path("/run/cyrene")
+PCI_DEVICES_ROOT = Path("/sys/bus/pci/devices")
+PCI_DRIVERS_ROOT = Path("/sys/bus/pci/drivers")
+MODULE_ROOT = Path("/sys/module")
+DEVICE_ROOT = Path("/dev")
+PROC_DRIVER_ROOT = Path("/proc/driver")
+NVIDIA_PCI_VENDOR_ID = "0x10de"
 LINUX_SYS_ADAPTER_COMPONENT_ID = "cyrene-linux-sys-adapter"
 LINUX_SYS_ADAPTER_UNIT = "cyrene-linux-sys-adapter.service"
 LINUX_SYS_ADAPTER_SOCKET = Path("linux-sys-adapter.sock")
@@ -114,6 +120,36 @@ def _is_root() -> bool:
 
 def _journal_path(updater: Any) -> Path:
     return Path(updater.state_root) / "native-first-bootstrap" / JOURNAL_NAME
+
+
+def _private_exception_chain(error: BaseException, *, private_token: str | None) -> dict[str, Any]:
+    """Build a small token-redacted error chain for the private recovery journal.
+
+    Only exception types, stable codes, errno values, and bounded messages are stored.
+    中文：恢复日志仅保存有限错误信息，并先遮盖维护令牌。
+    """
+
+    chain: list[dict[str, Any]] = []
+    current: BaseException | None = error
+    for _depth in range(3):
+        if current is None:
+            break
+        message = " ".join(str(current).split())
+        if private_token:
+            message = message.replace(private_token, "[REDACTED]")
+        record: dict[str, Any] = {"type": type(current).__name__, "message": message[:300]}
+        error_code = getattr(current, "code", None)
+        if isinstance(error_code, (str, int)) and not isinstance(error_code, bool):
+            code_text = str(error_code)
+            if private_token:
+                code_text = code_text.replace(private_token, "[REDACTED]")
+            record["code"] = code_text[:100]
+        error_number = getattr(current, "errno", None)
+        if isinstance(error_number, int) and not isinstance(error_number, bool):
+            record["errno"] = error_number
+        chain.append(record)
+        current = current.__cause__ or current.__context__
+    return {"chain": chain}
 
 
 def _resume_first_products_post_end(
@@ -503,6 +539,51 @@ def _validate_package_runtime_group(updater: Any) -> dict[str, Any] | None:
     return group
 
 
+def _confirmed_cpu_only_host() -> bool:
+    """Prove a missing NVIDIA utility means this host has no NVIDIA device.
+
+    A readable, non-empty PCI inventory and absence of NVIDIA device, driver,
+    and pass-through indicators are all required. Any unreadable or incomplete
+    inventory remains UNKNOWN and blocks first-Core activation.
+    中文：只有完整硬件清单明确无 NVIDIA 设备时，缺少工具才按空 GPU 清单处理。
+    """
+
+    try:
+        if shutil.which("nvidia-smi") is not None:
+            return False
+
+        pci_devices = tuple(PCI_DEVICES_ROOT.iterdir())
+        if not pci_devices:
+            return False
+        for device in pci_devices:
+            vendor = (device / "vendor").read_text(encoding="ascii").strip().lower()
+            if re.fullmatch(r"0x[0-9a-f]{4}", vendor) is None:
+                return False
+            if vendor == NVIDIA_PCI_VENDOR_ID:
+                return False
+
+        device_entries = tuple(DEVICE_ROOT.iterdir())
+        if any(
+            entry.name.lower().startswith("nvidia") or entry.name == "dxg"
+            for entry in device_entries
+        ):
+            return False
+
+        proc_driver_entries = tuple(PROC_DRIVER_ROOT.iterdir())
+        if any(entry.name.lower() == "nvidia" for entry in proc_driver_entries):
+            return False
+
+        pci_driver_entries = tuple(PCI_DRIVERS_ROOT.iterdir())
+        if any(entry.name.lower() == "nvidia" for entry in pci_driver_entries):
+            return False
+        modules = tuple(MODULE_ROOT.iterdir())
+        if any(entry.name.lower() == "nvidia" for entry in modules):
+            return False
+    except (OSError, UnicodeError):
+        return False
+    return True
+
+
 def _catalog_core_component_ids(updater: Any) -> tuple[str, ...]:
     """Select C9's fixed four or C10's complete six-component first-Core cohort."""
 
@@ -889,14 +970,21 @@ def _assert_fresh(
             timeout=10,
             check=False,
         )
-    except (OSError, TimeoutError) as error:
+    except FileNotFoundError as error:
+        if error.errno != errno.ENOENT or not _confirmed_cpu_only_host():
+            raise RuntimeError(
+                "GPU resource inventory is unavailable; first-Core eligibility is UNKNOWN"
+            ) from error
+        gpu = None
+    except (OSError, TimeoutError, subprocess.TimeoutExpired) as error:
         raise RuntimeError(
             "GPU resource inventory is unavailable; first-Core eligibility is UNKNOWN"
         ) from error
-    if gpu.returncode != 0:
-        raise RuntimeError("GPU resource inventory failed; first-Core eligibility is UNKNOWN")
-    if gpu.stdout.strip():
-        raise ValueError("Existing GPU compute resources block first-Core installation")
+    if gpu is not None:
+        if gpu.returncode != 0:
+            raise RuntimeError("GPU resource inventory failed; first-Core eligibility is UNKNOWN")
+        if gpu.stdout.strip():
+            raise ValueError("Existing GPU compute resources block first-Core installation")
     if held_adapter_socket_proof is not None:
         _verify_held_linux_sys_adapter_socket(
             updater,
@@ -905,6 +993,42 @@ def _assert_fresh(
             expected=held_adapter_socket_proof,
         )
     return current_broker
+
+
+def _assert_fresh_with_recovery_record(
+    updater: Any,
+    transaction: dict[str, Any],
+    journal_path: Path,
+    *,
+    proc_root: Path,
+    planned_components: list[dict[str, Any]],
+    require_empty_kernel_state: bool,
+    expected_bootstrap_broker: dict[str, Any],
+) -> None:
+    """Keep a failed pre-install freshness proof in the existing private journal."""
+
+    try:
+        _assert_fresh(
+            updater,
+            proc_root=proc_root,
+            planned_components=planned_components,
+            require_empty_kernel_state=require_empty_kernel_state,
+            expected_bootstrap_broker=expected_bootstrap_broker,
+        )
+    except Exception as error:
+        private_error = _private_exception_chain(
+            error,
+            private_token=(
+                transaction.get("maintenanceToken")
+                if isinstance(transaction.get("maintenanceToken"), str)
+                else None
+            ),
+        )
+        transaction["preInstallFreshnessError"] = private_error
+        transaction["failure"] = private_error["chain"][0]["message"]
+        _write_private_json(updater, journal_path, transaction)
+        raise
+    transaction.pop("preInstallFreshnessError", None)
 
 
 def _health_snapshot(updater: Any, *, require_eligible: bool = True) -> dict[str, Any]:
@@ -1395,21 +1519,31 @@ def _verify_started_processes(updater: Any, components: list[dict[str, Any]]) ->
     for item in components:
         component = updater.components[item["componentId"]]
         unit = component["systemdUnit"]
-        clock, _sleeper = _candidate_startup_clock(updater)
+        clock, sleeper = _candidate_startup_clock(updater)
         started_at = _startup_time(clock)
         deadline = started_at + CORE_EXEC_STARTUP_WAIT_SECONDS
-        timeout = _startup_remaining(clock, deadline, unit)
-        completed = updater.runner(
-            ["systemctl", "show", "--property=MainPID", "--value", unit],
-            capture_output=True,
-            text=True,
-            timeout=min(10, timeout),
-            check=False,
-        )
-        _startup_remaining(clock, deadline, unit)
-        if completed.returncode != 0 or not completed.stdout.strip().isdecimal():
-            raise RuntimeError(f"{unit} has no confirmed systemd MainPID")
-        pid = completed.stdout.strip()
+        while True:
+            timeout = _startup_remaining(clock, deadline, unit)
+            completed = updater.runner(
+                ["systemctl", "show", "--property=MainPID", "--value", unit],
+                capture_output=True,
+                text=True,
+                timeout=min(10, timeout),
+                check=False,
+            )
+            remaining = _startup_remaining(clock, deadline, unit)
+            pid = completed.stdout.strip() if isinstance(completed.stdout, str) else ""
+            if completed.returncode != 0 or not pid.isascii() or not pid.isdecimal():
+                raise RuntimeError(f"{unit} has no confirmed systemd MainPID")
+            if pid == "0":
+                # systemd may expose MainPID=0 briefly after a unit becomes active.
+                # 中文：服务刚变为 active 时，systemd 可能短暂返回 MainPID=0。
+                sleeper(min(CORE_EXEC_STARTUP_POLL_SECONDS, remaining))
+                continue
+            if not pid.strip("0"):
+                raise RuntimeError(f"{unit} has no confirmed systemd MainPID")
+            break
+
         _verify_candidate_pid(updater, item, pid, deadline=deadline)
 
 
@@ -1895,7 +2029,6 @@ def _candidate_unit_state(
                 "systemctl",
                 "show",
                 "--property=ActiveState,SubState,MainPID,ControlPID",
-                "--value",
                 unit,
             ],
             capture_output=True,
@@ -1908,10 +2041,25 @@ def _candidate_unit_state(
     _quiesce_remaining(clock, deadline, unit)
     if completed.returncode != 0:
         raise RuntimeError(f"Cannot confirm {unit} state during quiesce")
-    values = completed.stdout.splitlines()
-    if len(values) != 4:
+    properties = {"ActiveState", "SubState", "MainPID", "ControlPID"}
+    values: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        name, separator, value = line.partition("=")
+        if (
+            not separator
+            or line.count("=") != 1
+            or name not in properties
+            or name in values
+            or not value
+        ):
+            raise RuntimeError(f"Cannot parse coherent systemd state for {unit}")
+        values[name] = value
+    if values.keys() != properties:
         raise RuntimeError(f"Cannot parse coherent systemd state for {unit}")
-    active, substate, main_pid, control_pid = values
+    active = values["ActiveState"]
+    substate = values["SubState"]
+    main_pid = values["MainPID"]
+    control_pid = values["ControlPID"]
     if (
         not main_pid.isascii()
         or not main_pid.isdecimal()
@@ -3029,7 +3177,7 @@ def _fresh_workload_core_validate_transaction(
     gate_generation = transaction.get("expectedGateGeneration")
     begin_request = transaction.get("beginRequest")
     if gate_generation is not None:
-        if type(gate_generation) is not int or gate_generation < 1:
+        if type(gate_generation) is not int or gate_generation < 0:
             raise ValueError("Fresh workload Core journal has a changed live gate snapshot")
         plan["gateGeneration"] = gate_generation
         if begin_request != _core_bootstrap_begin_request(plan):
@@ -3169,6 +3317,298 @@ def _fresh_workload_core_validate_maintenance_hold(
         ):
             raise RuntimeError("Fresh workload maintenance hold response has an invalid shape")
     return catalog_generation
+
+
+def _verify_broker_service_principal(
+    updater: Any,
+    unit: str,
+    pid: str,
+    *,
+    proc_root: Path,
+    deadline: float,
+    clock: Any,
+) -> None:
+    """Match the signed unit's effective User/Group to its live process IDs.
+
+    中文：把已验签 unit 的有效用户和组与实际 Broker 进程身份逐项核对。
+    """
+
+    user = _systemd_unit_property(updater, unit, "User", deadline=deadline, clock=clock)
+    group = _systemd_unit_property(updater, unit, "Group", deadline=deadline, clock=clock)
+    try:
+        account = (
+            pwd.getpwuid(0)
+            if not user
+            else (
+                pwd.getpwuid(int(user))
+                if user.isascii() and user.isdecimal()
+                else pwd.getpwnam(user)
+            )
+        )
+        expected_uid = account.pw_uid
+        if group:
+            group_record = (
+                grp.getgrgid(int(group))
+                if group.isascii() and group.isdecimal()
+                else grp.getgrnam(group)
+            )
+            expected_gid = group_record.gr_gid
+        else:
+            expected_gid = account.pw_gid
+    except (KeyError, ValueError) as error:
+        raise RuntimeError("Signed Broker unit User/Group does not resolve to host IDs") from error
+
+    try:
+        status = (Path(proc_root) / pid / "status").read_text(encoding="ascii")
+    except (OSError, UnicodeError) as error:
+        raise RuntimeError("Broker process UID/GID identity is unreadable") from error
+    fields: dict[str, list[str]] = {}
+    for line in status.splitlines():
+        name, separator, value = line.partition(":")
+        if separator and name in {"Uid", "Gid"}:
+            fields[name] = value.split()
+    uid_values = fields.get("Uid", [])
+    gid_values = fields.get("Gid", [])
+    if (
+        len(uid_values) != 4
+        or len(gid_values) != 4
+        or any(not value.isascii() or not value.isdecimal() for value in (*uid_values, *gid_values))
+        or int(uid_values[1]) != expected_uid
+        or int(gid_values[1]) != expected_gid
+    ):
+        raise RuntimeError("Broker process effective UID/GID differs from its signed unit")
+
+
+def _fresh_workload_core_recover_held_broker(
+    updater: Any,
+    bootstrap_module: Any,
+    plan: dict[str, Any],
+    transaction: dict[str, Any],
+    broker_row: dict[str, Any],
+    broker_inputs: dict[str, Any],
+    *,
+    lock_lease: Any,
+    proc_root: Path,
+    journal_path: Path,
+) -> dict[str, Any]:
+    """Restore only the exact inactive Broker needed by the original held plan.
+
+    中文：只恢复同一计划、同一私有 hold 日志所绑定的 Broker，不重放 Begin。
+    """
+
+    token = transaction.get("maintenanceToken")
+    try:
+        if (
+            transaction.get("phase") != "hold_required"
+            or transaction.get("progress") != "catalog_initialized"
+            or not isinstance(token, str)
+            or not token.strip()
+            or type(transaction.get("maintenanceGateGeneration")) is not int
+            or transaction["maintenanceGateGeneration"] < 1
+        ):
+            raise ValueError("Held Broker recovery is outside catalog-initialized progress")
+
+        broker_id = "cyrene-runtime-maintenance"
+        component = updater.components.get(broker_id)
+        unit = component.get("systemdUnit") if isinstance(component, dict) else None
+        pointer = f"{broker_row['version']}--{broker_row['manifestDigest'].removeprefix('sha256:')}"
+        executable = _candidate_executable(updater, broker_row)
+        expected_identity = {
+            "componentId": broker_id,
+            "pointerIdentity": pointer,
+            "version": broker_row["version"],
+            "manifestDigest": broker_row["manifestDigest"],
+            "artifactDigest": broker_row["artifactDigest"],
+            "systemdUnit": unit,
+            "executable": str(executable),
+        }
+        previous = transaction.get("bootstrapBroker")
+        if (
+            not isinstance(unit, str)
+            or not isinstance(previous, dict)
+            or set(previous) != {*expected_identity, "mainPid"}
+            or any(previous.get(key) != value for key, value in expected_identity.items())
+            or not isinstance(previous.get("mainPid"), str)
+            or not previous["mainPid"].isascii()
+            or not previous["mainPid"].isdecimal()
+            or previous["mainPid"] == "0"
+            or updater._active_native_pointer_identity(broker_id) != pointer
+        ):
+            raise ValueError("Held journal or active pointer differs from the exact staged Broker")
+
+        block = plan.get("firstCoreBootstrap")
+        if not isinstance(block, dict):
+            raise TypeError("Held Broker recovery has no immutable C10 catalog identity")
+        activation = _fresh_workload_core_verify_broker_activation(
+            updater,
+            bootstrap_module,
+            broker_row,
+            broker_inputs,
+            expected_plan_digest=plan["brokerBootstrapPlanDigest"],
+            expected_active_catalog_digest=block["catalogDigest"],
+            lock_lease=lock_lease,
+        )
+        expected_activation = {
+            "status": "activated",
+            "planDigest": plan["brokerBootstrapPlanDigest"],
+            "releasePath": str(
+                updater.install_root / "components" / broker_id / "releases" / pointer
+            ),
+            "componentId": broker_id,
+            "targetId": block["targetId"],
+            "version": broker_row["version"],
+            "manifestDigest": broker_row["manifestDigest"],
+            "artifactDigest": broker_row["artifactDigest"],
+        }
+        if any(activation.get(key) != value for key, value in expected_activation.items()):
+            raise ValueError("Offline Broker proof differs from the exact held C10 plan")
+
+        clock, _sleeper = _candidate_startup_clock(updater)
+        unit_deadline = _startup_time(clock) + CORE_UNIT_QUIESCE_WAIT_SECONDS
+        proven_unit = _prove_candidate_unit_loaded(
+            updater,
+            broker_row,
+            deadline=unit_deadline,
+            clock=clock,
+            restore_missing=True,
+        )
+        if proven_unit != unit:
+            raise ValueError("Loaded Broker unit differs from the held C10 plan")
+
+        state = _candidate_unit_state(updater, unit, deadline=unit_deadline, clock=clock)
+        if state == ("inactive", "dead", "0", "0"):
+            if bootstrap_module._broker_process_exists(proc_root):
+                raise RuntimeError("An unowned Broker process blocks held recovery")
+            updater._run_systemctl("start", unit)
+            updater._wait_unit_active(unit)
+            unit_deadline = _startup_time(clock) + CORE_UNIT_QUIESCE_WAIT_SECONDS
+            state = _candidate_unit_state(updater, unit, deadline=unit_deadline, clock=clock)
+        elif not (
+            state[0] == "active"
+            and state[1] == "running"
+            and state[2].isascii()
+            and state[2].isdecimal()
+            and state[2] != "0"
+            and state[3] == "0"
+        ):
+            raise RuntimeError("Broker unit state is not active/running or exact inactive/dead")
+
+        if not (
+            state[0] == "active"
+            and state[1] == "running"
+            and state[2].isascii()
+            and state[2].isdecimal()
+            and state[2] != "0"
+            and state[3] == "0"
+        ):
+            raise RuntimeError("Restored Broker did not reach active/running with one MainPID")
+        broker_identity = _verified_running_c10_broker(updater, proc_root)
+        if set(broker_identity) != {*expected_identity, "mainPid"} or any(
+            broker_identity.get(key) != value for key, value in expected_identity.items()
+        ):
+            raise ValueError("Running Broker identity differs from the exact staged C10 candidate")
+        if broker_identity.get("mainPid") != state[2]:
+            raise RuntimeError("Running Broker MainPID differs from coherent systemd state")
+        _verify_broker_service_principal(
+            updater,
+            unit,
+            state[2],
+            proc_root=proc_root,
+            deadline=unit_deadline,
+            clock=clock,
+        )
+
+        catalog, _source_ids = updater._activity_catalog(allow_uninitialized=True)
+        catalog_generation = catalog.get("generation") if isinstance(catalog, dict) else None
+        gate_generation = transaction["maintenanceGateGeneration"]
+        if type(catalog_generation) is not int or catalog_generation != 1:
+            raise RuntimeError("Held Broker recovery requires the exact initialized catalog")
+        health = updater._broker_request("Health", {})
+        required_capabilities = {
+            "cyrene.runtime-maintenance.state.v2",
+            "cyrene.runtime-maintenance.binding-operations.v1",
+        }
+        if (
+            not isinstance(health, dict)
+            or health.get("status") != "SERVING"
+            or health.get("protocol_version") != "cyrene.runtime-maintenance.broker.v1"
+            or health.get("catalog_generation") != catalog_generation
+            or health.get("gate_generation") != gate_generation
+            or health.get("core_bootstrap_eligible") is not False
+            or not isinstance(health.get("capabilities"), list)
+            or not required_capabilities.issubset(set(health["capabilities"]))
+        ):
+            raise RuntimeError("Broker Health differs from the same held gate and catalog")
+
+        transaction["bootstrapBroker"] = broker_identity
+        transaction.pop("brokerRecoveryError", None)
+        _write_private_json(updater, journal_path, transaction)
+        return broker_identity
+    except Exception as error:  # noqa: BLE001 - all startup/proof failures must preserve the hold
+        try:
+            transaction["brokerRecoveryError"] = _private_exception_chain(
+                error, private_token=token if isinstance(token, str) else None
+            )
+            _write_private_json(updater, journal_path, transaction)
+        except Exception:  # noqa: BLE001 - report the durable hold, not secrets
+            raise RuntimeError(
+                "Held Broker recovery failed; its existing hold journal remains available"
+            ) from None
+        raise RuntimeError(
+            "Held Broker recovery failed; the exact maintenance hold remains available for retry"
+        ) from None
+
+
+def _fresh_workload_core_validate_held_transaction(
+    updater: Any,
+    bootstrap_module: Any,
+    plan: dict[str, Any],
+    transaction: dict[str, Any],
+    broker_row: dict[str, Any],
+    broker_inputs: dict[str, Any],
+    full_digests: dict[str, str],
+    *,
+    source_id: str,
+    source_uid: int,
+    source_gid: int,
+    lock_lease: Any,
+    proc_root: Path,
+    journal_path: Path,
+    recover_broker: bool,
+) -> bool:
+    """Recover a catalog-initialized Broker before validating its durable hold.
+
+    中文：所有已初始化目录的 hold 校验都先确认 Broker 可用，且同次调用只恢复一次。
+    """
+
+    recovered = False
+    if (
+        recover_broker
+        and transaction.get("phase") == "hold_required"
+        and transaction.get("progress") == "catalog_initialized"
+    ):
+        _fresh_workload_core_recover_held_broker(
+            updater,
+            bootstrap_module,
+            plan,
+            transaction,
+            broker_row,
+            broker_inputs,
+            lock_lease=lock_lease,
+            proc_root=proc_root,
+            journal_path=journal_path,
+        )
+        recovered = True
+    _fresh_workload_core_validate_maintenance_hold(
+        updater,
+        plan,
+        transaction,
+        full_digests,
+        source_id=source_id,
+        source_uid=source_uid,
+        source_gid=source_gid,
+    )
+    return recovered
 
 
 def _fresh_workload_core_public_result(plan: dict[str, Any], result: Any) -> dict[str, Any]:
@@ -3375,6 +3815,7 @@ def apply_fresh_workload_first_core(
         }:
             raise ValueError("Fresh workload Core journal has an unsupported recovery phase")
 
+    held_broker_recovered = False
     if transaction.get("phase") == "end_call_pending":
         token = transaction.get("maintenanceToken")
         result = _fresh_workload_core_public_result(plan, transaction.get("publicResult"))
@@ -3536,14 +3977,21 @@ def apply_fresh_workload_first_core(
         transaction.pop("failure", None)
         _write_private_json(updater, journal_path, transaction)
     elif transaction.get("phase") == "hold_required":
-        _fresh_workload_core_validate_maintenance_hold(
+        held_broker_recovered = _fresh_workload_core_validate_held_transaction(
             updater,
+            bootstrap_module,
             plan,
             transaction,
+            broker_row,
+            broker_inputs,
             full_digests,
             source_id=source_id,
             source_uid=source_uid,
             source_gid=source_gid,
+            lock_lease=lock_lease,
+            proc_root=PROC_ROOT,
+            journal_path=journal_path,
+            recover_broker=True,
         )
     elif transaction.get("phase") == "end_call_pending":
         if (
@@ -3643,14 +4091,21 @@ def apply_fresh_workload_first_core(
             "activitySources": activity_sources,
         }
 
-    _fresh_workload_core_validate_maintenance_hold(
+    _fresh_workload_core_validate_held_transaction(
         updater,
+        bootstrap_module,
         plan,
         transaction,
+        broker_row,
+        broker_inputs,
         full_digests,
         source_id=source_id,
         source_uid=source_uid,
         source_gid=source_gid,
+        lock_lease=lock_lease,
+        proc_root=PROC_ROOT,
+        journal_path=journal_path,
+        recover_broker=not held_broker_recovered,
     )
     stored_broker_identity = transaction.get("bootstrapBroker")
     if not isinstance(stored_broker_identity, dict):
@@ -3665,8 +4120,10 @@ def apply_fresh_workload_first_core(
     if current_progress in (
         _FRESH_WORKLOAD_CORE_EMPTY_PROGRESS | _FRESH_WORKLOAD_CORE_PARTIAL_PROGRESS
     ):
-        _assert_fresh(
+        _assert_fresh_with_recovery_record(
             updater,
+            transaction,
+            journal_path,
             proc_root=PROC_ROOT,
             planned_components=staged_components,
             require_empty_kernel_state=_fresh_workload_core_requires_empty_kernel_state(

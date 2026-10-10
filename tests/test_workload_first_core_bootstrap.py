@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -187,7 +188,6 @@ def test_fresh_core_broker_health_generation_boundaries(
         "_verified_running_c10_broker",
         lambda _updater, _proc_root: broker_identity,
     )
-
     if accepted:
         broker, result = native_core._fresh_workload_core_broker_health(
             updater,
@@ -1172,6 +1172,11 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
         "_verified_running_c10_broker",
         lambda _updater, _proc_root: broker_identity,
     )
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_core_recover_held_broker",
+        lambda *_args, **_kwargs: events.append("held-broker-recovery"),
+    )
     monkeypatch.setattr(native_core, "_assert_fresh", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         native_core,
@@ -1259,9 +1264,499 @@ def test_fresh_workload_first_core_initializes_catalog_before_kernel_and_probes_
     assert result["status"] == "installed"
     assert events.index("broker-health") < events.index("broker:BeginCoreBootstrap")
     assert events.index("broker:BeginCoreBootstrap") < events.index("init-catalog")
+    assert events.index("init-catalog") < events.index("held-broker-recovery")
+    assert events.index("held-broker-recovery") < events.index("broker:ValidateMaintenanceHold")
     assert events.index("init-catalog") < events.index("write-unit:cyrene-kernel")
     assert events.index("init-catalog") < events.index("start:cyrene-kernel")
     assert events.index("start:cyrene-kernel") < events.index("authority-probe")
+
+
+def _held_broker_recovery_case(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    initial_state: tuple[str, str, str, str] = ("inactive", "dead", "0", "0"),
+    startup_failure: bool = False,
+    orphan_process: bool = False,
+) -> dict[str, Any]:
+    """Build a held first-Core journal with seams for exact Broker resume tests."""
+
+    broker_id = "cyrene-runtime-maintenance"
+    target_id = "linux-ubuntu-24.04-x86_64-systemd"
+    manifest_digest = _digest("held-broker-manifest")
+    artifact_digest = _digest("held-broker-artifact")
+    pointer = f"1.2.3--{manifest_digest.removeprefix('sha256:')}"
+    unit = f"{broker_id}.service"
+    executable = "/usr/lib/cyrene/releases/held-broker"
+    previous_identity = {
+        "componentId": broker_id,
+        "pointerIdentity": pointer,
+        "version": "1.2.3",
+        "manifestDigest": manifest_digest,
+        "artifactDigest": artifact_digest,
+        "systemdUnit": unit,
+        "mainPid": "42" if initial_state[0] == "active" else "41",
+        "executable": executable,
+    }
+    plan_digest = _digest("held-first-core-plan")
+    broker_plan_digest = _digest("held-offline-broker-plan")
+    source_id = STANDALONE_SOURCE_ID
+    source_uid = 12004
+    source_gid = 12005
+    full_digests = {
+        component_id: _digest(component_id)
+        for component_id in native_core.C10_FIRST_CORE_COMPONENT_IDS
+    }
+    full_digests.update(
+        {f"test-plugin-{index}": _digest(f"test-plugin-{index}") for index in range(4)}
+    )
+    plan = {
+        "planId": "plan-" + plan_digest.removeprefix("sha256:")[:32],
+        "planDigest": plan_digest,
+        "requestId": "first-core-bootstrap-held-test",
+        "brokerBootstrapPlanDigest": broker_plan_digest,
+        "firstCoreBootstrap": {
+            "targetId": target_id,
+            "catalogDigest": _digest("held-compiled-catalog"),
+        },
+    }
+    transaction = {
+        "phase": "hold_required",
+        "progress": "catalog_initialized",
+        "maintenanceToken": "private-held-token-123",
+        "maintenanceGateGeneration": 1,
+        "bootstrapBroker": dict(previous_identity),
+    }
+    broker_row = {
+        "componentId": broker_id,
+        "targetId": target_id,
+        "version": "1.2.3",
+        "manifestDigest": manifest_digest,
+        "artifactDigest": artifact_digest,
+    }
+    events: list[Any] = []
+    current = {"active": initial_state[0] == "active"}
+    current_pid = {"value": initial_state[2] if initial_state[0] == "active" else "4243"}
+    proc_root = tmp_path / "proc"
+    for pid in {previous_identity["mainPid"], "4243"}:
+        process = proc_root / pid
+        process.mkdir(parents=True)
+        (process / "status").write_text(
+            "Name:\tcyrene-runtime-maintenance\nUid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n",
+            encoding="ascii",
+        )
+    journal_path = tmp_path / "private" / "first-core.json"
+    written: list[dict[str, Any]] = []
+
+    def broker_request(
+        method: str, params: dict[str, Any], *, request_id: str | None = None
+    ) -> dict[str, Any]:
+        events.append(("broker", method, params))
+        if method == "Health":
+            return {
+                "status": "SERVING",
+                "protocol_version": "cyrene.runtime-maintenance.broker.v1",
+                "catalog_generation": 1,
+                "gate_generation": 1,
+                "core_bootstrap_eligible": False,
+                "capabilities": [
+                    "cyrene.runtime-maintenance.state.v2",
+                    "cyrene.runtime-maintenance.binding-operations.v1",
+                ],
+            }
+        if method == "ValidateMaintenanceHold":
+            return {
+                "valid": True,
+                "request_id": params["request_id"],
+                "target_kind": params["target_kind"],
+                "plan_id": params["plan_id"],
+                "plan_digest": params["plan_digest"],
+                "component_artifact_digests": params["component_artifact_digests"],
+                "component_id": params["component_id"],
+                "artifact_digest": params["artifact_digest"],
+                "gate_generation": params["expected_gate_generation"],
+                "catalog_generation": params["expected_catalog_generation"],
+            }
+        raise AssertionError(method)
+
+    def run_systemctl(operation: str, actual_unit: str) -> None:
+        events.append(("start", operation, actual_unit))
+        assert operation == "start" and actual_unit == unit
+        if startup_failure:
+            raise RuntimeError(f"systemctl failure includes {transaction['maintenanceToken']}")
+        current["active"] = True
+
+    updater = SimpleNamespace(
+        components={broker_id: {"componentId": broker_id, "systemdUnit": unit}},
+        install_root=tmp_path / "install",
+        _active_native_pointer_identity=lambda _component: pointer,
+        _activity_catalog=lambda **_kwargs: (
+            {
+                "generation": 1,
+                "sources": [
+                    {
+                        "source_id": source_id,
+                        "uid": source_uid,
+                        "gid": source_gid,
+                        "binding_scopes": [],
+                    }
+                ],
+            },
+            [source_id],
+        ),
+        _broker_request=broker_request,
+        _run_systemctl=run_systemctl,
+        _wait_unit_active=lambda actual_unit: events.append(("wait", actual_unit)),
+    )
+    activation = {
+        "status": "activated",
+        "planDigest": broker_plan_digest,
+        "releasePath": str(updater.install_root / "components" / broker_id / "releases" / pointer),
+        "componentId": broker_id,
+        "targetId": target_id,
+        "version": "1.2.3",
+        "manifestDigest": manifest_digest,
+        "artifactDigest": artifact_digest,
+    }
+    monkeypatch.setattr(
+        native_core,
+        "_candidate_executable",
+        lambda *_args: Path(executable),
+    )
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_core_verify_broker_activation",
+        lambda *_args, **_kwargs: events.append("activation-proof") or activation,
+    )
+    monkeypatch.setattr(
+        native_core,
+        "_prove_candidate_unit_loaded",
+        lambda _updater, _row, **kwargs: (
+            events.append(("unit-proof", kwargs["restore_missing"])) or unit
+        ),
+    )
+    monkeypatch.setattr(
+        native_core, "_candidate_startup_clock", lambda _updater: (time.monotonic, time.sleep)
+    )
+
+    def unit_state(_updater: Any, actual_unit: str, **_kwargs: Any) -> tuple[str, str, str, str]:
+        assert actual_unit == unit
+        if current["active"]:
+            return "active", "running", current_pid["value"], "0"
+        return initial_state
+
+    monkeypatch.setattr(native_core, "_candidate_unit_state", unit_state)
+    monkeypatch.setattr(
+        native_core,
+        "_systemd_unit_property",
+        lambda _updater, _unit, property_name, **_kwargs: (
+            "root" if property_name in {"User", "Group"} else ""
+        ),
+    )
+
+    def verified_broker(_updater: Any, _proc_root: Path) -> dict[str, Any]:
+        return {
+            **{key: value for key, value in previous_identity.items() if key != "mainPid"},
+            "mainPid": current_pid["value"],
+        }
+
+    monkeypatch.setattr(native_core, "_verified_running_c10_broker", verified_broker)
+    monkeypatch.setattr(
+        native_core,
+        "_write_private_json",
+        lambda _updater, _path, value: written.append(copy.deepcopy(value)),
+    )
+    bootstrap_module = SimpleNamespace(
+        _broker_process_exists=lambda _root: events.append("process-table") or orphan_process
+    )
+    return {
+        "activation": activation,
+        "bootstrap_module": bootstrap_module,
+        "broker_inputs": {},
+        "broker_row": broker_row,
+        "events": events,
+        "full_digests": full_digests,
+        "journal_path": journal_path,
+        "plan": plan,
+        "previous_identity": previous_identity,
+        "proc_root": proc_root,
+        "source_gid": source_gid,
+        "source_id": source_id,
+        "source_uid": source_uid,
+        "transaction": transaction,
+        "updater": updater,
+        "written": written,
+    }
+
+
+def _transaction_validation_case() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build the original generation-zero Begin binding with its held generation one."""
+
+    source_id = STANDALONE_SOURCE_ID
+    source_policy = {"mode": "standaloneOperator", "sourceId": source_id}
+    source_principals = {source_id: {"uid": 12004, "gid": 12005}}
+    component_digests = {"cyrene-runtime-maintenance": _digest("held-broker")}
+    block = {"schemaVersion": 1, "cohortId": "C10", "catalogDigest": _digest("catalog")}
+    plan = {
+        "planId": "plan-held-validation",
+        "planDigest": _digest("parent-held-validation"),
+        "requestId": "first-core-bootstrap-held-validation",
+        "gateGeneration": 0,
+        "catalogGeneration": 0,
+        "activitySources": [],
+        "componentArtifactDigests": component_digests,
+        "firstCoreBootstrap": block,
+        "components": [],
+        "brokerBootstrapPlanDigest": _digest("nested-broker-plan"),
+    }
+    transaction = {
+        "mode": "fresh-workload-first-core",
+        "planId": plan["planId"],
+        "planDigest": plan["planDigest"],
+        "requestId": plan["requestId"],
+        "expectedCatalogGeneration": 0,
+        "expectedActivitySources": [],
+        "componentArtifactDigests": component_digests,
+        "firstCoreBootstrap": block,
+        "components": [],
+        "sourcePolicy": source_policy,
+        "selectedPluginRows": [],
+        "sourcePrincipalIdentities": source_principals,
+        "brokerBootstrapPlanDigest": plan["brokerBootstrapPlanDigest"],
+        "expectedGateGeneration": 0,
+        "beginRequest": native_core._core_bootstrap_begin_request(plan),
+        "phase": "hold_required",
+        "progress": "catalog_initialized",
+        "maintenanceGateGeneration": 1,
+    }
+    return (
+        plan,
+        transaction,
+        {
+            "source_policy": source_policy,
+            "source_principals": source_principals,
+        },
+    )
+
+
+def test_held_transaction_accepts_original_zero_begin_and_generation_one_hold() -> None:
+    plan, transaction, inputs = _transaction_validation_case()
+
+    native_core._fresh_workload_core_validate_transaction(
+        transaction,
+        plan,
+        source_policy=inputs["source_policy"],
+        selected_plugin_rows=[],
+        source_principals=inputs["source_principals"],
+    )
+
+    assert plan["gateGeneration"] == 0
+    assert transaction["expectedGateGeneration"] == 0
+    assert transaction["maintenanceGateGeneration"] == 1
+    assert transaction["beginRequest"] == native_core._core_bootstrap_begin_request(plan)
+
+
+@pytest.mark.parametrize("mutation", ["negative", "boolean", "begin-request"])
+def test_held_transaction_rejects_invalid_zero_begin_binding(mutation: str) -> None:
+    plan, transaction, inputs = _transaction_validation_case()
+    if mutation == "negative":
+        transaction["expectedGateGeneration"] = -1
+    elif mutation == "boolean":
+        transaction["expectedGateGeneration"] = True
+    else:
+        transaction["beginRequest"]["expected_gate_generation"] = 1
+
+    with pytest.raises(ValueError, match="live gate snapshot"):
+        native_core._fresh_workload_core_validate_transaction(
+            transaction,
+            plan,
+            source_policy=inputs["source_policy"],
+            selected_plugin_rows=[],
+            source_principals=inputs["source_principals"],
+        )
+
+
+def test_held_resume_validates_only_after_recovery_and_recovers_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_broker_recovery_case(monkeypatch, tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_core_recover_held_broker",
+        lambda *_args, **_kwargs: events.append("recover"),
+    )
+    monkeypatch.setattr(
+        native_core,
+        "_fresh_workload_core_validate_maintenance_hold",
+        lambda *_args, **_kwargs: events.append("validate"),
+    )
+    arguments = {
+        "source_id": case["source_id"],
+        "source_uid": case["source_uid"],
+        "source_gid": case["source_gid"],
+        "lock_lease": object(),
+        "proc_root": case["proc_root"],
+        "journal_path": case["journal_path"],
+    }
+    recovered = native_core._fresh_workload_core_validate_held_transaction(
+        case["updater"],
+        case["bootstrap_module"],
+        case["plan"],
+        case["transaction"],
+        case["broker_row"],
+        case["broker_inputs"],
+        case["full_digests"],
+        **arguments,
+        recover_broker=True,
+    )
+    native_core._fresh_workload_core_validate_held_transaction(
+        case["updater"],
+        case["bootstrap_module"],
+        case["plan"],
+        case["transaction"],
+        case["broker_row"],
+        case["broker_inputs"],
+        case["full_digests"],
+        **arguments,
+        recover_broker=not recovered,
+    )
+
+    assert recovered is True
+    assert events == ["recover", "validate", "validate"]
+
+
+def test_held_broker_recovery_starts_exact_inactive_unit_and_reuses_same_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_broker_recovery_case(monkeypatch, tmp_path)
+    identity = native_core._fresh_workload_core_recover_held_broker(
+        case["updater"],
+        case["bootstrap_module"],
+        case["plan"],
+        case["transaction"],
+        case["broker_row"],
+        case["broker_inputs"],
+        lock_lease=object(),
+        proc_root=case["proc_root"],
+        journal_path=case["journal_path"],
+    )
+    catalog_generation = native_core._fresh_workload_core_validate_maintenance_hold(
+        case["updater"],
+        case["plan"],
+        case["transaction"],
+        case["full_digests"],
+        source_id=case["source_id"],
+        source_uid=case["source_uid"],
+        source_gid=case["source_gid"],
+    )
+
+    requests = [
+        event for event in case["events"] if isinstance(event, tuple) and event[0] == "broker"
+    ]
+    validations = [event[2] for event in requests if event[1] == "ValidateMaintenanceHold"]
+    assert identity["mainPid"] == "4243"
+    assert catalog_generation == 1
+    assert case["transaction"]["phase"] == "hold_required"
+    assert case["transaction"]["progress"] == "catalog_initialized"
+    assert case["transaction"]["maintenanceToken"] == "private-held-token-123"
+    assert [
+        event[:2] for event in case["events"] if isinstance(event, tuple) and event[0] == "start"
+    ] == [("start", "start")]
+    assert len(validations) == len(case["full_digests"]) == 10
+    assert {request["component_id"] for request in validations} == set(case["full_digests"])
+    assert all(request["request_id"] == case["plan"]["requestId"] for request in validations)
+    assert all(request["plan_id"] == case["plan"]["planId"] for request in validations)
+    assert all(request["plan_digest"] == case["plan"]["planDigest"] for request in validations)
+    assert all(request["maintenance_token"] == "private-held-token-123" for request in validations)
+    assert all(request["expected_gate_generation"] == 1 for request in validations)
+    assert all(request["expected_catalog_generation"] == 1 for request in validations)
+    assert all(
+        request["component_artifact_digests"] == case["full_digests"] for request in validations
+    )
+    assert not any(event[1] == "BeginCoreBootstrap" for event in requests)
+    assert case["written"][-1]["bootstrapBroker"]["mainPid"] == "4243"
+    assert "brokerRecoveryError" not in case["written"][-1]
+
+
+def test_held_broker_recovery_leaves_exact_active_broker_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    active = ("active", "running", "42", "0")
+    case = _held_broker_recovery_case(monkeypatch, tmp_path, initial_state=active)
+    identity = native_core._fresh_workload_core_recover_held_broker(
+        case["updater"],
+        case["bootstrap_module"],
+        case["plan"],
+        case["transaction"],
+        case["broker_row"],
+        case["broker_inputs"],
+        lock_lease=object(),
+        proc_root=case["proc_root"],
+        journal_path=case["journal_path"],
+    )
+
+    assert identity == case["previous_identity"]
+    assert not any(isinstance(event, tuple) and event[0] == "start" for event in case["events"])
+    assert "process-table" not in case["events"]
+    assert case["transaction"]["maintenanceToken"] == "private-held-token-123"
+
+
+@pytest.mark.parametrize("mismatch", ["journal", "pointer"])
+def test_held_broker_recovery_refuses_mismatched_identity_before_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    case = _held_broker_recovery_case(monkeypatch, tmp_path)
+    if mismatch == "journal":
+        case["transaction"]["bootstrapBroker"]["artifactDigest"] = _digest("tampered")
+    else:
+        case["updater"]._active_native_pointer_identity = lambda _component: "different-pointer"
+
+    with pytest.raises(RuntimeError, match="exact maintenance hold remains available"):
+        native_core._fresh_workload_core_recover_held_broker(
+            case["updater"],
+            case["bootstrap_module"],
+            case["plan"],
+            case["transaction"],
+            case["broker_row"],
+            case["broker_inputs"],
+            lock_lease=object(),
+            proc_root=case["proc_root"],
+            journal_path=case["journal_path"],
+        )
+
+    assert not any(isinstance(event, tuple) and event[0] == "start" for event in case["events"])
+    assert case["transaction"]["phase"] == "hold_required"
+    assert case["transaction"]["progress"] == "catalog_initialized"
+    assert case["transaction"]["maintenanceToken"] == "private-held-token-123"
+
+
+def test_held_broker_start_failure_keeps_redacted_recoverable_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_broker_recovery_case(monkeypatch, tmp_path, startup_failure=True)
+
+    with pytest.raises(RuntimeError, match="exact maintenance hold remains available"):
+        native_core._fresh_workload_core_recover_held_broker(
+            case["updater"],
+            case["bootstrap_module"],
+            case["plan"],
+            case["transaction"],
+            case["broker_row"],
+            case["broker_inputs"],
+            lock_lease=object(),
+            proc_root=case["proc_root"],
+            journal_path=case["journal_path"],
+        )
+
+    saved = case["written"][-1]
+    error_text = json.dumps(saved["brokerRecoveryError"])
+    assert case["transaction"]["phase"] == "hold_required"
+    assert case["transaction"]["progress"] == "catalog_initialized"
+    assert case["transaction"]["maintenanceToken"] == "private-held-token-123"
+    assert "private-held-token-123" not in error_text
+    assert "[REDACTED]" in error_text
+    assert len(error_text) < 1000
 
 
 def _public_first_core_block() -> dict[str, Any]:
@@ -1976,6 +2471,623 @@ def test_public_apply_initializes_first_core_before_sdk_prepare_and_normal_readi
     assert events.index("durable-first-core-intent") < events.index("first-core")
     assert events.index("first-core") < events.index("sdk-prepare")
     assert events.index("first-core") < events.index("normal-core-readiness")
+
+
+def _held_sdk_recovery_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: str = "pending",
+    current_sdk: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build one exact staged held transaction for SDK-ordering recovery tests."""
+
+    updater = _workload_updates_updater(tmp_path)
+    block = _public_first_core_block()
+    plan_id = block["planId"]
+    plan_digest = block["planDigest"]
+    policy = {
+        "mode": "actualProduct",
+        "productComponentIds": ["cyrene-catalyst"],
+        "productSources": [{"componentId": "cyrene-catalyst", "sourceId": "cyrene-catalyst"}],
+        "operations": [],
+    }
+    updater.catalog = {"workloads": [{"workloadId": "catalyst", "sourcePolicy": policy}]}
+    sdk_id = updates.WORKLOAD_SDK_COMPONENT_ID
+    target_id = updates.WORKLOAD_SDK_TARGET_ID
+    archive = tmp_path / "sdk.tar.gz"
+    archive.write_bytes(b"verified SDK archive")
+    bundle = tmp_path / "sdk-bundle"
+    bundle.mkdir()
+    wheel = bundle / "cyrene_runtime_maintenance-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"verified SDK wheel")
+    sdk_row = {
+        "componentId": sdk_id,
+        "artifactKind": "python-bundle",
+        "version": "0.1.0",
+        "manifestDigest": _digest("sdk-manifest"),
+        "manifestAssetDigest": _digest("sdk-manifest-asset"),
+        "digest": updates._file_digest(archive),
+        "releaseId": "sdk-release-1",
+        "targetId": target_id,
+        "indexIdentity": {"releaseTag": "sdk-release-1"},
+        "publisherIdentity": {"repository": "DoHorizon-AI/Cyrene-Workspace"},
+        "attestationRef": {"subjectName": archive.name},
+        "manifestUri": "https://example.invalid/sdk-release.json",
+        "requiredness": "required",
+    }
+    sdk_stage_identity = {
+        "archivePath": str(archive),
+        "bundlePath": str(bundle),
+        "wheelPath": str(wheel),
+        "wheelDigest": _digest("sdk-wheel"),
+        "planId": plan_id,
+        "planDigest": plan_digest,
+    }
+    sdk_stage = {
+        **{field: sdk_row[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS},
+        "componentId": sdk_id,
+        "status": "staged",
+        "artifactKind": "python-bundle",
+        "stagedIdentity": sdk_stage_identity,
+    }
+    plugin_id = "cyrene-plugin-document-parsing"
+    plugin_row = {
+        "componentId": plugin_id,
+        "artifactKind": "plugin-package",
+        "version": "0.2.0",
+        "digest": _digest("plugin-release"),
+        "manifestDigest": _digest("plugin-manifest"),
+        "manifestAssetDigest": _digest("plugin-manifest-asset"),
+        "releaseId": "plugin-release-1",
+        "targetId": "linux-ubuntu-24.04-x86_64-plugin",
+        "indexIdentity": {"releaseTag": "plugin-release-1"},
+        "publisherIdentity": {"repository": "DoHorizon-AI/Cyrene-Plugins-Official"},
+        "attestationRef": {"subjectName": "plugin.json"},
+        "sourcePolicy": policy,
+        "requiredness": "recommended",
+    }
+    plugin_stage = {
+        **{field: plugin_row[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS},
+        "componentId": plugin_id,
+        "status": "staged",
+        "artifactKind": "plugin-package",
+        "packageArtifactDigest": _digest("plugin-package-aggregate"),
+    }
+    selected_rows = [plugin_row, sdk_row]
+    staged_rows = [plugin_stage, sdk_stage]
+    resolution = {
+        "status": "ready",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "action": "install",
+        "channel": "stable",
+        "selectedComponents": copy.deepcopy(selected_rows),
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "sourcePolicy": copy.deepcopy(policy),
+        "planDigestMaterial": {"firstCoreBootstrap": copy.deepcopy(block)},
+    }
+    stored = {
+        "planKind": updates.WORKLOAD_PROTOCOL_VERSION,
+        "phase": "staged",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "targetId": block["targetId"],
+        "action": "install",
+        "channel": "stable",
+        "catalogDigest": updater.catalog_digest,
+        "catalogGeneration": updater.catalog_generation,
+        "selections": {},
+        "candidates": {
+            sdk_id: {
+                "manifestUri": sdk_row["manifestUri"],
+                "manifestDigest": sdk_row["manifestDigest"],
+                "manifestAssetDigest": sdk_row["manifestAssetDigest"],
+                "artifactDigest": sdk_row["digest"],
+                "releaseTag": sdk_row["releaseId"],
+                "targetId": target_id,
+            }
+        },
+        "resolution": copy.deepcopy(resolution),
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "stagedComponents": copy.deepcopy(staged_rows),
+        "firstCoreBootstrapStage": {
+            "schemaVersion": 1,
+            "parentPlanId": plan_id,
+            "parentPlanDigest": plan_digest,
+            "stagedComponents": [{"componentId": "cyrene-runtime-maintenance"}],
+            "brokerProofs": {},
+        },
+    }
+    component_digests = updater._workload_component_artifact_map(
+        selected_rows, {row["componentId"]: row for row in staged_rows}, {"components": {}}
+    )
+    result = {
+        "status": "installed",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "catalogGeneration": 1,
+        "readiness": {"status": "READY", "catalogGeneration": 1},
+        "componentStatuses": [],
+    }
+    transaction = {
+        "transactionKind": "workload-assembly.v1",
+        "action": "install",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "targetId": block["targetId"],
+        "catalogDigest": updater.catalog_digest,
+        "channel": "stable",
+        "componentArtifactDigests": component_digests,
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "firstCoreBootstrapStatus": status,
+        "firstCoreBootstrapResult": copy.deepcopy(result) if status == "installed" else None,
+        "resolution": copy.deepcopy(resolution),
+        "selectedComponents": copy.deepcopy(selected_rows),
+        "stagedComponents": copy.deepcopy(staged_rows),
+        "sourcePolicy": copy.deepcopy(policy),
+        "sdkEnvironment": None,
+        "phase": "applying",
+    }
+    transaction_path = tmp_path / "transactions" / f"{plan_id}.json"
+    transaction_path.parent.mkdir()
+    transaction_path.parent.chmod(0o700)
+    updates._atomic_json(transaction_path, transaction)
+    events: list[str] = []
+    core_candidate = updates.Candidate(
+        component={"componentId": "cyrene-runtime-maintenance"},
+        manifest={},
+        manifest_digest=_digest("broker-manifest"),
+        artifact_digest=_digest("broker-artifact"),
+        manifest_uri="https://example.invalid/broker.json",
+        index={},
+        index_uri="https://example.invalid/index.json",
+    )
+    core_journal = {
+        "mode": "fresh-workload-first-core",
+        "planId": block["planId"],
+        "planDigest": block["planDigest"],
+        "firstCoreBootstrap": copy.deepcopy(block),
+        "componentArtifactDigests": copy.deepcopy(block["maintenanceComponentArtifactDigests"]),
+        "phase": "hold_required" if status == "pending" else "succeeded",
+        "progress": "catalog_initialized" if status == "pending" else "complete",
+    }
+    sdk_candidate = updates.Candidate(
+        component={"componentId": sdk_id},
+        manifest={"version": sdk_row["version"], "target": {"platform": "linux"}},
+        manifest_digest=sdk_row["manifestDigest"],
+        artifact_digest=sdk_row["digest"],
+        manifest_uri=sdk_row["manifestUri"],
+        index={},
+        index_uri="https://example.invalid/sdk-index.json",
+        release_tag=sdk_row["releaseId"],
+        manifest_asset_digest=sdk_row["manifestAssetDigest"],
+    )
+    sdk_state: dict[str, Any] = {"identity": current_sdk}
+    sdk_module = SimpleNamespace(
+        WORKLOAD_OPERATOR_ROOT=tmp_path / "missing-operator-root",
+        read_workload_sdk_environment=lambda: sdk_state["identity"],
+        _validate_candidate=lambda _selected, identity: {
+            "archivePath": Path(identity["archivePath"]),
+            "bundlePath": Path(identity["bundlePath"]),
+            "wheelPath": Path(identity["wheelPath"]),
+            "wheelDigest": identity["wheelDigest"],
+        },
+        _require_root_file=lambda *_args, **_kwargs: None,
+        _require_root_directory=lambda *_args, **_kwargs: None,
+        _require_root_directory_chain=lambda *_args, **_kwargs: None,
+        _read_verified_wheel=lambda *_args, **_kwargs: None,
+    )
+
+    def prepare(_component: dict[str, Any], _identity: dict[str, Any]) -> None:
+        events.append("sdk-prepare")
+        sdk_state["identity"] = {"installed": True}
+
+    sdk_module.prepare_workload_sdk_environment = prepare
+    monkeypatch.setattr(updater, "_load_workload_sdk_environment", lambda: sdk_module)
+    monkeypatch.setattr(
+        updater,
+        "_load_native_core_bootstrap",
+        lambda: SimpleNamespace(
+            _journal_path=lambda _updater: tmp_path / "first-core-bootstrap.json",
+            _read_private_json=lambda _path: core_journal,
+        ),
+    )
+    monkeypatch.setattr(updater, "_candidate", lambda *_args, **_kwargs: sdk_candidate)
+    monkeypatch.setattr(
+        updater,
+        "_first_core_resolution_projection",
+        lambda projected, _candidates, **_kwargs: (
+            (projected["firstCoreBootstrap"], {"cyrene-runtime-maintenance": core_candidate})
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_validate_first_core_stage_items",
+        lambda *_args, **_kwargs: [{"componentId": "cyrene-runtime-maintenance"}],
+    )
+    monkeypatch.setattr(updater, "_read_first_core_broker_release", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        updater, "_activity_catalog", lambda **_kwargs: ({"generation": 1, "sources": []}, [])
+    )
+    monkeypatch.setattr(updater, "_workload_source_principals", lambda *_args: {})
+    monkeypatch.setattr(
+        updater,
+        "_run_fresh_workload_first_core",
+        lambda *_args, **_kwargs: events.append("core-resume") or copy.deepcopy(result),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_workload_sdk_matches_selected",
+        lambda _selected, installed: (
+            isinstance(installed, dict) and installed.get("installed") is True
+        ),
+    )
+    atomic_json = updates._atomic_json
+
+    def record_atomic_json(path: Path, value: dict[str, Any], **kwargs: Any) -> None:
+        intent = value.get("sdkPrepareIntent")
+        if isinstance(intent, dict) and intent.get("status") == "pending":
+            events.append("sdk-intent")
+        atomic_json(path, value, **kwargs)
+
+    monkeypatch.setattr(updates, "_atomic_json", record_atomic_json)
+    monkeypatch.setattr(updates, "DEFAULT_PACKAGE_RUNTIME_POLICY", tmp_path / "runtime-policy.json")
+    updates.DEFAULT_PACKAGE_RUNTIME_POLICY.write_text("{}", encoding="utf-8")
+    updater.components[sdk_id] = {
+        "componentId": sdk_id,
+        "targets": [
+            {
+                "targetId": target_id,
+                "artifactKind": "python-bundle",
+                "support": "supported",
+            }
+        ],
+    }
+    updater.targets[target_id] = {"id": target_id, "target": {"platform": "linux"}}
+    monkeypatch.setattr(
+        updater,
+        "_target_for",
+        lambda _component, *, target_id=None: (
+            {**updater.targets[target_id], "artifactKind": "python-bundle"}
+            if target_id == updates.WORKLOAD_SDK_TARGET_ID
+            else None
+        ),
+    )
+    return {
+        "updater": updater,
+        "block": block,
+        "resolution": resolution,
+        "stored": stored,
+        "transaction": transaction,
+        "transaction_path": transaction_path,
+        "policy": policy,
+        "events": events,
+        "result": result,
+        "sdk_row": sdk_row,
+        "sdk_stage": sdk_stage,
+    }
+
+
+def _use_published_sdk_target(
+    updater: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Use the signed SDK component row and its separate global target profile."""
+
+    catalog = json.loads((ROOT / "governance" / "component-catalog-v2.json").read_text())
+    sdk_component = next(
+        row
+        for row in catalog["components"]
+        if row["componentId"] == updates.WORKLOAD_SDK_COMPONENT_ID
+    )
+    sdk_target_id = updates.WORKLOAD_SDK_TARGET_ID
+    sdk_target_profile = next(row for row in catalog["targets"] if row["id"] == sdk_target_id)
+    component_target = next(
+        row for row in sdk_component["targets"] if row["targetId"] == sdk_target_id
+    )
+    assert component_target == {
+        "targetId": sdk_target_id,
+        "artifactKind": "python-bundle",
+        "support": "supported",
+    }
+    assert "artifactKind" not in sdk_target_profile
+
+    updater.components[updates.WORKLOAD_SDK_COMPONENT_ID] = sdk_component
+    updater.targets[sdk_target_id] = sdk_target_profile
+    profile_id = "linux-ubuntu-24.04-x86_64-python-3.12"
+    updater.native_python_profiles[profile_id] = {
+        **sdk_target_profile["target"],
+        "pythonVersion": "3.12.14",
+        "pythonExecutable": str(updates.DEFAULT_PRIVATE_PYTHON),
+        "pythonInput": "packaging/python-runtime.lock.json",
+        "wheelResolver": {
+            "tool": "uv",
+            "version": "0.12.21",
+            "arguments": ["--python-platform", "x86_64-unknown-linux-gnu"],
+            "allowedWheelTags": {
+                "purePython": ["*-none-any"],
+                "pep600": {"architecture": "x86_64", "maxGlibc": "2.39"},
+            },
+        },
+    }
+    monkeypatch.setattr(
+        updates.platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "ubuntu", "VERSION_ID": "24.04"},
+    )
+    monkeypatch.setattr(updates.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(updates.platform, "libc_ver", lambda: ("glibc", "2.39"))
+    monkeypatch.setattr(updater, "_private_python_runtime_ready", lambda _profile: True)
+    monkeypatch.setattr(
+        updater,
+        "_target_for",
+        updates.ComponentUpdater._target_for.__get__(updater),
+    )
+    return sdk_component, sdk_target_profile, component_target
+
+
+def test_preinventory_resume_uses_component_sdk_target_for_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch)
+    updater = case["updater"]
+    sdk_component, sdk_target_profile, component_target = _use_published_sdk_target(
+        updater, monkeypatch
+    )
+    sdk_row = case["sdk_row"]
+    sdk_target = {**sdk_target_profile, "artifactKind": component_target["artifactKind"]}
+    candidate = updates.Candidate(
+        component=sdk_component,
+        manifest={"version": sdk_row["version"], "target": sdk_target_profile["target"]},
+        manifest_digest=sdk_row["manifestDigest"],
+        artifact_digest=sdk_row["digest"],
+        manifest_uri=sdk_row["manifestUri"],
+        index={},
+        index_uri="https://example.invalid/sdk-index.json",
+        release_tag=sdk_row["releaseId"],
+        manifest_asset_digest=sdk_row["manifestAssetDigest"],
+    )
+    candidate_targets: list[dict[str, Any]] = []
+
+    def signed_sdk_candidate(
+        _component: dict[str, Any], target: dict[str, Any], _channel: str, **_kwargs: Any
+    ) -> Any:
+        candidate_targets.append(target)
+        assert target == sdk_target
+        assert target["artifactKind"] == "python-bundle"
+        return candidate
+
+    monkeypatch.setattr(updater, "_candidate", signed_sdk_candidate)
+    result, sdk_prepared = updater._resume_first_core_before_workload_inventory(
+        case["stored"],
+        case["transaction"],
+        case["transaction_path"],
+        lock_lease=object(),
+        bootstrap_module=object(),
+    )
+
+    assert result == case["result"]
+    assert sdk_prepared is True
+    assert candidate_targets == [sdk_target]
+    assert candidate_targets[0] is not sdk_target_profile
+    assert case["events"] == ["core-resume", "sdk-intent", "sdk-prepare"]
+
+
+@pytest.mark.parametrize("target_result", ["unsupported", "wrong_kind"])
+def test_preinventory_resume_rejects_unsupported_sdk_target_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_result: str
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch)
+    updater = case["updater"]
+    _sdk_component, sdk_target_profile, component_target = _use_published_sdk_target(
+        updater, monkeypatch
+    )
+    original_target_for = updater._target_for
+    candidate_calls: list[bool] = []
+    if target_result == "unsupported":
+        monkeypatch.setattr(updater, "_target_for", lambda *_args, **_kwargs: None)
+        expected_code = "UNSUPPORTED_TARGET"
+    else:
+        resolved_target = original_target_for(
+            updater.components[updates.WORKLOAD_SDK_COMPONENT_ID],
+            target_id=updates.WORKLOAD_SDK_TARGET_ID,
+        )
+        assert resolved_target == {
+            **sdk_target_profile,
+            "artifactKind": component_target["artifactKind"],
+        }
+        monkeypatch.setattr(
+            updater,
+            "_target_for",
+            lambda *_args, **_kwargs: {**resolved_target, "artifactKind": "native-binary"},
+        )
+        expected_code = "UNSUPPORTED_ARTIFACT"
+    monkeypatch.setattr(
+        updater, "_candidate", lambda *_args, **_kwargs: candidate_calls.append(True)
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._resume_first_core_before_workload_inventory(
+            case["stored"],
+            case["transaction"],
+            case["transaction_path"],
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert error.value.code == expected_code
+    assert candidate_calls == []
+    assert case["events"] == []
+
+
+@pytest.mark.parametrize("status", ["pending", "installed"])
+def test_preinventory_resume_recovers_pending_and_post_core_pre_intent_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch, status=status)
+    updater = case["updater"]
+
+    result, sdk_prepared = updater._resume_first_core_before_workload_inventory(
+        case["stored"],
+        case["transaction"],
+        case["transaction_path"],
+        lock_lease=object(),
+        bootstrap_module=object(),
+    )
+
+    assert result == case["result"]
+    assert sdk_prepared is True
+    assert case["events"] == ["core-resume", "sdk-intent", "sdk-prepare"]
+    saved = updates._read_object(case["transaction_path"], "transaction")
+    assert saved["firstCoreBootstrapStatus"] == "installed"
+    assert saved["sdkPrepareIntent"]["status"] == "prepared"
+
+
+@pytest.mark.parametrize("mutation", ["plan", "staged_sdk", "component_map", "source", "hold"])
+def test_preinventory_resume_rejects_changed_authority_before_core_or_sdk_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch)
+    if mutation == "plan":
+        case["transaction"]["planDigest"] = _digest("changed-plan")
+    elif mutation == "staged_sdk":
+        case["stored"]["stagedComponents"][1]["stagedIdentity"]["planDigest"] = _digest(
+            "changed-sdk-stage"
+        )
+    elif mutation == "component_map":
+        case["transaction"]["componentArtifactDigests"][updates.WORKLOAD_SDK_COMPONENT_ID] = (
+            _digest("changed-component-map")
+        )
+    elif mutation == "source":
+        case["transaction"]["sourcePolicy"] = {"mode": "tampered"}
+    else:
+        case["transaction"]["firstCoreBootstrap"]["planDigest"] = _digest("changed-hold")
+
+    with pytest.raises(updates.UpdateError):
+        case["updater"]._resume_first_core_before_workload_inventory(
+            case["stored"],
+            case["transaction"],
+            case["transaction_path"],
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert case["events"] == []
+
+
+def test_preinventory_resume_does_not_replace_ambiguous_sdk_root_without_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch)
+    operator_root = case["updater"]._load_workload_sdk_environment().WORKLOAD_OPERATOR_ROOT
+    operator_root.mkdir()
+
+    with pytest.raises(updates.UpdateError, match="without its durable prepare intent"):
+        case["updater"]._resume_first_core_before_workload_inventory(
+            case["stored"],
+            case["transaction"],
+            case["transaction_path"],
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert case["events"] == []
+
+
+def test_invalid_existing_sdk_readback_still_reaches_authoritative_inventory_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invalid_sdk = {"installed": True, "componentId": updates.WORKLOAD_SDK_COMPONENT_ID}
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch, current_sdk=invalid_sdk)
+    result, sdk_prepared = case["updater"]._resume_first_core_before_workload_inventory(
+        case["stored"],
+        case["transaction"],
+        case["transaction_path"],
+        lock_lease=object(),
+        bootstrap_module=object(),
+    )
+    assert result is None
+    assert sdk_prepared is False
+    assert case["events"] == []
+
+    policy_path = tmp_path / "authenticated-runtime-policy.json"
+    policy_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(updates, "DEFAULT_PACKAGE_RUNTIME_POLICY", policy_path)
+    updater = case["updater"]
+    monkeypatch.setattr(
+        updater,
+        "_workload_plugin_owner_rows",
+        lambda *_args: (case["policy"], [{"componentId": "cyrene-plugin-document-parsing"}]),
+    )
+    monkeypatch.setattr(updater, "_read_workload_package_runtime_receipt", lambda *_args: None)
+    monkeypatch.setattr(
+        updater, "_activity_catalog", lambda **_kwargs: ({"generation": 1, "sources": []}, [])
+    )
+    monkeypatch.setattr(updater, "_workload_source_principals", lambda *_args: {})
+    monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: object())
+
+    with pytest.raises(
+        updates.UpdateError, match="operator SDK interpreter is not verified"
+    ) as error:
+        updater._read_workload_package_inventory("catalyst", ("cyrene-plugin-document-parsing",))
+    assert error.value.code == "WORKLOAD_SDK_READBACK_REQUIRED"
+
+
+def test_same_plan_recovery_precedes_ordinary_workload_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _workload_updates_updater(tmp_path)
+    block = _public_first_core_block()
+    events: list[str] = []
+    transaction_root = tmp_path / "transactions"
+    transaction_root.mkdir(mode=0o700)
+    transaction_path = transaction_root / f"{block['planId']}.json"
+    prior = {
+        "transactionKind": "workload-assembly.v1",
+        "action": "install",
+        "planId": block["planId"],
+        "planDigest": block["planDigest"],
+        "workloadId": "catalyst",
+        "phase": "applying",
+        "maintenanceHolds": {},
+    }
+    updates._atomic_json(transaction_path, prior)
+    stored = {
+        "planId": block["planId"],
+        "planDigest": block["planDigest"],
+        "workloadId": "catalyst",
+        "targetId": block["targetId"],
+        "channel": "stable",
+        "selections": {},
+    }
+    monkeypatch.setattr(updates, "_running_as_root", lambda: True)
+    monkeypatch.setattr(updater, "_private_state_directory", lambda _name: transaction_root)
+    monkeypatch.setattr(
+        updater,
+        "_resume_first_core_before_workload_inventory",
+        lambda *_args, **_kwargs: events.append("held-core-and-sdk-resume") or ({}, True),
+    )
+
+    class InventoryReached(Exception):
+        pass
+
+    def build_workload_plan(*_args: Any, **_kwargs: Any) -> Any:
+        events.append("ordinary-authoritative-inventory")
+        raise InventoryReached
+
+    monkeypatch.setattr(updater, "_build_workload_plan", build_workload_plan)
+
+    with pytest.raises(InventoryReached):
+        updater._apply_workload_install_assembled(
+            stored,
+            {"planId": block["planId"], "planDigest": block["planDigest"], "confirmed": True},
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert events == ["held-core-and-sdk-resume", "ordinary-authoritative-inventory"]
 
 
 def test_validate_maintenance_hold_uses_v1_wire_protocol(
