@@ -4718,7 +4718,7 @@ def test_boot_connection_recovery_skips_while_a_workload_hold_is_active(
     assert "private-token" not in json.dumps(result)
 
 
-def test_boot_connection_recovery_restores_exact_stopped_owner_before_projection(
+def test_boot_connection_recovery_resumes_succeeded_refs_rotation_after_journal_crash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     updater = _empty_updater(tmp_path)
@@ -4744,6 +4744,14 @@ def test_boot_connection_recovery_restores_exact_stopped_owner_before_projection
         "bindingId": binding_id,
         "sourcePolicy": source_policy,
     }
+    environment_path = tmp_path / "etc/cyrene/catalyst-plugin-refs.env"
+    dropin_path = tmp_path / "etc/systemd/cyrene-catalyst.service.d/90-plugin-refs.conf"
+    old_refs = b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19081\n"
+    desired_refs = b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19082\n"
+    old_digest = "sha256:" + hashlib.sha256(old_refs).hexdigest()
+    desired_digest = "sha256:" + hashlib.sha256(desired_refs).hexdigest()
+    dropin_bytes = f"[Service]\nEnvironmentFile=-{environment_path}\n".encode()
+    dropin_digest = "sha256:" + hashlib.sha256(dropin_bytes).hexdigest()
     identity = {
         "componentId": component_id,
         "capabilityId": capability_id,
@@ -4767,18 +4775,64 @@ def test_boot_connection_recovery_restores_exact_stopped_owner_before_projection
         "packageInstallations": {component_id: {"installation_id": installation_id}},
         "sdkEnvironment": {"installed": True, "pythonPath": "/opt/cyrene/sdk/bin/python"},
         "catalystPluginRefs": {
-            "environmentDigest": "sha256:" + "c" * 64,
+            "environmentDigest": desired_digest,
             "bindingIdentities": [identity],
         },
         "catalystPluginRefsRestartPending": True,
+        "managedConfigFiles": [
+            {
+                "path": str(environment_path),
+                "kind": "catalyst-plugin-refs-environment",
+                "priorDigest": None,
+                "writtenDigest": desired_digest,
+                "mode": 0o640,
+                "groupId": 1200,
+            },
+            {
+                "path": str(dropin_path),
+                "kind": "catalyst-plugin-refs-dropin",
+                "priorDigest": None,
+                "writtenDigest": dropin_digest,
+                "mode": 0o644,
+                "groupId": 0,
+            },
+        ],
+        "result": {
+            "action": "install",
+            "workloadId": "catalyst",
+            "planId": plan_id,
+            "planDigest": plan_digest,
+        },
         "bindingOperations": [],
     }
-    updater.state_root.mkdir(mode=0o700)
+    previous_backup = updater._write_workload_catalyst_plugin_refs_backup(
+        transaction, old_refs, digest=old_digest, owner_plan_id=plan_id
+    )
+    transaction["catalystPluginRefs"]["rotation"] = {
+        "previous": previous_backup,
+        "rollback": None,
+    }
+    updater.state_root.mkdir(mode=0o700, exist_ok=True)
     transaction_root = updater.state_root / "transactions"
     transaction_root.mkdir(mode=0o700)
     transaction_path = transaction_root / f"{plan_id}.json"
     transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
     transaction_path.chmod(0o600)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT", environment_path)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_DROPIN", dropin_path)
+    monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=1200))
+    protected_files = {environment_path: old_refs, dropin_path: dropin_bytes}
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda file_path, **_kwargs: protected_files.get(file_path),
+    )
+    transaction_without_restart_intent = dict(transaction)
+    transaction_without_restart_intent.pop("catalystPluginRefsRestartPending")
+    updates._atomic_json(transaction_path, transaction_without_restart_intent)
+    with pytest.raises(updates.UpdateError, match="no matching transaction"):
+        updater._verify_workload_catalyst_plugin_refs_dropin_owner(dropin_digest)
+    updates._atomic_json(transaction_path, transaction)
     updater.catalog["workloads"] = [
         {
             "workloadId": "catalyst",
@@ -4796,11 +4850,6 @@ def test_boot_connection_recovery_restores_exact_stopped_owner_before_projection
         updater,
         "_load_native_component_bootstrap",
         lambda: SimpleNamespace(exclusive_update_lock=lambda _updater: nullcontext()),
-    )
-    monkeypatch.setattr(
-        updater,
-        "_verify_workload_catalyst_plugin_refs_dropin_owner",
-        lambda _digest: [{"planId": plan_id, "planDigest": plan_digest}],
     )
     monkeypatch.setattr(
         updater,

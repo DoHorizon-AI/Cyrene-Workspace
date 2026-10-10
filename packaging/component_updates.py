@@ -12140,15 +12140,18 @@ class ComponentUpdater:
             ):
                 continue
             pending_replacement = False
+            pending_replacement_allowed = phase == "applying" or (
+                phase == "succeeded" and transaction.get("catalystPluginRefsRestartPending") is True
+            )
             if live_environment_digest != environment_digest:
                 previous = rotation.get("previous") if isinstance(rotation, dict) else None
                 if (
-                    phase != "applying"
+                    not pending_replacement_allowed
                     or not isinstance(previous, dict)
                     or previous.get("digest") != live_environment_digest
                 ):
-                    # A prior successful transaction is historical after a newer
-                    # exact transaction has replaced its protected projection.
+                    # A succeeded owner is current only while its exact journaled
+                    # refs rotation still awaits the protected file replacement.
                     continue
                 pending_replacement = True
             self._parse_workload_environment_file(
@@ -12166,7 +12169,7 @@ class ComponentUpdater:
                     or result.get("planDigest") != plan_digest
                 ):
                     continue
-            if pending_replacement and phase != "applying":
+            if pending_replacement and not pending_replacement_allowed:
                 continue
             owners.append({"planId": plan_id, "planDigest": plan_digest})
         if not owners:
