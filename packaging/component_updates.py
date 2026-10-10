@@ -12237,9 +12237,22 @@ class ComponentUpdater:
             )
 
         sdk_component = self.components.get(sdk_id)
-        sdk_target = self.targets.get(sdk_row.get("targetId"))
-        if not isinstance(sdk_component, dict) or not isinstance(sdk_target, dict):
-            raise UpdateError("INVALID_STAGE", "The signed SDK target is unavailable.")
+        sdk_target_id = sdk_row.get("targetId")
+        if not isinstance(sdk_component, dict) or not isinstance(sdk_target_id, str):
+            raise UpdateError("INVALID_STAGE", "The signed SDK component or target is unavailable.")
+        sdk_target = self._target_for(sdk_component, target_id=sdk_target_id)
+        if not isinstance(sdk_target, dict):
+            raise UpdateError(
+                "UNSUPPORTED_TARGET", "The signed SDK target is unavailable on this host."
+            )
+        if (
+            sdk_target.get("artifactKind") != "python-bundle"
+            or sdk_row.get("artifactKind") != "python-bundle"
+        ):
+            raise UpdateError(
+                "UNSUPPORTED_ARTIFACT",
+                "The signed SDK target does not resolve to the required Python bundle artifact.",
+            )
         candidate = self._candidate(
             sdk_component,
             sdk_target,
