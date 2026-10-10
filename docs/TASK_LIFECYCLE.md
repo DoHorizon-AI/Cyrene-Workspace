@@ -27,7 +27,7 @@ Omit `--only-branch` only for an authorized repository-wide housekeeping pass. M
 
 Cleanup requires either exact branch-tip ancestry or an exact-head merged PR into the expected integration branch whose merge commit is present. A reused branch with newer commits does not inherit an older PR's completion. Open PR heads, protected/default/integration/release branches, primary worktrees, locked or active worktrees, uncommitted/untracked work, and unmerged commits remain protected. Remote access or PR evidence failures must not become permission to delete.
 
-When a merged task still has acceptance or trial work, or its owner has active follow-up work in the worktree, the owner must mark it with `git worktree lock --reason '<task/owner and ongoing verification>' <worktree-path>`. Waiting for an external release or host-acceptance result is ongoing verification; merge alone does not make the worktree disposable. After the owner finishes the work and archives its evidence, the owner explicitly runs `git worktree unlock <worktree-path>` before a branch-scoped cleanup plan and apply. Cleanup helpers or other tools must never automatically unlock another owner's worktree.
+When a merged task still has acceptance or trial work, or its owner has active follow-up work in the worktree, the owner must mark it with `git worktree lock --reason '<task/owner and ongoing verification>' <worktree-path>`. Waiting for an external release or host-acceptance result is ongoing verification; a failed acceptance that still needs a corrective release is active follow-up work, and its host and evidence stay retained. Merge or a completed but failed run does not make the worktree disposable. After the owner finishes the work and archives its evidence, the owner explicitly runs `git worktree unlock <worktree-path>` before a branch-scoped cleanup plan and apply. Cleanup helpers or other tools must never automatically unlock another owner's worktree.
 
 The helper records recoverable Git tips under `refs/task-archive/`, preserves non-cache ignored data outside the worktree or refuses removal, and uses normal guarded Git worktree removal. Exact-SHA leases are permitted only for deleting an already verified task ref; branch history is never rewritten. A stale plan must be revalidated, and changing tips or new work cause a skip.
 
@@ -70,7 +70,7 @@ References: [Antigravity directory rules](https://www.antigravity.google/docs/ru
 
 主工作区、受保护/主干/发布分支、开放 PR、未合并提交、未提交文件、被锁定或仍在运行的 worktree 都保留。分支名复用后产生的新提交不能沿用旧 PR 的“已完成”结论。14 天只是识别旧任务的默认时间窗口，不能据此删除未完成工作。
 
-已合并任务仍在验收或试用，或 owner 仍在该 worktree 中进行后续工作时，应由 owner 执行 `git worktree lock --reason '<任务/owner 与持续验证原因>' <worktree-path>` 标记为活跃。等待外部发行物或主机验收结果也属于持续验证；仅完成合并不能作为 worktree 可清理的依据。owner 完成工作并归档证据后，显式执行 `git worktree unlock <worktree-path>`，再运行限定分支的清理计划与应用。清理脚本或其他工具不得自动解锁他人的 worktree。
+已合并任务仍在验收或试用，或 owner 仍在该 worktree 中进行后续工作时，应由 owner 执行 `git worktree lock --reason '<任务/owner 与持续验证原因>' <worktree-path>` 标记为活跃。等待外部发行物或主机验收结果也属于持续验证；需要修正发行物的失败验收仍属于活跃后续工作，应保留失败主机和证据。仅完成合并或完成一次失败运行，不能作为 worktree 可清理的依据。owner 完成工作并归档证据后，显式执行 `git worktree unlock <worktree-path>`，再运行限定分支的清理计划与应用。清理脚本或其他工具不得自动解锁他人的 worktree。
 
 禁止递归删除整个父任务目录或使用 `git clean -fdx`：同目录可能有试用服务、环境、验收报告、凭据和其他仓库。仍在提供试用服务的已合并工作区注明“运行占用”。受应用管理的 Codex worktree 使用其应用归档机制。
 

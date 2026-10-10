@@ -5,11 +5,24 @@ Status: The immutable Ubuntu 24.04 amd64 Native preview from Workspace source
 verified. The producer workflow completed all four jobs. Strict verification
 passed for 18 assets, 21 bound tuples, seven verifier source blobs, and 20
 release evidence records with no skipped checks; the independent root
-readback also passed. Fresh-host acceptance was handed off to Ubuntu 24.04
-guest 2234, but a complete authoritative phase readback is not yet recorded.
-No Catalyst/Core, Client, SFT-consumer, or Echo acceptance is claimed.
+readback also passed. The 34-gate fresh-host run on Ubuntu 24.04.5 guest 2234
+ended with 15 PASS, 1 FAIL, and 18 NOT_RUN. `catalyst_workload_apply` failed
+with retryable `FIRST_CORE_BOOTSTRAP_FAILED` when the first-Core Kernel service
+rejected its sandbox peer UID/GID arguments. Catalyst runtime activation,
+Client access, SFT production and independent loading, and Echo lifecycle have
+not passed acceptance. The Platform source correction is merged in
+[Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100)
+at `2bbd40b3b30cd9401127a033dd33cf6902378536`, and required CI passed. The
+official Platform release [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155),
+attempt 1, was still building Ubuntu 22.04 and 24.04 packages at the checkpoint
+time of 2026-10-10 09:04 UTC. The catalog-verification job succeeded and both
+Ubuntu native-build jobs remained in progress. No release for P was published
+and strict release verification had not run. This is an interim checkpoint,
+not final host-acceptance evidence; a verified Platform release and a new
+immutable Native preview must pass the remaining gates before this candidate
+can be accepted for a customer trial.
 
-状态：Workspace 源码 `0e8d8f56cc3bb827320a85671fff43220d0a4551` 对应的不可变 Ubuntu 24.04 amd64 Native 预览版已发布并通过独立验证。Producer workflow 的四个 job 全部成功。严格验证通过 18 项资产、21 个绑定 tuple、7 个 verifier 源文件和 20 条发行证据，未跳过检查；独立 root 回读也通过。Ubuntu 24.04 主机 2234 已收到全新主机验收交接，但尚未记录完整且权威的阶段回读。本 ADR 不宣称 Catalyst/Core、Client、SFT consumer 或 Echo 验收通过。
+状态：Workspace 源码 `0e8d8f56cc3bb827320a85671fff43220d0a4551` 对应的不可变 Ubuntu 24.04 amd64 Native 预览版已发布并通过独立验证。Producer workflow 的四个 job 全部成功。严格验证通过 18 项资产、21 个绑定 tuple、7 个 verifier 源文件和 20 条发行证据，未跳过检查；独立 root 回读也通过。Ubuntu 24.04.5 主机 2234 的 34 项全新主机验收以 15 项通过、1 项失败、18 项未运行结束。`catalyst_workload_apply` 因 first-Core Kernel 服务拒绝 sandbox peer UID/GID 参数而以可重试的 `FIRST_CORE_BOOTSTRAP_FAILED` 失败。Platform 源码修正已合并于 PR #100（`2bbd40b3b30cd9401127a033dd33cf6902378536`），required CI 已通过。2026-10-10 09:04 UTC checkpoint 回读时，正式 Platform 发行流程 [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155) 第 1 次尝试仍在运行：Catalog 验证已成功，Ubuntu 22.04 和 24.04 原生构建 job 仍在执行。尚未发布 P 的 release，也未运行严格发行验证。本文是阶段 checkpoint，不是最终主机验收证据；正式 Platform 发行验证和新的不可变 Native 预览版通过剩余验收后，才能接受该候选版本用于客户试用。Catalyst runtime 激活、Client 访问、SFT 生成与独立加载、Echo lifecycle 均未通过验收。
 
 ## Decision / 决策
 
@@ -63,27 +76,65 @@ attempt 2 的四个 job 全部成功；release API ID 为 `408779397`。
 
 已发布发行物的确切 DEB、manifest、source receipt 与 active Catalog 身份如上。严格发行验证通过全部 18 项资产、21 个绑定 tuple、7 个 verifier 源文件和 20 条 evidence，未跳过检查；独立 root 资产/源码回读也通过。上述发行证据只确认发行物身份与完整性，不代表主机安装、Catalyst/Core 启动、Client 访问、SFT 消费者加载或 Echo lifecycle 已通过。
 
-The reproducible install and component-selection commands are in the
-[Ubuntu installation guide](MODULAR_DISTRIBUTION_V01.md). Install Catalyst with
-`sudo cyrene workload install catalyst --channel preview --yes`. Keep the
-preview channel explicit and verify the release envelope and detached
-attestations before installation. Do not use `latest`, manually copy Catalog
-data, or set `PYTHONPATH`.
+The installation protocol and component-selection commands are in the
+[Ubuntu installation guide](MODULAR_DISTRIBUTION_V01.md). The pinned 0e
+candidate's package identity is verified, but its fresh-host Catalyst apply
+failed, so it is not an accepted customer-trial release. Keep the preview
+channel explicit and verify the release envelope and detached attestations
+before any installation. Do not use `latest`, manually copy Catalog data, or
+set `PYTHONPATH`.
 
-可复现的安装与组件选择命令见 [Ubuntu 安装指南](MODULAR_DISTRIBUTION_V01.md)。使用
-`sudo cyrene workload install catalyst --channel preview --yes` 安装 Catalyst。始终显式选择 preview 通道，并在安装前验证完整发行包和 detached attestation。不要使用 `latest`、手工复制 Catalog 数据或设置 `PYTHONPATH`。
+安装协议与组件选择命令见 [Ubuntu 安装指南](MODULAR_DISTRIBUTION_V01.md)。已固定的 0e 候选版本身份通过了发行验证，但全新主机 Catalyst apply 失败，因此它尚未成为通过客户试用验收的发行版。Platform 源码修正已在 PR #100 的 SHA `2bbd40b3b30cd9401127a033dd33cf6902378536` 合并，required CI 已通过；正式 Platform preview 发行和严格验证仍待完成。任何安装前均须显式选择 preview 通道，并验证完整发行包与 detached attestation。不要使用 `latest`、手工复制 Catalog 数据或设置 `PYTHONPATH`。
 
-## Acceptance boundary / 验收边界
+## Acceptance result and correction path / 验收结果与修正路径
 
-The formal fresh-host handoff authorizes acceptance on guest 2234. The final
-host phase record is still pending a complete authoritative readback. Report
-only results backed by the corresponding frozen receipt; package signature
-verification is not a substitute for runtime acceptance. Keep Catalyst/Core,
-Client, independent SFT-consumer, and Echo lifecycle results unclaimed until
-those phase receipts are available. Preserve the plan and receipts and do not
-edit Broker state by hand.
+The terminal ledger for the fresh Ubuntu 24.04.5 guest 2234 contains 34 known
+gates: 15 PASS, 1 FAIL, 18 NOT_RUN, and no unknown gates. The only failed gate
+is `catalyst_workload_apply`; it returned retryable
+`FIRST_CORE_BOOTSTRAP_FAILED`. The first-Core transaction entered
+`hold_required` at `cohort_starting` because `cyrene-kernel.service` exited
+with status 1.
 
-正式全新主机交接已授权在 guest 2234 上开展验收。主机各阶段的最终记录仍待完整且权威的回读。只报告对应冻结 receipt 支持的结果；发行包签名验证不能代替运行时验收。在取得相应阶段 receipt 前，不宣称 Catalyst/Core、Client、独立 SFT consumer 或 Echo lifecycle 通过。保留 plan 和 receipts，不要手工修改 Broker 状态。
+Read-only diagnosis against the frozen Platform source
+`daabf9ff561b4ab9296094d8198fd1fa3418b32b` confirmed an argument-contract
+mismatch: the signed unit and managed runtime pass sandbox peer UID/GID as
+named values (`sandboxd=0` and `sandboxd=992`), while the Kernel parser expects
+unsigned integer scalars. The correction is merged in
+[Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100)
+at `2bbd40b3b30cd9401127a033dd33cf6902378536`; required CI passed. It changes
+the shipped Kernel unit and managed-runtime sandbox peer UID/GID arguments to
+unsigned scalar values and adds regression coverage for parsing the shipped
+unit arguments and rejecting adapter-named values. The official Platform
+release [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155),
+attempt 1, was still building Ubuntu 22.04 and 24.04 packages at the checkpoint
+time of 2026-10-10 09:04 UTC. The catalog-verification job succeeded and both
+Ubuntu native-build jobs remained in progress. No release for P was published
+and strict release verification had not run, so this source commit was not yet
+an installable verified component. Record the exact Platform release and
+verification receipt before preparing the follow-on Native preview.
+
+The published 0e Native release is immutable and its tag is derived from the
+Workspace source SHA. Do not overwrite or retarget it. After the corrected
+Platform release is strictly verified, pin that exact Platform identity in a
+small Workspace documentation PR. The merge SHA of that PR is the source for
+the next Native preview, using the existing
+`native-installer-preview-<Workspace-SHA>` tag convention. Keep the existing
+`0.1.0-rc.1` package version, active-v2 Catalog generation 15, and all other
+frozen Product, component, and profile identities; this checkpoint does not
+introduce a Catalog, tag-scheme, or version change. This checkpoint does not
+claim a successful install:
+Core runtime, Catalyst product activation, Client access, SFT producer and
+independent consumer, restart/reboot recovery, plugin supervision, and Echo
+lifecycle remain NOT_RUN. Report those results only after the matching gates
+pass on the follow-on immutable preview. Preserve the failed guest and its
+receipts until the owner completes the follow-up acceptance; do not edit
+Broker state by hand or infer runtime success from package signatures.
+
+全新 Ubuntu 24.04.5 主机 2234 的终态 ledger 共包含 34 个已知 gate：15 项 PASS、1 项 FAIL、18 项 NOT_RUN，且没有未知 gate。唯一失败项是 `catalyst_workload_apply`，返回可重试的 `FIRST_CORE_BOOTSTRAP_FAILED`。first-Core transaction 在 `cohort_starting` 阶段进入 `hold_required`，原因是 `cyrene-kernel.service` 以状态码 1 退出。
+
+针对冻结的 Platform 源码 `daabf9ff561b4ab9296094d8198fd1fa3418b32b` 进行的只读诊断确认了参数契约不匹配：signed unit 和 managed runtime 以命名形式传递 sandbox peer UID/GID（`sandboxd=0` 与 `sandboxd=992`），而 Kernel parser 要求 unsigned integer scalar。修正已在 [Cyrene-Platform PR #100](https://github.com/DoHorizon-AI/Cyrene-Platform/pull/100) 合并至 `2bbd40b3b30cd9401127a033dd33cf6902378536`，required CI 已通过。该修改把 shipped Kernel unit 和 managed runtime 的 sandbox peer UID/GID 参数改为 unsigned scalar，并增加 shipped unit 参数解析和拒绝 adapter-named 参数的回归覆盖。2026-10-10 09:04 UTC checkpoint 回读时，正式 Platform 发行流程 [run 38039153155](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38039153155) 第 1 次尝试仍在运行：Catalog 验证已成功，Ubuntu 22.04 和 24.04 原生构建 job 仍在执行。尚未发布 P 的 release，也未运行严格发行验证，因此该源码提交还不是可安装且已验证的组件。准备后续 Native 预览版前，必须记录确切 Platform release 和验证 receipt。
+
+已发布的 0e Native release 不可变，且 tag 由 Workspace source SHA 派生。不得覆盖或重定向。Platform 修正版通过严格验证后，应通过一个小型 Workspace 文档 PR 固定确切 Platform 身份。该 PR 的 merge SHA 将作为下一个 Native preview 的源码，并沿用现有 `native-installer-preview-<Workspace-SHA>` tag 规则。保留 `0.1.0-rc.1` 包版本、active-v2 Catalog generation 15 及其他已冻结的 Product、component、profile identity；本 checkpoint 不引入新的 Catalog、tag scheme 或版本变更。本 checkpoint 不宣称安装成功：Core runtime、Catalyst product 激活、Client 访问、SFT producer 与独立 consumer、restart/reboot 恢复、plugin supervision 和 Echo lifecycle 均为 NOT_RUN。只有后续不可变预览版上的对应 gate 通过后，才能报告这些结果。owner 完成后续验收前，保留失败主机及其 receipts；不要手工修改 Broker 状态，也不要根据包签名推断 runtime 成功。
 
 ## Operational contract / 运行契约
 
