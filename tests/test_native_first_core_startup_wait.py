@@ -53,6 +53,7 @@ class StartupUpdater:
         }
         self.active_states = {unit: "active" for unit in self.unit_pids}
         self.pid_sequences: dict[str, list[str]] = {}
+        self.main_pid_returncodes: dict[str, int] = {}
         self.events: list[tuple[str, ...]] = []
         self.on_runner: Callable[[list[str], str], None] | None = None
 
@@ -87,7 +88,10 @@ class StartupUpdater:
         self.events.append(("show", property_name, unit, value))
         if self.on_runner is not None:
             self.on_runner(command, value)
-        return _completed(value)
+        return _completed(
+            value,
+            returncode=self.main_pid_returncodes.get(unit, 0) if property_name == "MainPID" else 0,
+        )
 
     def _run_systemctl(self, operation: str, unit: str) -> None:
         self.events.append((operation, unit))
@@ -99,8 +103,8 @@ class StartupUpdater:
         self.events.append(("wait-active", unit))
 
 
-def _completed(stdout: str) -> Any:
-    return type("Completed", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+def _completed(stdout: str, *, returncode: int = 0) -> Any:
+    return type("Completed", (), {"returncode": returncode, "stdout": stdout, "stderr": ""})()
 
 
 def _startup_fixture(
@@ -191,6 +195,73 @@ def test_start_waits_for_runner_to_exec_exact_signed_entrypoint(
     assert len(starts) == len(bootstrap.CORE_COMPONENT_IDS)
     assert exec_index < second_start_index
     assert 0.2 <= clock.now < bootstrap.CORE_EXEC_STARTUP_WAIT_SECONDS
+
+
+def test_start_waits_for_zero_mainpid_before_verifying_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wait under the shared deadline until systemd assigns a positive PID."""
+
+    updater, items, _expected, _launcher, clock = _startup_fixture(tmp_path, monkeypatch)
+    unit = updater.components[items[0]["componentId"]]["systemdUnit"]
+    pid = updater.unit_pids[unit]
+    updater.pid_sequences[unit] = ["0", "0", pid]
+
+    bootstrap._verify_started_processes(updater, items[:1])
+
+    observed_pids = [
+        event[3] for event in updater.events if event[0] == "show" and event[1] == "MainPID"
+    ]
+    assert observed_pids[:3] == ["0", "0", pid]
+    assert clock.sleeps == [bootstrap.CORE_EXEC_STARTUP_POLL_SECONDS] * 2
+    assert clock.now < bootstrap.CORE_EXEC_STARTUP_WAIT_SECONDS
+
+
+def test_persistent_zero_mainpid_times_out_without_starting_next_component(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep zero MainPID bounded and fail before any later Core component starts."""
+
+    updater, items, _expected, _launcher, clock = _startup_fixture(tmp_path, monkeypatch)
+    first_unit = updater.components[items[0]["componentId"]]["systemdUnit"]
+    updater.pid_sequences[first_unit] = ["0"]
+
+    with pytest.raises(RuntimeError, match="did not reach the exact staged release entrypoint"):
+        bootstrap._start_core_components(updater, items)
+
+    starts = [event[1] for event in updater.events if event[0] == "start"]
+    assert starts == [first_unit]
+    assert not any(
+        event[0] == "show" and event[1] == "ActiveState" and event[2] == first_unit
+        for event in updater.events
+    )
+    assert clock.now == pytest.approx(bootstrap.CORE_EXEC_STARTUP_WAIT_SECONDS)
+    assert len(clock.sleeps) <= 101
+
+
+@pytest.mark.parametrize(
+    ("pid_value", "returncode"),
+    [("", 0), ("not-a-pid", 0), ("٠", 0), ("00", 0), ("123", 1)],
+)
+def test_malformed_mainpid_fails_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pid_value: str,
+    returncode: int,
+) -> None:
+    """Reject malformed, non-ASCII, zero-form, and failed PID reads without polling."""
+
+    updater, items, _expected, _launcher, clock = _startup_fixture(tmp_path, monkeypatch)
+    unit = updater.components[items[0]["componentId"]]["systemdUnit"]
+    updater.pid_sequences[unit] = [pid_value]
+    updater.main_pid_returncodes[unit] = returncode
+
+    with pytest.raises(RuntimeError, match="has no confirmed systemd MainPID"):
+        bootstrap._verify_started_processes(updater, items[:1])
+
+    assert clock.now == 0
+    assert clock.sleeps == []
+    assert not any(event[1] == "ActiveState" for event in updater.events if len(event) > 1)
 
 
 def test_wrong_executable_times_out_within_fixed_bound(

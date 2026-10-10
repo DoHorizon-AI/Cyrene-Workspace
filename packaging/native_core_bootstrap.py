@@ -1519,21 +1519,31 @@ def _verify_started_processes(updater: Any, components: list[dict[str, Any]]) ->
     for item in components:
         component = updater.components[item["componentId"]]
         unit = component["systemdUnit"]
-        clock, _sleeper = _candidate_startup_clock(updater)
+        clock, sleeper = _candidate_startup_clock(updater)
         started_at = _startup_time(clock)
         deadline = started_at + CORE_EXEC_STARTUP_WAIT_SECONDS
-        timeout = _startup_remaining(clock, deadline, unit)
-        completed = updater.runner(
-            ["systemctl", "show", "--property=MainPID", "--value", unit],
-            capture_output=True,
-            text=True,
-            timeout=min(10, timeout),
-            check=False,
-        )
-        _startup_remaining(clock, deadline, unit)
-        if completed.returncode != 0 or not completed.stdout.strip().isdecimal():
-            raise RuntimeError(f"{unit} has no confirmed systemd MainPID")
-        pid = completed.stdout.strip()
+        while True:
+            timeout = _startup_remaining(clock, deadline, unit)
+            completed = updater.runner(
+                ["systemctl", "show", "--property=MainPID", "--value", unit],
+                capture_output=True,
+                text=True,
+                timeout=min(10, timeout),
+                check=False,
+            )
+            remaining = _startup_remaining(clock, deadline, unit)
+            pid = completed.stdout.strip() if isinstance(completed.stdout, str) else ""
+            if completed.returncode != 0 or not pid.isascii() or not pid.isdecimal():
+                raise RuntimeError(f"{unit} has no confirmed systemd MainPID")
+            if pid == "0":
+                # systemd may expose MainPID=0 briefly after a unit becomes active.
+                # 中文：服务刚变为 active 时，systemd 可能短暂返回 MainPID=0。
+                sleeper(min(CORE_EXEC_STARTUP_POLL_SECONDS, remaining))
+                continue
+            if not pid.strip("0"):
+                raise RuntimeError(f"{unit} has no confirmed systemd MainPID")
+            break
+
         _verify_candidate_pid(updater, item, pid, deadline=deadline)
 
 
