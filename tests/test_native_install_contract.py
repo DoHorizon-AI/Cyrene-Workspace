@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 from types import ModuleType
 
@@ -254,3 +255,92 @@ def test_verified_release_builder_scripts_remain_stage_only() -> None:
         encoding="utf-8"
     )
     assert '"serviceActivation": "deferred"' in contract_source
+
+
+def _kernel_service_account_block() -> str:
+    source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    postinst = source.split("cat <<'EOF' > \"${STAGE_DIR}/DEBIAN/postinst\"\n", 1)[1].split(
+        '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/postinst"', 1
+    )[0]
+    start = postinst.index("# The signed Kernel unit runs as a dedicated system account.")
+    end = postinst.index("ensure_fresh_service_directory() {", start)
+    return postinst[start:end]
+
+
+def _run_kernel_service_account_block(
+    tmp_path: Path, account_state: Path
+) -> subprocess.CompletedProcess[str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    id_stub = fake_bin / "id"
+    id_stub.write_text(
+        "#!/bin/sh\n"
+        '[ "$#" -eq 2 ] && [ "$1" = "-u" ] && [ "$2" = "cyrene-kernel" ] || exit 64\n'
+        '[ -f "$CYRENE_TEST_ACCOUNT_STATE" ] || exit 1\n'
+        'IFS=: read -r uid gid home shell < "$CYRENE_TEST_ACCOUNT_STATE" || exit 1\n'
+        'printf "%s\\n" "$uid"\n',
+        encoding="utf-8",
+    )
+    id_stub.chmod(0o755)
+    useradd_stub = fake_bin / "useradd"
+    useradd_stub.write_text(
+        "#!/bin/sh\n"
+        '[ "$*" = "--system --user-group --no-create-home --shell /usr/sbin/nologin cyrene-kernel" ] || exit 64\n'
+        '[ ! -e "$CYRENE_TEST_ACCOUNT_STATE" ] || exit 17\n'
+        'printf "997:997:/nonexistent:/usr/sbin/nologin\\n" > "$CYRENE_TEST_ACCOUNT_STATE"\n'
+        'printf "created\\n" >> "$CYRENE_TEST_USERADD_LOG"\n',
+        encoding="utf-8",
+    )
+    useradd_stub.chmod(0o755)
+    return subprocess.run(
+        ["/bin/sh", "-eu", "-c", _kernel_service_account_block()],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": str(fake_bin),
+            "CYRENE_TEST_ACCOUNT_STATE": str(account_state),
+            "CYRENE_TEST_USERADD_LOG": str(tmp_path / "useradd.log"),
+        },
+    )
+
+
+def test_postinst_provisions_kernel_service_user_idempotently(tmp_path: Path) -> None:
+    account_state = tmp_path / "account"
+    first = _run_kernel_service_account_block(tmp_path, account_state)
+    assert first.returncode == 0, first.stderr
+    assert account_state.read_text(encoding="utf-8") == "997:997:/nonexistent:/usr/sbin/nologin\n"
+    calls = tmp_path / "useradd.log"
+    assert calls.read_text(encoding="utf-8") == "created\n"
+
+    second = _run_kernel_service_account_block(tmp_path, account_state)
+    assert second.returncode == 0, second.stderr
+    assert account_state.read_text(encoding="utf-8") == "997:997:/nonexistent:/usr/sbin/nologin\n"
+    assert calls.read_text(encoding="utf-8") == "created\n"
+
+
+def test_postinst_preserves_existing_kernel_user_without_primary_group_contract(
+    tmp_path: Path,
+) -> None:
+    account_state = tmp_path / "account"
+    existing_account = "1500:2200:/home/existing:/bin/bash\n"
+    account_state.write_text(existing_account, encoding="utf-8")
+
+    result = _run_kernel_service_account_block(tmp_path, account_state)
+
+    assert result.returncode == 0, result.stderr
+    assert account_state.read_text(encoding="utf-8") == existing_account
+    assert not (tmp_path / "useradd.log").exists()
+
+
+def test_postinst_rejects_root_kernel_service_account_without_repair(tmp_path: Path) -> None:
+    account_state = tmp_path / "account"
+    root_account = "0:0:/root:/bin/bash\n"
+    account_state.write_text(root_account, encoding="utf-8")
+
+    result = _run_kernel_service_account_block(tmp_path, account_state)
+
+    assert result.returncode != 0
+    assert "Kernel service cannot run as root" in result.stderr
+    assert account_state.read_text(encoding="utf-8") == root_account
+    assert not (tmp_path / "useradd.log").exists()

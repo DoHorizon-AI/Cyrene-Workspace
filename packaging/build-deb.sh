@@ -648,6 +648,23 @@ if ! id -u cyrene >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --shell /usr/sbin/nologin cyrene
 fi
 
+# The signed Kernel unit runs as a dedicated system account. Its explicit
+# Group=cyrene setting controls the service's effective group at runtime.
+if ! id -u cyrene-kernel >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --shell /usr/sbin/nologin cyrene-kernel
+fi
+KERNEL_SERVICE_UID="$(id -u cyrene-kernel)"
+case "${KERNEL_SERVICE_UID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene-kernel account has no valid numeric identity." >&2
+        exit 1
+        ;;
+esac
+if [ "${KERNEL_SERVICE_UID}" = "0" ]; then
+    echo "ERROR: Kernel service cannot run as root." >&2
+    exit 1
+fi
+
 ensure_fresh_service_directory() {
     path="$1"
     if [ -L "$path" ]; then
