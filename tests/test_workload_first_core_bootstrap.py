@@ -2736,8 +2736,26 @@ def _held_sdk_recovery_case(
     monkeypatch.setattr(updates, "_atomic_json", record_atomic_json)
     monkeypatch.setattr(updates, "DEFAULT_PACKAGE_RUNTIME_POLICY", tmp_path / "runtime-policy.json")
     updates.DEFAULT_PACKAGE_RUNTIME_POLICY.write_text("{}", encoding="utf-8")
-    updater.components[sdk_id] = {"componentId": sdk_id}
+    updater.components[sdk_id] = {
+        "componentId": sdk_id,
+        "targets": [
+            {
+                "targetId": target_id,
+                "artifactKind": "python-bundle",
+                "support": "supported",
+            }
+        ],
+    }
     updater.targets[target_id] = {"id": target_id, "target": {"platform": "linux"}}
+    monkeypatch.setattr(
+        updater,
+        "_target_for",
+        lambda _component, *, target_id=None: (
+            {**updater.targets[target_id], "artifactKind": "python-bundle"}
+            if target_id == updates.WORKLOAD_SDK_TARGET_ID
+            else None
+        ),
+    )
     return {
         "updater": updater,
         "block": block,
@@ -2751,6 +2769,157 @@ def _held_sdk_recovery_case(
         "sdk_row": sdk_row,
         "sdk_stage": sdk_stage,
     }
+
+
+def _use_published_sdk_target(
+    updater: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Use the signed SDK component row and its separate global target profile."""
+
+    catalog = json.loads((ROOT / "governance" / "component-catalog-v2.json").read_text())
+    sdk_component = next(
+        row
+        for row in catalog["components"]
+        if row["componentId"] == updates.WORKLOAD_SDK_COMPONENT_ID
+    )
+    sdk_target_id = updates.WORKLOAD_SDK_TARGET_ID
+    sdk_target_profile = next(row for row in catalog["targets"] if row["id"] == sdk_target_id)
+    component_target = next(
+        row for row in sdk_component["targets"] if row["targetId"] == sdk_target_id
+    )
+    assert component_target == {
+        "targetId": sdk_target_id,
+        "artifactKind": "python-bundle",
+        "support": "supported",
+    }
+    assert "artifactKind" not in sdk_target_profile
+
+    updater.components[updates.WORKLOAD_SDK_COMPONENT_ID] = sdk_component
+    updater.targets[sdk_target_id] = sdk_target_profile
+    profile_id = "linux-ubuntu-24.04-x86_64-python-3.12"
+    updater.native_python_profiles[profile_id] = {
+        **sdk_target_profile["target"],
+        "pythonVersion": "3.12.14",
+        "pythonExecutable": str(updates.DEFAULT_PRIVATE_PYTHON),
+        "pythonInput": "packaging/python-runtime.lock.json",
+        "wheelResolver": {
+            "tool": "uv",
+            "version": "0.12.21",
+            "arguments": ["--python-platform", "x86_64-unknown-linux-gnu"],
+            "allowedWheelTags": {
+                "purePython": ["*-none-any"],
+                "pep600": {"architecture": "x86_64", "maxGlibc": "2.39"},
+            },
+        },
+    }
+    monkeypatch.setattr(
+        updates.platform,
+        "freedesktop_os_release",
+        lambda: {"ID": "ubuntu", "VERSION_ID": "24.04"},
+    )
+    monkeypatch.setattr(updates.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(updates.platform, "libc_ver", lambda: ("glibc", "2.39"))
+    monkeypatch.setattr(updater, "_private_python_runtime_ready", lambda _profile: True)
+    monkeypatch.setattr(
+        updater,
+        "_target_for",
+        updates.ComponentUpdater._target_for.__get__(updater),
+    )
+    return sdk_component, sdk_target_profile, component_target
+
+
+def test_preinventory_resume_uses_component_sdk_target_for_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch)
+    updater = case["updater"]
+    sdk_component, sdk_target_profile, component_target = _use_published_sdk_target(
+        updater, monkeypatch
+    )
+    sdk_row = case["sdk_row"]
+    sdk_target = {**sdk_target_profile, "artifactKind": component_target["artifactKind"]}
+    candidate = updates.Candidate(
+        component=sdk_component,
+        manifest={"version": sdk_row["version"], "target": sdk_target_profile["target"]},
+        manifest_digest=sdk_row["manifestDigest"],
+        artifact_digest=sdk_row["digest"],
+        manifest_uri=sdk_row["manifestUri"],
+        index={},
+        index_uri="https://example.invalid/sdk-index.json",
+        release_tag=sdk_row["releaseId"],
+        manifest_asset_digest=sdk_row["manifestAssetDigest"],
+    )
+    candidate_targets: list[dict[str, Any]] = []
+
+    def signed_sdk_candidate(
+        _component: dict[str, Any], target: dict[str, Any], _channel: str, **_kwargs: Any
+    ) -> Any:
+        candidate_targets.append(target)
+        assert target == sdk_target
+        assert target["artifactKind"] == "python-bundle"
+        return candidate
+
+    monkeypatch.setattr(updater, "_candidate", signed_sdk_candidate)
+    result, sdk_prepared = updater._resume_first_core_before_workload_inventory(
+        case["stored"],
+        case["transaction"],
+        case["transaction_path"],
+        lock_lease=object(),
+        bootstrap_module=object(),
+    )
+
+    assert result == case["result"]
+    assert sdk_prepared is True
+    assert candidate_targets == [sdk_target]
+    assert candidate_targets[0] is not sdk_target_profile
+    assert case["events"] == ["core-resume", "sdk-intent", "sdk-prepare"]
+
+
+@pytest.mark.parametrize("target_result", ["unsupported", "wrong_kind"])
+def test_preinventory_resume_rejects_unsupported_sdk_target_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_result: str
+) -> None:
+    case = _held_sdk_recovery_case(tmp_path, monkeypatch)
+    updater = case["updater"]
+    _sdk_component, sdk_target_profile, component_target = _use_published_sdk_target(
+        updater, monkeypatch
+    )
+    original_target_for = updater._target_for
+    candidate_calls: list[bool] = []
+    if target_result == "unsupported":
+        monkeypatch.setattr(updater, "_target_for", lambda *_args, **_kwargs: None)
+        expected_code = "UNSUPPORTED_TARGET"
+    else:
+        resolved_target = original_target_for(
+            updater.components[updates.WORKLOAD_SDK_COMPONENT_ID],
+            target_id=updates.WORKLOAD_SDK_TARGET_ID,
+        )
+        assert resolved_target == {
+            **sdk_target_profile,
+            "artifactKind": component_target["artifactKind"],
+        }
+        monkeypatch.setattr(
+            updater,
+            "_target_for",
+            lambda *_args, **_kwargs: {**resolved_target, "artifactKind": "native-binary"},
+        )
+        expected_code = "UNSUPPORTED_ARTIFACT"
+    monkeypatch.setattr(
+        updater, "_candidate", lambda *_args, **_kwargs: candidate_calls.append(True)
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._resume_first_core_before_workload_inventory(
+            case["stored"],
+            case["transaction"],
+            case["transaction_path"],
+            lock_lease=object(),
+            bootstrap_module=object(),
+        )
+
+    assert error.value.code == expected_code
+    assert candidate_calls == []
+    assert case["events"] == []
 
 
 @pytest.mark.parametrize("status", ["pending", "installed"])
