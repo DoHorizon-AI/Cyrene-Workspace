@@ -15,6 +15,7 @@ import tarfile
 import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -3994,6 +3995,1503 @@ def test_initial_workload_hold_moves_from_missing_gen_zero_to_live_generation_on
         ("GetUpdateReadiness", 1, False),
         ("BeginMaintenance", 1, False),
     ]
+
+
+def _initial_catalyst_source_transaction(tmp_path: Path) -> dict[str, Any]:
+    updater = _empty_updater(tmp_path)
+    c10_plan_digest = "sha256:" + "c" * 64
+    c10_plan_id = "plan-" + "c" * 32
+    parent_plan_digest = "sha256:" + "d" * 64
+    parent_plan_id = "plan-" + "d" * 32
+    product_digest = "sha256:" + "e" * 64
+    reference = {
+        "sourceId": updates.CATALYST_COMPONENT_ID,
+        "componentId": updates.CATALYST_COMPONENT_ID,
+        "artifactDigest": product_digest,
+    }
+    transaction: dict[str, Any] = {
+        "schemaVersion": 2,
+        "transactionKind": "workload-assembly.v1",
+        "planId": parent_plan_id,
+        "planDigest": parent_plan_digest,
+        "workloadId": "catalyst",
+        "action": "install",
+        "targetKind": "CORE_RUNTIME",
+        "componentArtifactDigests": {updates.CATALYST_COMPONENT_ID: product_digest},
+        "components": [
+            {
+                "componentId": updates.CATALYST_COMPONENT_ID,
+                "artifactDigest": product_digest,
+            }
+        ],
+        "selectedComponents": [
+            {
+                "componentId": updates.CATALYST_COMPONENT_ID,
+                "artifactKind": "native-binary",
+                "digest": product_digest,
+            }
+        ],
+        "sourcePolicy": {
+            "mode": "actualProduct",
+            "productComponentIds": [updates.CATALYST_COMPONENT_ID],
+            "productSources": [
+                {
+                    "componentId": updates.CATALYST_COMPONENT_ID,
+                    "sourceId": updates.CATALYST_COMPONENT_ID,
+                }
+            ],
+        },
+        "firstCoreBootstrap": {
+            "planId": c10_plan_id,
+            "planDigest": c10_plan_digest,
+            "initialSourceArtifactRef": reference,
+        },
+        "firstCoreBootstrapStatus": "installed",
+        "firstCoreBootstrapResult": {
+            "status": "installed",
+            "planId": c10_plan_id,
+            "planDigest": c10_plan_digest,
+        },
+        "phase": "applying",
+        "maintenanceHolds": {},
+    }
+    updater.components[updates.CATALYST_COMPONENT_ID] = {
+        "componentId": updates.CATALYST_COMPONENT_ID,
+        "systemdUnit": updates.CATALYST_SERVICE_UNIT,
+    }
+    return {"updater": updater, "transaction": transaction, "reference": reference}
+
+
+def _initial_catalyst_readiness(source_id: str) -> dict[str, Any]:
+    return {
+        "status": "UNKNOWN",
+        "gate_generation": 7,
+        "install_catalog_generation": 1,
+        "active_task_count": 0,
+        "active_tasks": [],
+        "unknown_activity_sources": [source_id],
+        "active_worker_count": 0,
+        "active_allocation_count": 0,
+        "inflight_runtime_admission_count": 0,
+        "blocker_codes": ["ACTIVITY_SOURCE_UNKNOWN"],
+        "requires_restart_confirmation": True,
+    }
+
+
+def _active_initial_catalyst_hold(
+    transaction: dict[str, Any], *, status: str = "active"
+) -> dict[str, Any]:
+    reference = transaction["firstCoreBootstrap"]["initialSourceArtifactRef"]
+    parent_request_id = "first-core-bootstrap-" + transaction["firstCoreBootstrap"][
+        "planId"
+    ].removeprefix("plan-")
+    transaction.update(
+        {
+            "maintenancePhase": "core-runtime-install",
+            "maintenanceBeginMethod": "BeginInitialSourceActivation",
+            "initialSourceActivation": {
+                "sourceId": reference["sourceId"],
+                "componentId": reference["componentId"],
+                "artifactDigest": reference["artifactDigest"],
+                "parentRequestId": parent_request_id,
+            },
+            "targetKind": "CORE_RUNTIME",
+            "expectedGateGeneration": 7,
+            "expectedCatalogGeneration": 1,
+            "expectedActivitySources": [reference["sourceId"]],
+            "maintenanceToken": "m" * 48,
+        }
+    )
+    request_id = updates._maintenance_request_id(transaction)
+    hold = {
+        "requestId": request_id,
+        "targetKind": "CORE_RUNTIME",
+        "expectedGateGeneration": 7,
+        "expectedCatalogGeneration": 1,
+        "expectedActivitySources": [reference["sourceId"]],
+        "componentArtifactDigests": transaction["componentArtifactDigests"],
+        "beginMethod": "BeginInitialSourceActivation",
+        "sourceId": reference["sourceId"],
+        "parentRequestId": parent_request_id,
+        "status": status,
+    }
+    if status == "end_pending":
+        hold.update({"outcome": "SUCCESS", "healthy": True})
+    transaction["maintenanceHolds"] = {"core-runtime-install": hold}
+    return hold
+
+
+def test_first_catalyst_source_end_pending_replays_exact_end_and_skips_phase(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    hold = _active_initial_catalyst_hold(transaction, status="end_pending")
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    calls: list[tuple[str, dict[str, Any], str | None]] = []
+
+    def broker_request(method: str, params: dict[str, Any], *, request_id: str | None = None):
+        calls.append((method, params, request_id))
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(updater, "_broker_request", broker_request)
+
+    assert not updater._ensure_workload_phase(
+        transaction,
+        transaction_path,
+        phase="core-runtime-install",
+        target_kind="CORE_RUNTIME",
+        requires_restart=True,
+    )
+
+    assert calls == [
+        (
+            "EndMaintenance",
+            {
+                "request_id": hold["requestId"],
+                "target_kind": "CORE_RUNTIME",
+                "maintenance_token": "m" * 48,
+                "outcome": "SUCCESS",
+                "healthy": True,
+            },
+            "cyrene-workload-end-core-runtime-install-" + transaction["planId"] + "-success",
+        )
+    ]
+    assert hold["status"] == "ended"
+    assert transaction.get("maintenanceToken") is None
+
+
+def test_first_catalyst_source_end_retry_failure_keeps_exact_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    hold = _active_initial_catalyst_hold(transaction, status="end_pending")
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+
+    def reject_end(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise updates.UpdateError("ACTIVITY_SOURCE_NOT_READY", "heartbeat is not persisted")
+
+    monkeypatch.setattr(updater, "_broker_request", reject_end)
+
+    with pytest.raises(updates.UpdateError, match="heartbeat is not persisted"):
+        updater._ensure_workload_phase(
+            transaction,
+            transaction_path,
+            phase="core-runtime-install",
+            target_kind="CORE_RUNTIME",
+            requires_restart=True,
+        )
+
+    assert hold["status"] == "end_pending"
+    assert transaction["maintenanceToken"] == "m" * 48
+
+
+def test_workload_recovery_reconciles_end_before_any_service_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    _active_initial_catalyst_hold(transaction, status="end_pending")
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    calls: list[str] = []
+
+    def broker_request(method: str, _params: dict[str, Any], **_kwargs: Any):
+        calls.append(method)
+        return {"status": "SUCCESS"}
+
+    monkeypatch.setattr(updater, "_broker_request", broker_request)
+    monkeypatch.setattr(
+        updater,
+        "_restore_workload_service_units",
+        lambda *_args, **_kwargs: pytest.fail("service rollback must wait for a held gate"),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._recover_workload_apply(transaction, transaction_path)
+
+    assert error.value.code == "WORKLOAD_PHASE_END_CONFIRMED"
+    assert calls == ["EndMaintenance"]
+    assert transaction["maintenanceHolds"]["core-runtime-install"]["status"] == "ended"
+    assert transaction.get("maintenanceToken") is None
+
+
+def test_first_catalyst_start_failure_preserves_special_hold_for_same_plan_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    hold = _active_initial_catalyst_hold(transaction)
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        updater,
+        "_restore_workload_service_units",
+        lambda *_args, **_kwargs: pytest.fail(
+            "initial hold recovery must not stop/restore services"
+        ),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._recover_workload_apply(
+            transaction, transaction_path, failure=RuntimeError("temporary health failure")
+        )
+
+    assert error.value.code == "FIRST_SOURCE_ACTIVATION_PENDING"
+    assert transaction["maintenanceToken"] == "m" * 48
+    assert transaction["maintenanceHolds"]["core-runtime-install"] == hold
+    assert transaction["phase"] == "applying"
+    monkeypatch.setattr(
+        updater,
+        "_begin_workload_hold",
+        lambda *_args, **_kwargs: pytest.fail("same-plan retry must reuse the initial hold"),
+    )
+    assert updater._ensure_workload_phase(
+        transaction,
+        transaction_path,
+        phase="core-runtime-install",
+        target_kind="CORE_RUNTIME",
+        requires_restart=True,
+    )
+
+
+def test_first_catalyst_source_uses_signed_parent_and_product_identity_for_begin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    reference = case["reference"]
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    calls: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        updater,
+        "_activity_catalog",
+        lambda **_kwargs: (
+            {"generation": 1, "sources": [{"source_id": reference["sourceId"]}]},
+            [reference["sourceId"]],
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_readiness_for",
+        lambda *_args, **_kwargs: _initial_catalyst_readiness(reference["sourceId"]),
+    )
+    monkeypatch.setattr(updater, "_active_native_pointer_identity", lambda _component_id: None)
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "inactive")
+
+    def broker_request(method: str, params: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        calls.append((method, params))
+        return {
+            "status": "MAINTENANCE_ACTIVE",
+            "maintenance_token": "m" * 48,
+            "gate_generation": 7,
+            "blocker_codes": [],
+        }
+
+    monkeypatch.setattr(updater, "_broker_request", broker_request)
+    updater._begin_workload_hold(
+        transaction,
+        transaction_path,
+        phase="core-runtime-install",
+        target_kind="CORE_RUNTIME",
+        requires_restart=True,
+    )
+
+    assert len(calls) == 1
+    method, params = calls[0]
+    assert method == "BeginInitialSourceActivation"
+    assert params["source_id"] == reference["sourceId"]
+    assert params["parent_request_id"] == "first-core-bootstrap-" + "c" * 32
+    assert params["component_artifact_digests"] == transaction["componentArtifactDigests"]
+    assert transaction["maintenanceHolds"]["core-runtime-install"]["beginMethod"] == method
+
+
+def test_first_catalyst_source_uncertain_begin_replays_exact_saved_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    reference = case["reference"]
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    request_id = updates._maintenance_request_id(
+        {
+            **transaction,
+            "maintenancePhase": "core-runtime-install",
+            "targetKind": "CORE_RUNTIME",
+        }
+    )
+    transaction["maintenanceHolds"] = {
+        "core-runtime-install": {
+            "requestId": request_id,
+            "targetKind": "CORE_RUNTIME",
+            "expectedGateGeneration": 9,
+            "expectedCatalogGeneration": 1,
+            "expectedActivitySources": [reference["sourceId"]],
+            "componentArtifactDigests": transaction["componentArtifactDigests"],
+            "beginMethod": "BeginInitialSourceActivation",
+            "sourceId": reference["sourceId"],
+            "parentRequestId": "first-core-bootstrap-" + "c" * 32,
+            "status": "begin_pending",
+        }
+    }
+    monkeypatch.setattr(
+        updater,
+        "_activity_catalog",
+        lambda **_kwargs: (
+            {"generation": 1, "sources": [{"source_id": reference["sourceId"]}]},
+            [reference["sourceId"]],
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_readiness_for",
+        lambda *_args, **_kwargs: pytest.fail("exact uncertain Begin must reuse saved readiness"),
+    )
+    monkeypatch.setattr(updater, "_active_native_pointer_identity", lambda _component_id: None)
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "inactive")
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def broker_request(method: str, params: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        calls.append((method, params))
+        return {
+            "status": "MAINTENANCE_ACTIVE",
+            "maintenance_token": "m" * 48,
+            "gate_generation": 9,
+            "blocker_codes": [],
+        }
+
+    monkeypatch.setattr(updater, "_broker_request", broker_request)
+    updater._begin_workload_hold(
+        transaction,
+        transaction_path,
+        phase="core-runtime-install",
+        target_kind="CORE_RUNTIME",
+        requires_restart=True,
+    )
+
+    assert len(calls) == 1
+    method, params = calls[0]
+    assert method == "BeginInitialSourceActivation"
+    assert params["expected_gate_generation"] == 9
+    assert params["parent_request_id"] == "first-core-bootstrap-" + "c" * 32
+    assert params["source_id"] == reference["sourceId"]
+
+
+@pytest.mark.parametrize(
+    "readiness_change",
+    [
+        {"blocker_codes": ["ACTIVITY_SOURCE_UNKNOWN", "ACTIVE_TASKS_PRESENT"]},
+        {"unknown_activity_sources": ["another-source"]},
+        {"active_task_count": 1},
+        {"inflight_runtime_admission_count": 1},
+    ],
+)
+def test_first_catalyst_source_begin_rejects_any_other_readiness_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    readiness_change: dict[str, Any],
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    reference = case["reference"]
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        updater,
+        "_activity_catalog",
+        lambda **_kwargs: (
+            {"generation": 1, "sources": [{"source_id": reference["sourceId"]}]},
+            [reference["sourceId"]],
+        ),
+    )
+    readiness = {**_initial_catalyst_readiness(reference["sourceId"]), **readiness_change}
+    monkeypatch.setattr(updater, "_readiness_for", lambda *_args, **_kwargs: readiness)
+    monkeypatch.setattr(updater, "_active_native_pointer_identity", lambda _component_id: None)
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "inactive")
+    monkeypatch.setattr(
+        updater,
+        "_broker_request",
+        lambda *_args, **_kwargs: pytest.fail("special Begin must not run for other blockers"),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._begin_workload_hold(
+            transaction,
+            transaction_path,
+            phase="core-runtime-install",
+            target_kind="CORE_RUNTIME",
+            requires_restart=True,
+        )
+
+    assert error.value.code == "GATE_UNKNOWN"
+
+
+@pytest.mark.parametrize("absent_proof", ["active_pointer", "active_unit"])
+def test_first_catalyst_source_special_begin_requires_product_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, absent_proof: str
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    reference = case["reference"]
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    monkeypatch.setattr(
+        updater,
+        "_activity_catalog",
+        lambda **_kwargs: (
+            {"generation": 1, "sources": [{"source_id": reference["sourceId"]}]},
+            [reference["sourceId"]],
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_readiness_for",
+        lambda *_args, **_kwargs: _initial_catalyst_readiness(reference["sourceId"]),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_active_native_pointer_identity",
+        lambda _component_id: "installed-release" if absent_proof == "active_pointer" else None,
+    )
+    monkeypatch.setattr(
+        updater,
+        "_package_product_unit_state",
+        lambda _unit: "active" if absent_proof == "active_unit" else "inactive",
+    )
+    monkeypatch.setattr(
+        updater,
+        "_broker_request",
+        lambda *_args, **_kwargs: pytest.fail(
+            "special Begin must not run for an installed Product"
+        ),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._begin_workload_hold(
+            transaction,
+            transaction_path,
+            phase="core-runtime-install",
+            target_kind="CORE_RUNTIME",
+            requires_restart=True,
+        )
+
+    assert error.value.code == "FIRST_CORE_READBACK_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        ("grpc://127.0.0.1:19081", True),
+        ("grpc://localhost:65535", True),
+        ("grpc://[::1]:19081", True),
+        ("grpc://0.0.0.0:19081", False),
+        ("grpc://127.0.0.1:19081/evil", False),
+        ("grpc://127.0.0.1:19081\\nINJECTED=yes", False),
+        ("grpc://user@127.0.0.1:19081", False),
+    ],
+)
+def test_catalyst_plugin_connection_ref_is_loopback_and_environment_safe(
+    value: str, valid: bool
+) -> None:
+    if valid:
+        assert updates.ComponentUpdater._validate_catalyst_plugin_connection_ref(value) == value
+    else:
+        with pytest.raises(updates.UpdateError):
+            updates.ComponentUpdater._validate_catalyst_plugin_connection_ref(value)
+
+
+def test_catalyst_plugin_refs_project_only_runtime_status_values_without_journaling_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    source_id = updates.CATALYST_COMPONENT_ID
+    selected = [
+        {
+            "componentId": "cyrene-tools-document-parsing",
+            "capabilityId": "document.parsing.v1",
+            "packageId": "cyrene.tools.document-parsing",
+            "bindingId": "catalog-binding-document-parsing",
+            "sourcePolicy": {
+                "mode": "actualProduct",
+                "productComponentIds": [updates.CATALYST_COMPONENT_ID],
+                "productSources": [
+                    {"componentId": updates.CATALYST_COMPONENT_ID, "sourceId": source_id}
+                ],
+            },
+        },
+        {
+            "componentId": "cyrene-tools-dataset-generation",
+            "capabilityId": "dataset.generation.v1",
+            "packageId": "cyrene.tools.dataset-generation",
+            "bindingId": "catalog-binding-dataset-generation",
+            "sourcePolicy": {
+                "mode": "actualProduct",
+                "productComponentIds": [updates.CATALYST_COMPONENT_ID],
+                "productSources": [
+                    {"componentId": updates.CATALYST_COMPONENT_ID, "sourceId": source_id}
+                ],
+            },
+        },
+    ]
+    refs = {
+        "cyrene-tools-document-parsing": "grpc://127.0.0.1:19081",
+        "cyrene-tools-dataset-generation": "grpc://127.0.0.1:19082",
+    }
+    installation_records = {}
+    source_bindings = []
+    for index, row in enumerate(selected, start=1):
+        component_id = row["componentId"]
+        installation_id = f"installation-{index}"
+        installation_records[component_id] = {"installation_id": installation_id}
+        source_bindings.append(
+            {
+                "sourceId": source_id,
+                "bindingId": row["bindingId"],
+                "packageId": row["packageId"],
+                "activeInstallationId": installation_id,
+                "state": "RUNNING",
+            }
+        )
+        updater.components[component_id] = {
+            "componentId": component_id,
+            "pluginPackage": {"capabilityId": row["capabilityId"]},
+        }
+
+    class RuntimeStatusHelper:
+        def run_package_binding_operation(self, **kwargs: Any) -> dict[str, Any]:
+            component_id = next(
+                row["componentId"] for row in selected if row["bindingId"] == kwargs["binding_id"]
+            )
+            return {
+                "requestId": kwargs["request_id"],
+                "status": {
+                    "binding_id": kwargs["binding_id"],
+                    "installation_id": kwargs["installation_ids"][0],
+                    "generation": kwargs["catalog_generation"],
+                    "state": "RUNNING",
+                    "connection_ref": refs[component_id],
+                },
+            }
+
+    transaction = {"sdkEnvironment": {"installed": True, "pythonPath": "/usr/bin/python3"}}
+    transaction_path = tmp_path / "transaction.json"
+    transaction_path.parent.mkdir(exist_ok=True)
+    environment_path = tmp_path / "etc/cyrene/catalyst-plugin-refs.env"
+    dropin_path = tmp_path / "etc/systemd/cyrene-catalyst.service.d/90-plugin-refs.conf"
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT", environment_path)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_DROPIN", dropin_path)
+    monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=1200))
+    written: dict[Path, bytes] = {}
+
+    def write_config(_transaction: dict[str, Any], _path: Path, **kwargs: Any) -> str:
+        written[kwargs["path"]] = kwargs["content"]
+        return "sha256:" + hashlib.sha256(kwargs["content"]).hexdigest()
+
+    monkeypatch.setattr(updater, "_write_workload_managed_config", write_config)
+    monkeypatch.setattr(
+        updater, "_ensure_workload_config_directory", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(updater, "_daemon_reload", lambda: None)
+    monkeypatch.setattr(updates, "_atomic_json", lambda *_args, **_kwargs: None)
+    principals = {source_id: {"uid": 1001, "gid": 1200, "tokenPath": tmp_path / "source.token"}}
+
+    assert updater._project_workload_catalyst_plugin_refs(
+        transaction,
+        transaction_path,
+        plugin_rows=selected,
+        package_inventory={
+            "installationRecords": installation_records,
+            "sourceBindings": source_bindings,
+        },
+        activity_catalog={"generation": 5},
+        runtime_policy={"schema_version": 1},
+        source_principals=principals,
+        helper=RuntimeStatusHelper(),
+    )
+
+    refs_payload = written[environment_path]
+    # The ref file can reach disk before the final CORE restart starts. Keep
+    # that restart intent in the parent transaction so an exact-plan retry
+    # does not mistake the now-identical file for a completed activation.
+    assert transaction["catalystPluginRefsRestartPending"] is True
+    assert refs_payload == (
+        b"CYRENE_DATASET_GENERATION_CONNECTION_REF=grpc://127.0.0.1:19082\n"
+        b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19081\n"
+    )
+    serialized = json.dumps(transaction, sort_keys=True)
+    assert all(value not in serialized for value in refs.values())
+    assert transaction["catalystPluginRefs"]["environmentDigest"] == (
+        "sha256:" + hashlib.sha256(refs_payload).hexdigest()
+    )
+    assert all(
+        "connection_ref" not in record
+        for record in transaction["catalystPluginRefs"]["bindingIdentities"]
+    )
+
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda path, **_kwargs: refs_payload if path == environment_path else None,
+    )
+    assert not updater._project_workload_catalyst_plugin_refs(
+        transaction,
+        transaction_path,
+        plugin_rows=selected,
+        package_inventory={
+            "installationRecords": installation_records,
+            "sourceBindings": source_bindings,
+        },
+        activity_catalog={"generation": 5},
+        runtime_policy={"schema_version": 1},
+        source_principals=principals,
+        helper=RuntimeStatusHelper(),
+    )
+    assert transaction["catalystPluginRefsRestartPending"] is True
+
+
+def test_boot_connection_recovery_skips_before_any_managed_catalyst_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    monkeypatch.setattr(updater, "_require_authorized_process", lambda: None)
+    monkeypatch.setattr(updater, "_clear_release_discovery_caches", lambda: None)
+    monkeypatch.setattr(
+        updater,
+        "_load_native_component_bootstrap",
+        lambda: SimpleNamespace(exclusive_update_lock=lambda _updater: nullcontext()),
+    )
+
+    assert updater.recover_workload_runtime_connections("catalyst") == {
+        "status": "skipped",
+        "workloadId": "catalyst",
+        "reason": "no-managed-catalyst-install",
+        "recoveredBindings": 0,
+        "projectionChanged": False,
+    }
+
+
+def test_boot_connection_recovery_skips_while_a_workload_hold_is_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    updater.state_root.mkdir(mode=0o700)
+    transaction_root = updater.state_root / "transactions"
+    transaction_root.mkdir(mode=0o700)
+    journal_path = transaction_root / ("plan-" + "d" * 32 + ".json")
+    journal_path.write_text(
+        json.dumps(
+            {
+                "transactionKind": "workload-assembly.v1",
+                "phase": "applying",
+                "maintenanceToken": "private-token",
+                "maintenanceHolds": {"core-runtime-install": {"status": "active"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    journal_path.chmod(0o600)
+    monkeypatch.setattr(updater, "_require_authorized_process", lambda: None)
+    monkeypatch.setattr(updater, "_clear_release_discovery_caches", lambda: None)
+    monkeypatch.setattr(
+        updater,
+        "_load_native_component_bootstrap",
+        lambda: SimpleNamespace(exclusive_update_lock=lambda _updater: nullcontext()),
+    )
+
+    result = updater.recover_workload_runtime_connections("catalyst")
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "maintenance-active"
+    assert "private-token" not in json.dumps(result)
+
+
+def test_boot_connection_recovery_resumes_succeeded_refs_rotation_after_journal_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    source_id = updates.CATALYST_COMPONENT_ID
+    component_id = "cyrene-tools-document-parsing"
+    capability_id = "document.parsing.v1"
+    package_id = "cyrene.tools.document-parsing"
+    binding_id = "catalog-binding-document-parsing"
+    installation_id = "installation-document-parsing-1"
+    plan_digest = "sha256:" + "b" * 64
+    plan_id = "plan-" + "b" * 32
+    source_policy = {
+        "mode": "actualProduct",
+        "productComponentIds": [updates.CATALYST_COMPONENT_ID],
+        "productSources": [{"componentId": updates.CATALYST_COMPONENT_ID, "sourceId": source_id}],
+        "operations": ["recover_binding", "runtime_status"],
+    }
+    owner_row = {
+        "componentId": component_id,
+        "artifactKind": "plugin-package",
+        "packageId": package_id,
+        "capabilityId": capability_id,
+        "bindingId": binding_id,
+        "sourcePolicy": source_policy,
+    }
+    environment_path = tmp_path / "etc/cyrene/catalyst-plugin-refs.env"
+    dropin_path = tmp_path / "etc/systemd/cyrene-catalyst.service.d/90-plugin-refs.conf"
+    old_refs = b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19081\n"
+    desired_refs = b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19082\n"
+    old_digest = "sha256:" + hashlib.sha256(old_refs).hexdigest()
+    desired_digest = "sha256:" + hashlib.sha256(desired_refs).hexdigest()
+    dropin_bytes = f"[Service]\nEnvironmentFile=-{environment_path}\n".encode()
+    dropin_digest = "sha256:" + hashlib.sha256(dropin_bytes).hexdigest()
+    identity = {
+        "componentId": component_id,
+        "capabilityId": capability_id,
+        "environmentName": updates.CATALYST_PLUGIN_CONNECTION_ENVIRONMENTS[capability_id],
+        "sourceId": source_id,
+        "bindingId": binding_id,
+        "packageId": package_id,
+        "installationId": installation_id,
+        "catalogGeneration": 3,
+    }
+    transaction = {
+        "schemaVersion": 2,
+        "transactionKind": "workload-assembly.v1",
+        "workloadId": "catalyst",
+        "action": "install",
+        "phase": "succeeded",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "selectedComponents": [{"componentId": updates.CATALYST_COMPONENT_ID}],
+        "selectedPluginRows": [owner_row],
+        "packageInstallations": {component_id: {"installation_id": installation_id}},
+        "sdkEnvironment": {"installed": True, "pythonPath": "/opt/cyrene/sdk/bin/python"},
+        "catalystPluginRefs": {
+            "environmentDigest": desired_digest,
+            "bindingIdentities": [identity],
+        },
+        "catalystPluginRefsRestartPending": True,
+        "managedConfigFiles": [
+            {
+                "path": str(environment_path),
+                "kind": "catalyst-plugin-refs-environment",
+                "priorDigest": None,
+                "writtenDigest": desired_digest,
+                "mode": 0o640,
+                "groupId": 1200,
+            },
+            {
+                "path": str(dropin_path),
+                "kind": "catalyst-plugin-refs-dropin",
+                "priorDigest": None,
+                "writtenDigest": dropin_digest,
+                "mode": 0o644,
+                "groupId": 0,
+            },
+        ],
+        "result": {
+            "action": "install",
+            "workloadId": "catalyst",
+            "planId": plan_id,
+            "planDigest": plan_digest,
+        },
+        "bindingOperations": [],
+    }
+    previous_backup = updater._write_workload_catalyst_plugin_refs_backup(
+        transaction, old_refs, digest=old_digest, owner_plan_id=plan_id
+    )
+    transaction["catalystPluginRefs"]["rotation"] = {
+        "previous": previous_backup,
+        "rollback": None,
+    }
+    updater.state_root.mkdir(mode=0o700, exist_ok=True)
+    transaction_root = updater.state_root / "transactions"
+    transaction_root.mkdir(mode=0o700)
+    transaction_path = transaction_root / f"{plan_id}.json"
+    transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
+    transaction_path.chmod(0o600)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT", environment_path)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_DROPIN", dropin_path)
+    monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=1200))
+    protected_files = {environment_path: old_refs, dropin_path: dropin_bytes}
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda file_path, **_kwargs: protected_files.get(file_path),
+    )
+    transaction_without_restart_intent = dict(transaction)
+    transaction_without_restart_intent.pop("catalystPluginRefsRestartPending")
+    updates._atomic_json(transaction_path, transaction_without_restart_intent)
+    with pytest.raises(updates.UpdateError, match="no matching transaction"):
+        updater._verify_workload_catalyst_plugin_refs_dropin_owner(dropin_digest)
+    updates._atomic_json(transaction_path, transaction)
+    updater.catalog["workloads"] = [
+        {
+            "workloadId": "catalyst",
+            "bindings": [{"componentId": component_id, "bindingId": binding_id}],
+            "sourcePolicy": source_policy,
+        }
+    ]
+    updater.components[component_id] = {
+        "componentId": component_id,
+        "pluginPackage": {"packageId": package_id, "capabilityId": capability_id},
+    }
+    monkeypatch.setattr(updater, "_require_authorized_process", lambda: None)
+    monkeypatch.setattr(updater, "_clear_release_discovery_caches", lambda: None)
+    monkeypatch.setattr(
+        updater,
+        "_load_native_component_bootstrap",
+        lambda: SimpleNamespace(exclusive_update_lock=lambda _updater: nullcontext()),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_workload_source_state",
+        lambda _workload_id: (
+            {"generation": 4},
+            {"generation": 4},
+            {source_id: {"uid": 1001, "gid": 1200, "tokenPath": tmp_path / "token"}},
+            object(),
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_package_inventory",
+        lambda _workload_id, _component_ids: {
+            "installationRecords": {component_id: {"installation_id": installation_id}},
+            "sourceBindings": [
+                {
+                    "sourceId": source_id,
+                    "bindingId": binding_id,
+                    "packageId": package_id,
+                    "installationIds": [installation_id],
+                    "activeInstallationId": (
+                        installation_id if runtime_state["binding"] == "RUNNING" else None
+                    ),
+                    "state": runtime_state["binding"],
+                }
+            ],
+        },
+    )
+    runtime_state = {"binding": "STOPPED"}
+    recover_calls: list[dict[str, Any]] = []
+
+    def recover_binding(_transaction: dict[str, Any], _path: Path, **kwargs: Any) -> dict[str, Any]:
+        recover_calls.append(kwargs)
+        runtime_state["binding"] = "RUNNING"
+        return {"requestId": kwargs["recovery_request_id"]}
+
+    monkeypatch.setattr(updater, "_workload_binding_operation", recover_binding)
+    projection_calls: list[dict[str, Any]] = []
+
+    def project_refs(_transaction: dict[str, Any], _path: Path, **kwargs: Any) -> bool:
+        projection_calls.append(kwargs)
+        assert kwargs["package_inventory"]["sourceBindings"][0]["state"] == "RUNNING"
+        return True
+
+    monkeypatch.setattr(updater, "_project_workload_catalyst_plugin_refs", project_refs)
+
+    result = updater.recover_workload_runtime_connections("catalyst")
+
+    assert result == {
+        "status": "recovered",
+        "workloadId": "catalyst",
+        "reason": None,
+        "recoveredBindings": 1,
+        "projectionChanged": True,
+    }
+    assert len(recover_calls) == 1
+    assert recover_calls[0]["operation"] == "recover_binding"
+    assert recover_calls[0]["component"] == owner_row
+    assert recover_calls[0]["installation_id"] == installation_id
+    assert recover_calls[0]["recovery_request_id"].startswith("cyrene-recover-bbbbbbbbbbbb-")
+    assert len(projection_calls) == 1
+    persisted = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert "catalystPluginRefsRestartPending" not in persisted
+    assert "connection_ref" not in json.dumps(persisted)
+
+
+def _controlled_catalyst_start_transaction(phase: str) -> dict[str, Any]:
+    plan_digest = "sha256:" + "d" * 64
+    plan_id = "plan-" + "d" * 32
+    product_digest = "sha256:" + "e" * 64
+    component_map = {updates.CATALYST_COMPONENT_ID: product_digest}
+    transaction: dict[str, Any] = {
+        "schemaVersion": 2,
+        "transactionKind": "workload-assembly.v1",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "action": "install",
+        "phase": "applying",
+        "maintenancePhase": phase,
+        "targetKind": "CORE_RUNTIME",
+        "maintenanceToken": "m" * 48,
+        "componentArtifactDigests": component_map,
+        "selectedComponents": [
+            {
+                "componentId": updates.CATALYST_COMPONENT_ID,
+                "artifactKind": "native-binary",
+                "digest": product_digest,
+            }
+        ],
+        "maintenanceHolds": {},
+    }
+    hold: dict[str, Any] = {
+        "targetKind": "CORE_RUNTIME",
+        "componentArtifactDigests": component_map,
+        "status": "active",
+        "beginMethod": "BeginMaintenance",
+    }
+    if phase == "core-runtime-install":
+        c10_digest = "sha256:" + "c" * 64
+        c10_plan_id = "plan-" + "c" * 32
+        source_id = "cyrene-catalyst"
+        parent_request_id = "first-core-bootstrap-" + c10_plan_id.removeprefix("plan-")
+        reference = {
+            "sourceId": source_id,
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "artifactDigest": product_digest,
+        }
+        transaction["firstCoreBootstrap"] = {
+            "planId": c10_plan_id,
+            "planDigest": c10_digest,
+            "initialSourceArtifactRef": reference,
+        }
+        transaction["firstCoreBootstrapStatus"] = "installed"
+        transaction["firstCoreBootstrapResult"] = {
+            "status": "installed",
+            "planId": c10_plan_id,
+            "planDigest": c10_digest,
+        }
+        transaction["sourcePolicy"] = {
+            "mode": "actualProduct",
+            "productSources": [
+                {
+                    "componentId": updates.CATALYST_COMPONENT_ID,
+                    "sourceId": source_id,
+                }
+            ],
+        }
+        transaction["initialSourceActivation"] = {
+            **reference,
+            "parentRequestId": parent_request_id,
+        }
+        hold.update(
+            {
+                "beginMethod": "BeginInitialSourceActivation",
+                "sourceId": source_id,
+                "parentRequestId": parent_request_id,
+            }
+        )
+    else:
+        transaction["catalystPluginRefs"] = {
+            "environmentDigest": "sha256:" + "f" * 64,
+            "bindingIdentities": [],
+        }
+    transaction["maintenanceHolds"][phase] = hold
+    hold["requestId"] = updates._maintenance_request_id(transaction)
+    return transaction
+
+
+@pytest.mark.parametrize("phase", ["core-runtime-install", "core-runtime-activate"])
+def test_boot_connection_recovery_skips_only_during_exact_live_catalyst_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction = _controlled_catalyst_start_transaction(phase)
+    transaction_path = (
+        updater._private_state_directory("transactions") / f"{transaction['planId']}.json"
+    )
+    updates._atomic_json(transaction_path, transaction)
+    if phase == "core-runtime-activate":
+        monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=1200))
+        refs_payload = b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19081\n"
+        transaction["catalystPluginRefs"]["environmentDigest"] = (
+            "sha256:" + hashlib.sha256(refs_payload).hexdigest()
+        )
+        monkeypatch.setattr(
+            updater,
+            "_read_workload_protected_file",
+            lambda path, **_kwargs: (
+                refs_payload if path == updates.DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT else None
+            ),
+        )
+        monkeypatch.setattr(
+            updater,
+            "_verify_workload_catalyst_plugin_refs_dropin_owner",
+            lambda _digest: [
+                {"planId": transaction["planId"], "planDigest": transaction["planDigest"]}
+            ],
+        )
+    monkeypatch.setattr(updater, "_require_authorized_process", lambda: None)
+    monkeypatch.setattr(updater, "_clear_release_discovery_caches", lambda: None)
+
+    class LockConflict:
+        def __enter__(self) -> None:
+            raise updates.UpdateError("UPDATE_IN_PROGRESS", "test lock is held", retryable=True)
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        updater,
+        "_load_native_component_bootstrap",
+        lambda: SimpleNamespace(exclusive_update_lock=lambda _updater: LockConflict()),
+    )
+    results: list[dict[str, Any]] = []
+
+    def invoke_start(_unit: str, _operation: str, *, wait_active: bool = False) -> None:
+        assert wait_active is True
+        persisted = json.loads(transaction_path.read_text(encoding="utf-8"))
+        assert persisted["serviceStartIntent"]["phase"] == phase
+        results.append(updater.recover_workload_runtime_connections("catalyst"))
+
+    monkeypatch.setattr(updater, "_set_workload_unit", invoke_start)
+    updater._set_workload_unit_for_apply(
+        transaction,
+        transaction_path,
+        updates.CATALYST_SERVICE_UNIT,
+        "start",
+        wait_active=True,
+    )
+
+    assert results == [
+        {
+            "status": "skipped",
+            "workloadId": "catalyst",
+            "reason": "installer-controlled-catalyst-start",
+            "recoveredBindings": 0,
+            "projectionChanged": False,
+        }
+    ]
+    persisted = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert "serviceStartIntent" not in persisted
+    assert "maintenanceToken" not in json.dumps(results)
+
+
+def test_boot_connection_recovery_does_not_skip_a_stale_or_unowned_start_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction = _controlled_catalyst_start_transaction("core-runtime-install")
+    transaction["serviceStartIntent"] = {
+        "schemaVersion": 1,
+        "planId": transaction["planId"],
+        "planDigest": transaction["planDigest"],
+        "phase": "core-runtime-install",
+        "holdRequestId": transaction["maintenanceHolds"]["core-runtime-install"]["requestId"],
+        "maintenanceTokenDigest": "sha256:"
+        + hashlib.sha256(transaction["maintenanceToken"].encode("utf-8")).hexdigest(),
+        "unit": updates.CATALYST_SERVICE_UNIT,
+        "operation": "start",
+        "parentPid": os.getpid(),
+        "parentStartTime": (updater._workload_process_start_time(os.getpid()) or 0) + 1,
+    }
+    transaction_path = (
+        updater._private_state_directory("transactions") / f"{transaction['planId']}.json"
+    )
+    updates._atomic_json(transaction_path, transaction)
+    monkeypatch.setattr(updater, "_require_authorized_process", lambda: None)
+    monkeypatch.setattr(updater, "_clear_release_discovery_caches", lambda: None)
+
+    class LockConflict:
+        def __enter__(self) -> None:
+            raise updates.UpdateError("UPDATE_IN_PROGRESS", "test lock is held", retryable=True)
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        updater,
+        "_load_native_component_bootstrap",
+        lambda: SimpleNamespace(exclusive_update_lock=lambda _updater: LockConflict()),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater.recover_workload_runtime_connections("catalyst")
+
+    assert error.value.code == "UPDATE_IN_PROGRESS"
+
+
+def test_controlled_catalyst_start_clears_intent_when_systemctl_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction = _controlled_catalyst_start_transaction("core-runtime-install")
+    transaction_path = (
+        updater._private_state_directory("transactions") / f"{transaction['planId']}.json"
+    )
+    updates._atomic_json(transaction_path, transaction)
+
+    def fail_start(*_args: Any, **_kwargs: Any) -> None:
+        persisted = json.loads(transaction_path.read_text(encoding="utf-8"))
+        assert "serviceStartIntent" in persisted
+        raise updates.UpdateError("UNIT_START_FAILED", "test service start failure")
+
+    monkeypatch.setattr(updater, "_set_workload_unit", fail_start)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._set_workload_unit_for_apply(
+            transaction,
+            transaction_path,
+            updates.CATALYST_SERVICE_UNIT,
+            "start",
+            wait_active=True,
+        )
+
+    assert error.value.code == "UNIT_START_FAILED"
+    persisted = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert "serviceStartIntent" not in persisted
+
+
+def test_boot_connection_recovery_does_not_skip_final_start_without_refs_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction = _controlled_catalyst_start_transaction("core-runtime-activate")
+    transaction["serviceStartIntent"] = {
+        "schemaVersion": 1,
+        "planId": transaction["planId"],
+        "planDigest": transaction["planDigest"],
+        "phase": "core-runtime-activate",
+        "holdRequestId": transaction["maintenanceHolds"]["core-runtime-activate"]["requestId"],
+        "maintenanceTokenDigest": "sha256:"
+        + hashlib.sha256(transaction["maintenanceToken"].encode("utf-8")).hexdigest(),
+        "unit": updates.CATALYST_SERVICE_UNIT,
+        "operation": "restart",
+        "parentPid": os.getpid(),
+        "parentStartTime": updater._workload_process_start_time(os.getpid()),
+    }
+    transaction_path = (
+        updater._private_state_directory("transactions") / f"{transaction['planId']}.json"
+    )
+    updates._atomic_json(transaction_path, transaction)
+    monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=1200))
+    refs_payload = b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19081\n"
+    transaction["catalystPluginRefs"]["environmentDigest"] = (
+        "sha256:" + hashlib.sha256(refs_payload).hexdigest()
+    )
+    updates._atomic_json(transaction_path, transaction)
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda path, **_kwargs: (
+            refs_payload if path == updates.DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT else None
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_verify_workload_catalyst_plugin_refs_dropin_owner",
+        lambda _digest: [],
+    )
+    monkeypatch.setattr(updater, "_require_authorized_process", lambda: None)
+    monkeypatch.setattr(updater, "_clear_release_discovery_caches", lambda: None)
+
+    class LockConflict:
+        def __enter__(self) -> None:
+            raise updates.UpdateError("UPDATE_IN_PROGRESS", "test lock is held", retryable=True)
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(
+        updater,
+        "_load_native_component_bootstrap",
+        lambda: SimpleNamespace(exclusive_update_lock=lambda _updater: LockConflict()),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater.recover_workload_runtime_connections("catalyst")
+
+    assert error.value.code == "UPDATE_IN_PROGRESS"
+
+
+def test_boot_connection_recovery_does_not_treat_locked_body_error_as_lock_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    monkeypatch.setattr(updater, "_require_authorized_process", lambda: None)
+    monkeypatch.setattr(updater, "_clear_release_discovery_caches", lambda: None)
+    monkeypatch.setattr(
+        updater,
+        "_load_native_component_bootstrap",
+        lambda: SimpleNamespace(exclusive_update_lock=lambda _updater: nullcontext()),
+    )
+
+    def locked_body_error(_workload_id: str) -> dict[str, Any]:
+        raise updates.UpdateError("UPDATE_IN_PROGRESS", "inner recovery error", retryable=True)
+
+    monkeypatch.setattr(
+        updater,
+        "_recover_workload_runtime_connections_locked",
+        locked_body_error,
+    )
+    monkeypatch.setattr(
+        updater,
+        "_skip_workload_runtime_recovery_for_controlled_start",
+        lambda: pytest.fail("a locked recovery-body error must not use the restart-intent skip"),
+    )
+
+    with pytest.raises(updates.UpdateError, match="inner recovery error") as error:
+        updater.recover_workload_runtime_connections("catalyst")
+
+    assert error.value.code == "UPDATE_IN_PROGRESS"
+
+
+def test_catalyst_plugin_refs_dropin_requires_digest_bound_owner_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    updater.state_root.mkdir(mode=0o700)
+    transaction_dir = updater.state_root / "transactions"
+    transaction_dir.mkdir(parents=True, mode=0o700)
+    plan_digest = "sha256:" + "a" * 64
+    plan_id = "plan-" + "a" * 32
+    source_id = updates.CATALYST_COMPONENT_ID
+    component_id = "cyrene-tools-document-parsing"
+    capability_id = "document.parsing.v1"
+    environment_name = "CYRENE_DOCUMENT_PARSING_CONNECTION_REF"
+    binding_id = "catalog-binding-document-parsing"
+    package_id = "cyrene.tools.document-parsing"
+    installation_id = "installation-document-parsing"
+    environment_path = tmp_path / "etc/cyrene/catalyst-plugin-refs.env"
+    dropin_path = tmp_path / "etc/systemd/cyrene-catalyst.service.d/90-plugin-refs.conf"
+    environment_payload = b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19081\n"
+    dropin_payload = f"[Service]\nEnvironmentFile=-{environment_path}\n".encode()
+    environment_digest = "sha256:" + hashlib.sha256(environment_payload).hexdigest()
+    dropin_digest = "sha256:" + hashlib.sha256(dropin_payload).hexdigest()
+    selected_row = {
+        "componentId": component_id,
+        "capabilityId": capability_id,
+        "bindingId": binding_id,
+        "packageId": package_id,
+        "sourcePolicy": {
+            "mode": "actualProduct",
+            "productComponentIds": [source_id],
+            "productSources": [{"componentId": source_id, "sourceId": source_id}],
+        },
+    }
+    transaction = {
+        "schemaVersion": 2,
+        "transactionKind": "workload-assembly.v1",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "action": "install",
+        "phase": "succeeded",
+        "selectedComponents": [{"componentId": source_id}],
+        "selectedPluginRows": [selected_row],
+        "packageInstallations": {component_id: {"installation_id": installation_id}},
+        "catalystPluginRefs": {
+            "environmentDigest": environment_digest,
+            "bindingIdentities": [
+                {
+                    "componentId": component_id,
+                    "capabilityId": capability_id,
+                    "environmentName": environment_name,
+                    "sourceId": source_id,
+                    "bindingId": binding_id,
+                    "packageId": package_id,
+                    "installationId": installation_id,
+                    "catalogGeneration": 4,
+                }
+            ],
+        },
+        "managedConfigFiles": [
+            {
+                "path": str(environment_path),
+                "kind": "catalyst-plugin-refs-environment",
+                "priorDigest": None,
+                "writtenDigest": environment_digest,
+                "mode": 0o640,
+                "groupId": 1200,
+            },
+            {
+                "path": str(dropin_path),
+                "kind": "catalyst-plugin-refs-dropin",
+                "priorDigest": None,
+                "writtenDigest": dropin_digest,
+                "mode": 0o644,
+                "groupId": 0,
+            },
+        ],
+        "result": {
+            "action": "install",
+            "workloadId": "catalyst",
+            "planId": plan_id,
+            "planDigest": plan_digest,
+        },
+    }
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT", environment_path)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_DROPIN", dropin_path)
+    monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=1200))
+    protected_files = {
+        environment_path: environment_payload,
+        dropin_path: dropin_payload,
+    }
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda path, **_kwargs: protected_files.get(path),
+    )
+    updates._atomic_json(transaction_dir / f"{plan_id}.json", transaction)
+
+    updater._verify_workload_catalyst_plugin_refs_dropin_owner(dropin_digest)
+
+    protected_files[environment_path] = (
+        b"CYRENE_DOCUMENT_PARSING_CONNECTION_REF=grpc://127.0.0.1:19082\n"
+    )
+    with pytest.raises(updates.UpdateError, match="no matching transaction"):
+        updater._verify_workload_catalyst_plugin_refs_dropin_owner(dropin_digest)
+
+    replacement_payload = protected_files[environment_path]
+    replacement_digest = "sha256:" + hashlib.sha256(replacement_payload).hexdigest()
+    replacement_plan_digest = "sha256:" + "b" * 64
+    replacement_plan_id = "plan-" + "b" * 32
+    replacement = json.loads(json.dumps(transaction))
+    replacement_backup = updater._write_workload_catalyst_plugin_refs_backup(
+        {"planId": replacement_plan_id, "planDigest": replacement_plan_digest},
+        environment_payload,
+        digest=environment_digest,
+        owner_plan_id=plan_id,
+    )
+    replacement["planId"] = replacement_plan_id
+    replacement["planDigest"] = replacement_plan_digest
+    replacement["phase"] = "applying"
+    replacement["catalystPluginRefs"]["environmentDigest"] = replacement_digest
+    replacement["catalystPluginRefs"]["rotation"] = {
+        "previous": replacement_backup,
+        "rollback": replacement_backup,
+    }
+    replacement["managedConfigFiles"][0]["priorDigest"] = environment_digest
+    replacement["managedConfigFiles"][0]["writtenDigest"] = replacement_digest
+    updates._atomic_json(transaction_dir / f"{replacement_plan_id}.json", replacement)
+
+    owners = updater._verify_workload_catalyst_plugin_refs_dropin_owner(dropin_digest)
+    assert owners == [{"planId": replacement_plan_id, "planDigest": replacement_plan_digest}]
+    assert (
+        updater._workload_current_plugin_refs_owner(
+            replacement, replacement_payload, replacement_digest
+        )
+        == replacement_plan_id
+    )
+
+
+def test_catalyst_plugin_refs_rotation_uses_private_backup_and_can_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    refs_path = tmp_path / "etc/cyrene/catalyst-plugin-refs.env"
+    refs_path.parent.mkdir(parents=True)
+    original = b"CYRENE_DATASET_GENERATION_CONNECTION_REF=grpc://127.0.0.1:19082\n"
+    replacement = b"CYRENE_DATASET_GENERATION_CONNECTION_REF=grpc://127.0.0.1:19083\n"
+    refs_path.write_bytes(original)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT", refs_path)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_API_TOKEN", tmp_path / "etc/cyrene/token")
+    monkeypatch.setattr(updates.grp, "getgrnam", lambda _name: SimpleNamespace(gr_gid=1200))
+    monkeypatch.setattr(updates.os, "fchown", lambda *_args: None)
+    monkeypatch.setattr(
+        updater, "_ensure_workload_config_directory", lambda *_args, **_kwargs: None
+    )
+    live = {refs_path: original}
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda path, **_kwargs: live.get(path),
+    )
+    plan_digest = "sha256:" + "c" * 64
+    plan_id = "plan-" + "c" * 32
+    original_digest = "sha256:" + hashlib.sha256(original).hexdigest()
+    replacement_digest = "sha256:" + hashlib.sha256(replacement).hexdigest()
+    backup = updater._write_workload_catalyst_plugin_refs_backup(
+        {"planId": plan_id, "planDigest": plan_digest},
+        original,
+        digest=original_digest,
+        owner_plan_id="plan-" + "d" * 32,
+    )
+    transaction: dict[str, Any] = {
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "catalystPluginRefs": {
+            "environmentDigest": replacement_digest,
+            "bindingIdentities": [],
+            "rotation": {"previous": backup, "rollback": backup},
+        },
+        "managedConfigFiles": [],
+    }
+    transaction_path = updater.state_root / "transactions" / f"{plan_id}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+
+    assert (
+        updater._write_workload_managed_config(
+            transaction,
+            transaction_path,
+            path=refs_path,
+            content=replacement,
+            group_id=1200,
+            mode=0o640,
+            entry_kind="catalyst-plugin-refs-environment",
+        )
+        == replacement_digest
+    )
+    live[refs_path] = replacement
+    assert refs_path.read_bytes() == replacement
+    assert transaction["managedConfigFiles"][0]["priorDigest"] == original_digest
+    serialized = json.dumps(transaction, sort_keys=True)
+    assert original.decode().strip() not in serialized
+    assert replacement.decode().strip() not in serialized
+
+    assert updater._restore_workload_catalyst_plugin_refs_file(
+        transaction, transaction["managedConfigFiles"][0]
+    )
+    live[refs_path] = original
+    assert refs_path.read_bytes() == original
+
+
+def test_catalyst_plugin_refs_rotation_rejects_unowned_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    refs_path = tmp_path / "etc/cyrene/catalyst-plugin-refs.env"
+    original = b"CYRENE_DATASET_GENERATION_CONNECTION_REF=grpc://127.0.0.1:19082\n"
+    replacement = b"CYRENE_DATASET_GENERATION_CONNECTION_REF=grpc://127.0.0.1:19083\n"
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT", refs_path)
+    monkeypatch.setattr(updates, "DEFAULT_CATALYST_API_TOKEN", tmp_path / "etc/cyrene/token")
+    monkeypatch.setattr(updates.os, "fchown", lambda *_args: None)
+    monkeypatch.setattr(
+        updater, "_ensure_workload_config_directory", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        updater,
+        "_read_workload_protected_file",
+        lambda path, **_kwargs: original if path == refs_path else None,
+    )
+    digest = "sha256:" + hashlib.sha256(replacement).hexdigest()
+    transaction = {
+        "planId": "plan-" + "e" * 32,
+        "planDigest": "sha256:" + "e" * 64,
+        "catalystPluginRefs": {"environmentDigest": digest, "bindingIdentities": []},
+        "managedConfigFiles": [],
+    }
+
+    with pytest.raises(updates.UpdateError, match="exact rotation receipt"):
+        updater._write_workload_managed_config(
+            transaction,
+            updater.state_root / "transactions" / f"{transaction['planId']}.json",
+            path=refs_path,
+            content=replacement,
+            group_id=1200,
+            mode=0o640,
+            entry_kind="catalyst-plugin-refs-environment",
+        )
 
 
 def test_apply_confirmation_is_bound_to_plan_id_and_digest(tmp_path: Path) -> None:

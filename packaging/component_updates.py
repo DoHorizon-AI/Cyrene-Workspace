@@ -34,7 +34,7 @@ import urllib.request
 import uuid
 import zipfile
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -220,10 +220,20 @@ DEFAULT_PACKAGE_RUNTIME_POLICY = Path("/etc/cyrene/runtime-package-sources.json"
 DEFAULT_ACTIVITY_TOKEN_DIRECTORY = Path("/etc/cyrene/runtime-activity-source-tokens")
 DEFAULT_CATALYST_API_TOKEN = Path("/etc/cyrene/secrets/catalyst-api-token")
 DEFAULT_CATALYST_AUTH_ENVIRONMENT = Path("/etc/cyrene/catalyst-auth.env")
+DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT = Path("/etc/cyrene/catalyst-plugin-refs.env")
 DEFAULT_STUDIO_CONTROL_ENVIRONMENT = Path("/etc/cyrene/studio-control.env")
 DEFAULT_CATALYST_AUTH_DROPIN = Path(
     "/etc/systemd/system/cyrene-catalyst.service.d/80-workload-api-token.conf"
 )
+DEFAULT_CATALYST_PLUGIN_REFS_DROPIN = Path(
+    "/etc/systemd/system/cyrene-catalyst.service.d/90-workload-plugin-refs.conf"
+)
+CATALYST_PLUGIN_CONNECTION_ENVIRONMENTS = {
+    "dataset.preparation.v1": "CYRENE_DATASET_PREPARATION_CONNECTION_REF",
+    "document.parsing.v1": "CYRENE_DOCUMENT_PARSING_CONNECTION_REF",
+    "dataset.generation.v1": "CYRENE_DATASET_GENERATION_CONNECTION_REF",
+    "dataset.knowledge.v1": "CYRENE_KNOWLEDGE_PREPARATION_CONNECTION_REF",
+}
 SYSTEMD_SYSTEM_UNIT_SEARCH_ROOTS = (
     Path("/etc/systemd/system.control"),
     Path("/run/systemd/system.control"),
@@ -1440,6 +1450,7 @@ class ComponentUpdater:
             "installed",
             "placement",
             "attestations",
+            "config-backups",
         }:
             raise UpdateError("UNSAFE_STATE", "Invalid updater state directory.")
         root = self._ensure_state_root()
@@ -5813,17 +5824,34 @@ class ComponentUpdater:
         if expected_block is None:
             if not self._first_core_host_is_unprovisioned():
                 return None, {}
-        elif not isinstance(expected_block, dict) or set(expected_block) != {
-            "schemaVersion",
-            "cohortId",
-            "planId",
-            "planDigest",
-            "targetId",
-            "catalogDigest",
-            "components",
-            "componentArtifactDigests",
-            "maintenanceComponentArtifactDigests",
-        }:
+        elif (
+            not isinstance(expected_block, dict)
+            or set(expected_block)
+            != {
+                "schemaVersion",
+                "cohortId",
+                "planId",
+                "planDigest",
+                "targetId",
+                "catalogDigest",
+                "components",
+                "componentArtifactDigests",
+                "maintenanceComponentArtifactDigests",
+            }
+            and set(expected_block)
+            != {
+                "schemaVersion",
+                "cohortId",
+                "planId",
+                "planDigest",
+                "targetId",
+                "catalogDigest",
+                "components",
+                "componentArtifactDigests",
+                "maintenanceComponentArtifactDigests",
+                "initialSourceArtifactRef",
+            }
+        ):
             raise UpdateError("INVALID_TRANSACTION", "The durable first-Core block is malformed.")
         core = self._load_native_core_bootstrap()
         try:
@@ -5950,6 +5978,57 @@ class ComponentUpdater:
                 )
             hold_digests[component_id] = digest
 
+        initial_source_ref: dict[str, str] | None = None
+        if source_policy.get("mode") == "actualProduct":
+            product_sources = source_policy.get("productSources")
+            product_component_ids = source_policy.get("productComponentIds")
+            if (
+                not isinstance(product_sources, list)
+                or not isinstance(product_component_ids, list)
+                or any(not isinstance(item, str) for item in product_component_ids)
+            ):
+                raise UpdateError(
+                    "SOURCE_POLICY_INVALID",
+                    "The signed actual-product source identity is malformed.",
+                )
+            matching_sources = [
+                item
+                for item in product_sources
+                if isinstance(item, dict) and item.get("componentId") in product_component_ids
+            ]
+            if matching_sources:
+                if len(matching_sources) != 1:
+                    raise UpdateError(
+                        "SOURCE_POLICY_INVALID",
+                        "First-Core activation requires one exact product activity source.",
+                    )
+                source_row = matching_sources[0]
+                product_component_id = source_row.get("componentId")
+                source_id = source_row.get("sourceId")
+                selected_product_rows = [
+                    row
+                    for row in parent_rows
+                    if isinstance(row, dict)
+                    and row.get("componentId") == product_component_id
+                    and row.get("artifactKind") == "native-binary"
+                ]
+                if selected_product_rows:
+                    if (
+                        len(selected_product_rows) != 1
+                        or not isinstance(product_component_id, str)
+                        or not isinstance(source_id, str)
+                        or not _valid_digest(selected_product_rows[0].get("digest"))
+                    ):
+                        raise UpdateError(
+                            "SOURCE_POLICY_INVALID",
+                            "The selected product artifact cannot bind its initial activity source.",
+                        )
+                    initial_source_ref = {
+                        "sourceId": source_id,
+                        "componentId": product_component_id,
+                        "artifactDigest": selected_product_rows[0]["digest"],
+                    }
+
         broker_candidate = core_candidates[BROKER_COMPONENT_ID]
         broker_plan_digest = self._first_core_broker_plan_digest(broker_candidate, channel=channel)
         child_material = {
@@ -5965,6 +6044,8 @@ class ComponentUpdater:
             "maintenanceComponentArtifactDigests": hold_digests,
             "brokerBootstrapPlanDigest": broker_plan_digest,
         }
+        if initial_source_ref is not None:
+            child_material["initialSourceArtifactRef"] = initial_source_ref
         child_digest = (
             "sha256:"
             + hashlib.sha256(
@@ -5988,6 +6069,8 @@ class ComponentUpdater:
             "componentArtifactDigests": child_digests,
             "maintenanceComponentArtifactDigests": hold_digests,
         }
+        if initial_source_ref is not None:
+            block["initialSourceArtifactRef"] = initial_source_ref
         if expected_block is not None and block != expected_block:
             raise UpdateError(
                 "PLAN_CHANGED",
@@ -8266,6 +8349,373 @@ class ComponentUpdater:
                 bootstrap_module=bootstrap_module,
             )
 
+    def recover_workload_runtime_connections(self, workload_id: str) -> dict[str, Any]:
+        """Restore managed Catalyst bindings before its systemd service starts.
+
+        同一 updater 正在持锁启动 Catalyst 时，仅识别其精确、存活的重启意图。
+        """
+
+        self._require_authorized_process()
+        if workload_id != "catalyst":
+            raise UpdateError("INVALID_WORKLOAD_ID", "Boot recovery supports Catalyst only.")
+        self._clear_release_discovery_caches()
+        bootstrap_module = self._load_native_component_bootstrap()
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(bootstrap_module.exclusive_update_lock(self))
+            except UpdateError as error:
+                if error.code != "UPDATE_IN_PROGRESS":
+                    raise
+                result = self._skip_workload_runtime_recovery_for_controlled_start()
+                if result is not None:
+                    return result
+                raise
+            return self._recover_workload_runtime_connections_locked(workload_id)
+
+    @staticmethod
+    def _workload_process_start_time(pid: int) -> int | None:
+        """Read a process start time to distinguish a live PID from PID reuse.
+
+        读取 `/proc/<pid>/stat` 的启动时钟，避免把 PID 重用误判为原 updater。
+        """
+
+        if type(pid) is not int or pid < 1:
+            return None
+        try:
+            raw = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+        except (OSError, UnicodeDecodeError):
+            return None
+        closing_parenthesis = raw.rfind(")")
+        if closing_parenthesis < 0:
+            return None
+        fields = raw[closing_parenthesis + 1 :].split()
+        # The first remaining value is field 3 (state); starttime is field 22.
+        if len(fields) <= 19 or not fields[19].isdecimal():
+            return None
+        return int(fields[19])
+
+    def _skip_workload_runtime_recovery_for_controlled_start(self) -> dict[str, Any] | None:
+        """Recognize only this updater's live, journaled Catalyst service start.
+
+        This path is read-only; unrelated lock contention continues to fail closed.
+        """
+
+        state_root = self.state_root
+        transaction_root = state_root / "transactions"
+        if not transaction_root.exists() and not transaction_root.is_symlink():
+            return None
+        _verify_private_directory(state_root)
+        _verify_private_directory(transaction_root)
+        intents: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for journal_path in sorted(transaction_root.iterdir()):
+            if (
+                journal_path.is_symlink()
+                or not journal_path.is_file()
+                or journal_path.suffix != ".json"
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Workload transaction inventory is unsafe."
+                )
+            try:
+                info = journal_path.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1
+                    or info.st_size > 16 * 1024 * 1024
+                ):
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED", "Workload transaction record is unsafe."
+                    )
+                transaction = json.loads(
+                    journal_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_unique_json_object,
+                )
+            except UpdateError:
+                raise
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Workload transaction record cannot be read safely."
+                ) from error
+            if not isinstance(transaction, dict):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Workload transaction record is malformed."
+                )
+            intent = transaction.get("serviceStartIntent")
+            if intent is None:
+                continue
+            if not isinstance(intent, dict):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst service start intent is malformed."
+                )
+            if journal_path.name != f"{transaction.get('planId')}.json":
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED",
+                    "Catalyst service start intent is not in its plan journal.",
+                )
+            intents.append((transaction, intent))
+
+        if len(intents) != 1:
+            return None
+        transaction, intent = intents[0]
+        if not self._workload_service_start_intent_is_current(transaction, intent):
+            return None
+        return {
+            "status": "skipped",
+            "workloadId": "catalyst",
+            "reason": "installer-controlled-catalyst-start",
+            "recoveredBindings": 0,
+            "projectionChanged": False,
+        }
+
+    def _workload_service_start_intent_is_current(
+        self, transaction: dict[str, Any], intent: dict[str, Any]
+    ) -> bool:
+        """Validate the exact active hold and live parent recorded before systemd.
+
+        最终激活还必须确认受保护连接引用仍由本事务摘要所有。
+        """
+
+        if set(intent) != {
+            "schemaVersion",
+            "planId",
+            "planDigest",
+            "phase",
+            "holdRequestId",
+            "maintenanceTokenDigest",
+            "unit",
+            "operation",
+            "parentPid",
+            "parentStartTime",
+        }:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalyst service start intent has an invalid shape."
+            )
+        phase = intent.get("phase")
+        plan_id = transaction.get("planId")
+        plan_digest = transaction.get("planDigest")
+        parent_pid = intent.get("parentPid")
+        parent_start_time = intent.get("parentStartTime")
+        if (
+            intent.get("schemaVersion") != 1
+            or phase not in {"core-runtime-install", "core-runtime-activate"}
+            or transaction.get("transactionKind") != "workload-assembly.v1"
+            or transaction.get("schemaVersion") != 2
+            or transaction.get("workloadId") != "catalyst"
+            or transaction.get("action") != "install"
+            or transaction.get("phase") != "applying"
+            or transaction.get("maintenancePhase") != phase
+            or transaction.get("targetKind") != "CORE_RUNTIME"
+            or intent.get("planId") != plan_id
+            or intent.get("planDigest") != plan_digest
+            or not isinstance(plan_id, str)
+            or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+            or not _valid_digest(plan_digest)
+            or plan_id != "plan-" + plan_digest.removeprefix("sha256:")[:32]
+            or intent.get("unit") != CATALYST_SERVICE_UNIT
+            or intent.get("operation") not in {"start", "restart"}
+            or type(parent_pid) is not int
+            or parent_pid < 1
+            or type(parent_start_time) is not int
+            or parent_start_time < 1
+            or self._workload_process_start_time(parent_pid) != parent_start_time
+        ):
+            return False
+        if transaction.get("selectedComponents") is None or not any(
+            isinstance(row, dict) and row.get("componentId") == CATALYST_COMPONENT_ID
+            for row in transaction.get("selectedComponents", [])
+        ):
+            return False
+        holds = transaction.get("maintenanceHolds")
+        hold = holds.get(phase) if isinstance(holds, dict) else None
+        token = transaction.get("maintenanceToken")
+        expected_request_id = _maintenance_request_id(transaction)
+        if (
+            not isinstance(hold, dict)
+            or hold.get("status") != "active"
+            or hold.get("requestId") != expected_request_id
+            or intent.get("holdRequestId") != expected_request_id
+            or hold.get("targetKind") != "CORE_RUNTIME"
+            or hold.get("componentArtifactDigests") != transaction.get("componentArtifactDigests")
+            or not isinstance(token, str)
+            or len(token) < 32
+            or intent.get("maintenanceTokenDigest")
+            != "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+        ):
+            return False
+
+        if phase == "core-runtime-install":
+            block = transaction.get("firstCoreBootstrap")
+            reference = block.get("initialSourceArtifactRef") if isinstance(block, dict) else None
+            first_core_result = transaction.get("firstCoreBootstrapResult")
+            activation = transaction.get("initialSourceActivation")
+            expected_parent = (
+                "first-core-bootstrap-" + str(block.get("planId", "")).removeprefix("plan-")
+                if isinstance(block, dict)
+                else None
+            )
+            source_policy = transaction.get("sourcePolicy")
+            product_sources = (
+                source_policy.get("productSources")
+                if isinstance(source_policy, dict) and source_policy.get("mode") == "actualProduct"
+                else None
+            )
+            if (
+                hold.get("beginMethod") != "BeginInitialSourceActivation"
+                or not isinstance(reference, dict)
+                or set(reference) != {"sourceId", "componentId", "artifactDigest"}
+                or not isinstance(reference.get("sourceId"), str)
+                or not reference["sourceId"]
+                or reference.get("componentId") != CATALYST_COMPONENT_ID
+                or not _valid_digest(reference.get("artifactDigest"))
+                or transaction.get("firstCoreBootstrapStatus") != "installed"
+                or not isinstance(first_core_result, dict)
+                or first_core_result.get("status") != "installed"
+                or first_core_result.get("planId") != block.get("planId")
+                or first_core_result.get("planDigest") != block.get("planDigest")
+                or not isinstance(activation, dict)
+                or activation.get("sourceId") != reference.get("sourceId")
+                or activation.get("componentId") != reference.get("componentId")
+                or activation.get("artifactDigest") != reference.get("artifactDigest")
+                or activation.get("parentRequestId") != expected_parent
+                or hold.get("sourceId") != reference.get("sourceId")
+                or hold.get("parentRequestId") != expected_parent
+                or not isinstance(product_sources, list)
+                or not any(
+                    isinstance(row, dict)
+                    and row.get("componentId") == reference.get("componentId")
+                    and row.get("sourceId") == reference.get("sourceId")
+                    for row in product_sources
+                )
+                or not any(
+                    isinstance(row, dict)
+                    and row.get("componentId") == reference.get("componentId")
+                    and row.get("digest") == reference.get("artifactDigest")
+                    for row in transaction.get("selectedComponents", [])
+                )
+                or transaction.get("componentArtifactDigests", {}).get(CATALYST_COMPONENT_ID)
+                != reference.get("artifactDigest")
+            ):
+                return False
+        else:
+            if hold.get("beginMethod") != "BeginMaintenance":
+                return False
+            refs_identity = transaction.get("catalystPluginRefs")
+            if not isinstance(refs_identity, dict) or not _valid_digest(
+                refs_identity.get("environmentDigest")
+            ):
+                return False
+            dropin_content = (
+                "[Service]\nEnvironmentFile=-"
+                + str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT)
+                + "\n"
+            ).encode("ascii")
+            dropin_digest = "sha256:" + hashlib.sha256(dropin_content).hexdigest()
+            owners = self._verify_workload_catalyst_plugin_refs_dropin_owner(dropin_digest)
+            try:
+                group_id = grp.getgrnam("cyrene").gr_gid
+            except KeyError as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst service group is unavailable."
+                ) from error
+            refs_bytes = self._read_workload_protected_file(
+                DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT,
+                allowed_identities={(0, group_id, 0o640)},
+                maximum_bytes=4096,
+                error_code="SERVICE_NOT_MANAGED",
+            )
+            if refs_bytes is None or "sha256:" + hashlib.sha256(
+                refs_bytes
+            ).hexdigest() != refs_identity.get("environmentDigest"):
+                return False
+            if not any(
+                owner.get("planId") == plan_id and owner.get("planDigest") == plan_digest
+                for owner in owners
+            ):
+                return False
+        return True
+
+    def _set_workload_unit_for_apply(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        unit: str,
+        operation: str,
+        *,
+        wait_active: bool = False,
+    ) -> None:
+        """Journal a bounded intent around an installer-controlled Catalyst start.
+
+        Intent 仅覆盖 systemd 调用窗口，并在正常返回或异常后清理。
+        """
+
+        if unit != CATALYST_SERVICE_UNIT or operation not in {"start", "restart"}:
+            self._set_workload_unit(unit, operation, wait_active=wait_active)
+            return
+        phase = transaction.get("maintenancePhase")
+        hold = transaction.get("maintenanceHolds", {}).get(phase)
+        token = transaction.get("maintenanceToken")
+        pid = os.getpid()
+        start_time = self._workload_process_start_time(pid)
+        if (
+            phase not in {"core-runtime-install", "core-runtime-activate"}
+            or not isinstance(hold, dict)
+            or hold.get("status") != "active"
+            or not isinstance(token, str)
+            or len(token) < 32
+            or start_time is None
+        ):
+            raise UpdateError(
+                "PENDING_MAINTENANCE",
+                "Catalyst service start requires its exact active workload hold.",
+            )
+        prior_intent = transaction.get("serviceStartIntent")
+        if prior_intent is not None:
+            if not isinstance(prior_intent, dict):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Prior Catalyst service start intent is malformed."
+                )
+            prior_pid = prior_intent.get("parentPid")
+            prior_start = prior_intent.get("parentStartTime")
+            if (
+                type(prior_pid) is not int
+                or type(prior_start) is not int
+                or self._workload_process_start_time(prior_pid) == prior_start
+            ):
+                raise UpdateError(
+                    "UPDATE_IN_PROGRESS",
+                    "A prior Catalyst service start intent still has a live parent process.",
+                    retryable=True,
+                )
+            transaction.pop("serviceStartIntent", None)
+        intent = {
+            "schemaVersion": 1,
+            "planId": transaction.get("planId"),
+            "planDigest": transaction.get("planDigest"),
+            "phase": phase,
+            "holdRequestId": hold.get("requestId"),
+            "maintenanceTokenDigest": "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            "unit": unit,
+            "operation": operation,
+            "parentPid": pid,
+            "parentStartTime": start_time,
+        }
+        if not self._workload_service_start_intent_is_current(transaction, intent):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Catalyst service start intent failed its exact hold checks."
+            )
+        transaction["serviceStartIntent"] = intent
+        _atomic_json(transaction_path, transaction)
+        try:
+            self._set_workload_unit(unit, operation, wait_active=wait_active)
+        finally:
+            current = _read_object(transaction_path, "workload transaction")
+            if current.get("serviceStartIntent") == intent:
+                current.pop("serviceStartIntent", None)
+                _atomic_json(transaction_path, current)
+            transaction.pop("serviceStartIntent", None)
+
     def _apply_workload_locked(
         self,
         workload_id: Any,
@@ -9066,6 +9516,391 @@ class ComponentUpdater:
             )
         return connection_ref, runner_identity
 
+    @staticmethod
+    def _validate_catalyst_plugin_connection_ref(value: Any) -> str:
+        """Accept only a loopback gRPC endpoint safe for a systemd environment file."""
+
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 2048
+            or any(character.isspace() or ord(character) < 32 for character in value)
+            or re.fullmatch(r"[A-Za-z0-9:/\[\]._-]+", value) is None
+        ):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Catalyst plugin returned a connection reference unsafe for protected configuration.",
+                retryable=True,
+            )
+        parsed = urllib.parse.urlsplit(value)
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if (
+            parsed.scheme != "grpc"
+            or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or port is None
+            or not 1 <= port <= 65535
+        ):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Catalyst plugin returned a non-loopback or malformed connection reference.",
+                retryable=True,
+            )
+        return value
+
+    def _project_workload_catalyst_plugin_refs(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        plugin_rows: list[dict[str, Any]],
+        package_inventory: dict[str, Any],
+        activity_catalog: dict[str, Any],
+        runtime_policy: dict[str, Any],
+        source_principals: dict[str, dict[str, Any]],
+        helper: Any,
+    ) -> bool:
+        """Project only selected, active Catalyst bindings into a protected env file."""
+
+        sdk_environment = transaction.get("sdkEnvironment")
+        sdk_python = (
+            Path(sdk_environment["pythonPath"])
+            if isinstance(sdk_environment, dict)
+            and sdk_environment.get("installed") is True
+            and isinstance(sdk_environment.get("pythonPath"), str)
+            else None
+        )
+        if sdk_python is None or not sdk_python.is_absolute():
+            raise UpdateError(
+                "WORKLOAD_SDK_READBACK_REQUIRED",
+                "The Package Runtime SDK interpreter is unavailable for Catalyst binding readback.",
+                retryable=True,
+            )
+        installations = package_inventory.get("installationRecords")
+        bindings = package_inventory.get("sourceBindings")
+        if not isinstance(installations, dict) or not isinstance(bindings, list):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Catalyst Package Runtime installation or binding inventory is malformed.",
+                retryable=True,
+            )
+        projected: dict[str, str] = {}
+        identities: list[dict[str, Any]] = []
+        for row in sorted(plugin_rows, key=lambda item: str(item.get("componentId", ""))):
+            component_id = row.get("componentId")
+            capability_id = row.get("capabilityId")
+            environment_name = CATALYST_PLUGIN_CONNECTION_ENVIRONMENTS.get(capability_id)
+            component = self.components.get(component_id) if isinstance(component_id, str) else None
+            package = component.get("pluginPackage") if isinstance(component, dict) else None
+            source_policy = row.get("sourcePolicy")
+            source_id = (
+                self._workload_policy_source_id(source_policy)
+                if isinstance(source_policy, dict)
+                else None
+            )
+            binding_id = row.get("bindingId")
+            package_id = row.get("packageId")
+            installation = (
+                installations.get(component_id) if isinstance(component_id, str) else None
+            )
+            installation_id = (
+                installation.get("installation_id") if isinstance(installation, dict) else None
+            )
+            if (
+                not isinstance(component_id, str)
+                or not isinstance(capability_id, str)
+                or package is None
+                or package.get("capabilityId") != capability_id
+                or not isinstance(environment_name, str)
+                or not isinstance(source_id, str)
+                or not isinstance(binding_id, str)
+                or not isinstance(package_id, str)
+                or not isinstance(installation_id, str)
+                or not isinstance(source_policy, dict)
+                or source_policy.get("mode") != "actualProduct"
+                or CATALYST_COMPONENT_ID not in source_policy.get("productComponentIds", [])
+            ):
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID",
+                    "Selected Catalyst Plugin does not have one supported signed owner binding.",
+                )
+            active = next(
+                (
+                    item
+                    for item in bindings
+                    if isinstance(item, dict)
+                    and item.get("sourceId") == source_id
+                    and item.get("bindingId") == binding_id
+                    and item.get("packageId") == package_id
+                    and item.get("activeInstallationId") == installation_id
+                    and item.get("state") == "RUNNING"
+                ),
+                None,
+            )
+            if not isinstance(active, dict):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    f"Catalyst binding is not active for {component_id}.",
+                    retryable=True,
+                )
+            principal = source_principals.get(source_id)
+            if (
+                not isinstance(principal, dict)
+                or type(principal.get("uid")) is not int
+                or type(principal.get("gid")) is not int
+                or not isinstance(principal.get("tokenPath"), Path)
+            ):
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID", "Catalyst Package Runtime principal is unavailable."
+                )
+            request_id = "cyrene-catalyst-status-" + uuid.uuid4().hex
+            try:
+                response = helper.run_package_binding_operation(
+                    operation="runtime_status",
+                    source_id=source_id,
+                    uid=principal["uid"],
+                    gid=principal["gid"],
+                    token_path=principal["tokenPath"],
+                    binding_id=binding_id,
+                    package_id=package_id,
+                    installation_ids=[installation_id],
+                    catalog_generation=activity_catalog["generation"],
+                    request_id=request_id,
+                    sdk_python=sdk_python,
+                    activity_catalog=activity_catalog,
+                    runtime_policy=runtime_policy,
+                    source_principals=source_principals,
+                )
+            except Exception as error:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    f"Catalyst binding status is unavailable for {component_id}.",
+                    retryable=True,
+                ) from error
+            status = response.get("status") if isinstance(response, dict) else None
+            if (
+                not isinstance(response, dict)
+                or response.get("requestId") != request_id
+                or not isinstance(status, dict)
+                or status.get("binding_id") != binding_id
+                or status.get("installation_id") != installation_id
+                or status.get("state") != "RUNNING"
+                or type(status.get("generation")) is not int
+                or status.get("generation") != activity_catalog.get("generation")
+            ):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    f"Catalyst binding status differs from its selected installation for {component_id}.",
+                    retryable=True,
+                )
+            connection_ref = self._validate_catalyst_plugin_connection_ref(
+                status.get("connection_ref")
+            )
+            if environment_name in projected:
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID",
+                    "Catalyst capability environment mapping is duplicated.",
+                )
+            projected[environment_name] = connection_ref
+            identities.append(
+                {
+                    "componentId": component_id,
+                    "capabilityId": capability_id,
+                    "environmentName": environment_name,
+                    "sourceId": source_id,
+                    "bindingId": binding_id,
+                    "packageId": package_id,
+                    "installationId": installation_id,
+                    "catalogGeneration": activity_catalog["generation"],
+                }
+            )
+        if not projected:
+            return False
+        content = "".join(f"{name}={projected[name]}\n" for name in sorted(projected)).encode(
+            "ascii"
+        )
+        dropin_content = (
+            "[Service]\nEnvironmentFile=-" + str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT) + "\n"
+        ).encode("ascii")
+        group_id = grp.getgrnam("cyrene").gr_gid
+        environment_digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        existing = self._read_workload_protected_file(
+            DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT,
+            allowed_identities={(0, group_id, 0o640)},
+            maximum_bytes=4096,
+        )
+        refs_changed = existing != content
+        previous_identity = transaction.get("catalystPluginRefs")
+        rotation: dict[str, Any] | None = None
+        if existing is not None:
+            existing_digest = "sha256:" + hashlib.sha256(existing).hexdigest()
+            if existing_digest != environment_digest:
+                dropin_digest = "sha256:" + hashlib.sha256(dropin_content).hexdigest()
+                owner_plan_id = self._workload_current_plugin_refs_owner(
+                    transaction, existing, existing_digest
+                )
+                if owner_plan_id is None:
+                    owners = self._verify_workload_catalyst_plugin_refs_dropin_owner(dropin_digest)
+                    owner_plan_id = next(
+                        (
+                            item["planId"]
+                            for item in owners
+                            if isinstance(item, dict) and isinstance(item.get("planId"), str)
+                        ),
+                        None,
+                    )
+                if owner_plan_id is None:
+                    raise UpdateError(
+                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                        "An existing Catalyst plugin-reference file has no verified transaction owner.",
+                    )
+                previous_backup = self._write_workload_catalyst_plugin_refs_backup(
+                    transaction,
+                    existing,
+                    digest=existing_digest,
+                    owner_plan_id=owner_plan_id,
+                )
+                managed = transaction.get("managedConfigFiles", [])
+                existing_record = (
+                    next(
+                        (
+                            item
+                            for item in managed
+                            if isinstance(item, dict)
+                            and item.get("path") == str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT)
+                        ),
+                        None,
+                    )
+                    if isinstance(managed, list)
+                    else None
+                )
+                prior_digest = (
+                    existing_record.get("priorDigest")
+                    if isinstance(existing_record, dict)
+                    else existing_digest
+                )
+                if not isinstance(existing_record, dict):
+                    rollback_backup = previous_backup
+                elif prior_digest is None:
+                    rollback_backup = None
+                elif prior_digest == existing_digest:
+                    rollback_backup = previous_backup
+                else:
+                    old_rotation = (
+                        previous_identity.get("rotation")
+                        if isinstance(previous_identity, dict)
+                        else None
+                    )
+                    rollback_backup = (
+                        old_rotation.get("rollback") if isinstance(old_rotation, dict) else None
+                    )
+                    if (
+                        not isinstance(rollback_backup, dict)
+                        or rollback_backup.get("digest") != prior_digest
+                    ):
+                        raise UpdateError(
+                            "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                            "The original Catalyst plugin-reference rollback snapshot is unavailable.",
+                        )
+                    self._verify_workload_catalyst_plugin_refs_backup(transaction, rollback_backup)
+                rotation = {"previous": previous_backup, "rollback": rollback_backup}
+        elif isinstance(previous_identity, dict) and isinstance(
+            previous_identity.get("rotation"), dict
+        ):
+            # Preserve the original rollback snapshot across an exact-plan retry.
+            rotation = previous_identity["rotation"]
+
+        refs_identity: dict[str, Any] = {
+            "environmentDigest": environment_digest,
+            "bindingIdentities": identities,
+        }
+        if rotation is not None:
+            refs_identity["rotation"] = rotation
+        transaction["catalystPluginRefs"] = refs_identity
+        if refs_changed:
+            transaction["catalystPluginRefsRestartPending"] = True
+        managed_files = transaction.setdefault("managedConfigFiles", [])
+        if not isinstance(managed_files, list):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Managed configuration rollback journal is malformed."
+            )
+        refs_records = [
+            item
+            for item in managed_files
+            if isinstance(item, dict)
+            and item.get("path") == str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT)
+        ]
+        if len(refs_records) > 1:
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Catalyst plugin-reference journal entry is duplicated."
+            )
+        if refs_records:
+            refs_record = refs_records[0]
+            if (
+                set(refs_record)
+                != {"path", "kind", "priorDigest", "writtenDigest", "mode", "groupId"}
+                or refs_record.get("kind") != "catalyst-plugin-refs-environment"
+                or refs_record.get("mode") != 0o640
+                or refs_record.get("groupId") != group_id
+                or refs_record.get("priorDigest") is not None
+                and not _valid_digest(refs_record.get("priorDigest"))
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Catalyst plugin-reference journal entry is malformed."
+                )
+            if existing is None and refs_record.get("priorDigest") is not None:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "The prior Catalyst plugin-reference file disappeared during retry.",
+                )
+            refs_record["writtenDigest"] = environment_digest
+        else:
+            managed_files.append(
+                {
+                    "path": str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT),
+                    "kind": "catalyst-plugin-refs-environment",
+                    "priorDigest": (
+                        "sha256:" + hashlib.sha256(existing).hexdigest()
+                        if existing is not None
+                        else None
+                    ),
+                    "writtenDigest": environment_digest,
+                    "mode": 0o640,
+                    "groupId": group_id,
+                }
+            )
+        _atomic_json(transaction_path, transaction)
+        self._write_workload_managed_config(
+            transaction,
+            transaction_path,
+            path=DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT,
+            content=content,
+            group_id=group_id,
+            mode=0o640,
+            entry_kind="catalyst-plugin-refs-environment",
+        )
+        self._ensure_workload_config_directory(
+            DEFAULT_CATALYST_PLUGIN_REFS_DROPIN.parent, group_id=0, mode=0o755
+        )
+        self._write_workload_managed_config(
+            transaction,
+            transaction_path,
+            path=DEFAULT_CATALYST_PLUGIN_REFS_DROPIN,
+            content=dropin_content,
+            group_id=0,
+            mode=0o644,
+            entry_kind="catalyst-plugin-refs-dropin",
+        )
+        self._daemon_reload()
+        return refs_changed
+
     def _workload_echo_container_spec(
         self,
         selected: dict[str, Any],
@@ -9276,20 +10111,67 @@ class ComponentUpdater:
         begin_from_uninitialized_catalog = (
             allow_uninitialized_catalog and activity_catalog["generation"] == 0
         )
-        readiness = self._readiness_for(
-            target_kind,
-            requires_restart=requires_restart,
-            force=True,
-            allow_uninitialized_catalog=begin_from_uninitialized_catalog,
+        holds = transaction.setdefault("maintenanceHolds", {})
+        if not isinstance(holds, dict):
+            raise UpdateError("INVALID_TRANSACTION", "Workload hold journal is malformed.")
+        prior = holds.get(phase)
+        request_id = _maintenance_request_id(transaction)
+        initial_source_activation = self._workload_initial_source_activation(
+            transaction,
+            phase=phase,
+            target_kind=target_kind,
+            activity_catalog=activity_catalog,
         )
-        self._require_ready(readiness, target_kind)
-        if readiness.get("install_catalog_generation") != activity_catalog["generation"]:
-            raise UpdateError(
-                "GATE_UNKNOWN",
-                "Activity source generation changed during workload readiness.",
-                retryable=True,
+        replay_uncertain_initial_begin = (
+            isinstance(prior, dict)
+            and prior.get("requestId") == request_id
+            and prior.get("status") == "begin_pending"
+            and prior.get("beginMethod") == "BeginInitialSourceActivation"
+        )
+        if replay_uncertain_initial_begin:
+            if (
+                initial_source_activation is None
+                or prior.get("sourceId") != initial_source_activation["sourceId"]
+                or prior.get("parentRequestId") != initial_source_activation["parentRequestId"]
+                or prior.get("targetKind") != target_kind
+                or prior.get("componentArtifactDigests")
+                != transaction.get("componentArtifactDigests")
+                or prior.get("expectedCatalogGeneration") != activity_catalog.get("generation")
+                or prior.get("expectedActivitySources") != activity_sources
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Uncertain initial-source Begin cannot be replayed with a changed identity.",
+                )
+            transaction["maintenanceBeginMethod"] = "BeginInitialSourceActivation"
+            transaction["initialSourceActivation"] = initial_source_activation
+            gate_generation = prior.get("expectedGateGeneration")
+        else:
+            readiness = self._readiness_for(
+                target_kind,
+                requires_restart=requires_restart,
+                force=True,
+                allow_uninitialized_catalog=begin_from_uninitialized_catalog,
             )
-        gate_generation = readiness.get("gate_generation")
+            if initial_source_activation is None:
+                self._require_ready(readiness, target_kind)
+                transaction.pop("maintenanceBeginMethod", None)
+                transaction.pop("initialSourceActivation", None)
+            else:
+                self._require_initial_source_activation_readiness(
+                    readiness,
+                    target_kind=target_kind,
+                    source_id=initial_source_activation["sourceId"],
+                )
+                transaction["maintenanceBeginMethod"] = "BeginInitialSourceActivation"
+                transaction["initialSourceActivation"] = initial_source_activation
+            if readiness.get("install_catalog_generation") != activity_catalog["generation"]:
+                raise UpdateError(
+                    "GATE_UNKNOWN",
+                    "Activity source generation changed during workload readiness.",
+                    retryable=True,
+                )
+            gate_generation = readiness.get("gate_generation")
         if type(gate_generation) is not int or gate_generation < 1:
             raise UpdateError(
                 "GATE_UNKNOWN", "Maintenance gate generation is unknown.", retryable=True
@@ -9299,11 +10181,6 @@ class ComponentUpdater:
         transaction["expectedActivitySources"] = activity_sources
         transaction["allowUninitializedActivityCatalog"] = begin_from_uninitialized_catalog
         transaction["phase"] = "begin_pending"
-        holds = transaction.setdefault("maintenanceHolds", {})
-        if not isinstance(holds, dict):
-            raise UpdateError("INVALID_TRANSACTION", "Workload hold journal is malformed.")
-        request_id = _maintenance_request_id(transaction)
-        prior = holds.get(phase)
         if (
             isinstance(prior, dict)
             and prior.get("requestId") == request_id
@@ -9318,7 +10195,17 @@ class ComponentUpdater:
             "targetKind": target_kind,
             "expectedGateGeneration": gate_generation,
             "expectedCatalogGeneration": activity_catalog["generation"],
+            "expectedActivitySources": activity_sources,
             "componentArtifactDigests": dict(transaction["componentArtifactDigests"]),
+            "beginMethod": transaction.get("maintenanceBeginMethod", "BeginMaintenance"),
+            **(
+                {
+                    "sourceId": initial_source_activation["sourceId"],
+                    "parentRequestId": initial_source_activation["parentRequestId"],
+                }
+                if initial_source_activation is not None
+                else {}
+            ),
             "status": "begin_pending",
         }
         _atomic_json(transaction_path, transaction)
@@ -9366,12 +10253,245 @@ class ComponentUpdater:
         hold["healthy"] = healthy
         _atomic_json(transaction_path, transaction)
         self._end_maintenance(transaction, outcome=outcome, healthy=healthy)
+        if phase == "core-runtime-activate" and outcome == "SUCCESS" and healthy:
+            transaction.pop("catalystPluginRefsRestartPending", None)
         hold["status"] = "ended"
         hold["endedAt"] = int(time.time())
         transaction.pop("maintenanceToken", None)
         transaction.pop("maintenanceRequestId", None)
+        transaction.pop("maintenanceBeginMethod", None)
         transaction["phase"] = "applying"
         _atomic_json(transaction_path, transaction)
+
+    def _complete_workload_end_pending(
+        self, transaction: dict[str, Any], transaction_path: Path, *, phase: str
+    ) -> bool:
+        """Replay one exact End before resuming work that could change service state."""
+
+        holds = transaction.get("maintenanceHolds")
+        hold = holds.get(phase) if isinstance(holds, dict) else None
+        if not isinstance(hold, dict) or hold.get("status") != "end_pending":
+            return False
+        if (
+            transaction.get("maintenancePhase") != phase
+            or hold.get("requestId") != _maintenance_request_id(transaction)
+            or hold.get("targetKind") != transaction.get("targetKind")
+            or hold.get("componentArtifactDigests") != transaction.get("componentArtifactDigests")
+            or hold.get("expectedGateGeneration") != transaction.get("expectedGateGeneration")
+            or hold.get("expectedCatalogGeneration") != transaction.get("expectedCatalogGeneration")
+            or hold.get("expectedActivitySources") != transaction.get("expectedActivitySources")
+            or hold.get("outcome") not in {"SUCCESS", "ROLLED_BACK", "FAILED"}
+            or type(hold.get("healthy")) is not bool
+            or not isinstance(transaction.get("maintenanceToken"), str)
+            or len(transaction["maintenanceToken"]) < 32
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION",
+                "Pending workload End no longer matches its exact maintenance request.",
+            )
+        if hold.get("beginMethod") == "BeginInitialSourceActivation":
+            block = transaction.get("firstCoreBootstrap")
+            reference = block.get("initialSourceArtifactRef") if isinstance(block, dict) else None
+            activation = transaction.get("initialSourceActivation")
+            expected_parent = (
+                "first-core-bootstrap-" + str(block.get("planId", "")).removeprefix("plan-")
+                if isinstance(block, dict)
+                else None
+            )
+            if (
+                phase != "core-runtime-install"
+                or not isinstance(reference, dict)
+                or not isinstance(activation, dict)
+                or activation.get("sourceId") != reference.get("sourceId")
+                or activation.get("componentId") != reference.get("componentId")
+                or activation.get("artifactDigest") != reference.get("artifactDigest")
+                or activation.get("parentRequestId") != expected_parent
+                or hold.get("sourceId") != reference.get("sourceId")
+                or hold.get("parentRequestId") != expected_parent
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Pending initial-source End differs from its exact signed plan identity.",
+                )
+        self._end_maintenance(
+            transaction,
+            outcome=hold["outcome"],
+            healthy=hold["healthy"],
+        )
+        if phase == "core-runtime-activate" and hold["outcome"] == "SUCCESS" and hold["healthy"]:
+            transaction.pop("catalystPluginRefsRestartPending", None)
+        hold["status"] = "ended"
+        hold["endedAt"] = int(time.time())
+        transaction.pop("maintenanceToken", None)
+        transaction.pop("maintenanceRequestId", None)
+        transaction.pop("maintenanceBeginMethod", None)
+        transaction["phase"] = "applying"
+        _atomic_json(transaction_path, transaction)
+        return True
+
+    def _workload_initial_source_activation(
+        self,
+        transaction: dict[str, Any],
+        *,
+        phase: str,
+        target_kind: str,
+        activity_catalog: dict[str, Any],
+    ) -> dict[str, str] | None:
+        """Select the one signed, absent Product eligible for first-source admission."""
+
+        if (
+            phase != "core-runtime-install"
+            or target_kind != "CORE_RUNTIME"
+            or transaction.get("transactionKind") != "workload-assembly.v1"
+            or transaction.get("action") != "install"
+            or transaction.get("workloadId") not in WORKLOAD_IDS
+            or activity_catalog.get("generation") != 1
+        ):
+            return None
+        block = transaction.get("firstCoreBootstrap")
+        if not isinstance(block, dict):
+            return None
+        reference = block.get("initialSourceArtifactRef")
+        if reference is None:
+            return None
+        if (
+            not isinstance(reference, dict)
+            or set(reference) != {"sourceId", "componentId", "artifactDigest"}
+            or not isinstance(reference.get("sourceId"), str)
+            or not reference["sourceId"]
+            or not isinstance(reference.get("componentId"), str)
+            or not reference["componentId"]
+            or not _valid_digest(reference.get("artifactDigest"))
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The signed first-Core source artifact reference is malformed.",
+                retryable=True,
+            )
+        first_core_result = transaction.get("firstCoreBootstrapResult")
+        if (
+            transaction.get("firstCoreBootstrapStatus") != "installed"
+            or not isinstance(first_core_result, dict)
+            or first_core_result.get("status") != "installed"
+            or first_core_result.get("planId") != block.get("planId")
+            or first_core_result.get("planDigest") != block.get("planDigest")
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "Initial source activation requires the completed exact C10 parent plan.",
+                retryable=True,
+            )
+        source_policy = transaction.get("sourcePolicy")
+        selected_rows = transaction.get("selectedComponents")
+        selected_products = (
+            [
+                row
+                for row in selected_rows
+                if isinstance(row, dict)
+                and row.get("componentId") == reference["componentId"]
+                and row.get("artifactKind") == "native-binary"
+                and row.get("digest") == reference["artifactDigest"]
+            ]
+            if isinstance(selected_rows, list)
+            else []
+        )
+        mappings = (
+            source_policy.get("productSources")
+            if isinstance(source_policy, dict) and source_policy.get("mode") == "actualProduct"
+            else None
+        )
+        if (
+            not isinstance(mappings, list)
+            or len(selected_products) != 1
+            or not any(
+                isinstance(row, dict)
+                and row.get("componentId") == reference["componentId"]
+                and row.get("sourceId") == reference["sourceId"]
+                for row in mappings
+            )
+            or transaction.get("componentArtifactDigests", {}).get(reference["componentId"])
+            != reference["artifactDigest"]
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "Initial source activation differs from the selected signed Product identity.",
+                retryable=True,
+            )
+        component = self.components.get(reference["componentId"])
+        unit = component.get("systemdUnit") if isinstance(component, dict) else None
+        selected_install = [
+            row
+            for row in transaction.get("components", [])
+            if isinstance(row, dict)
+            and row.get("componentId") == reference["componentId"]
+            and row.get("artifactDigest") == reference["artifactDigest"]
+        ]
+        if not isinstance(unit, str) or len(selected_install) != 1:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "Initial source activation requires the exact staged native Product service.",
+                retryable=True,
+            )
+        try:
+            if (
+                self._active_native_pointer_identity(reference["componentId"]) is not None
+                or self._package_product_unit_state(unit) == "active"
+            ):
+                raise UpdateError(
+                    "FIRST_CORE_READBACK_REQUIRED",
+                    "Initial source activation is limited to an absent Product service.",
+                    retryable=True,
+                )
+        except UpdateError:
+            raise
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The Product absence proof is unavailable for initial source activation.",
+                retryable=True,
+            ) from error
+        return {
+            "sourceId": reference["sourceId"],
+            "componentId": reference["componentId"],
+            "artifactDigest": reference["artifactDigest"],
+            "parentRequestId": ("first-core-bootstrap-" + block["planId"].removeprefix("plan-")),
+        }
+
+    @staticmethod
+    def _require_initial_source_activation_readiness(
+        readiness: dict[str, Any], *, target_kind: str, source_id: str
+    ) -> None:
+        """Allow only the exact never-started source UNKNOWN for its first install."""
+
+        zero_counts = (
+            "active_task_count",
+            "inflight_runtime_admission_count",
+            "active_worker_count",
+            "active_allocation_count",
+        )
+        blockers = readiness.get("blocker_codes")
+        if (
+            target_kind != "CORE_RUNTIME"
+            or readiness.get("status") != "UNKNOWN"
+            or blockers != ["ACTIVITY_SOURCE_UNKNOWN"]
+            or readiness.get("unknown_activity_sources") != [source_id]
+            or not isinstance(readiness.get("active_tasks"), list)
+            or readiness["active_tasks"]
+            or any(
+                type(readiness.get(field)) is not int or readiness.get(field) != 0
+                for field in zero_counts
+            )
+            or type(readiness.get("gate_generation")) is not int
+            or readiness["gate_generation"] < 1
+            or type(readiness.get("install_catalog_generation")) is not int
+            or readiness["install_catalog_generation"] != 1
+            or readiness.get("requires_restart_confirmation") is not True
+        ):
+            raise UpdateError(
+                "GATE_UNKNOWN",
+                "Only the exact never-started Product source may use initial-source admission; all other readiness remains fail-closed.",
+                retryable=True,
+            )
 
     @staticmethod
     def _journal_callback(
@@ -9479,6 +10599,365 @@ class ComponentUpdater:
             if descriptor is not None:
                 os.close(descriptor)
             temporary.unlink(missing_ok=True)
+
+    def _recover_workload_runtime_connections_locked(self, workload_id: str) -> dict[str, Any]:
+        """Recover only exact, succeeded Catalyst owners while no local update is pending."""
+
+        def skipped(reason: str) -> dict[str, Any]:
+            return {
+                "status": "skipped",
+                "workloadId": workload_id,
+                "reason": reason,
+                "recoveredBindings": 0,
+                "projectionChanged": False,
+            }
+
+        state_root = self.state_root
+        if not state_root.exists() and not state_root.is_symlink():
+            return skipped("no-managed-catalyst-install")
+        _verify_private_directory(state_root)
+        transaction_root = state_root / "transactions"
+        if not transaction_root.exists() and not transaction_root.is_symlink():
+            return skipped("no-managed-catalyst-install")
+        _verify_private_directory(transaction_root)
+
+        candidates: list[tuple[int, dict[str, Any], Path]] = []
+        for journal_path in sorted(transaction_root.iterdir()):
+            if (
+                journal_path.is_symlink()
+                or not journal_path.is_file()
+                or journal_path.suffix != ".json"
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Workload transaction inventory is unsafe."
+                )
+            try:
+                info = journal_path.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1
+                    or info.st_size > 16 * 1024 * 1024
+                ):
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED", "Workload transaction record is unsafe."
+                    )
+                transaction = json.loads(
+                    journal_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_unique_json_object,
+                )
+            except UpdateError:
+                raise
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Workload transaction record cannot be read safely."
+                ) from error
+            if not isinstance(transaction, dict):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Workload transaction record is malformed."
+                )
+            if transaction.get("transactionKind") != "workload-assembly.v1":
+                continue
+            holds = transaction.get("maintenanceHolds", {})
+            if (
+                transaction.get("maintenanceToken")
+                or isinstance(holds, dict)
+                and any(
+                    isinstance(row, dict) and row.get("status") in {"active", "end_pending"}
+                    for row in holds.values()
+                )
+            ):
+                return skipped("maintenance-active")
+            if transaction.get("phase") == "applying":
+                return skipped("workload-update-pending")
+            if (
+                transaction.get("workloadId") != workload_id
+                or transaction.get("action") != "install"
+                or not any(
+                    isinstance(row, dict) and row.get("componentId") == CATALYST_COMPONENT_ID
+                    for row in transaction.get("selectedComponents", [])
+                )
+            ):
+                continue
+            if transaction.get("phase") == "rolled_back":
+                continue
+            plan_id = transaction.get("planId")
+            plan_digest = transaction.get("planDigest")
+            if (
+                transaction.get("schemaVersion") != 2
+                or transaction.get("phase") != "succeeded"
+                or not isinstance(plan_id, str)
+                or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+                or journal_path.name != f"{plan_id}.json"
+                or not _valid_digest(plan_digest)
+                or plan_id != "plan-" + plan_digest.removeprefix("sha256:")[:32]
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst installation transaction identity is invalid."
+                )
+            candidates.append((info.st_mtime_ns, transaction, journal_path))
+
+        if not candidates:
+            return skipped("no-managed-catalyst-install")
+
+        has_plugin_selection = any(
+            isinstance(transaction.get("selectedPluginRows"), list)
+            and transaction["selectedPluginRows"]
+            for _timestamp, transaction, _path in candidates
+        )
+        refs_path = DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT
+        dropin_path = DEFAULT_CATALYST_PLUGIN_REFS_DROPIN
+        refs_present = refs_path.exists() or refs_path.is_symlink()
+        dropin_present = dropin_path.exists() or dropin_path.is_symlink()
+        if not has_plugin_selection and not refs_present and not dropin_present:
+            return skipped("no-managed-plugin-bindings")
+        expected_dropin = (
+            "[Service]\nEnvironmentFile=-" + str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT) + "\n"
+        ).encode("ascii")
+        dropin_digest = "sha256:" + hashlib.sha256(expected_dropin).hexdigest()
+        owners = self._verify_workload_catalyst_plugin_refs_dropin_owner(dropin_digest)
+        eligible = [
+            candidate
+            for candidate in candidates
+            if any(
+                owner.get("planId") == candidate[1].get("planId")
+                and owner.get("planDigest") == candidate[1].get("planDigest")
+                for owner in owners
+            )
+        ]
+        if not eligible:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED",
+                "The current Catalyst binding projection has no successful owner.",
+            )
+        _timestamp, latest_transaction, latest_path = max(eligible, key=lambda item: item[0])
+        stored_plugin_rows = latest_transaction.get("selectedPluginRows")
+        stored_refs = latest_transaction.get("catalystPluginRefs")
+        if not isinstance(stored_plugin_rows, list) or not stored_plugin_rows:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalyst plugin-reference owner has no selected bindings."
+            )
+        if not isinstance(stored_refs, dict) or not isinstance(
+            stored_refs.get("bindingIdentities"), list
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalyst plugin-reference identity is unavailable."
+            )
+        stored_identities = stored_refs["bindingIdentities"]
+        component_ids = tuple(
+            sorted(
+                identity.get("componentId")
+                for identity in stored_identities
+                if isinstance(identity, dict) and isinstance(identity.get("componentId"), str)
+            )
+        )
+        if (
+            not component_ids
+            or len(component_ids) != len(stored_identities)
+            or len(set(component_ids)) != len(component_ids)
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalyst plugin-reference bindings are malformed."
+            )
+
+        source_policy, plugin_rows = self._workload_plugin_owner_rows(workload_id, component_ids)
+        current_rows = {row["componentId"]: row for row in plugin_rows}
+        if source_policy is None or set(current_rows) != set(component_ids):
+            raise UpdateError(
+                "SOURCE_BINDING_INVALID", "The current signed Catalyst binding map changed."
+            )
+        identities_by_component = {
+            identity["componentId"]: identity for identity in stored_identities
+        }
+        for component_id, row in current_rows.items():
+            identity = identities_by_component[component_id]
+            if (
+                identity.get("capabilityId") != row.get("capabilityId")
+                or identity.get("bindingId") != row.get("bindingId")
+                or identity.get("packageId") != row.get("packageId")
+                or identity.get("sourceId")
+                != self._workload_policy_source_id(row.get("sourcePolicy", {}))
+                or identity.get("environmentName")
+                != CATALYST_PLUGIN_CONNECTION_ENVIRONMENTS.get(row.get("capabilityId"))
+            ):
+                raise UpdateError(
+                    "SOURCE_BINDING_INVALID", "The signed Catalyst binding identity changed."
+                )
+
+        activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+            workload_id
+        )
+        if not isinstance(runtime_policy, dict):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "The managed Package Runtime policy is unavailable during boot recovery.",
+                retryable=True,
+            )
+        inventory = self._read_workload_package_inventory(workload_id, component_ids)
+        installations = inventory.get("installationRecords")
+        bindings = inventory.get("sourceBindings")
+        if not isinstance(installations, dict) or not isinstance(bindings, list):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED", "Package Runtime inventory is malformed."
+            )
+        recovered = 0
+        for component_id, row in sorted(current_rows.items()):
+            identity = identities_by_component[component_id]
+            installation_id = identity.get("installationId")
+            installation = installations.get(component_id)
+            binding = next(
+                (
+                    item
+                    for item in bindings
+                    if isinstance(item, dict)
+                    and item.get("sourceId") == identity.get("sourceId")
+                    and item.get("bindingId") == identity.get("bindingId")
+                    and item.get("packageId") == identity.get("packageId")
+                    and installation_id in item.get("installationIds", [])
+                ),
+                None,
+            )
+            if (
+                not isinstance(installation_id, str)
+                or not isinstance(installation, dict)
+                or installation.get("installation_id") != installation_id
+                or not isinstance(binding, dict)
+            ):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    f"The current installation scope is unavailable for {component_id}.",
+                    retryable=True,
+                )
+            if binding.get("state") == "RUNNING":
+                if binding.get("activeInstallationId") != installation_id:
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        f"The running binding differs from the selected installation for {component_id}.",
+                        retryable=True,
+                    )
+                continue
+            if binding.get("state") != "STOPPED" or binding.get("activeInstallationId") is not None:
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    f"The selected binding is not safely recoverable for {component_id}.",
+                    retryable=True,
+                )
+            request_id = self._workload_boot_recovery_request_id(latest_transaction, identity)
+            self._workload_binding_operation(
+                latest_transaction,
+                latest_path,
+                operation="recover_binding",
+                component=row,
+                installation_id=installation_id,
+                activity_catalog=activity_catalog,
+                runtime_policy=runtime_policy,
+                source_principals=principals,
+                helper=helper,
+                recovery_request_id=request_id,
+            )
+            recovered += 1
+
+        refreshed_inventory = self._read_workload_package_inventory(workload_id, component_ids)
+        refreshed_bindings = refreshed_inventory.get("sourceBindings")
+        refreshed_installations = refreshed_inventory.get("installationRecords")
+        if not isinstance(refreshed_bindings, list) or not isinstance(
+            refreshed_installations, dict
+        ):
+            raise UpdateError(
+                "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                "Recovered Package Runtime inventory is malformed.",
+            )
+        for component_id, identity in identities_by_component.items():
+            installation_id = identity["installationId"]
+            installation = refreshed_installations.get(component_id)
+            binding = next(
+                (
+                    item
+                    for item in refreshed_bindings
+                    if isinstance(item, dict)
+                    and item.get("sourceId") == identity["sourceId"]
+                    and item.get("bindingId") == identity["bindingId"]
+                    and item.get("packageId") == identity["packageId"]
+                    and installation_id in item.get("installationIds", [])
+                ),
+                None,
+            )
+            if (
+                not isinstance(installation, dict)
+                or installation.get("installation_id") != installation_id
+                or not isinstance(binding, dict)
+                or binding.get("state") != "RUNNING"
+                or binding.get("activeInstallationId") != installation_id
+            ):
+                raise UpdateError(
+                    "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                    f"Package Runtime did not restore the selected Catalyst binding for {component_id}.",
+                    retryable=True,
+                )
+        projection_changed = self._project_workload_catalyst_plugin_refs(
+            latest_transaction,
+            latest_path,
+            plugin_rows=plugin_rows,
+            package_inventory=refreshed_inventory,
+            activity_catalog=activity_catalog,
+            runtime_policy=runtime_policy,
+            source_principals=principals,
+            helper=helper,
+        )
+        # This hook runs before systemd starts Catalyst. A projection written
+        # here is already in the environment the new process will read.
+        latest_transaction.pop("catalystPluginRefsRestartPending", None)
+        _atomic_json(latest_path, latest_transaction)
+        return {
+            "status": "recovered",
+            "workloadId": workload_id,
+            "reason": None,
+            "recoveredBindings": recovered,
+            "projectionChanged": projection_changed,
+        }
+
+    @staticmethod
+    def _workload_boot_recovery_request_id(
+        transaction: dict[str, Any], identity: dict[str, Any]
+    ) -> str:
+        """Reuse an interrupted exact RecoverBinding intent, else make a fresh boot ID."""
+
+        scope = {
+            "binding_id": identity.get("bindingId"),
+            "package_id": identity.get("packageId"),
+            "installation_id": identity.get("installationId"),
+            "operation": "recover",
+        }
+        operations = transaction.get("bindingOperations", [])
+        if not isinstance(operations, list):
+            raise UpdateError("INVALID_TRANSACTION", "Workload binding journal is malformed.")
+        for operation in reversed(operations):
+            request_id = operation.get("requestId") if isinstance(operation, dict) else None
+            if (
+                isinstance(operation, dict)
+                and operation.get("operation") == "recover_binding"
+                and operation.get("scope") == scope
+                and operation.get("state") != "completed"
+                and isinstance(request_id, str)
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", request_id)
+            ):
+                return request_id
+        plan_digest = transaction.get("planDigest")
+        component_id = identity.get("componentId")
+        if not _valid_digest(plan_digest) or not isinstance(component_id, str):
+            raise UpdateError("INVALID_TRANSACTION", "Boot recovery owner identity is malformed.")
+        request_id = (
+            "cyrene-recover-"
+            + plan_digest.removeprefix("sha256:")[:12]
+            + "-"
+            + uuid.uuid4().hex[:12]
+            + "-"
+            + component_id
+        )
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", request_id) is None:
+            raise UpdateError("INVALID_TRANSACTION", "Boot recovery request ID is malformed.")
+        return request_id
 
     def _workload_source_state(
         self, workload_id: str, *, allow_uninitialized_catalog: bool = False
@@ -10134,10 +11613,19 @@ class ComponentUpdater:
             raise UpdateError("SERVICE_NOT_MANAGED", f"Systemd drop-ins are duplicated for {unit}.")
         if not dropin_paths:
             return
+        allowed_catalyst_dropins = {
+            frozenset({str(DEFAULT_CATALYST_AUTH_DROPIN)}),
+            frozenset(
+                {
+                    str(DEFAULT_CATALYST_AUTH_DROPIN),
+                    str(DEFAULT_CATALYST_PLUGIN_REFS_DROPIN),
+                }
+            ),
+        }
         if (
             service != "catalyst"
-            or dropin_paths != [str(DEFAULT_CATALYST_AUTH_DROPIN)]
-            or str(DEFAULT_CATALYST_AUTH_DROPIN) not in disk_dropins
+            or frozenset(dropin_paths) not in allowed_catalyst_dropins
+            or set(dropin_paths) != set(disk_dropins)
         ):
             raise UpdateError(
                 "SERVICE_NOT_MANAGED", f"Systemd has an unmanaged drop-in for {unit}."
@@ -10207,14 +11695,20 @@ class ComponentUpdater:
         service: str,
         error_code: str,
     ) -> tuple[str, ...]:
-        """Allow only the transaction-owned fixed Catalyst auth drop-in."""
+        """Allow only the exact transaction-owned Catalyst auth and plugin-ref drop-ins."""
 
-        expected_dropin = (
+        expected_auth_dropin = (
             "[Service]\nEnvironmentFile=" + str(DEFAULT_CATALYST_AUTH_ENVIRONMENT) + "\n"
+        ).encode("ascii")
+        expected_refs_dropin = (
+            "[Service]\nEnvironmentFile=-" + str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT) + "\n"
         ).encode("ascii")
         found: list[str] = []
         for path in self._native_unit_dropin_files(unit, error_code=error_code):
-            if service != "catalyst" or path != DEFAULT_CATALYST_AUTH_DROPIN:
+            if service != "catalyst" or path not in {
+                DEFAULT_CATALYST_AUTH_DROPIN,
+                DEFAULT_CATALYST_PLUGIN_REFS_DROPIN,
+            }:
                 raise UpdateError(
                     error_code,
                     f"An unmanaged systemd drop-in may override the verified service policy for {unit}.",
@@ -10230,15 +11724,460 @@ class ComponentUpdater:
                 raise UpdateError(
                     error_code, "Catalyst's authentication drop-in is unsafe."
                 ) from error
-            if content != expected_dropin:
-                raise UpdateError(
-                    error_code,
-                    "Catalyst's authentication drop-in differs from its fixed contract.",
+            if path == DEFAULT_CATALYST_AUTH_DROPIN:
+                if content != expected_auth_dropin:
+                    raise UpdateError(
+                        error_code,
+                        "Catalyst's authentication drop-in differs from its fixed contract.",
+                    )
+                self._verify_workload_catalyst_dropin_owner(
+                    "sha256:" + hashlib.sha256(content).hexdigest()
                 )
-            digest = "sha256:" + hashlib.sha256(content).hexdigest()
-            self._verify_workload_catalyst_dropin_owner(digest)
+            else:
+                if content != expected_refs_dropin:
+                    raise UpdateError(
+                        error_code,
+                        "Catalyst's plugin-reference drop-in differs from its fixed contract.",
+                    )
+                self._verify_workload_catalyst_plugin_refs_dropin_owner(
+                    "sha256:" + hashlib.sha256(content).hexdigest()
+                )
             found.append(str(path))
         return tuple(found)
+
+    def _workload_current_plugin_refs_owner(
+        self, transaction: dict[str, Any], content: bytes, live_digest: str
+    ) -> str | None:
+        """Recognize only this applying plan's durably journaled refs projection."""
+
+        plan_id = transaction.get("planId")
+        plan_digest = transaction.get("planDigest")
+        identity = transaction.get("catalystPluginRefs")
+        managed = transaction.get("managedConfigFiles")
+        if (
+            transaction.get("phase") != "applying"
+            or not isinstance(plan_id, str)
+            or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+            or not isinstance(plan_digest, str)
+            or not _valid_digest(plan_digest)
+            or plan_id != "plan-" + plan_digest.removeprefix("sha256:")[:32]
+            or not isinstance(identity, dict)
+            or not _valid_digest(identity.get("environmentDigest"))
+            or not isinstance(identity.get("bindingIdentities"), list)
+            or not identity["bindingIdentities"]
+            or not isinstance(managed, list)
+            or not any(
+                isinstance(row, dict) and row.get("componentId") == CATALYST_COMPONENT_ID
+                for row in transaction.get("selectedComponents", [])
+            )
+        ):
+            return None
+        records = [
+            item
+            for item in managed
+            if isinstance(item, dict)
+            and item.get("path") == str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT)
+        ]
+        if len(records) != 1:
+            return None
+        record = records[0]
+        environment_digest = identity["environmentDigest"]
+        if (
+            set(record) != {"path", "kind", "priorDigest", "writtenDigest", "mode", "groupId"}
+            or record.get("kind") != "catalyst-plugin-refs-environment"
+            or record.get("writtenDigest") != environment_digest
+            or record.get("mode") != 0o640
+            or type(record.get("groupId")) is not int
+            or record.get("priorDigest") is not None
+            and not _valid_digest(record.get("priorDigest"))
+        ):
+            return None
+        prior_digest = record.get("priorDigest")
+        rotation = identity.get("rotation")
+        if rotation is not None:
+            if (
+                not isinstance(rotation, dict)
+                or set(rotation) != {"previous", "rollback"}
+                or not isinstance(rotation.get("previous"), dict)
+            ):
+                return None
+            try:
+                self._verify_workload_catalyst_plugin_refs_backup(transaction, rotation["previous"])
+            except UpdateError:
+                return None
+            rollback = rotation.get("rollback")
+            if prior_digest is None:
+                if rollback is not None:
+                    return None
+            else:
+                if not isinstance(rollback, dict) or rollback.get("digest") != prior_digest:
+                    return None
+                try:
+                    self._verify_workload_catalyst_plugin_refs_backup(transaction, rollback)
+                except UpdateError:
+                    return None
+        elif prior_digest is not None and prior_digest != environment_digest:
+            return None
+        if live_digest != environment_digest:
+            previous = rotation.get("previous") if isinstance(rotation, dict) else None
+            if not isinstance(previous, dict) or previous.get("digest") != live_digest:
+                return None
+            try:
+                self._verify_workload_catalyst_plugin_refs_backup(transaction, previous)
+            except UpdateError:
+                return None
+        selected_plugins = transaction.get("selectedPluginRows")
+        installations = transaction.get("packageInstallations")
+        if not isinstance(selected_plugins, list) or not isinstance(installations, dict):
+            return None
+        expected_fields = {
+            "componentId",
+            "capabilityId",
+            "environmentName",
+            "sourceId",
+            "bindingId",
+            "packageId",
+            "installationId",
+            "catalogGeneration",
+        }
+        environment_names: set[str] = set()
+        identities = identity["bindingIdentities"]
+        for binding in identities:
+            if (
+                not isinstance(binding, dict)
+                or set(binding) != expected_fields
+                or any(
+                    not isinstance(binding.get(field), str) or not binding[field]
+                    for field in (
+                        "componentId",
+                        "capabilityId",
+                        "environmentName",
+                        "sourceId",
+                        "bindingId",
+                        "packageId",
+                        "installationId",
+                    )
+                )
+                or type(binding.get("catalogGeneration")) is not int
+                or CATALYST_PLUGIN_CONNECTION_ENVIRONMENTS.get(binding["capabilityId"])
+                != binding["environmentName"]
+                or binding["environmentName"] in environment_names
+            ):
+                return None
+            selected = next(
+                (
+                    row
+                    for row in selected_plugins
+                    if isinstance(row, dict) and row.get("componentId") == binding["componentId"]
+                ),
+                None,
+            )
+            installation = installations.get(binding["componentId"])
+            if (
+                not isinstance(selected, dict)
+                or selected.get("capabilityId") != binding["capabilityId"]
+                or selected.get("bindingId") != binding["bindingId"]
+                or selected.get("packageId") != binding["packageId"]
+                or self._workload_policy_source_id(selected.get("sourcePolicy", {}))
+                != binding["sourceId"]
+                or not isinstance(installation, dict)
+                or installation.get("installation_id") != binding["installationId"]
+            ):
+                return None
+            environment_names.add(binding["environmentName"])
+        try:
+            self._parse_workload_environment_file(
+                content, expected_keys=environment_names, maximum_lines=len(environment_names)
+            )
+        except UpdateError:
+            return None
+        return plan_id
+
+    def _verify_workload_catalyst_plugin_refs_dropin_owner(
+        self, dropin_digest: str
+    ) -> list[dict[str, str]]:
+        """Require the optional Catalyst plugin-ref projection to have a durable owner."""
+
+        transaction_root = self.state_root / "transactions"
+        try:
+            _verify_private_directory(transaction_root)
+            entries = sorted(transaction_root.iterdir())
+            group_id = grp.getgrnam("cyrene").gr_gid
+        except (OSError, UpdateError, KeyError) as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalyst plugin-reference ownership is unavailable."
+            ) from error
+        expected_dropin = (
+            "[Service]\nEnvironmentFile=-" + str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT) + "\n"
+        ).encode("ascii")
+        refs_bytes = self._read_workload_protected_file(
+            DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT,
+            allowed_identities={(0, group_id, 0o640)},
+            maximum_bytes=4096,
+            error_code="SERVICE_NOT_MANAGED",
+        )
+        dropin_bytes = self._read_workload_protected_file(
+            DEFAULT_CATALYST_PLUGIN_REFS_DROPIN,
+            allowed_identities={(0, 0, 0o644)},
+            maximum_bytes=4096,
+            error_code="SERVICE_NOT_MANAGED",
+        )
+        if refs_bytes is None or dropin_bytes != expected_dropin:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED",
+                "Catalyst plugin-reference projection differs from its managed drop-in.",
+            )
+        live_environment_digest = "sha256:" + hashlib.sha256(refs_bytes).hexdigest()
+        owners: list[dict[str, str]] = []
+        for journal_path in entries:
+            if (
+                journal_path.is_symlink()
+                or not journal_path.is_file()
+                or journal_path.suffix != ".json"
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst transaction ownership inventory is unsafe."
+                )
+            try:
+                info = journal_path.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1
+                    or info.st_size > 16 * 1024 * 1024
+                ):
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED", "Catalyst transaction record is unsafe."
+                    )
+                transaction = json.loads(
+                    journal_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_unique_json_object,
+                )
+            except UpdateError:
+                raise
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst transaction record cannot be read safely."
+                ) from error
+            if not isinstance(transaction, dict):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED", "Catalyst transaction record has an invalid shape."
+                )
+            if (
+                transaction.get("transactionKind") != "workload-assembly.v1"
+                or transaction.get("workloadId") != "catalyst"
+                or transaction.get("action") != "install"
+                or not any(
+                    isinstance(row, dict) and row.get("componentId") == CATALYST_COMPONENT_ID
+                    for row in transaction.get("selectedComponents", [])
+                )
+            ):
+                continue
+            phase = transaction.get("phase")
+            if phase == "rolled_back":
+                continue
+            plan_id = transaction.get("planId")
+            plan_digest = transaction.get("planDigest")
+            refs_identity = transaction.get("catalystPluginRefs")
+            managed_files = transaction.get("managedConfigFiles")
+            if (
+                transaction.get("schemaVersion") != 2
+                or phase not in {"applying", "succeeded"}
+                or not isinstance(plan_id, str)
+                or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+                or journal_path.name != f"{plan_id}.json"
+                or not _valid_digest(plan_digest)
+                or plan_id != "plan-" + plan_digest.removeprefix("sha256:")[:32]
+                or not isinstance(refs_identity, dict)
+                or set(refs_identity)
+                not in (
+                    {"environmentDigest", "bindingIdentities"},
+                    {"environmentDigest", "bindingIdentities", "rotation"},
+                )
+                or not _valid_digest(refs_identity.get("environmentDigest"))
+                or not isinstance(refs_identity.get("bindingIdentities"), list)
+                or not refs_identity["bindingIdentities"]
+                or not isinstance(managed_files, list)
+            ):
+                continue
+            selected_plugins = transaction.get("selectedPluginRows")
+            installation_records = transaction.get("packageInstallations")
+            binding_identities = refs_identity["bindingIdentities"]
+            if not isinstance(selected_plugins, list) or not isinstance(installation_records, dict):
+                continue
+            expected_identity_fields = {
+                "componentId",
+                "capabilityId",
+                "environmentName",
+                "sourceId",
+                "bindingId",
+                "packageId",
+                "installationId",
+                "catalogGeneration",
+            }
+            environment_names: set[str] = set()
+            identity_components: set[str] = set()
+            valid_identities = True
+            for identity in binding_identities:
+                if (
+                    not isinstance(identity, dict)
+                    or set(identity) != expected_identity_fields
+                    or any(
+                        not isinstance(identity.get(field), str) or not identity[field]
+                        for field in (
+                            "componentId",
+                            "capabilityId",
+                            "environmentName",
+                            "sourceId",
+                            "bindingId",
+                            "packageId",
+                            "installationId",
+                        )
+                    )
+                    or type(identity.get("catalogGeneration")) is not int
+                    or identity["catalogGeneration"] < 1
+                    or CATALYST_PLUGIN_CONNECTION_ENVIRONMENTS.get(identity["capabilityId"])
+                    != identity["environmentName"]
+                    or identity["environmentName"] in environment_names
+                    or identity["componentId"] in identity_components
+                ):
+                    valid_identities = False
+                    break
+                selected_row = next(
+                    (
+                        row
+                        for row in selected_plugins
+                        if isinstance(row, dict)
+                        and row.get("componentId") == identity["componentId"]
+                    ),
+                    None,
+                )
+                installation = installation_records.get(identity["componentId"])
+                if (
+                    not isinstance(selected_row, dict)
+                    or selected_row.get("capabilityId") != identity["capabilityId"]
+                    or selected_row.get("bindingId") != identity["bindingId"]
+                    or selected_row.get("packageId") != identity["packageId"]
+                    or self._workload_policy_source_id(selected_row.get("sourcePolicy", {}))
+                    != identity["sourceId"]
+                    or not isinstance(installation, dict)
+                    or installation.get("installation_id") != identity["installationId"]
+                ):
+                    valid_identities = False
+                    break
+                environment_names.add(identity["environmentName"])
+                identity_components.add(identity["componentId"])
+            if not valid_identities:
+                continue
+            refs_record = [
+                item
+                for item in managed_files
+                if isinstance(item, dict)
+                and item.get("path") == str(DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT)
+            ]
+            dropin_record = [
+                item
+                for item in managed_files
+                if isinstance(item, dict)
+                and item.get("path") == str(DEFAULT_CATALYST_PLUGIN_REFS_DROPIN)
+            ]
+            if len(refs_record) != 1 or len(dropin_record) != 1:
+                continue
+            refs_record, dropin_record = refs_record[0], dropin_record[0]
+            environment_digest = refs_identity["environmentDigest"]
+            if (
+                not isinstance(refs_record, dict)
+                or set(refs_record)
+                != {"path", "kind", "priorDigest", "writtenDigest", "mode", "groupId"}
+                or refs_record.get("kind") != "catalyst-plugin-refs-environment"
+                or refs_record.get("priorDigest") is not None
+                and not _valid_digest(refs_record.get("priorDigest"))
+                or refs_record.get("writtenDigest") != environment_digest
+                or type(refs_record.get("mode")) is not int
+                or refs_record.get("mode") != 0o640
+                or type(refs_record.get("groupId")) is not int
+                or refs_record.get("groupId") != group_id
+                or not isinstance(dropin_record, dict)
+                or set(dropin_record)
+                != {"path", "kind", "priorDigest", "writtenDigest", "mode", "groupId"}
+                or dropin_record.get("kind") != "catalyst-plugin-refs-dropin"
+                or dropin_record.get("priorDigest") not in {None, dropin_digest}
+                or dropin_record.get("writtenDigest") != dropin_digest
+                or type(dropin_record.get("mode")) is not int
+                or dropin_record.get("mode") != 0o644
+                or dropin_record.get("groupId") != 0
+            ):
+                continue
+            rotation = refs_identity.get("rotation")
+            if rotation is not None:
+                if (
+                    not isinstance(rotation, dict)
+                    or set(rotation) != {"previous", "rollback"}
+                    or not isinstance(rotation.get("previous"), dict)
+                ):
+                    continue
+                try:
+                    self._verify_workload_catalyst_plugin_refs_backup(
+                        transaction, rotation["previous"]
+                    )
+                    rollback_snapshot = rotation.get("rollback")
+                    if rollback_snapshot is not None:
+                        if not isinstance(rollback_snapshot, dict) or rollback_snapshot.get(
+                            "digest"
+                        ) != refs_record.get("priorDigest"):
+                            continue
+                        self._verify_workload_catalyst_plugin_refs_backup(
+                            transaction, rollback_snapshot
+                        )
+                    elif refs_record.get("priorDigest") is not None:
+                        continue
+                except UpdateError:
+                    continue
+            elif (
+                refs_record.get("priorDigest") is not None
+                and refs_record.get("priorDigest") != environment_digest
+            ):
+                continue
+            pending_replacement = False
+            pending_replacement_allowed = phase == "applying" or (
+                phase == "succeeded" and transaction.get("catalystPluginRefsRestartPending") is True
+            )
+            if live_environment_digest != environment_digest:
+                previous = rotation.get("previous") if isinstance(rotation, dict) else None
+                if (
+                    not pending_replacement_allowed
+                    or not isinstance(previous, dict)
+                    or previous.get("digest") != live_environment_digest
+                ):
+                    # A succeeded owner is current only while its exact journaled
+                    # refs rotation still awaits the protected file replacement.
+                    continue
+                pending_replacement = True
+            self._parse_workload_environment_file(
+                refs_bytes,
+                expected_keys=environment_names,
+                maximum_lines=len(environment_names),
+            )
+            if phase == "succeeded":
+                result = transaction.get("result")
+                if (
+                    not isinstance(result, dict)
+                    or result.get("action") != "install"
+                    or result.get("workloadId") != "catalyst"
+                    or result.get("planId") != plan_id
+                    or result.get("planDigest") != plan_digest
+                ):
+                    continue
+            if pending_replacement and not pending_replacement_allowed:
+                continue
+            owners.append({"planId": plan_id, "planDigest": plan_digest})
+        if not owners:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED",
+                "Catalyst plugin-reference drop-in has no matching transaction.",
+            )
+        return owners
 
     def _verify_workload_catalyst_dropin_owner(self, dropin_digest: str) -> None:
         """Require the exact fixed Catalyst drop-in to have a durable transaction owner."""
@@ -11093,6 +13032,161 @@ class ComponentUpdater:
                 "A managed configuration directory cannot be created.",
             ) from error
 
+    def _workload_catalyst_plugin_refs_backup_path(self, plan_id: str, digest: str) -> Path:
+        if PLAN_ID_PATTERN.fullmatch(plan_id) is None or not _valid_digest(digest):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Catalyst plugin-reference backup identity is invalid."
+            )
+        return self._private_state_directory("config-backups") / (
+            f"{plan_id}-{digest.removeprefix('sha256:')}.plugin-refs"
+        )
+
+    def _read_workload_catalyst_plugin_refs_backup(
+        self, path: Path, *, plan_id: str, digest: str
+    ) -> bytes:
+        expected_path = self._workload_catalyst_plugin_refs_backup_path(plan_id, digest)
+        if path != expected_path:
+            raise UpdateError(
+                "ROLLBACK_CONFLICT", "Catalyst plugin-reference backup path is not plan-bound."
+            )
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                info = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1
+                    or info.st_size > 4096
+                ):
+                    raise UpdateError(
+                        "ROLLBACK_CONFLICT", "Catalyst plugin-reference backup is unsafe."
+                    )
+                content = os.read(descriptor, 4097)
+                if len(content) > 4096 or "sha256:" + hashlib.sha256(content).hexdigest() != digest:
+                    raise UpdateError(
+                        "ROLLBACK_CONFLICT", "Catalyst plugin-reference backup digest differs."
+                    )
+                return content
+            finally:
+                os.close(descriptor)
+        except UpdateError:
+            raise
+        except OSError as error:
+            raise UpdateError(
+                "ROLLBACK_CONFLICT", "Catalyst plugin-reference backup cannot be read safely."
+            ) from error
+
+    def _verify_workload_catalyst_plugin_refs_backup(
+        self, transaction: dict[str, Any], backup: dict[str, Any]
+    ) -> bytes:
+        if set(backup) != {"planId", "planDigest", "digest", "path", "ownerPlanId"}:
+            raise UpdateError(
+                "ROLLBACK_CONFLICT", "Catalyst plugin-reference backup receipt is malformed."
+            )
+        plan_id = transaction.get("planId")
+        plan_digest = transaction.get("planDigest")
+        owner_plan_id = backup.get("ownerPlanId")
+        digest = backup.get("digest")
+        path_text = backup.get("path")
+        if (
+            not isinstance(plan_id, str)
+            or not isinstance(plan_digest, str)
+            or backup.get("planId") != plan_id
+            or backup.get("planDigest") != plan_digest
+            or not isinstance(owner_plan_id, str)
+            or PLAN_ID_PATTERN.fullmatch(owner_plan_id) is None
+            or not isinstance(digest, str)
+            or not _valid_digest(digest)
+            or not isinstance(path_text, str)
+        ):
+            raise UpdateError(
+                "ROLLBACK_CONFLICT", "Catalyst plugin-reference backup receipt is invalid."
+            )
+        return self._read_workload_catalyst_plugin_refs_backup(
+            Path(path_text), plan_id=plan_id, digest=digest
+        )
+
+    def _write_workload_catalyst_plugin_refs_backup(
+        self,
+        transaction: dict[str, Any],
+        content: bytes,
+        *,
+        digest: str,
+        owner_plan_id: str,
+    ) -> dict[str, Any]:
+        actual_digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        plan_id = transaction.get("planId")
+        plan_digest = transaction.get("planDigest")
+        if (
+            actual_digest != digest
+            or not isinstance(plan_id, str)
+            or not isinstance(plan_digest, str)
+            or not _valid_digest(plan_digest)
+            or not isinstance(owner_plan_id, str)
+            or PLAN_ID_PATTERN.fullmatch(owner_plan_id) is None
+        ):
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Catalyst plugin-reference rotation lacks an exact owner identity.",
+            )
+        path = self._workload_catalyst_plugin_refs_backup_path(plan_id, digest)
+        directory = self._private_state_directory("config-backups")
+        if path.exists() or path.is_symlink():
+            existing = self._read_workload_catalyst_plugin_refs_backup(
+                path, plan_id=plan_id, digest=digest
+            )
+            if existing != content:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Catalyst plugin-reference backup bytes differ from the approved snapshot.",
+                )
+        else:
+            temporary = directory / f".{path.name}.{uuid.uuid4().hex}.tmp"
+            descriptor: int | None = None
+            try:
+                descriptor = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+                os.fchown(descriptor, os.geteuid(), os.getegid())
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "wb") as stream:
+                    descriptor = None
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                if path.exists() or path.is_symlink():
+                    raise UpdateError(
+                        "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                        "Catalyst plugin-reference backup appeared during creation.",
+                    )
+                os.replace(temporary, path)
+                self._fsync_directory(directory)
+            except UpdateError:
+                raise
+            except OSError as error:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "Catalyst plugin-reference backup cannot be written safely.",
+                ) from error
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+                temporary.unlink(missing_ok=True)
+        return {
+            "planId": plan_id,
+            "planDigest": plan_digest,
+            "digest": digest,
+            "path": str(path),
+            "ownerPlanId": owner_plan_id,
+        }
+
     def _write_workload_managed_config(
         self,
         transaction: dict[str, Any],
@@ -11126,6 +13220,19 @@ class ComponentUpdater:
             (item for item in changes if isinstance(item, dict) and item.get("path") == str(path)),
             None,
         )
+        if entry_kind == "catalyst-plugin-refs-environment":
+            return self._write_workload_catalyst_plugin_refs_config(
+                transaction,
+                transaction_path,
+                path=path,
+                content=content,
+                existing=existing,
+                digest=digest,
+                group_id=group_id,
+                mode=mode,
+                entry=entry,
+                changes=changes,
+            )
         if existing is not None:
             current_digest = "sha256:" + hashlib.sha256(existing).hexdigest()
             if current_digest != digest:
@@ -11200,6 +13307,129 @@ class ComponentUpdater:
             _atomic_json(transaction_path, transaction)
         return digest
 
+    def _write_workload_catalyst_plugin_refs_config(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        *,
+        path: Path,
+        content: bytes,
+        existing: bytes | None,
+        digest: str,
+        group_id: int,
+        mode: int,
+        entry: dict[str, Any] | None,
+        changes: list[Any],
+    ) -> str:
+        identity = transaction.get("catalystPluginRefs")
+        if (
+            not isinstance(identity, dict)
+            or identity.get("environmentDigest") != digest
+            or path != DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT
+            or mode != 0o640
+        ):
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Catalyst plugin-reference write identity is incomplete."
+            )
+        current_digest = (
+            "sha256:" + hashlib.sha256(existing).hexdigest() if existing is not None else None
+        )
+        prior_digest: str | None
+        if entry is not None:
+            if (
+                set(entry) != {"path", "kind", "priorDigest", "writtenDigest", "mode", "groupId"}
+                or entry.get("path") != str(path)
+                or entry.get("kind") != "catalyst-plugin-refs-environment"
+                or entry.get("mode") != mode
+                or entry.get("groupId") != group_id
+                or entry.get("priorDigest") is not None
+                and not _valid_digest(entry.get("priorDigest"))
+                or not _valid_digest(entry.get("writtenDigest"))
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Catalyst plugin-reference rollback identity is malformed.",
+                )
+            prior_digest = entry.get("priorDigest")
+        else:
+            prior_digest = current_digest
+
+        if existing is not None and current_digest != digest:
+            rotation = identity.get("rotation")
+            previous = rotation.get("previous") if isinstance(rotation, dict) else None
+            if not isinstance(previous, dict) or previous.get("digest") != current_digest:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "An existing Catalyst plugin-reference file is not covered by an exact rotation receipt.",
+                )
+            self._verify_workload_catalyst_plugin_refs_backup(transaction, previous)
+        elif existing is None and prior_digest is not None:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "An existing Catalyst plugin-reference file disappeared during workload recovery.",
+            )
+
+        rotation = identity.get("rotation")
+        rollback = rotation.get("rollback") if isinstance(rotation, dict) else None
+        if prior_digest is not None and prior_digest != current_digest:
+            if not isinstance(rollback, dict) or rollback.get("digest") != prior_digest:
+                raise UpdateError(
+                    "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                    "The original Catalyst plugin-reference rollback snapshot is unavailable.",
+                )
+            self._verify_workload_catalyst_plugin_refs_backup(transaction, rollback)
+
+        if entry is None:
+            entry = {
+                "path": str(path),
+                "kind": "catalyst-plugin-refs-environment",
+                "priorDigest": prior_digest,
+                "writtenDigest": digest,
+                "mode": mode,
+                "groupId": group_id,
+            }
+            changes.append(entry)
+        else:
+            entry["writtenDigest"] = digest
+        # The desired digest is durable before replacing the prior bytes. A restart
+        # can then verify the exact previous snapshot and finish the same write.
+        _atomic_json(transaction_path, transaction)
+        if existing == content:
+            return digest
+
+        if path.parent == DEFAULT_CATALYST_API_TOKEN.parent:
+            parent_group, parent_mode = group_id, 0o750
+        else:
+            parent_group, parent_mode = 0, 0o755
+        self._ensure_workload_config_directory(path.parent, group_id=parent_group, mode=parent_mode)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                mode,
+            )
+            os.fchown(descriptor, 0, group_id)
+            os.fchmod(descriptor, mode)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = None
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            self._fsync_directory(path.parent)
+        except OSError as error:
+            raise UpdateError(
+                "CATALYST_AUTH_CONFIGURATION_CONFLICT",
+                "Catalyst plugin-reference configuration cannot be replaced safely.",
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+        return digest
+
     def _project_workload_catalyst_auth(
         self, transaction: dict[str, Any], transaction_path: Path
     ) -> dict[str, Any]:
@@ -11270,6 +13500,83 @@ class ComponentUpdater:
         _atomic_json(transaction_path, transaction)
         return identity
 
+    def _restore_workload_catalyst_plugin_refs_file(
+        self, transaction: dict[str, Any], entry: dict[str, Any]
+    ) -> bool:
+        path = DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT
+        if (
+            entry.get("path") != str(path)
+            or entry.get("kind") != "catalyst-plugin-refs-environment"
+            or entry.get("mode") != 0o640
+            or type(entry.get("groupId")) is not int
+            or not _valid_digest(entry.get("writtenDigest"))
+            or entry.get("priorDigest") is not None
+            and not _valid_digest(entry.get("priorDigest"))
+        ):
+            raise UpdateError(
+                "ROLLBACK_CONFLICT", "Catalyst plugin-reference rollback identity is malformed."
+            )
+        prior_digest = entry.get("priorDigest")
+        group_id = entry["groupId"]
+        current = self._read_workload_protected_file(
+            path,
+            allowed_identities={(0, group_id, 0o640)},
+            maximum_bytes=4096,
+            error_code="ROLLBACK_CONFLICT",
+        )
+        current_digest = (
+            "sha256:" + hashlib.sha256(current).hexdigest() if current is not None else None
+        )
+        if current_digest == prior_digest:
+            return False
+        if current_digest is not None and current_digest != entry.get("writtenDigest"):
+            raise UpdateError(
+                "ROLLBACK_CONFLICT",
+                "Catalyst plugin-reference configuration changed outside this transaction.",
+            )
+        if prior_digest is None:
+            if current is None:
+                return False
+            path.unlink()
+            self._fsync_directory(path.parent)
+            return True
+
+        identity = transaction.get("catalystPluginRefs")
+        rotation = identity.get("rotation") if isinstance(identity, dict) else None
+        rollback = rotation.get("rollback") if isinstance(rotation, dict) else None
+        if not isinstance(rollback, dict) or rollback.get("digest") != prior_digest:
+            raise UpdateError(
+                "ROLLBACK_CONFLICT", "Catalyst plugin-reference rollback snapshot is unavailable."
+            )
+        prior_content = self._verify_workload_catalyst_plugin_refs_backup(transaction, rollback)
+        self._ensure_workload_config_directory(path.parent, group_id=0, mode=0o755)
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o640,
+            )
+            os.fchown(descriptor, 0, group_id)
+            os.fchmod(descriptor, 0o640)
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = None
+                stream.write(prior_content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            self._fsync_directory(path.parent)
+        except OSError as error:
+            raise UpdateError(
+                "ROLLBACK_CONFLICT", "Catalyst plugin-reference snapshot cannot be restored."
+            ) from error
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+        return True
+
     def _restore_workload_catalyst_auth(self, transaction: dict[str, Any]) -> None:
         """Remove only new non-token projections that still match the transaction."""
 
@@ -11290,13 +13597,20 @@ class ComponentUpdater:
             path = Path(path_text)
             if path not in {
                 DEFAULT_CATALYST_AUTH_ENVIRONMENT,
+                DEFAULT_CATALYST_PLUGIN_REFS_ENVIRONMENT,
                 DEFAULT_STUDIO_CONTROL_ENVIRONMENT,
                 DEFAULT_CATALYST_AUTH_DROPIN,
+                DEFAULT_CATALYST_PLUGIN_REFS_DROPIN,
             }:
                 raise UpdateError(
                     "INVALID_TRANSACTION",
                     "Managed configuration rollback path is outside its fixed allowlist.",
                 )
+            if entry.get("kind") == "catalyst-plugin-refs-environment":
+                changed = (
+                    self._restore_workload_catalyst_plugin_refs_file(transaction, entry) or changed
+                )
+                continue
             try:
                 info = path.lstat()
                 content = path.read_bytes()
@@ -11500,6 +13814,7 @@ class ComponentUpdater:
         runtime_policy: dict[str, Any],
         source_principals: dict[str, dict[str, Any]],
         helper: Any,
+        recovery_request_id: str | None = None,
     ) -> dict[str, Any]:
         """Run an owner-scoped Package Runtime SDK mutation with fsynced callbacks."""
 
@@ -11558,6 +13873,15 @@ class ComponentUpdater:
             + "-"
             + component_id
         )
+        if recovery_request_id is not None:
+            if (
+                operation != "recover_binding"
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", recovery_request_id) is None
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Boot recovery request identity is invalid."
+                )
+            request_id = recovery_request_id
         binding_ops = transaction.setdefault("bindingOperations", [])
         if not isinstance(binding_ops, list):
             raise UpdateError("INVALID_TRANSACTION", "Workload binding journal is malformed.")
@@ -11898,15 +14222,55 @@ class ComponentUpdater:
     ) -> bool:
         """Acquire or resume one phase; return false when it already committed."""
 
+        holds = transaction.get("maintenanceHolds")
+        prior = holds.get(phase) if isinstance(holds, dict) else None
+        if isinstance(prior, dict) and prior.get("status") == "end_pending":
+            self._complete_workload_end_pending(transaction, transaction_path, phase=phase)
+            return False
         if self._workload_phase_is_ended(transaction, phase):
+            if transaction.get("maintenanceToken"):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "An ended workload phase still has a maintenance token."
+                )
             return False
         if transaction.get("maintenanceToken"):
-            if transaction.get("maintenancePhase") != phase:
+            if transaction.get("maintenancePhase") != phase or not isinstance(prior, dict):
                 raise UpdateError(
                     "PENDING_MAINTENANCE",
                     "A different workload maintenance phase is still held.",
                     retryable=True,
                 )
+            if prior.get("status") != "active":
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "The saved workload token is not an active phase hold."
+                )
+            if prior.get("beginMethod") == "BeginInitialSourceActivation":
+                block = transaction.get("firstCoreBootstrap")
+                reference = (
+                    block.get("initialSourceArtifactRef") if isinstance(block, dict) else None
+                )
+                activation = transaction.get("initialSourceActivation")
+                expected_parent = (
+                    "first-core-bootstrap-" + str(block.get("planId", "")).removeprefix("plan-")
+                    if isinstance(block, dict)
+                    else None
+                )
+                if (
+                    phase != "core-runtime-install"
+                    or not isinstance(reference, dict)
+                    or not isinstance(activation, dict)
+                    or activation.get("sourceId") != reference.get("sourceId")
+                    or activation.get("componentId") != reference.get("componentId")
+                    or activation.get("artifactDigest") != reference.get("artifactDigest")
+                    or activation.get("parentRequestId") != expected_parent
+                    or prior.get("sourceId") != reference.get("sourceId")
+                    or prior.get("parentRequestId") != expected_parent
+                    or prior.get("requestId") != _maintenance_request_id(transaction)
+                ):
+                    raise UpdateError(
+                        "INVALID_TRANSACTION",
+                        "The active initial-source hold differs from its exact signed plan identity.",
+                    )
             return True
         self._begin_workload_hold(
             transaction,
@@ -13606,6 +15970,65 @@ class ComponentUpdater:
                         installation_records={},
                         phase="core-runtime-install",
                     )
+                initial_hold = transaction.get("maintenanceHolds", {}).get("core-runtime-install")
+                initial_ref = (
+                    transaction.get("firstCoreBootstrap", {}).get("initialSourceArtifactRef")
+                    if isinstance(transaction.get("firstCoreBootstrap"), dict)
+                    else None
+                )
+                if (
+                    isinstance(initial_hold, dict)
+                    and initial_hold.get("beginMethod") == "BeginInitialSourceActivation"
+                ):
+                    if (
+                        not isinstance(initial_ref, dict)
+                        or initial_hold.get("sourceId") != initial_ref.get("sourceId")
+                        or initial_hold.get("parentRequestId")
+                        != "first-core-bootstrap-"
+                        + str(transaction["firstCoreBootstrap"].get("planId", "")).removeprefix(
+                            "plan-"
+                        )
+                    ):
+                        raise UpdateError(
+                            "INVALID_TRANSACTION",
+                            "Initial-source hold differs from the signed first-Core Product identity.",
+                        )
+                    source_service = next(
+                        (
+                            service
+                            for service in service_units
+                            if service.get("componentId") == initial_ref.get("componentId")
+                        ),
+                        None,
+                    )
+                    if not isinstance(source_service, dict):
+                        raise UpdateError(
+                            "FIRST_CORE_READBACK_REQUIRED",
+                            "The initial-source Product service is not in this signed workload.",
+                            retryable=True,
+                        )
+                    source_unit = source_service.get("unit")
+                    if not isinstance(source_unit, str):
+                        raise UpdateError(
+                            "SERVICE_NOT_MANAGED",
+                            "The initial-source Product unit identity is incomplete.",
+                        )
+                    source_state = self._package_product_unit_state(source_unit)
+                    if source_state == "inactive":
+                        self._set_workload_unit_for_apply(
+                            transaction,
+                            transaction_path,
+                            source_unit,
+                            "start",
+                            wait_active=True,
+                        )
+                    elif source_state != "active":
+                        raise UpdateError(
+                            "FIRST_CORE_READBACK_REQUIRED",
+                            "The initial-source Product unit state is unknown.",
+                            retryable=True,
+                        )
+                    self._wait_http_health(8004, "/healthz", initial_ref["componentId"])
                 self._end_workload_hold(
                     transaction, transaction_path, outcome="SUCCESS", healthy=True
                 )
@@ -13774,6 +16197,7 @@ class ComponentUpdater:
         # Activate selected plugin bindings through the non-root source identity and
         # the normal Broker admission SDK. Each mutation's callback is already fsynced
         # into this transaction before the SDK completes its lease.
+        catalyst_plugin_refs_changed = False
         if plugin_rows:
             package_inventory = self._read_workload_package_inventory(
                 workload_id,
@@ -13883,10 +16307,33 @@ class ComponentUpdater:
                         retryable=True,
                     )
 
+            if workload_id == "catalyst":
+                activity_catalog, runtime_policy, principals, helper = self._workload_source_state(
+                    workload_id
+                )
+                if runtime_policy is None:
+                    raise UpdateError(
+                        "PACKAGE_RUNTIME_READBACK_REQUIRED",
+                        "Catalyst Package Runtime policy is unavailable for binding projection.",
+                        retryable=True,
+                    )
+                catalyst_plugin_refs_changed = self._project_workload_catalyst_plugin_refs(
+                    transaction,
+                    transaction_path,
+                    plugin_rows=plugin_rows,
+                    package_inventory=package_inventory,
+                    activity_catalog=activity_catalog,
+                    runtime_policy=runtime_policy,
+                    source_principals=principals,
+                    helper=helper,
+                )
+
         core_activation_needed = (
             bool(service_units)
             and (
                 core_install_needed
+                or catalyst_plugin_refs_changed
+                or transaction.get("catalystPluginRefsRestartPending") is True
                 or any(
                     self._package_product_unit_state(service["unit"]) != "active"
                     for service in service_units
@@ -13905,8 +16352,12 @@ class ComponentUpdater:
                 for service in service_units:
                     unit = service["unit"]
                     state = self._package_product_unit_state(unit)
-                    self._set_workload_unit(
-                        unit, "restart" if state == "active" else "start", wait_active=True
+                    self._set_workload_unit_for_apply(
+                        transaction,
+                        transaction_path,
+                        unit,
+                        "restart" if state == "active" else "start",
+                        wait_active=True,
                     )
                 if CATALYST_COMPONENT_ID in selected_ids:
                     self._wait_http_health(8004, "/healthz", CATALYST_COMPONENT_ID)
@@ -14576,6 +17027,49 @@ class ComponentUpdater:
         failure: Exception | None = None,
     ) -> tuple[bool, str]:
         """Rollback interrupted Product/web pointers and release their exact hold."""
+
+        if transaction.get("transactionKind") == "workload-assembly.v1":
+            phase = transaction.get("maintenancePhase")
+            holds = transaction.get("maintenanceHolds")
+            hold = holds.get(phase) if isinstance(holds, dict) and isinstance(phase, str) else None
+            if isinstance(hold, dict) and hold.get("status") in {"end_pending", "ended"}:
+                if hold.get("status") == "end_pending":
+                    self._complete_workload_end_pending(transaction, transaction_path, phase=phase)
+                raise UpdateError(
+                    "WORKLOAD_PHASE_END_CONFIRMED",
+                    "The phase End has been confirmed; retry this exact staged plan to continue without changing services outside maintenance.",
+                    retryable=True,
+                )
+            if (
+                isinstance(hold, dict)
+                and hold.get("status") == "active"
+                and phase == "core-runtime-install"
+                and hold.get("beginMethod") == "BeginInitialSourceActivation"
+            ):
+                initial_identity = transaction.get("initialSourceActivation")
+                if (
+                    transaction.get("maintenancePhase") != phase
+                    or not isinstance(transaction.get("maintenanceToken"), str)
+                    or len(transaction["maintenanceToken"]) < 32
+                    or hold.get("requestId") != _maintenance_request_id(transaction)
+                    or not isinstance(initial_identity, dict)
+                    or hold.get("sourceId") != initial_identity.get("sourceId")
+                    or hold.get("parentRequestId") != initial_identity.get("parentRequestId")
+                ):
+                    raise UpdateError(
+                        "INVALID_TRANSACTION",
+                        "The pending first-source hold lost its exact same-plan identity.",
+                    )
+                transaction["phase"] = "applying"
+                transaction["recoveryError"] = str(failure or "initial Product activation pending")[
+                    :500
+                ]
+                _atomic_json(transaction_path, transaction)
+                raise UpdateError(
+                    "FIRST_SOURCE_ACTIVATION_PENDING",
+                    "The first Product remains under its exact initial-source hold; retry this staged plan to complete real startup and heartbeat before End.",
+                    retryable=True,
+                ) from failure
 
         messages: list[str] = []
         healthy = True
@@ -19045,7 +21539,11 @@ class ComponentUpdater:
     ) -> dict[str, Any]:
         catalog: dict[str, Any] | None = None
         sources: list[str] = []
-        if method in {"GetUpdateReadiness", "BeginMaintenance"}:
+        if method in {
+            "GetUpdateReadiness",
+            "BeginMaintenance",
+            "BeginInitialSourceActivation",
+        }:
             if allow_uninitialized_catalog:
                 catalog, sources = self._activity_catalog(allow_uninitialized=True)
             else:
@@ -24043,6 +26541,12 @@ class ComponentUpdater:
         self, transaction: dict[str, Any], *, allow_uninitialized_catalog: bool = False
     ) -> str:
         request_id = _maintenance_request_id(transaction)
+        method = transaction.get("maintenanceBeginMethod", "BeginMaintenance")
+        initial_source_activation = transaction.get("initialSourceActivation")
+        if method not in {"BeginMaintenance", "BeginInitialSourceActivation"}:
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Workload maintenance begin method is invalid."
+            )
         if allow_uninitialized_catalog and (
             transaction.get("transactionKind") != "workload-assembly.v1"
             or transaction.get("action") != "install"
@@ -24053,6 +26557,27 @@ class ComponentUpdater:
             raise UpdateError(
                 "INVALID_TRANSACTION", "Initial catalog hold is not bound to the empty generation."
             )
+        if method == "BeginInitialSourceActivation":
+            block = transaction.get("firstCoreBootstrap")
+            reference = block.get("initialSourceArtifactRef") if isinstance(block, dict) else None
+            if (
+                allow_uninitialized_catalog
+                or transaction.get("maintenancePhase") != "core-runtime-install"
+                or transaction.get("targetKind") != "CORE_RUNTIME"
+                or transaction.get("transactionKind") != "workload-assembly.v1"
+                or transaction.get("action") != "install"
+                or not isinstance(reference, dict)
+                or not isinstance(initial_source_activation, dict)
+                or initial_source_activation.get("sourceId") != reference.get("sourceId")
+                or initial_source_activation.get("componentId") != reference.get("componentId")
+                or initial_source_activation.get("artifactDigest")
+                != reference.get("artifactDigest")
+                or not isinstance(initial_source_activation.get("parentRequestId"), str)
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Initial-source admission is not bound to its exact first-install Product and C10 parent.",
+                )
         params = {
             "request_id": request_id,
             "target_kind": transaction["targetKind"],
@@ -24065,16 +26590,19 @@ class ComponentUpdater:
             "plan_digest": transaction["planDigest"],
             "component_artifact_digests": transaction["componentArtifactDigests"],
         }
+        if method == "BeginInitialSourceActivation":
+            params["parent_request_id"] = initial_source_activation["parentRequestId"]
+            params["source_id"] = initial_source_activation["sourceId"]
         try:
             if allow_uninitialized_catalog:
                 result = self._broker_request(
-                    "BeginMaintenance",
+                    method,
                     params,
                     request_id=request_id,
                     allow_uninitialized_catalog=True,
                 )
             else:
-                result = self._broker_request("BeginMaintenance", params, request_id=request_id)
+                result = self._broker_request(method, params, request_id=request_id)
         except UpdateError as error:
             if error.code in {
                 "ACTIVE_TASKS",
