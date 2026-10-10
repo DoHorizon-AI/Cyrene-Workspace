@@ -87,6 +87,77 @@ WORKLOAD_FIRST_CORE_COMPONENT_IDS = (
 WORKLOAD_FIRST_CORE_HOLD_ARTIFACT_KINDS = frozenset(
     {"native-binary", "oci-image", "python-bundle", "static-web"}
 )
+_WORKLOAD_STAGE_RESOLUTION_BLOCKER_CODES = frozenset(
+    {
+        "CATALOG_COMPONENT_MISSING",
+        "CHOICE_REQUIRED",
+        "COMPONENT_CONFLICT",
+        "COMPONENT_NOT_FOUND",
+        "COMPONENT_NOT_IN_WORKLOAD",
+        "DEPENDENCY_CYCLE",
+        "INSTALLED_DEPENDENT",
+        "INSTALLED_IDENTITY_UNAVAILABLE",
+        "INSTALLED_TARGET_UNAVAILABLE",
+        "INVALID_ACTION",
+        "INVALID_CATALOG_DIGEST",
+        "INVALID_CHANNEL",
+        "INVALID_CHOICE",
+        "INVALID_DEPENDENCY",
+        "INVALID_SELECTION",
+        "INVALID_TARGET_ID",
+        "INVALID_WORKLOAD_ID",
+        "MINIMUM_SELECTION_NOT_MET",
+        "MISSING_CAPABILITY",
+        "MISSING_DEPENDENCY",
+        "MISSING_RELEASE",
+        "PUBLISHER_IDENTITY_INVALID",
+        "REQUIRED_COMPONENT_UNSELECTABLE",
+        "SELECTION_CONFLICT",
+        "SOURCE_BINDING_INVALID",
+        "SOURCE_BINDING_MISSING",
+        "SOURCE_POLICY_INVALID",
+        "TRUSTED_INDEX_BINDING_INVALID",
+        "UNINSTALL_SELECTION_INVALID",
+        "UNSUPPORTED_WORKLOAD_TARGET",
+        "VERSION_CONFLICT",
+        "VERSION_RANGE_UNSUPPORTED",
+        "WORKLOAD_NOT_FOUND",
+        "WORKLOAD_SELECTION_POLICY_INVALID",
+    }
+)
+_WORKLOAD_STAGE_CANDIDATE_FAILURE_CODES = frozenset(
+    {
+        "ATTESTATION_INVALID",
+        "ATTESTATION_MISSING",
+        "ATTESTATION_SUBJECT_MISMATCH",
+        "INDEX_DIGEST_MISMATCH",
+        "INVALID_ATTESTATION",
+        "INVALID_CATALOG",
+        "INVALID_HTTP_JSON",
+        "INVALID_MANIFEST",
+        "INVALID_RELEASE_ASSET_METADATA",
+        "INVALID_RELEASE_ASSETS",
+        "INVALID_RELEASE_INDEX",
+        "MANIFEST_DIGEST_MISMATCH",
+        "MANIFEST_IDENTITY_MISMATCH",
+        "NETWORK_ERROR",
+        "NO_RELEASE",
+        "RELEASE_ASSET_AMBIGUOUS",
+        "RELEASE_ASSET_DIGEST_MISMATCH",
+        "RELEASE_ASSET_IDENTITY_MISMATCH",
+        "RELEASE_ASSET_TOO_LARGE",
+        "RELEASE_DISCOVERY_INVALID",
+        "RELEASE_INDEX_MISSING",
+        "TARGET_RELEASE_MISSING",
+        "UNTRUSTED_RELEASE_TAG",
+        "UNTRUSTED_SOURCE",
+        "UNTRUSTED_URI",
+        "UNTRUSTED_WORKFLOW",
+    }
+)
+_WORKLOAD_STAGE_DIAGNOSTIC_MAX_BLOCKERS = 3
+_WORKLOAD_STAGE_DIAGNOSTIC_MAX_SCAN = 16
+_WORKLOAD_STAGE_DIAGNOSTIC_MAX_LENGTH = 512
 PRODUCT_CONTRACT_ATTESTATION_WORKFLOW = "/.github/workflows/product-contract.yml"
 PRODUCT_POLICY_ATTESTATION_WORKFLOW = "/.github/workflows/product-policy-release.yml"
 COMPONENT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -6083,6 +6154,72 @@ class ComponentUpdater:
             result["firstCoreBootstrap"] = {**first_core, "status": "required"}
         return result
 
+    def _workload_stage_blocker_summary(self, resolution: Any) -> str:
+        """Summarize known blocker identities without carrying external messages.
+
+        Only catalog component IDs and the fixed workload/candidate code sets are
+        returned. Provider text, tokens, and unrecognized values are omitted.
+        中文：只报告受信组件标识和白名单错误码，不传播外部错误文本。
+        """
+
+        blockers = resolution.get("blockers") if isinstance(resolution, dict) else None
+        components = getattr(self, "components", {})
+        if not isinstance(blockers, list) or not isinstance(components, dict):
+            return ""
+
+        summaries: list[str] = []
+        seen: set[str] = set()
+        for blocker in blockers[:_WORKLOAD_STAGE_DIAGNOSTIC_MAX_SCAN]:
+            if not isinstance(blocker, dict):
+                continue
+            component_id = blocker.get("componentId")
+            if (
+                not isinstance(component_id, str)
+                or COMPONENT_ID_PATTERN.fullmatch(component_id) is None
+                or component_id not in components
+            ):
+                component_id = None
+
+            blocker_code = blocker.get("code")
+            if not isinstance(blocker_code, str) or (
+                blocker_code not in _WORKLOAD_STAGE_RESOLUTION_BLOCKER_CODES
+                and blocker_code not in _WORKLOAD_STAGE_CANDIDATE_FAILURE_CODES
+            ):
+                blocker_code = None
+
+            details = blocker.get("details")
+            candidate_failure = (
+                details.get("candidateFailure") if isinstance(details, dict) else None
+            )
+            candidate_code = (
+                candidate_failure.get("code") if isinstance(candidate_failure, dict) else None
+            )
+            if (
+                not isinstance(candidate_code, str)
+                or candidate_code not in _WORKLOAD_STAGE_CANDIDATE_FAILURE_CODES
+            ):
+                candidate_code = None
+
+            if blocker_code is None and candidate_code is None:
+                continue
+            identity = component_id or "workload"
+            code_summary = blocker_code or "candidate"
+            if candidate_code is not None:
+                code_summary += f"/{candidate_code}"
+            summary = f"{identity}:{code_summary}"
+            if summary in seen:
+                continue
+            seen.add(summary)
+            summaries.append(summary)
+            if len(summaries) >= _WORKLOAD_STAGE_DIAGNOSTIC_MAX_BLOCKERS:
+                break
+
+        if not summaries:
+            return ""
+        return (" Resolution blockers: " + "; ".join(summaries))[
+            :_WORKLOAD_STAGE_DIAGNOSTIC_MAX_LENGTH
+        ]
+
     def stage_workload(
         self,
         workload_id: Any,
@@ -6128,16 +6265,35 @@ class ComponentUpdater:
             action=action,
             channel=selected_channel,
         )
-        if (
-            resolution.get("status") != "ready"
-            or resolution.get("planDigest") != plan_digest
-            or resolution.get("action") != action
-            or resolution.get("channel") != selected_channel
-            or stored.get("firstCoreBootstrap") != resolution.get("firstCoreBootstrap")
-        ):
+        if resolution.get("status") != "ready":
+            blocker_summary = self._workload_stage_blocker_summary(resolution)
+            message = (
+                "Trusted workload releases changed; check again before staging." + blocker_summary
+            )
             raise UpdateError(
                 "PLAN_CHANGED",
-                "Trusted workload releases changed; check again before staging.",
+                message[:_WORKLOAD_STAGE_DIAGNOSTIC_MAX_LENGTH],
+                retryable=True,
+            )
+        changed_identity_fields = [
+            field
+            for field, stored_value, current_value in (
+                ("planDigest", plan_digest, resolution.get("planDigest")),
+                ("action", action, resolution.get("action")),
+                ("channel", selected_channel, resolution.get("channel")),
+                (
+                    "firstCoreBootstrap",
+                    stored.get("firstCoreBootstrap"),
+                    resolution.get("firstCoreBootstrap"),
+                ),
+            )
+            if stored_value != current_value
+        ]
+        if changed_identity_fields:
+            raise UpdateError(
+                "PLAN_CHANGED",
+                "Trusted workload releases changed; check again before staging. "
+                "Changed checked-plan fields: " + ", ".join(changed_identity_fields) + ".",
                 retryable=True,
             )
         if any(
