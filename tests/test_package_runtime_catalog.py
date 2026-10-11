@@ -178,9 +178,9 @@ def test_catalog_bootstrap_copy_and_release_lock_pin_are_exact() -> None:
     catalog_bytes = CATALOG_PATH.read_bytes()
     release_lock = json.loads((WORKSPACE_ROOT / "release-lock.json").read_text(encoding="utf-8"))
     expected_repositories = {
-        "Cyrene-Platform": "5a4cb9f3f0438af5758c6c81f526c5cf7ae66705",
+        "Cyrene-Platform": "587d35588e8590abab5bd645ba09bbc480479daa",
         "Cyrene-Plugins-Official": "c9b8d4b7d4923d42368de3b3ec2db87ee97c3fa7",
-        "Cyrene-Workspace": "83e9a8e0a6db5ac8fef9fc9472e47f6ee9321bd8",
+        "Cyrene-Workspace": "8f976e988137f79e0374099a51aac51c210904eb",
         "Cyrene-Reactor": "470cec30bc09c2ba0b1fd62da47152ffd27b41bb",
         "Cyrene-Yield": "5c492b0932d0598ca140333611b2de6d85a6c458",
         "Cyrene-Exchange": "7f1823f6eabe9956ff40cc2e4aa9035197b51e83",
