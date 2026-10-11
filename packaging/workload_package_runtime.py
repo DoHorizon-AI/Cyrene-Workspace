@@ -2171,13 +2171,7 @@ def _validate_installation_record_identity(
         or dependencies.get("lock_digest") != verification.get("dependency_lock_digest")
         or not isinstance(dependencies.get("runtime_digest"), str)
         or _TYPED_SHA256.fullmatch(dependencies["runtime_digest"]) is None
-        or (
-            dependencies.get("runtime_executable") is not None
-            and (
-                not isinstance(dependencies["runtime_executable"], str)
-                or not Path(dependencies["runtime_executable"]).is_absolute()
-            )
-        )
+        or not _is_safe_relative_runtime_executable(dependencies.get("runtime_executable"))
     ):
         raise WorkloadPackageRuntimeError("Platform InstallationRecord verification is incomplete")
     capabilities = record.get("capabilities")
@@ -2205,6 +2199,18 @@ def _validate_installation_record_identity(
         raise WorkloadPackageRuntimeError(
             "Platform InstallationId is not derived from its identity"
         )
+
+
+def _is_safe_relative_runtime_executable(value: Any) -> bool:
+    """Accept only optional, non-escaping paths from Package Runtime evidence."""
+
+    if value is None:
+        return True
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    if Path(value).is_absolute():
+        return False
+    return all(part not in {"", ".", ".."} for part in value.split("/"))
 
 
 def _validate_runtime_policy_against_catalog(
