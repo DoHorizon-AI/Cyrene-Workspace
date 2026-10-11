@@ -10638,6 +10638,29 @@ class ComponentUpdater:
                 os.close(descriptor)
             temporary.unlink(missing_ok=True)
 
+    def _project_initial_source_activity_generation(
+        self, transaction: Mapping[str, Any], initial_hold: Mapping[str, Any]
+    ) -> None:
+        """Project the installed first-Core catalog before its initial Product start."""
+
+        result = transaction.get("firstCoreBootstrapResult")
+        generation = result.get("catalogGeneration") if isinstance(result, Mapping) else None
+        transaction_generation = transaction.get("expectedCatalogGeneration")
+        hold_generation = initial_hold.get("expectedCatalogGeneration")
+        if (
+            type(generation) is not int
+            or generation < 1
+            or type(transaction_generation) is not int
+            or transaction_generation != generation
+            or type(hold_generation) is not int
+            or hold_generation != generation
+        ):
+            raise UpdateError(
+                "CATALOG_GENERATION_MISMATCH",
+                "The initial-source hold does not match the installed Core catalog generation.",
+            )
+        self._write_workload_activity_generation(generation, previous_generation=0)
+
     def _recover_workload_runtime_connections_locked(self, workload_id: str) -> dict[str, Any]:
         """Recover only exact, succeeded Catalyst owners while no local update is pending."""
 
@@ -16051,6 +16074,7 @@ class ComponentUpdater:
                             "SERVICE_NOT_MANAGED",
                             "The initial-source Product unit identity is incomplete.",
                         )
+                    self._project_initial_source_activity_generation(transaction, initial_hold)
                     source_state = self._package_product_unit_state(source_unit)
                     if source_state == "inactive":
                         self._set_workload_unit_for_apply(
