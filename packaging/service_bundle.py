@@ -1927,7 +1927,7 @@ def _execution_runtime_prelude(
     ).as_posix()
     return f"""BUNDLE_VERSION="${{BUNDLE_DIR##*/}}"
 DATA_HOME="${{CYRENE_DATA_DIR:-/var/lib/cyrene}}"
-ARTIFACT_ROOT="${{CYRENE_ARTIFACT_ROOT:-$DATA_HOME/artifacts}}"
+ARTIFACT_ROOT="${{CYRENE_ARTIFACT_ROOT:-$DATA_HOME/{service}/artifacts}}"
 PLATFORM_RUNTIME_CONFIG="${{CYRENE_PLATFORM_RUNTIME_CONFIG:-/etc/cyrene/runtime/platform.json}}"
 TRAINER_RUNTIME_CONFIG="${{CYRENE_TRAINER_RUNTIME_CONFIG:-$DATA_HOME/{trainer_runtime_default}}}"
 if [ -L "$PLATFORM_RUNTIME_CONFIG" ] || [ -L "$TRAINER_RUNTIME_CONFIG" ]; then
@@ -1976,8 +1976,17 @@ def _entrypoint_text(
         ),
         "reactor": (""),
         "exchange": (
+            'DATA_HOME="${CYRENE_DATA_DIR:-/var/lib/cyrene}"\n'
+            'for legacy_exchange_file in "$DATA_HOME/exchange.sqlite3" '
+            '"$DATA_HOME/exchange.sqlite3-wal" "$DATA_HOME/exchange.sqlite3-shm"; do\n'
+            '  if [ -e "$legacy_exchange_file" ] || [ -L "$legacy_exchange_file" ]; then\n'
+            '    echo "ERROR: Legacy Exchange database state exists at '
+            '$legacy_exchange_file; refusing to start without an explicit data migration." >&2\n'
+            "    exit 1\n"
+            "  fi\n"
+            "done\n"
             "exec python3 -s -m cyrene_exchange_product.cli "
-            '--database "${CYRENE_DATA_DIR:-/var/lib/cyrene}/exchange.sqlite3" '
+            '--database "$DATA_HOME/exchange/exchange.sqlite3" '
             'serve --port "${CYRENE_PORT_EXCHANGE:-8003}" "$@"'
         ),
         "catalyst": (
@@ -2012,7 +2021,54 @@ BUNDLE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 unset PYTHONHOME
 export PYTHONPATH="$BUNDLE_DIR/python"
 DATA_HOME="${CYRENE_DEV_HOME:-${CYRENE_DATA_DIR:-/var/lib/cyrene}}"
-PAIRING_CODE_FILE="${CYRENE_PAIR_CODE_FILE:-$DATA_HOME/pair_code.txt}"
+PAIR_CODE_DIR="$DATA_HOME/navigator"
+PAIRING_CODE_FILE="${CYRENE_PAIR_CODE_FILE:-$PAIR_CODE_DIR/pair_code.txt}"
+if [ -L "$PAIR_CODE_DIR" ]; then
+  echo "ERROR: Navigator data directory is a symlink; refusing to use pairing credentials." >&2
+  exit 1
+elif [ ! -e "$PAIR_CODE_DIR" ]; then
+  mkdir -p -m 750 -- "$PAIR_CODE_DIR"
+elif [ ! -d "$PAIR_CODE_DIR" ]; then
+  echo "ERROR: Navigator data path is not a directory: $PAIR_CODE_DIR" >&2
+  exit 1
+fi
+if [ -z "${CYRENE_PAIR_CODE_FILE:-}" ]; then
+  LEGACY_PAIRING_CODE_FILE="$DATA_HOME/pair_code.txt"
+  if [ -L "$LEGACY_PAIRING_CODE_FILE" ]; then
+    echo "ERROR: Legacy Navigator pairing code is a symlink; refusing to follow it." >&2
+    exit 1
+  elif [ -e "$LEGACY_PAIRING_CODE_FILE" ] && [ ! -f "$LEGACY_PAIRING_CODE_FILE" ]; then
+    echo "ERROR: Legacy Navigator pairing code is not a regular file." >&2
+    exit 1
+  fi
+  if [ -e "$PAIRING_CODE_FILE" ] || [ -L "$PAIRING_CODE_FILE" ]; then
+    if [ -L "$PAIRING_CODE_FILE" ] || [ ! -f "$PAIRING_CODE_FILE" ]; then
+      echo "ERROR: Navigator pairing code destination is not a regular file." >&2
+      exit 1
+    fi
+    PAIRING_CODE_MODE="$(stat -c '%a' -- "$PAIRING_CODE_FILE")"
+    if [ "$PAIRING_CODE_MODE" != "600" ]; then
+      echo "ERROR: Navigator pairing code destination must have mode 600." >&2
+      exit 1
+    fi
+    if [ -e "$LEGACY_PAIRING_CODE_FILE" ] && ! cmp -s -- "$LEGACY_PAIRING_CODE_FILE" "$PAIRING_CODE_FILE"; then
+      echo "ERROR: Legacy and current Navigator pairing codes differ; refusing to choose one." >&2
+      exit 1
+    fi
+  elif [ -e "$LEGACY_PAIRING_CODE_FILE" ]; then
+    LEGACY_PAIRING_CODE_TEMP="$PAIRING_CODE_FILE.$$.new"
+    if ! (umask 077; set -C; cat -- "$LEGACY_PAIRING_CODE_FILE" > "$LEGACY_PAIRING_CODE_TEMP"); then
+      echo "ERROR: Could not safely copy the legacy Navigator pairing code." >&2
+      exit 1
+    fi
+    if ! ln -- "$LEGACY_PAIRING_CODE_TEMP" "$PAIRING_CODE_FILE"; then
+      rm -f -- "$LEGACY_PAIRING_CODE_TEMP"
+      echo "ERROR: Navigator pairing code destination changed during migration; retry service start." >&2
+      exit 1
+    fi
+    rm -- "$LEGACY_PAIRING_CODE_TEMP"
+  fi
+fi
 exec python3 -s "$BUNDLE_DIR/serve-web.py" \\
   --host "${CYRENE_WEB_HOST_HOST:-127.0.0.1}" \\
   --port "${CYRENE_PORT_NAVIGATOR:-7860}" \\

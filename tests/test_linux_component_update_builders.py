@@ -6,6 +6,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
+import subprocess
 import sys
 import zipfile
 from argparse import Namespace
@@ -479,7 +481,98 @@ def test_legacy_product_launchers_keep_their_existing_runtime_arguments() -> Non
         in launchers["reactor"]
     )
     assert "cyrene_exchange_product.cli" in launchers["exchange"]
+    assert '--database "$DATA_HOME/exchange/exchange.sqlite3"' in launchers["exchange"]
+    assert "Legacy Exchange database state exists" in launchers["exchange"]
     assert "cyrene_catalyst.cli serve" in launchers["catalyst"]
+    assert "$DATA_HOME/yield/artifacts" in bundle._execution_runtime_prelude(
+        _execution_runtime_descriptor(), service="yield"
+    )
+
+
+def _fake_python_executable(tmp_path: Path) -> Path:
+    executable = tmp_path / "fake-python"
+    executable.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$CYRENE_TEST_ARGV"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+def test_navigator_launcher_copies_legacy_pair_code_without_removing_source(
+    tmp_path: Path,
+) -> None:
+    data_home = tmp_path / "data"
+    data_home.mkdir()
+    legacy = data_home / "pair_code.txt"
+    legacy.write_text("PAIR-CODE-FIXTURE\n", encoding="utf-8")
+    legacy.chmod(0o600)
+    argv_path = tmp_path / "argv"
+    fake_python = _fake_python_executable(tmp_path)
+    launcher = tmp_path / "navigator"
+    launcher.write_text(bundle._entrypoint_text("navigator", str(fake_python)), encoding="utf-8")
+    launcher.chmod(0o755)
+
+    result = subprocess.run(
+        [str(launcher)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CYRENE_DATA_DIR": str(data_home),
+            "CYRENE_TEST_ARGV": str(argv_path),
+        },
+    )
+
+    current = data_home / "navigator" / "pair_code.txt"
+    assert result.returncode == 0, result.stderr
+    assert legacy.read_text(encoding="utf-8") == "PAIR-CODE-FIXTURE\n"
+    assert current.read_bytes() == legacy.read_bytes()
+    assert stat.S_IMODE(current.stat().st_mode) == 0o600
+    assert "--pairing-code-file\n" + str(current) in argv_path.read_text(encoding="utf-8")
+
+
+def test_exchange_launcher_uses_private_database_and_refuses_legacy_files(
+    tmp_path: Path,
+) -> None:
+    data_home = tmp_path / "data"
+    (data_home / "exchange").mkdir(parents=True)
+    argv_path = tmp_path / "argv"
+    fake_python = _fake_python_executable(tmp_path)
+    launcher = tmp_path / "exchange"
+    launcher.write_text(bundle._entrypoint_text("exchange", str(fake_python)), encoding="utf-8")
+    launcher.chmod(0o755)
+    environment = {
+        **os.environ,
+        "CYRENE_DATA_DIR": str(data_home),
+        "CYRENE_TEST_ARGV": str(argv_path),
+    }
+
+    normal = subprocess.run(
+        [str(launcher)], check=False, capture_output=True, text=True, env=environment
+    )
+    assert normal.returncode == 0, normal.stderr
+    assert "--database\n" + str(data_home / "exchange" / "exchange.sqlite3") in argv_path.read_text(
+        encoding="utf-8"
+    )
+
+    argv_path.unlink()
+    legacy_files = {
+        data_home / "exchange.sqlite3": b"database",
+        data_home / "exchange.sqlite3-wal": b"wal",
+        data_home / "exchange.sqlite3-shm": b"shm",
+    }
+    for path, content in legacy_files.items():
+        path.write_bytes(content)
+
+    refused = subprocess.run(
+        [str(launcher)], check=False, capture_output=True, text=True, env=environment
+    )
+    assert refused.returncode != 0
+    assert "explicit data migration" in refused.stderr
+    assert not argv_path.exists()
+    assert {path: path.read_bytes() for path in legacy_files} == legacy_files
 
 
 def test_echo_has_an_independent_bundle_without_joining_the_deb_service_set() -> None:

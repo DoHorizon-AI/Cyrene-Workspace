@@ -1316,7 +1316,7 @@ def test_studio_control_data_directory_is_safe_and_preserves_existing_data(
     assert 'ensure_fresh_service_directory "${STUDIO_CONTROL_DIR}"' in block
     assert 'install -d -o cyrene -g cyrene -m 750 "$path"' in build_script
     assert 'STUDIO_CONTROL_META="$(stat -c \'%u:%g:%a\' -- "${STUDIO_CONTROL_DIR}")"' in block
-    assert '"${STUDIO_CONTROL_UID}:${STUDIO_CONTROL_GID}:750"' in block
+    assert '"${CYRENE_UID}:${CYRENE_GID}:750"' in block
     assert "rm -" not in block
 
 

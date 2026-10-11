@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -263,7 +265,7 @@ def _kernel_service_account_block() -> str:
         '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/postinst"', 1
     )[0]
     start = postinst.index("# The signed Kernel unit runs as a dedicated system account.")
-    end = postinst.index("ensure_fresh_service_directory() {", start)
+    end = postinst.index('CYRENE_UID="$(id -u cyrene)"', start)
     return postinst[start:end]
 
 
@@ -303,6 +305,71 @@ def _run_kernel_service_account_block(
             "CYRENE_TEST_USERADD_LOG": str(tmp_path / "useradd.log"),
         },
     )
+
+
+def _postinst_owned_directory_function() -> str:
+    source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    postinst = source.split("cat <<'EOF' > \"${STAGE_DIR}/DEBIAN/postinst\"\n", 1)[1].split(
+        '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/postinst"', 1
+    )[0]
+    start = postinst.index("ensure_owned_directory() {")
+    end = postinst.index("\n}\n\nensure_fresh_service_directory()", start) + 2
+    return postinst[start:end]
+
+
+def test_postinst_owned_directory_validation_never_repairs_existing_state(
+    tmp_path: Path,
+) -> None:
+    function = _postinst_owned_directory_function()
+    uid = os.getuid()
+    gid = os.getgid()
+    safe = tmp_path / "safe"
+    safe.mkdir(mode=0o750)
+    safe.chmod(0o750)
+    accepted = subprocess.run(
+        [
+            "/bin/sh",
+            "-eu",
+            "-c",
+            function + '\nensure_owned_directory "$1" "$2" "$3" 750 test',
+            "test",
+            str(safe),
+            str(uid),
+            str(gid),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    wrong_owner = subprocess.run(
+        [
+            "/bin/sh",
+            "-eu",
+            "-c",
+            function + '\nensure_owned_directory "$1" 0 "$2" 750 test',
+            "test",
+            str(safe),
+            str(gid),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert wrong_owner.returncode != 0
+    assert "Refusing to repair existing test" in wrong_owner.stderr
+    metadata = safe.lstat()
+    assert metadata.st_uid == uid
+    assert stat.S_IMODE(metadata.st_mode) == 0o750
+
+    source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    assert 'ensure_owned_directory /var/lib/cyrene 0 "${CYRENE_GID}" 750' in source
+    assert '"/var/lib/cyrene/${product}"' in source
+    assert "Legacy Exchange database state exists" in source
+    assert '"${CYRENE_UID}:${CYRENE_GID}:750"' in source
+    assert "STUDIO_CONTROL_UID" not in source
+    assert "STUDIO_CONTROL_GID" not in source
 
 
 def test_postinst_provisions_kernel_service_user_idempotently(tmp_path: Path) -> None:
