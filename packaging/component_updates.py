@@ -309,6 +309,119 @@ class UpdateError(RuntimeError):
         self.maintenance_not_acquired = maintenance_not_acquired
 
 
+def _package_install_failure_diagnostic(error: BaseException) -> dict[str, Any]:
+    """Keep only a Platform install error or a code location from its cause chain."""
+
+    causes: list[BaseException] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen and len(causes) < 8:
+        seen.add(id(current))
+        causes.append(current)
+        current = current.__cause__ or current.__context__
+
+    for cause in causes:
+        diagnostic = getattr(cause, "diagnostic", None)
+        if (
+            type(cause).__name__ == "PackageRuntimeBootstrapError"
+            and type(diagnostic) is dict
+            and set(diagnostic)
+            == {
+                "code",
+                "message",
+                "remediation",
+                "returncode",
+            }
+        ):
+            code = diagnostic.get("code")
+            message = diagnostic.get("message")
+            remediation = diagnostic.get("remediation")
+            returncode = diagnostic.get("returncode")
+            if (
+                isinstance(code, str)
+                and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code)
+                and isinstance(message, str)
+                and 0 < len(message) <= 512
+                and message.isprintable()
+                and isinstance(remediation, str)
+                and 0 < len(remediation) <= 512
+                and remediation.isprintable()
+                and type(returncode) is int
+                and returncode != 0
+            ):
+                return {
+                    "platformError": {
+                        "code": code,
+                        "message": message,
+                        "remediation": remediation,
+                        "returncode": returncode,
+                    }
+                }
+
+    root_cause = causes[-1] if causes else error
+    exception_type = type(root_cause).__name__
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", exception_type) is None:
+        exception_type = "Exception"
+    allowed_files = {
+        "native_package_runtime_bootstrap.py",
+        "workload_package_runtime.py",
+        "component_updates.py",
+    }
+    bootstrap_location: str | None = None
+    source_location: str | None = None
+    for cause in reversed(causes):
+        frame = cause.__traceback__
+        while frame is not None:
+            filename = Path(frame.tb_frame.f_code.co_filename).name
+            function = frame.tb_frame.f_code.co_name
+            if (
+                filename in allowed_files
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", function) is not None
+            ):
+                location = f"{filename}:{frame.tb_lineno}:{function}"
+                if filename == "native_package_runtime_bootstrap.py":
+                    bootstrap_location = location
+                elif source_location is None:
+                    source_location = location
+            frame = frame.tb_next
+    return {
+        "exceptionType": exception_type,
+        "sourceLocation": bootstrap_location
+        or source_location
+        or "component_updates.py:package-install",
+    }
+
+
+def _package_install_failure_message(diagnostic: dict[str, Any]) -> str:
+    platform_error = diagnostic.get("platformError")
+    if isinstance(platform_error, dict):
+        return (
+            f"Platform error {platform_error['code']} (return code "
+            f"{platform_error['returncode']}): {platform_error['message']} "
+            f"Remediation: {platform_error['remediation']}"
+        )
+    return f"Bootstrap raised {diagnostic['exceptionType']} at {diagnostic['sourceLocation']}."
+
+
+def _record_package_install_failure(
+    transaction: dict[str, Any],
+    transaction_path: Path,
+    component_id: str,
+    *,
+    action: str,
+    error: BaseException,
+) -> UpdateError:
+    diagnostic = _package_install_failure_diagnostic(error)
+    transaction["packageInstallFailure"] = {"componentId": component_id, **diagnostic}
+    _atomic_json(transaction_path, transaction)
+    return UpdateError(
+        "PACKAGE_INSTALL_FAILED",
+        f"Platform package {action} did not complete for {component_id}. "
+        f"{_package_install_failure_message(diagnostic)}",
+        retryable=True,
+    )
+
+
 class _FirstCoreCandidateError(UpdateError):
     """Keep the C10 identity attached to an unchanged candidate failure."""
 
@@ -14584,12 +14697,15 @@ class ComponentUpdater:
                     runner=self.runner,
                 )
             except Exception as error:
-                raise UpdateError(
-                    "PACKAGE_INSTALL_FAILED",
-                    f"Platform package recovery did not complete for {component_id}.",
-                    retryable=True,
+                raise _record_package_install_failure(
+                    transaction,
+                    transaction_path,
+                    component_id,
+                    action="recovery",
+                    error=error,
                 ) from error
             identity = self._write_workload_package_runtime_receipt(row, staged, record)
+            transaction.pop("packageInstallFailure", None)
             installation_records[component_id] = record
             transaction.setdefault("packageIdentities", {})[component_id] = identity
             _atomic_json(transaction_path, transaction)
@@ -16215,16 +16331,19 @@ class ComponentUpdater:
                                 runner=self.runner,
                             )
                         except Exception as error:
-                            raise UpdateError(
-                                "PACKAGE_INSTALL_FAILED",
-                                f"Platform package install did not complete for {component_id}.",
-                                retryable=True,
+                            raise _record_package_install_failure(
+                                transaction,
+                                transaction_path,
+                                component_id,
+                                action="install",
+                                error=error,
                             ) from error
                         if not isinstance(record, dict):
                             raise UpdateError(
                                 "PACKAGE_RUNTIME_READBACK_REQUIRED",
                                 f"Platform install receipt is malformed for {component_id}.",
                             )
+                        transaction.pop("packageInstallFailure", None)
                         identity = self._write_workload_package_runtime_receipt(row, staged, record)
                         installation_records[component_id] = record
                         transaction.setdefault("packageIdentities", {})[component_id] = identity
