@@ -3937,7 +3937,7 @@ def test_initial_workload_hold_moves_from_missing_gen_zero_to_live_generation_on
             return {
                 "status": "MAINTENANCE_ACTIVE",
                 "maintenance_token": "m" * 48,
-                "gate_generation": 7 if generation == 0 else 8,
+                "gate_generation": 8 if generation == 0 else 9,
                 "blocker_codes": [],
             }
         if method == "EndMaintenance":
@@ -3953,6 +3953,9 @@ def test_initial_workload_hold_moves_from_missing_gen_zero_to_live_generation_on
         requires_restart=True,
         allow_uninitialized_catalog=True,
     )
+    assert transaction["expectedGateGeneration"] == 7
+    assert transaction["maintenanceGateGeneration"] == 8
+    assert transaction["maintenanceHolds"]["core-runtime-install"]["maintenanceGateGeneration"] == 8
     assert transaction["expectedCatalogGeneration"] == 0
     assert transaction["expectedActivitySources"] == []
     assert transaction["allowUninitializedActivityCatalog"] is True
@@ -3986,6 +3989,9 @@ def test_initial_workload_hold_moves_from_missing_gen_zero_to_live_generation_on
     )
 
     assert transaction["expectedCatalogGeneration"] == 1
+    assert transaction["expectedGateGeneration"] == 8
+    assert transaction["maintenanceGateGeneration"] == 9
+    assert transaction["maintenanceHolds"]["package-only"]["maintenanceGateGeneration"] == 9
     assert transaction["expectedActivitySources"] == ["cyrene-catalyst"]
     assert transaction["allowUninitializedActivityCatalog"] is False
     assert calls == [
@@ -3995,6 +4001,160 @@ def test_initial_workload_hold_moves_from_missing_gen_zero_to_live_generation_on
         ("GetUpdateReadiness", 1, False),
         ("BeginMaintenance", 1, False),
     ]
+
+
+def test_uncertain_workload_begin_replays_saved_pre_generation_and_persists_post_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "a" * 32
+    plan_digest = "sha256:" + "b" * 64
+    component_digests = {"cyrene-dataset-generation": "sha256:" + "c" * 64}
+    request_id = f"cyrene-workload-package-only-{plan_id}"
+    transaction: dict[str, Any] = {
+        "schemaVersion": 2,
+        "transactionKind": "workload-assembly.v1",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "action": "install",
+        "maintenancePhase": "package-only",
+        "targetKind": "PACKAGE_ONLY",
+        "requiresRestart": False,
+        "componentArtifactDigests": component_digests,
+        "expectedGateGeneration": 5,
+        "expectedCatalogGeneration": 1,
+        "expectedActivitySources": ["cyrene-catalyst"],
+        "maintenanceHolds": {
+            "package-only": {
+                "requestId": request_id,
+                "targetKind": "PACKAGE_ONLY",
+                "expectedGateGeneration": 5,
+                "expectedCatalogGeneration": 1,
+                "expectedActivitySources": ["cyrene-catalyst"],
+                "componentArtifactDigests": component_digests,
+                "beginMethod": "BeginMaintenance",
+                "status": "begin_pending",
+            }
+        },
+    }
+    transaction_path = updater._workload_transaction_path(transaction)
+    transaction_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
+    monkeypatch.setattr(
+        updater,
+        "_activity_catalog",
+        lambda **_kwargs: (
+            {"generation": 1, "sources": [{"source_id": "cyrene-catalyst"}]},
+            ["cyrene-catalyst"],
+        ),
+    )
+    monkeypatch.setattr(
+        updater,
+        "_readiness_for",
+        lambda *_args, **_kwargs: pytest.fail(
+            "an uncertain exact Begin must reuse saved readiness"
+        ),
+    )
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def broker_request(method: str, params: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        calls.append((method, params))
+        return {
+            "status": "MAINTENANCE_ACTIVE",
+            "maintenance_token": "m" * 48,
+            "gate_generation": 6,
+            "blocker_codes": [],
+        }
+
+    monkeypatch.setattr(updater, "_broker_request", broker_request)
+    updater._begin_workload_hold(
+        transaction,
+        transaction_path,
+        phase="package-only",
+        target_kind="PACKAGE_ONLY",
+        requires_restart=False,
+    )
+
+    assert len(calls) == 1
+    method, params = calls[0]
+    assert method == "BeginMaintenance"
+    assert params["expected_gate_generation"] == 5
+    assert params["expected_catalog_generation"] == 1
+    assert params["request_id"] == request_id
+    assert transaction["expectedGateGeneration"] == 5
+    assert transaction["maintenanceGateGeneration"] == 6
+    assert transaction["maintenanceHolds"]["package-only"]["maintenanceGateGeneration"] == 6
+    assert (
+        json.loads(transaction_path.read_text(encoding="utf-8"))["maintenanceGateGeneration"] == 6
+    )
+
+
+def test_active_workload_hold_echo_replays_exact_begin_for_live_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "d" * 32
+    plan_digest = "sha256:" + "e" * 64
+    component_digests = {"cyrene-dataset-generation": "sha256:" + "f" * 64}
+    request_id = f"cyrene-workload-package-only-{plan_id}"
+    transaction: dict[str, Any] = {
+        "schemaVersion": 2,
+        "transactionKind": "workload-assembly.v1",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "action": "install",
+        "maintenancePhase": "package-only",
+        "targetKind": "PACKAGE_ONLY",
+        "requiresRestart": False,
+        "maintenanceToken": "m" * 48,
+        "expectedGateGeneration": 5,
+        "expectedCatalogGeneration": 1,
+        "expectedActivitySources": ["cyrene-catalyst"],
+        "componentArtifactDigests": component_digests,
+        "maintenanceHolds": {
+            "package-only": {
+                "requestId": request_id,
+                "targetKind": "PACKAGE_ONLY",
+                "expectedGateGeneration": 5,
+                "expectedCatalogGeneration": 1,
+                "expectedActivitySources": ["cyrene-catalyst"],
+                "componentArtifactDigests": component_digests,
+                "beginMethod": "BeginMaintenance",
+                "status": "active",
+            }
+        },
+    }
+    transaction_path = updater._workload_transaction_path(transaction)
+    transaction_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
+    returned_generations = iter([32, 40])
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def broker_request(method: str, params: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        calls.append((method, params))
+        return {
+            "status": "MAINTENANCE_ACTIVE",
+            "maintenance_token": "m" * 48,
+            "gate_generation": next(returned_generations),
+            "blocker_codes": [],
+        }
+
+    monkeypatch.setattr(updater, "_broker_request", broker_request)
+    first = updater._workload_hold_echo(transaction)
+    second = updater._workload_hold_echo(transaction)
+
+    assert first["expected_gate_generation"] == 32
+    assert second["expected_gate_generation"] == 40
+    assert [method for method, _params in calls] == ["BeginMaintenance", "BeginMaintenance"]
+    assert all(params["request_id"] == request_id for _method, params in calls)
+    assert all(params["expected_gate_generation"] == 5 for _method, params in calls)
+    assert all(params["plan_digest"] == plan_digest for _method, params in calls)
+    assert transaction["expectedGateGeneration"] == 5
+    assert transaction["maintenanceGateGeneration"] == 40
+    persisted = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert persisted["maintenanceHolds"]["package-only"]["maintenanceGateGeneration"] == 40
 
 
 def _initial_catalyst_source_transaction(
@@ -4559,7 +4719,7 @@ def test_first_catalyst_source_uncertain_begin_replays_exact_saved_identity(
         return {
             "status": "MAINTENANCE_ACTIVE",
             "maintenance_token": "m" * 48,
-            "gate_generation": 9,
+            "gate_generation": 10,
             "blocker_codes": [],
         }
 
@@ -4578,6 +4738,8 @@ def test_first_catalyst_source_uncertain_begin_replays_exact_saved_identity(
     assert params["expected_gate_generation"] == 9
     assert params["parent_request_id"] == "first-core-bootstrap-" + "c" * 32
     assert params["source_id"] == reference["sourceId"]
+    assert transaction["expectedGateGeneration"] == 9
+    assert transaction["maintenanceGateGeneration"] == 10
 
 
 @pytest.mark.parametrize(
