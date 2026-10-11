@@ -476,6 +476,27 @@ EOF
 chmod 644 "${STAGE_DIR}/etc/cyrene/cyrene.env"
 printf '%s\n' '/etc/cyrene/cyrene.env' > "${STAGE_DIR}/DEBIAN/conffiles"
 
+cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/navigator.env"
+# Product-private pairing credentials; this file loads after shared settings.
+CYRENE_PAIR_CODE_FILE=/var/lib/cyrene/navigator/pair_code.txt
+EOF
+cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/yield.env"
+# Product-private generated artifacts; this file loads after shared settings.
+CYRENE_ARTIFACT_ROOT=/var/lib/cyrene/yield/artifacts
+EOF
+cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/exchange.env"
+# Product-private database state; this file loads after shared settings.
+CYRENE_DATA_DIR=/var/lib/cyrene/exchange
+EOF
+chmod 644 \
+    "${STAGE_DIR}/etc/cyrene/navigator.env" \
+    "${STAGE_DIR}/etc/cyrene/yield.env" \
+    "${STAGE_DIR}/etc/cyrene/exchange.env"
+printf '%s\n' \
+    '/etc/cyrene/navigator.env' \
+    '/etc/cyrene/yield.env' \
+    '/etc/cyrene/exchange.env' >> "${STAGE_DIR}/DEBIAN/conffiles"
+
 if [[ -f "${SCRIPT_DIR}/Caddyfile.template" ]]; then
     cp "${SCRIPT_DIR}/Caddyfile.template" "${STAGE_DIR}/etc/cyrene/Caddyfile.template"
     chmod 644 "${STAGE_DIR}/etc/cyrene/Caddyfile.template"
@@ -498,6 +519,7 @@ Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
 EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+EnvironmentFile=/etc/cyrene/navigator.env
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-navigator
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
@@ -528,6 +550,7 @@ WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
 EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
 EnvironmentFile=-/etc/cyrene/yield-package-runtime.env
+EnvironmentFile=/etc/cyrene/yield.env
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-yield
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
@@ -584,6 +607,7 @@ Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
 EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+EnvironmentFile=/etc/cyrene/exchange.env
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-exchange
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
@@ -768,6 +792,58 @@ ensure_owned_directory /var/lib/cyrene 0 "${CYRENE_GID}" 750 "shared Cyrene data
 for product in navigator yield reactor exchange catalyst; do
     ensure_owned_directory "/var/lib/cyrene/${product}" "${CYRENE_UID}" "${CYRENE_GID}" 750 "${product} private data directory"
 done
+
+# Preserve the existing Navigator pairing secret while moving its read path
+# into the service-owned directory. Never overwrite or repair existing data.
+migrate_navigator_pair_code() {
+    source="$1"
+    destination="$2"
+    if [ -L "$source" ]; then
+        echo "ERROR: Legacy Navigator pairing code is a symlink; refusing to follow it." >&2
+        exit 1
+    elif [ -e "$source" ] && [ ! -f "$source" ]; then
+        echo "ERROR: Legacy Navigator pairing code is not a regular file." >&2
+        exit 1
+    fi
+    if [ -L "$destination" ]; then
+        echo "ERROR: Navigator pairing code destination is a symlink." >&2
+        exit 1
+    elif [ -e "$destination" ]; then
+        if [ ! -f "$destination" ]; then
+            echo "ERROR: Navigator pairing code destination is not a regular file." >&2
+            exit 1
+        fi
+        destination_meta="$(stat -c '%u:%g:%a' -- "$destination")"
+        if [ "${destination_meta}" != "${CYRENE_UID}:${CYRENE_GID}:600" ]; then
+            echo "ERROR: Refusing to repair existing Navigator pairing code (${destination}: ${destination_meta})." >&2
+            exit 1
+        fi
+        if [ -e "$source" ] && ! cmp -s -- "$source" "$destination"; then
+            echo "ERROR: Legacy and current Navigator pairing codes differ; refusing to choose one." >&2
+            exit 1
+        fi
+        return 0
+    fi
+    if [ ! -e "$source" ]; then
+        return 0
+    fi
+    if ! temporary="$(mktemp "${source%/*}/.navigator-pair-code.XXXXXXXX")"; then
+        echo "ERROR: Could not safely stage the legacy Navigator pairing code." >&2
+        exit 1
+    fi
+    if ! install -o "${CYRENE_UID}" -g "${CYRENE_GID}" -m 600 -- "$source" "$temporary"; then
+        rm -f -- "$temporary"
+        echo "ERROR: Could not safely copy the legacy Navigator pairing code." >&2
+        exit 1
+    fi
+    if ! ln -- "$temporary" "$destination"; then
+        rm -f -- "$temporary"
+        echo "ERROR: Navigator pairing code destination changed during migration." >&2
+        exit 1
+    fi
+    rm -- "$temporary"
+}
+migrate_navigator_pair_code /var/lib/cyrene/pair_code.txt /var/lib/cyrene/navigator/pair_code.txt
 
 ensure_fresh_service_directory /var/log/cyrene
 
