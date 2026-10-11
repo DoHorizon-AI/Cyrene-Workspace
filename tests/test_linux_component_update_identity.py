@@ -184,6 +184,63 @@ def test_python_check_detects_new_outer_artifact_identity_without_version_change
     assert result["components"][0]["updateAvailable"] is True
 
 
+def test_python_activation_preserves_valid_staged_bundle_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Activation must pass the staged bare bundle ID without reformatting it."""
+
+    updater = _updater(tmp_path)
+    component_id = "cyrene-test-product"
+    component = {"componentId": component_id, "pythonBundleService": "catalyst"}
+    updater.components[component_id] = component
+    bundle_identity = "a" * 64
+    activated: list[tuple[str, str]] = []
+    fake_bundle = SimpleNamespace(
+        activate_release=lambda service, identity, **kwargs: activated.append((service, identity))
+    )
+    monkeypatch.setattr(updater, "_load_service_bundle", lambda: fake_bundle)
+    monkeypatch.setattr(updater, "_write_active_receipt", lambda item: None)
+
+    updater._activate_transaction(
+        {
+            "components": [{"componentId": component_id, "bundleIdentity": bundle_identity}],
+            "previous": [{"componentId": component_id, "bundleIdentity": None}],
+        }
+    )
+
+    assert activated == [("catalyst", bundle_identity)]
+
+
+@pytest.mark.parametrize("bundle_identity", ["sha256:" + "a" * 64, "a" * 63, "g" * 64])
+def test_python_activation_rejects_invalid_staged_bundle_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bundle_identity: str,
+) -> None:
+    updater = _updater(tmp_path)
+    component_id = "cyrene-test-product"
+    updater.components[component_id] = {
+        "componentId": component_id,
+        "pythonBundleService": "catalyst",
+    }
+    activated: list[tuple[str, str]] = []
+    fake_bundle = SimpleNamespace(
+        activate_release=lambda service, identity, **kwargs: activated.append((service, identity))
+    )
+    monkeypatch.setattr(updater, "_load_service_bundle", lambda: fake_bundle)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._activate_transaction(
+            {
+                "components": [{"componentId": component_id, "bundleIdentity": bundle_identity}],
+                "previous": [{"componentId": component_id, "bundleIdentity": None}],
+            }
+        )
+
+    assert error.value.code == "TRANSACTION_IDENTITY_UNKNOWN"
+    assert activated == []
+
+
 def _native_payload_bytes(marker: str) -> bytes:
     return f"#!/bin/sh\nprintf '%s\\n' '{marker}'\n".encode()
 
