@@ -1,5 +1,33 @@
 # ADR: Modular distribution preview / 模块化发行预览
 
+Stage75 package-runtime lifecycle finding: the official Native preview W
+`bb50ded5b01137767b81940961d06b2589d1580a`, bound to Platform source P
+`f07ee42dfb2745da248866c228bff32d02661048`, passed package installation and
+source read-back, but a real package-only apply stopped before installation
+completed. The observed `/run/cyrene-package-runtime` directory was absent
+while the Package Runtime daemon was stopped. The service owns this path as a
+systemd `RuntimeDirectory`; systemd removes it on stop unless preservation is
+configured, while the offline installer validates this trusted parent with
+the daemon stopped. The required Platform correction is to preserve this
+service's runtime directory across its stop/start lifecycle and cover that
+behavior with an isolated systemd regression. A replacement Platform release and a new
+Workspace-bound Native preview are required; this checkpoint does not claim a
+successful workload installation. Catalyst runtime, Plugin invocation,
+Client/browser, SFT, Echo, reboot recovery, and fresh-host acceptance remain
+pending until verified against that new release pair.
+
+Stage75 package-runtime 生命周期发现：官方 Native 预览版 W
+`bb50ded5b01137767b81940961d06b2589d1580a` 绑定 Platform 源码 P
+`f07ee42dfb2745da248866c228bff32d02661048`，软件包安装与源码回读通过，但一次
+真实的 package-only apply 在安装完成前停止。Package Runtime 守护进程停止时，实测
+`/run/cyrene-package-runtime` 目录不存在。该服务通过 systemd `RuntimeDirectory`
+管理此路径；若未设置保留策略，systemd 会在服务停止时移除目录，而离线安装器会在
+守护进程停止期间验证这一可信父目录。Platform 必须在服务停止/启动期间保留该运行
+目录，并用隔离的 systemd 回归测试覆盖这一行为。必须发布新的 Platform 版本，
+并为新的 Workspace source SHA 构建 Native 预览版；此检查点不表示 workload 安装
+已成功。Catalyst runtime、Plugin 调用、Client/browser、SFT、Echo、重启恢复和全新
+主机验收都须使用新发行对验证后才能标为完成。
+
 Status (Stage71 source correction): The previously published immutable Native preview W `670dcc640c7716484edacf5c0f77dd7ec93b5fea` (18 assets, bound to the previously verified Platform release P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`) remains unchanged. On Host 2238, the exact Stage70 Catalyst plan passed staging, but `BeginCoreBootstrap` was rejected with `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`; the original transaction and guest state were preserved, and runtime source activation did not begin. Platform PR #103 is merged at `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4`; its focused tests passed 61 total (50 library and 11 binary). The natural official release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) is pending publication and strict asset verification at this checkpoint. Do not retry the old W/P pair or describe installation as successful. Client/browser, Plugin invocation, SFT, Echo, reboot, and clean-host acceptance remain **PENDING / NOT_RUN**.
 
 状态（Stage71 源码修正）：此前发布的不可变 Native 预览版 W `670dcc640c7716484edacf5c0f77dd7ec93b5fea`（18 项资产，绑定此前已验证的 Platform release P `64e4b58eb1dedc5ea328c07c9b07df55d2f38590`）保持原样。Host 2238 上的 Stage70 Catalyst 精确计划已通过 staging，但 `BeginCoreBootstrap` 返回 `CORE_BOOTSTRAP_SOURCE_REF_UNTRUSTED`；原 transaction 与 guest 状态均已保留，runtime source activation 尚未开始。Platform PR #103 已正常合并至 `1e1a8d37b73d057bf63d2f57898f565e78cfdbd4`；相关定向测试共 61 项通过（library 50 项、binary 11 项）。截至本文记录时，正式 release run [38089871402](https://github.com/DoHorizon-AI/Cyrene-Platform/actions/runs/38089871402) 尚待发布和严格资产验证。不要重试旧 W/P 发行对，也不要将安装描述为成功。Client/browser、Plugin invoke、SFT、Echo、重启和全新主机验收仍为 **PENDING / NOT_RUN**。
