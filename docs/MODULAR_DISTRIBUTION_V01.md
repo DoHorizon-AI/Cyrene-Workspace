@@ -1,8 +1,8 @@
 # Modular Distribution v0.1: Ubuntu installation / Ubuntu 安装指南
 
-This preview targets Ubuntu 24.04 x86_64. The active Native release is built from Workspace W `a3bcc1a3b34c6417dc538887896de7a5358f3d6d`; Platform source P86, Plugins Official source G48, and signed Catalog generation 15 remain the pinned dependencies. The immutable releases and Native package payload are strictly verified. Live clean-host acceptance is still pending; release verification does not prove installation or runtime use. Use only the exact Native release and commands below, and do not reuse the historical W2327 Native release.
+This preview targets Ubuntu 24.04 x86_64. Workspace W `0d48ed2c5af4559225b721ec6c1283c79ab4fd15` (PR #151) and Platform P `99aa35d75397ab01746d90d6ca078fe20dda0c1e` (PR #107) have immutable, source-bound releases. Platform API release 409660341 has 52/52 assets matched, 24 indexed manifests, and 25 strict verification receipts. Native API release 409667638 has 18/18 assets matched and passed strict verification for all nine detached asset attestations without skip or trust cache. Root's consolidated source, pins, and Ubuntu 24.04 package-payload readback also passed. Fresh-host product acceptance remains PENDING. Do not use the historical W2327 or Stage78 W a3/P86 packages for this acceptance.
 
-此预览版面向 Ubuntu 24.04 x86_64。当前 Native release 基于 Workspace W `a3bcc1a3b34c6417dc538887896de7a5358f3d6d`；Platform 源码 P86、Plugins Official 源码 G48 和已签名的 Catalog generation 15 仍是固定依赖。不可变发行物与 Native 包 payload 已通过严格验证。全新主机实测验收仍待完成；发行验证不等于安装或运行验收。只使用下方列出的确切 Native release，不要复用历史 W2327 Native release。
+此预览版面向 Ubuntu 24.04 x86_64。Workspace W `0d48ed2c5af4559225b721ec6c1283c79ab4fd15`（PR #151）和 Platform P `99aa35d75397ab01746d90d6ca078fe20dda0c1e`（PR #107）均已有源码绑定的不可变 release。Platform API release 409660341 的 52/52 项资产匹配，24 个 index manifest 与 25 份严格验证记录通过。Native API release 409667638 的 18/18 项资产匹配；九个 detached asset attestation 均通过严格验证，未跳过、未使用信任缓存。Root 综合源码、pins 与 Ubuntu 24.04 包 payload 回读也已通过。全新主机产品验收仍待完成。此次验收不要使用历史 W2327 或 Stage78 W a3/P86 软件包。
 
 ## Workloads and components / Workload 与组件
 
@@ -26,42 +26,48 @@ Catalyst Plugin ID：`cyrene-tools-dataset-preparation`、`cyrene-tools-document
 
 | Item | Exact identity | Status |
 | --- | --- | --- |
-| Platform PR #106 source and release | `86ee31721113d548d0dccfa88bc7e080df9cd1f9`; [release](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-86ee31721113d548d0dccfa88bc7e080df9cd1f9), API 409542106, run 38123069265 | Immutable; all 52 assets match API IDs/digests/sizes; 24 indexed manifests and 31 subjects passed strict verification |
+| Platform | `99aa35d75397ab01746d90d6ca078fe20dda0c1e` (PR #107 merge) | [Immutable release](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e), API 409660341; run 38137876503; 52/52 assets matched; 24 indexed manifests and 25 strict verification receipts passed |
 | Plugins Official source | `48f9148e987c6e9066038db99ae0295542e32a77`; producer run 38123576893 | Five immutable packages; 80 assets and 40 attestation subjects verified |
 | Signed v2 Catalog | source `18455255cdf8b87dd8cd48ceb25e5ea411a622ad`, generation 15 | `catalog-v2-preview-18455255cdf8b87dd8cd48ceb25e5ea411a622ad`; SHA-256 `9356861a377e18d1b6ed586d7ee8316de7d7d11c5e7543269d3cbd5d456f314d`; unchanged |
-| Workspace source for Native | `a3bcc1a3b34c6417dc538887896de7a5358f3d6d` (PR #150 merge) | Exact source for official Native producer run 38133372833 |
-| Native release | [immutable release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-a3bcc1a3b34c6417dc538887896de7a5358f3d6d), API 409611808 | All 18 official asset identities/digests/sizes match the release API; strict no-skip/no-trust-cache verification passed for nine detached asset attestations |
-| Ubuntu 24.04 amd64 DEB | [Download](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/download/native-installer-preview-a3bcc1a3b34c6417dc538887896de7a5358f3d6d/cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb) | SHA-256 `690bf42e15ecb2b702272c36ec900e20e0741cb52854c89a5eb5e140b7b0a4ea`; 155,118,204 bytes; API asset 630517926 |
-| Clean-host acceptance for this release | PENDING | The release and package payload have been verified; installation, product use, browser access, Echo evaluation, and reboot recovery remain pending. A prior W2327 attempt is historical and is not evidence for this release. |
+| Workspace source for Native | `0d48ed2c5af4559225b721ec6c1283c79ab4fd15` (PR #151 merge) | Canonical source readback passed; producer run 38140478542 succeeded on the exact source |
+| Native release | [Immutable release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-0d48ed2c5af4559225b721ec6c1283c79ab4fd15), API 409667638 | 18/18 assets match API IDs/digests/sizes; strict source-bound verifier passed all nine detached attestations without skip or trust cache |
+| Ubuntu 24.04 amd64 DEB | API asset 630759450 | SHA-256 `d7d12af32b81327680dcdc94f7945218293ba4570005383b960f4d5d9b8d74c0`; 155,107,854 bytes |
+| Consolidated Root source/pin and package-payload readback | PASS | Native Root record SHA-256 `7f82b0e34e274cb145dec54bd2b5751f2c57c7ea21c970daf5e8f6b944dd2562`; canonical pins `release-pins-v1.json` SHA-256 `316e8ea06f527eba19d18a9f98a8c1e16e16db1f7cbb27a3ecc46623bdaaae25`; closure SHA-256 `bd7f43c7a2156f21e620d9d81258768b7303549c945cfd8f5d52fe0f42aaf43f` |
+| Release-bound clean-host acceptance | PENDING | Acceptance results will be recorded against Native API release 409667638 and this package digest; the retained guest2246 hold is not reported as recovered |
 
 | 项目 | 精确身份 | 状态 |
 | --- | --- | --- |
-| Platform PR #106 源码与 release | `86ee31721113d548d0dccfa88bc7e080df9cd1f9`；[release](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-86ee31721113d548d0dccfa88bc7e080df9cd1f9)，API 409542106、run 38123069265 | 不可变；52 项资产的 API ID/摘要/大小均匹配；24 个 index manifest 与 31 个 subject 严格验证通过 |
+| Platform | `99aa35d75397ab01746d90d6ca078fe20dda0c1e`（PR #107 merge） | [不可变 release](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e)，API 409660341；run 38137876503；52/52 项资产匹配；24 个 index manifest 与 25 份严格验证记录通过 |
 | Plugins Official 源码 | `48f9148e987c6e9066038db99ae0295542e32a77`；producer run 38123576893 | 五个不可变包；80 项资产与 40 个 attestation subject 已验证 |
 | 已签名 v2 Catalog | 源码 `18455255cdf8b87dd8cd48ceb25e5ea411a622ad`，generation 15 | `catalog-v2-preview-18455255cdf8b87dd8cd48ceb25e5ea411a622ad`；SHA-256 `9356861a377e18d1b6ed586d7ee8316de7d7d11c5e7543269d3cbd5d456f314d`；未变化 |
-| Native 构建 Workspace 源码 | `a3bcc1a3b34c6417dc538887896de7a5358f3d6d`（PR #150 merge） | 官方 Native producer run 38133372833 的精确源码 |
-| Native release | [不可变 release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-a3bcc1a3b34c6417dc538887896de7a5358f3d6d)，API 409611808 | 18 项官方资产身份、摘要、大小与 release API 匹配；9 个 detached asset attestation 严格验证通过，未跳过、未使用信任缓存 |
-| Ubuntu 24.04 amd64 DEB | [下载](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/download/native-installer-preview-a3bcc1a3b34c6417dc538887896de7a5358f3d6d/cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb) | SHA-256 `690bf42e15ecb2b702272c36ec900e20e0741cb52854c89a5eb5e140b7b0a4ea`；155,118,204 字节；API asset 630517926 |
-| 此 release 的全新主机验收 | 待完成 | release 和包 payload 已验证；实际安装、产品使用、浏览器访问、Echo 评测和重启恢复仍待完成。此前 W2327 尝试仅为历史记录，不作为此 release 的验收证据。 |
+| Native 构建 Workspace 源码 | `0d48ed2c5af4559225b721ec6c1283c79ab4fd15`（PR #151 merge） | canonical 源码回读通过；producer run 38140478542 使用该精确源码并成功 |
+| Native release | [不可变 release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-0d48ed2c5af4559225b721ec6c1283c79ab4fd15)，API 409667638 | 18/18 项资产与 API 的 ID/摘要/大小匹配；九个 detached asset attestation 严格验证通过，未跳过、未使用信任缓存 |
+| Ubuntu 24.04 amd64 DEB | API asset 630759450 | SHA-256 `d7d12af32b81327680dcdc94f7945218293ba4570005383b960f4d5d9b8d74c0`；155,107,854 字节 |
+| Root 综合源码/pins 与包 payload 回读 | 通过 | Native Root 记录 SHA-256 `7f82b0e34e274cb145dec54bd2b5751f2c57c7ea21c970daf5e8f6b944dd2562`；canonical pins `release-pins-v1.json` SHA-256 `316e8ea06f527eba19d18a9f98a8c1e16e16db1f7cbb27a3ecc46623bdaaae25`；closure SHA-256 `bd7f43c7a2156f21e620d9d81258768b7303549c945cfd8f5d52fe0f42aaf43f` |
+| 绑定当前 release 的全新主机验收 | 待完成 | 验收结果将绑定 Native API release 409667638 与此包摘要；不把 guest2246 保留的旧 hold 报告为已恢复 |
 
 Earlier package-only apply attempts exposed two separate Platform issues. First, `/run/cyrene-package-runtime` disappeared when the daemon stopped; PR #105 added `RuntimeDirectoryPreserve=yes`. A later attempt reached `/run/cyrene-package-runtime/control.sock`, created for `cyrene:cyrene` (UID 999, GID 988) with mode `0660`, but bootstrap's generic `mode & 0022` check rejected it. PR #106 permits only that expected socket identity and mode; the existing rejection remains for other checked paths and objects, and a live/listening socket is still rejected. No guest-side `chmod` was used. These older immutable Native/Platform pairs remain historical evidence only.
 
 此前的 package-only apply 暴露了两个独立 Platform 问题。首先，daemon 停止时 `/run/cyrene-package-runtime` 消失；PR #105 增加 `RuntimeDirectoryPreserve=yes`。后续尝试到达服务创建的 `/run/cyrene-package-runtime/control.sock`，该 socket 属于 `cyrene:cyrene`（UID 999、GID 988），权限为 `0660`，但 bootstrap 通用 `mode & 0022` 检查将其拒绝。PR #106 只允许该预期 socket 身份与权限；其他受检查路径和对象仍保留原拒绝规则，活动/监听 socket 仍会被拒绝。修复未使用 guest 侧 `chmod`。旧的不可变 Native/Platform 发行对仍仅作为历史证据。
 
-## Install the verified Native release / 安装已验证的 Native release
+The retired P86/W a3 package-only apply on guest2246 later failed with `MAINTENANCE_ADMISSION_DENIED` and left an active Standard PackageOnly hold. Platform PR #107 adds a durable source heartbeat for the empty reconciliation case; Workspace PR #151 fixes the related pre-Begin generation reuse and same-held-plan replay paths. These source changes do not migrate or clear guest2246's existing hold, and the public workload protocol has no supported cancel/recovery operation for that transaction. Preserve its disk, journal, and hold; do not issue a direct Broker RPC, clear state, or start a second plan there. Guest2246 is not claimed recovered; fresh-host acceptance is tracked separately.
 
-Use an Ubuntu 24.04 amd64 host with sudo, curl, `sha256sum`, `stat`, and GitHub CLI 2.102.0 or newer. The commands below download the exact immutable DEB and its detached attestation, check the published size and SHA-256, verify the signer workflow and source commit, then install the package. Stop if any check fails.
+guest2246 上已退役的 P86/W a3 package-only apply 随后以 `MAINTENANCE_ADMISSION_DENIED` 失败，并留下 active Standard PackageOnly hold。Platform PR #107 为空 reconciliation 情况增加持久化 source heartbeat；Workspace PR #151 修复相关的 Begin 前 generation 重用和同一 hold 下的 plan replay 路径。这些源码修正不会迁移或清除 guest2246 已有的 hold；公开 workload protocol 也没有该事务受支持的 cancel/recovery 操作。保留其磁盘、journal 与 hold；不要直接调用 Broker RPC、清除状态或在那里启动第二个 plan。不能声称 guest2246 已恢复；全新主机验收单独记录。
 
-使用 Ubuntu 24.04 amd64 主机，并准备 sudo、curl、`sha256sum`、`stat` 和 GitHub CLI 2.102.0 或更高版本。以下命令下载确切不可变 DEB 及 detached attestation，核对已发布的文件大小和 SHA-256，再验证签名 workflow 与 source commit，最后安装软件包。任何检查失败都应停止。
+## Install the current Native release / 安装当前 Native release
+
+Use an Ubuntu 24.04 amd64 host with sudo, curl, `sha256sum`, `stat`, and GitHub CLI 2.102.0 or newer. This exact immutable release has passed release API, asset-byte, source-binding, and detached-attestation checks. The command installs the verified package; fresh-host workload and restart acceptance are still pending. Do not substitute a historical release.
+
+使用 Ubuntu 24.04 amd64 主机，并准备 sudo、curl、`sha256sum`、`stat` 和 GitHub CLI 2.102.0 或更高版本。此确切不可变 release 已通过 release API、资产字节、源码绑定和 detached attestation 检查。以下命令安装已验证的软件包；全新主机上的 workload 与重启验收仍待完成。不要替换为历史 release。
 
 ```bash
 set -euo pipefail
 WORKSPACE_REPOSITORY='DoHorizon-AI/Cyrene-Workspace'
-NATIVE_TAG='native-installer-preview-a3bcc1a3b34c6417dc538887896de7a5358f3d6d'
-NATIVE_SOURCE_SHA='a3bcc1a3b34c6417dc538887896de7a5358f3d6d'
+NATIVE_TAG='native-installer-preview-0d48ed2c5af4559225b721ec6c1283c79ab4fd15'
+NATIVE_SOURCE_SHA='0d48ed2c5af4559225b721ec6c1283c79ab4fd15'
 NATIVE_DEB='cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb'
-NATIVE_DEB_SHA256='690bf42e15ecb2b702272c36ec900e20e0741cb52854c89a5eb5e140b7b0a4ea'
-NATIVE_DEB_SIZE_BYTES='155118204'
+NATIVE_DEB_SHA256='d7d12af32b81327680dcdc94f7945218293ba4570005383b960f4d5d9b8d74c0'
+NATIVE_DEB_SIZE_BYTES='155107854'
 NATIVE_RELEASE_URL="https://github.com/$WORKSPACE_REPOSITORY/releases/download/$NATIVE_TAG"
 RELEASE_DIR="$(mktemp -d)"
 cd "$RELEASE_DIR"
@@ -79,9 +85,9 @@ gh attestation verify "$NATIVE_DEB" \
 sudo apt install "./$NATIVE_DEB"
 ```
 
-After the verified DEB is installed, install Catalyst with the signed preview Catalog:
+After the exact W0d48-bound DEB is published, verified, and installed, install Catalyst with the signed preview Catalog:
 
-验证并安装 DEB 后，使用签名 preview Catalog 安装 Catalyst：
+安装确切的 W0d48 DEB 后，使用签名 preview Catalog 安装 Catalyst：
 
 ```bash
 sudo cyrene workload install catalyst --channel preview --yes
