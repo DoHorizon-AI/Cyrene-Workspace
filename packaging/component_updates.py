@@ -5255,6 +5255,7 @@ class ComponentUpdater:
             or not _valid_digest(receipt.get("digest"))
             or not _valid_digest(receipt.get("manifestDigest"))
             or not _valid_digest(receipt.get("manifestAssetDigest"))
+            or not _valid_digest(receipt.get("packageManifestDigest"))
             or not _valid_digest(receipt.get("packageArtifactDigest"))
             or not _valid_digest(receipt.get("archiveDigest"))
             or not _valid_digest(receipt.get("descriptorDigest"))
@@ -5280,7 +5281,7 @@ class ComponentUpdater:
             or verification.get("archive_digest") != receipt.get("archiveDigest")
             or verification.get("artifact_digest") != receipt.get("packageArtifactDigest")
             or verification.get("descriptor_digest") != receipt.get("descriptorDigest")
-            or verification.get("manifest_digest") != receipt.get("manifestDigest")
+            or verification.get("manifest_digest") != receipt.get("packageManifestDigest")
             or verification.get("dependency_lock_digest") != receipt.get("dependencyLockDigest")
         ):
             raise UpdateError(
@@ -5298,6 +5299,7 @@ class ComponentUpdater:
                 "targetId",
                 "manifestDigest",
                 "manifestAssetDigest",
+                "packageManifestDigest",
                 "digest",
                 "indexIdentity",
                 "publisherIdentity",
@@ -6703,6 +6705,7 @@ class ComponentUpdater:
                                 for field in (
                                     "packageArtifactDigest",
                                     "archiveDigest",
+                                    "packageManifestDigest",
                                     "descriptorDigest",
                                     "dependencyLockDigest",
                                 )
@@ -14359,6 +14362,7 @@ class ComponentUpdater:
             or installation.get("archive_digest") != component.get("digest")
             or installation.get("artifact_digest") != staged.get("packageArtifactDigest")
             or not _valid_digest(staged.get("packageArtifactDigest"))
+            or not _valid_digest(staged.get("packageManifestDigest"))
             or not _valid_digest(staged.get("descriptorDigest"))
             or not _valid_digest(staged.get("dependencyLockDigest"))
             or not _valid_digest(component.get("manifestDigest"))
@@ -14375,7 +14379,7 @@ class ComponentUpdater:
             or verification.get("artifact_digest") != staged["packageArtifactDigest"]
             or verification.get("archive_digest") != component["digest"]
             or verification.get("descriptor_digest") != staged["descriptorDigest"]
-            or verification.get("manifest_digest") != component["manifestDigest"]
+            or verification.get("manifest_digest") != staged["packageManifestDigest"]
             or verification.get("dependency_lock_digest") != staged["dependencyLockDigest"]
         ):
             raise UpdateError(
@@ -14392,6 +14396,7 @@ class ComponentUpdater:
             "targetId": component["targetId"],
             "manifestDigest": component["manifestDigest"],
             "manifestAssetDigest": component["manifestAssetDigest"],
+            "packageManifestDigest": staged["packageManifestDigest"],
             "digest": component["digest"],
             "indexIdentity": component["indexIdentity"],
             "publisherIdentity": component["publisherIdentity"],
@@ -14844,10 +14849,13 @@ class ComponentUpdater:
                 continue
             try:
                 candidate = helper.candidate_from_workload_rows(row, staged)
+                receipt_staged = dict(staged)
+                if receipt_staged.get("packageManifestDigest") is None:
+                    receipt_staged["packageManifestDigest"] = candidate.manifest_digest
                 request_id = _workload_package_install_request_id(transaction["planId"], candidate)
                 record = helper.install_workload_package(
                     row,
-                    staged,
+                    receipt_staged,
                     request_id=request_id,
                     maintenance=maintenance,
                     runner=self.runner,
@@ -14860,7 +14868,7 @@ class ComponentUpdater:
                     action="recovery",
                     error=error,
                 ) from error
-            identity = self._write_workload_package_runtime_receipt(row, staged, record)
+            identity = self._write_workload_package_runtime_receipt(row, receipt_staged, record)
             transaction.pop("packageInstallFailure", None)
             installation_records[component_id] = record
             transaction.setdefault("packageIdentities", {})[component_id] = identity
@@ -20455,7 +20463,7 @@ class ComponentUpdater:
                     for field in ("releasePath", "archivePath")
                 )
                 or not isinstance(receipt.get("pointerIdentity"), str)
-                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", receipt["pointerIdentity"])
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,255}", receipt["pointerIdentity"])
                 is None
             ):
                 raise UpdateError(

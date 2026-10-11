@@ -221,8 +221,9 @@ def _hint(record: dict[str, Any], *, component_id: str = "cyrene-tools-plugin-a"
         "version": record["package_version"],
         "releaseId": "plugin-release-immutable-abc123",
         "manifestUri": "https://example.invalid/releases/plugin/manifest.json",
-        "manifestDigest": verification["manifest_digest"],
+        "manifestDigest": _digest("outer component release manifest"),
         "manifestAssetDigest": _digest("release-manifest-asset"),
+        "packageManifestDigest": verification["manifest_digest"],
         "digest": record["archive_digest"],
         "targetId": "linux-u24-plugin",
         "indexIdentity": {"source": "signed-release-index"},
@@ -233,6 +234,36 @@ def _hint(record: dict[str, Any], *, component_id: str = "cyrene-tools-plugin-a"
         "descriptorDigest": verification["descriptor_digest"],
         "dependencyLockDigest": verification["dependency_lock_digest"],
     }
+
+
+def test_installation_hint_keeps_outer_and_inner_manifest_digests_distinct() -> None:
+    record = _installation_record()
+    hint = _hint(record)
+
+    assert hint["manifestDigest"] != hint["packageManifestDigest"]
+    identity = runtime._validate_installation_record_identity_for_hint(record, hint)
+    assert identity["manifestDigest"] == hint["manifestDigest"]
+    assert identity["packageManifestDigest"] == record["verification"]["manifest_digest"]
+
+    tampered_hint = {**hint, "packageManifestDigest": _digest("tampered package manifest")}
+    with pytest.raises(
+        runtime.WorkloadPackageRuntimeError,
+        match="Local plugin receipt differs from authenticated Package Runtime",
+    ):
+        runtime._validate_installation_record_identity_for_hint(record, tampered_hint)
+
+    tampered_record = {
+        **record,
+        "verification": {
+            **record["verification"],
+            "manifest_digest": _digest("tampered installed manifest"),
+        },
+    }
+    with pytest.raises(
+        runtime.WorkloadPackageRuntimeError,
+        match="Local plugin receipt differs from authenticated Package Runtime",
+    ):
+        runtime._validate_installation_record_identity_for_hint(tampered_record, hint)
 
 
 def _maintenance(
@@ -1231,6 +1262,8 @@ def test_inventory_returns_full_record_and_all_owner_binding_readback(
         }
 
     monkeypatch.setattr(runtime, "run_package_binding_operation", sdk_read)
+    hint = _hint(record)
+    assert hint["manifestDigest"] != hint["packageManifestDigest"]
     inventory = runtime.read_workload_package_inventory(
         selected_rows=[row],
         source_principals=principals,
@@ -1238,16 +1271,34 @@ def test_inventory_returns_full_record_and_all_owner_binding_readback(
         activity_catalog_path=tmp_path / "catalog.json",
         policy_path=tmp_path / "policy.json",
         token_directory=tmp_path,
-        installation_hints={row["componentId"]: _hint(record)},
+        installation_hints={row["componentId"]: hint},
     )
 
     assert inventory["installationRecords"][row["componentId"]] == record
     assert inventory["components"][row["componentId"]]["installationId"] == installation_id
+    assert inventory["components"][row["componentId"]]["manifestDigest"] == hint["manifestDigest"]
+    assert (
+        inventory["components"][row["componentId"]]["packageManifestDigest"]
+        == hint["packageManifestDigest"]
+    )
     assert len(inventory["sourceBindings"]) == 2
     active_owner = next(
         item for item in inventory["sourceBindings"] if item["sourceId"] == product_id
     )
     assert active_owner["activeInstallationId"] == installation_id
+
+    tampered_hint = {**hint, "packageManifestDigest": _digest("tampered package manifest")}
+    rejected_inventory = runtime.read_workload_package_inventory(
+        selected_rows=[row],
+        source_principals=principals,
+        sdk_python=Path("/opt/cyrene/operator/venv/bin/python"),
+        activity_catalog_path=tmp_path / "catalog.json",
+        policy_path=tmp_path / "policy.json",
+        token_directory=tmp_path,
+        installation_hints={row["componentId"]: tampered_hint},
+    )
+    assert row["componentId"] not in rejected_inventory["components"]
+    assert row["componentId"] not in rejected_inventory["installationRecords"]
 
 
 def test_sdk_callback_bridge_requires_journal_ack_before_completion(

@@ -1938,6 +1938,67 @@ def test_legacy_source_update_intent_persists_success_history_map(
     assert transaction["sourceUpdateIntent"] == transaction["sourceUpdateIntents"][phase]
 
 
+def test_native_workload_receipt_accepts_signed_semver_build_metadata_pointer(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    component_id = "cyrene-client-workspace-control"
+    source_commit = "b3c3" + "a" * 36
+    version = f"0.0.1+sha.{source_commit}"
+    release_id = f"preview-{component_id}-{source_commit}"
+    artifact_digest = "sha256:" + "6" * 64
+    manifest_asset_digest = "sha256:" + "7" * 64
+    manifest = {
+        "schemaVersion": 2,
+        "releaseId": release_id,
+        "componentId": component_id,
+        "version": version,
+        "artifact": {"kind": "native-binary", "sha256": artifact_digest},
+    }
+    manifest["manifestDigest"] = updates._digest_json(manifest, "manifestDigest")
+    item = {
+        "componentId": component_id,
+        "version": version,
+        "releaseIdentity": manifest["manifestDigest"],
+        "manifestDigest": manifest["manifestDigest"],
+        "artifactDigest": artifact_digest,
+        "bundleIdentity": None,
+        "manifest": manifest,
+        "releaseId": release_id,
+        "targetId": "linux-ubuntu-24.04-x86_64-node-24",
+        "manifestAssetDigest": manifest_asset_digest,
+        "manifestUri": "https://example.invalid/component-release-manifest-v2.json",
+        "releaseTag": release_id,
+        "indexIdentity": {"assetName": "component-release-index-v1.json"},
+        "publisherIdentity": {"id": "official-client-workspace-control"},
+        "attestationRef": None,
+        "releasePath": str(tmp_path / "components" / component_id / "releases" / version),
+        "archivePath": str(tmp_path / "staged" / "control.tar.gz"),
+        "pointerIdentity": f"{version}--{manifest['manifestDigest'].removeprefix('sha256:')}",
+    }
+
+    updater._write_release_receipt(item)
+    updater._write_active_receipt(item)
+
+    receipt = updater._read_active_receipt(component_id)
+    assert receipt is not None
+    assert receipt["schemaVersion"] == 2
+    assert receipt["pointerIdentity"] == item["pointerIdentity"]
+    assert receipt["manifestDigest"] == manifest["manifestDigest"]
+
+    receipt_path = (
+        updater._installed_component_directory(component_id)
+        / "releases"
+        / f"{manifest['manifestDigest'].removeprefix('sha256:')}.json"
+    )
+    stored = json.loads(receipt_path.read_text(encoding="utf-8"))
+    stored["pointerIdentity"] = "../outside-release"
+    receipt_path.write_text(json.dumps(stored), encoding="utf-8")
+    with pytest.raises(updates.UpdateError) as error:
+        updater._read_active_receipt(component_id)
+    assert error.value.code == "INVALID_INSTALLED_RELEASE"
+
+
 def test_workload_receipt_upgrade_persists_exact_raw_release_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6867,6 +6928,207 @@ def test_workload_plugin_stage_projects_all_signed_resolution_identity_fields(
         capability=staged["capabilityId"],
     )
     assert staged["packageManifestDigest"] != staged["manifestDigest"]
+
+
+def test_package_runtime_receipt_preserves_outer_and_inner_manifest_digests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outer_manifest_digest = (
+        "sha256:21f44b5da8222ba5ff929fd29821ef07b4777f77ba8527f3deb9834b1250a433"
+    )
+    package_manifest_digest = (
+        "sha256:90e40e910e973d90271ca264e2c902ba3d17a5dd198f27d99b645b6df2ebb52d"
+    )
+    archive_digest = "sha256:b3add17e494989c4ad40b768221c2a0090a97b243b3200c880b09a4db57c9172"
+    artifact_digest = "sha256:9c098f2c79e61d46dfe48f56e0faf0638c429b585042030f0cb4c5974fc6d439"
+    descriptor_digest = "sha256:ee2f9f39478d475f5067b771c98b752b612587c15b207202a954602b04a5775d"
+    dependency_lock_digest = (
+        "sha256:cf427a6a1ed737f889ec9b2cd16957c7a1aff2648e03032e1d5904172d266a0e"
+    )
+    component_id = "cyrene-tools-dataset-generation"
+    package_id = "cyrene.tools.dataset-generation"
+    component = {
+        "componentId": component_id,
+        "version": "0.2.2",
+        "releaseId": "preview-cyrene-tools-dataset-generation-0.2.2",
+        "manifestUri": "https://example.invalid/component-release-manifest-v2.json",
+        "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+        "manifestDigest": outer_manifest_digest,
+        "manifestAssetDigest": "sha256:" + "a" * 64,
+        "digest": archive_digest,
+        "indexIdentity": {"releaseTag": "preview-cyrene-tools-dataset-generation-0.2.2"},
+        "publisherIdentity": {"repository": "DoHorizon-AI/Cyrene-Plugins-Official"},
+        "attestationRef": {"sourceCommit": "b" * 40},
+        "packageId": package_id,
+    }
+    staged = {
+        "packageArtifactDigest": artifact_digest,
+        "packageManifestDigest": package_manifest_digest,
+        "descriptorDigest": descriptor_digest,
+        "dependencyLockDigest": dependency_lock_digest,
+    }
+    installation = {
+        "record_version": 1,
+        "installation_id": "installation-2bce88e7f136106316265ab0668a78ca",
+        "package_id": package_id,
+        "package_version": "0.2.2",
+        "archive_digest": archive_digest,
+        "artifact_digest": artifact_digest,
+        "capabilities": [package_id],
+        "state": "INSTALLED",
+        "verification": {
+            "verifier": "workspace-offline-package-verifier-v1",
+            "verified_at_unix_ms": 100,
+            "archive_digest": archive_digest,
+            "artifact_digest": artifact_digest,
+            "descriptor_digest": descriptor_digest,
+            "manifest_digest": package_manifest_digest,
+            "dependency_lock_digest": dependency_lock_digest,
+        },
+        "dependencies": {
+            "preparer": "cyrene-plugin-python-preparer",
+            "prepared_at_unix_ms": 101,
+            "lock_digest": dependency_lock_digest,
+            "runtime_digest": "sha256:" + "c" * 64,
+            "runtime_executable": "bin/python",
+        },
+        "installed_at_unix_ms": 102,
+    }
+    updater = _empty_updater(tmp_path)
+    monkeypatch.setattr(updates, "_verify_private_directory", lambda _path: None)
+
+    receipt = updater._write_workload_package_runtime_receipt(component, staged, installation)
+    hint = updater._read_workload_package_runtime_receipt(component_id)
+
+    assert receipt["manifestDigest"] == outer_manifest_digest
+    assert receipt["packageManifestDigest"] == package_manifest_digest
+    assert hint is not None
+    assert hint["manifestDigest"] == outer_manifest_digest
+    assert hint["packageManifestDigest"] == package_manifest_digest
+
+    helper = updater._load_workload_package_runtime()
+    identity = helper._validate_installation_record_identity_for_hint(installation, hint)
+    assert identity["manifestDigest"] == outer_manifest_digest
+    assert identity["packageManifestDigest"] == package_manifest_digest
+
+    with pytest.raises(
+        updates.UpdateError,
+        match="Platform verification record differs from the verified descriptor and manifest",
+    ):
+        mismatched_stage = {**staged, "packageManifestDigest": outer_manifest_digest}
+        updater._write_workload_package_runtime_receipt(component, mismatched_stage, installation)
+
+    tampered_installation = {
+        **installation,
+        "verification": {
+            **installation["verification"],
+            "manifest_digest": outer_manifest_digest,
+        },
+    }
+    with pytest.raises(
+        helper.WorkloadPackageRuntimeError,
+        match="Local plugin receipt differs from authenticated Package Runtime",
+    ):
+        helper._validate_installation_record_identity_for_hint(tampered_installation, hint)
+
+    receipt_path = updater._installed_component_directory(component_id) / "package-runtime.json"
+    tampered_receipt = dict(receipt)
+    tampered_receipt["packageManifestDigest"] = outer_manifest_digest
+    receipt_path.write_text(json.dumps(tampered_receipt), encoding="utf-8")
+    with pytest.raises(
+        updates.UpdateError,
+        match="Package Runtime installation hint differs from its stored receipt",
+    ):
+        updater._read_workload_package_runtime_receipt(component_id)
+
+
+def test_legacy_package_stage_recovery_rebuilds_inner_manifest_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(updates, "_verify_private_directory", lambda _path: None)
+    updater, plan_id, _plan_digest, resolution, _candidates, plan_directory = (
+        _cached_plugin_stage_fixture(
+            tmp_path, monkeypatch, component_ids=("cyrene-tools-dataset-preparation",)
+        )
+    )
+    selected = resolution["selectedComponents"][0]
+    stored = json.loads((plan_directory / f"{plan_id}.json").read_text(encoding="utf-8"))
+    staged = dict(stored["stagedComponents"][0])
+    expected_package_manifest_digest = staged.pop("packageManifestDigest")
+    component_id = selected["componentId"]
+    transaction_path = tmp_path / "recovery-transaction.json"
+    transaction: dict[str, Any] = {
+        "maintenancePhase": "package-only",
+        "maintenanceToken": "active-hold-token",
+        "workloadId": "catalyst",
+        "planId": plan_id,
+        "selectedPluginRows": [selected],
+        "stagedComponents": [staged],
+        "packageInstallations": {},
+        "sourcePolicy": selected["sourcePolicy"],
+    }
+    helper = updater._load_workload_package_runtime()
+    observed_stages: list[dict[str, Any]] = []
+
+    def install_from_verified_stage(
+        row: dict[str, Any], verified_staged: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        observed_stages.append(dict(verified_staged))
+        candidate = helper.candidate_from_workload_rows(row, verified_staged)
+        return {
+            "record_version": 1,
+            "installation_id": "installation-" + "d" * 32,
+            "package_id": candidate.package_id,
+            "package_version": candidate.package_version,
+            "artifact_digest": candidate.artifact_digest,
+            "archive_digest": candidate.archive_digest,
+            "capabilities": [candidate.capability],
+            "state": "INSTALLED",
+            "verification": {
+                "artifact_digest": candidate.artifact_digest,
+                "archive_digest": candidate.archive_digest,
+                "descriptor_digest": candidate.descriptor_digest,
+                "manifest_digest": candidate.manifest_digest,
+                "dependency_lock_digest": candidate.dependency_lock_digest,
+            },
+            "installed_at_unix_ms": 102,
+        }
+
+    monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: helper)
+    monkeypatch.setattr(helper, "install_workload_package", install_from_verified_stage)
+    monkeypatch.setattr(updater, "_workload_inventory_before_daemon_stop", lambda *_args: None)
+    monkeypatch.setattr(updater, "_workload_hold_echo", lambda _transaction: {})
+    monkeypatch.setattr(updater, "_update_workload_source_policy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_end_workload_hold", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_workload_runtime_daemon", lambda *_args, **_kwargs: None)
+
+    updater._resume_workload_package_install_phase(transaction, transaction_path)
+
+    assert "packageManifestDigest" not in staged
+    assert len(observed_stages) == 1
+    assert observed_stages[0]["packageManifestDigest"] == expected_package_manifest_digest
+    candidate = helper.candidate_from_workload_rows(selected, staged)
+    assert candidate.manifest_digest == expected_package_manifest_digest
+    receipt = updater._read_workload_package_runtime_receipt(component_id)
+    assert receipt is not None
+    assert receipt["manifestDigest"] == selected["manifestDigest"]
+    assert receipt["packageManifestDigest"] == expected_package_manifest_digest
+
+    wrong_inner_digest = {**staged, "packageManifestDigest": "sha256:" + "e" * 64}
+    with pytest.raises(
+        helper.WorkloadPackageRuntimeError,
+        match="Staged Plugin manifest digest differs from the verified archive",
+    ):
+        helper.candidate_from_workload_rows(selected, wrong_inner_digest)
+
+    archive_path = Path(staged["stagedIdentity"]["assetPaths"]["archive"])
+    archive_path.write_bytes(archive_path.read_bytes() + b"tampered")
+    bootstrap = helper._bootstrap_module()
+    with pytest.raises(
+        bootstrap.PackageRuntimeBootstrapError,
+        match="Verified Package Runtime asset changed after attestation",
+    ):
+        helper.candidate_from_workload_rows(selected, staged)
 
 
 @pytest.mark.parametrize("conflicting_wheels", [False, True])
