@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import zipfile
 from argparse import Namespace
@@ -473,13 +474,80 @@ def test_legacy_product_launchers_keep_their_existing_runtime_arguments() -> Non
     assert all("service-prepare" not in launcher for launcher in launchers.values())
     assert '"$BUNDLE_DIR/serve-web.py"' in launchers["navigator"]
     assert '--pairing-code-file "$PAIRING_CODE_FILE"' in launchers["navigator"]
+    assert (
+        'PAIRING_CODE_FILE="${CYRENE_PAIR_CODE_FILE:-$DATA_HOME/pair_code.txt}"'
+        in launchers["navigator"]
+    )
     assert '--state-directory "${CYRENE_DATA_DIR:-/var/lib/cyrene}/yield"' in launchers["yield"]
     assert (
         f"{bundle.PRIVATE_PYTHON_EXECUTABLE} -s -m cyrene_reactor_product.cli control"
         in launchers["reactor"]
     )
     assert "cyrene_exchange_product.cli" in launchers["exchange"]
+    assert (
+        '--database "${CYRENE_DATA_DIR:-/var/lib/cyrene}/exchange.sqlite3"' in launchers["exchange"]
+    )
+    assert "Legacy Exchange database state exists" not in launchers["exchange"]
     assert "cyrene_catalyst.cli serve" in launchers["catalyst"]
+    assert "$DATA_HOME/artifacts" in bundle._execution_runtime_prelude(
+        _execution_runtime_descriptor(), service="yield"
+    )
+
+
+def test_published_v1_launcher_bytes_remain_compatible() -> None:
+    fixture_path = WORKSPACE_ROOT / "tests/fixtures/native-installer-v1-launcher-sha256.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert fixture["sourceRef"] == (
+        "Cyrene-Workspace/develop@2327cf9221a23721b64017f326b5ba47cf2bc3fd"
+    )
+
+    launchers = {
+        "exchange": bundle._entrypoint_text("exchange", bundle.PRIVATE_PYTHON_EXECUTABLE),
+        "navigator": bundle._entrypoint_text("navigator", bundle.PRIVATE_PYTHON_EXECUTABLE),
+        "yieldExecutionRuntime": bundle._entrypoint_text(
+            "yield",
+            bundle.PRIVATE_PYTHON_EXECUTABLE,
+            execution_runtime=_execution_runtime_descriptor(),
+        ),
+    }
+    assert {
+        name: hashlib.sha256(content.encode("utf-8")).hexdigest()
+        for name, content in launchers.items()
+    } == fixture["launchers"]
+
+
+def _fake_python_executable(tmp_path: Path) -> Path:
+    executable = tmp_path / "fake-python"
+    executable.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$CYRENE_TEST_ARGV"\n',
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    return executable
+
+
+def test_exchange_launcher_uses_configured_private_data_directory(tmp_path: Path) -> None:
+    data_home = tmp_path / "data"
+    exchange_home = data_home / "exchange"
+    exchange_home.mkdir(parents=True)
+    argv_path = tmp_path / "argv"
+    fake_python = _fake_python_executable(tmp_path)
+    launcher = tmp_path / "exchange"
+    launcher.write_text(bundle._entrypoint_text("exchange", str(fake_python)), encoding="utf-8")
+    launcher.chmod(0o755)
+    environment = {
+        **os.environ,
+        "CYRENE_DATA_DIR": str(exchange_home),
+        "CYRENE_TEST_ARGV": str(argv_path),
+    }
+
+    normal = subprocess.run(
+        [str(launcher)], check=False, capture_output=True, text=True, env=environment
+    )
+    assert normal.returncode == 0, normal.stderr
+    assert "--database\n" + str(exchange_home / "exchange.sqlite3") in argv_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_echo_has_an_independent_bundle_without_joining_the_deb_service_set() -> None:

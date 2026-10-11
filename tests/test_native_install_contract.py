@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import stat
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -263,7 +265,7 @@ def _kernel_service_account_block() -> str:
         '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/postinst"', 1
     )[0]
     start = postinst.index("# The signed Kernel unit runs as a dedicated system account.")
-    end = postinst.index("ensure_fresh_service_directory() {", start)
+    end = postinst.index('CYRENE_UID="$(id -u cyrene)"', start)
     return postinst[start:end]
 
 
@@ -303,6 +305,235 @@ def _run_kernel_service_account_block(
             "CYRENE_TEST_USERADD_LOG": str(tmp_path / "useradd.log"),
         },
     )
+
+
+def _postinst_owned_directory_function() -> str:
+    source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    postinst = source.split("cat <<'EOF' > \"${STAGE_DIR}/DEBIAN/postinst\"\n", 1)[1].split(
+        '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/postinst"', 1
+    )[0]
+    start = postinst.index("ensure_owned_directory() {")
+    end = postinst.index("\n}\n\nensure_fresh_service_directory()", start) + 2
+    return postinst[start:end]
+
+
+def _postinst_navigator_pair_code_migration_function() -> str:
+    source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    postinst = source.split("cat <<'EOF' > \"${STAGE_DIR}/DEBIAN/postinst\"\n", 1)[1].split(
+        '\nEOF\nchmod 755 "${STAGE_DIR}/DEBIAN/postinst"', 1
+    )[0]
+    start = postinst.index("migrate_navigator_pair_code() {")
+    end = postinst.index("\nmigrate_navigator_pair_code /var/lib/cyrene/", start)
+    return postinst[start:end]
+
+
+def _systemd_unit(source: str, service: str) -> str:
+    marker = f"cat <<'EOF' > \"${{STAGE_DIR}}/lib/systemd/system/cyrene-{service}.service\"\n"
+    start = source.index(marker) + len(marker)
+    end = source.index("\nEOF\n", start)
+    return source[start:end]
+
+
+def _staged_environment_file(source: str, name: str) -> str:
+    marker = f"cat <<'EOF' > \"${{STAGE_DIR}}/etc/cyrene/{name}.env\"\n"
+    start = source.index(marker) + len(marker)
+    end = source.index("\nEOF\n", start)
+    return source[start:end]
+
+
+def test_postinst_owned_directory_validation_never_repairs_existing_state(
+    tmp_path: Path,
+) -> None:
+    function = _postinst_owned_directory_function()
+    uid = os.getuid()
+    gid = os.getgid()
+    safe = tmp_path / "safe"
+    safe.mkdir(mode=0o750)
+    safe.chmod(0o750)
+    accepted = subprocess.run(
+        [
+            "/bin/sh",
+            "-eu",
+            "-c",
+            function + '\nensure_owned_directory "$1" "$2" "$3" 750 test',
+            "test",
+            str(safe),
+            str(uid),
+            str(gid),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    wrong_owner = subprocess.run(
+        [
+            "/bin/sh",
+            "-eu",
+            "-c",
+            function + '\nensure_owned_directory "$1" 0 "$2" 750 test',
+            "test",
+            str(safe),
+            str(gid),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert wrong_owner.returncode != 0
+    assert "Refusing to repair existing test" in wrong_owner.stderr
+    metadata = safe.lstat()
+    assert metadata.st_uid == uid
+    assert stat.S_IMODE(metadata.st_mode) == 0o750
+
+    source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    assert 'ensure_owned_directory /var/lib/cyrene 0 "${CYRENE_GID}" 750' in source
+    assert '"/var/lib/cyrene/${product}"' in source
+    assert "Legacy Exchange database state exists" in source
+    assert '"${CYRENE_UID}:${CYRENE_GID}:750"' in source
+    assert "STUDIO_CONTROL_UID" not in source
+    assert "STUDIO_CONTROL_GID" not in source
+
+
+def test_product_units_load_private_path_defaults_after_shared_environment() -> None:
+    source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    defaults = {
+        "navigator": ("CYRENE_PAIR_CODE_FILE", "/var/lib/cyrene/navigator/pair_code.txt"),
+        "yield": ("CYRENE_ARTIFACT_ROOT", "/var/lib/cyrene/yield/artifacts"),
+        "exchange": ("CYRENE_DATA_DIR", "/var/lib/cyrene/exchange"),
+    }
+    shared = _staged_environment_file(source, "cyrene")
+
+    for service, (variable, expected) in defaults.items():
+        unit = _systemd_unit(source, service)
+        unit_lines = unit.splitlines()
+        service_environment = f"/etc/cyrene/{service}.env"
+        environment_files = [
+            line.removeprefix("EnvironmentFile=").removeprefix("-")
+            for line in unit_lines
+            if line.startswith("EnvironmentFile=")
+        ]
+        assert environment_files[-1] == service_environment
+        assert not any(line.startswith(f"Environment={variable}=") for line in unit_lines)
+
+        # systemd applies Environment= first, then EnvironmentFile values in
+        # file order; later files therefore supply the effective private path.
+        effective: dict[str, str] = {}
+        for line in unit_lines:
+            if line.startswith("Environment="):
+                key, value = line.removeprefix("Environment=").split("=", 1)
+                effective[key] = value
+        files = {
+            "/etc/cyrene/cyrene.env": shared,
+            service_environment: _staged_environment_file(source, service),
+        }
+        for path in environment_files:
+            for entry in files.get(path, "").splitlines():
+                if entry and not entry.startswith("#"):
+                    key, value = entry.split("=", 1)
+                    effective[key] = value
+        assert effective[variable] == expected
+
+    for service in SERVICES:
+        unit = _systemd_unit(source, service.removeprefix("cyrene-"))
+        assert not any(line == "StateDirectory=cyrene" for line in unit.splitlines())
+
+
+def test_navigator_pair_code_migration_copies_atomically_and_preserves_source(
+    tmp_path: Path,
+) -> None:
+    function = _postinst_navigator_pair_code_migration_function()
+    shared_root = tmp_path / "cyrene"
+    navigator_dir = shared_root / "navigator"
+    navigator_dir.mkdir(parents=True, mode=0o750)
+    legacy = shared_root / "pair_code.txt"
+    legacy.write_text("PAIR-CODE-FIXTURE\n", encoding="utf-8")
+    legacy.chmod(0o600)
+    destination = navigator_dir / "pair_code.txt"
+    uid, gid = os.getuid(), os.getgid()
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-eu",
+            "-c",
+            function + '\nmigrate_navigator_pair_code "$1" "$2"',
+            "test",
+            str(legacy),
+            str(destination),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CYRENE_UID": str(uid), "CYRENE_GID": str(gid)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert legacy.read_text(encoding="utf-8") == "PAIR-CODE-FIXTURE\n"
+    assert destination.read_bytes() == legacy.read_bytes()
+    assert (destination.stat().st_uid, destination.stat().st_gid) == (uid, gid)
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert not list(shared_root.glob(".navigator-pair-code.*"))
+    assert 'mktemp "${source%/*}/.navigator-pair-code.XXXXXXXX"' in function
+
+
+def test_navigator_pair_code_migration_refuses_to_replace_conflicting_state(
+    tmp_path: Path,
+) -> None:
+    function = _postinst_navigator_pair_code_migration_function()
+    shared_root = tmp_path / "cyrene"
+    navigator_dir = shared_root / "navigator"
+    navigator_dir.mkdir(parents=True, mode=0o750)
+    legacy = shared_root / "pair_code.txt"
+    legacy.write_text("legacy code\n", encoding="utf-8")
+    destination = navigator_dir / "pair_code.txt"
+    destination.write_text("current code\n", encoding="utf-8")
+    destination.chmod(0o600)
+    uid, gid = os.getuid(), os.getgid()
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-eu",
+            "-c",
+            function + '\nmigrate_navigator_pair_code "$1" "$2"',
+            "test",
+            str(legacy),
+            str(destination),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CYRENE_UID": str(uid), "CYRENE_GID": str(gid)},
+    )
+
+    assert result.returncode != 0
+    assert "differ; refusing to choose one" in result.stderr
+    assert legacy.read_text(encoding="utf-8") == "legacy code\n"
+    assert destination.read_text(encoding="utf-8") == "current code\n"
+
+
+def test_postinst_refuses_existing_exchange_database_without_modifying_it(
+    tmp_path: Path,
+) -> None:
+    source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
+    start = source.index("for legacy_exchange_file in /var/lib/cyrene/exchange.sqlite3")
+    end = source.index("\ndone", start) + len("\ndone")
+    check = source[start:end].replace("/var/lib/cyrene", str(tmp_path))
+    paths = {
+        tmp_path / "exchange.sqlite3": b"database",
+        tmp_path / "exchange.sqlite3-wal": b"wal",
+        tmp_path / "exchange.sqlite3-shm": b"shm",
+    }
+    for path, content in paths.items():
+        path.write_bytes(content)
+
+    result = subprocess.run(
+        ["/bin/sh", "-eu", "-c", check], check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode != 0
+    assert "explicit data migration" in result.stderr
+    assert {path: path.read_bytes() for path in paths} == paths
 
 
 def test_postinst_provisions_kernel_service_user_idempotently(tmp_path: Path) -> None:

@@ -476,6 +476,27 @@ EOF
 chmod 644 "${STAGE_DIR}/etc/cyrene/cyrene.env"
 printf '%s\n' '/etc/cyrene/cyrene.env' > "${STAGE_DIR}/DEBIAN/conffiles"
 
+cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/navigator.env"
+# Product-private pairing credentials; this file loads after shared settings.
+CYRENE_PAIR_CODE_FILE=/var/lib/cyrene/navigator/pair_code.txt
+EOF
+cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/yield.env"
+# Product-private generated artifacts; this file loads after shared settings.
+CYRENE_ARTIFACT_ROOT=/var/lib/cyrene/yield/artifacts
+EOF
+cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/exchange.env"
+# Product-private database state; this file loads after shared settings.
+CYRENE_DATA_DIR=/var/lib/cyrene/exchange
+EOF
+chmod 644 \
+    "${STAGE_DIR}/etc/cyrene/navigator.env" \
+    "${STAGE_DIR}/etc/cyrene/yield.env" \
+    "${STAGE_DIR}/etc/cyrene/exchange.env"
+printf '%s\n' \
+    '/etc/cyrene/navigator.env' \
+    '/etc/cyrene/yield.env' \
+    '/etc/cyrene/exchange.env' >> "${STAGE_DIR}/DEBIAN/conffiles"
+
 if [[ -f "${SCRIPT_DIR}/Caddyfile.template" ]]; then
     cp "${SCRIPT_DIR}/Caddyfile.template" "${STAGE_DIR}/etc/cyrene/Caddyfile.template"
     chmod 644 "${STAGE_DIR}/etc/cyrene/Caddyfile.template"
@@ -498,6 +519,7 @@ Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
 EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+EnvironmentFile=/etc/cyrene/navigator.env
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-navigator
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
@@ -528,6 +550,7 @@ WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
 EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
 EnvironmentFile=-/etc/cyrene/yield-package-runtime.env
+EnvironmentFile=/etc/cyrene/yield.env
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-yield
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
@@ -584,6 +607,7 @@ Group=cyrene
 WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
 EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+EnvironmentFile=/etc/cyrene/exchange.env
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-exchange
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
@@ -688,6 +712,50 @@ if [ "${KERNEL_SERVICE_UID}" = "0" ]; then
     exit 1
 fi
 
+CYRENE_UID="$(id -u cyrene)"
+CYRENE_GID="$(getent group cyrene | cut -d: -f3)"
+case "${CYRENE_UID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene account has no valid numeric uid." >&2
+        exit 1
+        ;;
+esac
+case "${CYRENE_GID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene group has no valid numeric gid." >&2
+        exit 1
+        ;;
+esac
+if [ "${CYRENE_UID}" = "0" ] || [ "${CYRENE_GID}" = "0" ]; then
+    echo "ERROR: Product data cannot be owned by root." >&2
+    exit 1
+fi
+
+# Keep the shared traversal root root-owned so cy-package-runtime can validate
+# its trusted parent chain. Product processes receive write access only to
+# their own child directories. Existing directories are checked, never repaired.
+ensure_owned_directory() {
+    path="$1"
+    expected_uid="$2"
+    expected_gid="$3"
+    expected_mode="$4"
+    label="$5"
+    if [ -L "$path" ]; then
+        echo "ERROR: ${label} is a symlink; refusing to follow existing runtime state (${path})." >&2
+        exit 1
+    elif [ ! -e "$path" ]; then
+        install -d -o "${expected_uid}" -g "${expected_gid}" -m "${expected_mode}" "$path"
+    elif [ ! -d "$path" ]; then
+        echo "ERROR: ${label} exists but is not a directory (${path})." >&2
+        exit 1
+    fi
+    metadata="$(stat -c '%u:%g:%a' -- "$path")"
+    if [ "${metadata}" != "${expected_uid}:${expected_gid}:${expected_mode}" ]; then
+        echo "ERROR: Refusing to repair existing ${label} (${path}: ${metadata})." >&2
+        exit 1
+    fi
+}
+
 ensure_fresh_service_directory() {
     path="$1"
     if [ -L "$path" ]; then
@@ -700,7 +768,83 @@ ensure_fresh_service_directory() {
         exit 1
     fi
 }
-ensure_fresh_service_directory /var/lib/cyrene
+
+# The old Exchange default database lived directly in the shared root. Do not
+# hide it by silently switching to the new private product directory.
+if [ -L /var/lib/cyrene ]; then
+    echo "ERROR: /var/lib/cyrene is a symlink; refusing to inspect legacy Product state." >&2
+    exit 1
+elif [ -e /var/lib/cyrene ] && [ ! -d /var/lib/cyrene ]; then
+    echo "ERROR: /var/lib/cyrene exists but is not a directory." >&2
+    exit 1
+fi
+for legacy_exchange_file in /var/lib/cyrene/exchange.sqlite3 /var/lib/cyrene/exchange.sqlite3-wal /var/lib/cyrene/exchange.sqlite3-shm; do
+    if [ -e "${legacy_exchange_file}" ] || [ -L "${legacy_exchange_file}" ]; then
+        echo "ERROR: Legacy Exchange database state exists at ${legacy_exchange_file}; refusing installation without an explicit data migration." >&2
+        exit 1
+    fi
+done
+
+# Preview releases used to make the shared root service-owned. Refuse that
+# unsafe legacy state without changing it; operators must migrate it explicitly.
+ensure_owned_directory /var/lib/cyrene 0 "${CYRENE_GID}" 750 "shared Cyrene data root"
+
+for product in navigator yield reactor exchange catalyst; do
+    ensure_owned_directory "/var/lib/cyrene/${product}" "${CYRENE_UID}" "${CYRENE_GID}" 750 "${product} private data directory"
+done
+
+# Preserve the existing Navigator pairing secret while moving its read path
+# into the service-owned directory. Never overwrite or repair existing data.
+migrate_navigator_pair_code() {
+    source="$1"
+    destination="$2"
+    if [ -L "$source" ]; then
+        echo "ERROR: Legacy Navigator pairing code is a symlink; refusing to follow it." >&2
+        exit 1
+    elif [ -e "$source" ] && [ ! -f "$source" ]; then
+        echo "ERROR: Legacy Navigator pairing code is not a regular file." >&2
+        exit 1
+    fi
+    if [ -L "$destination" ]; then
+        echo "ERROR: Navigator pairing code destination is a symlink." >&2
+        exit 1
+    elif [ -e "$destination" ]; then
+        if [ ! -f "$destination" ]; then
+            echo "ERROR: Navigator pairing code destination is not a regular file." >&2
+            exit 1
+        fi
+        destination_meta="$(stat -c '%u:%g:%a' -- "$destination")"
+        if [ "${destination_meta}" != "${CYRENE_UID}:${CYRENE_GID}:600" ]; then
+            echo "ERROR: Refusing to repair existing Navigator pairing code (${destination}: ${destination_meta})." >&2
+            exit 1
+        fi
+        if [ -e "$source" ] && ! cmp -s -- "$source" "$destination"; then
+            echo "ERROR: Legacy and current Navigator pairing codes differ; refusing to choose one." >&2
+            exit 1
+        fi
+        return 0
+    fi
+    if [ ! -e "$source" ]; then
+        return 0
+    fi
+    if ! temporary="$(mktemp "${source%/*}/.navigator-pair-code.XXXXXXXX")"; then
+        echo "ERROR: Could not safely stage the legacy Navigator pairing code." >&2
+        exit 1
+    fi
+    if ! install -o "${CYRENE_UID}" -g "${CYRENE_GID}" -m 600 -- "$source" "$temporary"; then
+        rm -f -- "$temporary"
+        echo "ERROR: Could not safely copy the legacy Navigator pairing code." >&2
+        exit 1
+    fi
+    if ! ln -- "$temporary" "$destination"; then
+        rm -f -- "$temporary"
+        echo "ERROR: Navigator pairing code destination changed during migration." >&2
+        exit 1
+    fi
+    rm -- "$temporary"
+}
+migrate_navigator_pair_code /var/lib/cyrene/pair_code.txt /var/lib/cyrene/navigator/pair_code.txt
+
 ensure_fresh_service_directory /var/log/cyrene
 
 # Studio Control owns user-visible workload state. Create only a missing
@@ -708,26 +852,8 @@ ensure_fresh_service_directory /var/log/cyrene
 # closed before any service can consume it.
 STUDIO_CONTROL_DIR=/var/lib/cyrene/studio-control
 ensure_fresh_service_directory "${STUDIO_CONTROL_DIR}"
-STUDIO_CONTROL_UID="$(id -u cyrene)"
-STUDIO_CONTROL_GID="$(getent group cyrene | cut -d: -f3)"
-case "${STUDIO_CONTROL_UID}" in
-    ''|*[!0-9]*)
-        echo "ERROR: cyrene account or primary group has no valid numeric identity." >&2
-        exit 1
-        ;;
-esac
-case "${STUDIO_CONTROL_GID}" in
-    ''|*[!0-9]*)
-        echo "ERROR: cyrene account or primary group has no valid numeric identity." >&2
-        exit 1
-        ;;
-esac
-if [ "${STUDIO_CONTROL_UID}" = "0" ] || [ "${STUDIO_CONTROL_GID}" = "0" ]; then
-    echo "ERROR: Studio Control data cannot be owned by root." >&2
-    exit 1
-fi
 STUDIO_CONTROL_META="$(stat -c '%u:%g:%a' -- "${STUDIO_CONTROL_DIR}")"
-if [ "${STUDIO_CONTROL_META}" != "${STUDIO_CONTROL_UID}:${STUDIO_CONTROL_GID}:750" ]; then
+if [ "${STUDIO_CONTROL_META}" != "${CYRENE_UID}:${CYRENE_GID}:750" ]; then
     echo "ERROR: Refusing to repair existing Studio Control data directory (${STUDIO_CONTROL_DIR}: ${STUDIO_CONTROL_META})." >&2
     exit 1
 fi
