@@ -1048,6 +1048,46 @@ def _workload_candidate(tmp_path: Path) -> bootstrap.WorkloadPackageCandidate:
     )
 
 
+def _workload_installation_record(
+    candidate: bootstrap.WorkloadPackageCandidate,
+    *,
+    runtime_executable: Any = "bin/python",
+) -> dict[str, Any]:
+    installation_id = (
+        "installation-"
+        + hashlib.sha256(
+            f"{candidate.package_id}\0{candidate.package_version}\0{candidate.artifact_digest}".encode()
+        ).hexdigest()[:32]
+    )
+    return {
+        "record_version": 1,
+        "installation_id": installation_id,
+        "package_id": candidate.package_id,
+        "package_version": candidate.package_version,
+        "artifact_digest": candidate.artifact_digest,
+        "archive_digest": candidate.archive_digest,
+        "capabilities": [candidate.capability],
+        "state": "INSTALLED",
+        "verification": {
+            "verifier": "package-runtime-v1",
+            "verified_at_unix_ms": 10,
+            "artifact_digest": candidate.artifact_digest,
+            "archive_digest": candidate.archive_digest,
+            "descriptor_digest": candidate.descriptor_digest,
+            "manifest_digest": candidate.manifest_digest,
+            "dependency_lock_digest": candidate.dependency_lock_digest,
+        },
+        "dependencies": {
+            "preparer": "cyrene-plugin-python-preparer",
+            "prepared_at_unix_ms": 11,
+            "lock_digest": candidate.dependency_lock_digest,
+            "runtime_digest": _digest(b"runtime"),
+            "runtime_executable": runtime_executable,
+        },
+        "installed_at_unix_ms": 12,
+    }
+
+
 def _workload_maintenance(candidate: bootstrap.WorkloadPackageCandidate) -> dict[str, Any]:
     request_id = "cyrene-workload-plan-" + "a" * 32
     return {
@@ -1060,6 +1100,44 @@ def _workload_maintenance(candidate: bootstrap.WorkloadPackageCandidate) -> dict
         "expected_gate_generation": 17,
         "expected_catalog_generation": 9,
     }
+
+
+@pytest.mark.parametrize("runtime_executable", [None, "bin/python", "lib/python3.12/bin/python"])
+def test_workload_install_receipt_accepts_optional_safe_relative_runtime_executable(
+    tmp_path: Path, runtime_executable: str | None
+) -> None:
+    candidate = _workload_candidate(tmp_path)
+    record = _workload_installation_record(candidate, runtime_executable=runtime_executable)
+
+    assert bootstrap.validate_workload_installation_record(candidate, record) == record
+
+
+@pytest.mark.parametrize(
+    "runtime_executable",
+    [
+        "/opt/cyrene/python",
+        "",
+        ".",
+        "./bin/python",
+        "bin/../python",
+        "../python",
+        "bin//python",
+        "bin/python\x00",
+        7,
+        ["bin", "python"],
+    ],
+)
+def test_workload_install_receipt_rejects_unsafe_runtime_executable(
+    tmp_path: Path, runtime_executable: Any
+) -> None:
+    candidate = _workload_candidate(tmp_path)
+    record = _workload_installation_record(candidate, runtime_executable=runtime_executable)
+
+    with pytest.raises(
+        bootstrap.PackageRuntimeBootstrapError,
+        match="receipt differs from signed bytes",
+    ):
+        bootstrap.validate_workload_installation_record(candidate, record)
 
 
 def test_workload_install_request_binds_catalog_component_not_dotted_package(
@@ -1211,39 +1289,7 @@ def test_workload_install_receipt_preserves_distinct_artifact_and_archive_digest
         descriptor_path=descriptor_path,
         archive_path=archive_path,
     )
-    installation_id = (
-        "installation-"
-        + hashlib.sha256(
-            f"{candidate.package_id}\0{candidate.package_version}\0{candidate.artifact_digest}".encode()
-        ).hexdigest()[:32]
-    )
-    installation = {
-        "record_version": 1,
-        "installation_id": installation_id,
-        "package_id": candidate.package_id,
-        "package_version": candidate.package_version,
-        "artifact_digest": candidate.artifact_digest,
-        "archive_digest": candidate.archive_digest,
-        "capabilities": [candidate.capability],
-        "state": "INSTALLED",
-        "verification": {
-            "verifier": "package-runtime-v1",
-            "verified_at_unix_ms": 10,
-            "artifact_digest": candidate.artifact_digest,
-            "archive_digest": candidate.archive_digest,
-            "descriptor_digest": candidate.descriptor_digest,
-            "manifest_digest": candidate.manifest_digest,
-            "dependency_lock_digest": candidate.dependency_lock_digest,
-        },
-        "dependencies": {
-            "preparer": "cyrene-plugin-python-preparer",
-            "prepared_at_unix_ms": 11,
-            "lock_digest": candidate.dependency_lock_digest,
-            "runtime_digest": _digest(b"runtime"),
-            "runtime_executable": "/var/lib/cyrene/package-runtime/runtimes/python/bin/python",
-        },
-        "installed_at_unix_ms": 12,
-    }
+    installation = _workload_installation_record(candidate)
     result = {
         "transaction_id": maintenance["transaction_id"],
         "target_kind": "PACKAGE_ONLY",
