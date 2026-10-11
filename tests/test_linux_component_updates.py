@@ -4125,6 +4125,80 @@ def _active_initial_catalyst_hold(
     return hold
 
 
+def test_initial_source_activity_generation_projection_writes_and_reuses_catalog_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    transaction["firstCoreBootstrapResult"]["catalogGeneration"] = 1
+    hold = _active_initial_catalyst_hold(transaction)
+    activity_environment = tmp_path / "runtime-activity-sources.env"
+    monkeypatch.setattr(updates, "DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT", activity_environment)
+    real_fstat = os.fstat
+    monkeypatch.setattr(updates.os, "fchown", lambda *_args: None)
+
+    def root_owned_fstat(descriptor: int) -> SimpleNamespace:
+        actual = real_fstat(descriptor)
+        return SimpleNamespace(
+            st_mode=actual.st_mode,
+            st_uid=0,
+            st_gid=0,
+            st_nlink=actual.st_nlink,
+            st_dev=actual.st_dev,
+            st_ino=actual.st_ino,
+            st_size=actual.st_size,
+        )
+
+    monkeypatch.setattr(updates.os, "fstat", root_owned_fstat)
+
+    updater._project_initial_source_activity_generation(transaction, hold)
+
+    expected = b"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION=1\n"
+    assert activity_environment.read_bytes() == expected
+    assert stat.S_IMODE(activity_environment.stat().st_mode) == 0o644
+    first_inode = activity_environment.stat().st_ino
+
+    # Reapplying the same saved hold must leave the already projected file intact.
+    updater._project_initial_source_activity_generation(transaction, hold)
+
+    assert activity_environment.read_bytes() == expected
+    assert activity_environment.stat().st_ino == first_inode
+
+    activity_environment.write_bytes(b"CYRENE_RUNTIME_ACTIVITY_CATALOG_GENERATION=2\n")
+    with pytest.raises(updates.UpdateError) as error:
+        updater._project_initial_source_activity_generation(transaction, hold)
+
+    assert error.value.code == "PRODUCT_ENVIRONMENT_UNKNOWN"
+
+
+@pytest.mark.parametrize(
+    ("transaction_generation", "hold_generation"),
+    [(2, 1), (1, 2), (True, 1)],
+)
+def test_initial_source_activity_generation_rejects_unmatched_hold_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transaction_generation: int | bool,
+    hold_generation: int,
+) -> None:
+    case = _initial_catalyst_source_transaction(tmp_path)
+    updater = case["updater"]
+    transaction = case["transaction"]
+    transaction["firstCoreBootstrapResult"]["catalogGeneration"] = 1
+    hold = _active_initial_catalyst_hold(transaction)
+    transaction["expectedCatalogGeneration"] = transaction_generation
+    hold["expectedCatalogGeneration"] = hold_generation
+    activity_environment = tmp_path / "runtime-activity-sources.env"
+    monkeypatch.setattr(updates, "DEFAULT_PACKAGE_ACTIVITY_ENVIRONMENT", activity_environment)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._project_initial_source_activity_generation(transaction, hold)
+
+    assert error.value.code == "CATALOG_GENERATION_MISMATCH"
+    assert not activity_environment.exists()
+
+
 def test_first_catalyst_source_end_pending_replays_exact_end_and_skips_phase(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
