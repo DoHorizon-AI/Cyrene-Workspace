@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from itertools import pairwise
 from pathlib import Path
@@ -34,6 +36,28 @@ def _digest(label: str) -> str:
 
 def _raw_digest(label: str) -> str:
     return _digest(label).removeprefix("sha256:")
+
+
+def _package_archive(
+    *, package_id: str, version: str, capability: str, manifest_bytes: bytes | None = None
+) -> tuple[bytes, bytes]:
+    if manifest_bytes is None:
+        manifest_bytes = json.dumps(
+            {
+                "schemaVersion": 1,
+                "id": package_id,
+                "version": version,
+                "capabilities": [capability],
+                "runtime": {"entrypoint": "plugins:entrypoint"},
+            },
+            ensure_ascii=False,
+            separators=(",", ": "),
+        ).encode("utf-8")
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("plugin.manifest.json", manifest_bytes)
+        archive.writestr("plugin.py", b"def entrypoint(): pass\n")
+    return stream.getvalue(), manifest_bytes
 
 
 def _canonical(value: Any) -> bytes:
@@ -189,6 +213,110 @@ def _maintenance(
         "expected_gate_generation": 9,
         "expected_catalog_generation": catalog_generation,
     }
+
+
+def _workload_candidate_rows(
+    tmp_path: Path, *, include_package_manifest_digest: bool = True
+) -> tuple[dict[str, Any], dict[str, Any], str, str, str]:
+    component_id = "cyrene-tools-dataset-generation"
+    package_id = "cyrene.tools.dataset-generation"
+    version = "0.2.1"
+    capability = "dataset.generation.v1"
+    archive_bytes, manifest_bytes = _package_archive(
+        package_id=package_id, version=version, capability=capability
+    )
+    archive_path = tmp_path / "archive.zip"
+    descriptor_path = tmp_path / "descriptor.json"
+    archive_path.write_bytes(archive_bytes)
+    descriptor_path.write_text("{}", encoding="utf-8")
+    outer_manifest_digest = _digest("outer component release manifest")
+    package_manifest_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+    aggregate_digest = _digest("package aggregate")
+    archive_digest = "sha256:" + hashlib.sha256(archive_bytes).hexdigest()
+    selected = {
+        "componentId": component_id,
+        "artifactKind": "plugin-package",
+        "packageId": package_id,
+        "version": version,
+        "capabilityId": capability,
+        "bindingId": "dataset-generation-catalyst",
+        "sourcePolicy": _source_policy(),
+        "manifestDigest": outer_manifest_digest,
+    }
+    staged = {
+        "componentId": component_id,
+        "artifactKind": "plugin-package",
+        "packageId": package_id,
+        "version": version,
+        "capabilityId": capability,
+        "bindingId": selected["bindingId"],
+        "sourcePolicy": selected["sourcePolicy"],
+        "manifestDigest": outer_manifest_digest,
+        "digest": archive_digest,
+        "packageArtifactDigest": aggregate_digest,
+        "archiveDigest": archive_digest,
+        "descriptorDigest": _digest("descriptor bytes"),
+        "dependencyLockDigest": _digest("dependency lock bytes"),
+        "stagedIdentity": {
+            "planId": "plan-" + "a" * 32,
+            "planDigest": _digest("parent-plan"),
+            "assetPaths": {"descriptor": str(descriptor_path), "archive": str(archive_path)},
+        },
+    }
+    if include_package_manifest_digest:
+        staged["packageManifestDigest"] = package_manifest_digest
+    return selected, staged, package_manifest_digest, outer_manifest_digest, aggregate_digest
+
+
+def test_workload_candidate_uses_inner_manifest_digest_and_rebuilds_legacy_stage(
+    tmp_path: Path,
+) -> None:
+    selected, staged, package_digest, outer_digest, aggregate_digest = _workload_candidate_rows(
+        tmp_path
+    )
+    assert package_digest != outer_digest
+
+    candidate = runtime.candidate_from_workload_rows(selected, staged)
+    assert candidate.manifest_digest == package_digest
+    assert staged["manifestDigest"] == selected["manifestDigest"] == outer_digest
+    assert candidate.artifact_digest == aggregate_digest
+    assert candidate.archive_digest == staged["archiveDigest"]
+
+    # A pre-fix staged journal has only the outer release digest. Rebuilding the
+    # candidate from its verified archive recovers the same identity for retry.
+    legacy_stage = dict(staged)
+    legacy_stage.pop("packageManifestDigest")
+    recovered = runtime.candidate_from_workload_rows(selected, legacy_stage)
+    assert recovered == candidate
+    hold = _maintenance(component_id=selected["componentId"], artifact_digest=aggregate_digest)
+    runtime._validate_phase_identity(
+        legacy_stage,
+        "cyrene-wpkg-recovery-test",
+        hold,
+        selected["componentId"],
+        aggregate_digest,
+    )
+
+
+def test_workload_candidate_rejects_package_manifest_or_archive_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    selected, staged, _package_digest, _outer_digest, _aggregate_digest = _workload_candidate_rows(
+        tmp_path
+    )
+    staged["packageManifestDigest"] = _digest("wrong inner manifest")
+    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="manifest digest differs"):
+        runtime.candidate_from_workload_rows(selected, staged)
+
+    staged.pop("packageManifestDigest")
+    staged["archiveDigest"] = _digest("wrong archive")
+    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="digest differs"):
+        runtime.candidate_from_workload_rows(selected, staged)
+
+    staged["archiveDigest"] = staged["digest"]
+    staged["manifestDigest"] = _digest("wrong outer release manifest")
+    with pytest.raises(runtime.WorkloadPackageRuntimeError, match="metadata differ"):
+        runtime.candidate_from_workload_rows(selected, staged)
 
 
 def test_source_update_registers_product_with_empty_initial_catalog() -> None:

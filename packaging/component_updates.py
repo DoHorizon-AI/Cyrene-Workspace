@@ -517,6 +517,42 @@ def _valid_digest(value: Any) -> bool:
     return isinstance(value, str) and DIGEST_PATTERN.fullmatch(value) is not None
 
 
+def _workload_package_install_request_id(plan_id: str, candidate: Any) -> str:
+    """Bind one stable Platform request key to the plan and full package identity."""
+
+    identity_fields = (
+        "component_id",
+        "package_id",
+        "package_version",
+        "capability",
+        "interface_version",
+        "artifact_digest",
+        "archive_digest",
+        "descriptor_digest",
+        "manifest_digest",
+        "dependency_lock_digest",
+    )
+    if (
+        not isinstance(plan_id, str)
+        or PLAN_ID_PATTERN.fullmatch(plan_id) is None
+        or any(not isinstance(getattr(candidate, field, None), str) for field in identity_fields)
+        or any(
+            not _valid_digest(getattr(candidate, field, None))
+            for field in (
+                "artifact_digest",
+                "archive_digest",
+                "descriptor_digest",
+                "manifest_digest",
+                "dependency_lock_digest",
+            )
+        )
+    ):
+        raise UpdateError("INVALID_STAGE", "Workload package candidate identity is incomplete.")
+    material = {field: getattr(candidate, field) for field in identity_fields}
+    identity_digest = hashlib.sha256(canonical_jcs(material)).hexdigest()[:24]
+    return f"cyrene-wpkg-{plan_id.removeprefix('plan-')}-{identity_digest}"
+
+
 def _trusted_contract_lock(value: Any) -> bool:
     if not isinstance(value, dict) or set(value) != {"repository", "commit", "path", "sha256"}:
         return False
@@ -5306,6 +5342,7 @@ class ComponentUpdater:
             ) from error
         required = (
             "candidate_from_workload_rows",
+            "package_manifest_digest",
             "install_workload_package",
             "uninstall_workload_package",
             "build_workload_source_update",
@@ -7411,6 +7448,25 @@ class ComponentUpdater:
         descriptor = self._validate_workload_package_descriptor(
             payloads["descriptor"], candidate, artifact, payload_root
         )
+        package_runtime = self._load_workload_package_runtime()
+        try:
+            package_manifest_digest = package_runtime.package_manifest_digest(
+                payloads["archive"],
+                package_id=artifact.get("packageId"),
+                version=candidate.manifest.get("version"),
+                capability=artifact.get("capabilityId"),
+            )
+        except Exception as error:
+            raise UpdateError(
+                "INVALID_STAGE", "Cached Plugin manifest cannot be derived from its archive."
+            ) from error
+        if (
+            cached.get("packageManifestDigest") is not None
+            and cached.get("packageManifestDigest") != package_manifest_digest
+        ):
+            raise UpdateError(
+                "INVALID_STAGE", f"Cached Plugin manifest digest differs for {component_id}."
+            )
         self._validate_workload_package_source_policy(metadata, selected.get("sourcePolicy"))
         expected_fields = {
             "packageArtifactDigest": descriptor["artifactDigest"],
@@ -7907,6 +7963,19 @@ class ComponentUpdater:
             artifact,
             payload_root,
         )
+        package_runtime = self._load_workload_package_runtime()
+        try:
+            package_manifest_digest = package_runtime.package_manifest_digest(
+                payloads["archive"],
+                package_id=package_id,
+                version=candidate.manifest["version"],
+                capability=artifact["capabilityId"],
+            )
+        except Exception as error:
+            raise UpdateError(
+                "INVALID_PACKAGE_MANIFEST",
+                "Plugin manifest identity could not be derived from the verified archive.",
+            ) from error
         self._validate_workload_package_source_policy(
             metadata,
             resolution_component.get("sourcePolicy")
@@ -7948,6 +8017,7 @@ class ComponentUpdater:
             "attestationRef": identity_fields["attestationRef"],
             "packageId": package_id,
             "capabilityId": artifact["capabilityId"],
+            "packageManifestDigest": package_manifest_digest,
             "bindingId": binding_id,
             "packageArtifactDigest": descriptor["artifactDigest"],
             "archiveDigest": descriptor["archiveDigest"],
@@ -14772,13 +14842,9 @@ class ComponentUpdater:
                 installation_records.get(component_id), dict
             ):
                 continue
-            request_id = (
-                "cyrene-wpkg-"
-                + transaction["planId"].removeprefix("plan-")
-                + "-"
-                + hashlib.sha256(component_id.encode("utf-8")).hexdigest()[:12]
-            )
             try:
+                candidate = helper.candidate_from_workload_rows(row, staged)
+                request_id = _workload_package_install_request_id(transaction["planId"], candidate)
                 record = helper.install_workload_package(
                     row,
                     staged,
@@ -16406,13 +16472,9 @@ class ComponentUpdater:
                                     retryable=True,
                                 )
                             continue
-                        request_id = (
-                            "cyrene-wpkg-"
-                            + plan_id.removeprefix("plan-")
-                            + "-"
-                            + hashlib.sha256(component_id.encode("utf-8")).hexdigest()[:12]
-                        )
                         try:
+                            candidate = helper.candidate_from_workload_rows(row, staged)
+                            request_id = _workload_package_install_request_id(plan_id, candidate)
                             record = helper.install_workload_package(
                                 row,
                                 staged,
