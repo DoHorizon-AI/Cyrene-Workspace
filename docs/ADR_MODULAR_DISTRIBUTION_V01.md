@@ -2,9 +2,9 @@
 
 ## Status / 状态
 
-The v0.1 architecture is accepted. Workspace W `0d48ed2c5af4559225b721ec6c1283c79ab4fd15` (PR #151 merge) and Platform P `99aa35d75397ab01746d90d6ca078fe20dda0c1e` (PR #107 merge) now have immutable source-bound releases. The Native release passed official release API and asset-byte checks, and its exact-source verifier passed all nine detached asset attestations without skip or trust cache. Plugins Official G `48f9148e987c6e9066038db99ae0295542e32a77` and signed Catalog generation 15 from `18455255cdf8b87dd8cd48ceb25e5ea411a622ad` remain unchanged. Root's combined source, canonical pins, closure, and Ubuntu 24.04 package-payload readback also passed. Fresh-host product acceptance remains PENDING.
+The v0.1 architecture is accepted. Workspace W `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3` (PR #152 merge) and Platform P `99aa35d75397ab01746d90d6ca078fe20dda0c1e` (PR #107 merge) now have immutable source-bound releases. The Native release passed official release API and asset-byte checks, and its exact-source verifier passed all nine detached asset attestations without skip or trust cache. Plugins Official G `48f9148e987c6e9066038db99ae0295542e32a77` and signed Catalog generation 15 from `18455255cdf8b87dd8cd48ceb25e5ea411a622ad` remain unchanged. Root's combined source, canonical pins, closure, and Ubuntu 24.04 package-payload readback also passed. Fresh-host product acceptance remains PENDING.
 
-v0.1 架构已接受。Workspace W `0d48ed2c5af4559225b721ec6c1283c79ab4fd15`（PR #151 merge）和 Platform P `99aa35d75397ab01746d90d6ca078fe20dda0c1e`（PR #107 merge）现均有源码绑定的不可变 release。Native release 已通过官方 release API 与资产字节核对；精确源码 verifier 对九个 detached asset attestation 全部严格验证通过，未跳过、未使用信任缓存。Plugins Official G `48f9148e987c6e9066038db99ae0295542e32a77` 与源码 `18455255cdf8b87dd8cd48ceb25e5ea411a622ad` 发布的已签名 Catalog generation 15 保持不变。Root 综合源码、canonical pins、closure 与 Ubuntu 24.04 包 payload 回读也已通过。全新主机产品验收仍待完成。
+v0.1 架构已接受。Workspace W `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3`（PR #152 merge）和 Platform P `99aa35d75397ab01746d90d6ca078fe20dda0c1e`（PR #107 merge）现均有源码绑定的不可变 release。Native release 已通过官方 release API 与资产字节核对；精确源码 verifier 对九个 detached asset attestation 全部严格验证通过，未跳过、未使用信任缓存。Plugins Official G `48f9148e987c6e9066038db99ae0295542e32a77` 与源码 `18455255cdf8b87dd8cd48ceb25e5ea411a622ad` 发布的已签名 Catalog generation 15 保持不变。Root 综合源码、canonical pins、closure 与 Ubuntu 24.04 包 payload 回读也已通过。全新主机产品验收仍待完成。
 
 ## Decision / 决策
 
@@ -32,18 +32,22 @@ Two distinct failures were observed during real package-only apply attempts. Fir
 
 The subsequent retired P86/W a3 package-only apply on guest2246 failed with `MAINTENANCE_ADMISSION_DENIED` and retained an active Standard PackageOnly hold. Platform PR #107 adds a durable `SourceHeartbeat` for the empty reconciliation case; Workspace PR #151 fixes pre-Begin generation reuse and same-held-plan replay. These changes target the source paths but do not migrate or clear guest2246's existing transaction. The public workload protocol exposes no supported cancellation or recovery operation for that active hold. Preserve the VM disk, journal, and hold; do not issue direct Broker RPCs, clear state, or start a second plan. Guest2246 is not claimed recovered; fresh-host acceptance is tracked separately.
 
+A separate attempt with the superseded W0d48 Native release on fresh guest2247 reached Dataset Generation but failed with `OFFLINE_CANDIDATE_IDENTITY_MISMATCH`: the offline adapter compared the outer release-manifest digest with the inner Plugin manifest digest. Workspace PR #152 fixes that binding. The replacement b9068f0 release is published and strictly verified; its guest retry and full product acceptance remain PENDING.
+
 后续已退役的 P86/W a3 package-only apply 在 guest2246 上以 `MAINTENANCE_ADMISSION_DENIED` 失败，并保留 active Standard PackageOnly hold。Platform PR #107 为空 reconciliation 情况增加持久化 `SourceHeartbeat`；Workspace PR #151 修复 Begin 前 generation 重用与同一 hold 下的 plan replay。这些变更针对源码路径，但不会迁移或清除 guest2246 已有事务。公开 workload protocol 没有该 active hold 受支持的取消或恢复操作。保留 VM 磁盘、journal 和 hold；不要直接调用 Broker RPC、清除状态或启动第二个 plan。不能声称 guest2246 已恢复；全新主机验收单独记录。
 
-Published releases remain immutable. P86 and the W a3 Native release are historical Stage78 evidence only. The current official Platform release is `preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e` (API 409660341; producer run 38137876503); all 52 assets matched the release API, with 24 indexed manifests and 25 strict verification receipts. The Native release is `native-installer-preview-0d48ed2c5af4559225b721ec6c1283c79ab4fd15` (API 409667638; producer run 38140478542), built from the exact W `0d48ed2c5af4559225b721ec6c1283c79ab4fd15` source. All 18 assets matched API IDs/digests/sizes, and the exact-source strict verifier passed nine detached attestations without skip or trust cache. The Ubuntu 24.04 DEB is SHA-256 `d7d12af32b81327680dcdc94f7945218293ba4570005383b960f4d5d9b8d74c0`, 155107854 bytes (asset 630759450). Root's consolidated source, canonical pin, closure, and package-payload readback passed (Native readback SHA-256 `7f82b0e34e274cb145dec54bd2b5751f2c57c7ea21c970daf5e8f6b944dd2562`; pins SHA-256 `316e8ea06f527eba19d18a9f98a8c1e16e16db1f7cbb27a3ecc46623bdaaae25`; closure SHA-256 `bd7f43c7a2156f21e620d9d81258768b7303549c945cfd8f5d52fe0f42aaf43f`). The older W2327 Native release is not valid for this acceptance.
+全新 guest2247 上另一次使用已被替代的 W0d48 Native release 的尝试运行到 Dataset Generation 时，以 `OFFLINE_CANDIDATE_IDENTITY_MISMATCH` 失败：offline adapter 将外层 release-manifest digest 与 Plugin 内层 manifest digest 比较。Workspace PR #152 修正了该绑定。替代版本 b9068f0 已发布并通过严格验证；其主机重试与完整产品验收仍待完成。
 
-已发布的 release 保持不可变。P86 与 W a3 Native release 仅作为 Stage78 历史证据。当前 Platform 官方 release 为 `preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e`（API 409660341；producer run 38137876503）；52 项资产均与 release API 匹配，24 个 index manifest 与 25 份严格验证记录通过。Native release 为 `native-installer-preview-0d48ed2c5af4559225b721ec6c1283c79ab4fd15`（API 409667638；producer run 38140478542），基于精确 W `0d48ed2c5af4559225b721ec6c1283c79ab4fd15` 源码构建。18 项资产均与 API 的 ID/摘要/大小匹配，精确源码严格 verifier 对九个 detached attestation 全部通过，未跳过、未使用信任缓存。Ubuntu 24.04 DEB 的 SHA-256 为 `d7d12af32b81327680dcdc94f7945218293ba4570005383b960f4d5d9b8d74c0`，大小 155107854 字节（asset 630759450）。Root 综合源码、canonical pins、closure 与包 payload 回读通过（Native 回读 SHA-256 `7f82b0e34e274cb145dec54bd2b5751f2c57c7ea21c970daf5e8f6b944dd2562`；pins SHA-256 `316e8ea06f527eba19d18a9f98a8c1e16e16db1f7cbb27a3ecc46623bdaaae25`；closure SHA-256 `bd7f43c7a2156f21e620d9d81258768b7303549c945cfd8f5d52fe0f42aaf43f`）。旧 W2327 Native release 不适用于本次验收。
+Published releases remain immutable. P86 and the W a3 Native release are historical Stage78 evidence only. The current official Platform release is `preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e` (API 409660341; producer run 38137876503); all 52 assets matched the release API, with 24 indexed manifests and 25 strict verification receipts. The current Native release is `native-installer-preview-b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3` (API 409705856; producer run 38144970974), built from exact W `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3` source (PR #152). All 18 assets matched API IDs/digests/sizes, and the exact-source strict verifier passed nine detached attestations without skip or trust cache. The Ubuntu 24.04 DEB is SHA-256 `d240c03a8635ebe1e78a18330400c035b898ab62e56baf9abd1a6c4985b0b6b4`, 155111334 bytes (asset 630904057). Root's full-release readback SHA-256 is `60781f5bce08d2b28b82fb230bff04d46b830afcec232c7ff910bc7fc0e43780`; canonical pins SHA-256 `e614d27101fa818ca06f4cdb302be338783e68c789853e4804f71e35d3e4db7a`; pins/closure readback SHA-256 `09ebf1e7c335bfe49ffa84abbccfc4149153933bdc345a0ad7435225646686cf`; Ubuntu 24.04 payload readback SHA-256 `92f0d50351ea8aa70ab0f1027cc33c596d1f8a8fc3ab507dfce2bb2275327c58`. The older W2327, W a3/P86, and superseded W0d48 Native releases are not valid for this acceptance.
+
+已发布的 release 保持不可变。P86 与 W a3 Native release 仅作为 Stage78 历史证据。当前 Platform 官方 release 为 `preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e`（API 409660341；producer run 38137876503）；52 项资产均与 release API 匹配，24 个 index manifest 与 25 份严格验证记录通过。当前 Native release 为 `native-installer-preview-b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3`（API 409705856；producer run 38144970974），基于精确 W `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3` 源码（PR #152）构建。18 项资产均与 API 的 ID/摘要/大小匹配，精确源码严格 verifier 对九个 detached attestation 全部通过，未跳过、未使用信任缓存。Ubuntu 24.04 DEB 的 SHA-256 为 `d240c03a8635ebe1e78a18330400c035b898ab62e56baf9abd1a6c4985b0b6b4`，大小 155111334 字节（asset 630904057）。Root full-release 回读 SHA-256 `60781f5bce08d2b28b82fb230bff04d46b830afcec232c7ff910bc7fc0e43780`；canonical pins SHA-256 `e614d27101fa818ca06f4cdb302be338783e68c789853e4804f71e35d3e4db7a`；pins/closure 回读 SHA-256 `09ebf1e7c335bfe49ffa84abbccfc4149153933bdc345a0ad7435225646686cf`；Ubuntu 24.04 payload 回读 SHA-256 `92f0d50351ea8aa70ab0f1027cc33c596d1f8a8fc3ab507dfce2bb2275327c58`。旧 W2327、W a3/P86 与已被替代的 W0d48 Native release 不适用于本次验收。
 
 ## Release identities / 发行身份
 
 | Repository / artifact | Exact source or version | Published identity / status |
 | --- | --- | --- |
-| Workspace / Native | `0d48ed2c5af4559225b721ec6c1283c79ab4fd15` (PR #151 merge) | [Immutable release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-0d48ed2c5af4559225b721ec6c1283c79ab4fd15), API 409667638; producer run 38140478542; all 18 assets matched; nine strict detached attestations passed without skip or trust cache |
-| Ubuntu 24.04 amd64 DEB | API asset 630759450 | SHA-256 `d7d12af32b81327680dcdc94f7945218293ba4570005383b960f4d5d9b8d74c0`; 155,107,854 bytes |
+| Workspace / Native | `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3` (PR #152 merge) | [Immutable release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3), API 409705856; producer run 38144970974; all 18 assets matched; nine strict detached attestations passed without skip or trust cache |
+| Ubuntu 24.04 amd64 DEB | API asset 630904057 | SHA-256 `d240c03a8635ebe1e78a18330400c035b898ab62e56baf9abd1a6c4985b0b6b4`; 155,107,854 bytes |
 | Platform | `99aa35d75397ab01746d90d6ca078fe20dda0c1e` (PR #107 merge) | [Immutable release](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e), API 409660341; run 38137876503; 52 assets matched; 24 indexed manifests and 25 strict verification receipts passed |
 | Historical Platform P86 / Native W a3 | P86 source `86ee31721113d548d0dccfa88bc7e080df9cd1f9`; Native W `a3bcc1a3b34c6417dc538887896de7a5358f3d6d` | Immutable release and strict asset verification passed; not the current release candidate and not evidence that guest2246's active hold was recovered |
 | Catalyst | `4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b` | `cyrene-catalyst` bundle version `cdbc66391cb43eee2c66248f1dfd07f2cf2cd09db4e079374bd24415f4b4b1ba`; release `preview-4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b` |
@@ -54,8 +58,8 @@ Published releases remain immutable. P86 and the W a3 Native release are histori
 
 | 仓库 / 制品 | 精确源码或版本 | 已发布身份 / 状态 |
 | --- | --- | --- |
-| Workspace / Native | `0d48ed2c5af4559225b721ec6c1283c79ab4fd15`（PR #151 merge） | [不可变 release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-0d48ed2c5af4559225b721ec6c1283c79ab4fd15)，API 409667638；producer run 38140478542；18 项资产匹配；9 个 detached attestation 严格验证通过，未跳过、未使用信任缓存 |
-| Ubuntu 24.04 amd64 DEB | API asset 630759450 | SHA-256 `d7d12af32b81327680dcdc94f7945218293ba4570005383b960f4d5d9b8d74c0`；155,107,854 字节 |
+| Workspace / Native | `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3`（PR #152 merge） | [不可变 release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3)，API 409705856；producer run 38144970974；18 项资产匹配；9 个 detached attestation 严格验证通过，未跳过、未使用信任缓存 |
+| Ubuntu 24.04 amd64 DEB | API asset 630904057 | SHA-256 `d240c03a8635ebe1e78a18330400c035b898ab62e56baf9abd1a6c4985b0b6b4`；155,107,854 字节 |
 | Platform | `99aa35d75397ab01746d90d6ca078fe20dda0c1e`（PR #107 merge） | [不可变 release](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e)，API 409660341；run 38137876503；52 项资产匹配；24 个 index manifest 与 25 份严格验证记录通过 |
 | 历史 Platform P86 / Native W a3 | P86 源码 `86ee31721113d548d0dccfa88bc7e080df9cd1f9`；Native W `a3bcc1a3b34c6417dc538887896de7a5358f3d6d` | 不可变 release 与资产严格验证已通过；不是当前 release 候选，也不代表 guest2246 的 active hold 已恢复 |
 | Catalyst | `4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b` | `cyrene-catalyst` bundle 版本 `cdbc66391cb43eee2c66248f1dfd07f2cf2cd09db4e079374bd24415f4b4b1ba`；release `preview-4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b` |
@@ -97,16 +101,16 @@ Native source receipt 与 release manifest 绑定此发行版的精确组件锁�
 | Current Platform P99 official release and strict verification | PASS: API release 409660341; 52 API-matched assets; 24 indexed manifests; 25 strict verification receipts |
 | Five Plugins G48 package identities and strict attestations | PASS: 5 immutable releases; 80 assets; 40 subjects; no skip or trust cache |
 | Historical Native W a3 publication and complete verification | PASS: immutable API release 409611808; run 38133372833; 18 API-matched assets; nine detached asset attestations; strict verification without skip or trust cache |
-| Current Native W0d48 publication and strict verification | PASS: API release 409667638; producer run 38140478542; 18 API-matched assets; nine detached attestations passed without skip or trust cache |
+| Current Native publication and strict verification | PASS: API release 409705856; producer run 38144970974; 18 API-matched assets; nine detached attestations passed without skip or trust cache |
 | Ubuntu 24.04 current Native source and package payload readback | PASS: exact W source and DEB SHA/size verified by the Root release reader |
-| Consolidated current-release source, pins, and DEB payload readback | PASS: Native Root readback `7f82b0e34e274cb145dec54bd2b5751f2c57c7ea21c970daf5e8f6b944dd2562`; canonical pins `316e8ea06f527eba19d18a9f98a8c1e16e16db1f7cbb27a3ecc46623bdaaae25`; closure `bd7f43c7a2156f21e620d9d81258768b7303549c945cfd8f5d52fe0f42aaf43f` |
+| Consolidated current-release source, pins, and DEB payload readback | PASS: Native full-release readback `60781f5bce08d2b28b82fb230bff04d46b830afcec232c7ff910bc7fc0e43780`; canonical pins `e614d27101fa818ca06f4cdb302be338783e68c789853e4804f71e35d3e4db7a`; pins/closure `09ebf1e7c335bfe49ffa84abbccfc4149153933bdc345a0ad7435225646686cf`; Ubuntu 24.04 payload `92f0d50351ea8aa70ab0f1027cc33c596d1f8a8fc3ab507dfce2bb2275327c58` |
 | Clean-host installation bound to the current Native release | PENDING final release-bound record |
 | Catalyst workload resolution, installation, Plugin invocation, and data workflow | PENDING |
 | Client browser access and SFT package consumer | PENDING |
 | Restart recovery and Echo install/evaluation/removal | PENDING |
 | Full clean-host acceptance bound to current release identities | PENDING final release-bound record |
 | Guest2246 old P86 PackageOnly hold recovery | NOT SUPPORTED / NOT CLAIMED: disk, journal, and hold retained; no cancel/recovery operation is exposed by the public workload protocol |
-| Historical W2327 first Catalyst stage | BLOCKED on the retired release; not evidence for current W0d48 acceptance |
+| Historical W2327 first Catalyst stage | BLOCKED on the retired release; not evidence for current Native acceptance |
 
 | 检查 | 状态 |
 | --- | --- |
@@ -115,16 +119,16 @@ Native source receipt 与 release manifest 绑定此发行版的精确组件锁�
 | 当前 Platform P99 官方 release 与严格验证 | 通过：API release 409660341；52 项资产与 API 匹配；24 个 index manifest；25 份严格验证记录 |
 | 五个 Plugins G48 包身份与严格 attestation | 通过：5 个不可变 release；80 项资产；40 个 subject；未跳过、未使用信任缓存 |
 | 历史 Native W a3 发布与完整验证 | 通过：不可变 API release 409611808；run 38133372833；18 项资产与 API 匹配；9 个 detached asset attestation；严格验证未跳过、未使用信任缓存 |
-| 当前 Native W0d48 发布与严格验证 | 通过：API release 409667638；producer run 38140478542；18 项资产与 API 匹配；9 个 detached attestation 严格验证通过，未跳过、未使用信任缓存 |
+| 当前 Native release 发布与严格验证 | 通过：API release 409705856；producer run 38144970974；18 项资产与 API 匹配；9 个 detached attestation 严格验证通过，未跳过、未使用信任缓存 |
 | Ubuntu 24.04 当前 Native 源码与包 payload 回读 | 通过：Root release reader 核对精确 W 源码及 DEB 摘要/大小 |
-| 当前 release 的综合源码、pins 与 DEB payload 回读 | 通过：Native Root 回读 `7f82b0e34e274cb145dec54bd2b5751f2c57c7ea21c970daf5e8f6b944dd2562`；canonical pins `316e8ea06f527eba19d18a9f98a8c1e16e16db1f7cbb27a3ecc46623bdaaae25`；closure `bd7f43c7a2156f21e620d9d81258768b7303549c945cfd8f5d52fe0f42aaf43f` |
+| 当前 release 的综合源码、pins 与 DEB payload 回读 | 通过：Native full-release 回读 `60781f5bce08d2b28b82fb230bff04d46b830afcec232c7ff910bc7fc0e43780`；canonical pins `e614d27101fa818ca06f4cdb302be338783e68c789853e4804f71e35d3e4db7a`；pins/closure `09ebf1e7c335bfe49ffa84abbccfc4149153933bdc345a0ad7435225646686cf`；Ubuntu 24.04 payload `92f0d50351ea8aa70ab0f1027cc33c596d1f8a8fc3ab507dfce2bb2275327c58` |
 | 绑定当前 Native release 的全新主机安装 | 等待绑定 release 身份的最终记录 |
 | Catalyst workload 解析、安装、Plugin 调用与数据流程 | 待完成 |
 | Client 浏览器访问与 SFT 包 consumer | 待完成 |
 | 重启恢复与 Echo 安装/评测/移除 | 待完成 |
 | 绑定当前 release 身份的全新主机端到端验收 | 等待绑定 release 身份的最终记录 |
 | guest2246 旧 P86 PackageOnly hold 恢复 | 不支持 / 未声称完成：保留磁盘、journal 和 hold；公开 workload protocol 未提供 cancel/recovery 操作 |
-| 历史 W2327 首次 Catalyst stage | 旧 release 上受阻；不作为当前 W0d48 验收证据 |
+| 历史 W2327 首次 Catalyst stage | 旧 release 上受阻；不作为当前 Native 验收证据 |
 
 ## Operations / 运维约定
 
