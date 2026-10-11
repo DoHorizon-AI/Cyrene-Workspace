@@ -48,7 +48,7 @@ PACKAGE_WORKFLOW = (
     "DoHorizon-AI/Cyrene-Plugins-Official/.github/workflows/training-plugin-package-release.yml"
 )
 PACKAGE_SOURCE_REF = "refs/heads/develop"
-PACKAGE_SOURCE_COMMIT = "7b8315d2f88cc7147cb9f58d48c89d0dabe7bb36"
+PACKAGE_SOURCE_COMMIT = "c9b8d4b7d4923d42368de3b3ec2db87ee97c3fa7"
 PACKAGE_TARGET_ID = "linux-x86_64"
 PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
@@ -73,7 +73,7 @@ PACKAGE_PREPARER_PYTHON = Path(PACKAGE_PREPARER_ARGS[3])
 PACKAGE_PREPARER_UV = Path(PACKAGE_PREPARER_ARGS[1])
 WORKLOAD_PREPARER_ROOT = Path("/opt/cyrene/plugin-preparer")
 WORKLOAD_PREPARER_RELEASES = WORKLOAD_PREPARER_ROOT / "releases"
-WORKLOAD_PREPARER_VERSION = "0.2.0"
+WORKLOAD_PREPARER_VERSION = "0.2.1"
 WORKLOAD_PREPARER_PYTHON_VERSION = "3.12.14"
 WORKLOAD_PREPARER_MODULE = "cyrene_plugin_runtime.dependency_preparer"
 WORKLOAD_PREPARER_ENTRYPOINT = "cyrene-plugin-python-preparer"
@@ -110,7 +110,7 @@ ASSET_NAMES = {
     "descriptor": f"{PACKAGE_ID}-{PACKAGE_VERSION}-package-descriptor.json",
     "archive": f"{PACKAGE_ID}-{PACKAGE_VERSION}-linux-x86_64.zip",
     "dependency_lock": f"{PACKAGE_ID}-{PACKAGE_VERSION}-requirements.lock",
-    "preparer_wheel": "cyrene_plugin_runtime-0.2.0-py3-none-any.whl",
+    "preparer_wheel": f"cyrene_plugin_runtime-{WORKLOAD_PREPARER_VERSION}-py3-none-any.whl",
 }
 ATTESTATION_NAMES = {name: f"{name}.attestation.jsonl" for name in ASSET_NAMES.values()}
 _SUBJECT_KEYS = ("archive", "descriptor", "dependency_lock", "preparer_wheel")
@@ -516,7 +516,7 @@ def _validate_release_metadata(
         or wheel.get("format") != "wheel"
         or wheel.get("package") != "cyrene-plugin-runtime"
         or wheel.get("target") != "py3-none-any"
-        or wheel.get("version") != "0.2.0"
+        or wheel.get("version") != WORKLOAD_PREPARER_VERSION
         or wheel.get("entrypoint") != "cyrene-plugin-python-preparer"
     ):
         raise PackageRuntimeBootstrapError(
@@ -537,7 +537,7 @@ def _validate_release_metadata(
     if (
         runtime.get("launch_executable") != "prepared-runtime"
         or runtime.get("preparer_command") != "cyrene-plugin-python-preparer"
-        or runtime.get("preparer_package") != "cyrene-plugin-runtime==0.2.0"
+        or runtime.get("preparer_package") != f"cyrene-plugin-runtime=={WORKLOAD_PREPARER_VERSION}"
         or runtime.get("protocol") != "cyrene.plugin.runtime.v1.DirectPluginRuntime"
         or not isinstance(preparer, dict)
         or set(preparer)

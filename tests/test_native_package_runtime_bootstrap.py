@@ -34,7 +34,7 @@ def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _preparer_wheel() -> bytes:
+def _preparer_wheel(version: str = bootstrap.WORKLOAD_PREPARER_VERSION) -> bytes:
     """Build one dependency-free CLI wheel for a real offline install probe."""
 
     from base64 import urlsafe_b64encode
@@ -51,14 +51,14 @@ def _preparer_wheel() -> bytes:
             b"if __name__ == '__main__':\n"
             b"    main()\n"
         ),
-        "cyrene_plugin_runtime-0.2.0.dist-info/METADATA": (
-            b"Metadata-Version: 2.1\nName: cyrene-plugin-runtime\nVersion: 0.2.0\n"
-            b"Requires-Python: >=3.11\n\n"
-        ),
-        "cyrene_plugin_runtime-0.2.0.dist-info/WHEEL": (
+        f"cyrene_plugin_runtime-{version}.dist-info/METADATA": (
+            f"Metadata-Version: 2.1\nName: cyrene-plugin-runtime\nVersion: {version}\n"
+            "Requires-Python: >=3.11\n\n"
+        ).encode(),
+        f"cyrene_plugin_runtime-{version}.dist-info/WHEEL": (
             b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
         ),
-        "cyrene_plugin_runtime-0.2.0.dist-info/entry_points.txt": (
+        f"cyrene_plugin_runtime-{version}.dist-info/entry_points.txt": (
             b"[console_scripts]\n"
             b"cyrene-plugin-python-preparer = cyrene_plugin_runtime.dependency_preparer:main\n"
         ),
@@ -67,8 +67,8 @@ def _preparer_wheel() -> bytes:
     for name, content in members.items():
         digest = urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
         record_rows.append(f"{name},sha256={digest},{len(content)}")
-    record_rows.append("cyrene_plugin_runtime-0.2.0.dist-info/RECORD,,")
-    members["cyrene_plugin_runtime-0.2.0.dist-info/RECORD"] = (
+    record_rows.append(f"cyrene_plugin_runtime-{version}.dist-info/RECORD,,")
+    members[f"cyrene_plugin_runtime-{version}.dist-info/RECORD"] = (
         "\n".join(record_rows) + "\n"
     ).encode()
     buffer = io.BytesIO()
@@ -139,7 +139,7 @@ def _write_release(tmp_path: Path) -> tuple[Path, Path, Path]:
                 "package": "cyrene-plugin-runtime",
                 "sha256": payload_hashes["preparer_wheel"],
                 "target": "py3-none-any",
-                "version": "0.2.0",
+                "version": bootstrap.WORKLOAD_PREPARER_VERSION,
             },
         },
         "attestation_policy": {
@@ -174,7 +174,7 @@ def _write_release(tmp_path: Path) -> tuple[Path, Path, Path]:
                 "host_api": "cy-package-runtime::CommandDependencyPreparer",
                 "runtime_executable_is_consumed_by": "ProcessPluginServiceSupervisor",
             },
-            "preparer_package": "cyrene-plugin-runtime==0.2.0",
+            "preparer_package": f"cyrene-plugin-runtime=={bootstrap.WORKLOAD_PREPARER_VERSION}",
             "preparer_wheel_install_command": [
                 "<python >=3.11 executable>",
                 "-m",
@@ -265,6 +265,16 @@ def _write_release(tmp_path: Path) -> tuple[Path, Path, Path]:
     gh.write_bytes(b"test-only gh")
     gh.chmod(0o755)
     return assets, attestations, gh
+
+
+def test_pinned_carrier_source_matches_the_release_lock() -> None:
+    release_lock_path = Path(__file__).resolve().parents[1] / "release-lock.json"
+    release_lock = json.loads(release_lock_path.read_text(encoding="utf-8"))
+
+    assert bootstrap.PACKAGE_SOURCE_COMMIT == "c9b8d4b7d4923d42368de3b3ec2db87ee97c3fa7"
+    assert release_lock["repositories"]["Cyrene-Plugins-Official"] == (
+        bootstrap.PACKAGE_SOURCE_COMMIT
+    )
 
 
 def _record(candidate: bootstrap.VerifiedPackageCandidate) -> dict[str, Any]:
@@ -524,6 +534,31 @@ def test_rejects_release_identity_or_digest_mismatch(
     )
     with pytest.raises(bootstrap.PackageRuntimeBootstrapError):
         bootstrap.verify_signed_package_candidate(assets, attestations, gh)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("wheel_version", "Package runtime assets differ"),
+        ("preparer_package", "Package preparer runtime contract"),
+    ],
+)
+def test_release_metadata_rejects_preparer_version_drift(
+    tmp_path: Path, field: str, message: str
+) -> None:
+    assets, _attestations, _gh = _write_release(tmp_path)
+    release_path = assets / bootstrap.ASSET_NAMES["package_release"]
+    metadata = json.loads(release_path.read_text(encoding="utf-8"))
+    if field == "wheel_version":
+        metadata["assets"]["preparer_wheel"]["version"] = "0.2.0"
+    else:
+        metadata["runtime"]["preparer_package"] = "cyrene-plugin-runtime==0.2.0"
+    asset_hashes = {
+        key: _digest((assets / name).read_bytes()) for key, name in bootstrap.ASSET_NAMES.items()
+    }
+
+    with pytest.raises(bootstrap.PackageRuntimeBootstrapError, match=message):
+        bootstrap._validate_release_metadata(metadata, asset_hashes)
 
 
 def test_rejects_failed_official_attestation(
