@@ -1938,6 +1938,67 @@ def test_legacy_source_update_intent_persists_success_history_map(
     assert transaction["sourceUpdateIntent"] == transaction["sourceUpdateIntents"][phase]
 
 
+def test_native_workload_receipt_accepts_signed_semver_build_metadata_pointer(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    component_id = "cyrene-client-workspace-control"
+    source_commit = "b3c3" + "a" * 36
+    version = f"0.0.1+sha.{source_commit}"
+    release_id = f"preview-{component_id}-{source_commit}"
+    artifact_digest = "sha256:" + "6" * 64
+    manifest_asset_digest = "sha256:" + "7" * 64
+    manifest = {
+        "schemaVersion": 2,
+        "releaseId": release_id,
+        "componentId": component_id,
+        "version": version,
+        "artifact": {"kind": "native-binary", "sha256": artifact_digest},
+    }
+    manifest["manifestDigest"] = updates._digest_json(manifest, "manifestDigest")
+    item = {
+        "componentId": component_id,
+        "version": version,
+        "releaseIdentity": manifest["manifestDigest"],
+        "manifestDigest": manifest["manifestDigest"],
+        "artifactDigest": artifact_digest,
+        "bundleIdentity": None,
+        "manifest": manifest,
+        "releaseId": release_id,
+        "targetId": "linux-ubuntu-24.04-x86_64-node-24",
+        "manifestAssetDigest": manifest_asset_digest,
+        "manifestUri": "https://example.invalid/component-release-manifest-v2.json",
+        "releaseTag": release_id,
+        "indexIdentity": {"assetName": "component-release-index-v1.json"},
+        "publisherIdentity": {"id": "official-client-workspace-control"},
+        "attestationRef": None,
+        "releasePath": str(tmp_path / "components" / component_id / "releases" / version),
+        "archivePath": str(tmp_path / "staged" / "control.tar.gz"),
+        "pointerIdentity": f"{version}--{manifest['manifestDigest'].removeprefix('sha256:')}",
+    }
+
+    updater._write_release_receipt(item)
+    updater._write_active_receipt(item)
+
+    receipt = updater._read_active_receipt(component_id)
+    assert receipt is not None
+    assert receipt["schemaVersion"] == 2
+    assert receipt["pointerIdentity"] == item["pointerIdentity"]
+    assert receipt["manifestDigest"] == manifest["manifestDigest"]
+
+    receipt_path = (
+        updater._installed_component_directory(component_id)
+        / "releases"
+        / f"{manifest['manifestDigest'].removeprefix('sha256:')}.json"
+    )
+    stored = json.loads(receipt_path.read_text(encoding="utf-8"))
+    stored["pointerIdentity"] = "../outside-release"
+    receipt_path.write_text(json.dumps(stored), encoding="utf-8")
+    with pytest.raises(updates.UpdateError) as error:
+        updater._read_active_receipt(component_id)
+    assert error.value.code == "INVALID_INSTALLED_RELEASE"
+
+
 def test_workload_receipt_upgrade_persists_exact_raw_release_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
