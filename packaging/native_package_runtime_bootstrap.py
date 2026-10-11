@@ -1317,13 +1317,24 @@ def validate_workload_installation_record(
         or verification.get("manifest_digest") != candidate.manifest_digest
         or verification.get("dependency_lock_digest") != candidate.dependency_lock_digest
         or dependencies.get("lock_digest") != candidate.dependency_lock_digest
-        or not isinstance(dependencies.get("runtime_executable"), str)
-        or not Path(dependencies["runtime_executable"]).is_absolute()
+        or not _is_safe_relative_runtime_executable(dependencies.get("runtime_executable"))
     ):
         raise PackageRuntimeBootstrapError(
             "Package Runtime workload receipt differs from signed bytes"
         )
     return record
+
+
+def _is_safe_relative_runtime_executable(value: Any) -> bool:
+    """Accept the optional, confined executable path recorded by Package Runtime."""
+
+    if value is None:
+        return True
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    if Path(value).is_absolute():
+        return False
+    return all(part not in {"", ".", ".."} for part in value.split("/"))
 
 
 def run_workload_offline_install(

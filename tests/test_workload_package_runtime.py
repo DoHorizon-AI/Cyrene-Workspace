@@ -133,10 +133,50 @@ def _installation_record(
             "prepared_at_unix_ms": 101,
             "lock_digest": verification["dependency_lock_digest"],
             "runtime_digest": _digest(f"runtime-{version}"),
-            "runtime_executable": "/opt/cyrene/runtime/prepared-runtime",
+            "runtime_executable": "bin/python",
         },
         "installed_at_unix_ms": 102,
     }
+
+
+@pytest.mark.parametrize("runtime_executable", [None, "bin/python", "lib/python3.12/bin/python"])
+def test_installation_record_accepts_optional_safe_relative_runtime_executable(
+    runtime_executable: str | None,
+) -> None:
+    row = _package_row()
+    record = _installation_record()
+    record["dependencies"]["runtime_executable"] = runtime_executable
+
+    runtime._validate_installation_record_identity(row, record)
+
+
+@pytest.mark.parametrize(
+    "runtime_executable",
+    [
+        "/opt/cyrene/python",
+        "",
+        ".",
+        "./bin/python",
+        "bin/../python",
+        "../python",
+        "bin//python",
+        "bin/python\x00",
+        7,
+        ["bin", "python"],
+    ],
+)
+def test_installation_record_rejects_unsafe_runtime_executable(
+    runtime_executable: Any,
+) -> None:
+    row = _package_row()
+    record = _installation_record()
+    record["dependencies"]["runtime_executable"] = runtime_executable
+
+    with pytest.raises(
+        runtime.WorkloadPackageRuntimeError,
+        match="InstallationRecord verification is incomplete",
+    ):
+        runtime._validate_installation_record_identity(row, record)
 
 
 def _broker_scope(binding_id: str, package_id: str, installation_ids: list[str]) -> dict[str, Any]:
