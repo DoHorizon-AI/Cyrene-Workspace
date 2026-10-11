@@ -688,6 +688,50 @@ if [ "${KERNEL_SERVICE_UID}" = "0" ]; then
     exit 1
 fi
 
+CYRENE_UID="$(id -u cyrene)"
+CYRENE_GID="$(getent group cyrene | cut -d: -f3)"
+case "${CYRENE_UID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene account has no valid numeric uid." >&2
+        exit 1
+        ;;
+esac
+case "${CYRENE_GID}" in
+    ''|*[!0-9]*)
+        echo "ERROR: cyrene group has no valid numeric gid." >&2
+        exit 1
+        ;;
+esac
+if [ "${CYRENE_UID}" = "0" ] || [ "${CYRENE_GID}" = "0" ]; then
+    echo "ERROR: Product data cannot be owned by root." >&2
+    exit 1
+fi
+
+# Keep the shared traversal root root-owned so cy-package-runtime can validate
+# its trusted parent chain. Product processes receive write access only to
+# their own child directories. Existing directories are checked, never repaired.
+ensure_owned_directory() {
+    path="$1"
+    expected_uid="$2"
+    expected_gid="$3"
+    expected_mode="$4"
+    label="$5"
+    if [ -L "$path" ]; then
+        echo "ERROR: ${label} is a symlink; refusing to follow existing runtime state (${path})." >&2
+        exit 1
+    elif [ ! -e "$path" ]; then
+        install -d -o "${expected_uid}" -g "${expected_gid}" -m "${expected_mode}" "$path"
+    elif [ ! -d "$path" ]; then
+        echo "ERROR: ${label} exists but is not a directory (${path})." >&2
+        exit 1
+    fi
+    metadata="$(stat -c '%u:%g:%a' -- "$path")"
+    if [ "${metadata}" != "${expected_uid}:${expected_gid}:${expected_mode}" ]; then
+        echo "ERROR: Refusing to repair existing ${label} (${path}: ${metadata})." >&2
+        exit 1
+    fi
+}
+
 ensure_fresh_service_directory() {
     path="$1"
     if [ -L "$path" ]; then
@@ -700,7 +744,31 @@ ensure_fresh_service_directory() {
         exit 1
     fi
 }
-ensure_fresh_service_directory /var/lib/cyrene
+
+# The old Exchange default database lived directly in the shared root. Do not
+# hide it by silently switching to the new private product directory.
+if [ -L /var/lib/cyrene ]; then
+    echo "ERROR: /var/lib/cyrene is a symlink; refusing to inspect legacy Product state." >&2
+    exit 1
+elif [ -e /var/lib/cyrene ] && [ ! -d /var/lib/cyrene ]; then
+    echo "ERROR: /var/lib/cyrene exists but is not a directory." >&2
+    exit 1
+fi
+for legacy_exchange_file in /var/lib/cyrene/exchange.sqlite3 /var/lib/cyrene/exchange.sqlite3-wal /var/lib/cyrene/exchange.sqlite3-shm; do
+    if [ -e "${legacy_exchange_file}" ] || [ -L "${legacy_exchange_file}" ]; then
+        echo "ERROR: Legacy Exchange database state exists at ${legacy_exchange_file}; refusing installation without an explicit data migration." >&2
+        exit 1
+    fi
+done
+
+# Preview releases used to make the shared root service-owned. Refuse that
+# unsafe legacy state without changing it; operators must migrate it explicitly.
+ensure_owned_directory /var/lib/cyrene 0 "${CYRENE_GID}" 750 "shared Cyrene data root"
+
+for product in navigator yield reactor exchange catalyst; do
+    ensure_owned_directory "/var/lib/cyrene/${product}" "${CYRENE_UID}" "${CYRENE_GID}" 750 "${product} private data directory"
+done
+
 ensure_fresh_service_directory /var/log/cyrene
 
 # Studio Control owns user-visible workload state. Create only a missing
@@ -708,26 +776,8 @@ ensure_fresh_service_directory /var/log/cyrene
 # closed before any service can consume it.
 STUDIO_CONTROL_DIR=/var/lib/cyrene/studio-control
 ensure_fresh_service_directory "${STUDIO_CONTROL_DIR}"
-STUDIO_CONTROL_UID="$(id -u cyrene)"
-STUDIO_CONTROL_GID="$(getent group cyrene | cut -d: -f3)"
-case "${STUDIO_CONTROL_UID}" in
-    ''|*[!0-9]*)
-        echo "ERROR: cyrene account or primary group has no valid numeric identity." >&2
-        exit 1
-        ;;
-esac
-case "${STUDIO_CONTROL_GID}" in
-    ''|*[!0-9]*)
-        echo "ERROR: cyrene account or primary group has no valid numeric identity." >&2
-        exit 1
-        ;;
-esac
-if [ "${STUDIO_CONTROL_UID}" = "0" ] || [ "${STUDIO_CONTROL_GID}" = "0" ]; then
-    echo "ERROR: Studio Control data cannot be owned by root." >&2
-    exit 1
-fi
 STUDIO_CONTROL_META="$(stat -c '%u:%g:%a' -- "${STUDIO_CONTROL_DIR}")"
-if [ "${STUDIO_CONTROL_META}" != "${STUDIO_CONTROL_UID}:${STUDIO_CONTROL_GID}:750" ]; then
+if [ "${STUDIO_CONTROL_META}" != "${CYRENE_UID}:${CYRENE_GID}:750" ]; then
     echo "ERROR: Refusing to repair existing Studio Control data directory (${STUDIO_CONTROL_DIR}: ${STUDIO_CONTROL_META})." >&2
     exit 1
 fi
