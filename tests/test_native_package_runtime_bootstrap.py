@@ -1061,6 +1061,105 @@ def test_workload_install_request_binds_catalog_component_not_dotted_package(
         )
 
 
+def test_workload_offline_install_preserves_platform_error_without_raw_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = _workload_candidate(tmp_path)
+    request_id = "cyrene-workload-package-diagnostic"
+    request_directory = tmp_path / "stage" / request_id
+    request_directory.mkdir(parents=True, mode=0o700)
+    descriptor_path = request_directory / "descriptor.json"
+    archive_path = request_directory / "archive.zip"
+    descriptor_path.write_bytes(candidate.descriptor_path.read_bytes())
+    archive_path.write_bytes(candidate.archive_path.read_bytes())
+    request_path = request_directory / "request.json"
+    request = {
+        "request_id": request_id,
+        "candidate": {
+            "descriptor_path": str(descriptor_path),
+            "archive_path": str(archive_path),
+        },
+    }
+    request_path.write_bytes(bootstrap._canonical_json(request))
+    for path in (descriptor_path, archive_path, request_path):
+        path.chmod(0o600)
+    monkeypatch.setattr(bootstrap, "PACKAGE_BOOTSTRAP_STAGE_ROOT", request_directory.parent)
+
+    failure = {
+        "request_id": request_id,
+        "ok": False,
+        "error": {
+            "code": "PACKAGE_INSTALL_FAILED",
+            "message": "Package installation failed.",
+            "remediation": "Retry the same staged plan.",
+        },
+    }
+    seen_argv: list[str] | None = None
+
+    def run_with(response: dict[str, Any]) -> bootstrap.PackageRuntimeBootstrapError:
+        def runner(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            nonlocal seen_argv
+            seen_argv = argv
+            return subprocess.CompletedProcess(
+                argv,
+                19,
+                json.dumps(response),
+                "opaque-maintenance-token and raw stderr",
+            )
+
+        with pytest.raises(bootstrap.PackageRuntimeBootstrapError) as raised:
+            bootstrap.run_workload_offline_install(
+                candidate,
+                request,
+                runner=runner,
+            )
+        return raised.value
+
+    error = run_with(failure)
+    assert seen_argv is not None
+    assert seen_argv[:4] == ["/usr/bin/cyrene", "component-run", "cy-package-runtime", "--"]
+    assert "/usr/bin/cy-package-runtime" not in seen_argv
+
+    assert error.diagnostic == {
+        "code": "PACKAGE_INSTALL_FAILED",
+        "message": "Package installation failed.",
+        "remediation": "Retry the same staged plan.",
+        "returncode": 19,
+    }
+    assert "opaque-maintenance-token" not in str(error)
+    assert "raw stderr" not in repr(error.diagnostic)
+
+    unbound = run_with({**failure, "request_id": "another-request"})
+    assert unbound.diagnostic is None
+    assert "another-request" not in str(unbound)
+
+
+def test_workload_offline_uninstall_uses_the_installed_component_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_id = "cyrene-workload-uninstall-diagnostic"
+    request_directory = tmp_path / "stage" / request_id
+    request_directory.mkdir(parents=True, mode=0o700)
+    request = {"request_id": request_id}
+    request_path = request_directory / "request.json"
+    request_path.write_bytes(bootstrap._canonical_json(request))
+    request_path.chmod(0o600)
+    monkeypatch.setattr(bootstrap, "PACKAGE_BOOTSTRAP_STAGE_ROOT", request_directory.parent)
+    seen_argv: list[str] | None = None
+
+    def runner(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal seen_argv
+        seen_argv = argv
+        return subprocess.CompletedProcess(argv, 19, "", "")
+
+    with pytest.raises(bootstrap.PackageRuntimeBootstrapError):
+        bootstrap.run_workload_offline_uninstall(request, runner=runner)
+
+    assert seen_argv is not None
+    assert seen_argv[:4] == ["/usr/bin/cyrene", "component-run", "cy-package-runtime", "--"]
+    assert "/usr/bin/cy-package-runtime" not in seen_argv
+
+
 def test_workload_install_receipt_preserves_distinct_artifact_and_archive_digests(
     tmp_path: Path,
 ) -> None:

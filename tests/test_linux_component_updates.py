@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from contextlib import nullcontext
 from pathlib import Path
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -4338,6 +4338,119 @@ def test_first_catalyst_start_failure_preserves_special_hold_for_same_plan_retry
         target_kind="CORE_RUNTIME",
         requires_restart=True,
     )
+
+
+def test_package_recovery_preserves_bootstrap_exception_type_and_source_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    component_id = "cyrene-tools-dataset-generation"
+    transaction = {
+        "workloadId": "plugins",
+        "planId": "plan-" + "a" * 32,
+        "maintenancePhase": "package-only",
+        "maintenanceToken": "m" * 48,
+        "selectedPluginRows": [{"componentId": component_id}],
+        "stagedComponents": [{"componentId": component_id, "status": "staged"}],
+    }
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+
+    def raise_private_error() -> None:
+        raise RuntimeError("private maintenance token")
+
+    failure_code = raise_private_error.__code__.replace(
+        co_filename="/controlled/native_package_runtime_bootstrap.py",
+        co_name="run_workload_offline_install",
+    )
+    failure_function = FunctionType(failure_code, globals())
+
+    def wrap_failure(*_args: Any, **_kwargs: Any) -> None:
+        try:
+            failure_function()
+        except Exception as error:
+            raise ValueError("private wrapper detail") from error
+
+    wrapper_code = wrap_failure.__code__.replace(
+        co_filename="/controlled/workload_package_runtime.py",
+        co_name="install_workload_package",
+    )
+    install = FunctionType(wrapper_code, globals(), closure=wrap_failure.__closure__)
+
+    monkeypatch.setattr(updater, "_workload_inventory_before_daemon_stop", lambda _id: None)
+    monkeypatch.setattr(updater, "_workload_hold_echo", lambda _transaction: {})
+    monkeypatch.setattr(
+        updater,
+        "_load_workload_package_runtime",
+        lambda: SimpleNamespace(install_workload_package=install),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._resume_workload_package_install_phase(transaction, transaction_path)
+
+    assert error.value.code == "PACKAGE_INSTALL_FAILED"
+    assert error.value.retryable is True
+    assert "RuntimeError" in str(error.value)
+    failure_line = failure_code.co_firstlineno + 1
+    assert (
+        f"native_package_runtime_bootstrap.py:{failure_line}:run_workload_offline_install"
+        in str(error.value)
+    )
+    assert "private maintenance token" not in str(error.value)
+    assert transaction["packageInstallFailure"] == {
+        "componentId": component_id,
+        "exceptionType": "RuntimeError",
+        "sourceLocation": (
+            f"native_package_runtime_bootstrap.py:{failure_line}:run_workload_offline_install"
+        ),
+    }
+    persisted = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert persisted["packageInstallFailure"] == transaction["packageInstallFailure"]
+    assert "private maintenance token" not in transaction_path.read_text(encoding="utf-8")
+
+
+def test_package_install_failure_keeps_platform_error_fields_and_retry_contract(
+    tmp_path: Path,
+) -> None:
+    transaction: dict[str, Any] = {"planId": "plan-" + "b" * 32}
+    transaction_path = tmp_path / "transactions" / f"{transaction['planId']}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+
+    class PackageRuntimeBootstrapError(RuntimeError):
+        pass
+
+    platform_error = PackageRuntimeBootstrapError("raw output with an opaque token")
+    platform_error.diagnostic = {
+        "code": "PACKAGE_INSTALL_FAILED",
+        "message": "Package installation failed.",
+        "remediation": "Retry the same staged plan.",
+        "returncode": 23,
+    }
+
+    error = updates._record_package_install_failure(
+        transaction,
+        transaction_path,
+        "cyrene-tools-dataset-generation",
+        action="install",
+        error=platform_error,
+    )
+
+    assert error.code == "PACKAGE_INSTALL_FAILED"
+    assert error.retryable is True
+    assert "PACKAGE_INSTALL_FAILED" in str(error)
+    assert "return code 23" in str(error)
+    assert "Retry the same staged plan." in str(error)
+    assert "opaque token" not in str(error)
+    assert transaction["packageInstallFailure"] == {
+        "componentId": "cyrene-tools-dataset-generation",
+        "platformError": {
+            "code": "PACKAGE_INSTALL_FAILED",
+            "message": "Package installation failed.",
+            "remediation": "Retry the same staged plan.",
+            "returncode": 23,
+        },
+    }
+    assert "opaque token" not in transaction_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("artifact_kind", ["native-binary", "python-bundle"])

@@ -80,7 +80,7 @@ WORKLOAD_PREPARER_ENTRYPOINT = "cyrene-plugin-python-preparer"
 WORKLOAD_PREPARER_ENTRYPOINT_TARGET = "cyrene_plugin_runtime.dependency_preparer:main"
 WORKLOAD_PREPARER_MAX_WHEEL_BYTES = 64 * 1024 * 1024
 WORKLOAD_PREPARER_MAX_WHEEL_FILES = 4096
-PACKAGE_RUNTIME_COMMAND = Path("/usr/bin/cy-package-runtime")
+PACKAGE_RUNTIME_COMMAND = CYRENE_COMMAND
 PACKAGE_POLICY_SCHEMA_VERSION = 1
 PACKAGE_RUNTIME_GROUP = "cyrene"
 PACKAGE_POLICY_OPERATIONS = (
@@ -118,6 +118,10 @@ _SUBJECT_KEYS = ("archive", "descriptor", "dependency_lock", "preparer_wheel")
 
 class PackageRuntimeBootstrapError(ValueError):
     """Raised when immutable package proof or its derived scope is incomplete."""
+
+    def __init__(self, message: str, *, diagnostic: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 
 @dataclass(frozen=True)
@@ -1354,6 +1358,9 @@ def run_workload_offline_install(
         ) from error
     argv = [
         str(command),
+        "component-run",
+        "cy-package-runtime",
+        "--",
         "--root",
         str(PACKAGE_RUNTIME_STATE_ROOT),
         "--dependency-preparer",
@@ -1379,7 +1386,15 @@ def run_workload_offline_install(
             "Package Runtime offline install failed to run"
         ) from error
     lines = completed.stdout.splitlines()
-    if completed.returncode != 0 or len(lines) != 1:
+    if completed.returncode != 0:
+        diagnostic = _platform_install_failure_diagnostic(completed, request)
+        if diagnostic is not None:
+            raise PackageRuntimeBootstrapError(
+                "Package Runtime offline install did not complete",
+                diagnostic=diagnostic,
+            )
+        raise PackageRuntimeBootstrapError("Package Runtime offline install did not complete")
+    if len(lines) != 1:
         raise PackageRuntimeBootstrapError("Package Runtime offline install did not complete")
     try:
         response = json.loads(lines[0], object_pairs_hook=_unique_object)
@@ -1388,6 +1403,59 @@ def run_workload_offline_install(
             "Package Runtime install receipt is malformed"
         ) from error
     return validate_workload_offline_install_result(candidate, request, response)
+
+
+def _platform_install_failure_diagnostic(
+    completed: subprocess.CompletedProcess[str], request: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Return only Platform's bounded, request-bound structured error fields."""
+
+    if (
+        not isinstance(completed.returncode, int)
+        or isinstance(completed.returncode, bool)
+        or completed.returncode == 0
+        or not isinstance(completed.stdout, str)
+    ):
+        return None
+    lines = completed.stdout.splitlines()
+    if len(lines) != 1:
+        return None
+    try:
+        response = json.loads(lines[0], object_pairs_hook=_unique_object)
+    except (json.JSONDecodeError, PackageRuntimeBootstrapError):
+        return None
+    error = response.get("error") if isinstance(response, dict) else None
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"request_id", "ok", "error"}
+        or response.get("request_id") != request.get("request_id")
+        or response.get("ok") is not False
+        or not isinstance(error, dict)
+        or set(error) != {"code", "message", "remediation"}
+    ):
+        return None
+    code = error.get("code")
+    message = error.get("message")
+    remediation = error.get("remediation")
+    if (
+        not isinstance(code, str)
+        or re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code) is None
+        or not isinstance(message, str)
+        or not message
+        or len(message) > 512
+        or not message.isprintable()
+        or not isinstance(remediation, str)
+        or not remediation
+        or len(remediation) > 512
+        or not remediation.isprintable()
+    ):
+        return None
+    return {
+        "code": code,
+        "message": message,
+        "remediation": remediation,
+        "returncode": completed.returncode,
+    }
 
 
 def validate_workload_offline_install_result(
@@ -1581,6 +1649,9 @@ def run_workload_offline_uninstall(
     )
     argv = [
         str(command),
+        "component-run",
+        "cy-package-runtime",
+        "--",
         "--root",
         str(PACKAGE_RUNTIME_STATE_ROOT),
         "--dependency-preparer",
@@ -2747,7 +2818,15 @@ def run_offline_install(
             "Package Runtime one-shot installer failed to run"
         ) from error
     lines = completed.stdout.splitlines()
-    if completed.returncode != 0 or len(lines) != 1:
+    if completed.returncode != 0:
+        diagnostic = _platform_install_failure_diagnostic(completed, request)
+        if diagnostic is not None:
+            raise PackageRuntimeBootstrapError(
+                "Package Runtime one-shot installer did not complete",
+                diagnostic=diagnostic,
+            )
+        raise PackageRuntimeBootstrapError("Package Runtime one-shot installer did not complete")
+    if len(lines) != 1:
         raise PackageRuntimeBootstrapError("Package Runtime one-shot installer did not complete")
     try:
         response = json.loads(lines[0], object_pairs_hook=_unique_object)
