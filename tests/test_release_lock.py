@@ -33,6 +33,16 @@ def test_repository_lock_is_structurally_valid() -> None:
     assert errors == []
 
 
+def test_plugin_runtime_lock_selects_the_dependency_closure_preparer() -> None:
+    runtime = _document()["plugins"]["cyrene-plugin-runtime"]
+
+    assert runtime == {
+        "package": "cyrene-plugin-runtime",
+        "versionRange": "=0.2.1",
+        "status": "PINNED",
+    }
+
+
 def test_native_python_profiles_lock_supported_targets_and_private_runtime() -> None:
     document = _document()
     profiles = document["nativePythonProfiles"]
