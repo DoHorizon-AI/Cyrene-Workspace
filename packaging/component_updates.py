@@ -26820,7 +26820,10 @@ class ComponentUpdater:
             if component.get("pythonBundleService"):
                 bundle = self._load_service_bundle()
                 bundle_identity = item.get("bundleIdentity")
-                if not _valid_digest(bundle_identity):
+                if (
+                    not isinstance(bundle_identity, str)
+                    or BUNDLE_ID_PATTERN.fullmatch(bundle_identity) is None
+                ):
                     raise UpdateError(
                         "TRANSACTION_IDENTITY_UNKNOWN",
                         f"Staged Python bundle identity is missing for {item['componentId']}.",
