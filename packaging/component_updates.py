@@ -14849,10 +14849,13 @@ class ComponentUpdater:
                 continue
             try:
                 candidate = helper.candidate_from_workload_rows(row, staged)
+                receipt_staged = dict(staged)
+                if receipt_staged.get("packageManifestDigest") is None:
+                    receipt_staged["packageManifestDigest"] = candidate.manifest_digest
                 request_id = _workload_package_install_request_id(transaction["planId"], candidate)
                 record = helper.install_workload_package(
                     row,
-                    staged,
+                    receipt_staged,
                     request_id=request_id,
                     maintenance=maintenance,
                     runner=self.runner,
@@ -14865,7 +14868,7 @@ class ComponentUpdater:
                     action="recovery",
                     error=error,
                 ) from error
-            identity = self._write_workload_package_runtime_receipt(row, staged, record)
+            identity = self._write_workload_package_runtime_receipt(row, receipt_staged, record)
             transaction.pop("packageInstallFailure", None)
             installation_records[component_id] = record
             transaction.setdefault("packageIdentities", {})[component_id] = identity
