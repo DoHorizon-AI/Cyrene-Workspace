@@ -20463,7 +20463,7 @@ class ComponentUpdater:
                     for field in ("releasePath", "archivePath")
                 )
                 or not isinstance(receipt.get("pointerIdentity"), str)
-                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}", receipt["pointerIdentity"])
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,255}", receipt["pointerIdentity"])
                 is None
             ):
                 raise UpdateError(
