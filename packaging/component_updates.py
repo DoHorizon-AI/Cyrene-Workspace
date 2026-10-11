@@ -10200,23 +10200,81 @@ class ComponentUpdater:
         except (OSError, urllib.error.URLError, TimeoutError):
             return None
 
-    @staticmethod
-    def _workload_hold_echo(transaction: dict[str, Any]) -> dict[str, Any]:
-        """Project one active workload maintenance hold for the official package helper."""
+    def _workload_hold_echo(self, transaction: dict[str, Any]) -> dict[str, Any]:
+        """Refresh and project the active workload hold for an offline package operation."""
 
         token = transaction.get("maintenanceToken")
-        if not isinstance(token, str) or len(token) < 32:
-            raise UpdateError(
-                "PENDING_MAINTENANCE", "The workload maintenance hold is unavailable."
+        phase = transaction.get("maintenancePhase")
+        holds = transaction.get("maintenanceHolds")
+        hold = holds.get(phase) if isinstance(holds, dict) and isinstance(phase, str) else None
+        request_id = _maintenance_request_id(transaction)
+        begin_method = transaction.get("maintenanceBeginMethod")
+        if begin_method is None:
+            begin_method = (
+                hold.get("beginMethod", "BeginMaintenance") if isinstance(hold, dict) else None
             )
+        if (
+            transaction.get("transactionKind") != "workload-assembly.v1"
+            or not isinstance(token, str)
+            or len(token) < 32
+            or not isinstance(hold, dict)
+            or hold.get("status") != "active"
+            or hold.get("requestId") != request_id
+            or hold.get("targetKind") != transaction.get("targetKind")
+            or hold.get("expectedGateGeneration") != transaction.get("expectedGateGeneration")
+            or hold.get("expectedCatalogGeneration") != transaction.get("expectedCatalogGeneration")
+            or hold.get("expectedActivitySources") != transaction.get("expectedActivitySources")
+            or hold.get("componentArtifactDigests") != transaction.get("componentArtifactDigests")
+            or type(transaction.get("requiresRestart")) is not bool
+            or hold.get("requiresRestart", transaction.get("requiresRestart"))
+            != transaction.get("requiresRestart")
+            or hold.get("beginMethod") != begin_method
+            or begin_method not in {"BeginMaintenance", "BeginInitialSourceActivation"}
+        ):
+            raise UpdateError(
+                "PENDING_MAINTENANCE", "The exact active workload maintenance hold is unavailable."
+            )
+        if begin_method == "BeginInitialSourceActivation":
+            activation = transaction.get("initialSourceActivation")
+            if (
+                not isinstance(activation, dict)
+                or hold.get("sourceId") != activation.get("sourceId")
+                or hold.get("parentRequestId") != activation.get("parentRequestId")
+            ):
+                raise UpdateError(
+                    "PENDING_MAINTENANCE",
+                    "The active initial-source hold differs from its saved source identity.",
+                )
+            transaction["maintenanceBeginMethod"] = begin_method
+        else:
+            transaction.pop("maintenanceBeginMethod", None)
+
+        # Exact Begin replay returns the broker's live generation without appending an event.
+        refreshed_token = self._begin_maintenance(
+            transaction,
+            allow_uninitialized_catalog=(
+                transaction.get("allowUninitializedActivityCatalog") is True
+            ),
+        )
+        if refreshed_token != token:
+            raise UpdateError(
+                "PENDING_MAINTENANCE", "The active workload hold token changed during refresh."
+            )
+        gate_generation = transaction.get("maintenanceGateGeneration")
+        if type(gate_generation) is not int or gate_generation < 0:
+            raise UpdateError(
+                "GATE_UNKNOWN", "The refreshed workload gate generation is unknown.", retryable=True
+            )
+        _atomic_json(self._workload_transaction_path(transaction), transaction)
+
         return {
-            "transaction_id": _maintenance_request_id(transaction),
+            "transaction_id": request_id,
             "maintenance_token": token,
             "target_kind": transaction["targetKind"],
             "plan_id": transaction["planId"],
             "plan_digest": transaction["planDigest"],
             "component_artifact_digests": dict(transaction["componentArtifactDigests"]),
-            "expected_gate_generation": transaction["expectedGateGeneration"],
+            "expected_gate_generation": gate_generation,
             "expected_catalog_generation": transaction["expectedCatalogGeneration"],
         }
 
@@ -10242,6 +10300,10 @@ class ComponentUpdater:
             raise UpdateError("INVALID_TRANSACTION", "Workload maintenance phase is invalid.")
         if target_kind not in {"CORE_RUNTIME", "PACKAGE_ONLY"}:
             raise UpdateError("INVALID_TRANSACTION", "Workload maintenance target is invalid.")
+        prior_requires_restart = transaction.get("requiresRestart")
+        if type(prior_requires_restart) is not bool:
+            prior_requires_restart = requires_restart
+        transaction.pop("maintenanceGateGeneration", None)
         transaction["maintenancePhase"] = phase
         transaction.pop("maintenanceRequestId", None)
         transaction["targetKind"] = target_kind
@@ -10279,6 +10341,12 @@ class ComponentUpdater:
             and prior.get("status") == "begin_pending"
             and prior.get("beginMethod") == "BeginInitialSourceActivation"
         )
+        replay_uncertain_maintenance_begin = (
+            isinstance(prior, dict)
+            and prior.get("requestId") == request_id
+            and prior.get("status") == "begin_pending"
+            and prior.get("beginMethod") == "BeginMaintenance"
+        )
         if replay_uncertain_initial_begin:
             if (
                 initial_source_activation is None
@@ -10287,6 +10355,7 @@ class ComponentUpdater:
                 or prior.get("targetKind") != target_kind
                 or prior.get("componentArtifactDigests")
                 != transaction.get("componentArtifactDigests")
+                or prior.get("requiresRestart", prior_requires_restart) != requires_restart
                 or prior.get("expectedCatalogGeneration") != activity_catalog.get("generation")
                 or prior.get("expectedActivitySources") != activity_sources
             ):
@@ -10297,6 +10366,25 @@ class ComponentUpdater:
             transaction["maintenanceBeginMethod"] = "BeginInitialSourceActivation"
             transaction["initialSourceActivation"] = initial_source_activation
             gate_generation = prior.get("expectedGateGeneration")
+        elif replay_uncertain_maintenance_begin:
+            if (
+                initial_source_activation is not None
+                or prior.get("targetKind") != target_kind
+                or prior.get("componentArtifactDigests")
+                != transaction.get("componentArtifactDigests")
+                or prior.get("requiresRestart", prior_requires_restart) != requires_restart
+                or prior.get("expectedCatalogGeneration") != activity_catalog.get("generation")
+                or prior.get("expectedActivitySources") != activity_sources
+                or type(prior.get("expectedGateGeneration")) is not int
+                or prior.get("expectedGateGeneration") < 1
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION",
+                    "Uncertain maintenance Begin cannot be replayed with a changed identity.",
+                )
+            transaction.pop("maintenanceBeginMethod", None)
+            transaction.pop("initialSourceActivation", None)
+            gate_generation = prior["expectedGateGeneration"]
         else:
             readiness = self._readiness_for(
                 target_kind,
@@ -10348,6 +10436,7 @@ class ComponentUpdater:
             "expectedCatalogGeneration": activity_catalog["generation"],
             "expectedActivitySources": activity_sources,
             "componentArtifactDigests": dict(transaction["componentArtifactDigests"]),
+            "requiresRestart": requires_restart,
             "beginMethod": transaction.get("maintenanceBeginMethod", "BeginMaintenance"),
             **(
                 {
@@ -10408,6 +10497,7 @@ class ComponentUpdater:
             transaction.pop("catalystPluginRefsRestartPending", None)
         hold["status"] = "ended"
         hold["endedAt"] = int(time.time())
+        transaction.pop("maintenanceGateGeneration", None)
         transaction.pop("maintenanceToken", None)
         transaction.pop("maintenanceRequestId", None)
         transaction.pop("maintenanceBeginMethod", None)
@@ -26862,8 +26952,17 @@ class ComponentUpdater:
                 "Maintenance broker did not return a durable transaction token.",
                 retryable=True,
             )
-        if transaction.get("schemaAdoption") is True:
+        if (
+            transaction.get("schemaAdoption") is True
+            or transaction.get("transactionKind") == "workload-assembly.v1"
+        ):
             transaction["maintenanceGateGeneration"] = gate_generation
+            if transaction.get("transactionKind") == "workload-assembly.v1":
+                phase = transaction.get("maintenancePhase")
+                holds = transaction.get("maintenanceHolds")
+                hold = holds.get(phase) if isinstance(holds, dict) else None
+                if isinstance(hold, dict) and hold.get("requestId") == request_id:
+                    hold["maintenanceGateGeneration"] = gate_generation
         return token
 
     def _clear_begin_pending(self, transaction: dict[str, Any], transaction_path: Path) -> None:
