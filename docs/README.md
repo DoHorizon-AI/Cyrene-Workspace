@@ -24,6 +24,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 ---
 
 ## 3. Specifications & Governance
+- [**Shared Runtime Directory Lifecycle ADR**](ADR_SHARED_RUNTIME_DIRECTORY_LIFECYCLE.md): systemd lifecycle contract for the shared `/run/cyrene` directory.
 - [**TEXT_MODEL_LIFECYCLE.md**](TEXT_MODEL_LIFECYCLE.md): Six-stage closed loop from data engineering to evaluation feedback.
 - [**COMPATIBILITY.md**](COMPATIBILITY.md): OpenAI API compatibility and scoped Plugin migration surfaces.
 - [**MIGRATION.md**](MIGRATION.md): Legacy surface final closure report and verification inventory.
@@ -63,6 +64,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 ---
 
 ## 3. 规范与治理
+- [**共享运行时目录生命周期 ADR**](ADR_SHARED_RUNTIME_DIRECTORY_LIFECYCLE.md)：共享 `/run/cyrene` 目录的 systemd 生命周期合约。
 - [**TEXT_MODEL_LIFECYCLE.md**](TEXT_MODEL_LIFECYCLE.md)：从数据工程到评估反馈的六阶段闭环。
 - [**COMPATIBILITY.md**](COMPATIBILITY.md)：OpenAI API 兼容性及限定范围的插件迁移代码面。
 - [**MIGRATION.md**](MIGRATION.md)：旧版代码面最终清理报告及验证清单。
