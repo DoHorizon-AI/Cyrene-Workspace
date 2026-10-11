@@ -4536,13 +4536,28 @@ def test_package_recovery_preserves_bootstrap_exception_type_and_source_line(
         co_name="install_workload_package",
     )
     install = FunctionType(wrapper_code, globals(), closure=wrap_failure.__closure__)
+    candidate = SimpleNamespace(
+        component_id=component_id,
+        package_id="cyrene.training.llama-factory",
+        package_version="0.1.0",
+        capability="training.llama-factory.v1",
+        interface_version="1",
+        artifact_digest="sha256:" + "1" * 64,
+        archive_digest="sha256:" + "2" * 64,
+        descriptor_digest="sha256:" + "3" * 64,
+        manifest_digest="sha256:" + "4" * 64,
+        dependency_lock_digest="sha256:" + "5" * 64,
+    )
 
     monkeypatch.setattr(updater, "_workload_inventory_before_daemon_stop", lambda _id: None)
     monkeypatch.setattr(updater, "_workload_hold_echo", lambda _transaction: {})
     monkeypatch.setattr(
         updater,
         "_load_workload_package_runtime",
-        lambda: SimpleNamespace(install_workload_package=install),
+        lambda: SimpleNamespace(
+            candidate_from_workload_rows=lambda *_args: candidate,
+            install_workload_package=install,
+        ),
     )
 
     with pytest.raises(updates.UpdateError) as error:
@@ -6234,6 +6249,40 @@ def test_workload_maintenance_uses_unique_phase_request_ids(phase: str) -> None:
     assert transaction["maintenanceRequestId"] == f"cyrene-workload-{phase}-{plan_id}"
 
 
+def test_workload_package_install_request_id_tracks_stable_full_candidate_identity() -> None:
+    plan_id = "plan-" + "a" * 32
+    candidate = SimpleNamespace(
+        component_id="cyrene-tools-dataset-generation",
+        package_id="cyrene.training.llama-factory",
+        package_version="0.1.0",
+        capability="training.llama-factory.v1",
+        interface_version="1",
+        artifact_digest="sha256:" + "1" * 64,
+        archive_digest="sha256:" + "2" * 64,
+        descriptor_digest="sha256:" + "3" * 64,
+        manifest_digest="sha256:" + "4" * 64,
+        dependency_lock_digest="sha256:" + "5" * 64,
+    )
+
+    request_id = updates._workload_package_install_request_id(plan_id, candidate)
+    assert request_id == updates._workload_package_install_request_id(plan_id, candidate)
+    assert request_id.startswith("cyrene-wpkg-" + plan_id.removeprefix("plan-") + "-")
+    assert request_id != (
+        "cyrene-wpkg-"
+        + plan_id.removeprefix("plan-")
+        + "-"
+        + hashlib.sha256(candidate.component_id.encode("utf-8")).hexdigest()[:12]
+    )
+
+    changed = SimpleNamespace(**vars(candidate))
+    changed.manifest_digest = "sha256:" + "6" * 64
+    assert updates._workload_package_install_request_id(plan_id, changed) != request_id
+
+    changed.artifact_digest = "sha256:invalid"
+    with pytest.raises(updates.UpdateError, match="identity is incomplete"):
+        updates._workload_package_install_request_id(plan_id, changed)
+
+
 def test_workload_end_maintenance_uses_phase_scoped_idempotency_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -6560,7 +6609,23 @@ def _cached_plugin_stage_fixture(
             "tagFormat": "component-version-source-sha",
         }
         release_id = f"preview-{component_id}-{version}-{commit}"
-        archive_bytes = f"archive:{component_id}".encode()
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "plugin.manifest.json",
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "id": package_id,
+                        "version": version,
+                        "capabilities": [capability_id],
+                        "runtime": {"entrypoint": "plugins:entrypoint"},
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+            archive.writestr("plugin.py", b"def entrypoint(): pass\n")
+        archive_bytes = archive_buffer.getvalue()
         reference_payloads = {
             "archive": archive_bytes,
             "descriptor": f"descriptor:{component_id}".encode(),
@@ -6793,6 +6858,15 @@ def test_workload_plugin_stage_projects_all_signed_resolution_identity_fields(
     assert {
         field: staged[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS
     } == {field: selected[field] for field in updates.WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS}
+    package_runtime = updater._load_workload_package_runtime()
+    archive_path = Path(staged["stagedIdentity"]["assetPaths"]["archive"])
+    assert staged["packageManifestDigest"] == package_runtime.package_manifest_digest(
+        archive_path.read_bytes(),
+        package_id=staged["packageId"],
+        version=staged["version"],
+        capability=staged["capabilityId"],
+    )
+    assert staged["packageManifestDigest"] != staged["manifestDigest"]
 
 
 @pytest.mark.parametrize("conflicting_wheels", [False, True])

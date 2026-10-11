@@ -12,6 +12,7 @@ import fcntl
 import grp
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import pwd
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -368,6 +370,65 @@ def _require_digest(value: Any, label: str, *, typed: bool = True) -> str:
     if not isinstance(value, str) or pattern.fullmatch(value) is None:
         raise WorkloadPackageRuntimeError(f"{label} is invalid")
     return value
+
+
+def package_manifest_digest(
+    archive_bytes: bytes,
+    *,
+    package_id: str,
+    version: str,
+    capability: str,
+) -> str:
+    """Hash the exact top-level Plugin manifest bytes in a verified package ZIP."""
+
+    if (
+        not isinstance(archive_bytes, bytes)
+        or not archive_bytes
+        or len(archive_bytes) > 128 * 1024 * 1024
+        or not isinstance(package_id, str)
+        or _PACKAGE_ID.fullmatch(package_id) is None
+        or not isinstance(version, str)
+        or _VERSION.fullmatch(version) is None
+        or not isinstance(capability, str)
+        or _PACKAGE_ID.fullmatch(capability) is None
+    ):
+        raise WorkloadPackageRuntimeError("Plugin package manifest inputs are invalid")
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+            matches = [
+                info for info in archive.infolist() if info.filename == "plugin.manifest.json"
+            ]
+            if len(matches) != 1:
+                raise WorkloadPackageRuntimeError(
+                    "Package archive must contain one top-level Plugin manifest"
+                )
+            info = matches[0]
+            file_type = stat.S_IFMT(info.external_attr >> 16)
+            if info.is_dir() or info.file_size > 1024 * 1024 or file_type not in {0, stat.S_IFREG}:
+                raise WorkloadPackageRuntimeError("Package Plugin manifest entry is unsafe")
+            manifest_bytes = archive.read(info)
+    except WorkloadPackageRuntimeError:
+        raise
+    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+        raise WorkloadPackageRuntimeError("Package archive is not a valid ZIP file") from error
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WorkloadPackageRuntimeError("Package Plugin manifest is invalid JSON") from error
+    runtime = manifest.get("runtime") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or type(manifest.get("schemaVersion")) is not int
+        or manifest.get("schemaVersion") != 1
+        or manifest.get("id") != package_id
+        or manifest.get("version") != version
+        or manifest.get("capabilities") != [capability]
+        or not isinstance(runtime, dict)
+        or not isinstance(runtime.get("entrypoint"), str)
+        or not runtime["entrypoint"]
+    ):
+        raise WorkloadPackageRuntimeError("Package Plugin manifest identity differs")
+    return "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
 
 
 def _require_request_id(value: Any, label: str = "request_id") -> str:
@@ -761,6 +822,23 @@ def candidate_from_workload_rows(
     archive_path = Path(_require_text(assets.get("archive"), "archive path"))
     if not descriptor_path.is_absolute() or not archive_path.is_absolute():
         raise WorkloadPackageRuntimeError("Verified staged package paths must be absolute")
+    archive_bytes = bootstrap._safe_source_bytes(
+        archive_path, archive_digest, bootstrap.MAX_RELEASE_ASSET_BYTES
+    )
+    package_digest = package_manifest_digest(
+        archive_bytes,
+        package_id=package_id,
+        version=version,
+        capability=capability,
+    )
+    staged_package_digest = staged_row.get("packageManifestDigest")
+    if (
+        staged_package_digest is not None
+        and _require_digest(staged_package_digest, "staged.packageManifestDigest") != package_digest
+    ):
+        raise WorkloadPackageRuntimeError(
+            "Staged Plugin manifest digest differs from the verified archive"
+        )
     candidate = bootstrap.WorkloadPackageCandidate(
         component_id=selected_id,
         package_id=package_id,
@@ -770,7 +848,7 @@ def candidate_from_workload_rows(
         artifact_digest=artifact_digest,
         archive_digest=archive_digest,
         descriptor_digest=_require_digest(staged_row.get("descriptorDigest"), "descriptorDigest"),
-        manifest_digest=_require_digest(staged_row.get("manifestDigest"), "manifestDigest"),
+        manifest_digest=package_digest,
         dependency_lock_digest=_require_digest(
             staged_row.get("dependencyLockDigest"), "dependencyLockDigest"
         ),
@@ -3681,6 +3759,7 @@ __all__ = [
     "build_workload_source_update",
     "candidate_from_workload_rows",
     "install_workload_package",
+    "package_manifest_digest",
     "read_runtime_source_policy_generic",
     "read_workload_package_inventory",
     "reconcile_workload_source_update",
