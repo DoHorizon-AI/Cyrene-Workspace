@@ -6981,6 +6981,95 @@ def test_package_runtime_receipt_preserves_outer_and_inner_manifest_digests(
         updater._read_workload_package_runtime_receipt(component_id)
 
 
+def test_legacy_package_stage_recovery_rebuilds_inner_manifest_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(updates, "_verify_private_directory", lambda _path: None)
+    updater, plan_id, _plan_digest, resolution, _candidates, plan_directory = (
+        _cached_plugin_stage_fixture(
+            tmp_path, monkeypatch, component_ids=("cyrene-tools-dataset-preparation",)
+        )
+    )
+    selected = resolution["selectedComponents"][0]
+    stored = json.loads((plan_directory / f"{plan_id}.json").read_text(encoding="utf-8"))
+    staged = dict(stored["stagedComponents"][0])
+    expected_package_manifest_digest = staged.pop("packageManifestDigest")
+    component_id = selected["componentId"]
+    transaction_path = tmp_path / "recovery-transaction.json"
+    transaction: dict[str, Any] = {
+        "maintenancePhase": "package-only",
+        "maintenanceToken": "active-hold-token",
+        "workloadId": "catalyst",
+        "planId": plan_id,
+        "selectedPluginRows": [selected],
+        "stagedComponents": [staged],
+        "packageInstallations": {},
+        "sourcePolicy": selected["sourcePolicy"],
+    }
+    helper = updater._load_workload_package_runtime()
+    observed_stages: list[dict[str, Any]] = []
+
+    def install_from_verified_stage(
+        row: dict[str, Any], verified_staged: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        observed_stages.append(dict(verified_staged))
+        candidate = helper.candidate_from_workload_rows(row, verified_staged)
+        return {
+            "record_version": 1,
+            "installation_id": "installation-" + "d" * 32,
+            "package_id": candidate.package_id,
+            "package_version": candidate.package_version,
+            "artifact_digest": candidate.artifact_digest,
+            "archive_digest": candidate.archive_digest,
+            "capabilities": [candidate.capability],
+            "state": "INSTALLED",
+            "verification": {
+                "artifact_digest": candidate.artifact_digest,
+                "archive_digest": candidate.archive_digest,
+                "descriptor_digest": candidate.descriptor_digest,
+                "manifest_digest": candidate.manifest_digest,
+                "dependency_lock_digest": candidate.dependency_lock_digest,
+            },
+            "installed_at_unix_ms": 102,
+        }
+
+    monkeypatch.setattr(updater, "_load_workload_package_runtime", lambda: helper)
+    monkeypatch.setattr(helper, "install_workload_package", install_from_verified_stage)
+    monkeypatch.setattr(updater, "_workload_inventory_before_daemon_stop", lambda *_args: None)
+    monkeypatch.setattr(updater, "_workload_hold_echo", lambda _transaction: {})
+    monkeypatch.setattr(updater, "_update_workload_source_policy", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_end_workload_hold", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_workload_runtime_daemon", lambda *_args, **_kwargs: None)
+
+    updater._resume_workload_package_install_phase(transaction, transaction_path)
+
+    assert "packageManifestDigest" not in staged
+    assert len(observed_stages) == 1
+    assert observed_stages[0]["packageManifestDigest"] == expected_package_manifest_digest
+    candidate = helper.candidate_from_workload_rows(selected, staged)
+    assert candidate.manifest_digest == expected_package_manifest_digest
+    receipt = updater._read_workload_package_runtime_receipt(component_id)
+    assert receipt is not None
+    assert receipt["manifestDigest"] == selected["manifestDigest"]
+    assert receipt["packageManifestDigest"] == expected_package_manifest_digest
+
+    wrong_inner_digest = {**staged, "packageManifestDigest": "sha256:" + "e" * 64}
+    with pytest.raises(
+        helper.WorkloadPackageRuntimeError,
+        match="Staged Plugin manifest digest differs from the verified archive",
+    ):
+        helper.candidate_from_workload_rows(selected, wrong_inner_digest)
+
+    archive_path = Path(staged["stagedIdentity"]["assetPaths"]["archive"])
+    archive_path.write_bytes(archive_path.read_bytes() + b"tampered")
+    bootstrap = helper._bootstrap_module()
+    with pytest.raises(
+        bootstrap.PackageRuntimeBootstrapError,
+        match="Verified Package Runtime asset changed after attestation",
+    ):
+        helper.candidate_from_workload_rows(selected, staged)
+
+
 @pytest.mark.parametrize("conflicting_wheels", [False, True])
 def test_first_core_preparer_requires_all_selected_plugins_to_share_one_wheel(
     tmp_path: Path,
