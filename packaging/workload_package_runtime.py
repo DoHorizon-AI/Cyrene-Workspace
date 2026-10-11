@@ -3118,6 +3118,7 @@ def _validate_installation_record_identity_for_hint(
         "manifestUri",
         "manifestDigest",
         "manifestAssetDigest",
+        "packageManifestDigest",
         "digest",
         "targetId",
         "indexIdentity",
@@ -3132,6 +3133,7 @@ def _validate_installation_record_identity_for_hint(
     for field in (
         "manifestDigest",
         "manifestAssetDigest",
+        "packageManifestDigest",
         "digest",
         "descriptorDigest",
         "archiveDigest",
@@ -3170,7 +3172,7 @@ def _validate_installation_record_identity_for_hint(
         "artifactDigest": hinted_artifact_digest,
         "archiveDigest": hint.get("archiveDigest"),
         "descriptorDigest": hint.get("descriptorDigest"),
-        "manifestDigest": hint.get("manifestDigest"),
+        "packageManifestDigest": hint.get("packageManifestDigest"),
         "dependencyLockDigest": hint.get("dependencyLockDigest"),
     }
     actual = {
@@ -3182,7 +3184,7 @@ def _validate_installation_record_identity_for_hint(
         "artifactDigest": record.get("artifact_digest"),
         "archiveDigest": record.get("archive_digest"),
         "descriptorDigest": verification.get("descriptor_digest"),
-        "manifestDigest": verification.get("manifest_digest"),
+        "packageManifestDigest": verification.get("manifest_digest"),
         "dependencyLockDigest": verification.get("dependency_lock_digest"),
     }
     if hint.get("installed") is not True or expected != actual:
@@ -3208,6 +3210,7 @@ def _validate_installation_record_identity_for_hint(
             "manifestUri",
             "manifestDigest",
             "manifestAssetDigest",
+            "packageManifestDigest",
             "digest",
             "targetId",
             "indexIdentity",
