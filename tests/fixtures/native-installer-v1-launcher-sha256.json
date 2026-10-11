@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sourceRef": "Cyrene-Workspace/develop@2327cf9221a23721b64017f326b5ba47cf2bc3fd",
+  "launchers": {
+    "exchange": "8ec895f54b101679d344138c2825ed7cea00577ebfd651d9395b3fefbf36acad",
+    "navigator": "ec5fe43e78d9e2930ac9509eb18088f92c178a00652d73c666c70936eb5cdf6f",
+    "yieldExecutionRuntime": "d9d45d9285b5f82f5ae2842844d3b703f2cbf7c9f1757cba3045441f8928f54c"
+  }
+}
