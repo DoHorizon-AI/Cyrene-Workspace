@@ -10705,11 +10705,321 @@ class ComponentUpdater:
                 wait_active=True,
             )
 
+    def _workload_first_core_current_catalog_generation(
+        self,
+        transaction: dict[str, Any],
+        journal: dict[str, Any],
+        result: dict[str, Any],
+        package_inventory: dict[str, Any],
+        *,
+        source_id: str,
+        source_principal: dict[str, Any],
+    ) -> int:
+        """Accept a current source generation only from this plan's committed update."""
+
+        historical_generation = result.get("catalogGeneration")
+        current_generation = package_inventory.get("catalogGeneration")
+        if (
+            type(historical_generation) is not int
+            or historical_generation < 1
+            or type(current_generation) is not int
+            or current_generation < historical_generation
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The current Package Runtime catalog generation is unavailable.",
+                retryable=True,
+            )
+        if current_generation == historical_generation:
+            return historical_generation
+
+        def reject() -> None:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The current source catalog is not proven by this exact workload transaction.",
+                retryable=True,
+            )
+
+        plan_id = transaction.get("planId")
+        plan_digest = transaction.get("planDigest")
+        source_policy = transaction.get("sourcePolicy")
+        current_workloads = [
+            row
+            for row in self.catalog.get("workloads", [])
+            if isinstance(row, dict) and row.get("workloadId") == "catalyst"
+        ]
+        if (
+            not isinstance(plan_id, str)
+            or not _valid_digest(plan_digest)
+            or not isinstance(source_policy, dict)
+            or len(current_workloads) != 1
+            or current_workloads[0].get("sourcePolicy") != source_policy
+            or journal.get("sourcePolicy") != source_policy
+            or self._workload_policy_source_id(source_policy) != source_id
+            or current_generation != historical_generation + 1
+            or transaction.get("expectedCatalogGeneration") != historical_generation
+            or transaction.get("activityCatalogGeneration") != current_generation
+            or package_inventory.get("sourcePolicy") != source_policy
+        ):
+            reject()
+
+        intents = transaction.get("sourceUpdateIntents")
+        source_updates = transaction.get("sourceUpdates")
+        intent = intents.get("package-only") if isinstance(intents, dict) else None
+        receipt = source_updates.get("package-only") if isinstance(source_updates, dict) else None
+        request_id = "cyrene-wsource-package-only-" + plan_id.removeprefix("plan-")
+        if (
+            not isinstance(intent, dict)
+            or transaction.get("sourceUpdateIntent") != intent
+            or transaction.get("sourceUpdate") != receipt
+            or intent.get("schemaVersion") != 1
+            or intent.get("phase") != "package-only"
+            or intent.get("requestId") != request_id
+            or intent.get("parentPlanId") != plan_id
+            or intent.get("parentPlanDigest") != plan_digest
+            or intent.get("previousCatalogGeneration") != historical_generation
+            or intent.get("expectedCatalogGeneration") != current_generation
+            or intent.get("changed") is not True
+            or intent.get("committed") is not True
+            or intent.get("requiredHoldComponentIds") != []
+            or not isinstance(intent.get("result"), dict)
+            or intent.get("result") != receipt
+        ):
+            reject()
+
+        selected_rows = transaction.get("selectedPluginRows")
+        selected_ids = (
+            [row.get("componentId") for row in selected_rows if isinstance(row, dict)]
+            if isinstance(selected_rows, list)
+            else []
+        )
+        if (
+            not selected_ids
+            or any(not isinstance(component_id, str) for component_id in selected_ids)
+            or len(selected_ids) != len(set(selected_ids))
+        ):
+            reject()
+        signed_policy, signed_selected_rows = self._workload_plugin_owner_rows(
+            "catalyst", tuple(sorted(selected_ids))
+        )
+        if signed_policy != source_policy or len(signed_selected_rows) != len(selected_rows):
+            reject()
+        stored_by_id = {row["componentId"]: row for row in selected_rows if isinstance(row, dict)}
+        signed_by_id = {row["componentId"]: row for row in signed_selected_rows}
+        for component_id in selected_ids:
+            stored = stored_by_id[component_id]
+            signed = signed_by_id.get(component_id)
+            if not isinstance(signed, dict) or any(
+                stored.get(field) != signed.get(field)
+                for field in (
+                    "componentId",
+                    "artifactKind",
+                    "packageId",
+                    "capabilityId",
+                    "bindingId",
+                    "sourcePolicy",
+                )
+            ):
+                reject()
+
+        selected_bindings = [
+            {
+                "componentId": row["componentId"],
+                "sourceId": source_id,
+                "bindingId": row["bindingId"],
+            }
+            for row in sorted(signed_selected_rows, key=lambda value: value["componentId"])
+        ]
+        transaction_digests = transaction.get("componentArtifactDigests")
+        expected_digests = (
+            {component_id: transaction_digests.get(component_id) for component_id in selected_ids}
+            if isinstance(transaction_digests, dict)
+            else None
+        )
+        if (
+            expected_digests is None
+            or any(not _valid_digest(digest) for digest in expected_digests.values())
+            or intent.get("selectedBindings") != selected_bindings
+            or intent.get("componentArtifactDigests") != expected_digests
+            or receipt.get("bindings") != selected_bindings
+        ):
+            reject()
+
+        current_package_records = package_inventory.get("installationRecords")
+        transaction_records = transaction.get("packageInstallations")
+        if not isinstance(current_package_records, dict) or not isinstance(
+            transaction_records, dict
+        ):
+            reject()
+        for component_id in selected_ids:
+            current_record = current_package_records.get(component_id)
+            recorded_record = transaction_records.get(component_id)
+            if (
+                not isinstance(current_record, dict)
+                or current_record != recorded_record
+                or current_record.get("package_id") != signed_by_id[component_id].get("packageId")
+                or not isinstance(current_record.get("installation_id"), str)
+            ):
+                reject()
+
+        try:
+            activity_catalog, runtime_policy, _principals, helper = self._workload_source_state(
+                "catalyst"
+            )
+            if runtime_policy is None:
+                reject()
+            runtime_policy = helper._validate_runtime_policy_against_catalog(
+                runtime_policy,
+                activity_catalog,
+            )
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The current signed source catalog and Package Runtime policy cannot be verified.",
+                retryable=True,
+            ) from error
+
+        sources = activity_catalog.get("sources")
+        initial_identities = journal.get("sourceCatalog", {}).get("sourceIdentities")
+        if (
+            type(activity_catalog.get("generation")) is not int
+            or activity_catalog.get("generation") != current_generation
+            or not isinstance(sources, list)
+            or len(sources) != 1
+            or not isinstance(sources[0], dict)
+            or sources[0].get("source_id") != source_id
+            or sources[0].get("uid") != source_principal.get("uid")
+            or sources[0].get("gid") != source_principal.get("gid")
+            or "binding_scopes" not in sources[0]
+            or initial_identities
+            != [
+                {
+                    "sourceId": source_id,
+                    "uid": source_principal.get("uid"),
+                    "gid": source_principal.get("gid"),
+                }
+            ]
+        ):
+            reject()
+        runtime_sources = (
+            runtime_policy.get("sources") if isinstance(runtime_policy, dict) else None
+        )
+        if not isinstance(runtime_sources, list) or len(runtime_sources) != 1:
+            reject()
+        runtime_source = runtime_sources[0]
+        source_token_digest = sources[0].get("source_token_sha256")
+        expected_source_identity = {
+            source_id: {
+                "uid": source_principal.get("uid"),
+                "gid": source_principal.get("gid"),
+                "source_token_sha256": source_token_digest,
+            }
+        }
+        expected_scopes = {source_id: sources[0]["binding_scopes"]}
+        expected_runtime_bindings = {source_id: runtime_source.get("bindings")}
+        if (
+            intent.get("sourceIdentity") != expected_source_identity
+            or intent.get("bindingScopes") != expected_scopes
+            or intent.get("runtimeBindings") != expected_runtime_bindings
+            or intent.get("sourceArguments")
+            != [
+                "--source",
+                f"{source_id}={source_principal.get('uid')}:{source_principal.get('gid')}",
+            ]
+            or runtime_source.get("source_id") != source_id
+            or runtime_source.get("uid") != source_principal.get("uid")
+            or runtime_source.get("gid") != source_principal.get("gid")
+            or runtime_source.get("source_token_sha256") != source_token_digest
+        ):
+            reject()
+
+        broker_operations = getattr(helper, "BROKER_OPERATIONS", None)
+        runtime_operations = getattr(helper, "RUNTIME_OPERATIONS", None)
+        if not isinstance(broker_operations, (tuple, list)) or not isinstance(
+            runtime_operations, (tuple, list)
+        ):
+            reject()
+        expected_scope_rows = []
+        expected_runtime_rows = []
+        for row in signed_selected_rows:
+            component_id = row["componentId"]
+            record = current_package_records.get(component_id)
+            if not isinstance(record, dict):
+                reject()
+            scope_identity = {
+                "binding_id": row["bindingId"],
+                "package_id": row["packageId"],
+                "installation_ids": [record.get("installation_id")],
+            }
+            expected_scope_rows.append({**scope_identity, "operations": list(broker_operations)})
+            expected_runtime_rows.append({**scope_identity, "operations": list(runtime_operations)})
+        expected_scope_rows.sort(key=lambda value: value["binding_id"])
+        expected_runtime_rows.sort(key=lambda value: value["binding_id"])
+        if (
+            sources[0]["binding_scopes"] != expected_scope_rows
+            or runtime_source.get("bindings") != expected_runtime_rows
+        ):
+            reject()
+
+        all_binding_component_ids = [
+            row.get("componentId")
+            for row in current_workloads[0].get("bindings", [])
+            if isinstance(row, dict)
+        ]
+        _policy, all_signed_rows = self._workload_plugin_owner_rows(
+            "catalyst", tuple(sorted(set(all_binding_component_ids)))
+        )
+        signed_by_binding = {row["bindingId"]: row for row in all_signed_rows}
+        for scope in sources[0]["binding_scopes"]:
+            owner = signed_by_binding.get(scope.get("binding_id"))
+            record = (
+                current_package_records.get(owner.get("componentId"))
+                if isinstance(owner, dict)
+                else None
+            )
+            if (
+                not isinstance(owner, dict)
+                or scope.get("package_id") != owner.get("packageId")
+                or not isinstance(record, dict)
+                or scope.get("installation_ids") != [record.get("installation_id")]
+            ):
+                reject()
+
+        policy_digest_reader = getattr(helper, "_runtime_policy_digest", None)
+        if not callable(policy_digest_reader):
+            reject()
+        expected_result_identities = [
+            {
+                "sourceId": source_id,
+                "uid": source_principal.get("uid"),
+                "gid": source_principal.get("gid"),
+            }
+        ]
+        try:
+            catalog_digest = _file_digest(self.activity_catalog_path)
+            policy_digest = policy_digest_reader(runtime_policy)
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The committed source update digests cannot be verified against current state.",
+                retryable=True,
+            ) from error
+        if (
+            receipt.get("catalogGeneration") != current_generation
+            or receipt.get("policyGeneration") != current_generation
+            or receipt.get("catalogDigest") != catalog_digest
+            or receipt.get("policyDigest") != policy_digest
+            or receipt.get("sourceIdentities") != expected_result_identities
+        ):
+            reject()
+        return current_generation
+
     def _workload_first_core_verified_active_components(
         self,
         transaction: dict[str, Any],
         service_units: list[dict[str, Any]],
         staged_first_core: list[dict[str, Any]] | None,
+        package_inventory: dict[str, Any],
         *,
         workload_id: str,
         plugin_refs_changed: bool,
@@ -10888,12 +11198,20 @@ class ComponentUpdater:
                 retryable=True,
             ) from error
         try:
+            live_catalog_generation = self._workload_first_core_current_catalog_generation(
+                transaction,
+                journal,
+                result,
+                package_inventory,
+                source_id=expected_source_id,
+                source_principal=expected_principal,
+            )
             live_verifier(
                 self,
                 journal,
                 {
                     "components": staged_first_core,
-                    "catalogGeneration": result.get("catalogGeneration"),
+                    "catalogGeneration": live_catalog_generation,
                     "activitySources": [expected_source_id],
                 },
                 probe_package_runtime=True,
@@ -17202,6 +17520,7 @@ class ComponentUpdater:
             transaction,
             service_units,
             staged_first_core,
+            package_inventory,
             workload_id=workload_id,
             plugin_refs_changed=catalyst_plugin_refs_changed,
             plugin_refs_restart_pending=(
