@@ -5329,7 +5329,7 @@ def test_catalyst_plugin_connection_ref_is_loopback_and_environment_safe(
             updates.ComponentUpdater._validate_catalyst_plugin_connection_ref(value)
 
 
-def test_catalyst_plugin_refs_project_only_runtime_status_values_without_journaling_them(
+def test_catalyst_plugin_refs_accept_binding_generation_distinct_from_catalog_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     updater = _empty_updater(tmp_path)
@@ -5387,20 +5387,23 @@ def test_catalyst_plugin_refs_project_only_runtime_status_values_without_journal
         }
 
     class RuntimeStatusHelper:
+        def __init__(self, status_overrides: dict[str, Any] | None = None) -> None:
+            self.status_overrides = status_overrides or {}
+
         def run_package_binding_operation(self, **kwargs: Any) -> dict[str, Any]:
+            assert kwargs["catalog_generation"] == 2
             component_id = next(
                 row["componentId"] for row in selected if row["bindingId"] == kwargs["binding_id"]
             )
-            return {
-                "requestId": kwargs["request_id"],
-                "status": {
-                    "binding_id": kwargs["binding_id"],
-                    "installation_id": kwargs["installation_ids"][0],
-                    "generation": kwargs["catalog_generation"],
-                    "state": "RUNNING",
-                    "connection_ref": refs[component_id],
-                },
+            status = {
+                "binding_id": kwargs["binding_id"],
+                "installation_id": kwargs["installation_ids"][0],
+                "generation": 1,
+                "state": "RUNNING",
+                "connection_ref": refs[component_id],
             }
+            status.update(self.status_overrides)
+            return {"requestId": kwargs["request_id"], "status": status}
 
     transaction = {"sdkEnvironment": {"installed": True, "pythonPath": "/usr/bin/python3"}}
     transaction_path = tmp_path / "transaction.json"
@@ -5424,19 +5427,22 @@ def test_catalyst_plugin_refs_project_only_runtime_status_values_without_journal
     monkeypatch.setattr(updates, "_atomic_json", lambda *_args, **_kwargs: None)
     principals = {source_id: {"uid": 1001, "gid": 1200, "tokenPath": tmp_path / "source.token"}}
 
-    assert updater._project_workload_catalyst_plugin_refs(
-        transaction,
-        transaction_path,
-        plugin_rows=selected,
-        package_inventory={
-            "installationRecords": installation_records,
-            "sourceBindings": source_bindings,
-        },
-        activity_catalog={"generation": 5},
-        runtime_policy={"schema_version": 1},
-        source_principals=principals,
-        helper=RuntimeStatusHelper(),
-    )
+    def project(helper: RuntimeStatusHelper) -> bool:
+        return updater._project_workload_catalyst_plugin_refs(
+            transaction,
+            transaction_path,
+            plugin_rows=selected,
+            package_inventory={
+                "installationRecords": installation_records,
+                "sourceBindings": source_bindings,
+            },
+            activity_catalog={"generation": 2},
+            runtime_policy={"schema_version": 1},
+            source_principals=principals,
+            helper=helper,
+        )
+
+    assert project(RuntimeStatusHelper())
 
     refs_payload = written[environment_path]
     # The ref file can reach disk before the final CORE restart starts. Keep
@@ -5462,20 +5468,23 @@ def test_catalyst_plugin_refs_project_only_runtime_status_values_without_journal
         "_read_workload_protected_file",
         lambda path, **_kwargs: refs_payload if path == environment_path else None,
     )
-    assert not updater._project_workload_catalyst_plugin_refs(
-        transaction,
-        transaction_path,
-        plugin_rows=selected,
-        package_inventory={
-            "installationRecords": installation_records,
-            "sourceBindings": source_bindings,
-        },
-        activity_catalog={"generation": 5},
-        runtime_policy={"schema_version": 1},
-        source_principals=principals,
-        helper=RuntimeStatusHelper(),
-    )
+    assert not project(RuntimeStatusHelper())
     assert transaction["catalystPluginRefsRestartPending"] is True
+    assert not project(RuntimeStatusHelper({"generation": (1 << 64) - 1}))
+
+    for status_overrides in (
+        {"binding_id": "wrong-binding"},
+        {"installation_id": "wrong-installation"},
+        {"state": "STOPPED"},
+        {"generation": 0},
+        {"generation": -1},
+        {"generation": True},
+        {"generation": 1.5},
+        {"generation": 1 << 64},
+    ):
+        with pytest.raises(updates.UpdateError) as error:
+            project(RuntimeStatusHelper(status_overrides))
+        assert error.value.code == "PACKAGE_RUNTIME_READBACK_REQUIRED"
 
 
 def test_boot_connection_recovery_skips_before_any_managed_catalyst_install(
