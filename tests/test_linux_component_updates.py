@@ -3904,12 +3904,407 @@ def _first_core_live_reuse_fixture() -> tuple[dict[str, Any], list[dict[str, Any
     }
     transaction = {
         "workloadId": "catalyst",
+        "planId": plan_id,
+        "planDigest": plan_digest,
         "firstCoreBootstrap": block,
         "firstCoreBootstrapStatus": "installed",
         "firstCoreBootstrapResult": result,
         "sourcePolicy": source_policy,
     }
     return transaction, staged, journal
+
+
+def _configure_first_core_source_update_fixture(
+    tmp_path: Path,
+    updater: updates.ComponentUpdater,
+    transaction: dict[str, Any],
+    journal: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Any]:
+    """Model the exact committed package-only source update after C10 generation 1."""
+
+    source_id = "cyrene-catalyst"
+    source_policy = transaction["sourcePolicy"]
+    component_ids = (
+        "cyrene-tools-dataset-preparation",
+        "cyrene-tools-document-parsing",
+        "cyrene-tools-dataset-generation",
+        "cyrene-tools-knowledge-preparation",
+    )
+    bindings = [
+        {
+            "componentId": component_id,
+            "bindingId": f"catalog-binding-{component_id.removeprefix('cyrene-tools-')}",
+        }
+        for component_id in component_ids
+    ]
+    updater.catalog["workloads"] = [
+        {
+            "workloadId": "catalyst",
+            "sourcePolicy": source_policy,
+            "bindings": bindings,
+        }
+    ]
+    updater.components = {
+        component_id: {
+            "componentId": component_id,
+            "pluginPackage": {
+                "packageId": component_id.replace("cyrene-tools-", "cyrene.tools."),
+                "capabilityId": component_id.replace("cyrene-tools-", "dataset.") + ".v1",
+            },
+        }
+        for component_id in component_ids
+    }
+    _policy, selected_rows = updater._workload_plugin_owner_rows("catalyst", component_ids)
+    transaction["selectedPluginRows"] = selected_rows
+    transaction["expectedCatalogGeneration"] = 1
+    transaction["activityCatalogGeneration"] = 2
+
+    source_token_digest = "f" * 64
+    package_records = {
+        component_id: {
+            "installation_id": f"installation-{index}",
+            "package_id": updater.components[component_id]["pluginPackage"]["packageId"],
+            "state": "INSTALLED",
+        }
+        for index, component_id in enumerate(component_ids, start=1)
+    }
+    transaction["packageInstallations"] = package_records
+    transaction["componentArtifactDigests"] = {
+        **transaction.get("componentArtifactDigests", {}),
+        **{
+            component_id: f"sha256:{index:064x}"
+            for index, component_id in enumerate(component_ids, start=20)
+        },
+    }
+    binding_scopes = [
+        {
+            "binding_id": row["bindingId"],
+            "package_id": updater.components[row["componentId"]]["pluginPackage"]["packageId"],
+            "installation_ids": [package_records[row["componentId"]]["installation_id"]],
+            "operations": ["activate", "deactivate", "recover"],
+        }
+        for row in bindings
+    ]
+    runtime_bindings = [
+        {
+            "binding_id": scope["binding_id"],
+            "package_id": scope["package_id"],
+            "installation_ids": scope["installation_ids"],
+            "operations": [
+                "activate",
+                "deactivate",
+                "get_installation",
+                "recover_binding",
+                "runtime_status",
+            ],
+        }
+        for scope in binding_scopes
+    ]
+    binding_scopes.sort(key=lambda scope: scope["binding_id"])
+    runtime_bindings.sort(key=lambda binding: binding["binding_id"])
+    activity_catalog = {
+        "schema_version": 1,
+        "generation": 2,
+        "sources": [
+            {
+                "source_id": source_id,
+                "uid": 1000,
+                "gid": 1000,
+                "source_token_sha256": source_token_digest,
+                "binding_scopes": binding_scopes,
+            }
+        ],
+    }
+    updater.activity_catalog_path.write_text(
+        json.dumps(activity_catalog, sort_keys=True), encoding="utf-8"
+    )
+    runtime_policy = {
+        "generation": 2,
+        "sources": [
+            {
+                "source_id": source_id,
+                "uid": 1000,
+                "gid": 1000,
+                "source_token_sha256": source_token_digest,
+                "bindings": runtime_bindings,
+            }
+        ],
+    }
+    policy_digest = "sha256:" + "e" * 64
+    helper = SimpleNamespace(
+        _validate_runtime_policy_against_catalog=lambda policy, _catalog: policy,
+        _runtime_policy_digest=lambda _policy: policy_digest,
+        BROKER_OPERATIONS=("activate", "deactivate", "recover"),
+        RUNTIME_OPERATIONS=(
+            "activate",
+            "deactivate",
+            "get_installation",
+            "recover_binding",
+            "runtime_status",
+        ),
+    )
+    updater._workload_source_state = lambda _workload_id: (
+        activity_catalog,
+        runtime_policy,
+        {source_id: {"uid": 1000, "gid": 1000}},
+        helper,
+    )
+
+    selected_bindings = [
+        {
+            "componentId": row["componentId"],
+            "sourceId": source_id,
+            "bindingId": row["bindingId"],
+        }
+        for row in sorted(selected_rows, key=lambda value: value["componentId"])
+    ]
+    receipt = {
+        "catalogGeneration": 2,
+        "catalogDigest": updates._file_digest(updater.activity_catalog_path),
+        "policyGeneration": 2,
+        "policyDigest": policy_digest,
+        "sourceIdentities": [{"sourceId": source_id, "uid": 1000, "gid": 1000}],
+        "bindings": selected_bindings,
+    }
+    intent = {
+        "schemaVersion": 1,
+        "phase": "package-only",
+        "requestId": "cyrene-wsource-package-only-" + transaction["planId"].removeprefix("plan-"),
+        "previousCatalogGeneration": 1,
+        "expectedCatalogGeneration": 2,
+        "previousPolicyDigest": "sha256:" + "d" * 64,
+        "bindingScopes": {source_id: binding_scopes},
+        "sourceIdentity": {
+            source_id: {
+                "uid": 1000,
+                "gid": 1000,
+                "source_token_sha256": source_token_digest,
+            }
+        },
+        "sourceArguments": ["--source", f"{source_id}=1000:1000"],
+        "runtimeBindings": {source_id: runtime_bindings},
+        "changed": True,
+        "committed": True,
+        "selectedBindings": selected_bindings,
+        "componentArtifactDigests": {
+            component_id: transaction["componentArtifactDigests"][component_id]
+            for component_id in component_ids
+        },
+        "requiredHoldComponentIds": [],
+        "parentPlanId": transaction["planId"],
+        "parentPlanDigest": transaction["planDigest"],
+        "result": receipt,
+    }
+    transaction["sourceUpdateIntents"] = {"package-only": intent}
+    transaction["sourceUpdateIntent"] = intent
+    transaction["sourceUpdates"] = {"package-only": receipt}
+    transaction["sourceUpdate"] = receipt
+    package_inventory = {
+        "catalogGeneration": 2,
+        "sourcePolicy": source_policy,
+        "installationRecords": package_records,
+    }
+    journal["sourceCatalog"]["sourceIdentities"] = [
+        {"sourceId": source_id, "uid": 1000, "gid": 1000}
+    ]
+    return package_inventory, activity_catalog, runtime_policy, helper
+
+
+def _first_core_reuse_services(
+    updater: updates.ComponentUpdater,
+) -> list[dict[str, Any]]:
+    services = [
+        {
+            "componentId": component_id,
+            "unit": f"{component_id}.service",
+            "candidate": None,
+        }
+        for component_id in ("cyrene-runtime-maintenance", "cy-package-runtime")
+    ]
+    updater.components.update(
+        {
+            row["componentId"]: {
+                "componentId": row["componentId"],
+                "systemdUnit": row["unit"],
+                "restart": {"unit": row["unit"], "group": "core-runtime"},
+            }
+            for row in services
+        }
+    )
+    return services
+
+
+def _mock_first_core_live_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    journal: dict[str, Any],
+    calls: list[dict[str, Any]],
+) -> None:
+    core = SimpleNamespace(
+        _journal_path=lambda _updater: tmp_path / "first-core.json",
+        _read_private_json=lambda _path: journal,
+        _fresh_workload_core_public_result=lambda _expected, value: value,
+        _verify_live_core_cohort=lambda _updater, _journal, plan, **kwargs: calls.append(
+            {"plan": plan, "kwargs": kwargs}
+        ),
+    )
+    monkeypatch.setattr(updates.ComponentUpdater, "_load_native_core_bootstrap", lambda _self: core)
+
+
+def test_catalyst_first_core_reuse_uses_exact_current_source_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction, staged, journal = _first_core_live_reuse_fixture()
+    inventory, _activity_catalog, _runtime_policy, _helper = (
+        _configure_first_core_source_update_fixture(tmp_path, updater, transaction, journal)
+    )
+    health_core = updater._load_native_core_bootstrap()
+    health_updater = SimpleNamespace(
+        catalog={"compatibilityGroups": []},
+        components={},
+        _broker_request=lambda _operation, _request: {
+            "status": "SERVING",
+            "gate_generation": 36,
+            "catalog_generation": 2,
+            "core_bootstrap_eligible": False,
+        },
+        _activity_catalog=lambda: (_activity_catalog, ["cyrene-catalyst"]),
+    )
+    assert (
+        health_core._health_snapshot(health_updater, require_eligible=False)[
+            "coreBootstrapEligible"
+        ]
+        is False
+    )
+    services = _first_core_reuse_services(updater)
+    calls: list[dict[str, Any]] = []
+    _mock_first_core_live_verifier(tmp_path, monkeypatch, journal, calls)
+
+    reusable = updater._workload_first_core_verified_active_components(
+        transaction,
+        services,
+        staged,
+        inventory,
+        workload_id="catalyst",
+        plugin_refs_changed=True,
+        plugin_refs_restart_pending=False,
+        has_oci_components=False,
+        web_selected=False,
+    )
+
+    assert reusable == {"cyrene-runtime-maintenance", "cy-package-runtime"}
+    assert journal["result"]["catalogGeneration"] == 1
+    assert len(calls) == 1
+    assert calls[0]["plan"]["catalogGeneration"] == 2
+    assert calls[0]["plan"]["activitySources"] == ["cyrene-catalyst"]
+    assert calls[0]["kwargs"] == {"probe_package_runtime": True}
+
+
+@pytest.mark.parametrize(
+    "invalid_state", ["wrong_plan", "uncommitted", "extra_source", "extra_binding", "digest"]
+)
+def test_catalyst_first_core_reuse_rejects_unproven_current_source_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_state: str,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction, staged, journal = _first_core_live_reuse_fixture()
+    inventory, activity_catalog, runtime_policy, helper = (
+        _configure_first_core_source_update_fixture(tmp_path, updater, transaction, journal)
+    )
+    intent = transaction["sourceUpdateIntents"]["package-only"]
+    receipt = transaction["sourceUpdates"]["package-only"]
+    if invalid_state == "wrong_plan":
+        intent["parentPlanDigest"] = "sha256:" + "b" * 64
+    elif invalid_state == "uncommitted":
+        intent["committed"] = False
+    elif invalid_state == "extra_source":
+        activity_catalog["sources"].append(
+            {
+                "source_id": "other-source",
+                "uid": 1001,
+                "gid": 1001,
+                "source_token_sha256": "a" * 64,
+                "binding_scopes": [],
+            }
+        )
+        runtime_policy["sources"].append(
+            {
+                "source_id": "other-source",
+                "uid": 1001,
+                "gid": 1001,
+                "source_token_sha256": "a" * 64,
+                "bindings": [],
+            }
+        )
+        updater.activity_catalog_path.write_text(
+            json.dumps(activity_catalog, sort_keys=True), encoding="utf-8"
+        )
+        receipt["catalogDigest"] = updates._file_digest(updater.activity_catalog_path)
+    elif invalid_state == "extra_binding":
+        component_id = "cyrene-tools-unselected"
+        package_id = "cyrene.tools.unselected"
+        binding_id = "catalog-binding-unselected"
+        extra_record = {
+            "installation_id": "installation-unselected",
+            "package_id": package_id,
+            "state": "INSTALLED",
+        }
+        updater.catalog["workloads"][0]["bindings"].append(
+            {"componentId": component_id, "bindingId": binding_id}
+        )
+        updater.components[component_id] = {
+            "componentId": component_id,
+            "pluginPackage": {"packageId": package_id, "capabilityId": "dataset.extra.v1"},
+        }
+        inventory["installationRecords"][component_id] = extra_record
+        transaction["packageInstallations"][component_id] = extra_record
+        extra_scope = {
+            "binding_id": binding_id,
+            "package_id": package_id,
+            "installation_ids": [extra_record["installation_id"]],
+            "operations": list(helper.BROKER_OPERATIONS),
+        }
+        extra_runtime_binding = {
+            **{key: extra_scope[key] for key in ("binding_id", "package_id", "installation_ids")},
+            "operations": list(helper.RUNTIME_OPERATIONS),
+        }
+        activity_catalog["sources"][0]["binding_scopes"].append(extra_scope)
+        runtime_policy["sources"][0]["bindings"].append(extra_runtime_binding)
+        activity_catalog["sources"][0]["binding_scopes"].sort(key=lambda row: row["binding_id"])
+        runtime_policy["sources"][0]["bindings"].sort(key=lambda row: row["binding_id"])
+        updater.activity_catalog_path.write_text(
+            json.dumps(activity_catalog, sort_keys=True), encoding="utf-8"
+        )
+        intent["bindingScopes"] = {
+            "cyrene-catalyst": activity_catalog["sources"][0]["binding_scopes"]
+        }
+        intent["runtimeBindings"] = {"cyrene-catalyst": runtime_policy["sources"][0]["bindings"]}
+        receipt["catalogDigest"] = updates._file_digest(updater.activity_catalog_path)
+    else:
+        receipt["catalogDigest"] = "sha256:" + "b" * 64
+
+    services = _first_core_reuse_services(updater)
+    calls: list[dict[str, Any]] = []
+    _mock_first_core_live_verifier(tmp_path, monkeypatch, journal, calls)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_first_core_verified_active_components(
+            transaction,
+            services,
+            staged,
+            inventory,
+            workload_id="catalyst",
+            plugin_refs_changed=True,
+            plugin_refs_restart_pending=False,
+            has_oci_components=False,
+            web_selected=False,
+        )
+
+    assert error.value.code == "FIRST_CORE_READBACK_REQUIRED"
+    assert calls == []
 
 
 def test_catalyst_first_core_refs_activation_requires_exact_live_c10_proof(
@@ -3950,6 +4345,7 @@ def test_catalyst_first_core_refs_activation_requires_exact_live_c10_proof(
         transaction,
         service_units,
         staged,
+        {"catalogGeneration": 1},
         workload_id="catalyst",
         plugin_refs_changed=True,
         plugin_refs_restart_pending=False,
@@ -4018,6 +4414,7 @@ def test_catalyst_first_core_refs_activation_rejects_wrong_plan_receipt(
             transaction,
             service_units,
             staged,
+            {"catalogGeneration": 1},
             workload_id="catalyst",
             plugin_refs_changed=False,
             plugin_refs_restart_pending=True,
@@ -4062,6 +4459,7 @@ def test_catalyst_first_core_refs_activation_rejects_wrong_request_receipt(
             transaction,
             service_units,
             staged,
+            {"catalogGeneration": 1},
             workload_id="catalyst",
             plugin_refs_changed=False,
             plugin_refs_restart_pending=True,
@@ -4121,6 +4519,7 @@ def test_catalyst_first_core_refs_activation_keeps_full_path_for_new_target(
         transaction,
         service_units,
         staged,
+        {"catalogGeneration": 1},
         workload_id="catalyst",
         plugin_refs_changed=True,
         plugin_refs_restart_pending=False,
@@ -4184,6 +4583,7 @@ def test_catalyst_first_core_refs_activation_fails_closed_on_live_mismatch(
             transaction,
             service_units,
             staged,
+            {"catalogGeneration": 1},
             workload_id="catalyst",
             plugin_refs_changed=True,
             plugin_refs_restart_pending=False,
