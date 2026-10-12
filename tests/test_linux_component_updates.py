@@ -4151,8 +4151,9 @@ def _mock_first_core_live_verifier(
     monkeypatch.setattr(updates.ComponentUpdater, "_load_native_core_bootstrap", lambda _self: core)
 
 
+@pytest.mark.parametrize("web_selected", [False, True])
 def test_catalyst_first_core_reuse_uses_exact_current_source_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, web_selected: bool
 ) -> None:
     updater = _empty_updater(tmp_path)
     transaction, staged, journal = _first_core_live_reuse_fixture()
@@ -4178,6 +4179,13 @@ def test_catalyst_first_core_reuse_uses_exact_current_source_generation(
         is False
     )
     services = _first_core_reuse_services(updater)
+    services.append(
+        {
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "unit": updates.CATALYST_SERVICE_UNIT,
+            "candidate": None,
+        }
+    )
     calls: list[dict[str, Any]] = []
     _mock_first_core_live_verifier(tmp_path, monkeypatch, journal, calls)
 
@@ -4190,7 +4198,8 @@ def test_catalyst_first_core_reuse_uses_exact_current_source_generation(
         plugin_refs_changed=True,
         plugin_refs_restart_pending=False,
         has_oci_components=False,
-        web_selected=False,
+        # The signed Catalyst workload also selects its required static Client Web component.
+        web_selected=web_selected,
     )
 
     assert reusable == {"cyrene-runtime-maintenance", "cy-package-runtime"}
@@ -4199,6 +4208,24 @@ def test_catalyst_first_core_reuse_uses_exact_current_source_generation(
     assert calls[0]["plan"]["catalogGeneration"] == 2
     assert calls[0]["plan"]["activitySources"] == ["cyrene-catalyst"]
     assert calls[0]["kwargs"] == {"probe_package_runtime": True}
+
+    unit_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "active")
+    monkeypatch.setattr(
+        updater,
+        "_set_workload_unit_for_apply",
+        lambda _transaction, _path, unit, operation, **_kwargs: unit_calls.append(
+            (unit, operation)
+        ),
+    )
+    updater._activate_workload_service_units_for_apply(
+        transaction,
+        tmp_path / "transaction.json",
+        services,
+        catalyst_refs_only=False,
+        verified_active_component_ids=reusable,
+    )
+    assert unit_calls == [(updates.CATALYST_SERVICE_UNIT, "restart")]
 
 
 @pytest.mark.parametrize(
