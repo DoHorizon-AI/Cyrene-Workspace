@@ -51,6 +51,12 @@ Cyrene decomposes AI engineering into six specialized service repositories with 
 - **Schema Single Source of Truth**: Products own domain schemas such as `ModelVersion`, `DatasetVersion`, and `TenantQuota`; Platform owns only generic runtime and ArtifactRef schemas; Plugins owns capability payload schemas.
 - **No Direct Database Bypass**: Services must interact across canonical public HTTP/gRPC/IPC APIs rather than querying internal databases.
 - **Fail-Fast In Production**: Deprecated compatibility modes are strictly disabled in production environments.
+
+## 4. Internal Exchange Integration Authority
+
+The accepted internal GitHub-to-WeCom integration profile follows the same single-authority rule: Platform owns Cyrene identity, directory, policy, and revocable delegation; Plugins Account Center owns external account links and credentials; Exchange owns integration inbox/outbox/operation state and the public REST facade; Navigator remains a later consumer and keeps its Work authority unchanged. The deterministic command path does not call an LLM or generic workflow engine. Its SQLite MVP uses separate databases at the Account Center and Exchange ownership boundaries; services never share or query each other's database.
+
+The full ownership matrix, delegation and credential rules, REST/OpenAPI/catalog contract, wire protocol requirements, migration behavior, and NOT_RUN acceptance gates are recorded in the [Exchange Integration v1 ADR](ADR_EXCHANGE_INTEGRATION_V1.md).
 ---
 <!-- Chinese Translation / 中文翻译 -->
 
@@ -104,3 +110,9 @@ Cyrene 将 AI 工程能力拆分到六个各自拥有单一概念权威的专业
 - **Schema 单一事实来源**：产品拥有 `ModelVersion`、`DatasetVersion` 和 `TenantQuota` 等领域 schema；Platform 只拥有通用运行时和 `ArtifactRef` schema；Plugins 拥有能力载荷 schema。
 - **禁止绕过数据库**：服务之间必须通过规范的公开 HTTP/gRPC/IPC API 交互，不得查询对方的内部数据库。
 - **生产环境快速失败**：生产环境严格禁用已弃用的兼容模式。
+
+## 4. 内部 Exchange 集成权属
+
+已接受的内部 GitHub 到企业微信群集成配置遵循相同的单一权威规则：Platform 负责 Cyrene 身份、目录、策略和可撤销委托；Plugins Account Center 负责外部账号关联与凭据；Exchange 负责集成 inbox/outbox/operation 状态及公开 REST 门面；Navigator 后续作为消费者，保持其 Work 权威不变。确定性命令路径不调用 LLM 或通用工作流引擎。SQLite MVP 在 Account Center 和 Exchange 各自权属边界使用独立数据库；服务不得共享或查询彼此的数据库。
+
+完整权属矩阵、委托与凭据规则、REST/OpenAPI/catalog 合约、wire 协议要求、迁移行为和 NOT_RUN 验收门禁见 [Exchange Integration v1 ADR](ADR_EXCHANGE_INTEGRATION_V1.md)。

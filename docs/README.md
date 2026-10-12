@@ -9,6 +9,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**PRODUCTS.md**](PRODUCTS.md): Product catalog and service responsibilities (Catalyst, Yield, Reactor, Exchange, Navigator, Echo).
 - [**RUNTIME.md**](RUNTIME.md): Clean-room runtime execution model and environment profiles.
 - [**PLUGINS.md**](PLUGINS.md): Plugin architecture, `plugin.manifest.json` specification, and catalog governance.
+- [**Exchange Integration v1 ADR**](ADR_EXCHANGE_INTEGRATION_V1.md): Accepted internal GitHub-to-WeCom architecture, ownership, contracts, compatibility, and implementation evidence gates.
 - [**Modular distribution ADR**](ADR_MODULAR_DISTRIBUTION_V01.md): Ubuntu workload selection, signed releases, deployment boundaries, and installed-service acceptance gates.
 
 ---
@@ -50,6 +51,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**PRODUCTS.md**](PRODUCTS.md)：产品目录及服务职责（Catalyst、Yield、Reactor、Exchange、Navigator、Echo）。
 - [**RUNTIME.md**](RUNTIME.md)：洁净室运行时执行模型和环境配置档。
 - [**PLUGINS.md**](PLUGINS.md)：插件架构、`plugin.manifest.json` 规范及目录治理。
+- [**Exchange Integration v1 ADR**](ADR_EXCHANGE_INTEGRATION_V1.md)：已接受的内部 GitHub 到企业微信架构、权属、合约、兼容性和实现证据门禁。
 - [**模块化发行 ADR**](ADR_MODULAR_DISTRIBUTION_V01.md)：Ubuntu 工作负载选择、签名发布、部署边界与安装后验收门禁。
 
 ---
