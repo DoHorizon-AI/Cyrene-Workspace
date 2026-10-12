@@ -14222,6 +14222,18 @@ class ComponentUpdater:
         binding_ops = transaction.setdefault("bindingOperations", [])
         if not isinstance(binding_ops, list):
             raise UpdateError("INVALID_TRANSACTION", "Workload binding journal is malformed.")
+        scope_operation = "recover" if operation == "recover_binding" else operation
+        request_id = self._select_workload_binding_request_id(
+            transaction,
+            request_id=request_id,
+            operation=operation,
+            scope={
+                "binding_id": binding_id,
+                "package_id": package_id,
+                "installation_id": installation_id,
+                "operation": scope_operation,
+            },
+        )
 
         def persist_intent(operation_request_id: str, scope: Mapping[str, Any]) -> None:
             if operation_request_id != request_id or not isinstance(scope, Mapping):
@@ -14345,6 +14357,77 @@ class ComponentUpdater:
         completed["completedAt"] = int(time.time())
         _atomic_json(transaction_path, transaction)
         return result
+
+    @staticmethod
+    def _select_workload_binding_request_id(
+        transaction: dict[str, Any],
+        *,
+        request_id: str,
+        operation: str,
+        scope: Mapping[str, Any],
+    ) -> str:
+        """Reuse unresolved intents, but never replay a completed mutation as new work.
+
+        中文：未完成操作复用原 ID 以便 Broker 对账；已完成后再次执行同一 owner 操作时，
+        分配新的请求 ID，避免只读回放旧结果而不重新执行绑定变更。
+        """
+
+        binding_ops = transaction.get("bindingOperations", [])
+        if not isinstance(binding_ops, list):
+            raise UpdateError("INVALID_TRANSACTION", "Workload binding journal is malformed.")
+
+        expected_scope = dict(scope)
+        matching_scope: list[dict[str, Any]] = []
+        used_request_ids: set[str] = set()
+        requested_row: dict[str, Any] | None = None
+        request_id_pattern = r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"
+        for row in binding_ops:
+            if not isinstance(row, dict):
+                raise UpdateError("INVALID_TRANSACTION", "Workload binding journal is malformed.")
+            existing_id = row.get("requestId")
+            if (
+                not isinstance(existing_id, str)
+                or re.fullmatch(request_id_pattern, existing_id) is None
+            ):
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Workload binding request identity is malformed."
+                )
+            if existing_id in used_request_ids:
+                raise UpdateError(
+                    "INVALID_TRANSACTION", "Workload binding request ID is duplicated."
+                )
+            used_request_ids.add(existing_id)
+            same_scope = row.get("operation") == operation and row.get("scope") == expected_scope
+            if existing_id == request_id:
+                if not same_scope:
+                    raise UpdateError(
+                        "INVALID_TRANSACTION",
+                        "Package Runtime request ID belongs to another binding operation.",
+                    )
+                requested_row = row
+            if same_scope:
+                matching_scope.append(row)
+
+        unresolved = [row for row in matching_scope if row.get("state") != "completed"]
+        if len(unresolved) > 1:
+            raise UpdateError(
+                "INVALID_TRANSACTION", "Multiple Package Runtime binding operations are unresolved."
+            )
+        if unresolved:
+            return unresolved[0]["requestId"]
+        if requested_row is None:
+            return request_id
+
+        # The deterministic first ID is intentionally stable. Once that exact
+        # mutation is durably complete, a later Apply cycle needs a new admission
+        # key; otherwise Broker returns the old RuntimeStatus without dispatching.
+        for _attempt in range(8):
+            attempt_id = "cyrene-wop-attempt-" + uuid.uuid4().hex
+            if attempt_id not in used_request_ids:
+                return attempt_id
+        raise UpdateError(
+            "INVALID_TRANSACTION", "A unique Package Runtime binding request ID is unavailable."
+        )
 
     def _write_workload_package_runtime_receipt(
         self,

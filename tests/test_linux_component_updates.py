@@ -1424,6 +1424,220 @@ def test_workload_catalyst_token_projection_never_journals_bearer(
     assert token not in journal_path.read_text(encoding="utf-8")
 
 
+def test_completed_workload_binding_operation_uses_a_new_attempt_id(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "a" * 32
+    component_id = "cyrene-test-plugin"
+    binding_id = "catalog-binding-test-plugin"
+    package_id = "cyrene.test.plugin"
+    installation_id = "test-installation-1"
+    source_id = "cyrene-test-source"
+    component = {
+        "componentId": component_id,
+        "bindingId": binding_id,
+        "packageId": package_id,
+        "sourcePolicy": {"mode": "standaloneOperator", "sourceId": source_id},
+    }
+    transaction: dict[str, Any] = {
+        "planId": plan_id,
+        "sdkEnvironment": {"pythonPath": "/usr/bin/python3"},
+        "bindingOperations": [],
+    }
+    transaction_path = tmp_path / "transactions" / f"{plan_id}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    source_principals = {
+        source_id: {"uid": 1001, "gid": 1001, "tokenPath": tmp_path / "source.token"}
+    }
+    observed: list[tuple[str, str]] = []
+
+    def invoke(operation: str, state: str) -> str:
+        def run_binding_operation(**kwargs: Any) -> dict[str, str]:
+            request_id = kwargs["request_id"]
+            scope = {
+                "binding_id": binding_id,
+                "package_id": package_id,
+                "installation_id": installation_id,
+                "operation": operation,
+            }
+            kwargs["persist_intent"](request_id, scope)
+            kwargs["persist_outcome"](
+                {
+                    "binding_id": binding_id,
+                    "installation_id": installation_id,
+                    "generation": 1,
+                    "state": state,
+                    "failure_code": None,
+                    "failure_message": None,
+                    "connection_ref": None,
+                },
+                {"request_id": request_id, "already_completed": False},
+            )
+            observed.append((operation, request_id))
+            return {"requestId": request_id}
+
+        result = updater._workload_binding_operation(
+            transaction,
+            transaction_path,
+            operation=operation,
+            component=component,
+            installation_id=installation_id,
+            activity_catalog={"generation": 4},
+            runtime_policy={"generation": 4},
+            source_principals=source_principals,
+            helper=SimpleNamespace(run_package_binding_operation=run_binding_operation),
+        )
+        return result["requestId"]
+
+    first_activation = invoke("activate", "RUNNING")
+    first_deactivation = invoke("deactivate", "STOPPED")
+    retried_activation = invoke("activate", "RUNNING")
+    retried_deactivation = invoke("deactivate", "STOPPED")
+
+    deterministic_first_id = (
+        "cyrene-wop-"
+        + plan_id.removeprefix("plan-")
+        + "-act-"
+        + updates.hashlib.sha256(installation_id.encode("utf-8")).hexdigest()[:8]
+        + "-"
+        + component_id
+    )
+    assert first_activation == deterministic_first_id
+    assert retried_activation != first_activation
+    assert retried_activation.startswith("cyrene-wop-attempt-")
+    deterministic_deactivation_id = (
+        "cyrene-wop-"
+        + plan_id.removeprefix("plan-")
+        + "-dea-"
+        + updates.hashlib.sha256(installation_id.encode("utf-8")).hexdigest()[:8]
+        + "-"
+        + component_id
+    )
+    assert observed == [
+        ("activate", first_activation),
+        ("deactivate", first_deactivation),
+        ("activate", retried_activation),
+        ("deactivate", retried_deactivation),
+    ]
+    assert first_deactivation == deterministic_deactivation_id
+    assert retried_deactivation != first_deactivation
+    assert retried_deactivation.startswith("cyrene-wop-attempt-")
+    journal = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert [entry["state"] for entry in journal["bindingOperations"]] == [
+        "completed",
+        "completed",
+        "completed",
+        "completed",
+    ]
+    assert [entry["status"]["state"] for entry in journal["bindingOperations"]] == [
+        "RUNNING",
+        "STOPPED",
+        "RUNNING",
+        "STOPPED",
+    ]
+
+
+def test_unfinished_workload_binding_operation_reuses_its_request_id(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "b" * 32
+    component_id = "cyrene-test-plugin"
+    binding_id = "catalog-binding-test-plugin"
+    package_id = "cyrene.test.plugin"
+    installation_id = "test-installation-2"
+    source_id = "cyrene-test-source"
+    component = {
+        "componentId": component_id,
+        "bindingId": binding_id,
+        "packageId": package_id,
+        "sourcePolicy": {"mode": "standaloneOperator", "sourceId": source_id},
+    }
+    transaction: dict[str, Any] = {
+        "planId": plan_id,
+        "sdkEnvironment": {"pythonPath": "/usr/bin/python3"},
+        "bindingOperations": [],
+    }
+    transaction_path = tmp_path / "transactions" / f"{plan_id}.json"
+    transaction_path.parent.mkdir(mode=0o700)
+    source_principals = {
+        source_id: {"uid": 1001, "gid": 1001, "tokenPath": tmp_path / "source.token"}
+    }
+    request_ids: list[str] = []
+
+    def interrupted_operation(**kwargs: Any) -> dict[str, str]:
+        request_id = kwargs["request_id"]
+        request_ids.append(request_id)
+        kwargs["persist_intent"](
+            request_id,
+            {
+                "binding_id": binding_id,
+                "package_id": package_id,
+                "installation_id": installation_id,
+                "operation": "activate",
+            },
+        )
+        raise RuntimeError("simulated interruption after durable intent")
+
+    common = {
+        "transaction": transaction,
+        "transaction_path": transaction_path,
+        "operation": "activate",
+        "component": component,
+        "installation_id": installation_id,
+        "activity_catalog": {"generation": 4},
+        "runtime_policy": {"generation": 4},
+        "source_principals": source_principals,
+    }
+    with pytest.raises(updates.UpdateError, match="did not complete"):
+        updater._workload_binding_operation(
+            **common,
+            helper=SimpleNamespace(run_package_binding_operation=interrupted_operation),
+        )
+    assert (
+        json.loads(transaction_path.read_text(encoding="utf-8"))["bindingOperations"][0]["state"]
+        == "intent"
+    )
+
+    def resumed_operation(**kwargs: Any) -> dict[str, str]:
+        request_id = kwargs["request_id"]
+        request_ids.append(request_id)
+        kwargs["persist_intent"](
+            request_id,
+            {
+                "binding_id": binding_id,
+                "package_id": package_id,
+                "installation_id": installation_id,
+                "operation": "activate",
+            },
+        )
+        kwargs["persist_outcome"](
+            {
+                "binding_id": binding_id,
+                "installation_id": installation_id,
+                "generation": 1,
+                "state": "RUNNING",
+                "failure_code": None,
+                "failure_message": None,
+                "connection_ref": None,
+            },
+            {"request_id": request_id, "already_completed": True},
+        )
+        return {"requestId": request_id}
+
+    updater._workload_binding_operation(
+        **common,
+        helper=SimpleNamespace(run_package_binding_operation=resumed_operation),
+    )
+
+    assert len(request_ids) == 2
+    assert request_ids[0] == request_ids[1]
+    final_journal = json.loads(transaction_path.read_text(encoding="utf-8"))
+    assert final_journal["bindingOperations"][0]["state"] == "completed"
+    assert final_journal["bindingOperations"][0]["receipt"]["already_completed"] is True
+
+
 def test_workload_catalyst_auth_reuses_protected_service_owned_token_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
