@@ -3544,6 +3544,178 @@ def test_catalyst_uses_deb_owned_unit_and_restarts_without_replacing_it(
     ) == [component["systemdUnit"]]
 
 
+def test_workload_services_follow_verified_dependency_and_unit_start_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    broker = {
+        "componentId": "cyrene-runtime-maintenance",
+        "dependencies": [],
+        "systemdUnit": "cyrene-runtime-maintenance.service",
+        "restart": {
+            "group": "single-service",
+            "unit": "cyrene-runtime-maintenance.service",
+            "order": 50,
+        },
+    }
+    package_runtime = {
+        "componentId": "cy-package-runtime",
+        "dependencies": [{"componentId": broker["componentId"], "versionRange": ">=0.1.0"}],
+        "systemdUnit": "cyrene-package-runtime.service",
+        "restart": {
+            "group": "single-service",
+            "unit": "cyrene-package-runtime.service",
+            "order": 40,
+        },
+    }
+    catalyst = {
+        "componentId": "cyrene-catalyst",
+        "kind": "python-bundle",
+        "pythonBundleService": "catalyst",
+        "dependencies": [
+            {"componentId": broker["componentId"], "versionRange": ">=0.1.0"},
+            {"componentId": "cyrene-runtime-maintenance-sdk", "versionRange": "=0.1.0"},
+        ],
+        "systemdUnit": "cyrene-catalyst.service",
+        "restart": {
+            "group": "single-service",
+            "unit": "cyrene-catalyst.service",
+            "order": -100,
+        },
+    }
+    wants_consumer = {
+        "componentId": "cyrene-a-wants-only-consumer",
+        "dependencies": [],
+        "systemdUnit": "cyrene-a-wants-only-consumer.service",
+        "restart": {
+            "group": "single-service",
+            "unit": "cyrene-a-wants-only-consumer.service",
+            "order": 100,
+        },
+    }
+    wants_target = {
+        "componentId": "cyrene-z-wants-only-target",
+        "dependencies": [],
+        "systemdUnit": "cyrene-z-wants-only-target.service",
+        "restart": {
+            "group": "single-service",
+            "unit": "cyrene-z-wants-only-target.service",
+            "order": 100,
+        },
+    }
+    sdk = {"componentId": "cyrene-runtime-maintenance-sdk", "dependencies": []}
+    updater.components = {
+        row["componentId"]: row
+        for row in (broker, package_runtime, catalyst, wants_consumer, wants_target, sdk)
+    }
+    unit_payloads = {
+        broker["componentId"]: b"[Unit]\nDescription=Broker\n",
+        package_runtime["componentId"]: (
+            b"[Unit]\nRequires=cyrene-runtime-maintenance.service\n"
+            b"After = cyrene-runtime-maintenance.service\n"
+        ),
+        catalyst["componentId"]: (
+            b"[Unit]\nWants=cyrene-package-runtime.service\n"
+            b"Requires=cyrene-runtime-maintenance.service\n"
+            b"After=cyrene-runtime-maintenance.service cyrene-package-runtime.service\n"
+        ),
+        wants_consumer["componentId"]: (
+            b"[Unit]\nRequires=cyrene-z-wants-only-target.service\n"
+            b"Wants=cyrene-z-wants-only-target.service\n"
+        ),
+        wants_target["componentId"]: b"[Unit]\n",
+    }
+
+    def signed_unit(
+        component: dict[str, Any], _candidate: dict[str, Any] | None
+    ) -> tuple[bytes, Path, str]:
+        payload = unit_payloads[component["componentId"]]
+        return (
+            payload,
+            tmp_path / f"{component['componentId']}.service",
+            "sha256:" + hashlib.sha256(payload).hexdigest(),
+        )
+
+    def deb_unit(
+        component: dict[str, Any],
+        _candidate: dict[str, Any] | None,
+        *,
+        verify_fragment: bool,
+    ) -> tuple[bytes, Path, str]:
+        assert verify_fragment is True
+        return signed_unit(component, _candidate)
+
+    monkeypatch.setattr(updater, "_workload_signed_unit_bytes", signed_unit)
+    monkeypatch.setattr(updater, "_workload_deb_managed_unit_bytes", deb_unit)
+    rows = [
+        {"componentId": catalyst["componentId"]},
+        {"componentId": package_runtime["componentId"]},
+        {"componentId": broker["componentId"]},
+        {"componentId": wants_target["componentId"]},
+        {"componentId": wants_consumer["componentId"]},
+    ]
+    candidates = [{"componentId": row["componentId"]} for row in rows]
+
+    services = updater._workload_service_units(rows, {}, candidates)
+
+    assert [service["componentId"] for service in services] == [
+        broker["componentId"],
+        package_runtime["componentId"],
+        catalyst["componentId"],
+        wants_consumer["componentId"],
+        wants_target["componentId"],
+    ]
+
+
+def test_workload_unit_before_directive_adds_start_order_edge() -> None:
+    assert updates.ComponentUpdater._workload_unit_after_before(
+        b"[Unit]\nBefore = consumer.service\\\n  another.service\n[Service]\nAfter=ignored.service\n"
+    ) == (set(), {"consumer.service", "another.service"})
+
+
+def test_workload_services_reject_dependency_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    first = {
+        "componentId": "service-a",
+        "dependencies": [],
+        "systemdUnit": "service-a.service",
+        "restart": {"group": "single-service", "unit": "service-a.service"},
+    }
+    second = {
+        "componentId": "service-b",
+        "dependencies": [],
+        "systemdUnit": "service-b.service",
+        "restart": {"group": "single-service", "unit": "service-b.service"},
+    }
+    updater.components = {row["componentId"]: row for row in (first, second)}
+    payloads = {
+        first["componentId"]: b"[Unit]\nAfter=service-b.service\n",
+        second["componentId"]: b"[Unit]\nAfter=service-a.service\n",
+    }
+
+    def signed_unit(
+        component: dict[str, Any], _candidate: dict[str, Any] | None
+    ) -> tuple[bytes, Path, str]:
+        payload = payloads[component["componentId"]]
+        return (
+            payload,
+            tmp_path / f"{component['componentId']}.service",
+            "sha256:" + hashlib.sha256(payload).hexdigest(),
+        )
+
+    monkeypatch.setattr(updater, "_workload_signed_unit_bytes", signed_unit)
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_service_units(
+            [{"componentId": first["componentId"]}, {"componentId": second["componentId"]}],
+            {},
+            [],
+        )
+
+    assert error.value.code == "SERVICE_DEPENDENCY_CYCLE"
+
+
 def test_control_service_keeps_signed_release_unit_ownership(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
