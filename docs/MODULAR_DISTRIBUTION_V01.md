@@ -1,8 +1,8 @@
 # Modular Distribution v0.1: Ubuntu installation / Ubuntu 安装指南
 
-This preview targets Ubuntu 24.04 x86_64. Workspace W `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3` (PR #152) and Platform P `99aa35d75397ab01746d90d6ca078fe20dda0c1e` (PR #107) have immutable, source-bound releases. Platform API release 409660341 has 52/52 assets matched, 24 indexed manifests, and 25 strict verification receipts. Native API release 409705856 has 18/18 assets matched and passed strict verification for all nine detached asset attestations without skip or trust cache. Root's consolidated source, pins, closure, and Ubuntu 24.04 package-payload readback also passed. Fresh-host product acceptance remains PENDING. Do not use the historical W2327, Stage78 W a3/P86, or superseded W0d48 packages for this acceptance.
+This preview targets Ubuntu 24.04 x86_64. Stage94’s exact Workspace source has an immutable Native release with official API/asset, exact-source, and strict-attestation readbacks passing. Stage93 guest2253 recorded three distinct Apply failures: `PLAN_CHANGED` and `PACKAGE_RUNTIME_READBACK_REQUIRED` with causes not established, then `FIRST_CORE_READBACK_REQUIRED` caused by the C10 authority probe defaulting to `cyrene-yield` instead of the signed Catalyst source. A later recovery Apply reported overall success with the SDK and six pointers healthy; the earlier failures remain recorded. Stage94 same-guest upgrade and new-source public Apply are pending, so core acceptance is not claimed.
 
-此预览版面向 Ubuntu 24.04 x86_64。Workspace W `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3`（PR #152）和 Platform P `99aa35d75397ab01746d90d6ca078fe20dda0c1e`（PR #107）均已有源码绑定的不可变 release。Platform API release 409660341 的 52/52 项资产匹配，24 个 index manifest 与 25 份严格验证记录通过。Native API release 409705856 的 18/18 项资产匹配；九个 detached asset attestation 均通过严格验证，未跳过、未使用信任缓存。Root 综合源码、pins、closure 与 Ubuntu 24.04 包 payload 回读也已通过。全新主机产品验收仍待完成。此次验收不要使用历史 W2327、Stage78 W a3/P86 或已被替代的 W0d48 软件包。
+此预览版面向 Ubuntu 24.04 x86_64。Stage94 的精确 Workspace 源码已发布为不可变 Native release，官方 API/资产、精确源码和严格 attestation 回读均已通过。Stage93 的 guest2253 记录了三次不同的 Apply 失败：`PLAN_CHANGED` 和 `PACKAGE_RUNTIME_READBACK_REQUIRED` 的原因未能确认；随后 `FIRST_CORE_READBACK_REQUIRED` 的原因是 C10 authority probe 默认选择 `cyrene-yield`，而不是签名 Catalyst source。之后一次 recovery Apply 报告 overall success，SDK 与六个 pointers 健康；此前失败仍作为独立回执保留。Stage94 同一主机的 upgrade 和新源码 public Apply 尚待执行，因此不声称 core 验收通过。
 
 ## Workloads and components / Workload 与组件
 
@@ -22,60 +22,107 @@ Catalyst Plugin IDs: `cyrene-tools-dataset-preparation`, `cyrene-tools-document-
 
 Catalyst Plugin ID：`cyrene-tools-dataset-preparation`、`cyrene-tools-document-parsing`、`cyrene-tools-dataset-generation`、`cyrene-tools-knowledge-preparation`。Echo 使用 `cyrene-evaluation-exact-match`。可省略可选组件，但必须报告对应 capability 不可用。Echo 独立安装；Catalyst 不需要 Docker。
 
-## Current release identities / 当前发行身份
+<a id="stage94-native-install"></a>
 
-| Item | Exact identity | Status |
-| --- | --- | --- |
-| Platform | `99aa35d75397ab01746d90d6ca078fe20dda0c1e` (PR #107 merge) | [Immutable release](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e), API 409660341; run 38137876503; 52/52 assets matched; 24 indexed manifests and 25 strict verification receipts passed |
-| Plugins Official source | `48f9148e987c6e9066038db99ae0295542e32a77`; producer run 38123576893 | Five immutable packages; 80 assets and 40 attestation subjects verified |
-| Signed v2 Catalog | source `18455255cdf8b87dd8cd48ceb25e5ea411a622ad`, generation 15 | `catalog-v2-preview-18455255cdf8b87dd8cd48ceb25e5ea411a622ad`; SHA-256 `9356861a377e18d1b6ed586d7ee8316de7d7d11c5e7543269d3cbd5d456f314d`; unchanged |
-| Workspace source for Native | `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3` (PR #152 merge) | Canonical source readback passed; producer run 38144970974 succeeded on the exact source |
-| Native release | [Immutable release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3), API 409705856 | 18/18 assets match API IDs/digests/sizes; strict source-bound verifier passed all nine detached attestations without skip or trust cache |
-| Ubuntu 24.04 amd64 DEB | API asset 630904057 | SHA-256 `d240c03a8635ebe1e78a18330400c035b898ab62e56baf9abd1a6c4985b0b6b4`; 155,111,334 bytes |
-| Consolidated Root source/pin and package-payload readback | PASS | Native full-release readback SHA-256 `60781f5bce08d2b28b82fb230bff04d46b830afcec232c7ff910bc7fc0e43780`; canonical pins `release-pins-v1.json` SHA-256 `e614d27101fa818ca06f4cdb302be338783e68c789853e4804f71e35d3e4db7a`; pins/closure readback SHA-256 `09ebf1e7c335bfe49ffa84abbccfc4149153933bdc345a0ad7435225646686cf`; Ubuntu 24.04 payload readback SHA-256 `92f0d50351ea8aa70ab0f1027cc33c596d1f8a8fc3ab507dfce2bb2275327c58` |
-| Release-bound clean-host acceptance | PENDING | Native API release 409705856 passed immutable-release checks, but its authorized apply failed during offline dependency preparation; final acceptance will use a corrected immutable release on a clean host. The retained earlier holds are not reported as recovered |
+## Current Native download and Catalyst install / 当前 Native 下载与 Catalyst 安装
 
-| 项目 | 精确身份 | 状态 |
-| --- | --- | --- |
-| Platform | `99aa35d75397ab01746d90d6ca078fe20dda0c1e`（PR #107 merge） | [不可变 release](https://github.com/DoHorizon-AI/Cyrene-Platform/releases/tag/preview-99aa35d75397ab01746d90d6ca078fe20dda0c1e)，API 409660341；run 38137876503；52/52 项资产匹配；24 个 index manifest 与 25 份严格验证记录通过 |
-| Plugins Official 源码 | `48f9148e987c6e9066038db99ae0295542e32a77`；producer run 38123576893 | 五个不可变包；80 项资产与 40 个 attestation subject 已验证 |
-| 已签名 v2 Catalog | 源码 `18455255cdf8b87dd8cd48ceb25e5ea411a622ad`，generation 15 | `catalog-v2-preview-18455255cdf8b87dd8cd48ceb25e5ea411a622ad`；SHA-256 `9356861a377e18d1b6ed586d7ee8316de7d7d11c5e7543269d3cbd5d456f314d`；未变化 |
-| Native 构建 Workspace 源码 | `b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3`（PR #152 merge） | canonical 源码回读通过；producer run 38144970974 使用该精确源码并成功 |
-| Native release | [不可变 release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3)，API 409705856 | 18/18 项资产与 API 的 ID/摘要/大小匹配；九个 detached asset attestation 严格验证通过，未跳过、未使用信任缓存 |
-| Ubuntu 24.04 amd64 DEB | API asset 630904057 | SHA-256 `d240c03a8635ebe1e78a18330400c035b898ab62e56baf9abd1a6c4985b0b6b4`；155,111,334 字节 |
-| Root 综合源码/pins 与包 payload 回读 | 通过 | Native full-release 回读 SHA-256 `60781f5bce08d2b28b82fb230bff04d46b830afcec232c7ff910bc7fc0e43780`；canonical pins `release-pins-v1.json` SHA-256 `e614d27101fa818ca06f4cdb302be338783e68c789853e4804f71e35d3e4db7a`；pins/closure 回读 SHA-256 `09ebf1e7c335bfe49ffa84abbccfc4149153933bdc345a0ad7435225646686cf`；Ubuntu 24.04 payload 回读 SHA-256 `92f0d50351ea8aa70ab0f1027cc33c596d1f8a8fc3ab507dfce2bb2275327c58` |
-| 绑定当前 release 的全新主机验收 | 待完成 | 验收结果将绑定 Native API release 409705856 与此包摘要；不把 guest2246 保留的旧 hold 报告为已恢复 |
+The current immutable Native release is [native-installer-preview-03453ed1c053151c9af86a2c0a185747b55c3968](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-03453ed1c053151c9af86a2c0a185747b55c3968), built from Workspace develop `03453ed1c053151c9af86a2c0a185747b55c3968` (PR #166). Release API ID `410782500` was produced by run `38272522755`. All 18 downloaded assets match the immutable release API SHA-256 digests and byte sizes. The exact-source verifier passed 19 attestation invocations (nine direct Native subjects and ten nested Product subjects), with no skip or trust cache. The Ubuntu 24.04 DEB is `cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb`, SHA-256 `12987b876a6918608efa6973a9029d0840517d6e4a52e5252cb4ef1f0e4271b6`, size `155115228` bytes. Platform P `587d35588e8590abab5bd645ba09bbc480479daa`, Plugins G `c9b8d4b7d4923d42368de3b3ec2db87ee97c3fa7` (SDK `0.2.1`), signed Catalog generation 15, and selected Product identities are unchanged from Stage93. PR #166 fixes C10 authority-source selection using the validated signed plan source while retaining authority checks. These release checks do not establish Stage94 workload acceptance; the same-guest upgrade and public Apply remain pending.
 
-Earlier package-only apply attempts exposed two separate Platform issues. First, `/run/cyrene-package-runtime` disappeared when the daemon stopped; PR #105 added `RuntimeDirectoryPreserve=yes`. A later attempt reached `/run/cyrene-package-runtime/control.sock`, created for `cyrene:cyrene` (UID 999, GID 988) with mode `0660`, but bootstrap's generic `mode & 0022` check rejected it. PR #106 permits only that expected socket identity and mode; the existing rejection remains for other checked paths and objects, and a live/listening socket is still rejected. No guest-side `chmod` was used. These older immutable Native/Platform pairs remain historical evidence only.
+当前不可变 Native release 为 [native-installer-preview-03453ed1c053151c9af86a2c0a185747b55c3968](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-03453ed1c053151c9af86a2c0a185747b55c3968)，基于 Workspace develop `03453ed1c053151c9af86a2c0a185747b55c3968`（PR #166）构建。Release API ID 为 `410782500`，producer run 为 `38272522755`。全部 18 项下载资产均与不可变 release API 的 SHA-256 和字节大小匹配。精确源码 verifier 的 19 次 attestation 调用（9 个 Native 直接 subject、10 个嵌入 Product subject）全部通过，未跳过或使用信任缓存。Ubuntu 24.04 DEB 为 `cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb`，SHA-256 为 `12987b876a6918608efa6973a9029d0840517d6e4a52e5252cb4ef1f0e4271b6`，大小为 `155115228` 字节。Platform P `587d35588e8590abab5bd645ba09bbc480479daa`、带 SDK `0.2.1` 的 Plugins G `c9b8d4b7d4923d42368de3b3ec2db87ee97c3fa7`、已签名 Catalog generation 15 和所选 Product 身份均与 Stage93 相同。PR #166 修复了 C10 authority source 选择，使用已验证签名 plan 中的 source，同时保留 authority 校验。这些发行回读不代表 Stage94 workload 验收通过；同一主机升级和 public Apply 仍待执行。
 
-此前的 package-only apply 暴露了两个独立 Platform 问题。首先，daemon 停止时 `/run/cyrene-package-runtime` 消失；PR #105 增加 `RuntimeDirectoryPreserve=yes`。后续尝试到达服务创建的 `/run/cyrene-package-runtime/control.sock`，该 socket 属于 `cyrene:cyrene`（UID 999、GID 988），权限为 `0660`，但 bootstrap 通用 `mode & 0022` 检查将其拒绝。PR #106 只允许该预期 socket 身份与权限；其他受检查路径和对象仍保留原拒绝规则，活动/监听 socket 仍会被拒绝。修复未使用 guest 侧 `chmod`。旧的不可变 Native/Platform 发行对仍仅作为历史证据。
+The separate Catalyst/Echo cloud update check is not verified: its pinned catalog helper rejects the `deploymentRoles` property in `compatibilityGroups.0` before Azure deployment. This schema mismatch does not affect the Ubuntu Native release or its local acceptance; the cloud app update remains unverified.
 
-The retired P86/W a3 package-only apply on guest2246 later failed with `MAINTENANCE_ADMISSION_DENIED` and left an active Standard PackageOnly hold. Platform PR #107 adds a durable source heartbeat for the empty reconciliation case; Workspace PR #151 fixes the related pre-Begin generation reuse and same-held-plan replay paths. These source changes do not migrate or clear guest2246's existing hold, and the public workload protocol has no supported cancel/recovery operation for that transaction. Preserve its disk, journal, and hold; do not issue a direct Broker RPC, clear state, or start a second plan there. Guest2246 is not claimed recovered; fresh-host acceptance is tracked separately.
+单独的 Catalyst/Echo 云端更新检查尚未验证：固定版本 catalog helper 在 Azure 部署前拒绝了 `compatibilityGroups.0` 中的 `deploymentRoles` 属性。该 schema 不匹配不影响 Ubuntu Native release 或其本机验收；云端 app 更新仍未验证。
 
-A separate attempt with the superseded W0d48 Native release on a fresh test host reached Dataset Generation but failed with `OFFLINE_CANDIDATE_IDENTITY_MISMATCH`: the offline adapter compared the outer release-manifest digest with the inner Plugin manifest digest. Workspace PR #152 fixes that binding.
+### Verify the GitHub CLI prerequisite / 校验 GitHub CLI 前置工具
 
-The replacement b9068f0 Native release passed official publication, asset, source, and attestation checks, and its DEB was installed and read back on a test host. The one authorized same-plan apply then failed for `cyrene-tools-dataset-generation` with `PACKAGE_INSTALL_FAILED` / `DEPENDENCY_PREPARE_FAILED`; the original hold and journal were retained. The current diagnosis is an incomplete offline dependency closure: the Dataset Generation 0.2.1 package archive has no wheelhouse although its lock requires `grpcio==1.62.3` and `protobuf==4.25.9`, while Platform runs with `UV_OFFLINE=1` and the Native wheelhouse lacks these distributions. The official Plugin package and Workspace catalog/lock closure are being corrected before a new immutable Native release is published. Do not retry this held plan; final acceptance will use a clean host. SFT generation, Client browser access, Echo evaluation, and reboot recovery remain NOT_RUN.
+The Native DEB's detached attestation is verified with GitHub CLI. A clean Ubuntu 24.04 host does not include this tool, so install the official `cli/cli` v2.102.0 package before running `gh attestation verify`. The acceptance workflow pins release commit `fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd`, the amd64 DEB SHA-256/size, and the checksum-list SHA-256/size below. This step checks the official release API identity and asset metadata, downloaded bytes, DEB package fields, and the installed version. It does not skip or replace the Native DEB attestation check.
 
-此前在全新测试主机上使用已被替代的 W0d48 Native release 运行到 Dataset Generation 时，以 `OFFLINE_CANDIDATE_IDENTITY_MISMATCH` 失败：offline adapter 将外层 release-manifest digest 与 Plugin 内层 manifest digest 比较。Workspace PR #152 修正了该绑定。
+Native DEB 的 detached attestation 使用 GitHub CLI 验证。全新 Ubuntu 24.04 主机默认没有该工具，因此先安装官方 `cli/cli` v2.102.0，再运行 `gh attestation verify`。验收 workflow 固定了 release commit `fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd`、amd64 DEB 的 SHA-256/大小，以及 checksum 文件的 SHA-256/大小。以下步骤会核对官方 release API 身份与资产元数据、下载字节、DEB 包字段和安装后的版本；它不会跳过或替代 Native DEB 的 attestation 验证。
 
-替代版本 b9068f0 Native release 已通过官方发布、资产、源码和 attestation 检查；其 DEB 也已在测试主机安装并完成回读。但唯一获准的同一 plan apply 在 `cyrene-tools-dataset-generation` 失败，错误为 `PACKAGE_INSTALL_FAILED` / `DEPENDENCY_PREPARE_FAILED`；原 hold 与 journal 已保留。当前诊断为离线依赖闭包不完整：Dataset Generation 0.2.1 包归档没有 wheelhouse，但 lock 要求 `grpcio==1.62.3` 和 `protobuf==4.25.9`；Platform 设置 `UV_OFFLINE=1`，Native wheelhouse 也缺少这两个发行包。团队正在补齐官方 Plugin 包及 Workspace catalog/lock 闭包，然后发布新的不可变 Native release。不要重试这个已有 hold 的 plan；最终验收将在干净主机进行。SFT 生成、Client 浏览器访问、Echo 评测和重启恢复仍为 NOT_RUN。
+```bash
+set -euo pipefail
+GH_CLI_VERSION='2.102.0'
+GH_CLI_TAG="v$GH_CLI_VERSION"
+GH_CLI_SOURCE_COMMIT='fc4b137cdef0a6bd28fd461b7cf9c84a5812a8cd'
+GH_CLI_DEB='gh_2.102.0_linux_amd64.deb'
+GH_CLI_DEB_SHA256='7e54a307f90afdc59796c325ec0c49fb09e6c18537727207a8ac7513584ea5b0'
+GH_CLI_DEB_SIZE_BYTES='15392446'
+GH_CLI_CHECKSUMS='gh_2.102.0_checksums.txt'
+GH_CLI_CHECKSUMS_SHA256='afe49e9affa232faa8212aed035417166f6ade9b9470acb53d4dbd28c0504e8d'
+GH_CLI_CHECKSUMS_SIZE_BYTES='1971'
+GH_CLI_RELEASE_URL="https://github.com/cli/cli/releases/download/$GH_CLI_TAG"
+GH_CLI_RELEASE_API='https://api.github.com/repos/cli/cli/releases/tags/v2.102.0'
+GH_CLI_DIR="$(mktemp -d)"
+curl --fail --location --silent --show-error \
+  --header 'Accept: application/vnd.github+json' \
+  --header 'X-GitHub-Api-Version: 2022-11-28' \
+  --output "$GH_CLI_DIR/release-api.json" "$GH_CLI_RELEASE_API"
+python3 - "$GH_CLI_DIR/release-api.json" \
+  "$GH_CLI_TAG" "$GH_CLI_SOURCE_COMMIT" \
+  "$GH_CLI_DEB" "$GH_CLI_DEB_SHA256" "$GH_CLI_DEB_SIZE_BYTES" "$GH_CLI_RELEASE_URL/$GH_CLI_DEB" \
+  "$GH_CLI_CHECKSUMS" "$GH_CLI_CHECKSUMS_SHA256" "$GH_CLI_CHECKSUMS_SIZE_BYTES" "$GH_CLI_RELEASE_URL/$GH_CLI_CHECKSUMS" <<'PY'
+import json
+import sys
+from pathlib import Path
 
-guest2246 上已退役的 P86/W a3 package-only apply 随后以 `MAINTENANCE_ADMISSION_DENIED` 失败，并留下 active Standard PackageOnly hold。Platform PR #107 为空 reconciliation 情况增加持久化 source heartbeat；Workspace PR #151 修复相关的 Begin 前 generation 重用和同一 hold 下的 plan replay 路径。这些源码修正不会迁移或清除 guest2246 已有的 hold；公开 workload protocol 也没有该事务受支持的 cancel/recovery 操作。保留其磁盘、journal 与 hold；不要直接调用 Broker RPC、清除状态或在那里启动第二个 plan。不能声称 guest2246 已恢复；全新主机验收单独记录。
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
 
-## Install the current Native release / 安装当前 Native release
+(
+    api_path, expected_tag, expected_source,
+    deb_name, deb_sha256, deb_size, deb_url,
+    sums_name, sums_sha256, sums_size, sums_url,
+) = sys.argv[1:]
+release = json.loads(Path(api_path).read_text(encoding="utf-8"))
+require(release.get("tag_name") == expected_tag, "official GitHub CLI release tag differs from the pin")
+require(release.get("target_commitish") == expected_source, "official GitHub CLI source commit differs from the pin")
+require(release.get("immutable") is True and release.get("draft") is False, "official GitHub CLI release is not immutable and published")
+asset_rows = release.get("assets")
+require(isinstance(asset_rows, list), "official GitHub CLI release has no asset list")
+assets = {row.get("name"): row for row in asset_rows if isinstance(row, dict)}
+require(len(assets) == len(asset_rows), "official GitHub CLI release has malformed or duplicate assets")
+for name, digest, size, url in (
+    (deb_name, deb_sha256, deb_size, deb_url),
+    (sums_name, sums_sha256, sums_size, sums_url),
+):
+    asset = assets.get(name)
+    require(isinstance(asset, dict), f"official GitHub CLI release omits {name}")
+    require(asset.get("digest") == f"sha256:{digest}", f"GitHub API digest for {name} differs from the pin")
+    require(asset.get("size") == int(size), f"GitHub API size for {name} differs from the pin")
+    require(asset.get("browser_download_url") == url, f"canonical download URL for {name} differs from the pin")
+PY
+curl --fail --location --silent --show-error \
+  --output "$GH_CLI_DIR/$GH_CLI_DEB" "$GH_CLI_RELEASE_URL/$GH_CLI_DEB"
+curl --fail --location --silent --show-error \
+  --output "$GH_CLI_DIR/$GH_CLI_CHECKSUMS" "$GH_CLI_RELEASE_URL/$GH_CLI_CHECKSUMS"
+test "$(stat -c '%s' "$GH_CLI_DIR/$GH_CLI_DEB")" = "$GH_CLI_DEB_SIZE_BYTES"
+test "$(stat -c '%s' "$GH_CLI_DIR/$GH_CLI_CHECKSUMS")" = "$GH_CLI_CHECKSUMS_SIZE_BYTES"
+printf '%s  %s\n' "$GH_CLI_DEB_SHA256" "$GH_CLI_DEB" \
+  | (cd "$GH_CLI_DIR" && sha256sum --check --strict)
+printf '%s  %s\n' "$GH_CLI_CHECKSUMS_SHA256" "$GH_CLI_CHECKSUMS" \
+  | (cd "$GH_CLI_DIR" && sha256sum --check --strict)
+test "$(grep -Fxc -- "$GH_CLI_DEB_SHA256  $GH_CLI_DEB" "$GH_CLI_DIR/$GH_CLI_CHECKSUMS")" = '1'
+test "$(dpkg-deb -f "$GH_CLI_DIR/$GH_CLI_DEB" Package Version Architecture)" = "$(printf '%s\n' 'Package: gh' 'Version: 2.102.0' 'Architecture: amd64')"
+sudo apt-get install -y --no-install-recommends "$GH_CLI_DIR/$GH_CLI_DEB"
+GH_INSTALLED_VERSION="$(gh --version | sed -n '1s/^gh version \([0-9][0-9.]*\).*/\1/p')"
+test "$GH_INSTALLED_VERSION" = "$GH_CLI_VERSION"
+printf 'GitHub CLI %s is installed and verified.\n' "$GH_INSTALLED_VERSION"
+```
 
-Use an Ubuntu 24.04 amd64 host with sudo, curl, `sha256sum`, `stat`, and GitHub CLI 2.102.0 or newer. This exact immutable release has passed release API, asset-byte, source-binding, and detached-attestation checks. The command installs the verified package; fresh-host workload and restart acceptance are still pending. Do not substitute a historical release.
+Only after this version readback succeeds, download and independently verify the Native DEB attestation below. Do not add a `--skip` path if the CLI or attestation check fails.
 
-使用 Ubuntu 24.04 amd64 主机，并准备 sudo、curl、`sha256sum`、`stat` 和 GitHub CLI 2.102.0 或更高版本。此确切不可变 release 已通过 release API、资产字节、源码绑定和 detached attestation 检查。以下命令安装已验证的软件包；全新主机上的 workload 与重启验收仍待完成。不要替换为历史 release。
+只有确认安装后版本读回成功，才继续下载并独立验证下方 Native DEB attestation。若 CLI 或 attestation 检查失败，不得添加 `--skip` 路径。
 
 ```bash
 set -euo pipefail
 WORKSPACE_REPOSITORY='DoHorizon-AI/Cyrene-Workspace'
-NATIVE_TAG='native-installer-preview-b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3'
-NATIVE_SOURCE_SHA='b9068f0b16f4d52fc53b3ca9bffa8d5428dd43c3'
+NATIVE_TAG='native-installer-preview-03453ed1c053151c9af86a2c0a185747b55c3968'
+NATIVE_SOURCE_SHA='03453ed1c053151c9af86a2c0a185747b55c3968'
 NATIVE_DEB='cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb'
-NATIVE_DEB_SHA256='d240c03a8635ebe1e78a18330400c035b898ab62e56baf9abd1a6c4985b0b6b4'
-NATIVE_DEB_SIZE_BYTES='155111334'
+NATIVE_DEB_SHA256='12987b876a6918608efa6973a9029d0840517d6e4a52e5252cb4ef1f0e4271b6'
+NATIVE_DEB_SIZE_BYTES='155115228'
 NATIVE_RELEASE_URL="https://github.com/$WORKSPACE_REPOSITORY/releases/download/$NATIVE_TAG"
 RELEASE_DIR="$(mktemp -d)"
 cd "$RELEASE_DIR"
@@ -91,25 +138,29 @@ gh attestation verify "$NATIVE_DEB" \
   --source-digest "$NATIVE_SOURCE_SHA" \
   --predicate-type https://slsa.dev/provenance/v1
 sudo apt install "./$NATIVE_DEB"
+sudo cyrene workload install catalyst --channel preview
 ```
 
-After the exact PR #152 Native DEB is published, verified, and installed, install Catalyst with the signed preview Catalog:
+Run the Catalyst install interactively so you can record the displayed `planId` and `planDigest` before confirming. The `preview` channel resolves the trusted candidate available when the plan is created, and that plan pins exact immutable release identities and digests. Record the actual source tuple from the returned plan and installed-state readbacks. `--yes` suppresses the confirmation prompt and omits plan identity when an operation fails; `workload status` does not list pending plans. If a retryable Apply failure requires recovery, do not rerun guided install because it creates a new check/stage rather than resuming the exact plan. The supported public resume is `sudo cyrene workload --json` with `operation:"apply"` and the original plan fields below; there is no `workload apply --plan-id` subcommand.
 
-安装确切的 PR #152 Native DEB 后，使用签名 preview Catalog 安装 Catalyst：
+请使用交互式 Catalyst 安装，以便在确认前记录显示的 `planId` 和 `planDigest`。`preview` channel 会解析创建 plan 时可用的受信候选版本，plan 随后固定精确的不可变 release 身份和 digest。应从返回的 plan 与 installed-state 回读记录实际来源 tuple。`--yes` 会跳过确认提示，操作失败时不会显示 plan identity；`workload status` 不会列出待处理 plan。若 Apply 可重试失败后需要恢复，不要重新运行 guided install，因为它会创建新的 check/stage，而不是续用原 plan。公开支持的恢复入口是 `sudo cyrene workload --json`，请求使用 `operation:"apply"` 和下方原 plan 字段；没有 `workload apply --plan-id` 子命令。
+
+Replace every placeholder below with the exact values saved from the original plan. Keep the original `planId`, `planDigest`, and channel unchanged:
+
+以下命令中的占位符必须替换为原 plan 保存的精确值。保持原 `planId`、`planDigest` 和 channel 不变：
 
 ```bash
-sudo cyrene workload install catalyst --channel preview --yes
+printf '%s\n' \
+  '{"protocolVersion":"cyrene.workload-plan.v1","operation":"apply","workloadId":"catalyst","targetId":"linux-ubuntu-24.04-x86_64","planId":"<original-plan-id>","planDigest":"sha256:<original-64-hex-digest>","confirmation":{"planId":"<original-plan-id>","planDigest":"sha256:<original-64-hex-digest>","confirmed":true},"action":"install","channel":"<original-stable-or-preview-channel>"}' \
+  | sudo cyrene workload --json | jq .
 ```
 
-The `yes` option confirms that invocation's resolved plan. It does not skip source, signature, or digest checks. Review the plan and stop on any blocker. Keep the plan identity, receipts, error details, and transaction journal if an operation is interrupted.
 
-`yes` 选项只确认本次解析出的 plan，不会跳过源码、签名或摘要检查。检查 plan 并在遇到 blocker 时停止。操作中断时保留 plan identity、receipt、错误详情和 transaction journal。
+Keep the original plan identity, command output, and transaction receipts if Apply must be resumed. The runtime acceptance associated with this release is still in progress; see the concise status below.
 
-Read-only status:
+若需要恢复 Apply，请保存原 plan 身份、命令输出和事务回执。本 release 对应的 runtime 验收仍在进行；当前状态见下方简表。
 
-只读状态查询：
-
-    printf '%s\n' '{"protocolVersion":"cyrene.workload-plan.v1","operation":"status","workloadId":"catalyst"}' | sudo cyrene workload --json | jq .
+<a id="standalone-plugin"></a>
 
 ## Install one Plugin / 单独安装 Plugin
 
@@ -124,6 +175,8 @@ Use the `plugins` workload with one explicit component selection. Example check 
 Use the returned `planId` and `planDigest` unchanged for stage and apply. Empty selection is blocked; it does not install every Plugin.
 
 stage 与 apply 使用返回的 `planId` 和 `planDigest`，保持其值不变。空选择会被拒绝，不会安装全部 Plugin。
+
+<a id="echo"></a>
 
 ## Add or remove Echo / 增装或移除 Echo
 
@@ -145,9 +198,9 @@ The default lifecycle retains Catalyst and user datasets, artifacts, review hist
 
 ## Access and limits / 访问与限制
 
-Keep Client and Control bound to `127.0.0.1`. The expected local Client address is `http://127.0.0.1:8100/`; browser access for this release is PENDING. For remote access, use an approved SSH local forward and keep the service bound to loopback:
+Keep Client and Control bound to `127.0.0.1`. The expected local Client address is `http://127.0.0.1:8100/`; Stage94 browser acceptance is pending its actual receipt. For remote access, use an approved SSH local forward and keep the service bound to loopback:
 
-Client 与 Control 仅绑定到 `127.0.0.1`。预期本机 Client 地址为 `http://127.0.0.1:8100/`；此 release 的浏览器访问验收待完成。远程访问使用获准的 SSH 本地转发，服务仍保持 loopback 绑定：
+Client 与 Control 仅绑定到 `127.0.0.1`。预期本机 Client 地址为 `http://127.0.0.1:8100/`；Stage94 浏览器验收仍等待实际回执。远程访问使用获准的 SSH 本地转发，服务仍保持 loopback 绑定：
 
     ssh -L 8100:127.0.0.1:8100 user@ubuntu-host
 
@@ -162,3 +215,65 @@ The preview has no customer-facing arbitrary-version downgrade command. On failu
 See the [architecture decision record](ADR_MODULAR_DISTRIBUTION_V01.md) for system boundaries and release evidence.
 
 系统边界与发行证据见[架构决策记录](ADR_MODULAR_DISTRIBUTION_V01.md)。
+
+## Release identity and acceptance status / 发行身份与验收状态
+
+The current release is an immutable, source-bound Native preview. The signed plan pins exact package identities when created; selecting `preview` later may resolve a newer candidate, so record the plan and installed-state source tuple for each installation.
+
+当前 release 是不可变且绑定源码的 Native preview。签名 plan 会在创建时固定精确 package 身份；之后选择 `preview` 可能解析到更新的候选版本，因此每次安装都应记录 plan 和 installed-state 返回的来源 tuple。
+
+| Component | Source / identity | Current status |
+| --- | --- | --- |
+| Workspace Native | `03453ed1c053151c9af86a2c0a185747b55c3968` (PR #166) | [Immutable release](https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/tag/native-installer-preview-03453ed1c053151c9af86a2c0a185747b55c3968); API `410782500`; producer run `38272522755`; 18 assets matched; 9 direct + 10 nested subjects; 19 strict attestations |
+| Ubuntu 24.04 amd64 DEB | Asset `cyrene_0.1.0-rc.1_ubuntu-24.04_amd64.deb` | SHA-256 `12987b876a6918608efa6973a9029d0840517d6e4a52e5252cb4ef1f0e4271b6`; `155115228` bytes |
+| Platform | `587d35588e8590abab5bd645ba09bbc480479daa` (PR #109) | Existing immutable release reused; 52 assets verified |
+| Plugins Official | `c9b8d4b7d4923d42368de3b3ec2db87ee97c3fa7` (PR #119) | Five data Plugins and SDK carrier verified; SDK `0.2.1` |
+| Signed v2 Catalog | source `18455255cdf8b87dd8cd48ceb25e5ea411a622ad`; generation 15; SHA-256 `9356861a377e18d1b6ed586d7ee8316de7d7d11c5e7543269d3cbd5d456f314d` | Unchanged |
+| Catalyst / Echo / Client | `4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b` / `d5a920078077bdbaa76e7117ad83f69cbfa1c614` / `b3c3f964540e3aa761612371891e3bb6a3f7ad59` | Existing Product release identities reused |
+| Data Plugins | Preparation `0.2.1`; Parsing `0.2.1`; Generation `0.2.2`; Knowledge Preparation `0.1.1`; Exact Match `0.1.1` | Immutable signed releases reused |
+
+Stage94 publisher and exact-source verifier receipts confirm the immutable release identity, all 18 API asset digests and byte sizes, eleven exact source files, and 19 strict attestations. These checks prove the published release and provenance; they do not prove successful workload execution.
+
+Stage94 publisher 与精确源码 verifier 回执确认了不可变发行身份、18 项资产的 API digest 和字节大小、11 个精确源码文件及 19 次严格 attestation。这些检查证明发行物和来源，不证明 workload 已成功运行。
+
+| Acceptance gate | Status as of this update |
+| --- | --- |
+| Stage94 Native API/assets, exact source, and strict attestations | PASS: 18/18 assets match API digests/sizes; eleven-file source readback; 19/19 invocations (9 direct + 10 nested), no skip or trust cache |
+| Stage93 guest2253 Apply #1 | FAILED: `PLAN_CHANGED`; cause not established |
+| Stage93 guest2253 same-plan Apply #2 | FAILED: `PACKAGE_RUNTIME_READBACK_REQUIRED`; cause not established and not attributed to the later C10 bug |
+| Stage93 guest2253 Apply #3 | FAILED: `FIRST_CORE_READBACK_REQUIRED`; C10 probe defaulted to `cyrene-yield` because the validated signed `activitySources` source ID was omitted; Catalyst was selected |
+| Stage93 later recovery Apply | LIMITED PASS: Root reports overall Apply success with SDK and six pointers healthy; earlier failure receipts remain failures and this is not Stage94 core acceptance |
+| PR #166 / Stage94 C10 source fix | MERGED: select the C10 authority source from the validated signed plan while retaining authority checks |
+| Stage94 same-guest stage-only upgrade and new-source public Apply | PENDING: no Stage94 host acceptance receipt has been recorded |
+| Stage92 Catalyst Apply on guest2252 | FAILED: required signed Client Web `static-web` was rejected by a blanket core-reuse veto; refs-only restart hit a transient active-state failure and rolled back |
+| Stage92 root cause / PR #165 source fix | MERGED: removed only the `web_selected` veto; retained OCI exclusion and signed live-proof checks |
+| Stage94 full core acceptance | PENDING: same-guest upgrade, new-source public Apply, and required downstream gates remain open |
+| Catalyst data workflow and SFT package/independent consumer | NOT_RUN: Stage94 host acceptance is pending |
+| Client/browser | NOT_RUN: no current browser result recorded |
+| Echo install/evaluation/removal | NOT_RUN: no current result recorded |
+| Full core recovery, lifecycle retention, and reboot | PENDING: the later Stage93 recovery Apply was limited to the reported SDK/six-pointer result; Stage94 proof is still required |
+| Catalyst/Echo cloud update check | NOT_VERIFIED: pinned helper/schema rejected `deploymentRoles` before Azure deployment; Ubuntu Native is unaffected |
+| Historical Stage91 Catalyst Apply | FAILED (retryable): `PACKAGE_RUNTIME_READBACK_REQUIRED`; this is not the Stage94 result |
+
+| 验收门禁 | 本次更新时的状态 |
+| --- | --- |
+| Stage94 Native API/资产、精确源码与严格 attestation | 通过：18/18 项资产匹配 API digest/大小；11 个源码文件精确回读；19/19 次调用（9 直接 + 10 嵌套）；无跳过或信任缓存 |
+| Stage93 guest2253 Apply #1 | 失败：`PLAN_CHANGED`；原因未能确认 |
+| Stage93 guest2253 同一 plan Apply #2 | 失败：`PACKAGE_RUNTIME_READBACK_REQUIRED`；原因未能确认，不能归因于后续 C10 bug |
+| Stage93 guest2253 Apply #3 | 失败：`FIRST_CORE_READBACK_REQUIRED`；C10 probe 未取得已验证签名 `activitySources` source ID，默认选择 `cyrene-yield`；plan 实际选择 Catalyst |
+| Stage93 后续 recovery Apply | 有限通过：Root 报告整体 Apply success，SDK 与六个 pointers 健康；此前失败回执仍保留为失败，且不代表 Stage94 core 验收通过 |
+| PR #166 / Stage94 C10 源码修复 | 已合并：从已验证签名 plan 选择 C10 authority source，同时保留 authority 校验 |
+| Stage94 同一主机 stage-only upgrade 与新源码 public Apply | 等待中：尚无 Stage94 主机验收回执 |
+| guest2252 Stage92 Catalyst Apply | 失败：helper 一票否决签名 Catalog 中必需的 Client Web `static-web`，refs-only restart 遇到暂态 active-state 错误后回滚 |
+| Stage92 根因与 PR #165 源码修复 | 已合并：仅移除 `web_selected` 一票否决，保留 OCI 排除和签名 live-proof 校验 |
+| Stage94 完整 core 验收 | 等待中：同一主机 upgrade、新源码 public Apply 和后续门禁尚未完成 |
+| Catalyst 数据流程、SFT 包及独立 consumer | 未运行：Stage94 主机验收仍待执行 |
+| Client/浏览器 | 未运行：无当前浏览器结果 |
+| Echo 安装/评测/移除 | 未运行：无当前结果 |
+| 完整 core recovery、生命周期保留与重启 | 等待中：Stage93 后续 recovery Apply 仅有 SDK/六个 pointers 健康回读；仍需 Stage94 验收 |
+| Catalyst/Echo 云端更新检查 | 未验证：固定 helper/schema 在 Azure 部署前拒绝 `deploymentRoles`；不影响 Ubuntu Native |
+| Stage91 历史 Catalyst Apply | 失败（可重试）：`PACKAGE_RUNTIME_READBACK_REQUIRED`；此结果不是 Stage94 验收结果 |
+
+Earlier preview attempts exposed and fixed package/runtime identity and recovery issues through normal Workspace/Platform changes. Those attempts are historical diagnostics; they are not results for this release. The initial cause of the superseded Stage90 Apply failure was not established. The older guest2246 PackageOnly hold is not claimed as recovered. Do not infer current acceptance from CI, release signatures, or a successful DEB install.
+
+此前 preview 尝试通过正常的 Workspace/Platform 修复处理了 package/runtime 身份与恢复问题。这些尝试属于历史诊断，不是当前 release 的验收结果。已被替代的 Stage90 Apply 失败，其最初原因未能确定。这里不声称旧 guest2246 PackageOnly hold 已恢复。不能从 CI、release 签名或 DEB 安装成功推断当前验收通过。
