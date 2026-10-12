@@ -4151,6 +4151,188 @@ def _mock_first_core_live_verifier(
     monkeypatch.setattr(updates.ComponentUpdater, "_load_native_core_bootstrap", lambda _self: core)
 
 
+def _c10_parent_rollback_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[
+    updates.ComponentUpdater,
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, Path],
+    dict[str, str | None],
+    list[list[str]],
+]:
+    updater = _empty_updater(tmp_path)
+    transaction, staged, journal = _first_core_live_reuse_fixture()
+    inventory, *_ = _configure_first_core_source_update_fixture(
+        tmp_path, updater, transaction, journal
+    )
+    services = _first_core_reuse_services(updater)
+    staged_by_id = {item["componentId"]: item for item in staged}
+    product = {
+        "componentId": updates.CATALYST_COMPONENT_ID,
+        "version": "0.3.0",
+        "manifestDigest": "sha256:" + "c" * 64,
+        "artifactDigest": "sha256:" + "d" * 64,
+        "targetId": updates.WORKLOAD_HOST_TARGET,
+        "manifest": {
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "health": {"kind": "systemd-active"},
+        },
+    }
+    parent_ids = ("cyrene-runtime-maintenance", "cy-package-runtime", updates.CATALYST_COMPONENT_ID)
+    parent_components = [
+        product if component_id == updates.CATALYST_COMPONENT_ID else staged_by_id[component_id]
+        for component_id in parent_ids
+    ]
+    transaction.update(
+        {
+            "transactionKind": "workload-assembly.v1",
+            "action": "install",
+            "targetKind": "CORE_RUNTIME",
+            "phase": "applying",
+            "maintenancePhase": "core-runtime-activate",
+            "maintenanceToken": "t" * 40,
+            "activityCatalogGeneration": 2,
+            "components": parent_components,
+            "previous": [
+                {
+                    "componentId": component_id,
+                    "version": None,
+                    "releaseIdentity": None,
+                    "manifestDigest": None,
+                    "artifactDigest": None,
+                    "pointerIdentity": None,
+                    "bundleIdentity": None,
+                    "identityAttested": False,
+                }
+                for component_id in parent_ids
+            ],
+            "ociComponents": [],
+            "webComponents": [],
+        }
+    )
+    services.append(
+        {
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "unit": updates.CATALYST_SERVICE_UNIT,
+            "candidate": product,
+        }
+    )
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    updater.systemd_unit_dirs = (unit_dir,)
+    unit_paths: dict[str, Path] = {}
+    pointers: dict[str, str | None] = {}
+    for order, item in enumerate(parent_components, start=10):
+        component_id = item["componentId"]
+        unit = (
+            updates.CATALYST_SERVICE_UNIT
+            if component_id == updates.CATALYST_COMPONENT_ID
+            else f"{component_id}.service"
+        )
+        updater.components[component_id] = {
+            **updater.components.get(component_id, {}),
+            "componentId": component_id,
+            "kind": "native-binary",
+            "systemdUnit": unit,
+            "restart": {"unit": unit, "group": "core-runtime", "order": order},
+        }
+        unit_path = unit_dir / unit
+        unit_path.write_text(
+            f"[Service]\\nExecStart=/usr/bin/cyrene component-run {component_id}\\n",
+            encoding="utf-8",
+        )
+        unit_path.chmod(0o644)
+        unit_paths[component_id] = unit_path
+        pointers[component_id] = updates._native_release_pointer_identity(item)
+    product_unit = unit_paths[updates.CATALYST_COMPONENT_ID]
+    transaction["unitFileChanges"] = [
+        {
+            "path": str(product_unit),
+            "priorDigest": None,
+            "writtenDigest": "sha256:" + hashlib.sha256(product_unit.read_bytes()).hexdigest(),
+            "priorBytes": None,
+        }
+    ]
+
+    def capture_active(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "componentId": item["componentId"],
+                "version": staged_by_id[item["componentId"]]["version"],
+                "releaseIdentity": staged_by_id[item["componentId"]]["manifestDigest"],
+                "manifestDigest": staged_by_id[item["componentId"]]["manifestDigest"],
+                "artifactDigest": staged_by_id[item["componentId"]]["artifactDigest"],
+                "pointerIdentity": pointers[item["componentId"]],
+                "bundleIdentity": None,
+                "identityAttested": True,
+            }
+            for item in items
+        ]
+
+    monkeypatch.setattr(updater, "_capture_active_versions", capture_active)
+    _mock_first_core_live_verifier(tmp_path, monkeypatch, journal, [])
+    original_lstat = Path.lstat
+
+    def root_owned_product_unit(path: Path) -> os.stat_result:
+        result = original_lstat(path)
+        if path == product_unit:
+            fields = list(result)
+            fields[4] = 0
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", root_owned_product_unit)
+    monkeypatch.setattr(
+        updater, "_active_native_pointer_identity", lambda component_id: pointers[component_id]
+    )
+
+    def activate(component_id: str, pointer: str | None, *, expected_current: str | None) -> None:
+        assert pointers[component_id] == expected_current
+        pointers[component_id] = pointer
+
+    monkeypatch.setattr(updater, "_activate_native", activate)
+    monkeypatch.setattr(
+        updater, "_unit_exists", lambda component: unit_paths[component["componentId"]].is_file()
+    )
+    monkeypatch.setattr(
+        updater,
+        "_installed",
+        lambda component: {
+            "activeVersion": pointers[component["componentId"]],
+            "manifest": (
+                next(
+                    row["manifest"]
+                    for row in transaction["components"]
+                    if row["componentId"] == component["componentId"]
+                )
+                if pointers[component["componentId"]] is not None
+                else None
+            ),
+        },
+    )
+    monkeypatch.setattr(updater, "_restore_active_receipt", lambda _component_id, _previous: None)
+    monkeypatch.setattr(updater, "_end_workload_hold", lambda *_args, **_kwargs: None)
+    original_wait = updater._wait_unit_active
+
+    def wait_active(unit: str) -> None:
+        if unit == updates.CATALYST_SERVICE_UNIT:
+            pytest.fail("rollback tried to restart a Product whose prior unit was absent")
+        original_wait(unit)
+
+    monkeypatch.setattr(updater, "_wait_unit_active", wait_active)
+    systemctl_calls: list[list[str]] = []
+
+    def runner(argv: list[str], **_kwargs: Any) -> SimpleNamespace:
+        systemctl_calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    updater.runner = runner
+    return updater, transaction, staged, inventory, services, unit_paths, pointers, systemctl_calls
+
+
 @pytest.mark.parametrize("web_selected", [False, True])
 def test_catalyst_first_core_reuse_uses_exact_current_source_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, web_selected: bool
@@ -4226,6 +4408,101 @@ def test_catalyst_first_core_reuse_uses_exact_current_source_generation(
         verified_active_component_ids=reusable,
     )
     assert unit_calls == [(updates.CATALYST_SERVICE_UNIT, "restart")]
+
+
+def test_c10_parent_product_failure_preserves_core_and_prior_product_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, transaction, staged, inventory, services, unit_paths, pointers, calls = (
+        _c10_parent_rollback_case(tmp_path, monkeypatch)
+    )
+
+    def verify_core() -> set[str]:
+        return updater._workload_first_core_verified_active_components(
+            transaction,
+            services,
+            staged,
+            inventory,
+            workload_id="catalyst",
+            plugin_refs_changed=True,
+            plugin_refs_restart_pending=False,
+            has_oci_components=False,
+            web_selected=False,
+        )
+
+    assert verify_core() == {"cyrene-runtime-maintenance", "cy-package-runtime"}
+    baseline = json.loads(json.dumps(transaction["previous"]))
+    handoff = json.loads(json.dumps(transaction["firstCoreRollbackBaseline"]))
+    core_pointers = {
+        component_id: pointers[component_id]
+        for component_id in ("cyrene-runtime-maintenance", "cy-package-runtime")
+    }
+    assert verify_core() == {"cyrene-runtime-maintenance", "cy-package-runtime"}
+    assert transaction["previous"] == baseline
+    assert transaction["firstCoreRollbackBaseline"] == handoff
+
+    path = tmp_path / "transactions" / "c10-parent.json"
+    path.parent.mkdir(mode=0o700)
+    healthy, _message = updater._recover_workload_apply(
+        transaction, path, failure=RuntimeError("new Product activation failed")
+    )
+    assert healthy is True
+    assert pointers["cyrene-runtime-maintenance"] == core_pointers["cyrene-runtime-maintenance"]
+    assert pointers["cy-package-runtime"] == core_pointers["cy-package-runtime"]
+    assert pointers[updates.CATALYST_COMPONENT_ID] is None
+    assert unit_paths["cyrene-runtime-maintenance"].is_file()
+    assert unit_paths["cy-package-runtime"].is_file()
+    assert not unit_paths[updates.CATALYST_COMPONENT_ID].exists()
+    restart_units = {command[2] for command in calls if command[:2] == ["systemctl", "restart"]}
+    assert restart_units == {"cyrene-runtime-maintenance.service", "cy-package-runtime.service"}
+    assert not any(command[:2] == ["systemctl", "stop"] for command in calls)
+
+    healthy, _message = updater._rollback_transaction(transaction)
+    assert healthy is True
+    assert pointers[updates.CATALYST_COMPONENT_ID] is None
+    assert {
+        command[2] for command in calls if command[:2] == ["systemctl", "restart"]
+    } == restart_units
+
+
+def test_c10_parent_rollback_refuses_unproven_core_before_pointer_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, transaction, staged, inventory, services, unit_paths, pointers, calls = (
+        _c10_parent_rollback_case(tmp_path, monkeypatch)
+    )
+    core = updater._load_native_core_bootstrap()
+
+    def fail_live_proof(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("Package Runtime authority is unavailable")
+
+    core._verify_live_core_cohort = fail_live_proof
+    with pytest.raises(updates.UpdateError, match="not currently live and healthy"):
+        updater._workload_first_core_verified_active_components(
+            transaction,
+            services,
+            staged,
+            inventory,
+            workload_id="catalyst",
+            plugin_refs_changed=True,
+            plugin_refs_restart_pending=False,
+            has_oci_components=False,
+            web_selected=False,
+        )
+    assert "firstCoreRollbackBaseline" not in transaction
+
+    path = tmp_path / "transactions" / "c10-parent-unproven.json"
+    path.parent.mkdir(mode=0o700)
+    healthy, message = updater._recover_workload_apply(
+        transaction, path, failure=RuntimeError("activation failed")
+    )
+    assert healthy is False
+    assert "handoff is missing or mismatched" in message
+    assert pointers["cyrene-runtime-maintenance"] is not None
+    assert pointers["cy-package-runtime"] is not None
+    assert pointers[updates.CATALYST_COMPONENT_ID] is not None
+    assert not unit_paths[updates.CATALYST_COMPONENT_ID].exists()
+    assert not any(command[:2] == ["systemctl", "restart"] for command in calls)
 
 
 @pytest.mark.parametrize(
