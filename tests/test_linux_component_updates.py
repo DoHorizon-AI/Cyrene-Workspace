@@ -3667,6 +3667,642 @@ def test_workload_services_follow_verified_dependency_and_unit_start_order(
     ]
 
 
+def test_catalyst_plugin_ref_only_activation_preserves_active_runtime_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    services = [
+        {
+            "componentId": "cyrene-runtime-maintenance",
+            "unit": "cyrene-runtime-maintenance.service",
+            "candidate": None,
+        },
+        {
+            "componentId": "cy-package-runtime",
+            "unit": "cyrene-package-runtime.service",
+            "candidate": None,
+        },
+        {
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "unit": updates.CATALYST_SERVICE_UNIT,
+            "candidate": None,
+        },
+    ]
+    restart_only_catalyst = updates.ComponentUpdater._workload_catalyst_refs_only_activation(
+        workload_id="catalyst",
+        selected_ids={updates.CATALYST_COMPONENT_ID},
+        service_units=services,
+        core_install_needed=False,
+        plugin_refs_changed=True,
+        plugin_refs_restart_pending=False,
+        has_oci_components=False,
+        web_selected=False,
+    )
+    assert restart_only_catalyst
+
+    calls: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "active")
+    monkeypatch.setattr(
+        updater,
+        "_set_workload_unit_for_apply",
+        lambda _transaction, _path, unit, operation, *, wait_active: calls.append(
+            (unit, operation, wait_active)
+        ),
+    )
+    updater._activate_workload_service_units_for_apply(
+        {}, tmp_path / "transaction.json", services, catalyst_refs_only=restart_only_catalyst
+    )
+
+    assert calls == [(updates.CATALYST_SERVICE_UNIT, "restart", True)]
+
+
+def test_catalyst_plugin_ref_only_activation_starts_inactive_dependencies_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    services = [
+        {
+            "componentId": "cyrene-runtime-maintenance",
+            "unit": "cyrene-runtime-maintenance.service",
+            "candidate": None,
+        },
+        {
+            "componentId": "cy-package-runtime",
+            "unit": "cyrene-package-runtime.service",
+            "candidate": None,
+        },
+        {
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "unit": updates.CATALYST_SERVICE_UNIT,
+            "candidate": None,
+        },
+    ]
+    state = {
+        services[0]["unit"]: "inactive",
+        services[1]["unit"]: "active",
+        services[2]["unit"]: "active",
+    }
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda unit: state[unit])
+    monkeypatch.setattr(
+        updater,
+        "_set_workload_unit_for_apply",
+        lambda _transaction, _path, unit, operation, **_kwargs: calls.append((unit, operation)),
+    )
+
+    updater._activate_workload_service_units_for_apply(
+        {}, tmp_path / "transaction.json", services, catalyst_refs_only=True
+    )
+
+    assert calls == [
+        (services[0]["unit"], "start"),
+        (updates.CATALYST_SERVICE_UNIT, "restart"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("core_install_needed", "service_candidate", "has_oci", "web_selected", "expected"),
+    [
+        (True, None, False, False, False),
+        (False, {"componentId": "cyrene-catalyst"}, False, False, False),
+        (False, None, True, False, False),
+        (False, None, False, True, False),
+    ],
+)
+def test_catalyst_plugin_ref_only_activation_requires_unchanged_core_units(
+    tmp_path: Path,
+    core_install_needed: bool,
+    service_candidate: dict[str, Any] | None,
+    has_oci: bool,
+    web_selected: bool,
+    expected: bool,
+) -> None:
+    services = [
+        {
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "unit": updates.CATALYST_SERVICE_UNIT,
+            "candidate": service_candidate,
+        }
+    ]
+
+    assert (
+        updates.ComponentUpdater._workload_catalyst_refs_only_activation(
+            workload_id="catalyst",
+            selected_ids={updates.CATALYST_COMPONENT_ID},
+            service_units=services,
+            core_install_needed=core_install_needed,
+            plugin_refs_changed=False,
+            plugin_refs_restart_pending=True,
+            has_oci_components=has_oci,
+            web_selected=web_selected,
+        )
+        is expected
+    )
+
+
+def test_catalyst_plugin_ref_only_activation_keeps_service_failure_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    services = [
+        {
+            "componentId": "cyrene-runtime-maintenance",
+            "unit": "cyrene-runtime-maintenance.service",
+            "candidate": None,
+        },
+        {
+            "componentId": "cy-package-runtime",
+            "unit": "cyrene-package-runtime.service",
+            "candidate": None,
+        },
+        {
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "unit": updates.CATALYST_SERVICE_UNIT,
+            "candidate": None,
+        },
+    ]
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "active")
+
+    def fail_catalyst(
+        _transaction: dict[str, Any], _path: Path, unit: str, operation: str, **_kwargs: Any
+    ) -> None:
+        assert unit == updates.CATALYST_SERVICE_UNIT
+        assert operation == "restart"
+        raise updates.UpdateError("SYSTEMD_FAILED", "Catalyst did not become ready.")
+
+    monkeypatch.setattr(updater, "_set_workload_unit_for_apply", fail_catalyst)
+    with pytest.raises(updates.UpdateError) as error:
+        updater._activate_workload_service_units_for_apply(
+            {},
+            tmp_path / "transaction.json",
+            services,
+            catalyst_refs_only=True,
+        )
+
+    assert error.value.code == "SYSTEMD_FAILED"
+
+
+def _first_core_live_reuse_fixture() -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    plan_id = "plan-" + "a" * 32
+    plan_digest = "sha256:" + "a" * 64
+    source_id = "cyrene-catalyst"
+    source_policy = {
+        "mode": "actualProduct",
+        "productSources": [{"componentId": updates.CATALYST_COMPONENT_ID, "sourceId": source_id}],
+    }
+    staged = [
+        {
+            "componentId": component_id,
+            "version": "0.1.0",
+            "manifestDigest": f"sha256:{index:064x}",
+            "artifactDigest": f"sha256:{index + 10:064x}",
+            "targetId": updates.WORKLOAD_FIRST_CORE_TARGET_ID,
+            "manifest": {"componentId": component_id},
+        }
+        for index, component_id in enumerate(updates.WORKLOAD_FIRST_CORE_COMPONENT_IDS, start=1)
+    ]
+    digest_map = {item["componentId"]: item["artifactDigest"] for item in staged}
+    block = {
+        "schemaVersion": 1,
+        "cohortId": "C10",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "targetId": updates.WORKLOAD_FIRST_CORE_TARGET_ID,
+        "catalogDigest": "sha256:" + "b" * 64,
+        "components": [
+            {
+                field: item[field]
+                for field in ("componentId", "version", "manifestDigest", "artifactDigest")
+            }
+            for item in staged
+        ],
+        "componentArtifactDigests": digest_map,
+        "maintenanceComponentArtifactDigests": digest_map,
+    }
+    result = {
+        "status": "installed",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "catalogGeneration": 1,
+    }
+    principal = {"uid": 1000, "gid": 1000}
+    journal = {
+        "mode": "fresh-workload-first-core",
+        "phase": "succeeded",
+        "planId": plan_id,
+        "requestId": "first-core-bootstrap-" + plan_id.removeprefix("plan-"),
+        "planDigest": plan_digest,
+        "firstCoreBootstrap": block,
+        "componentArtifactDigests": digest_map,
+        "components": staged,
+        "result": result,
+        "sourcePolicy": source_policy,
+        "sourcePrincipalIdentities": {source_id: principal},
+        "sourceCatalog": {
+            "sourceIdentities": [{"sourceId": source_id, **principal}],
+        },
+    }
+    transaction = {
+        "workloadId": "catalyst",
+        "firstCoreBootstrap": block,
+        "firstCoreBootstrapStatus": "installed",
+        "firstCoreBootstrapResult": result,
+        "sourcePolicy": source_policy,
+    }
+    return transaction, staged, journal
+
+
+def test_catalyst_first_core_refs_activation_requires_exact_live_c10_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction, staged, journal = _first_core_live_reuse_fixture()
+    broker_id = "cyrene-runtime-maintenance"
+    package_runtime_id = "cy-package-runtime"
+    service_units = [
+        {
+            "componentId": component_id,
+            "unit": f"{component_id}.service",
+            "candidate": None,
+        }
+        for component_id in (broker_id, package_runtime_id, updates.CATALYST_COMPONENT_ID)
+    ]
+    updater.components = {
+        row["componentId"]: {
+            "componentId": row["componentId"],
+            "systemdUnit": row["unit"],
+            "restart": {"unit": row["unit"], "group": "core-runtime"},
+        }
+        for row in service_units
+    }
+    verifier_calls: list[dict[str, Any]] = []
+    core = SimpleNamespace(
+        _journal_path=lambda _updater: tmp_path / "first-core.json",
+        _read_private_json=lambda _path: journal,
+        _fresh_workload_core_public_result=lambda _expected, value: value,
+        _verify_live_core_cohort=lambda _updater, _journal, plan, **kwargs: verifier_calls.append(
+            {"plan": plan, "kwargs": kwargs}
+        ),
+    )
+    monkeypatch.setattr(updater, "_load_native_core_bootstrap", lambda: core)
+
+    reusable = updater._workload_first_core_verified_active_components(
+        transaction,
+        service_units,
+        staged,
+        workload_id="catalyst",
+        plugin_refs_changed=True,
+        plugin_refs_restart_pending=False,
+        has_oci_components=False,
+        web_selected=False,
+    )
+
+    assert reusable == {broker_id, package_runtime_id}
+    assert len(verifier_calls) == 1
+    assert verifier_calls[0]["plan"] == {
+        "components": staged,
+        "catalogGeneration": 1,
+        "activitySources": ["cyrene-catalyst"],
+    }
+    assert verifier_calls[0]["kwargs"] == {"probe_package_runtime": True}
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "active")
+    monkeypatch.setattr(
+        updater,
+        "_set_workload_unit_for_apply",
+        lambda _transaction, _path, unit, operation, **_kwargs: calls.append((unit, operation)),
+    )
+    updater._activate_workload_service_units_for_apply(
+        transaction,
+        tmp_path / "transaction.json",
+        service_units,
+        catalyst_refs_only=False,
+        verified_active_component_ids=reusable,
+    )
+    assert calls == [(updates.CATALYST_SERVICE_UNIT, "restart")]
+
+
+def test_catalyst_first_core_refs_activation_rejects_wrong_plan_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction, staged, journal = _first_core_live_reuse_fixture()
+    service_units = [
+        {
+            "componentId": "cyrene-runtime-maintenance",
+            "unit": "cyrene-runtime-maintenance.service",
+            "candidate": None,
+        }
+    ]
+    updater.components = {
+        "cyrene-runtime-maintenance": {
+            "componentId": "cyrene-runtime-maintenance",
+            "systemdUnit": "cyrene-runtime-maintenance.service",
+            "restart": {"unit": "cyrene-runtime-maintenance.service", "group": "core-runtime"},
+        }
+    }
+    journal["planDigest"] = "sha256:" + "c" * 64
+    core = SimpleNamespace(
+        _journal_path=lambda _updater: tmp_path / "first-core.json",
+        _read_private_json=lambda _path: journal,
+        _fresh_workload_core_public_result=lambda _expected, value: value,
+        _verify_live_core_cohort=lambda *_args, **_kwargs: pytest.fail(
+            "a mismatched C10 receipt must not reach live preservation"
+        ),
+    )
+    monkeypatch.setattr(updater, "_load_native_core_bootstrap", lambda: core)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_first_core_verified_active_components(
+            transaction,
+            service_units,
+            staged,
+            workload_id="catalyst",
+            plugin_refs_changed=False,
+            plugin_refs_restart_pending=True,
+            has_oci_components=False,
+            web_selected=False,
+        )
+    assert error.value.code == "FIRST_CORE_READBACK_REQUIRED"
+
+
+def test_catalyst_first_core_refs_activation_rejects_wrong_request_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction, staged, journal = _first_core_live_reuse_fixture()
+    service_units = [
+        {
+            "componentId": "cyrene-runtime-maintenance",
+            "unit": "cyrene-runtime-maintenance.service",
+            "candidate": None,
+        }
+    ]
+    updater.components = {
+        "cyrene-runtime-maintenance": {
+            "componentId": "cyrene-runtime-maintenance",
+            "systemdUnit": "cyrene-runtime-maintenance.service",
+            "restart": {"unit": "cyrene-runtime-maintenance.service", "group": "core-runtime"},
+        }
+    }
+    journal["requestId"] = "first-core-bootstrap-" + "b" * 32
+    core = SimpleNamespace(
+        _journal_path=lambda _updater: tmp_path / "first-core.json",
+        _read_private_json=lambda _path: journal,
+        _fresh_workload_core_public_result=lambda _expected, value: value,
+        _verify_live_core_cohort=lambda *_args, **_kwargs: pytest.fail(
+            "a mismatched C10 request receipt must not reach live preservation"
+        ),
+    )
+    monkeypatch.setattr(updater, "_load_native_core_bootstrap", lambda: core)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_first_core_verified_active_components(
+            transaction,
+            service_units,
+            staged,
+            workload_id="catalyst",
+            plugin_refs_changed=False,
+            plugin_refs_restart_pending=True,
+            has_oci_components=False,
+            web_selected=False,
+        )
+    assert error.value.code == "FIRST_CORE_READBACK_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [("version", "0.2.0"), ("targetId", "cyrene.first-core.other")],
+)
+def test_catalyst_first_core_refs_activation_keeps_full_path_for_new_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_field: str,
+    changed_value: str,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction, staged, journal = _first_core_live_reuse_fixture()
+    broker = "cyrene-runtime-maintenance"
+    package_runtime = "cy-package-runtime"
+    expected = next(item for item in staged if item["componentId"] == broker)
+    candidate = {**expected, changed_field: changed_value}
+    journal["planDigest"] = "sha256:" + "c" * 64
+    service_units = [
+        {
+            "componentId": broker,
+            "unit": f"{broker}.service",
+            "candidate": candidate,
+        },
+        {
+            "componentId": package_runtime,
+            "unit": f"{package_runtime}.service",
+            "candidate": None,
+        },
+    ]
+    updater.components = {
+        row["componentId"]: {
+            "componentId": row["componentId"],
+            "systemdUnit": row["unit"],
+            "restart": {"unit": row["unit"], "group": "core-runtime"},
+        }
+        for row in service_units
+    }
+    verifier_calls: list[bool] = []
+    core = SimpleNamespace(
+        _journal_path=lambda _updater: tmp_path / "first-core.json",
+        _read_private_json=lambda _path: journal,
+        _fresh_workload_core_public_result=lambda _expected, value: value,
+        _verify_live_core_cohort=lambda *_args, **_kwargs: verifier_calls.append(True),
+    )
+    monkeypatch.setattr(updater, "_load_native_core_bootstrap", lambda: core)
+
+    reusable = updater._workload_first_core_verified_active_components(
+        transaction,
+        service_units,
+        staged,
+        workload_id="catalyst",
+        plugin_refs_changed=True,
+        plugin_refs_restart_pending=False,
+        has_oci_components=False,
+        web_selected=False,
+    )
+
+    assert reusable == set()
+    assert verifier_calls == []
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda _unit: "active")
+    monkeypatch.setattr(
+        updater,
+        "_set_workload_unit_for_apply",
+        lambda _transaction, _path, unit, operation, **_kwargs: calls.append((unit, operation)),
+    )
+    updater._activate_workload_service_units_for_apply(
+        transaction,
+        tmp_path / "transaction.json",
+        service_units,
+        catalyst_refs_only=False,
+        verified_active_component_ids=reusable,
+    )
+    assert calls == [(f"{broker}.service", "restart"), (f"{package_runtime}.service", "restart")]
+
+
+def test_catalyst_first_core_refs_activation_fails_closed_on_live_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    transaction, staged, journal = _first_core_live_reuse_fixture()
+    service_units = [
+        {
+            "componentId": "cyrene-runtime-maintenance",
+            "unit": "cyrene-runtime-maintenance.service",
+            "candidate": None,
+        }
+    ]
+    updater.components = {
+        "cyrene-runtime-maintenance": {
+            "componentId": "cyrene-runtime-maintenance",
+            "systemdUnit": "cyrene-runtime-maintenance.service",
+            "restart": {"unit": "cyrene-runtime-maintenance.service", "group": "core-runtime"},
+        }
+    }
+
+    def fail_live_proof(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("The active unit differs from the signed C10 target.")
+
+    core = SimpleNamespace(
+        _journal_path=lambda _updater: tmp_path / "first-core.json",
+        _read_private_json=lambda _path: journal,
+        _fresh_workload_core_public_result=lambda _expected, value: value,
+        _verify_live_core_cohort=fail_live_proof,
+    )
+    monkeypatch.setattr(updater, "_load_native_core_bootstrap", lambda: core)
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._workload_first_core_verified_active_components(
+            transaction,
+            service_units,
+            staged,
+            workload_id="catalyst",
+            plugin_refs_changed=True,
+            plugin_refs_restart_pending=False,
+            has_oci_components=False,
+            web_selected=False,
+        )
+    assert error.value.code == "FIRST_CORE_READBACK_REQUIRED"
+
+
+def test_core_first_install_starts_all_units_and_core_upgrade_restarts_all_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater = _empty_updater(tmp_path)
+    services = [
+        {
+            "componentId": "cyrene-runtime-maintenance",
+            "unit": "cyrene-runtime-maintenance.service",
+            "candidate": None,
+        },
+        {
+            "componentId": "cy-package-runtime",
+            "unit": "cyrene-package-runtime.service",
+            "candidate": None,
+        },
+        {
+            "componentId": updates.CATALYST_COMPONENT_ID,
+            "unit": updates.CATALYST_SERVICE_UNIT,
+            "candidate": {"componentId": updates.CATALYST_COMPONENT_ID},
+        },
+    ]
+    state = {service["unit"]: "inactive" for service in services}
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(updater, "_package_product_unit_state", lambda unit: state[unit])
+    monkeypatch.setattr(
+        updater,
+        "_set_workload_unit_for_apply",
+        lambda _transaction, _path, unit, operation, **_kwargs: calls.append((unit, operation)),
+    )
+
+    updater._activate_workload_service_units_for_apply(
+        {}, tmp_path / "transaction.json", services, catalyst_refs_only=False
+    )
+    assert calls == [(service["unit"], "start") for service in services]
+
+    calls.clear()
+    for service in services:
+        state[service["unit"]] = "active"
+    updater._activate_workload_service_units_for_apply(
+        {}, tmp_path / "transaction.json", services, catalyst_refs_only=False
+    )
+    assert calls == [(service["unit"], "restart") for service in services]
+
+
+@pytest.mark.parametrize(
+    ("phase", "hold_status", "outcome", "expected_code"),
+    [
+        ("rollback_required", None, None, "WORKLOAD_ROLLBACK_REQUIRED"),
+        ("rollback_end_pending", "end_pending", "ROLLED_BACK", "WORKLOAD_ROLLBACK_REQUIRED"),
+        ("applying", "end_pending", "FAILED", "WORKLOAD_ROLLBACK_REQUIRED"),
+        ("applying", "ended", "ROLLED_BACK", "WORKLOAD_ROLLBACK_REQUIRED"),
+        ("succeeded", "end_pending", "FAILED", "WORKLOAD_ROLLBACK_REQUIRED"),
+        ("rolled_back", None, None, "APPLY_ROLLED_BACK"),
+    ],
+)
+def test_workload_apply_refuses_incomplete_or_failed_rollback_before_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    hold_status: str | None,
+    outcome: str | None,
+    expected_code: str,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    plan_id = "plan-" + "a" * 32
+    plan_digest = "sha256:" + "b" * 64
+    transaction_root = tmp_path / "transactions"
+    transaction_root.mkdir(mode=0o700)
+    transaction_path = transaction_root / f"{plan_id}.json"
+    transaction: dict[str, Any] = {
+        "transactionKind": "workload-assembly.v1",
+        "action": "install",
+        "planId": plan_id,
+        "planDigest": plan_digest,
+        "workloadId": "catalyst",
+        "phase": phase,
+        "rollbackMessage": "rollback needs recovery",
+        "result": {"status": "activated"},
+    }
+    if hold_status is not None:
+        transaction["maintenanceHolds"] = {
+            "core-runtime-activate": {"status": hold_status, "outcome": outcome}
+        }
+    transaction_path.write_text(json.dumps(transaction), encoding="utf-8")
+    transaction_path.chmod(0o600)
+    prior_bytes = transaction_path.read_bytes()
+
+    monkeypatch.setattr(updates, "_running_as_root", lambda: True)
+    monkeypatch.setattr(updater, "_private_state_directory", lambda _kind: transaction_root)
+    monkeypatch.setattr(
+        updater,
+        "_resume_first_core_before_workload_inventory",
+        lambda *_args, **_kwargs: pytest.fail("rollback state must be checked before resume"),
+    )
+
+    with pytest.raises(updates.UpdateError) as error:
+        updater._apply_workload_install_assembled(
+            {
+                "planId": plan_id,
+                "planDigest": plan_digest,
+                "workloadId": "catalyst",
+                "targetId": "ubuntu-24.04-x86_64",
+            },
+            {},
+        )
+
+    assert error.value.code == expected_code
+    assert transaction_path.read_bytes() == prior_bytes
+
+
 def test_workload_unit_before_directive_adds_start_order_edge() -> None:
     assert updates.ComponentUpdater._workload_unit_after_before(
         b"[Unit]\nBefore = consumer.service\\\n  another.service\n[Service]\nAfter=ignored.service\n"

@@ -10644,6 +10644,268 @@ class ComponentUpdater:
         _atomic_json(transaction_path, transaction)
         return True
 
+    @staticmethod
+    def _workload_catalyst_refs_only_activation(
+        *,
+        workload_id: str,
+        selected_ids: set[Any],
+        service_units: list[dict[str, Any]],
+        core_install_needed: bool,
+        plugin_refs_changed: bool,
+        plugin_refs_restart_pending: bool,
+        has_oci_components: bool,
+        web_selected: bool,
+    ) -> bool:
+        """Whether only Catalyst's plugin-ref projection needs a service restart."""
+
+        if (
+            workload_id != "catalyst"
+            or CATALYST_COMPONENT_ID not in selected_ids
+            or not (plugin_refs_changed or plugin_refs_restart_pending)
+            or core_install_needed
+            or has_oci_components
+            or web_selected
+        ):
+            return False
+        catalyst_service_selected = any(
+            service.get("componentId") == CATALYST_COMPONENT_ID
+            and service.get("unit") == CATALYST_SERVICE_UNIT
+            for service in service_units
+        )
+        return catalyst_service_selected and all(
+            service.get("candidate") is None for service in service_units
+        )
+
+    def _activate_workload_service_units_for_apply(
+        self,
+        transaction: dict[str, Any],
+        transaction_path: Path,
+        service_units: list[dict[str, Any]],
+        *,
+        catalyst_refs_only: bool,
+        verified_active_component_ids: set[str] | None = None,
+    ) -> None:
+        """Activate verified units in dependency order without redundant core restarts."""
+
+        verified_active_component_ids = verified_active_component_ids or set()
+        for service in service_units:
+            unit = service["unit"]
+            component_id = service["componentId"]
+            state = self._package_product_unit_state(unit)
+            preserve_active = (
+                catalyst_refs_only and component_id != CATALYST_COMPONENT_ID
+            ) or component_id in verified_active_component_ids
+            if state == "active" and preserve_active:
+                continue
+            self._set_workload_unit_for_apply(
+                transaction,
+                transaction_path,
+                unit,
+                "restart" if state == "active" else "start",
+                wait_active=True,
+            )
+
+    def _workload_first_core_verified_active_components(
+        self,
+        transaction: dict[str, Any],
+        service_units: list[dict[str, Any]],
+        staged_first_core: list[dict[str, Any]] | None,
+        *,
+        workload_id: str,
+        plugin_refs_changed: bool,
+        plugin_refs_restart_pending: bool,
+        has_oci_components: bool,
+        web_selected: bool,
+    ) -> set[str]:
+        """Return C10 services safe to preserve after exact current live readback."""
+
+        block = transaction.get("firstCoreBootstrap")
+        result = transaction.get("firstCoreBootstrapResult")
+        if (
+            workload_id != "catalyst"
+            or not (plugin_refs_changed or plugin_refs_restart_pending)
+            or has_oci_components
+            or web_selected
+            or not isinstance(block, dict)
+        ):
+            return set()
+        core_ids = set(WORKLOAD_FIRST_CORE_COMPONENT_IDS)
+        selected_core_services = [
+            service for service in service_units if service.get("componentId") in core_ids
+        ]
+        if not selected_core_services:
+            return set()
+        if (
+            not isinstance(staged_first_core, list)
+            or len(staged_first_core) != len(core_ids)
+            or {item.get("componentId") for item in staged_first_core if isinstance(item, dict)}
+            != core_ids
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The exact staged C10 identities are unavailable for live unit reuse.",
+                retryable=True,
+            )
+        staged_by_id = {item["componentId"]: item for item in staged_first_core}
+        for service in selected_core_services:
+            component_id = service["componentId"]
+            component = self.components.get(component_id)
+            if (
+                not isinstance(component, dict)
+                or service.get("unit") != component.get("systemdUnit")
+                or component.get("systemdUnit") != self._catalog_matched_unit(component)
+            ):
+                raise UpdateError(
+                    "FIRST_CORE_READBACK_REQUIRED",
+                    f"The selected C10 service identity changed for {component_id}.",
+                    retryable=True,
+                )
+
+        for service in selected_core_services:
+            candidate = service.get("candidate")
+            if candidate is None:
+                continue
+            if not isinstance(candidate, dict):
+                raise UpdateError(
+                    "FIRST_CORE_READBACK_REQUIRED",
+                    f"The selected C10 target identity is malformed for {service['componentId']}.",
+                    retryable=True,
+                )
+            expected = staged_by_id[service["componentId"]]
+            if any(
+                candidate.get(field) != expected.get(field)
+                for field in (
+                    "componentId",
+                    "version",
+                    "manifestDigest",
+                    "artifactDigest",
+                    "targetId",
+                )
+            ):
+                # A different signed target is an ordinary update. Keep the existing
+                # full activation path; C10 reuse is only for the exact staged target.
+                return set()
+
+        if transaction.get("firstCoreBootstrapStatus") != "installed" or not isinstance(
+            result, dict
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The signed first-Core completion receipt is unavailable for live unit reuse.",
+                retryable=True,
+            )
+
+        core = self._load_native_core_bootstrap()
+        journal_path_reader = getattr(core, "_journal_path", None)
+        journal_reader = getattr(core, "_read_private_json", None)
+        result_validator = getattr(core, "_fresh_workload_core_public_result", None)
+        live_verifier = getattr(core, "_verify_live_core_cohort", None)
+        if not all(
+            callable(value)
+            for value in (journal_path_reader, journal_reader, result_validator, live_verifier)
+        ):
+            raise UpdateError(
+                "HELPER_UNAVAILABLE", "The first-Core live identity verifier is unavailable."
+            )
+        try:
+            journal = journal_reader(journal_path_reader(self))
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The exact first-Core journal cannot be read safely for live unit reuse.",
+                retryable=True,
+            ) from error
+
+        expected_source_id = self._workload_policy_source_id(
+            transaction.get("sourcePolicy", {})
+            if isinstance(transaction.get("sourcePolicy"), dict)
+            else {}
+        )
+        source_policy = transaction.get("sourcePolicy")
+        source_identities = (
+            journal.get("sourceCatalog", {}).get("sourceIdentities")
+            if isinstance(journal, dict) and isinstance(journal.get("sourceCatalog"), dict)
+            else None
+        )
+        source_principals = (
+            journal.get("sourcePrincipalIdentities") if isinstance(journal, dict) else None
+        )
+        expected_principal = (
+            source_principals.get(expected_source_id)
+            if isinstance(source_principals, dict) and isinstance(expected_source_id, str)
+            else None
+        )
+        expected_source_identity = (
+            [
+                {
+                    "sourceId": expected_source_id,
+                    "uid": expected_principal.get("uid"),
+                    "gid": expected_principal.get("gid"),
+                }
+            ]
+            if isinstance(expected_principal, dict)
+            else None
+        )
+        if (
+            not isinstance(journal, dict)
+            or journal.get("mode") != "fresh-workload-first-core"
+            or journal.get("phase") != "succeeded"
+            or not isinstance(block.get("planId"), str)
+            or journal.get("planId") != block.get("planId")
+            or journal.get("requestId")
+            != "first-core-bootstrap-" + block["planId"].removeprefix("plan-")
+            or journal.get("planDigest") != block.get("planDigest")
+            or journal.get("firstCoreBootstrap") != block
+            or journal.get("componentArtifactDigests")
+            != block.get("maintenanceComponentArtifactDigests")
+            or journal.get("components") != staged_first_core
+            or journal.get("result") != result
+            or journal.get("sourcePolicy") != source_policy
+            or not isinstance(expected_source_id, str)
+            or expected_source_identity is None
+            or source_identities != expected_source_identity
+        ):
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The completed C10 journal differs from this signed workload plan.",
+                retryable=True,
+            )
+        try:
+            validated_result = result_validator(
+                {
+                    "planId": block.get("planId"),
+                    "planDigest": block.get("planDigest"),
+                    "initialSourceArtifactRef": block.get("initialSourceArtifactRef"),
+                },
+                result,
+            )
+            if validated_result != result:
+                raise ValueError("The C10 completion result changed during validation")
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The completed C10 result is malformed for this signed workload plan.",
+                retryable=True,
+            ) from error
+        try:
+            live_verifier(
+                self,
+                journal,
+                {
+                    "components": staged_first_core,
+                    "catalogGeneration": result.get("catalogGeneration"),
+                    "activitySources": [expected_source_id],
+                },
+                probe_package_runtime=True,
+            )
+        except Exception as error:
+            raise UpdateError(
+                "FIRST_CORE_READBACK_REQUIRED",
+                "The exact C10 target is not currently live and healthy; refusing to reuse its services.",
+                retryable=True,
+            ) from error
+        return {service["componentId"] for service in selected_core_services}
+
     def _workload_initial_source_activation(
         self,
         transaction: dict[str, Any],
@@ -15837,6 +16099,34 @@ class ComponentUpdater:
                     "A different transaction occupies this workload plan.",
                     retryable=True,
                 )
+            prior_phase = prior_transaction.get("phase")
+            prior_holds = prior_transaction.get("maintenanceHolds")
+            failed_or_rolled_back_end = (
+                any(
+                    isinstance(hold, dict)
+                    and hold.get("status") in {"end_pending", "ended"}
+                    and hold.get("outcome") in {"FAILED", "ROLLED_BACK"}
+                    for hold in prior_holds.values()
+                )
+                if isinstance(prior_holds, dict)
+                else False
+            )
+            if prior_phase == "rolled_back":
+                raise UpdateError(
+                    "APPLY_ROLLED_BACK",
+                    prior_transaction.get("rollbackMessage", "Workload apply rolled back."),
+                )
+            if (
+                prior_phase in {"rollback_required", "rollback_end_pending"}
+                or failed_or_rolled_back_end
+            ):
+                raise UpdateError(
+                    "WORKLOAD_ROLLBACK_REQUIRED",
+                    prior_transaction.get(
+                        "rollbackMessage",
+                        "The prior workload attempt requires exact rollback recovery before it can be applied again.",
+                    ),
+                )
             if prior_transaction.get("phase") == "succeeded":
                 return prior_transaction["result"]
         preinventory_first_core_result, preinventory_sdk_prepared = (
@@ -16159,6 +16449,7 @@ class ComponentUpdater:
             self._capture_workload_web_identity(item["componentId"]) for item in web_components
         ]
         first_core_block = resolution.get("firstCoreBootstrap")
+        staged_first_core: list[dict[str, Any]] | None = None
         if isinstance(first_core_block, dict):
             if stored.get("firstCoreBootstrap") != first_core_block:
                 raise UpdateError(
@@ -16214,6 +16505,7 @@ class ComponentUpdater:
                 plan_id=plan_id,
                 plan_digest=plan_digest,
             )
+            staged_first_core = staged_core
             broker_candidate = core_candidates.get(BROKER_COMPONENT_ID)
             broker_stage = next(
                 row for row in staged_core if row["componentId"] == BROKER_COMPONENT_ID
@@ -16894,6 +17186,30 @@ class ComponentUpdater:
             )
         ) or bool(oci_components)
         web_selected = any(row.get("artifactKind") == "static-web" for row in rows)
+        catalyst_refs_only_activation = self._workload_catalyst_refs_only_activation(
+            workload_id=workload_id,
+            selected_ids=selected_ids,
+            service_units=service_units,
+            core_install_needed=core_install_needed,
+            plugin_refs_changed=catalyst_plugin_refs_changed,
+            plugin_refs_restart_pending=(
+                transaction.get("catalystPluginRefsRestartPending") is True
+            ),
+            has_oci_components=bool(oci_components),
+            web_selected=web_selected,
+        )
+        verified_active_core_components = self._workload_first_core_verified_active_components(
+            transaction,
+            service_units,
+            staged_first_core,
+            workload_id=workload_id,
+            plugin_refs_changed=catalyst_plugin_refs_changed,
+            plugin_refs_restart_pending=(
+                transaction.get("catalystPluginRefsRestartPending") is True
+            ),
+            has_oci_components=bool(oci_components),
+            web_selected=web_selected,
+        )
         if (core_activation_needed or web_selected) and self._ensure_workload_phase(
             transaction,
             transaction_path,
@@ -16903,16 +17219,13 @@ class ComponentUpdater:
         ):
             try:
                 # Start providers first; the sequence already honors verified unit ordering.
-                for service in service_units:
-                    unit = service["unit"]
-                    state = self._package_product_unit_state(unit)
-                    self._set_workload_unit_for_apply(
-                        transaction,
-                        transaction_path,
-                        unit,
-                        "restart" if state == "active" else "start",
-                        wait_active=True,
-                    )
+                self._activate_workload_service_units_for_apply(
+                    transaction,
+                    transaction_path,
+                    service_units,
+                    catalyst_refs_only=catalyst_refs_only_activation,
+                    verified_active_component_ids=verified_active_core_components,
+                )
                 if CATALYST_COMPONENT_ID in selected_ids:
                     self._wait_http_health(8004, "/healthz", CATALYST_COMPONENT_ID)
                 if web_selected and web_host is not None:
