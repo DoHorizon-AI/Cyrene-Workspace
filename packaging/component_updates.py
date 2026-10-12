@@ -11632,7 +11632,7 @@ class ComponentUpdater:
         source_policy: dict[str, Any],
         candidate_items: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Resolve only selected signed Product/service units for this workload."""
+        """Resolve selected, verified Product units in safe start order."""
 
         component_ids = {row.get("componentId") for row in rows if isinstance(row, dict)}
         if source_policy.get("mode") == "actualProduct":
@@ -11643,6 +11643,8 @@ class ComponentUpdater:
             if isinstance(item, dict) and isinstance(item.get("componentId"), str)
         }
         services: dict[str, dict[str, Any]] = {}
+        services_by_component: dict[str, dict[str, Any]] = {}
+        unit_dependencies: dict[str, tuple[set[str], set[str]]] = {}
         for component_id in sorted(value for value in component_ids if isinstance(value, str)):
             component = self.components.get(component_id)
             if not isinstance(component, dict):
@@ -11662,12 +11664,14 @@ class ComponentUpdater:
             try:
                 candidate = candidate_by_id.get(component_id)
                 if component.get("pythonBundleService"):
-                    self._workload_deb_managed_unit_bytes(
+                    unit_bytes, _unit_path, _unit_digest = self._workload_deb_managed_unit_bytes(
                         component, candidate, verify_fragment=True
                     )
                     unit_owner = "native-deb"
                 else:
-                    self._workload_signed_unit_bytes(component, candidate)
+                    unit_bytes, _unit_path, _unit_digest = self._workload_signed_unit_bytes(
+                        component, candidate
+                    )
                     unit_owner = "signed-release"
             except UpdateError:
                 raise
@@ -11677,15 +11681,138 @@ class ComponentUpdater:
                     f"{component_id} has no verified unit in its active or staged release.",
                     retryable=True,
                 ) from error
-            services[unit] = {
+            order = restart.get("order", 0)
+            if type(order) is not int:
+                raise UpdateError(
+                    "INVALID_CATALOG",
+                    f"{component_id} has a malformed service restart order.",
+                )
+            service = {
                 "componentId": component_id,
                 "unit": unit,
-                "order": restart.get("order", 0),
+                "order": order,
                 "restartGroup": restart.get("group"),
                 "candidate": candidate,
                 "unitOwner": unit_owner,
             }
-        return sorted(services.values(), key=lambda item: (item["order"], item["componentId"]))
+            if unit in services:
+                raise UpdateError(
+                    "INVALID_CATALOG",
+                    f"Multiple selected components claim service unit {unit}.",
+                )
+            services[unit] = service
+            services_by_component[component_id] = service
+            unit_dependencies[unit] = self._workload_unit_after_before(unit_bytes)
+
+        service_by_unit = {item["unit"]: item for item in services.values()}
+        prerequisites: dict[str, set[str]] = {unit: set() for unit in services}
+        for component_id, service in services_by_component.items():
+            component = self.components[component_id]
+            dependencies = component.get("dependencies", [])
+            if not isinstance(dependencies, list):
+                raise UpdateError(
+                    "INVALID_CATALOG",
+                    f"Trusted dependencies are malformed for {component_id}.",
+                )
+            seen_dependencies: set[str] = set()
+            for dependency in dependencies:
+                dependency_id = (
+                    dependency.get("componentId") if isinstance(dependency, dict) else None
+                )
+                if (
+                    not isinstance(dependency_id, str)
+                    or dependency_id not in self.components
+                    or dependency_id in seen_dependencies
+                ):
+                    raise UpdateError(
+                        "INVALID_CATALOG",
+                        f"Trusted dependencies are malformed for {component_id}.",
+                    )
+                seen_dependencies.add(dependency_id)
+                dependency_service = services_by_component.get(dependency_id)
+                if dependency_service is not None:
+                    prerequisites[service["unit"]].add(dependency_service["unit"])
+
+            after_units, before_units = unit_dependencies[service["unit"]]
+            for dependency_unit in after_units:
+                dependency_service = service_by_unit.get(dependency_unit)
+                if dependency_service is not None:
+                    prerequisites[service["unit"]].add(dependency_service["unit"])
+            for dependent_unit in before_units:
+                dependent_service = service_by_unit.get(dependent_unit)
+                if dependent_service is not None:
+                    prerequisites[dependent_service["unit"]].add(service["unit"])
+
+        def sort_key(unit: str) -> tuple[int, str, str]:
+            item = service_by_unit[unit]
+            return (item["order"], item["componentId"], unit)
+
+        ready = sorted(
+            (unit for unit, dependencies in prerequisites.items() if not dependencies),
+            key=sort_key,
+        )
+        ordered_units: list[str] = []
+        while ready:
+            unit = ready.pop(0)
+            ordered_units.append(unit)
+            for dependent, dependencies in prerequisites.items():
+                if unit in dependencies:
+                    dependencies.remove(unit)
+                    if not dependencies:
+                        ready.append(dependent)
+            ready.sort(key=sort_key)
+        if len(ordered_units) != len(services):
+            raise UpdateError(
+                "SERVICE_DEPENDENCY_CYCLE",
+                "Selected service-unit dependencies contain a cycle.",
+            )
+        return [service_by_unit[unit] for unit in ordered_units]
+
+    @staticmethod
+    def _workload_unit_after_before(payload: bytes) -> tuple[set[str], set[str]]:
+        """Read service ordering edges from already verified unit bytes."""
+
+        try:
+            lines = payload.decode("utf-8").splitlines()
+        except UnicodeDecodeError as error:
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Verified service unit is not UTF-8."
+            ) from error
+        unit_section = False
+        after: set[str] = set()
+        before: set[str] = set()
+        logical_lines: list[str] = []
+        pending = ""
+        for line in lines:
+            stripped = line.strip()
+            if pending:
+                pending += stripped
+            else:
+                pending = stripped
+            if pending.endswith("\\"):
+                pending = pending[:-1] + " "
+                continue
+            logical_lines.append(pending)
+            pending = ""
+        if pending:
+            logical_lines.append(pending)
+        for line in logical_lines:
+            if not line or line.startswith(("#", ";")):
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                unit_section = line == "[Unit]"
+                continue
+            if not unit_section or "=" not in line:
+                continue
+            key, value = (part.strip() for part in line.split("=", 1))
+            if key not in {"After", "Before"}:
+                continue
+            destination = after if key == "After" else before
+            if not value.strip():
+                destination.clear()
+            else:
+                destination.update(value.split())
+        return after, before
 
     def _workload_deb_managed_unit_bytes(
         self,
@@ -16340,7 +16467,8 @@ class ComponentUpdater:
         ):
             try:
                 prior_states = transaction.setdefault("priorServiceStates", {})
-                for service in service_units:
+                # Stop dependents first so a provider stop cannot cascade before state capture.
+                for service in reversed(service_units):
                     unit = service["unit"]
                     state = self._package_product_unit_state(unit)
                     prior_states.setdefault(unit, state)
@@ -16773,6 +16901,7 @@ class ComponentUpdater:
             requires_restart=bool(service_units or oci_components),
         ):
             try:
+                # Start providers first; the sequence already honors verified unit ordering.
                 for service in service_units:
                     unit = service["unit"]
                     state = self._package_product_unit_state(unit)
