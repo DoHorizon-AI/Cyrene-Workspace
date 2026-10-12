@@ -1437,13 +1437,23 @@ def _require_c10_package_runtime_ready(updater: Any, plan: dict[str, Any]) -> di
         C10_FIRST_CORE_COMPONENT_IDS
     ):
         return {}
+    sources_in_plan = plan.get("activitySources")
+    if (
+        not isinstance(sources_in_plan, list)
+        or len(sources_in_plan) != 1
+        or not isinstance(sources_in_plan[0], str)
+        or not sources_in_plan[0]
+    ):
+        raise RuntimeError("C10 plan must identify exactly one Package Runtime activity source")
     catalog, sources = updater._activity_catalog()
-    if catalog.get("generation") != plan["catalogGeneration"] or sources != plan["activitySources"]:
+    if catalog.get("generation") != plan["catalogGeneration"] or sources != sources_in_plan:
         raise RuntimeError("Activity source identity changed before C10 readiness proof")
     helper = updater._load_native_package_runtime_bootstrap()
     try:
         result = helper.probe_runtime_authority(
-            catalog, expected_catalog_generation=plan["catalogGeneration"]
+            catalog,
+            expected_catalog_generation=plan["catalogGeneration"],
+            source_id=sources_in_plan[0],
         )
     except Exception as error:
         raise RuntimeError(
