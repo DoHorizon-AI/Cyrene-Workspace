@@ -11014,6 +11014,157 @@ class ComponentUpdater:
             reject()
         return current_generation
 
+    def _workload_first_core_rollback_baseline(
+        self,
+        transaction: dict[str, Any],
+        *,
+        source_id: str | None = None,
+        catalog_generation: int | None = None,
+    ) -> None:
+        """Handoff and validate only parent rollback entries covered by live C10."""
+
+        def reject(message: str) -> None:
+            raise UpdateError("FIRST_CORE_READBACK_REQUIRED", message, retryable=True)
+
+        if (
+            transaction.get("transactionKind") != "workload-assembly.v1"
+            or transaction.get("action") != "install"
+            or transaction.get("firstCoreBootstrapStatus") != "installed"
+        ):
+            return
+        block, result = (
+            transaction.get("firstCoreBootstrap"),
+            transaction.get("firstCoreBootstrapResult"),
+        )
+        components, previous = transaction.get("components"), transaction.get("previous")
+        if (
+            not isinstance(block, dict)
+            or not isinstance(result, dict)
+            or not isinstance(components, list)
+            or not isinstance(previous, list)
+        ):
+            reject("C10 parent rollback baseline is unavailable.")
+        baseline_ids = {BROKER_COMPONENT_ID, "cy-package-runtime"}
+        component_rows = [
+            row
+            for row in components
+            if isinstance(row, dict) and row.get("componentId") in baseline_ids
+        ]
+        previous_rows = [
+            row
+            for row in previous
+            if isinstance(row, dict) and row.get("componentId") in baseline_ids
+        ]
+        component_by_id = {row["componentId"]: row for row in component_rows}
+        previous_by_id = {row["componentId"]: row for row in previous_rows}
+        component_ids, previous_ids = set(component_by_id), set(previous_by_id)
+        if (
+            len(component_rows) != len(component_ids)
+            or len(previous_rows) != len(previous_ids)
+            or component_ids != previous_ids
+        ):
+            reject("C10 parent Broker/Package Runtime rollback identities are incomplete.")
+        if not component_ids:
+            return
+
+        block_rows = block.get("components")
+        block_by_id = (
+            {
+                row.get("componentId"): row
+                for row in block_rows
+                if isinstance(row, dict) and isinstance(row.get("componentId"), str)
+            }
+            if isinstance(block_rows, list)
+            else {}
+        )
+        expected = {
+            component_id: {
+                "version": block_by_id[component_id]["version"],
+                "releaseIdentity": block_by_id[component_id]["manifestDigest"],
+                "manifestDigest": block_by_id[component_id]["manifestDigest"],
+                "artifactDigest": block_by_id[component_id]["artifactDigest"],
+                "pointerIdentity": f"{block_by_id[component_id]['version']}--{block_by_id[component_id]['manifestDigest'].removeprefix('sha256:')}",
+                "bundleIdentity": None,
+            }
+            for component_id in component_ids
+            if component_id in block_by_id
+        }
+        if (
+            set(expected) != component_ids
+            or block.get("cohortId") != "C10"
+            or block.get("targetId") != WORKLOAD_FIRST_CORE_TARGET_ID
+            or result.get("status") != "installed"
+            or result.get("planId") != block.get("planId")
+            or result.get("planDigest") != block.get("planDigest")
+        ):
+            reject("C10 rollback plan identity is incomplete.")
+
+        if catalog_generation is not None:
+            expected_source = self._workload_policy_source_id(transaction.get("sourcePolicy", {}))
+            if (
+                source_id != expected_source
+                or type(catalog_generation) is not int
+                or catalog_generation < 1
+            ):
+                reject("C10 rollback source proof is incomplete.")
+            handoff = {
+                "schemaVersion": 1,
+                "parentPlanId": transaction.get("planId"),
+                "parentPlanDigest": transaction.get("planDigest"),
+                "planId": block["planId"],
+                "planDigest": block["planDigest"],
+                "targetId": block["targetId"],
+                "sourceId": source_id,
+                "catalogGeneration": catalog_generation,
+            }
+            existing = transaction.get("firstCoreRollbackBaseline")
+            if existing is not None and existing != handoff:
+                reject("C10 rollback handoff changed on replay.")
+            current = {
+                row["componentId"]: row
+                for row in self._capture_active_versions(list(component_by_id.values()))
+            }
+            if not self._same_release_identities(expected, current, require_attested=True):
+                reject("Live C10 rollback identities differ from the signed cohort.")
+            if not self._same_release_identities(expected, previous_by_id, require_attested=True):
+                empty = all(
+                    prior.get("identityAttested") is False
+                    and all(prior.get(field) is None for field in expected[component_id])
+                    for component_id, prior in previous_by_id.items()
+                )
+                if not empty:
+                    reject("Parent rollback identity conflicts with live C10.")
+                for component_id in component_ids:
+                    previous_by_id[component_id].update(current[component_id])
+            transaction["firstCoreRollbackBaseline"] = handoff
+            return
+
+        handoff = transaction.get("firstCoreRollbackBaseline")
+        source_id = self._workload_policy_source_id(transaction.get("sourcePolicy", {}))
+        generation = handoff.get("catalogGeneration") if isinstance(handoff, dict) else None
+        expected_handoff = {
+            "schemaVersion": 1,
+            "parentPlanId": transaction.get("planId"),
+            "parentPlanDigest": transaction.get("planDigest"),
+            "planId": block.get("planId"),
+            "planDigest": block.get("planDigest"),
+            "targetId": block.get("targetId"),
+            "sourceId": source_id,
+            "catalogGeneration": generation,
+        }
+        if (
+            not isinstance(handoff, dict)
+            or type(generation) is not int
+            or generation < 1
+            or (
+                transaction.get("activityCatalogGeneration") is not None
+                and generation != transaction.get("activityCatalogGeneration")
+            )
+            or handoff != expected_handoff
+            or not self._same_release_identities(expected, previous_by_id, require_attested=True)
+        ):
+            reject("C10 rollback handoff is missing or mismatched.")
+
     def _workload_first_core_verified_active_components(
         self,
         transaction: dict[str, Any],
@@ -11223,6 +11374,11 @@ class ComponentUpdater:
                 "The exact C10 target is not currently live and healthy; refusing to reuse its services.",
                 retryable=True,
             ) from error
+        self._workload_first_core_rollback_baseline(
+            transaction,
+            source_id=expected_source_id,
+            catalog_generation=live_catalog_generation,
+        )
         return {service["componentId"] for service in selected_core_services}
 
     def _workload_initial_source_activation(
@@ -17530,6 +17686,8 @@ class ComponentUpdater:
             has_oci_components=bool(oci_components),
             web_selected=web_selected,
         )
+        if transaction.get("firstCoreRollbackBaseline") is not None:
+            _atomic_json(transaction_path, transaction)
         if (core_activation_needed or web_selected) and self._ensure_workload_phase(
             transaction,
             transaction_path,
@@ -28207,6 +28365,8 @@ class ComponentUpdater:
 
     def _rollback_transaction(self, transaction: dict[str, Any]) -> tuple[bool, str]:
         try:
+            if transaction.get("firstCoreBootstrapStatus") == "installed":
+                self._workload_first_core_rollback_baseline(transaction)
             for previous in transaction["previous"]:
                 component = self.components[previous["componentId"]]
                 if component.get("kind") == "data-bundle":
@@ -28258,19 +28418,23 @@ class ComponentUpdater:
                     )
                     self._restore_active_receipt(previous["componentId"], previous)
             self._restart_transaction(transaction)
+            previous_by_id = {item["componentId"]: item for item in transaction["previous"]}
+            health_components = []
+            for item in transaction["components"]:
+                component_id = item["componentId"]
+                prior = previous_by_id[component_id]
+                installed = self._installed(self.components[component_id])
+                absent_before = (
+                    prior.get("identityAttested") is False
+                    and prior.get("pointerIdentity") is None
+                    and installed.get("activeVersion") is None
+                )
+                manifest = {} if absent_before else installed.get("manifest") or item["manifest"]
+                health_components.append({**item, "manifest": manifest})
             self._health_transaction(
                 {
                     **transaction,
-                    "components": [
-                        {
-                            **item,
-                            "manifest": self._installed(self.components[item["componentId"]]).get(
-                                "manifest"
-                            )
-                            or item["manifest"],
-                        }
-                        for item in transaction["components"]
-                    ],
+                    "components": health_components,
                 }
             )
             self._rollback_authority_activation(transaction)
