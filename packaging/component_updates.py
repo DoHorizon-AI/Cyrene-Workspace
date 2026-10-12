@@ -11031,11 +11031,12 @@ class ComponentUpdater:
 
         block = transaction.get("firstCoreBootstrap")
         result = transaction.get("firstCoreBootstrapResult")
+        # Static Client assets are refreshed separately after unit activation and do
+        # not change the signed C10 process or unit identities verified below.
         if (
             workload_id != "catalyst"
             or not (plugin_refs_changed or plugin_refs_restart_pending)
             or has_oci_components
-            or web_selected
             or not isinstance(block, dict)
         ):
             return set()
