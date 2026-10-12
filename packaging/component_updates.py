@@ -9909,6 +9909,7 @@ class ComponentUpdater:
                     retryable=True,
                 ) from error
             status = response.get("status") if isinstance(response, dict) else None
+            runtime_generation = status.get("generation") if isinstance(status, dict) else None
             if (
                 not isinstance(response, dict)
                 or response.get("requestId") != request_id
@@ -9916,8 +9917,8 @@ class ComponentUpdater:
                 or status.get("binding_id") != binding_id
                 or status.get("installation_id") != installation_id
                 or status.get("state") != "RUNNING"
-                or type(status.get("generation")) is not int
-                or status.get("generation") != activity_catalog.get("generation")
+                or type(runtime_generation) is not int
+                or not 1 <= runtime_generation <= (1 << 64) - 1
             ):
                 raise UpdateError(
                     "PACKAGE_RUNTIME_READBACK_REQUIRED",
