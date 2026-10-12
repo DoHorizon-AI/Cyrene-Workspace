@@ -247,6 +247,12 @@ class FakeUpdater:
         raise AssertionError(method)
 
     def _activity_catalog(self) -> tuple[dict[str, Any], list[str]]:
+        if self.catalog["compatibilityGroups"]:
+            sources = ["cyrene-catalyst"]
+            return {
+                "generation": 1,
+                "sources": [{"source_id": sources[0], "uid": 999, "gid": 988}],
+            }, sources
         return {"generation": 1}, ["source-a", "source-b"]
 
     def _load_native_package_runtime_bootstrap(self) -> Any:
@@ -254,9 +260,21 @@ class FakeUpdater:
 
         class RuntimeProbe:
             def probe_runtime_authority(
-                self, _catalog: dict[str, Any], *, expected_catalog_generation: int
+                self,
+                catalog: dict[str, Any],
+                *,
+                expected_catalog_generation: int,
+                source_id: str,
             ) -> dict[str, Any]:
-                updater.events.append(("package-runtime-authority", expected_catalog_generation))
+                if source_id not in {
+                    source.get("source_id")
+                    for source in catalog.get("sources", [])
+                    if isinstance(source, dict)
+                }:
+                    raise ValueError("Requested activity source is missing from the catalog")
+                updater.events.append(
+                    ("package-runtime-authority", expected_catalog_generation, source_id)
+                )
                 return {
                     "authority": "platform_package_runtime",
                     "protocol_version": "cy-package-runtime.control.v1",
@@ -866,6 +884,89 @@ def test_c10_first_core_checks_stages_and_applies_exact_group_in_dependency_orde
     )
     end = next(index for index, event in enumerate(updater.events) if event[0] == "end")
     assert readiness < end
+
+
+def test_c10_package_runtime_authority_uses_the_planned_generation_two_source(
+    tmp_path: Path,
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    catalog = {
+        "generation": 2,
+        "sources": [
+            {
+                "source_id": "cyrene-catalyst",
+                "uid": 999,
+                "gid": 988,
+                "source_token_sha256": "a" * 64,
+                "binding_scopes": [],
+            }
+        ],
+    }
+
+    def activity_catalog() -> tuple[dict[str, Any], list[str]]:
+        return catalog, ["cyrene-catalyst"]
+
+    updater._activity_catalog = activity_catalog
+    plan = {
+        "components": [
+            {"componentId": component_id} for component_id in bootstrap.C10_FIRST_CORE_COMPONENT_IDS
+        ],
+        "catalogGeneration": 2,
+        "activitySources": ["cyrene-catalyst"],
+    }
+
+    result = bootstrap._require_c10_package_runtime_ready(updater, plan)
+
+    assert result["catalog_generation"] == 2
+    assert (
+        "package-runtime-authority",
+        2,
+        "cyrene-catalyst",
+    ) in updater.events
+
+
+@pytest.mark.parametrize(
+    ("planned_sources", "catalog_sources"),
+    [
+        (["cyrene-yield"], ["cyrene-catalyst"]),
+        ([], ["cyrene-catalyst"]),
+        (["cyrene-catalyst", "cyrene-yield"], ["cyrene-catalyst", "cyrene-yield"]),
+    ],
+)
+def test_c10_package_runtime_authority_rejects_wrong_missing_or_ambiguous_source(
+    tmp_path: Path, planned_sources: list[str], catalog_sources: list[str]
+) -> None:
+    updater = FakeUpdater(tmp_path, c10=True)
+    catalog = {
+        "generation": 2,
+        "sources": [
+            {
+                "source_id": source_id,
+                "uid": 999 + index,
+                "gid": 988 + index,
+                "source_token_sha256": f"{index + 1:x}" * 64,
+                "binding_scopes": [],
+            }
+            for index, source_id in enumerate(catalog_sources)
+        ],
+    }
+
+    def activity_catalog() -> tuple[dict[str, Any], list[str]]:
+        return catalog, catalog_sources
+
+    updater._activity_catalog = activity_catalog
+    plan = {
+        "components": [
+            {"componentId": component_id} for component_id in bootstrap.C10_FIRST_CORE_COMPONENT_IDS
+        ],
+        "catalogGeneration": 2,
+        "activitySources": planned_sources,
+    }
+
+    with pytest.raises(RuntimeError, match="source"):
+        bootstrap._require_c10_package_runtime_ready(updater, plan)
+
+    assert not any(event[0] == "package-runtime-authority" for event in updater.events)
 
 
 @pytest.mark.parametrize("defect", ["missing-member", "mixed-member"])
