@@ -309,6 +309,8 @@ cp "${SCRIPT_DIR}/service_bundle.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/servic
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/service_bundle.py"
 cp "${SCRIPT_DIR}/component_updates.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
 chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/component_updates.py"
+cp "${SCRIPT_DIR}/native_exchange_integration_preflight.py" "${STAGE_DIR}/usr/lib/cyrene/scripts/native_exchange_integration_preflight.py"
+chmod 644 "${STAGE_DIR}/usr/lib/cyrene/scripts/native_exchange_integration_preflight.py"
 cp "${SCRIPT_DIR}/workload_plugin_boot_recovery.py" \
     "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_plugin_boot_recovery.py"
 chmod 755 "${STAGE_DIR}/usr/lib/cyrene/scripts/workload_plugin_boot_recovery.py"
@@ -488,14 +490,21 @@ cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/exchange.env"
 # Product-private database state; this file loads after shared settings.
 CYRENE_DATA_DIR=/var/lib/cyrene/exchange
 EOF
+cat <<'EOF' > "${STAGE_DIR}/etc/cyrene/exchange-integration.env"
+# GatewayOnly is the default. Integration profiles are supplied by the host.
+CYRENE_EXCHANGE_RUNTIME_MODE=gateway-only
+CYRENE_EXCHANGE_INTEGRATION_DATABASE=/var/lib/cyrene/exchange/integrations.sqlite3
+EOF
 chmod 644 \
     "${STAGE_DIR}/etc/cyrene/navigator.env" \
     "${STAGE_DIR}/etc/cyrene/yield.env" \
-    "${STAGE_DIR}/etc/cyrene/exchange.env"
+    "${STAGE_DIR}/etc/cyrene/exchange.env" \
+    "${STAGE_DIR}/etc/cyrene/exchange-integration.env"
 printf '%s\n' \
     '/etc/cyrene/navigator.env' \
     '/etc/cyrene/yield.env' \
-    '/etc/cyrene/exchange.env' >> "${STAGE_DIR}/DEBIAN/conffiles"
+    '/etc/cyrene/exchange.env' \
+    '/etc/cyrene/exchange-integration.env' >> "${STAGE_DIR}/DEBIAN/conffiles"
 
 if [[ -f "${SCRIPT_DIR}/Caddyfile.template" ]]; then
     cp "${SCRIPT_DIR}/Caddyfile.template" "${STAGE_DIR}/etc/cyrene/Caddyfile.template"
@@ -597,6 +606,7 @@ cat <<'EOF' > "${STAGE_DIR}/lib/systemd/system/cyrene-exchange.service"
 [Unit]
 Description=Cyrene Exchange Routing & Gateway Service
 After=network.target
+Wants=cyrene-exchange-integration-dispatcher.service
 Requires=cyrene-runtime-maintenance.service
 After=cyrene-runtime-maintenance.service
 
@@ -608,11 +618,40 @@ WorkingDirectory=/var/lib/cyrene
 EnvironmentFile=-/etc/cyrene/cyrene.env
 EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
 EnvironmentFile=/etc/cyrene/exchange.env
+EnvironmentFile=-/etc/cyrene/exchange-integration.env
+EnvironmentFile=-/etc/cyrene/exchange-integration-secrets.env
+Environment=CYRENE_EXCHANGE_PROCESS_ROLE=api
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_ID=cyrene-exchange
 Environment=CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE=%d/activity-token
 Environment=CYRENE_RUNTIME_MAINTENANCE_SOCKET=/run/cyrene/runtime-maintenance.sock
 LoadCredential=activity-token:/etc/cyrene/runtime-activity-source-tokens/cyrene-exchange.token
 PrivateMounts=yes
+ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run exchange
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# cyrene-exchange-integration-dispatcher.service
+cat <<'EOF' > "${STAGE_DIR}/lib/systemd/system/cyrene-exchange-integration-dispatcher.service"
+[Unit]
+Description=Cyrene Exchange Integration Dispatcher
+After=cyrene-exchange.service
+
+[Service]
+Type=simple
+User=cyrene
+Group=cyrene
+WorkingDirectory=/var/lib/cyrene
+EnvironmentFile=-/etc/cyrene/cyrene.env
+EnvironmentFile=/etc/cyrene/runtime-activity-sources.env
+EnvironmentFile=/etc/cyrene/exchange.env
+EnvironmentFile=-/etc/cyrene/exchange-integration.env
+EnvironmentFile=-/etc/cyrene/exchange-integration-secrets.env
+Environment=CYRENE_EXCHANGE_PROCESS_ROLE=dispatcher
+ExecCondition=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py exchange-dispatcher-condition
 ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run exchange
 Restart=on-failure
 RestartSec=5

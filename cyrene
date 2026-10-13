@@ -109,6 +109,7 @@ SERVICE_UPDATE_TIMEOUT_SECONDS = 90
 SERVICE_UPDATE_JOURNAL_NAME = "update-journal.json"
 SERVICE_RELEASE_VERSION_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SERVICE_UPDATE_RUNTIME_DIR = Path("/run/cyrene")
+EXCHANGE_INTEGRATION_WORKLOAD_ID = "exchange-integration"
 
 # Preserve the historical module entrypoints until each systemd service has a
 # staged immutable artifact. The service runner prefers that artifact and only
@@ -645,6 +646,78 @@ def cmd_service_run(args: argparse.Namespace) -> int:
             return 1
 
     service_args = list(args.service_args)
+    if service == "exchange":
+        process_role = os.environ.get("CYRENE_EXCHANGE_PROCESS_ROLE", "api")
+        if process_role not in {"api", "dispatcher", "check-config"}:
+            print("ERROR: Exchange process role is not supported.", file=sys.stderr)
+            return 2
+        if process_role != "api":
+            if release is None or bundle_module is None:
+                print(
+                    "ERROR: Exchange integration requires an active immutable Product release.",
+                    file=sys.stderr,
+                )
+                return 1
+            if service_args:
+                print(
+                    "ERROR: Exchange integration process roles do not accept extra arguments.",
+                    file=sys.stderr,
+                )
+                return 2
+            entrypoint, version = release
+            release_root = entrypoint.parent
+            python_root = release_root / "python"
+            python_executable = Path(bundle_module.PRIVATE_PYTHON_EXECUTABLE)
+            if (
+                entrypoint.is_symlink()
+                or python_root.is_symlink()
+                or not python_root.is_dir()
+                or python_executable.is_symlink()
+                or not python_executable.is_file()
+            ):
+                print(
+                    f"ERROR: Exchange release {version} has no trusted Python runtime.",
+                    file=sys.stderr,
+                )
+                return 1
+
+            environment = os.environ.copy()
+            environment.pop("PYTHONHOME", None)
+            environment["PYTHONPATH"] = str(python_root)
+            command = [
+                str(python_executable),
+                "-s",
+                "-m",
+                "cyrene_exchange_product.cli",
+            ]
+            if process_role == "check-config":
+                command.extend(["integrations", "check-config"])
+            else:
+                data_directory = Path(
+                    os.environ.get("CYRENE_DATA_DIR", "/var/lib/cyrene")
+                ).expanduser()
+                integration_database = Path(
+                    os.environ.get(
+                        "CYRENE_EXCHANGE_INTEGRATION_DATABASE",
+                        str(data_directory / "integrations.sqlite3"),
+                    )
+                ).expanduser()
+                gateway_database = data_directory / "exchange.sqlite3"
+                command.extend(
+                    [
+                        "--database",
+                        str(gateway_database),
+                        "integrations",
+                        "dispatch",
+                        "--integration-database",
+                        str(integration_database),
+                    ]
+                )
+            try:
+                os.execvpe(str(python_executable), command, environment)
+            except OSError as error:
+                print(f"ERROR: cannot start Exchange {process_role}: {error}", file=sys.stderr)
+                return 1
     if release is not None:
         entrypoint, version = release
         print(f"Starting {service} release {version}.", flush=True)
@@ -686,6 +759,18 @@ def cmd_service_run(args: argparse.Namespace) -> int:
         print(f"ERROR: cannot start {service}: {error}", file=sys.stderr)
         return 1
     return 0
+
+
+def cmd_exchange_dispatcher_condition(_args: argparse.Namespace) -> int:
+    """Skip only the dispatcher unit when the configured mode excludes it."""
+
+    mode = os.environ.get("CYRENE_EXCHANGE_RUNTIME_MODE", "gateway-only")
+    if mode == "gateway-only":
+        return 1
+    if mode in {"integration-only", "combined"}:
+        return 0
+    print("ERROR: Exchange runtime mode is invalid.", file=sys.stderr)
+    return 255
 
 
 def cmd_service_bootstrap(args: argparse.Namespace) -> int:
@@ -2503,7 +2588,7 @@ def cmd_workload(args: argparse.Namespace) -> int:
         return cmd_workload_lifecycle(args)
     if not getattr(args, "json", False):
         print(
-            "ERROR: use `cyrene workload install <catalyst|echo|plugins>`, `cyrene workload uninstall <component-id>`, or `cyrene workload --json`.",
+            "ERROR: use `cyrene workload install <catalyst|echo|plugins|exchange-integration>`, `cyrene workload uninstall <component-id>`, or `cyrene workload --json`.",
             file=sys.stderr,
         )
         return 2
@@ -2545,16 +2630,137 @@ def cmd_workload(args: argparse.Namespace) -> int:
     return module.run_json_stdio(updater)
 
 
+def _selected_provider_component_ids(package_ids: list[str]) -> list[str]:
+    """Resolve selected manifest IDs through the Exchange workload catalog.
+
+    The user-facing selector accepts the canonical Plugin package ID. The
+    privileged Package Runtime plan receives only the component IDs explicitly
+    mapped by the trusted Workspace catalog.
+    """
+
+    if not package_ids or len(package_ids) != len(set(package_ids)):
+        raise ValueError("select each provider Plugin package ID once")
+    packaged = WORKSPACE_ROOT == Path("/usr/lib/cyrene")
+    catalog_path = (
+        Path("/usr/share/cyrene/component-catalog-v2.json")
+        if packaged
+        else WORKSPACE_ROOT / "governance" / "component-catalog-v2.json"
+    )
+    if catalog_path.is_symlink() or not catalog_path.is_file():
+        raise ValueError("the trusted v2 component catalog is unavailable")
+    catalog_info = catalog_path.lstat()
+    if (
+        not stat.S_ISREG(catalog_info.st_mode)
+        or catalog_info.st_nlink != 1
+        or catalog_info.st_size > 4 * 1024 * 1024
+        or (packaged and (catalog_info.st_uid != 0 or catalog_info.st_mode & 0o022))
+    ):
+        raise ValueError("the trusted v2 component catalog is unsafe")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("the trusted v2 component catalog contains duplicate keys")
+            result[key] = value
+        return result
+
+    try:
+        catalog = json.loads(
+            catalog_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError("the trusted v2 component catalog is invalid") from error
+    if not isinstance(catalog, dict) or catalog.get("schemaVersion") != 2:
+        raise ValueError("the trusted v2 component catalog has an unsupported shape")
+
+    components = catalog.get("components")
+    workloads = catalog.get("workloads")
+    if not isinstance(components, list) or not isinstance(workloads, list):
+        raise TypeError("the trusted v2 component catalog is incomplete")
+    workload = next(
+        (
+            item
+            for item in workloads
+            if isinstance(item, dict) and item.get("workloadId") == EXCHANGE_INTEGRATION_WORKLOAD_ID
+        ),
+        None,
+    )
+    optional_components = workload.get("optionalComponents") if isinstance(workload, dict) else None
+    minimum = (
+        workload.get("minimumExplicitOptionalSelections", 0) if isinstance(workload, dict) else None
+    )
+    if (
+        not isinstance(optional_components, list)
+        or not optional_components
+        or not isinstance(minimum, int)
+        or isinstance(minimum, bool)
+        or minimum < 1
+        or len(package_ids) < minimum
+        or len(package_ids) > len(optional_components)
+    ):
+        raise ValueError("the trusted catalog requires an explicit provider selection")
+    optional_set = set(optional_components)
+
+    package_to_component: dict[str, str] = {}
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        plugin_package = component.get("pluginPackage")
+        package_id = plugin_package.get("packageId") if isinstance(plugin_package, dict) else None
+        component_id = component.get("componentId")
+        if isinstance(package_id, str) and isinstance(component_id, str):
+            if package_id in package_to_component:
+                raise ValueError("the trusted catalog maps a Plugin package ID more than once")
+            package_to_component[package_id] = component_id
+
+    selected: list[str] = []
+    for package_id in package_ids:
+        component_id = package_to_component.get(package_id)
+        if component_id is None or component_id not in optional_set:
+            raise ValueError(f"Plugin package ID is not selectable: {package_id}")
+        selected.append(component_id)
+    return selected
+
+
 def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
     """Check, stage, and confirm one workload action using the installed helper."""
 
     action = getattr(args, "workload_action", None)
     workload_id = getattr(args, "workload_id", None)
+    selected_provider_packages = list(getattr(args, "selected_provider_plugins", []) or [])
+    selected_provider_components: list[str] = []
     if action == "install":
-        if workload_id not in {"catalyst", "echo", "plugins"}:
-            print("ERROR: workload ID must be catalyst, echo, or plugins.", file=sys.stderr)
+        allowed_workloads = {"catalyst", "echo", "plugins", EXCHANGE_INTEGRATION_WORKLOAD_ID}
+        if workload_id not in allowed_workloads:
+            print(
+                "ERROR: workload ID must be catalyst, echo, plugins, or exchange-integration.",
+                file=sys.stderr,
+            )
+            return 2
+        if workload_id == EXCHANGE_INTEGRATION_WORKLOAD_ID:
+            try:
+                selected_provider_components = _selected_provider_component_ids(
+                    selected_provider_packages
+                )
+            except ValueError as error:
+                print(
+                    f"ERROR: Exchange integration selection is invalid: {error}.", file=sys.stderr
+                )
+                return 2
+        elif selected_provider_packages:
+            print(
+                "ERROR: --selected-provider-plugin is only valid for exchange-integration.",
+                file=sys.stderr,
+            )
             return 2
     elif action == "uninstall":
+        if selected_provider_packages:
+            print(
+                "ERROR: --selected-provider-plugin is only valid for exchange-integration installs.",
+                file=sys.stderr,
+            )
+            return 2
         if (
             not isinstance(workload_id, str)
             or re.fullmatch(r"[a-z][a-z0-9-]{0,63}", workload_id) is None
@@ -2562,8 +2768,17 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
             print("ERROR: uninstall needs one exact component ID.", file=sys.stderr)
             return 2
         requested_owner = getattr(args, "workload_owner", None)
-        if requested_owner not in {None, "catalyst", "echo", "plugins"}:
-            print("ERROR: workload owner must be catalyst, echo, or plugins.", file=sys.stderr)
+        if requested_owner not in {
+            None,
+            "catalyst",
+            "echo",
+            "plugins",
+            EXCHANGE_INTEGRATION_WORKLOAD_ID,
+        }:
+            print(
+                "ERROR: workload owner must be catalyst, echo, plugins, or exchange-integration.",
+                file=sys.stderr,
+            )
             return 2
         if requested_owner is not None:
             workload_id = requested_owner
@@ -2619,7 +2834,11 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
 
     target = "linux-ubuntu-24.04-x86_64"
     selections = (
-        {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}}
+        {
+            "includeComponentIds": selected_provider_components,
+            "excludeComponentIds": [],
+            "choices": {},
+        }
         if action == "install"
         else {"includeComponentIds": [args.workload_id], "excludeComponentIds": [], "choices": {}}
     )
@@ -2644,7 +2863,12 @@ def cmd_workload_lifecycle(args: argparse.Namespace) -> int:
         )
         return 1
     workload_id = checked["result"].get("workloadId")
-    if workload_id not in {"catalyst", "echo", "plugins"}:
+    if workload_id not in {
+        "catalyst",
+        "echo",
+        "plugins",
+        EXCHANGE_INTEGRATION_WORKLOAD_ID,
+    }:
         print("ERROR: the checked plan omitted its workload owner.", file=sys.stderr)
         return 1
     plan_id = checked["result"].get("planId")
@@ -3213,6 +3437,11 @@ def build_parser() -> argparse.ArgumentParser:
     service_run_parser.add_argument("service_args", nargs=argparse.REMAINDER)
     service_run_parser.set_defaults(func=cmd_service_run)
 
+    exchange_condition_parser = subparsers.add_parser(
+        "exchange-dispatcher-condition", help=argparse.SUPPRESS
+    )
+    exchange_condition_parser.set_defaults(func=cmd_exchange_dispatcher_condition)
+
     service_bootstrap_parser = subparsers.add_parser("service-bootstrap", help=argparse.SUPPRESS)
     service_bootstrap_parser.add_argument(
         "--activate-missing",
@@ -3291,7 +3520,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     workload_parser = subparsers.add_parser(
         "workload",
-        help="Install or manage a trusted Catalyst, Echo, or Plugins workload",
+        help="Install or manage a trusted Product or Plugin workload",
     )
     workload_parser.add_argument(
         "--json",
@@ -3312,13 +3541,24 @@ def build_parser() -> argparse.ArgumentParser:
     workload_parser.add_argument(
         "--workload",
         dest="workload_owner",
-        choices=("catalyst", "echo", "plugins"),
+        choices=("catalyst", "echo", "plugins", EXCHANGE_INTEGRATION_WORKLOAD_ID),
         help="Explicit workload owner when uninstall ownership is ambiguous",
     )
     workload_parser.add_argument(
         "--channel",
         choices=("stable", "preview"),
         help="Release channel; omitted uses the active trusted catalog default",
+    )
+    workload_parser.add_argument(
+        "--selected-provider-plugin",
+        dest="selected_provider_plugins",
+        action="append",
+        default=[],
+        metavar="PACKAGE_ID",
+        help=(
+            "Select a canonical Plugin manifest package ID for exchange-integration; "
+            "repeat once per provider"
+        ),
     )
     workload_parser.add_argument(
         "--yes",

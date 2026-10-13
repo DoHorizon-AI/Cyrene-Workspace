@@ -90,6 +90,14 @@ def _units(directory: Path, *, invalid_service: str | None = None) -> None:
             encoding="utf-8",
         )
         path.chmod(0o644)
+    dispatcher = directory / "cyrene-exchange-integration-dispatcher.service"
+    dispatcher.write_text(
+        "[Service]\nUser=cyrene\nGroup=cyrene\n"
+        "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+        "/usr/lib/cyrene/scripts/cyrene.py service-run exchange\n",
+        encoding="utf-8",
+    )
+    dispatcher.chmod(0o644)
 
 
 def test_contract_binds_the_exact_index_bytes_and_maintainer_scripts(tmp_path: Path) -> None:
@@ -124,6 +132,7 @@ def test_contract_binds_the_exact_index_bytes_and_maintainer_scripts(tmp_path: P
     assert written["serviceArtifactsIndexSha256"] == hashlib.sha256(index_bytes).hexdigest()
     assert set(written["services"]) == set(SERVICES)
     assert set(written["managedUnits"]) == set(SERVICES)
+    assert set(written["auxiliaryUnits"]) == {"cyrene-exchange-integration-dispatcher.service"}
     for component_id, unit in written["managedUnits"].items():
         service = component_id.removeprefix("cyrene-")
         assert unit == {
@@ -139,6 +148,20 @@ def test_contract_binds_the_exact_index_bytes_and_maintainer_scripts(tmp_path: P
                 "commit": "a" * 40,
             },
         }
+    auxiliary_unit = "cyrene-exchange-integration-dispatcher.service"
+    assert written["auxiliaryUnits"][auxiliary_unit] == {
+        "componentId": "cyrene-exchange",
+        "service": "exchange",
+        "unit": auxiliary_unit,
+        "packagePath": f"lib/systemd/system/{auxiliary_unit}",
+        "sha256": hashlib.sha256((units / auxiliary_unit).read_bytes()).hexdigest(),
+        "targetProfile": TARGET,
+        "source": {
+            "repository": "DoHorizon-AI/Cyrene-Workspace",
+            "ref": "refs/heads/develop",
+            "commit": "a" * 40,
+        },
+    }
     assert set(written["maintainerScriptsSha256"]) == {"postinst", "prerm", "postrm"}
     for name in written["maintainerScriptsSha256"]:
         assert (
@@ -211,6 +234,33 @@ def test_contract_rejects_unmanaged_runner_or_source_target_tuple(
         module.create_contract(**arguments)
 
 
+def test_contract_rejects_auxiliary_unit_outside_the_product_runner(tmp_path: Path) -> None:
+    module = _module()
+    index_path = tmp_path / "index.json"
+    index_path.write_text(json.dumps(_index()), encoding="utf-8")
+    scripts = tmp_path / "DEBIAN"
+    _scripts(scripts)
+    units = tmp_path / "lib/systemd/system"
+    _units(units)
+    dispatcher = units / "cyrene-exchange-integration-dispatcher.service"
+    dispatcher.write_text(
+        "[Service]\nUser=cyrene\nGroup=cyrene\nExecStart=/bin/false\n",
+        encoding="utf-8",
+    )
+    dispatcher.chmod(0o644)
+
+    with pytest.raises(module.ContractError, match="runner differs"):
+        module.create_contract(
+            target_profile=TARGET,
+            service_artifacts_index=index_path,
+            scripts_dir=scripts,
+            unit_directory=units,
+            source_ref="refs/heads/develop",
+            source_commit="a" * 40,
+            output=tmp_path / "contract.json",
+        )
+
+
 def test_verified_release_builder_scripts_remain_stage_only() -> None:
     source = (WORKSPACE_ROOT / "packaging" / "build-deb.sh").read_text(encoding="utf-8")
     postinst = source.split("cat <<'EOF' > \"${STAGE_DIR}/DEBIAN/postinst\"\n", 1)[1].split(
@@ -251,7 +301,7 @@ def test_verified_release_builder_scripts_remain_stage_only() -> None:
         unit_stanzas.count(
             "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE /usr/lib/cyrene/scripts/cyrene.py service-run "
         )
-        == 5
+        == 6
     )
     contract_source = (WORKSPACE_ROOT / "packaging" / "native_install_contract.py").read_text(
         encoding="utf-8"
@@ -414,7 +464,14 @@ def test_product_units_load_private_path_defaults_after_shared_environment() -> 
             for line in unit_lines
             if line.startswith("EnvironmentFile=")
         ]
-        assert environment_files[-1] == service_environment
+        if service == "exchange":
+            assert environment_files[-3:] == [
+                "/etc/cyrene/exchange.env",
+                "/etc/cyrene/exchange-integration.env",
+                "/etc/cyrene/exchange-integration-secrets.env",
+            ]
+        else:
+            assert environment_files[-1] == service_environment
         assert not any(line.startswith(f"Environment={variable}=") for line in unit_lines)
 
         # systemd applies Environment= first, then EnvironmentFile values in
@@ -428,6 +485,11 @@ def test_product_units_load_private_path_defaults_after_shared_environment() -> 
             "/etc/cyrene/cyrene.env": shared,
             service_environment: _staged_environment_file(source, service),
         }
+        if service == "exchange":
+            files["/etc/cyrene/exchange-integration.env"] = _staged_environment_file(
+                source, "exchange-integration"
+            )
+            files["/etc/cyrene/exchange-integration-secrets.env"] = ""
         for path in environment_files:
             for entry in files.get(path, "").splitlines():
                 if entry and not entry.startswith("#"):

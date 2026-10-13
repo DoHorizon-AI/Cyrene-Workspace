@@ -1772,6 +1772,15 @@ def _write_package_fixture(
         ).encode()
         (unit_root / f"{component_id}.service").write_bytes(unit_bytes)
         (unit_root / f"{component_id}.service").chmod(0o644)
+    dispatcher_unit = unit_root / "cyrene-exchange-integration-dispatcher.service"
+    dispatcher_unit.write_text(
+        "[Unit]\nDescription=Exchange dispatcher\nAfter=cyrene-exchange.service\n"
+        "[Service]\nUser=cyrene\nGroup=cyrene\n"
+        "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+        "/usr/lib/cyrene/scripts/cyrene.py service-run exchange\n",
+        encoding="utf-8",
+    )
+    dispatcher_unit.chmod(0o644)
 
     runtime_lock = json.loads(
         (WORKSPACE_ROOT / "packaging/python-runtime.lock.json").read_text(encoding="utf-8")
@@ -1846,6 +1855,7 @@ def _write_package_fixture(
     script_hashes = {
         name: hashlib.sha256((control_root / name).read_bytes()).hexdigest() for name in scripts
     }
+    contract_module = module._native_install_contract_module()
     marker = {
         **module.INSTALL_CONTRACT_POLICY,
         "targetProfile": profile,
@@ -1857,7 +1867,13 @@ def _write_package_fixture(
                 "verifiedTuples": receipt_tuples,
             },
         ),
-        "managedUnits": module._native_install_contract_module().managed_units_from_directory(
+        "managedUnits": contract_module.managed_units_from_directory(
+            unit_root,
+            target_profile=profile,
+            source_ref="refs/heads/main",
+            source_commit="d" * 40,
+        ),
+        "auxiliaryUnits": contract_module.auxiliary_units_from_directory(
             unit_root,
             target_profile=profile,
             source_ref="refs/heads/main",

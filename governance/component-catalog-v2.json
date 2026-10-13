@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generation": 15,
+  "generation": 16,
   "defaultChannel": "stable",
   "channels": {
     "stable": {
@@ -906,6 +906,9 @@
       ],
       "systemdUnit": "cyrene-exchange.service",
       "pythonBundleService": "exchange",
+      "auxiliarySystemdUnits": [
+        "cyrene-exchange-integration-dispatcher.service"
+      ],
       "ociImageRepository": "ghcr.io/dohorizon-ai/cyrene-exchange"
     },
     {
@@ -1314,6 +1317,117 @@
       "protocolVersion": "cyrene.plugin.runtime.v1"
     },
     {
+      "componentId": "cyrene-accounts-account-center",
+      "kind": "plugin-package",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "publisherId": "official-data-tools-plugins",
+      "artifactKinds": [
+        "plugin-package"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "plugin-package",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [
+        {
+          "componentId": "cy-package-runtime",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "pluginPackage": {
+        "packageId": "cyrene.accounts.account-center",
+        "capabilityId": "account.center.v1",
+        "interfaceVersion": "1"
+      },
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-accounts-account-center-",
+          "stable": "stable-cyrene-accounts-account-center-"
+        }
+      },
+      "protocolVersion": "cyrene.plugin.runtime.v1"
+    },
+    {
+      "componentId": "cyrene-connectors-wecom",
+      "kind": "plugin-package",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "publisherId": "official-data-tools-plugins",
+      "artifactKinds": [
+        "plugin-package"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "plugin-package",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [
+        {
+          "componentId": "cy-package-runtime",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "pluginPackage": {
+        "packageId": "cyrene.connectors.wecom",
+        "capabilityId": "message.connector.v1",
+        "interfaceVersion": "1"
+      },
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-connectors-wecom-",
+          "stable": "stable-cyrene-connectors-wecom-"
+        }
+      },
+      "protocolVersion": "cyrene.plugin.runtime.v1"
+    },
+    {
+      "componentId": "cyrene-providers-github-issues",
+      "kind": "plugin-package",
+      "publisher": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "publisherId": "official-data-tools-plugins",
+      "artifactKinds": [
+        "plugin-package"
+      ],
+      "targets": [
+        {
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+          "artifactKind": "plugin-package",
+          "support": "supported"
+        }
+      ],
+      "restart": {
+        "group": "none"
+      },
+      "dependencies": [
+        {
+          "componentId": "cy-package-runtime",
+          "versionRange": ">=0.1.0, <0.2.0"
+        }
+      ],
+      "pluginPackage": {
+        "packageId": "cyrene.providers.github-issues",
+        "capabilityId": "tool.provider.v1",
+        "interfaceVersion": "1"
+      },
+      "releaseDiscovery": {
+        "tagPrefixes": {
+          "preview": "preview-cyrene-providers-github-issues-",
+          "stable": "stable-cyrene-providers-github-issues-"
+        }
+      },
+      "protocolVersion": "cyrene.plugin.runtime.v1"
+    },
+    {
       "componentId": "cyrene-client-workspace-web",
       "kind": "static-web",
       "publisher": "DoHorizon-AI/Cyrene-Client",
@@ -1380,9 +1494,9 @@
       "wireApiVersion": "cyrene.workspace.product.v2",
       "contractLock": {
         "repository": "DoHorizon-AI/Cyrene-Workspace",
-        "commit": "c7dea28958a97ccab3a9cc3199faf0ac5819a2a5",
+        "commit": "cbe649f1a859a20836da17f0c4365747f57e6ffd",
         "path": "governance/workspace-connection-protocols-v2.lock.json",
-        "sha256": "sha256:00fd59fb76d7144b6e1b554feadf035328b216231e0a323178836abf2b8bdd5a"
+        "sha256": "sha256:e03b2b6e7d2c61a80597fc27694c7319f7c414fa483a2e5e841c8618d5f74dab"
       },
       "members": [
         {
@@ -1749,6 +1863,80 @@
         {
           "componentId": "cyrene-tools-knowledge-preparation",
           "bindingId": "catalog-binding-standalone-operator-cyrene-tools-knowledge-preparation"
+        }
+      ]
+    },
+    {
+      "workloadId": "exchange-integration",
+      "hostTargets": [
+        "linux-ubuntu-24.04-x86_64"
+      ],
+      "requiredComponents": [
+        "cyrene-exchange",
+        "cyrene-runtime-maintenance-sdk"
+      ],
+      "minimumExplicitOptionalSelections": 3,
+      "recommendedComponents": [],
+      "optionalComponents": [
+        "cyrene-accounts-account-center",
+        "cyrene-connectors-wecom",
+        "cyrene-providers-github-issues"
+      ],
+      "choiceGroups": [],
+      "conflicts": [],
+      "targetPreferences": [
+        {
+          "componentId": "cyrene-runtime-maintenance-sdk",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12-library"
+        },
+        {
+          "componentId": "cyrene-exchange",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-accounts-account-center",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-connectors-wecom",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        },
+        {
+          "componentId": "cyrene-providers-github-issues",
+          "targetId": "linux-ubuntu-24.04-x86_64-python-3.12"
+        }
+      ],
+      "sourcePolicy": {
+        "mode": "actualProduct",
+        "productComponentIds": [
+          "cyrene-exchange"
+        ],
+        "productSources": [
+          {
+            "componentId": "cyrene-exchange",
+            "sourceId": "cyrene-exchange"
+          }
+        ],
+        "operations": [
+          "activate",
+          "recover_binding",
+          "deactivate",
+          "runtime_status",
+          "get_installation"
+        ]
+      },
+      "bindings": [
+        {
+          "componentId": "cyrene-accounts-account-center",
+          "bindingId": "exchange-integration-account-center"
+        },
+        {
+          "componentId": "cyrene-connectors-wecom",
+          "bindingId": "exchange-integration-wecom"
+        },
+        {
+          "componentId": "cyrene-providers-github-issues",
+          "bindingId": "exchange-integration-github-issues"
         }
       ]
     }

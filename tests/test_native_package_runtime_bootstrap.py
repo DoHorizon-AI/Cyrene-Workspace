@@ -267,13 +267,17 @@ def _write_release(tmp_path: Path) -> tuple[Path, Path, Path]:
     return assets, attestations, gh
 
 
-def test_pinned_carrier_source_matches_the_release_lock() -> None:
+def test_pinned_carrier_source_remains_separate_from_current_plugin_source_pin() -> None:
     release_lock_path = Path(__file__).resolve().parents[1] / "release-lock.json"
     release_lock = json.loads(release_lock_path.read_text(encoding="utf-8"))
 
     assert bootstrap.PACKAGE_SOURCE_COMMIT == "c9b8d4b7d4923d42368de3b3ec2db87ee97c3fa7"
     assert release_lock["repositories"]["Cyrene-Plugins-Official"] == (
-        bootstrap.PACKAGE_SOURCE_COMMIT
+        "c772bfaf632d28e8fba77dfb57aa8ed4215d16dc"
+    )
+    assert (
+        "separate artifact pinned to Plugins commit " + bootstrap.PACKAGE_SOURCE_COMMIT
+        in (release_lock["sourceState"])
     )
 
 

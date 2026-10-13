@@ -42,7 +42,7 @@ from typing import Any
 PROTOCOL_VERSION = "cyrene.component-updates.helper.v1"
 WORKLOAD_PROTOCOL_VERSION = "cyrene.workload-plan.v1"
 WORKLOAD_HOST_TARGET = "linux-ubuntu-24.04-x86_64"
-WORKLOAD_IDS = frozenset({"catalyst", "echo", "plugins"})
+WORKLOAD_IDS = frozenset({"catalyst", "echo", "plugins", "exchange-integration"})
 WORKLOAD_SDK_COMPONENT_ID = "cyrene-runtime-maintenance-sdk"
 WORKLOAD_SDK_TARGET_ID = "linux-ubuntu-24.04-x86_64-python-3.12-library"
 WORKLOAD_STAGE_RESOLUTION_IDENTITY_FIELDS = (
@@ -265,7 +265,7 @@ CONTROL_ADMISSION_DROPINS = {
 }
 PLACEMENT_ADOPTION_JOURNAL = "workspace-product-v2.json"
 DEFAULT_CHANNEL = "stable"
-TRUSTED_CATALOG_DIGEST = "sha256:79866ed32c4393e5bbbd3e36144ae080f316e9bf2695a0768bdbbfa98bf76247"
+TRUSTED_CATALOG_DIGEST = "sha256:1af86e539d9891a7b9687ef55704134ec4b4a441b833cde64a53322382316743"
 USER_AGENT = "CyreneComponentUpdater/1"
 BEGIN_NO_TOKEN_STATUSES = frozenset(
     {
@@ -5020,7 +5020,8 @@ class ComponentUpdater:
     def _require_workload_target(self, workload_id: Any, target_id: Any) -> tuple[str, str]:
         if not isinstance(workload_id, str) or workload_id not in WORKLOAD_IDS:
             raise UpdateError(
-                "INVALID_WORKLOAD_ID", "workloadId must be catalyst, echo, or plugins."
+                "INVALID_WORKLOAD_ID",
+                "workloadId must be catalyst, echo, plugins, or exchange-integration.",
             )
         if target_id != WORKLOAD_HOST_TARGET:
             raise UpdateError(
@@ -5358,6 +5359,44 @@ class ComponentUpdater:
                 "The workload Package Runtime helper API is incomplete.",
             )
         return module
+
+    def _preflight_exchange_integration_configuration(self) -> None:
+        """Validate host-owned profiles before creating any Package Runtime plan state."""
+
+        module_path = Path(__file__).with_name("native_exchange_integration_preflight.py")
+        if module_path.is_symlink() or not module_path.is_file():
+            raise UpdateError(
+                "EXCHANGE_INTEGRATION_PREFLIGHT_FAILED",
+                "The Exchange integration configuration checker is unavailable.",
+            )
+        module_name = "_cyrene_exchange_integration_preflight"
+        existing = sys.modules.get(module_name)
+        if existing is None:
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            if spec is None or spec.loader is None:
+                raise UpdateError(
+                    "EXCHANGE_INTEGRATION_PREFLIGHT_FAILED",
+                    "The Exchange integration configuration checker is unavailable.",
+                )
+            existing = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = existing
+            try:
+                spec.loader.exec_module(existing)
+            except Exception:  # noqa: BLE001 - keep host paths and environment details private.
+                sys.modules.pop(module_name, None)
+                raise UpdateError(
+                    "EXCHANGE_INTEGRATION_PREFLIGHT_FAILED",
+                    "The Exchange integration configuration checker could not start.",
+                ) from None
+        try:
+            existing.run_exchange_integration_preflight()
+        except Exception as error:  # noqa: BLE001 - report only bounded, safe diagnostics.
+            error_type = getattr(existing, "ExchangeIntegrationPreflightError", None)
+            if isinstance(error_type, type) and isinstance(error, error_type):
+                detail = str(error)
+            else:
+                detail = "Exchange integration configuration validation failed."
+            raise UpdateError("EXCHANGE_INTEGRATION_PREFLIGHT_FAILED", detail) from None
 
     def _workload_plugin_owner_rows(
         self, workload_id: str, component_ids: tuple[str, ...]
@@ -6307,6 +6346,8 @@ class ComponentUpdater:
         """Resolve the exact catalog workload and persist a digest-bound plan."""
 
         self._reload_catalog_for_operation()
+        if action == "install" and workload_id == "exchange-integration":
+            self._preflight_exchange_integration_configuration()
         self._ensure_state_root()
         if not isinstance(action, str) or action not in {"install", "uninstall"}:
             raise UpdateError("INVALID_ACTION", "Workload action must be install or uninstall.")
@@ -12381,7 +12422,7 @@ class ComponentUpdater:
             if isinstance(item, dict) and isinstance(item.get("componentId"), str)
         }
         services: dict[str, dict[str, Any]] = {}
-        services_by_component: dict[str, dict[str, Any]] = {}
+        services_by_component: dict[str, list[dict[str, Any]]] = {}
         unit_dependencies: dict[str, tuple[set[str], set[str]]] = {}
         for component_id in sorted(value for value in component_ids if isinstance(value, str)):
             component = self.components.get(component_id)
@@ -12439,12 +12480,58 @@ class ComponentUpdater:
                     f"Multiple selected components claim service unit {unit}.",
                 )
             services[unit] = service
-            services_by_component[component_id] = service
+            services_by_component.setdefault(component_id, []).append(service)
             unit_dependencies[unit] = self._workload_unit_after_before(unit_bytes)
+
+            auxiliary_units = component.get("auxiliarySystemdUnits", [])
+            if not isinstance(auxiliary_units, list):
+                raise UpdateError(
+                    "INVALID_CATALOG", f"{component_id} auxiliary units are malformed."
+                )
+            for auxiliary_unit in auxiliary_units:
+                if not isinstance(auxiliary_unit, str):
+                    raise UpdateError(
+                        "INVALID_CATALOG", f"{component_id} auxiliary units are malformed."
+                    )
+                try:
+                    auxiliary_bytes, _aux_path, _aux_digest = self._workload_deb_managed_unit_bytes(
+                        component,
+                        candidate,
+                        verify_fragment=True,
+                        unit_override=auxiliary_unit,
+                    )
+                except UpdateError:
+                    raise
+                except Exception as error:
+                    raise UpdateError(
+                        "SERVICE_NOT_MANAGED",
+                        f"{component_id} has no verified auxiliary unit {auxiliary_unit}.",
+                        retryable=True,
+                    ) from error
+                auxiliary_service = {
+                    "componentId": component_id,
+                    "unit": auxiliary_unit,
+                    "unitOverride": auxiliary_unit,
+                    "order": order,
+                    "restartGroup": restart.get("group"),
+                    "candidate": candidate,
+                    "unitOwner": "native-deb",
+                }
+                if auxiliary_unit in services:
+                    raise UpdateError(
+                        "INVALID_CATALOG",
+                        f"Multiple selected components claim service unit {auxiliary_unit}.",
+                    )
+                services[auxiliary_unit] = auxiliary_service
+                services_by_component.setdefault(component_id, []).append(auxiliary_service)
+                unit_dependencies[auxiliary_unit] = self._workload_unit_after_before(
+                    auxiliary_bytes
+                )
 
         service_by_unit = {item["unit"]: item for item in services.values()}
         prerequisites: dict[str, set[str]] = {unit: set() for unit in services}
-        for component_id, service in services_by_component.items():
+        for service in services.values():
+            component_id = service["componentId"]
             component = self.components[component_id]
             dependencies = component.get("dependencies", [])
             if not isinstance(dependencies, list):
@@ -12467,8 +12554,7 @@ class ComponentUpdater:
                         f"Trusted dependencies are malformed for {component_id}.",
                     )
                 seen_dependencies.add(dependency_id)
-                dependency_service = services_by_component.get(dependency_id)
-                if dependency_service is not None:
+                for dependency_service in services_by_component.get(dependency_id, []):
                     prerequisites[service["unit"]].add(dependency_service["unit"])
 
             after_units, before_units = unit_dependencies[service["unit"]]
@@ -12558,17 +12644,28 @@ class ComponentUpdater:
         candidate: dict[str, Any] | None,
         *,
         verify_fragment: bool,
+        unit_override: str | None = None,
     ) -> tuple[bytes, Path, str]:
         """Verify a Product unit owned by the installed, attested Workspace DEB."""
 
         component_id = component.get("componentId")
         service = component.get("pythonBundleService")
-        unit = self._catalog_matched_unit(component)
+        primary_unit = self._catalog_matched_unit(component)
+        auxiliary_units = component.get("auxiliarySystemdUnits", [])
+        if not isinstance(auxiliary_units, list) or any(
+            not isinstance(item, str) for item in auxiliary_units
+        ):
+            raise UpdateError(
+                "SERVICE_NOT_MANAGED", "Catalog auxiliary Product units are malformed."
+            )
+        unit = primary_unit if unit_override is None else unit_override
         if (
             not isinstance(component_id, str)
             or NATIVE_PRODUCT_SERVICES.get(component_id) != service
             or not isinstance(service, str)
-            or unit != f"{component_id}.service"
+            or primary_unit != f"{component_id}.service"
+            or (unit_override is None and unit != primary_unit)
+            or (unit_override is not None and unit_override not in auxiliary_units)
         ):
             raise UpdateError(
                 "SERVICE_NOT_MANAGED", "Catalog Product service identity is not DEB-managed."
@@ -12613,11 +12710,30 @@ class ComponentUpdater:
             "serviceArtifactsIndexSha256",
             "services",
             "managedUnits",
+            "auxiliaryUnits",
             "maintainerScriptsSha256",
         }
         expected_service_ids = set(NATIVE_PRODUCT_SERVICES)
         managed_units = contract.get("managedUnits") if isinstance(contract, dict) else None
+        contract_auxiliary_units = (
+            contract.get("auxiliaryUnits") if isinstance(contract, dict) else None
+        )
         service_records = contract.get("services") if isinstance(contract, dict) else None
+        expected_auxiliary_units: dict[str, str] = {}
+        for owner_id, owner_component in self.components.items():
+            owner_units = owner_component.get("auxiliarySystemdUnits", [])
+            if not isinstance(owner_units, list) or any(
+                not isinstance(item, str) for item in owner_units
+            ):
+                raise UpdateError(
+                    "INVALID_CATALOG", "Catalog auxiliary Product units are malformed."
+                )
+            for auxiliary_unit in owner_units:
+                if auxiliary_unit in expected_auxiliary_units:
+                    raise UpdateError(
+                        "INVALID_CATALOG", "Catalog auxiliary Product units are duplicated."
+                    )
+                expected_auxiliary_units[auxiliary_unit] = owner_id
         if (
             not isinstance(contract, dict)
             or set(contract) != expected_contract_fields
@@ -12633,6 +12749,8 @@ class ComponentUpdater:
             or re.fullmatch(r"[0-9a-f]{64}", contract["serviceArtifactsIndexSha256"]) is None
             or not isinstance(managed_units, dict)
             or set(managed_units) != expected_service_ids
+            or not isinstance(contract_auxiliary_units, dict)
+            or set(contract_auxiliary_units) != set(expected_auxiliary_units)
             or not isinstance(service_records, dict)
             or set(service_records) != expected_service_ids
         ):
@@ -12691,7 +12809,51 @@ class ComponentUpdater:
                     "Installed native DEB managed-unit source identities disagree.",
                 )
 
-        unit_record = managed_units[component_id]
+        for auxiliary_unit, owner_id in expected_auxiliary_units.items():
+            owner_component = self.components.get(owner_id)
+            owner_service = (
+                owner_component.get("pythonBundleService")
+                if isinstance(owner_component, dict)
+                else None
+            )
+            row = contract_auxiliary_units.get(auxiliary_unit)
+            source_row = service_records.get(owner_id)
+            if (
+                not isinstance(owner_service, str)
+                or NATIVE_PRODUCT_SERVICES.get(owner_id) != owner_service
+                or not isinstance(row, dict)
+                or set(row)
+                != {
+                    "componentId",
+                    "service",
+                    "unit",
+                    "packagePath",
+                    "sha256",
+                    "targetProfile",
+                    "source",
+                }
+                or row.get("componentId") != owner_id
+                or row.get("service") != owner_service
+                or row.get("unit") != auxiliary_unit
+                or row.get("packagePath") != f"lib/systemd/system/{auxiliary_unit}"
+                or row.get("targetProfile") != target_profile
+                or not isinstance(row.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None
+                or not isinstance(row.get("source"), dict)
+                or row.get("source") != expected_source
+                or not isinstance(source_row, dict)
+                or source_row.get("componentId") != owner_id
+            ):
+                raise UpdateError(
+                    "SERVICE_NOT_MANAGED",
+                    "Installed native DEB auxiliary unit identity is malformed.",
+                )
+
+        unit_record = (
+            managed_units[component_id]
+            if unit_override is None
+            else contract_auxiliary_units[unit_override]
+        )
         try:
             package_real_root = self._resolve_native_unit_directory(self.native_deb_unit_root)
             package_real_path = package_real_root / unit
@@ -13798,7 +13960,12 @@ class ComponentUpdater:
             component = self.components[service["componentId"]]
             candidate = service.get("candidate")
             if service.get("unitOwner") == "native-deb":
-                self._workload_deb_managed_unit_bytes(component, candidate, verify_fragment=True)
+                self._workload_deb_managed_unit_bytes(
+                    component,
+                    candidate,
+                    verify_fragment=True,
+                    unit_override=service.get("unitOverride"),
+                )
                 continue
             candidate_bytes, _source, candidate_digest = self._workload_signed_unit_bytes(
                 component, candidate

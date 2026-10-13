@@ -48,6 +48,22 @@ def test_uv_export_uses_supported_fixed_argv_without_cross_target_flag() -> None
     assert "--python-platform" not in arguments
 
 
+def test_service_uv_export_enables_all_extras_only_for_exchange() -> None:
+    output = Path("/tmp/wheelhouse/.exports/service.requirements.txt")
+    project = Path("/tmp/product")
+
+    for service in prepare.SERVICE_SPECS:
+        arguments = prepare._service_uv_export_arguments(
+            service,
+            "/tools/uv",
+            "/tools/python3.12",
+            output,
+            project,
+        )
+
+        assert ("--all-extras" in arguments) is (service.service == "exchange")
+
+
 @pytest.mark.parametrize(
     ("profile_id", "ubuntu_version", "glibc", "target_floor"),
     [

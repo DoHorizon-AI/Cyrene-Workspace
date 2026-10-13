@@ -286,6 +286,15 @@
           "type": "string",
           "pattern": "^[A-Za-z0-9_.@-]+\\.service$"
         },
+        "auxiliarySystemdUnits": {
+          "type": "array",
+          "description": "Additional DEB-managed units owned by the same immutable Product bundle and restarted with its primary unit.",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.@-]+\\.service$"
+          },
+          "uniqueItems": true
+        },
         "pythonBundleService": {
           "enum": [
             "navigator",
