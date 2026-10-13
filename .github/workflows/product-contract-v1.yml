@@ -207,16 +207,31 @@ jobs:
       CYRENE_PLUGINS_PROTO_ROOT: ${{ github.workspace }}/_native-protocols/contracts/proto
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.14"
+      - name: Resolve the Plugins protocol source from the release lock
+        id: plugins-proto-source
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import re
+          from pathlib import Path
+
+          commit = json.loads(Path("release-lock.json").read_text(encoding="utf-8"))[
+              "repositories"
+          ]["Cyrene-Plugins-Official"]
+          if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+              raise SystemExit("release lock must pin a full Plugins source commit")
+          print(f"commit={commit}")
+          PY
       - name: Stage pinned Plugins protobufs for the local caller compatibility test
         uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Plugins-Official
-          ref: 0387f487ccfb0f2dd77d31126c0f5669abdde822
+          ref: ${{ steps.plugins-proto-source.outputs.commit }}
           path: _native-protocols
           persist-credentials: false
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12.14"
       - name: Assert this job runs on its declared Ubuntu profile
         run: |
           set -euo pipefail
