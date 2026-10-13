@@ -178,12 +178,12 @@ def test_catalog_bootstrap_copy_and_release_lock_pin_are_exact() -> None:
     catalog_bytes = CATALOG_PATH.read_bytes()
     release_lock = json.loads((WORKSPACE_ROOT / "release-lock.json").read_text(encoding="utf-8"))
     expected_repositories = {
-        "Cyrene-Platform": "587d35588e8590abab5bd645ba09bbc480479daa",
-        "Cyrene-Plugins-Official": "c9b8d4b7d4923d42368de3b3ec2db87ee97c3fa7",
+        "Cyrene-Platform": "b294fe9e360c758e516c0b7d2c0a2291d0e1f299",
+        "Cyrene-Plugins-Official": "c772bfaf632d28e8fba77dfb57aa8ed4215d16dc",
         "Cyrene-Workspace": "8f976e988137f79e0374099a51aac51c210904eb",
         "Cyrene-Reactor": "470cec30bc09c2ba0b1fd62da47152ffd27b41bb",
         "Cyrene-Yield": "5c492b0932d0598ca140333611b2de6d85a6c458",
-        "Cyrene-Exchange": "7f1823f6eabe9956ff40cc2e4aa9035197b51e83",
+        "Cyrene-Exchange": "b7f59cfebe7c817783d915b073bcf6ffee0bdc03",
         "Cyrene-Catalyst": "4ad95061bde8c5d216a8cb7b30e1ef2ae1b4d49b",
         "Cyrene-Echo": "7480d72c3d2520ccf7684ae43e2f2558c5c6e828",
         "Cyrene-Navigator": "d7c33d47dff899e26f3f8b1ef8c028373b826392",
@@ -191,7 +191,7 @@ def test_catalog_bootstrap_copy_and_release_lock_pin_are_exact() -> None:
     }
     expected_connection_protocol_hashes = {
         "cyrene.workspace.authority.v2": (
-            "d8d1f7e9abff39877f55521a3a8f3fc56e950aca55472cc12a2b0fcbcd889d0b"
+            "68bbaedcf825393ff17b51b77cd2019dd6e35a682f190f108801754417bfedb1"
         ),
         "cyrene.workspace.tunnel.v1": (
             "65e7cee26af09ab3bfa81b90a74fa6cb719bc520ca89d7c36fda224f3afd15dc"

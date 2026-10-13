@@ -30,6 +30,8 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 RELEASE = re.compile(r"^(stable|preview)-([0-9a-f]{40})$")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 WORKSPACE_REPOSITORY = "DoHorizon-AI/Cyrene-Workspace"
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+COMPONENT_CATALOG_V2 = WORKSPACE_ROOT / "governance" / "component-catalog-v2.json"
 UNIT_DIRECTORY = "lib/systemd/system"
 PRIVATE_PYTHON = "/opt/cyrene/python/3.12.14/bin/python3.12"
 SERVICE_RUNNER = "/usr/lib/cyrene/scripts/cyrene.py"
@@ -62,10 +64,21 @@ def _read_json(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
         raise ContractError(f"{label} is missing or unsafe: {path}")
     try:
         content = path.read_bytes()
-        value = json.loads(content.decode("utf-8"))
+        value = json.loads(content.decode("utf-8"), object_pairs_hook=_unique_object)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ContractError(f"cannot read {label} at {path}: {error}") from error
     return _object(value, label), content
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate keys in installer catalog and contract inputs."""
+
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ContractError("JSON input contains duplicate object keys")
+        result[key] = value
+    return result
 
 
 def _sha_file(path: Path, label: str) -> str:
@@ -168,6 +181,66 @@ def managed_units_from_directory(
             "targetProfile": target_profile,
             "source": source,
         }
+    return result
+
+
+def auxiliary_units_from_directory(
+    unit_directory: Path,
+    *,
+    target_profile: str,
+    source_ref: str,
+    source_commit: str,
+    component_catalog_path: Path = COMPONENT_CATALOG_V2,
+) -> dict[str, dict[str, Any]]:
+    """Bind catalog-declared auxiliary Product units to the DEB source tuple."""
+
+    catalog, _catalog_bytes = _read_json(component_catalog_path, "component catalog v2")
+    if catalog.get("schemaVersion") != 2 or not isinstance(catalog.get("components"), list):
+        raise ContractError("component catalog v2 has an unsupported shape")
+    if target_profile not in TARGETS or COMMIT.fullmatch(source_commit) is None:
+        raise ContractError("auxiliary units require the selected native source profile")
+    if re.fullmatch(r"refs/(heads|tags)/[A-Za-z0-9._/-]{1,200}", source_ref) is None:
+        raise ContractError("Workspace source ref must be an exact Git ref")
+
+    source = {
+        "repository": WORKSPACE_REPOSITORY,
+        "ref": source_ref,
+        "commit": source_commit,
+    }
+    product_services = {
+        component_id: component_id.removeprefix("cyrene-") for component_id in SERVICES
+    }
+    result: dict[str, dict[str, Any]] = {}
+    for component in catalog["components"]:
+        if not isinstance(component, dict):
+            raise ContractError("component catalog contains a malformed component")
+        component_id = component.get("componentId")
+        units = component.get("auxiliarySystemdUnits", [])
+        if not isinstance(units, list):
+            raise ContractError("component catalog auxiliarySystemdUnits must be an array")
+        if not units:
+            continue
+        service = product_services.get(component_id)
+        if service is None or component.get("pythonBundleService") != service:
+            raise ContractError("auxiliary units must belong to a DEB-managed Product bundle")
+        for unit in units:
+            if (
+                not isinstance(unit, str)
+                or re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", unit) is None
+                or unit == f"{component_id}.service"
+                or unit in result
+            ):
+                raise ContractError("component catalog auxiliary systemd unit is invalid")
+            digest = _validate_service_unit(unit_directory / unit, service)
+            result[unit] = {
+                "componentId": component_id,
+                "service": service,
+                "unit": unit,
+                "packagePath": f"{UNIT_DIRECTORY}/{unit}",
+                "sha256": digest,
+                "targetProfile": target_profile,
+                "source": source,
+            }
     return result
 
 
@@ -308,6 +381,12 @@ def create_contract(
         "serviceArtifactsIndexSha256": hashlib.sha256(index_bytes).hexdigest(),
         "services": _verified_source_summary(index, target_profile),
         "managedUnits": managed_units_from_directory(
+            unit_directory,
+            target_profile=target_profile,
+            source_ref=source_ref,
+            source_commit=source_commit,
+        ),
+        "auxiliaryUnits": auxiliary_units_from_directory(
             unit_directory,
             target_profile=target_profile,
             source_ref=source_ref,

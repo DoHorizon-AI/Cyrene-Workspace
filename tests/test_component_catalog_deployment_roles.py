@@ -55,9 +55,9 @@ def test_c12_workspace_product_deployment_roles_match_the_catalog_members() -> N
     assert group["wireApiVersion"] == "cyrene.workspace.product.v2"
     assert group["contractLock"] == {
         "repository": "DoHorizon-AI/Cyrene-Workspace",
-        "commit": "c7dea28958a97ccab3a9cc3199faf0ac5819a2a5",
+        "commit": "cbe649f1a859a20836da17f0c4365747f57e6ffd",
         "path": "governance/workspace-connection-protocols-v2.lock.json",
-        "sha256": "sha256:00fd59fb76d7144b6e1b554feadf035328b216231e0a323178836abf2b8bdd5a",
+        "sha256": "sha256:e03b2b6e7d2c61a80597fc27694c7319f7c414fa483a2e5e841c8618d5f74dab",
     }
     assert {
         component_id: member["requiredForAdoption"] for component_id, member in members.items()

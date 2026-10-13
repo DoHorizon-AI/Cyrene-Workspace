@@ -92,6 +92,29 @@ def test_private_token_rejects_symlink(tmp_path: Path) -> None:
         invocation.read_private_token(token_file, local=False)
 
 
+def test_native_installer_checks_out_the_protocol_mirror_from_release_lock() -> None:
+    import yaml
+
+    workflow_path = MODULE_PATH.parents[3] / ".github/workflows/product-contract-v1.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["native-profile-contracts"]["steps"]
+    pin_step = next(step for step in steps if step.get("id") == "plugins-proto-source")
+    checkout_step = next(
+        step
+        for step in steps
+        if step.get("name")
+        == "Stage pinned Plugins protobufs for the local caller compatibility test"
+    )
+
+    assert '"repositories"' in pin_step["run"]
+    assert '"Cyrene-Plugins-Official"' in pin_step["run"]
+    assert "release-lock.json" in pin_step["run"]
+    assert checkout_step["with"]["ref"] == "${{ steps.plugins-proto-source.outputs.commit }}"
+    assert "0387f487ccfb0f2dd77d31126c0f5669abdde822" not in workflow_path.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_local_token_accepts_valid_private_file(tmp_path: Path) -> None:
     token_file = tmp_path / "sidecar.local-token"
     token_file.write_bytes(b"A" * 29 + b"-._\n")

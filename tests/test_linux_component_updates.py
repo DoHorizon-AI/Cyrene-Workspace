@@ -3150,6 +3150,33 @@ def test_blocked_workload_check_echoes_digest_bound_channel() -> None:
     assert result["resolution"]["planDigestMaterial"]["channel"] == "preview"
 
 
+def test_exchange_integration_config_preflight_precedes_workload_state_creation(
+    tmp_path: Path,
+) -> None:
+    updater = _empty_updater(tmp_path)
+    updater._reload_catalog_for_operation = lambda: None
+    updater._ensure_state_root = lambda: pytest.fail(
+        "configuration failure must precede workload plan state writes"
+    )
+
+    def reject_missing_profile() -> None:
+        raise updates.UpdateError(
+            "EXCHANGE_INTEGRATION_PREFLIGHT_FAILED",
+            "Exchange integration profiles are not ready.",
+        )
+
+    updater._preflight_exchange_integration_configuration = reject_missing_profile
+    with pytest.raises(updates.UpdateError) as error:
+        updater.check_workload(
+            "exchange-integration",
+            updates.WORKLOAD_HOST_TARGET,
+            {"includeComponentIds": [], "excludeComponentIds": [], "choices": {}},
+            action="install",
+        )
+
+    assert error.value.code == "EXCHANGE_INTEGRATION_PREFLIGHT_FAILED"
+
+
 def test_workload_candidate_failures_enrich_only_resolver_blockers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3415,7 +3442,24 @@ def _native_unit_runtime_fixture(
         )
         (canonical_units / f"{component_id}.service").chmod(0o644)
 
-    managed_units = _native_unit_contract_module().managed_units_from_directory(
+    dispatcher_unit = "cyrene-exchange-integration-dispatcher.service"
+    (canonical_units / dispatcher_unit).write_text(
+        "[Unit]\nAfter=cyrene-exchange.service\n"
+        "[Service]\nUser=cyrene\nGroup=cyrene\n"
+        "ExecStart=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+        "/usr/lib/cyrene/scripts/cyrene.py service-run exchange\n",
+        encoding="utf-8",
+    )
+    (canonical_units / dispatcher_unit).chmod(0o644)
+
+    contract_module = _native_unit_contract_module()
+    managed_units = contract_module.managed_units_from_directory(
+        canonical_units,
+        target_profile=target_id,
+        source_ref=source["ref"],
+        source_commit=source["commit"],
+    )
+    auxiliary_units = contract_module.auxiliary_units_from_directory(
         canonical_units,
         target_profile=target_id,
         source_ref=source["ref"],
@@ -3443,6 +3487,7 @@ def _native_unit_runtime_fixture(
                 "serviceArtifactsIndexSha256": "1" * 64,
                 "services": service_records,
                 "managedUnits": managed_units,
+                "auxiliaryUnits": auxiliary_units,
                 "maintainerScriptsSha256": {
                     name: "2" * 64 for name in ("postinst", "prerm", "postrm")
                 },
@@ -3455,6 +3500,18 @@ def _native_unit_runtime_fixture(
     updater_root = tmp_path / "updater"
     updater_root.mkdir()
     updater = _empty_updater(updater_root)
+    catalog_v2 = json.loads(
+        (WORKSPACE_ROOT / "governance" / "component-catalog-v2.json").read_text(encoding="utf-8")
+    )
+    exchange_component = next(
+        row for row in catalog_v2["components"] if row.get("componentId") == "cyrene-exchange"
+    )
+    updater.components["cyrene-exchange"] = exchange_component
+    for dependency in exchange_component["dependencies"]:
+        dependency_id = dependency["componentId"]
+        updater.components[dependency_id] = next(
+            row for row in catalog_v2["components"] if row.get("componentId") == dependency_id
+        )
     updater.native_install_contract_path = contract_path
     updater.native_deb_unit_root = host_root / "lib/systemd/system"
     updater.systemd_unit_dirs = (
@@ -3542,6 +3599,54 @@ def test_catalyst_uses_deb_owned_unit_and_restarts_without_replacing_it(
             "components": [{"componentId": component["componentId"]}],
         }
     ) == [component["systemdUnit"]]
+
+
+def test_exchange_integration_workload_manages_both_deb_owned_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    updater, _catalyst, _candidate, _contract, _unit, _systemd_units, _properties = (
+        _native_unit_runtime_fixture(tmp_path, monkeypatch)
+    )
+    exchange = updater.components["cyrene-exchange"]
+    candidate = {
+        "componentId": "cyrene-exchange",
+        "targetId": "linux-ubuntu-24.04-x86_64-python-3.12",
+    }
+    canonical_units = updater.native_deb_unit_root.resolve()
+
+    def systemd_property(unit: str, name: str) -> str:
+        properties = {
+            "FragmentPath": str(canonical_units / unit),
+            "DropInPaths": "",
+            "User": "cyrene",
+            "Group": "cyrene",
+            "ExecStart": (
+                "{ path=/opt/cyrene/python/3.12.14/bin/python3.12 ; "
+                "argv[]=/opt/cyrene/python/3.12.14/bin/python3.12 -sE "
+                "/usr/lib/cyrene/scripts/cyrene.py service-run exchange ; "
+                "ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; "
+                "code=(null) ; status=0/0 }"
+            ),
+        }
+        return properties[name]
+
+    monkeypatch.setattr(updater, "_systemd_property", systemd_property)
+    services = updater._workload_service_units(
+        [{"componentId": "cyrene-exchange"}],
+        {
+            "mode": "actualProduct",
+            "productComponentIds": ["cyrene-exchange"],
+            "productSources": [{"componentId": "cyrene-exchange", "sourceId": "cyrene-exchange"}],
+        },
+        [candidate],
+    )
+
+    assert [item["unit"] for item in services] == [
+        "cyrene-exchange.service",
+        "cyrene-exchange-integration-dispatcher.service",
+    ]
+    assert all(item["componentId"] == exchange["componentId"] for item in services)
+    assert services[1]["unitOverride"] == "cyrene-exchange-integration-dispatcher.service"
 
 
 def test_workload_services_follow_verified_dependency_and_unit_start_order(

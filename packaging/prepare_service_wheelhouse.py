@@ -46,6 +46,7 @@ class ServiceSpec:
     repository: str
     lock_relative_path: str
     application_distributions: tuple[str, ...]
+    all_extras: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ SERVICE_SPECS = (
         "Cyrene-Exchange",
         "product/uv.lock",
         ("cyrene-exchange", "cyrene-exchange-product"),
+        all_extras=True,
     ),
     ServiceSpec("catalyst", "Cyrene-Catalyst", "uv.lock", ("cyrene-catalyst",)),
     ServiceSpec("echo", "Cyrene-Echo", "uv.lock", ("cyrene-echo",)),
@@ -994,6 +996,8 @@ def _uv_export_arguments(
     python_executable: str,
     output_path: Path,
     project_root: Path,
+    *,
+    all_extras: bool = False,
 ) -> list[str]:
     """Build a locked host export command for the prevalidated native target.
 
@@ -1003,7 +1007,7 @@ def _uv_export_arguments(
     CPython and manylinux constraints explicitly through pip.
     """
 
-    return [
+    arguments = [
         uv_executable,
         "export",
         "--locked",
@@ -1022,6 +1026,27 @@ def _uv_export_arguments(
         "--directory",
         str(project_root),
     ]
+    if all_extras:
+        arguments.insert(arguments.index("--no-emit-project"), "--all-extras")
+    return arguments
+
+
+def _service_uv_export_arguments(
+    spec: ServiceSpec,
+    uv_executable: str,
+    python_executable: str,
+    output_path: Path,
+    project_root: Path,
+) -> list[str]:
+    """Project the per-service optional-dependency policy to the frozen export."""
+
+    return _uv_export_arguments(
+        uv_executable,
+        python_executable,
+        output_path,
+        project_root,
+        all_extras=spec.all_extras,
+    )
 
 
 def _pip_platform_tags(profile: dict[str, Any]) -> list[str]:
@@ -1398,7 +1423,8 @@ def _write_service(
     uv_export_path = staging_root / ".exports" / f"{spec.service}.requirements.txt"
     uv_export_path.parent.mkdir(parents=True, exist_ok=True)
     _run(
-        _uv_export_arguments(
+        _service_uv_export_arguments(
+            spec,
             uv_executable,
             python_executable,
             uv_export_path,

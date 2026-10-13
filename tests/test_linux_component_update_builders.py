@@ -550,6 +550,52 @@ def test_exchange_launcher_uses_configured_private_data_directory(tmp_path: Path
     )
 
 
+def test_exchange_launcher_ignores_host_python_paths_and_disables_user_site(
+    tmp_path: Path,
+) -> None:
+    release_root = tmp_path / "releases" / "exchange-release"
+    release_root.mkdir(parents=True)
+    (release_root / "python").mkdir()
+    argv_path = tmp_path / "argv"
+    pythonpath_path = tmp_path / "pythonpath"
+    pythonhome_path = tmp_path / "pythonhome"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" > "$CYRENE_TEST_ARGV"\n'
+        'printf "%s" "${PYTHONPATH:-<unset>}" > "$CYRENE_TEST_PYTHONPATH"\n'
+        'printf "%s" "${PYTHONHOME:-<unset>}" > "$CYRENE_TEST_PYTHONHOME"\n',
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    launcher = release_root / "run-service"
+    launcher.write_text(bundle._entrypoint_text("exchange", str(fake_python)), encoding="utf-8")
+    launcher.chmod(0o755)
+    host_pythonpath = str(tmp_path / "host-pythonpath")
+    host_pythonhome = str(tmp_path / "host-pythonhome")
+    environment = {
+        **os.environ,
+        "CYRENE_TEST_ARGV": str(argv_path),
+        "CYRENE_TEST_PYTHONPATH": str(pythonpath_path),
+        "CYRENE_TEST_PYTHONHOME": str(pythonhome_path),
+        "PYTHONPATH": host_pythonpath,
+        "PYTHONHOME": host_pythonhome,
+        "PYTHONUSERBASE": str(tmp_path / "host-user-site"),
+    }
+
+    result = subprocess.run(
+        [str(launcher)], check=False, capture_output=True, text=True, env=environment
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = argv_path.read_text(encoding="utf-8").splitlines()
+    assert arguments[:2] == ["-s", "-m"]
+    assert pythonpath_path.read_text(encoding="utf-8") == str(release_root / "python")
+    assert pythonhome_path.read_text(encoding="utf-8") == "<unset>"
+    assert host_pythonpath != pythonpath_path.read_text(encoding="utf-8")
+    assert host_pythonhome != pythonhome_path.read_text(encoding="utf-8")
+
+
 def test_echo_has_an_independent_bundle_without_joining_the_deb_service_set() -> None:
     echo_launcher = bundle._entrypoint_text("echo", bundle.PRIVATE_PYTHON_EXECUTABLE)
     echo_spec = next(spec for spec in prepare.SERVICE_SPECS if spec.service == "echo")

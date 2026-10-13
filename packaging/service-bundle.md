@@ -162,6 +162,13 @@ generation may access the network, while `build-deb.sh` consumes only
 this complete wheelhouse and never resolves dependencies or falls back to an
 index.
 
+Exchange's frozen `uv export` enables all project extras so its `integrations`
+extra, including the pinned Account Center SDK, is present in the offline
+wheelhouse. Other service exports leave optional extras disabled.
+
+Exchange 的冻结 `uv export` 会启用全部项目 extras，使 `integrations` extra
+（包括已 pin 的 Account Center SDK）进入离线 wheelhouse。其他服务的导出不会启用可选 extras。
+
 The DEB assembly host also needs Python 3.12 venv support
 (`python3.12-venv` on Ubuntu); the builder creates an isolated pip installer
 environment. The installed package declares `python3 (>= 3.12)`,

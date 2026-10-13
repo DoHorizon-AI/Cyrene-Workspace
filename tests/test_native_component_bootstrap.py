@@ -462,7 +462,7 @@ def test_first_core_bootstrap_binds_active_v2_to_compiled_v1_broker_authority(
         "sourceCommit": "b" * 40,
         "sourceRef": "refs/heads/main",
         "catalogSha256": active_digest,
-        "generation": 15,
+        "generation": active["generation"],
         "subjectName": "component-catalog-v2.json",
         "attestationAssetName": "component-catalog-v2.json.attestation.jsonl",
     }
@@ -470,7 +470,7 @@ def test_first_core_bootstrap_binds_active_v2_to_compiled_v1_broker_authority(
     updater.catalog = active
     updater.catalog_bytes = active_bytes
     updater.catalog_digest = active_digest
-    updater.catalog_generation = 15
+    updater.catalog_generation = active["generation"]
     updater.catalog_source = metadata
     updater.components = {row["componentId"]: row for row in active["components"]}
     updater.targets = {row["id"]: row for row in active["targets"]}
@@ -478,7 +478,7 @@ def test_first_core_bootstrap_binds_active_v2_to_compiled_v1_broker_authority(
 
     assert updater.bootstrap_catalog_digest == bootstrap.COMPILED_CATALOG_DIGEST
     assert updater.bootstrap_catalog_digest != updater.catalog_digest
-    assert updater.catalog_generation == 15
+    assert updater.catalog_generation == active["generation"]
     assert (
         updater.bootstrap_catalog_bytes
         == (ROOT / "packaging" / "component-catalog-bootstrap-v1.json").read_bytes()
@@ -590,7 +590,7 @@ def test_packaged_v2_bootstrap_binding_uses_bundled_v1_baseline_without_active_p
 
     assert updater.bootstrap_catalog_digest == active_digest
     assert updater.bootstrap_catalog_digest != bootstrap.COMPILED_CATALOG_DIGEST
-    assert updater.catalog_generation == 15
+    assert updater.catalog_generation == active["generation"]
     assert json.loads(baseline_bytes)["generation"] == 13
 
     binding_bytes = binding_path.read_bytes()

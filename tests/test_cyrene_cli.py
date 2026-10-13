@@ -57,6 +57,60 @@ def test_workload_cli_accepts_guided_install_and_exact_component_uninstall() -> 
     assert uninstall.workload_owner == "plugins"
 
 
+def test_exchange_integration_cli_maps_manifest_ids_through_catalog() -> None:
+    module = _module()
+    install = module.build_parser().parse_args(
+        [
+            "workload",
+            "install",
+            "exchange-integration",
+            "--selected-provider-plugin",
+            "cyrene.accounts.account-center",
+            "--selected-provider-plugin",
+            "cyrene.providers.github-issues",
+            "--selected-provider-plugin",
+            "cyrene.connectors.wecom",
+        ]
+    )
+
+    assert install.selected_provider_plugins == [
+        "cyrene.accounts.account-center",
+        "cyrene.providers.github-issues",
+        "cyrene.connectors.wecom",
+    ]
+    assert module._selected_provider_component_ids(install.selected_provider_plugins) == [
+        "cyrene-accounts-account-center",
+        "cyrene-providers-github-issues",
+        "cyrene-connectors-wecom",
+    ]
+    with pytest.raises(ValueError, match="not selectable"):
+        module._selected_provider_component_ids(
+            [
+                "cyrene.accounts.account-center",
+                "cyrene.providers.github-issues",
+                "cyrene.unknown.provider",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [(None, 1), ("gateway-only", 1), ("integration-only", 0), ("combined", 0), ("broken", 255)],
+)
+def test_exchange_dispatcher_condition_only_skips_gateway_only(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str | None,
+    expected: int,
+) -> None:
+    module = _module()
+    if mode is None:
+        monkeypatch.delenv("CYRENE_EXCHANGE_RUNTIME_MODE", raising=False)
+    else:
+        monkeypatch.setenv("CYRENE_EXCHANGE_RUNTIME_MODE", mode)
+
+    assert module.cmd_exchange_dispatcher_condition(Namespace()) == expected
+
+
 def test_workload_cli_repeats_explicit_channel_through_check_stage_and_apply(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

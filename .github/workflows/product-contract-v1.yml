@@ -93,10 +93,12 @@ jobs:
       - name: Lint component updater and bundle producers
         run: >-
           uvx ruff==0.16.5 check
-          packaging/component_updates.py packaging/prepare_service_wheelhouse.py
+          packaging/component_updates.py packaging/native_exchange_integration_preflight.py
+          packaging/prepare_service_wheelhouse.py
           packaging/bootstrap_catalog_binding.py
           packaging/service_bundle.py tests/test_cyrene_cli.py
           tests/test_service_wheelhouse_export.py
+          tests/test_exchange_integration_installer.py
           tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
           tests/test_data_bundle_source_workflows.py
@@ -109,10 +111,12 @@ jobs:
       - name: Check component updater and bundle producer formatting
         run: >-
           uvx ruff==0.16.5 format --check
-          packaging/component_updates.py packaging/prepare_service_wheelhouse.py
+          packaging/component_updates.py packaging/native_exchange_integration_preflight.py
+          packaging/prepare_service_wheelhouse.py
           packaging/bootstrap_catalog_binding.py
           packaging/service_bundle.py tests/test_cyrene_cli.py
           tests/test_service_wheelhouse_export.py
+          tests/test_exchange_integration_installer.py
           tests/test_linux_component_update_builders.py
           tests/test_linux_component_update_identity.py
           tests/test_data_bundle_source_workflows.py
@@ -135,6 +139,7 @@ jobs:
           tests/test_native_legacy_rollback_health.py
           tests/test_workload_first_core_bootstrap.py
           tests/test_service_wheelhouse_export.py
+          tests/test_exchange_integration_installer.py
       - name: Check package and privileged helper shell syntax
         run: |
           bash -n packaging/build-deb.sh
@@ -202,16 +207,31 @@ jobs:
       CYRENE_PLUGINS_PROTO_ROOT: ${{ github.workspace }}/_native-protocols/contracts/proto
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.14"
+      - name: Resolve the Plugins protocol source from the release lock
+        id: plugins-proto-source
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import re
+          from pathlib import Path
+
+          commit = json.loads(Path("release-lock.json").read_text(encoding="utf-8"))[
+              "repositories"
+          ]["Cyrene-Plugins-Official"]
+          if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+              raise SystemExit("release lock must pin a full Plugins source commit")
+          print(f"commit={commit}")
+          PY
       - name: Stage pinned Plugins protobufs for the local caller compatibility test
         uses: actions/checkout@v5
         with:
           repository: DoHorizon-AI/Cyrene-Plugins-Official
-          ref: 0387f487ccfb0f2dd77d31126c0f5669abdde822
+          ref: ${{ steps.plugins-proto-source.outputs.commit }}
           path: _native-protocols
           persist-credentials: false
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12.14"
       - name: Assert this job runs on its declared Ubuntu profile
         run: |
           set -euo pipefail
@@ -229,6 +249,7 @@ jobs:
           ruff check
           packaging/python_runtime.py packaging/verified_service_artifacts.py
           packaging/native_install_contract.py
+          packaging/native_exchange_integration_preflight.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
           packaging/native_core_successor.py
@@ -249,6 +270,7 @@ jobs:
           tooling/acceptance/native-components-v2/training_evidence.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
+          tests/test_exchange_integration_installer.py
           tests/test_bootstrap_catalog_binding.py
           tests/test_native_updater_bootstrap_binding.py
           tests/test_native_legacy_rollback_health.py
@@ -298,6 +320,7 @@ jobs:
           ruff format --check
           packaging/python_runtime.py packaging/verified_service_artifacts.py
           packaging/native_install_contract.py
+          packaging/native_exchange_integration_preflight.py
           packaging/prepare_service_wheelhouse.py packaging/service_bundle.py
           packaging/component_updates.py packaging/native_core_bootstrap.py
           packaging/native_core_successor.py
@@ -318,6 +341,7 @@ jobs:
           tooling/acceptance/native-components-v2/training_evidence.py
           tests/test_python_runtime_lock.py tests/test_verified_service_artifacts.py
           tests/test_native_install_contract.py tests/test_native_installer_release.py
+          tests/test_exchange_integration_installer.py
           tests/test_bootstrap_catalog_binding.py
           tests/test_native_updater_bootstrap_binding.py
           tests/test_native_legacy_rollback_health.py

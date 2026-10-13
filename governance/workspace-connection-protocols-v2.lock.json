@@ -7,12 +7,12 @@
       "definition": {
         "repository": "DoHorizon-AI/Cyrene-Platform",
         "path": "contracts/proto/cyrene/workspace/authority/v2/workspace_authority.proto",
-        "sha256": "d8d1f7e9abff39877f55521a3a8f3fc56e950aca55472cc12a2b0fcbcd889d0b"
+        "sha256": "68bbaedcf825393ff17b51b77cd2019dd6e35a682f190f108801754417bfedb1"
       },
       "mirror": {
         "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
         "path": "contracts/proto/cyrene/workspace/authority/v2/workspace_authority.proto",
-        "sha256": "d8d1f7e9abff39877f55521a3a8f3fc56e950aca55472cc12a2b0fcbcd889d0b"
+        "sha256": "68bbaedcf825393ff17b51b77cd2019dd6e35a682f190f108801754417bfedb1"
       }
     },
     {

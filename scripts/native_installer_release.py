@@ -98,7 +98,7 @@ BOOTSTRAP_CATALOG_V2_PATH = "usr/share/cyrene/component-catalog-v2.json"
 BOOTSTRAP_CATALOG_BINDING_PATH = "usr/share/cyrene/bootstrap-catalog-binding-v1.json"
 BOOTSTRAP_CATALOG_BINDING_LOADER_PATH = "usr/lib/cyrene/scripts/bootstrap_catalog_binding.py"
 FROZEN_CATALOG_V1_GENERATION = 13
-FROZEN_CATALOG_V1_SHA256 = "79866ed32c4393e5bbbd3e36144ae080f316e9bf2695a0768bdbbfa98bf76247"
+FROZEN_CATALOG_V1_SHA256 = "1af86e539d9891a7b9687ef55704134ec4b4a441b833cde64a53322382316743"
 MINIMUM_ACTIVE_CATALOG_V2_GENERATION = 14
 INSTALL_CONTRACT_POLICY = {
     "schemaVersion": 1,
@@ -1780,7 +1780,14 @@ def _inspect_deb_initialization(
         if not isinstance(workspace_source, dict):
             raise ReleaseError("source receipt has no Workspace source identity for managed units")
         try:
-            managed_units = _native_install_contract_module().managed_units_from_directory(
+            contract_module = _native_install_contract_module()
+            managed_units = contract_module.managed_units_from_directory(
+                extraction / "lib/systemd/system",
+                target_profile=profile_id,
+                source_ref=workspace_source.get("ref"),
+                source_commit=workspace_source.get("commit"),
+            )
+            auxiliary_units = contract_module.auxiliary_units_from_directory(
                 extraction / "lib/systemd/system",
                 target_profile=profile_id,
                 source_ref=workspace_source.get("ref"),
@@ -1794,6 +1801,7 @@ def _inspect_deb_initialization(
             "serviceArtifactsIndexSha256",
             "services",
             "managedUnits",
+            "auxiliaryUnits",
             "maintainerScriptsSha256",
         }
         if set(marker) != expected_marker_keys:
@@ -1804,6 +1812,7 @@ def _inspect_deb_initialization(
             "serviceArtifactsIndexSha256": _sha256(index_path),
             "services": _marker_services_from_index(index, profile_id, receipt),
             "managedUnits": managed_units,
+            "auxiliaryUnits": auxiliary_units,
             "maintainerScriptsSha256": script_hashes,
         }
         if marker != expected_policy:

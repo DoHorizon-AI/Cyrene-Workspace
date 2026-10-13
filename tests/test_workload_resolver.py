@@ -1217,7 +1217,7 @@ def test_existing_v1_and_new_v2_catalogs_validate_without_mutating_v1_schema() -
     )
     assert v1["schemaVersion"] == 1
     assert v2["schemaVersion"] == 2
-    assert v2["generation"] == 15
+    assert v2["generation"] == 16
     invalid_binding = copy.deepcopy(v2)
     invalid_binding["workloads"][0]["bindings"][0]["bindingId"] = "invalid/scope-id"
     with pytest.raises(metadata.CatalogMetadataError):
