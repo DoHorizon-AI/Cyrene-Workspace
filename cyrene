@@ -503,6 +503,8 @@ def _start_web_host(home: Path, env: dict[str, str], pair_code: str) -> int | No
     ]
     for product, port in PRODUCT_PORTS.items():
         argv += ["--proxy", f"/api/v1/{product}=http://127.0.0.1:{port}"]
+        if product == "exchange":
+            argv += ["--proxy-product-auth", "/api/v1/exchange"]
     # A same-host HTTP console cannot set Secure cookies; suppress only that.
     argv.append("--insecure-http")
 
