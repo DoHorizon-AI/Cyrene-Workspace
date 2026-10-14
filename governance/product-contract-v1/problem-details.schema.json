@@ -3,17 +3,65 @@
   "$id": "https://schemas.cyrene.dev/product/common/v1/problem-details.schema.json",
   "title": "Cyrene RFC 9457 Product Problem Details v1",
   "type": "object",
-  "required": ["type", "title", "status", "detail", "instance", "code", "retryable", "traceId"],
+  "required": [
+    "type",
+    "title",
+    "status",
+    "detail",
+    "instance",
+    "code",
+    "retryable",
+    "traceId"
+  ],
   "properties": {
-    "type": {"type": "string", "format": "uri"},
-    "title": {"type": "string"},
-    "status": {"type": "integer", "minimum": 400, "maximum": 599},
-    "detail": {"type": "string"},
-    "instance": {"type": "string"},
-    "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]+$"},
-    "retryable": {"type": "boolean"},
-    "traceId": {"type": "string", "pattern": "^(?!0{32}$)[0-9a-f]{32}$"},
-    "resourceRef": {"type": "string"}
+    "type": {
+      "type": "string",
+      "format": "uri"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "type": "integer",
+      "minimum": 400,
+      "maximum": 599
+    },
+    "detail": {
+      "type": "string"
+    },
+    "instance": {
+      "type": "string"
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]+$"
+    },
+    "retryable": {
+      "type": "boolean"
+    },
+    "traceId": {
+      "type": "string",
+      "pattern": "^(?!0{32}$)[0-9a-f]{32}$"
+    },
+    "resourceRef": {
+      "type": "string"
+    },
+    "context": {
+      "type": "object",
+      "description": "Optional verified Product resource references; never identity, role or credential claims.",
+      "properties": {
+        "connectionId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "authorizationRef": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

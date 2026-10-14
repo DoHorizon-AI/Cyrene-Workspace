@@ -29,6 +29,49 @@ def test_common_schemas_are_valid_draft_2020_12() -> None:
         Draft202012Validator.check_schema(schema)
 
 
+def test_problem_details_authorization_context_is_scoped_and_closed() -> None:
+    validator = Draft202012Validator(
+        _json("problem-details.schema.json"), format_checker=FormatChecker()
+    )
+    problem = {
+        "type": "https://errors.cyrene.dev/exchange/connection-reauthorization-required",
+        "title": "Provider authorization requires renewal",
+        "status": 409,
+        "detail": "Renew the provider authorization for this connection.",
+        "instance": "/api/v1/integrations/connections/11111111-1111-4111-8111-111111111111/authorization-health",
+        "code": "EXCHANGE_CONNECTION_REAUTHORIZATION_REQUIRED",
+        "retryable": False,
+        "traceId": "11111111111111111111111111111111",
+        "context": {
+            "connectionId": "11111111-1111-4111-8111-111111111111",
+            "authorizationRef": "wecom:binding-auth-reference",
+        },
+    }
+
+    assert validator.is_valid(problem)
+
+    for forbidden_claim in (
+        {"subject": "provider-user"},
+        {"roles": ["administrator"]},
+        {"credential": "secret"},
+        {"hostPath": "/private/profile"},
+    ):
+        invalid_problem = {
+            **problem,
+            "context": {**problem["context"], **forbidden_claim},
+        }
+        assert not validator.is_valid(invalid_problem)
+
+    invalid_problem = {**problem, "context": {"authorizationRef": ""}}
+    assert not validator.is_valid(invalid_problem)
+
+    invalid_problem = {
+        **problem,
+        "context": {**problem["context"], "connectionId": "not-a-uuid"},
+    }
+    assert not validator.is_valid(invalid_problem)
+
+
 def test_product_event_is_a_resource_notification_not_state_payload() -> None:
     schema = _json("product-event.schema.json")
     event = {
