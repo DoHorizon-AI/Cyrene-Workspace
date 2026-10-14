@@ -679,8 +679,15 @@ def _verify_runtime_launcher(
     """Require the generated entrypoint to use only the profile's fixed interpreter."""
 
     text = path.read_text(encoding="utf-8")
-    expected = _entrypoint_text(
-        service, profile["pythonExecutable"], execution_runtime=execution_runtime
+    expected = _bundle_entrypoint_text(
+        service,
+        profile["pythonExecutable"],
+        execution_runtime=execution_runtime,
+    )
+    legacy_navigator = _entrypoint_text(
+        service,
+        profile["pythonExecutable"],
+        execution_runtime=execution_runtime,
     )
     legacy_yield = (
         "#!/bin/sh\n"
@@ -692,9 +699,10 @@ def _verify_runtime_launcher(
         '--state-directory "${CYRENE_DATA_DIR:-/var/lib/cyrene}/yield" '
         '--port "${CYRENE_PORT_YIELD:-8001}" "$@"\n'
     )
-    if text != expected and not (
+    compatible_legacy = (service == "navigator" and text == legacy_navigator) or (
         service == "yield" and execution_runtime is None and text == legacy_yield
-    ):
+    )
+    if text != expected and not compatible_legacy:
         raise ServiceBundleError(
             "bundle entrypoint differs from the generated launcher for its locked private CPython"
         )
@@ -1967,7 +1975,26 @@ def _entrypoint_text(
     python_executable: str,
     *,
     execution_runtime: dict[str, Any] | None = None,
+    enable_exchange_product_auth: bool = False,
 ) -> str:
+    """Render one fixed service launcher, optionally enabling Navigator's Exchange auth proxy.
+
+    Args:
+        service: Service ID selected by the signed bundle descriptor.
+        python_executable: Locked private interpreter for this target profile.
+        execution_runtime: Optional signed runtime descriptor for Yield.
+        enable_exchange_product_auth: Add the fixed Exchange-only per-request auth opt-in.
+
+    Returns:
+        The complete shell entrypoint for the selected service.
+
+    Raises:
+        ServiceBundleError: If the Exchange auth proxy is requested for another service.
+    """
+    if enable_exchange_product_auth and service != "navigator":
+        raise ServiceBundleError(
+            "Exchange Product proxy authorization can only be enabled for Navigator"
+        )
     commands = {
         "yield": (
             "exec python3 -s -m cy_exec.training.product_cli "
@@ -2006,6 +2033,9 @@ export PYTHONPATH="$BUNDLE_DIR/python"
 """
         return text.replace("python3", shlex.quote(python_executable))
     if service == "navigator":
+        exchange_product_auth_argument = (
+            '  --proxy-product-auth "/api/v1/exchange" \\\n' if enable_exchange_product_auth else ""
+        )
         text = """#!/bin/sh
 set -eu
 BUNDLE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
@@ -2020,9 +2050,10 @@ exec python3 -s "$BUNDLE_DIR/serve-web.py" \\
   --proxy "/api/v1/yield=http://127.0.0.1:${CYRENE_PORT_YIELD:-8001}" \\
   --proxy "/api/v1/reactor=http://127.0.0.1:${CYRENE_PORT_REACTOR:-8002}" \\
   --proxy "/api/v1/exchange=http://127.0.0.1:${CYRENE_PORT_EXCHANGE:-8003}" \\
-  --proxy "/api/v1/catalyst=http://127.0.0.1:${CYRENE_PORT_CATALYST:-8004}" \\
+__EXCHANGE_PRODUCT_AUTH_ARGUMENT__  --proxy "/api/v1/catalyst=http://127.0.0.1:${CYRENE_PORT_CATALYST:-8004}" \\
   --insecure-http "$@"
 """
+        text = text.replace("__EXCHANGE_PRODUCT_AUTH_ARGUMENT__", exchange_product_auth_argument)
         if execution_prelude:
             text = text.replace(
                 'export PYTHONPATH="$BUNDLE_DIR/python"\n',
@@ -2103,6 +2134,21 @@ exec python3 -s -m cyrene_reactor_product.cli control \\
         f"{command}\n"
     )
     return text.replace("python3", shlex.quote(python_executable))
+
+
+def _bundle_entrypoint_text(
+    service: str,
+    python_executable: str,
+    *,
+    execution_runtime: dict[str, Any] | None = None,
+) -> str:
+    """Select the standard bundle's fixed service-specific entrypoint options."""
+    return _entrypoint_text(
+        service,
+        python_executable,
+        execution_runtime=execution_runtime,
+        enable_exchange_product_auth=service == "navigator",
+    )
 
 
 def _write_bundle_manifest(
@@ -2377,7 +2423,7 @@ def _build_one_bundle(
         shutil.copy2(service_input / "serve-web.py", bundle_root / "serve-web.py")
     entrypoint = bundle_root / "run-service"
     entrypoint.write_text(
-        _entrypoint_text(
+        _bundle_entrypoint_text(
             service,
             target_profile["pythonExecutable"],
             execution_runtime=execution_runtime,

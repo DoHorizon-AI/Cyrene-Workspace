@@ -138,3 +138,12 @@ RFC 7240 定义了该偏好头；本规范补全其生命周期：
 ## Trace Context
 
 规范依赖是 W3C Trace Context Level 1（2021 年 11 月 23 日发布的 Recommendation），即 `traceparent` 和 `tracestate`。全零 trace / parent ID，以及语法无效的版本 `00` 值，作为传入身份时会被拒绝；服务会启动新的有效上下文，而不会传播它们。Trace Context Level 2 在成为 W3C Recommendation 之前，只作为向前兼容的实验性支持，不属于 Product v1 的规范依赖。
+
+
+## Provider authorization context / Provider 授权上下文
+
+A confirmed provider grant that requires user reauthorization may use HTTP 409 and the Product code `EXCHANGE_CONNECTION_REAUTHORIZATION_REQUIRED`. Its optional closed RFC 9457 `context` object carries only the verified scoped `connectionId` and `authorizationRef`, which locate the existing Product/provider binding. They do not prove identity, roles, credential possession, or a new grant. `authorizationRef` is a provider-native profile/grant reference; it is not an Account Center `accountLinkRef`.
+
+Only confirmed provider reauthorization uses this 409 code. HTTP 401 keeps caller-authentication semantics; generic 403 keeps authorization-denial semantics, including provider permission denial that does not prove a supported renewal path. Network failures, unsupported protocol results, and unknown expiry remain unknown under the endpoint's existing semantics. They do not establish valid/expired authorization or trigger this 409. Platform `AWAITING_AUTHORITY` is a separate state. The schema rejects identity claims, roles, credentials, host paths, and arbitrary context fields.
+
+只有已确认且需要用户重新授权的 Provider grant 才使用此 409 错误码。HTTP 401 保持调用方身份认证语义；一般 403 保持授权拒绝语义，包括无法证明存在受支持续期路径的 Provider permission denial。网络失败、不支持的协议结果和未知 expiry 按 endpoint 既有语义保持未知；它们不能证明授权有效/过期，也不能触发此 409。Platform `AWAITING_AUTHORITY` 是独立状态。Schema 会拒绝身份声明、角色、凭据、主机路径和任意 context 字段。

@@ -881,3 +881,58 @@ def test_pair_code_is_printed_only_to_a_terminal(
     captured = module._pair_code_notice(home, "ABCDEF")
     assert "ABCDEF" not in captured
     assert str(home / "pair_code.txt") in captured
+
+
+@pytest.mark.parametrize(
+    ("products", "exchange_registered"),
+    [
+        ({"yield": 8001, "exchange": 8003, "catalyst": 8004}, True),
+        ({"yield": 8001, "catalyst": 8004}, False),
+    ],
+)
+def test_dev_web_host_adds_product_auth_only_for_registered_exchange_proxy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    products: dict[str, int],
+    exchange_registered: bool,
+) -> None:
+    module = _module()
+    launcher = tmp_path / "serve-web.py"
+    captured: dict[str, object] = {}
+
+    def fake_popen(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(pid=43210)
+
+    monkeypatch.setattr(module, "_locate_web_host_launcher", lambda: launcher)
+    monkeypatch.setattr(module, "_web_host_command", lambda _launcher: ["python", str(launcher)])
+    monkeypatch.setattr(module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(module, "PRODUCT_PORTS", products)
+    monkeypatch.setattr(module, "WEB_HOST_PORT", 17860)
+    monkeypatch.setenv("CYRENE_WEB_HOST_HOST", "127.0.0.1")
+
+    home = tmp_path / "home"
+    result = module._start_web_host(home, {"LANG": "C"}, "synthetic-pair-code")
+
+    assert result == 43210
+    expected_args = [
+        "python",
+        str(launcher),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "17860",
+        "--pairing-code",
+        "synthetic-pair-code",
+    ]
+    for product, port in products.items():
+        expected_args += ["--proxy", f"/api/v1/{product}=http://127.0.0.1:{port}"]
+        if product == "exchange":
+            expected_args += ["--proxy-product-auth", "/api/v1/exchange"]
+    expected_args.append("--insecure-http")
+    assert captured["argv"] == expected_args
+    assert ("--proxy-product-auth" in expected_args) is exchange_registered
+    popen_kwargs = captured["kwargs"]
+    assert isinstance(popen_kwargs, dict)
+    assert popen_kwargs["env"] == {"LANG": "C"}

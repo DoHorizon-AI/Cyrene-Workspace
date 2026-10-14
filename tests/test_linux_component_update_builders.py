@@ -466,9 +466,10 @@ def test_product_execution_runtime_declaration_is_bound_to_copied_bytes(
 def test_legacy_product_launchers_keep_their_existing_runtime_arguments() -> None:
     launchers = {
         service: bundle._entrypoint_text(service, bundle.PRIVATE_PYTHON_EXECUTABLE)
-        for service in bundle.SERVICES
+        for service in bundle.BUNDLE_SERVICES
     }
 
+    assert all("--proxy-product-auth" not in launcher for launcher in launchers.values())
     assert all("--runtime-config" not in launcher for launcher in launchers.values())
     assert all("--trainer-runtime-config" not in launcher for launcher in launchers.values())
     assert all("service-prepare" not in launcher for launcher in launchers.values())
@@ -492,6 +493,78 @@ def test_legacy_product_launchers_keep_their_existing_runtime_arguments() -> Non
     assert "$DATA_HOME/artifacts" in bundle._execution_runtime_prelude(
         _execution_runtime_descriptor(), service="yield"
     )
+
+
+def test_navigator_bundle_opts_in_only_exchange_proxy_product_auth(
+    tmp_path: Path,
+) -> None:
+    fake_python = _fake_python_executable(tmp_path)
+    argv_path = tmp_path / "navigator-argv"
+    launcher = tmp_path / "run-service"
+    launcher.write_text(
+        bundle._bundle_entrypoint_text("navigator", str(fake_python)),
+        encoding="utf-8",
+    )
+    launcher.chmod(0o755)
+    environment = {
+        **os.environ,
+        "CYRENE_DEV_HOME": str(tmp_path / "data"),
+        "CYRENE_DATA_DIR": str(tmp_path / "data"),
+        "CYRENE_PAIR_CODE_FILE": str(tmp_path / "pair-code"),
+        "CYRENE_TEST_ARGV": str(argv_path),
+    }
+
+    result = subprocess.run(
+        [str(launcher)], check=False, capture_output=True, text=True, env=environment
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = argv_path.read_text(encoding="utf-8").splitlines()
+    auth_index = argv.index("--proxy-product-auth")
+    assert argv[auth_index - 2 : auth_index + 4] == [
+        "--proxy",
+        "/api/v1/exchange=http://127.0.0.1:8003",
+        "--proxy-product-auth",
+        "/api/v1/exchange",
+        "--proxy",
+        "/api/v1/catalyst=http://127.0.0.1:8004",
+    ]
+    assert argv.count("--proxy-product-auth") == 1
+    bundle_launchers = {
+        service: bundle._bundle_entrypoint_text(service, bundle.PRIVATE_PYTHON_EXECUTABLE)
+        for service in bundle.BUNDLE_SERVICES
+    }
+    assert [
+        service
+        for service, content in bundle_launchers.items()
+        if "--proxy-product-auth" in content
+    ] == ["navigator"]
+
+    legacy = bundle._entrypoint_text("navigator", str(fake_python))
+    assert "--proxy-product-auth" not in legacy
+
+    enabled_launcher = tmp_path / "enabled-run-service"
+    enabled_launcher.write_text(
+        bundle._bundle_entrypoint_text("navigator", bundle.PRIVATE_PYTHON_EXECUTABLE),
+        encoding="utf-8",
+    )
+    bundle._verify_runtime_launcher(enabled_launcher, UBUNTU_24_PROFILE, "navigator", None)
+    legacy_launcher = tmp_path / "legacy-run-service"
+    legacy_launcher.write_text(
+        bundle._entrypoint_text("navigator", UBUNTU_24_PROFILE["pythonExecutable"]),
+        encoding="utf-8",
+    )
+    bundle._verify_runtime_launcher(legacy_launcher, UBUNTU_24_PROFILE, "navigator", None)
+
+
+@pytest.mark.parametrize("service", ("yield", "reactor", "exchange", "catalyst", "echo"))
+def test_only_navigator_can_opt_into_exchange_product_auth(service: str) -> None:
+    with pytest.raises(bundle.ServiceBundleError, match="only be enabled for Navigator"):
+        bundle._entrypoint_text(
+            service,
+            bundle.PRIVATE_PYTHON_EXECUTABLE,
+            enable_exchange_product_auth=True,
+        )
 
 
 def test_published_v1_launcher_bytes_remain_compatible() -> None:

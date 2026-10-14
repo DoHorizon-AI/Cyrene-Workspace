@@ -84,6 +84,22 @@ DirectPluginRuntime 另外提供 Invoke / InvokeStream / Health。能力 proto �
 
 公开 C ABI、生成语言投影与TCK入口都在Plugins contracts/ 与 sdk/；不要把 generated bindings 作为另一份手工维护的权威。capability-verification.json 明确部分 runtime 只达到模拟分发验证，合同存在不代表所有方法已dispatch或可在生产调用。
 
+### Authorization/cloud staged tool-provider catalog
+
+截至 2026-10-14，授权与 cloud task 在既有 `tool.provider.v1` 上增加下列固定、签名调用的 tool catalog entries；它们不是新的 capability ID，也不会自动变成 Client MCP tools。这里列出动态 tool catalog 是因为静态 `interface-inventory.json` 只索引 `tool.provider.v1` 的 `call_tool` / `list_tools` 契约，不展开每个 provider 在运行时发布的 tool ID。
+
+| Tool ID | 固定 operation ID | arguments |
+|---|---|---|
+| `wecom_authorization_health` | `wecom.authorization.health.read` | `authorization_ref` |
+| `wecom_reauthorization_start` | `wecom.authorization.renewal.start` | `authorization_ref` |
+| `wecom_reauthorization_status` | `wecom.authorization.renewal.status` | `session_ref` |
+| `cloud_resources_query` | `cloud.resources.query` | configured `target_ref` |
+| `cloud_authorization_health` | `cloud.authorization.health.read` | configured `target_ref` |
+| `email_notification_send` | `email.notification.send` | allowlisted `recipient_ref`, subject, text, request_ref |
+| `email_connection_health` | `email.connection.health.read` | empty object |
+
+The calls use the shared `cyrene_integration_contracts` signed-context DTOs and closed `{caller_context, arguments}` envelope; caller payloads cannot choose provider credentials, URLs, filesystem paths, executables, or cloud accounts. Reviewed source snapshots remain staged pending normal owner PR integration and Platform grants. See the [Authorization, Cloud Observation, and Recovery v1 ADR](../../../../docs/ADR_AUTHORIZATION_CLOUD_V1.md) for exact source SHAs, recovery rules, and evidence limits.
+
 ## Platform接口族
 
 以 contracts/proto 下 canonical 版本为入口，contracts/rust/cy-proto/proto 含镜像副本。v1/v2同名service仍是不同协议，需先协商实际版本。
