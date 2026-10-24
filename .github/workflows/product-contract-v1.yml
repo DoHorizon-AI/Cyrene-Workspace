@@ -25,13 +25,16 @@ jobs:
           uvx ruff==0.16.5 check
           cyrene scripts/validate_release_lock.py tests/test_cyrene_cli.py
           tests/test_release_lock.py tests/test_workspace_topology.py governance/product-contract-v1/tests
+          tooling/deploy/teams-cloud
       - run: >-
           uvx ruff==0.16.5 format --check
           cyrene scripts/validate_release_lock.py tests/test_cyrene_cli.py
           tests/test_release_lock.py tests/test_workspace_topology.py governance/product-contract-v1/tests
+          tooling/deploy/teams-cloud
       - run: >-
           uvx --from pytest==9.1.1 --with jsonschema==4.26.0 --with PyYAML==6.0.3 pytest -q
           tests/test_cyrene_cli.py tests/test_release_lock.py tests/test_workspace_topology.py governance/product-contract-v1/tests
+          tooling/deploy/teams-cloud/tests
       - run: python scripts/validate_release_lock.py
 
   data-bundle-regression:
