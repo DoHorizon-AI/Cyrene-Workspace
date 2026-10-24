@@ -24,6 +24,9 @@ from typing import Any
 from build_arm64 import BuildError, check_local_lock
 
 GIB = 1024**3
+# Match preflight's nominal 4 GiB guest class; this is not an available-memory gate.
+# 中文：允许固件和内核保留内存；部署仍须通过实际 MemAvailable 和 RSS 检查。
+MIN_GUEST_MEMORY_MIB = 3584
 SSH_TARGET_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 HOST_ALIAS_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
@@ -83,7 +86,7 @@ def _remote(ssh: list[str], argv: list[str], *, capture: bool = True) -> str:
 
 
 def _remote_facts(ssh: list[str]) -> dict[str, Any]:
-    """Confirm ARM64 Docker, two CPUs, 4 GiB RAM, and current root free space."""
+    """Confirm ARM64 Docker, two CPUs, the 4 GiB guest class, and root free space."""
 
     architecture = (
         _remote(ssh, ["sudo", "-n", "docker", "info", "--format", "{{.Architecture}}"])
@@ -103,7 +106,7 @@ def _remote_facts(ssh: list[str]) -> dict[str, Any]:
     if len(df_lines) < 2:
         raise TransferError("remote root filesystem capacity could not be read")
     free_kib = int(df_lines[-1].split()[3])
-    if processors < 2 or memory_mib < 4096:
+    if processors < 2 or memory_mib < MIN_GUEST_MEMORY_MIB:
         raise TransferError(
             f"remote host capacity is below the pinned profile ({processors} CPU, {memory_mib} MiB)"
         )

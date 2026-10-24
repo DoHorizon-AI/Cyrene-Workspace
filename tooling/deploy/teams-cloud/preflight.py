@@ -31,6 +31,9 @@ from build_arm64 import BuildError, check_local_lock
 
 GIB = 1024**3
 MIB = 1024**2
+# A nominal 4 GiB VM reports less MemTotal after firmware/kernel reservations.
+# 中文：4 GiB 规格按 guest 可见下限识别；实际可用内存仍由独立余量检查决定。
+MIN_GUEST_MEMORY_MIB = 3584
 SECRET_SIZE_MINIMUMS = {
     "authority-signing-seed": 32,
     "authority-tls-key": 1,
@@ -2167,13 +2170,15 @@ def _validate_tailscale() -> None:
 
 
 def _validate_host(required_free_gib: float) -> tuple[int, float]:
-    """Require native ARM64, two vCPUs, 4 GiB RAM, and durable disk headroom."""
+    """Recognize the 4 GiB VM class and require native ARM64, two CPUs, and disk headroom."""
 
     if platform.system() != "Linux" or platform.machine().lower() not in {"aarch64", "arm64"}:
         raise PreflightError("production host must be native Linux ARM64")
     memory_mib = _parse_meminfo()
-    if memory_mib < 4096:
-        raise PreflightError(f"host has {memory_mib} MiB RAM; at least 4096 MiB is required")
+    if memory_mib < MIN_GUEST_MEMORY_MIB:
+        raise PreflightError(
+            f"host has {memory_mib} MiB guest RAM; at least {MIN_GUEST_MEMORY_MIB} MiB is required"
+        )
     if (os.cpu_count() or 0) < 2:
         raise PreflightError(
             "host must have at least two CPUs for the one-task concurrency profile"

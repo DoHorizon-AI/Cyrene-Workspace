@@ -5,6 +5,14 @@ and bounded cloud-acceptance helpers for the Cyrene Teams workload.
 
 本目录提供 Cyrene Teams 工作负载的受控 ARM64 构建、运行编排、主机预检和有预算上限的云端验收工具。
 
+The existing nominal 4 GiB VM may report less RAM in Linux `MemTotal` after
+firmware/kernel reservations. Host recognition requires at least 3584 MiB of
+guest-visible total RAM; it does not waive the separate `MemAvailable`, runtime
+RSS, cgroup-limit, or disk-reserve checks.
+
+现有 4 GiB 规格云机的 Linux `MemTotal` 会扣除固件和内核保留内存。规格识别要求 guest
+可见总内存至少 3584 MiB；实际 `MemAvailable`、运行时 RSS、cgroup 上限和磁盘余量检查仍须独立通过。
+
 | File | Responsibility |
 | --- | --- |
 | `compose.yaml` | Private service network and the single Teams callback ingress / 内网服务与唯一 Teams 回调入口 |

@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+from collections import namedtuple
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,10 +25,66 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 preflight = importlib.import_module("preflight")
+transfer = importlib.import_module("transfer_arm64")
 
 
 DEPLOYMENT_ROOT = Path(__file__).resolve().parents[1]
 UUID = "00000000-0000-4000-8000-000000000001"
+
+
+@pytest.mark.parametrize("memory_mib", [3584, 3893])
+def test_nominal_four_gib_guest_reservations_do_not_block_host_recognition(
+    monkeypatch: pytest.MonkeyPatch, memory_mib: int
+) -> None:
+    """Accept the reserved-memory guest class in both staging and transfer checks."""
+
+    monkeypatch.setattr(preflight.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(preflight.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(preflight, "_parse_meminfo", lambda: memory_mib)
+    monkeypatch.setattr(preflight.os, "cpu_count", lambda: 2)
+    usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(
+        preflight.shutil, "disk_usage", lambda _path: usage(20, 10, 10 * preflight.GIB)
+    )
+    monkeypatch.setattr(preflight, "_validate_tailscale", lambda: None)
+
+    def remote(_ssh: list[str], argv: list[str], **_kwargs: Any) -> str:
+        if argv[0] == "sudo":
+            return "aarch64\n"
+        if argv[0] == "getconf":
+            return "2\n"
+        if argv[0] == "awk":
+            return str(memory_mib * 1024) + "\n"
+        return "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 20971520 10485760 10485760 50% /\n"
+
+    monkeypatch.setattr(transfer, "_remote", remote)
+    assert preflight._validate_host(2.0) == (memory_mib, 10.0)
+    assert transfer._remote_facts(["ssh"])["memoryMiB"] == memory_mib
+
+
+def test_host_recognition_still_rejects_smaller_memory_guests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not treat a smaller machine as the approved guest profile."""
+
+    monkeypatch.setattr(preflight.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(preflight.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(preflight, "_parse_meminfo", lambda: 3583)
+
+    def remote(_ssh: list[str], argv: list[str], **_kwargs: Any) -> str:
+        if argv[0] == "sudo":
+            return "aarch64\n"
+        if argv[0] == "getconf":
+            return "2\n"
+        if argv[0] == "awk":
+            return str(3583 * 1024) + "\n"
+        return "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 20971520 10485760 10485760 50% /\n"
+
+    monkeypatch.setattr(transfer, "_remote", remote)
+    with pytest.raises(preflight.PreflightError, match="guest RAM"):
+        preflight._validate_host(2.0)
+    with pytest.raises(transfer.TransferError, match="below the pinned profile"):
+        transfer._remote_facts(["ssh"])
 
 
 def _binding(provider: str, operation: str, projection: str, mutating: bool) -> dict[str, Any]:

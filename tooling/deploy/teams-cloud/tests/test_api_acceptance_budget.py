@@ -107,6 +107,8 @@ def _exercise_and_cleanup(
     resource_id: str,
     provider: str,
     clock: dict[str, datetime],
+    *,
+    finish_cleanup: bool = True,
 ) -> None:
     base = clock["now"]
 
@@ -170,6 +172,17 @@ def _exercise_and_cleanup(
         actual_state="ABSENT",
         readiness="NOT_READY",
     )
+    ledger.record_resource_state(
+        resource_id,
+        vendor_ref=f"{provider}-vendor-resource-{resource_id}",
+        desired_state="DELETED",
+        actual_state="ABSENT",
+        readiness="NOT_READY",
+        observed_at=iso(700),
+    )
+    assert ledger.snapshot()["resourceStates"][resource_id]["windowBreached"] is False
+    if not finish_cleanup:
+        return
     with pytest.raises(
         budget.ApiBudgetError, match="must follow cleanup dispatch and delete read-back"
     ):
@@ -343,6 +356,57 @@ def test_cleanup_must_begin_before_the_reserved_deadline(
             resource_ref="azure-profile/resource/delete-target",
             timeout_seconds=300,
         )
+
+
+@pytest.mark.parametrize("observation_seconds", [600, 901])
+def test_resource_state_after_cleanup_deadline_without_cleanup_breaches_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, observation_seconds: int
+) -> None:
+    """A state read cannot extend the resource window or postpone cleanup."""
+
+    ledger, _evidence_dir = _new_azure_gcp_ledger(tmp_path, monkeypatch)
+    clock = {"now": START}
+    monkeypatch.setattr(budget, "_now_utc", lambda _value=None: clock["now"])
+    _reserve(ledger, "azure-resource-test", "azure", 1.0)
+    ledger.begin_mutation(
+        "azure-resource-test",
+        tool_id="cloud_resource_create",
+        operation_id="cloud.resource.create",
+        request_digest_sha256="d" * 64,
+        resource_ref="azure-profile/resource/create-target",
+    )
+    clock["now"] = START + timedelta(seconds=observation_seconds)
+    ledger.record_resource_state(
+        "azure-resource-test",
+        vendor_ref="azure-vendor-resource",
+        desired_state="RUNNING",
+        actual_state="RUNNING",
+        readiness="READY",
+        observed_at=clock["now"].isoformat(),
+    )
+    assert ledger.snapshot()["resourceStates"]["azure-resource-test"]["windowBreached"] is True
+
+
+def test_cleanup_started_in_time_does_not_extend_resource_expiry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Starting cleanup before its cutoff still requires absence within 900 seconds."""
+
+    ledger, _evidence_dir = _new_azure_gcp_ledger(tmp_path, monkeypatch)
+    clock = {"now": START}
+    monkeypatch.setattr(budget, "_now_utc", lambda _value=None: clock["now"])
+    _reserve(ledger, "azure-resource-test", "azure", 1.0)
+    _exercise_and_cleanup(ledger, "azure-resource-test", "azure", clock, finish_cleanup=False)
+    clock["now"] = START + timedelta(seconds=901)
+    ledger.record_resource_state(
+        "azure-resource-test",
+        vendor_ref="azure-vendor-resource-azure-resource-test",
+        desired_state="DELETED",
+        actual_state="ABSENT",
+        readiness="NOT_READY",
+        observed_at=clock["now"].isoformat(),
+    )
+    assert ledger.snapshot()["resourceStates"]["azure-resource-test"]["windowBreached"] is True
 
 
 def test_runpod_budget_chains_to_exact_azure_gcp_api_receipt(

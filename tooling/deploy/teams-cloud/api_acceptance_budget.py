@@ -971,10 +971,18 @@ class ApiAcceptanceLedger:
                 )
             expiry = _timestamp(resource["windowExpiresAt"], "resource expiry")
             cutoff = _timestamp(resource["cleanupStartBy"], "cleanup start deadline")
-            if observed > expiry or observed >= cutoff:
+            cleanup_started = resource.get("cleanupStartedAt")
+            cleanup_in_time = (
+                isinstance(cleanup_started, str)
+                and bool(cleanup_started)
+                and (_timestamp(cleanup_started, "cleanup start") < cutoff)
+            )
+            if observed > expiry or (observed >= cutoff and not cleanup_in_time):
                 resource["windowBreached"] = True
                 resource["windowBreachReason"] = (
-                    "resource state read-back crossed the resource or cleanup deadline"
+                    "resource state read-back crossed the resource deadline"
+                    if observed > expiry
+                    else "resource state read-back reached the cleanup deadline before cleanup started"
                 )
             if resource["vendorRef"] and resource["vendorRef"] != vendor_ref:
                 raise ApiBudgetError(
