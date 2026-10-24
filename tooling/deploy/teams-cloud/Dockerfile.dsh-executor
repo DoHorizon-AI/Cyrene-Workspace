@@ -9,7 +9,7 @@ ARG DSH_COMMIT=639ed015397290b3745d163aafe02ffee4aa3f84
 ARG CODEBUDDY_PACKAGE=@tencent-ai/codebuddy-code@2.163.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git python3 python3-pip \
+    build-essential ca-certificates git python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 

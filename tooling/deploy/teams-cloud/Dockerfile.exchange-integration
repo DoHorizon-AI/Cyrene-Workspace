@@ -20,8 +20,12 @@ RUN groupadd --system --gid 10001 exchange \
 
 WORKDIR /app
 COPY Cyrene-Services/Cyrene-Exchange ./Cyrene-Services/Cyrene-Exchange
-RUN uv sync --frozen --no-dev --extra integrations \
-    --project /app/Cyrene-Services/Cyrene-Exchange/product
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git \
+    && uv sync --frozen --no-dev --extra integrations \
+        --project /app/Cyrene-Services/Cyrene-Exchange/product \
+    && apt-get purge --yes --auto-remove git \
+    && rm -rf /var/lib/apt/lists/*
 COPY --chown=10001:10001 Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
 RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint
 
