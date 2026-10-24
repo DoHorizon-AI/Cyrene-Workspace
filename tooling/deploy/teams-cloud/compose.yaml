@@ -1,0 +1,927 @@
+name: cyrene-teams-cloud
+
+x-default-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  postgres:
+    image: ${CYRENE_POSTGRES_IMAGE:?render the ARM64 image lock first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: cyrene_directory
+      POSTGRES_USER: cyrene_directory_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres-admin-password
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/run/secrets/postgres-server-cert
+      - -c
+      - ssl_key_file=/run/secrets/postgres-server-key
+    secrets:
+      - source: postgres-admin-password
+        target: postgres-admin-password
+      - source: postgres-server-cert
+        target: postgres-server-cert
+      - source: postgres-server-key
+        target: postgres-server-key
+    volumes:
+      - directory-postgres:/var/lib/postgresql/data
+    networks:
+      - directory-private
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.15"
+    pids_limit: 96
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cyrene_directory_admin -d cyrene_directory"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+
+  workspace-authority:
+    image: ${CYRENE_IMAGE_WORKSPACE_AUTHORITY:?build and lock the Authority image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CYRENE_ORGANIZATION_ID: ${CYRENE_ORGANIZATION_ID:?directory organization ID is required}
+      CYRENE_WORKSPACE_ID: ${CYRENE_WORKSPACE_ID:?directory workspace ID is required}
+      CYRENE_AUTHORITY_AAD_TENANT_ID: ${CYRENE_AUTHORITY_AAD_TENANT_ID:?tenant ID is required}
+      CYRENE_AUTHORITY_SIGNING_KEY_ID: ${CYRENE_AUTHORITY_SIGNING_KEY_ID:?Authority signing key ID is required}
+      CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_ID: ${CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_ID:?Exchange workload ID is required}
+      CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_AUDIENCE: ${CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_AUDIENCE:-exchange}
+      CYRENE_AUTHORITY_EXCHANGE_MTLS_SHA256: ${CYRENE_AUTHORITY_EXCHANGE_MTLS_SHA256:?Exchange mTLS certificate fingerprint is required}
+      CYRENE_WORKSPACE_CONNECTOR_AUTHORITY_LISTEN: 0.0.0.0:7443
+      CYRENE_WORKSPACE_CONNECTOR_AUTHORITY_HEALTH_ADDR: 127.0.0.1:8080
+      CYRENE_AUTHORITY_TLS_CERT_FILE: /run/secrets/authority-tls-cert
+      CYRENE_AUTHORITY_TLS_KEY_FILE: /run/secrets/authority-tls-key
+      CYRENE_AUTHORITY_TLS_CLIENT_CA_FILE: /run/secrets/authority-tls-client-ca
+      CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL_FILE: /run/secrets/directory-runtime-reader-database-url
+    secrets:
+      - source: directory-runtime-reader-database-url
+        target: directory-runtime-reader-database-url
+      - source: authority-signing-seed
+        target: authority-signing-key
+      - source: authority-tls-cert
+        target: authority-tls-cert
+      - source: authority-tls-key
+        target: authority-tls-key
+      - source: authority-tls-client-ca
+        target: authority-tls-client-ca
+      - source: postgres-root-ca
+        target: postgres-root-ca
+    entrypoint:
+      - /usr/local/bin/cyrene-secret-env-entrypoint
+      - /usr/local/bin/cy-workspace-connector-authority-host
+    expose:
+      - "7443"
+      - "8080"
+    networks:
+      directory-private:
+        aliases: [authority]
+      exchange-authority-private: {}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.15"
+    pids_limit: 96
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+
+  directory-migrate:
+    image: ${CYRENE_IMAGE_WORKSPACE_AUTHORITY:?build and lock the Authority image first}
+    pull_policy: never
+    restart: "no"
+    profiles: [directory-bootstrap]
+    logging: *default-logging
+    entrypoint:
+      - /usr/local/bin/cyrene-secret-env-entrypoint
+      - /usr/local/bin/cy-workspace-directory-admin
+    command: ["migrate"]
+    environment:
+      CYRENE_SECRET_FILE_MAP: CYRENE_WORKSPACE_DIRECTORY_MIGRATION_DATABASE_URL=/run/secrets/directory-admin-database-url
+    secrets:
+      - source: directory-admin-database-url
+        target: directory-admin-database-url
+      - source: postgres-root-ca
+        target: postgres-root-ca
+    networks:
+      - directory-private
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.05"
+    pids_limit: 64
+
+  directory-runtime-role-bootstrap:
+    image: ${CYRENE_IMAGE_DIRECTORY_ROLE_BOOTSTRAP:?build and lock the Directory role bootstrap image first}
+    pull_policy: never
+    restart: "no"
+    profiles: [directory-bootstrap]
+    logging: *default-logging
+    environment:
+      CYRENE_DIRECTORY_ADMIN_DATABASE_URL_FILE: /run/secrets/directory-admin-database-url
+      CYRENE_DIRECTORY_APP_DATABASE_URL_FILE: /run/secrets/directory-runtime-reader-database-url
+      CYRENE_DIRECTORY_OPERATOR_DATABASE_URL_FILE: /run/secrets/directory-operator-database-url
+    secrets:
+      - source: directory-admin-database-url
+        target: directory-admin-database-url
+      - source: directory-runtime-reader-database-url
+        target: directory-runtime-reader-database-url
+      - source: directory-operator-database-url
+        target: directory-operator-database-url
+      - source: postgres-root-ca
+        target: postgres-root-ca
+    networks:
+      - directory-private
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.05"
+    pids_limit: 64
+
+  directory-operator:
+    image: ${CYRENE_IMAGE_WORKSPACE_AUTHORITY:?build and lock the Authority image first}
+    pull_policy: never
+    restart: "no"
+    logging: *default-logging
+    profiles: [directory-operator]
+    entrypoint:
+      - /usr/local/bin/cyrene-secret-env-entrypoint
+      - /usr/local/bin/cyrene-maintainer-subjects
+    environment:
+      CYRENE_SECRET_FILE_MAP: CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL=/run/secrets/directory-operator-database-url
+      CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID: ${CYRENE_DIRECTORY_OPERATOR_ACTOR_ID:?verified Directory operator actor ID is required}
+      CYRENE_WORKSPACE_ID: ${CYRENE_WORKSPACE_ID:?workspace ID is required}
+      CYRENE_ORGANIZATION_ID: ${CYRENE_ORGANIZATION_ID:?organization ID is required}
+      CYRENE_AUTHORITY_AAD_TENANT_ID: ${CYRENE_AUTHORITY_AAD_TENANT_ID:?tenant ID is required}
+    secrets:
+      - source: directory-operator-database-url
+        target: directory-operator-database-url
+      - source: postgres-root-ca
+        target: postgres-root-ca
+    volumes:
+      - type: bind
+        source: ${CYRENE_CONFIG_DIR:?provision the private config directory}
+        target: /run/cyrene-config
+    networks:
+      - directory-private
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: "0.05"
+    pids_limit: 64
+
+  account-center:
+    image: ${CYRENE_IMAGE_ACCOUNT_CENTER:?build and lock the Account Center image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_ACCOUNT_CENTER_BINDING_ID:?Account Center binding ID is required}
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_ACCOUNT_CENTER_CONFIGURATION_JSON:?generate the App and HF binding config}
+      CYRENE_PLUGIN_STORAGE_PATH: /data
+      CYRENE_SECRET_FILE_MAP: CYRENE_ACCOUNT_CENTER_ENCRYPTION_KEY=/run/secrets/account-center-encryption-key,CYRENE_ACCOUNT_CENTER_EXCHANGE_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,CYRENE_ACCOUNT_CENTER_GITHUB_PROVIDER_HMAC_KEY=/run/secrets/account-center-github-provider-hmac-key,CYRENE_ACCOUNT_CENTER_HF_PROVIDER_HMAC_KEY=/run/secrets/account-center-hf-provider-hmac-key,CYRENE_ACCOUNT_CENTER_GITHUB_APP_PRIVATE_KEY=/run/secrets/account-center-github-app-private-key
+    secrets:
+      - source: account-center-encryption-key
+        target: account-center-encryption-key
+      - source: account-center-exchange-hmac-key
+        target: account-center-exchange-hmac-key
+      - source: account-center-github-provider-hmac-key
+        target: account-center-github-provider-hmac-key
+      - source: account-center-hf-provider-hmac-key
+        target: account-center-hf-provider-hmac-key
+      - source: account-center-github-app-private-key
+        target: account-center-github-app-private-key
+      - source: account-center-huggingface-oauth-source
+        target: huggingface-oauth.json
+      - source: account-center-server-cert
+        target: account-center-server-cert
+      - source: account-center-server-key
+        target: account-center-server-key
+      - source: account-center-client-ca
+        target: account-center-client-ca
+      - source: account-center-health-client-cert
+        target: account-center-health-client-cert
+      - source: account-center-health-client-key
+        target: account-center-health-client-key
+      - source: exchange-plugin-root-ca
+        target: account-center-server-root-ca
+    volumes:
+      - account-center-state:/data
+    expose:
+      - "7443"
+    networks:
+      - account-private
+      - github-account-center-private
+      - huggingface-account-center-private
+      - account-egress
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.10"
+    pids_limit: 96
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/bin/cyrene-plugin-grpc-health
+        - --target
+        - account-center:7443
+        - --plugin-id
+        - cyrene.accounts.account-center
+        - --server-ca
+        - /run/secrets/account-center-server-root-ca
+        - --client-cert
+        - /run/secrets/account-center-health-client-cert
+        - --client-key
+        - /run/secrets/account-center-health-client-key
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+
+  navigator-persistence:
+    image: ${CYRENE_IMAGE_NAVIGATOR_PERSISTENCE:?build and lock the persistence image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      NAVIGATOR_DATABASE_PATH: /var/lib/cyrene-navigator/persistence.db
+      NAVIGATOR_PRINCIPAL_CONFIG_FILE: /run/secrets/principal-config.json
+      NAVIGATOR_HOST: 0.0.0.0
+      PORT: "8080"
+      CYRENE_PERSISTENCE_TLS_CERT_FILE: /run/secrets/navigator-persistence-tls-cert
+      CYRENE_PERSISTENCE_TLS_KEY_FILE: /run/secrets/navigator-persistence-tls-key
+      CYRENE_SECRET_FILE_MAP: NAVIGATOR_SESSION_TOKEN=/run/secrets/navigator-session-token
+    secrets:
+      - source: navigator-session-token
+        target: navigator-session-token
+      - source: navigator-persistence-tls-cert
+        target: navigator-persistence-tls-cert
+      - source: navigator-persistence-tls-key
+        target: navigator-persistence-tls-key
+      - source: internal-service-root-ca
+        target: internal-service-root-ca
+    configs:
+      - source: navigator-principal
+        target: /run/secrets/principal-config.json
+    volumes:
+      - navigator-sessions:/var/lib/cyrene-navigator
+    expose:
+      - "8080"
+    networks:
+      - navigator-persistence-private
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.10"
+    pids_limit: 96
+    healthcheck:
+      test:
+        - CMD
+        - /opt/venv/bin/python
+        - -c
+        - "import ssl,urllib.request; c=ssl.create_default_context(cafile='/run/secrets/internal-service-root-ca'); urllib.request.urlopen('https://navigator-persistence:8080/readyz', context=c, timeout=3)"
+      interval: 10s
+      timeout: 4s
+      retries: 8
+      start_period: 30s
+
+  navigator:
+    image: ${CYRENE_IMAGE_DSH_EXECUTOR:?build and lock the DSH image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CYRENE_HARNESS_MODEL_SOURCE: codebuddy
+      CYRENE_HARNESS_MODEL: ${CYRENE_HARNESS_MODEL:-glm-5.3-flash}
+      CYRENE_WORKSPACE_ID: ${CYRENE_WORKSPACE_ID:?workspace ID is required}
+      CYRENE_PERSISTENCE_URL: https://navigator-persistence:8080
+      CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS: "1"
+      NAVIGATOR_DATABASE_PATH: /var/lib/cyrene-navigator/persistence.db
+      CYRENE_CONNECTOR_BINDINGS_FILE: /run/config/connector-bindings.json
+      CYRENE_CONNECTOR_TOOL_CATALOG_FILE: /run/config/connector-tool-catalog.json
+      NODE_EXTRA_CA_CERTS: /run/secrets/internal-service-root-ca
+      CYRENE_INTERNAL_CA_FILE: /run/secrets/internal-service-root-ca
+      NAVIGATOR_EXCHANGE_HMAC_KEY_FILE: /run/secrets/navigator-exchange-hmac-key
+      NAVIGATOR_EXCHANGE_HMAC_KEY_ID: ${CYRENE_NAVIGATOR_EXCHANGE_HMAC_KEY_ID:?Navigator exchange key ID is required}
+      TEAMS_ENABLED: "true"
+      TEAMS_TENANT_ID: ${TEAMS_TENANT_ID:?Teams tenant ID is required}
+      TEAMS_ALLOWED_TEAM_IDS: ${TEAMS_ALLOWED_TEAM_IDS:?allowlist the one approved team}
+      TEAMS_BOT_APP_ID: ${TEAMS_BOT_APP_ID:?Teams Bot app ID is required}
+      TEAMS_TASK_ACTOR_SUBJECTS_FILE: /run/teams-authorization/teams-actor-subjects.json
+      TEAMS_NAVIGATOR_HMAC_KEY_ID: ${CYRENE_TEAMS_NAVIGATOR_HMAC_KEY_ID:?Teams-to-Navigator key ID is required}
+      TEAMS_EXCHANGE_CONNECTION_REF: ${CYRENE_TEAMS_EXCHANGE_CONNECTION_REF:?Teams Exchange connection ref is required}
+      TEAMS_EXCHANGE_PROFILE_REF: ${CYRENE_TEAMS_EXCHANGE_PROFILE_REF:?Teams Exchange profile ref is required}
+      CYRENE_EXCHANGE_CONNECTOR_INTERNAL_URL: https://exchange:8081
+      CYRENE_PERSISTENCE_TOKEN_ENV: CYRENE_SESSION_TOKEN
+      CYRENE_SECRET_FILE_MAP: CYRENE_SESSION_TOKEN=/run/secrets/navigator-session-token,TEAMS_NAVIGATOR_HMAC_KEY=/run/secrets/teams-navigator-hmac-key
+      CODEBUDDY_CONFIG_DIR: /home/navigator/.codebuddy
+      DISABLE_AUTOUPDATER: "1"
+    secrets:
+      - source: navigator-exchange-hmac-key
+        target: navigator-exchange-hmac-key
+      - source: navigator-session-token
+        target: navigator-session-token
+      - source: teams-navigator-hmac-key
+        target: teams-navigator-hmac-key
+      - source: internal-service-root-ca
+        target: internal-service-root-ca
+    volumes:
+      - type: bind
+        source: ${CYRENE_CODEBUDDY_HOME:?provision a service-owned CodeBuddy login directory}
+        target: /home/navigator/.codebuddy
+      - navigator-sessions:/var/lib/cyrene-navigator
+      - type: bind
+        source: ${CYRENE_CONFIG_DIR:?provision the private config directory}
+        target: /run/teams-authorization
+        read_only: true
+    configs:
+      - source: connector-bindings
+        target: /run/config/connector-bindings.json
+      - source: connector-tool-catalog
+        target: /run/config/connector-tool-catalog.json
+    expose:
+      - "8080"
+    networks:
+      - navigator-exchange-private
+      - navigator-persistence-private
+      - navigator-teams-private
+      - navigator-egress
+    depends_on:
+      navigator-persistence:
+        condition: service_healthy
+      exchange:
+        condition: service_healthy
+    mem_limit: 768m
+    memswap_limit: 768m
+    cpus: "0.65"
+    pids_limit: 192
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+      start_period: 90s
+
+  exchange:
+    image: ${CYRENE_IMAGE_EXCHANGE:?build and lock the Exchange image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CYRENE_EXCHANGE_RUNTIME_MODE: integration-only
+      CYRENE_EXCHANGE_TLS_CERT_FILE: /run/secrets/exchange-tls-cert
+      CYRENE_EXCHANGE_TLS_KEY_FILE: /run/secrets/exchange-tls-key
+      CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON: ${CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON:?generate the non-secret Exchange binding config}
+      CYRENE_EXCHANGE_AUTHORITY_SIGNING_KEYS_FILE: /run/config/authority-signing-keyring.json
+      CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_AUDIENCE: ${CYRENE_AUTHORITY_EXCHANGE_WORKLOAD_AUDIENCE:-exchange}
+      NAVIGATOR_EXCHANGE_HMAC_KEY_FILE: /run/secrets/navigator-exchange-hmac-key
+      NAVIGATOR_EXCHANGE_HMAC_KEY_ID: ${CYRENE_NAVIGATOR_EXCHANGE_HMAC_KEY_ID:?Navigator exchange key ID is required}
+      PLATFORM_CONNECTOR_AUTHORITY_ROOT_CERTIFICATE_PATH: /run/secrets/exchange-authority-root-ca
+      EXCHANGE_CONNECTOR_CLIENT_CERTIFICATE_PATH: /run/secrets/exchange-authority-client-cert
+      EXCHANGE_CONNECTOR_CLIENT_PRIVATE_KEY_PATH: /run/secrets/exchange-authority-client-key
+      PLUGIN_RUNTIME_ROOT_CERTIFICATE_PATH: /run/secrets/exchange-plugin-root-ca
+      EXCHANGE_PLUGIN_CLIENT_CERTIFICATE_PATH: /run/secrets/exchange-plugin-client-cert
+      EXCHANGE_PLUGIN_CLIENT_PRIVATE_KEY_PATH: /run/secrets/exchange-plugin-client-key
+      EXCHANGE_ACCOUNT_CENTER_CLIENT_CERTIFICATE_PATH: /run/secrets/exchange-account-center-client-cert
+      EXCHANGE_ACCOUNT_CENTER_CLIENT_PRIVATE_KEY_PATH: /run/secrets/exchange-account-center-client-key
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_ACCOUNT_CONTEXT_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key
+    secrets:
+      - source: exchange-tls-cert
+        target: exchange-tls-cert
+      - source: exchange-tls-key
+        target: exchange-tls-key
+      - source: internal-service-root-ca
+        target: internal-service-root-ca
+      - source: navigator-exchange-hmac-key
+        target: navigator-exchange-hmac-key
+      - source: exchange-authority-client-cert
+        target: exchange-authority-client-cert
+      - source: exchange-authority-client-key
+        target: exchange-authority-client-key
+      - source: exchange-authority-root-ca
+        target: exchange-authority-root-ca
+      - source: exchange-plugin-root-ca
+        target: exchange-plugin-root-ca
+      - source: exchange-plugin-client-cert
+        target: exchange-plugin-client-cert
+      - source: exchange-plugin-client-key
+        target: exchange-plugin-client-key
+      - source: exchange-account-center-client-cert
+        target: exchange-account-center-client-cert
+      - source: exchange-account-center-client-key
+        target: exchange-account-center-client-key
+      - source: account-center-exchange-hmac-key
+        target: account-center-exchange-hmac-key
+      - source: exchange-hf-auth-context-hmac-key
+        target: exchange-hf-auth-context-hmac-key
+    configs:
+      - source: authority-signing-keyring
+        target: /run/config/authority-signing-keyring.json
+      - source: connector-bootstrap
+        target: /run/config/connector-bootstrap.json
+    volumes:
+      - exchange-integrations:/data
+    expose:
+      - "8081"
+    networks:
+      - navigator-exchange-private
+      - account-private
+      - cloud-management-private
+      - exchange-authority-private
+      - github-exchange-private
+      - huggingface-exchange-private
+      - teams-provider-private
+    depends_on:
+      workspace-authority:
+        condition: service_healthy
+      account-center:
+        condition: service_healthy
+      github-issues:
+        condition: service_healthy
+      huggingface:
+        condition: service_healthy
+      teams-provider:
+        condition: service_healthy
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.15"
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "/app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/python", "-c", "import ssl,urllib.request; c=ssl.create_default_context(cafile='/run/secrets/internal-service-root-ca'); urllib.request.urlopen('https://exchange:8081/readyz', context=c, timeout=3)"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+      start_period: 45s
+
+  github-issues:
+    image: ${CYRENE_IMAGE_GITHUB_ISSUES_PROVIDER:?build and lock the GitHub provider image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_GITHUB_ISSUES_BINDING_ID:?GitHub provider binding ID is required}
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_GITHUB_ISSUES_CONFIGURATION_JSON:?configure the exact GitHub App installation and repositories}
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_ACCOUNT_CONTEXT_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,GITHUB_ISSUES_WEBHOOK_SECRET=/run/secrets/github-issues-webhook-secret,GITHUB_ISSUES_ACCOUNT_CENTER_PROVIDER_HMAC_KEY=/run/secrets/account-center-github-provider-hmac-key,GITHUB_ISSUES_ACCOUNT_CENTER_ROOT_CERTIFICATE=/run/secrets/exchange-plugin-root-ca,GITHUB_ISSUES_ACCOUNT_CENTER_CLIENT_CERTIFICATE=/run/secrets/github-issues-account-center-client-cert,GITHUB_ISSUES_ACCOUNT_CENTER_CLIENT_KEY=/run/secrets/github-issues-account-center-client-key
+    secrets:
+      - source: account-center-exchange-hmac-key
+        target: account-center-exchange-hmac-key
+      - source: github-issues-webhook-secret
+        target: github-issues-webhook-secret
+      - source: account-center-github-provider-hmac-key
+        target: account-center-github-provider-hmac-key
+      - source: exchange-plugin-root-ca
+        target: exchange-plugin-root-ca
+      - source: exchange-plugin-root-ca
+        target: github-issues-health-server-ca
+      - source: github-issues-account-center-client-cert
+        target: github-issues-account-center-client-cert
+      - source: github-issues-account-center-client-key
+        target: github-issues-account-center-client-key
+      - source: github-issues-server-cert
+        target: github-issues-server-cert
+      - source: github-issues-server-key
+        target: github-issues-server-key
+      - source: exchange-plugin-client-ca
+        target: github-issues-client-ca
+      - source: github-issues-health-client-cert
+        target: github-issues-health-client-cert
+      - source: github-issues-health-client-key
+        target: github-issues-health-client-key
+    expose:
+      - "7443"
+    networks:
+      github-exchange-private:
+        aliases: [github-issues]
+      github-account-center-private: {}
+      github-egress: {}
+    depends_on:
+      account-center:
+        condition: service_healthy
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.10"
+    pids_limit: 96
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/bin/cyrene-plugin-grpc-health
+        - --target
+        - github-issues:7443
+        - --plugin-id
+        - cyrene.providers.github-issues
+        - --server-ca
+        - /run/secrets/github-issues-health-server-ca
+        - --client-cert
+        - /run/secrets/github-issues-health-client-cert
+        - --client-key
+        - /run/secrets/github-issues-health-client-key
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+
+  huggingface:
+    image: ${CYRENE_IMAGE_HUGGINGFACE_PROVIDER:?build and lock the Hugging Face provider image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_HUGGINGFACE_BINDING_ID:?Hugging Face provider binding ID is required}
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_HUGGINGFACE_CONFIGURATION_JSON:?configure the exact Hugging Face profiles and repositories}
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key,HF_ACCOUNT_CENTER_PROVIDER_HMAC_KEY=/run/secrets/account-center-hf-provider-hmac-key,HF_ACCOUNT_CENTER_ROOT_CERTIFICATE=/run/secrets/exchange-plugin-root-ca,HF_ACCOUNT_CENTER_CLIENT_CERTIFICATE=/run/secrets/huggingface-account-center-client-cert,HF_ACCOUNT_CENTER_CLIENT_KEY=/run/secrets/huggingface-account-center-client-key
+    secrets:
+      - source: exchange-hf-auth-context-hmac-key
+        target: exchange-hf-auth-context-hmac-key
+      - source: account-center-hf-provider-hmac-key
+        target: account-center-hf-provider-hmac-key
+      - source: exchange-plugin-root-ca
+        target: exchange-plugin-root-ca
+      - source: exchange-plugin-root-ca
+        target: huggingface-health-server-ca
+      - source: huggingface-account-center-client-cert
+        target: huggingface-account-center-client-cert
+      - source: huggingface-account-center-client-key
+        target: huggingface-account-center-client-key
+      - source: huggingface-server-cert
+        target: huggingface-server-cert
+      - source: huggingface-server-key
+        target: huggingface-server-key
+      - source: exchange-plugin-client-ca
+        target: huggingface-client-ca
+      - source: huggingface-health-client-cert
+        target: huggingface-health-client-cert
+      - source: huggingface-health-client-key
+        target: huggingface-health-client-key
+    expose:
+      - "7443"
+    networks:
+      huggingface-exchange-private:
+        aliases: [huggingface]
+      huggingface-account-center-private: {}
+      huggingface-egress: {}
+    depends_on:
+      account-center:
+        condition: service_healthy
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.10"
+    pids_limit: 96
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/bin/cyrene-plugin-grpc-health
+        - --target
+        - huggingface:7443
+        - --plugin-id
+        - cyrene.providers.huggingface
+        - --server-ca
+        - /run/secrets/huggingface-health-server-ca
+        - --client-cert
+        - /run/secrets/huggingface-health-client-cert
+        - --client-key
+        - /run/secrets/huggingface-health-client-key
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+
+  teams-provider:
+    image: ${CYRENE_IMAGE_TEAMS_INGRESS:?build and lock the Teams connector image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_TEAMS_CONNECTOR_BINDING_ID:?Teams connector binding ID is required}
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_TEAMS_CONNECTOR_CONFIGURATION_JSON:?configure the exact Teams bot binding}
+      CYRENE_SECRET_FILE_MAP: TEAMS_BOT_CLIENT_SECRET=/run/secrets/teams-bot-client-secret
+    secrets:
+      - source: teams-bot-client-secret
+        target: teams-bot-client-secret
+      - source: teams-connector-server-cert
+        target: teams-connector-server-cert
+      - source: teams-connector-server-key
+        target: teams-connector-server-key
+      - source: exchange-plugin-root-ca
+        target: teams-provider-health-server-ca
+      - source: exchange-plugin-client-ca
+        target: teams-connector-client-ca
+      - source: teams-connector-health-client-cert
+        target: teams-connector-health-client-cert
+      - source: teams-connector-health-client-key
+        target: teams-connector-health-client-key
+    entrypoint:
+      - /usr/local/bin/cyrene-secret-env-entrypoint
+      - python
+      - -m
+      - cyrene_plugin_runtime.server
+    command:
+      - --entrypoint
+      - teams_connector.plugin:TeamsConnectorPlugin
+      - --capability
+      - message.connector.v1
+      - --interface-version
+      - "1"
+      - --listen
+      - teams-provider:7443
+      - --tls-cert-file
+      - /run/secrets/teams-connector-server-cert
+      - --tls-key-file
+      - /run/secrets/teams-connector-server-key
+      - --tls-client-ca-file
+      - /run/secrets/teams-connector-client-ca
+    expose:
+      - "7443"
+    networks:
+      teams-provider-private:
+        aliases: [teams-provider]
+      teams-provider-egress: {}
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: "0.05"
+    pids_limit: 96
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/bin/cyrene-plugin-grpc-health
+        - --target
+        - teams-provider:7443
+        - --plugin-id
+        - cyrene.connectors.teams
+        - --server-ca
+        - /run/secrets/teams-provider-health-server-ca
+        - --client-cert
+        - /run/secrets/teams-connector-health-client-cert
+        - --client-key
+        - /run/secrets/teams-connector-health-client-key
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+
+  teams-ingress:
+    image: ${CYRENE_IMAGE_TEAMS_INGRESS:?build and lock the Teams ingress image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      TEAMS_BOT_APP_ID: ${TEAMS_BOT_APP_ID:?Teams Bot app ID is required}
+      TEAMS_TENANT_ID: ${TEAMS_TENANT_ID:?Teams tenant ID is required}
+      CLIENT_ID: ${TEAMS_BOT_APP_ID:?Teams Bot app ID is required}
+      TENANT_ID: ${TEAMS_TENANT_ID:?Teams tenant ID is required}
+      TEAMS_ALLOWED_TEAM_IDS: ${TEAMS_ALLOWED_TEAM_IDS:?allowlist the one approved team}
+      NAVIGATOR_INTERNAL_BASE_URL: http://navigator:8080
+      TEAMS_NAVIGATOR_HMAC_KEY_FILE: /run/secrets/teams-navigator-hmac-key
+      TEAMS_NAVIGATOR_KEY_ID: ${CYRENE_TEAMS_NAVIGATOR_HMAC_KEY_ID:?Teams-to-Navigator key ID is required}
+      HOST: 0.0.0.0
+      PORT: "3978"
+    secrets:
+      - source: teams-navigator-hmac-key
+        target: teams-navigator-hmac-key
+    expose:
+      - "3978"
+    networks:
+      - teams-proxy-private
+      - navigator-teams-private
+      - teams-egress
+    depends_on:
+      navigator:
+        condition: service_healthy
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: "0.05"
+    pids_limit: 96
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3978/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+      start_period: 30s
+
+  teams-public-ingress:
+    image: ${CYRENE_CADDY_IMAGE:?resolve and lock the Caddy ARM64 image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *default-logging
+    profiles: [public-ingress]
+    environment:
+      TEAMS_FQDN: ${TEAMS_FQDN:?public DNS name is required}
+    ports:
+      - target: 443
+        published: ${CYRENE_HTTPS_PORT:-18443}
+        host_ip: ${CYRENE_PUBLIC_BIND:-127.0.0.1}
+        protocol: tcp
+    volumes:
+      - ${CYRENE_CADDYFILE:-./Caddyfile.staging}:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - teams-proxy-private
+      - ingress-egress
+    depends_on:
+      teams-ingress:
+        condition: service_healthy
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.05"
+    pids_limit: 64
+
+volumes:
+  directory-postgres:
+  account-center-state:
+  navigator-sessions:
+  exchange-integrations:
+  cloud-management-state:
+  caddy-data:
+  caddy-config:
+
+networks:
+  directory-private:
+    internal: true
+  exchange-authority-private:
+    internal: true
+  account-private:
+    internal: true
+  navigator-persistence-private:
+    internal: true
+  navigator-exchange-private:
+    internal: true
+  navigator-teams-private:
+    internal: true
+  teams-proxy-private:
+    internal: true
+  github-exchange-private:
+    internal: true
+  github-account-center-private:
+    internal: true
+  huggingface-exchange-private:
+    internal: true
+  huggingface-account-center-private:
+    internal: true
+  teams-provider-private:
+    internal: true
+  cloud-management-private:
+    internal: true
+  account-egress:
+  navigator-egress:
+  teams-egress:
+  teams-provider-egress:
+  github-egress:
+  huggingface-egress:
+  cloud-management-egress:
+  ingress-egress:
+
+secrets:
+  postgres-admin-password:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/postgres-admin-password
+  postgres-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/postgres-server-cert
+  postgres-server-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/postgres-server-key
+  postgres-root-ca:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/postgres-root-ca
+  directory-admin-database-url:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/directory-admin-database-url
+  directory-runtime-reader-database-url:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/directory-runtime-reader-database-url
+  directory-operator-database-url:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/directory-operator-database-url
+  authority-signing-seed:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/authority-signing-seed
+  authority-tls-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/authority-tls-cert
+  authority-tls-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/authority-tls-key
+  authority-tls-client-ca:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/authority-tls-client-ca
+  account-center-encryption-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-encryption-key
+  account-center-exchange-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-exchange-hmac-key
+  account-center-github-provider-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-github-provider-hmac-key
+  account-center-hf-provider-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-hf-provider-hmac-key
+  account-center-github-app-private-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-github-app-private-key
+  account-center-huggingface-oauth-source:
+    file: ${CYRENE_HF_OAUTH_BOOTSTRAP_FILE:?provision the private Hugging Face OAuth bootstrap file}
+  navigator-session-token:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/navigator-session-token
+  navigator-exchange-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/navigator-exchange-hmac-key
+  exchange-authority-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-authority-client-cert
+  exchange-authority-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-authority-client-key
+  exchange-authority-root-ca:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-authority-root-ca
+  exchange-plugin-root-ca:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-plugin-root-ca
+  exchange-plugin-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-plugin-client-cert
+  exchange-plugin-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-plugin-client-key
+  exchange-plugin-client-ca:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-plugin-client-ca
+  account-center-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-server-cert
+  account-center-server-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-server-key
+  account-center-client-ca:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-client-ca
+  account-center-health-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-health-client-cert
+  account-center-health-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-health-client-key
+  exchange-account-center-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-account-center-client-cert
+  exchange-account-center-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-account-center-client-key
+  github-issues-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/github-issues-server-cert
+  github-issues-server-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/github-issues-server-key
+  github-issues-health-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/github-issues-health-client-cert
+  github-issues-health-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/github-issues-health-client-key
+  github-issues-account-center-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/github-issues-account-center-client-cert
+  github-issues-account-center-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/github-issues-account-center-client-key
+  huggingface-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-server-cert
+  huggingface-server-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-server-key
+  huggingface-health-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-health-client-cert
+  huggingface-health-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-health-client-key
+  huggingface-account-center-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-account-center-client-cert
+  huggingface-account-center-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-account-center-client-key
+  teams-connector-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-connector-server-cert
+  teams-connector-server-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-connector-server-key
+  teams-connector-health-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-connector-health-client-cert
+  teams-connector-health-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-connector-health-client-key
+  cloud-management-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/cloud-management-server-cert
+  cloud-management-server-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/cloud-management-server-key
+  cloud-management-health-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/cloud-management-health-client-cert
+  cloud-management-health-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/cloud-management-health-client-key
+  github-issues-webhook-secret:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/github-issues-webhook-secret
+  exchange-hf-auth-context-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-hf-auth-context-hmac-key
+  teams-bot-client-secret:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-bot-client-secret
+  teams-navigator-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-navigator-hmac-key
+  exchange-tls-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-tls-cert
+  exchange-tls-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-tls-key
+  navigator-persistence-tls-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/navigator-persistence-tls-cert
+  navigator-persistence-tls-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/navigator-persistence-tls-key
+  internal-service-root-ca:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/internal-service-root-ca
+
+configs:
+  authority-signing-keyring:
+    file: ${CYRENE_CONFIG_DIR:?export a verified public-only Authority keyring}/authority-signing-keyring.json
+  navigator-principal:
+    file: ${CYRENE_CONFIG_DIR:?provision the private config directory}/navigator-principal-config.json
+  connector-bindings:
+    file: ${CYRENE_CONFIG_DIR:?provision the private config directory}/connector-bindings.json
+  connector-tool-catalog:
+    file: ${CYRENE_CONFIG_DIR:?provision the private config directory}/connector-tool-catalog.json
+  connector-bootstrap:
+    file: ${CYRENE_CONFIG_DIR:?provision the private config directory}/connector-bootstrap.json

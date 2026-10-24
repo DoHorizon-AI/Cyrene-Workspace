@@ -1,0 +1,81 @@
+{
+  "$schema": "./acceptance-plan.schema.json",
+  "schemaVersion": "cyrene-cloud-acceptance-plan-v1",
+  "taskId": "replace-with-task-id",
+  "budgetUsd": 5.0,
+  "stage": "runpod",
+  "owner": "REPLACE_WITH_OPERATOR_IDENTITY",
+  "resources": [
+    {
+      "id": "REPLACE_WITH_RUNPOD_RESOURCE_ID",
+      "provider": "runpod",
+      "maxLifetimeSeconds": 900,
+      "ownership": {
+        "taskId": "replace-with-task-id",
+        "owner": "REPLACE_WITH_OPERATOR_IDENTITY",
+        "marker": "cyrene-teams-cloud-replace-with-task-id"
+      },
+      "pricing": {
+        "currency": "USD",
+        "upperBoundUsd": 1.0,
+        "quoteRef": "https://REPLACE_WITH_RUNPOD_PRICE_QUOTE",
+        "quotedAt": "2026-10-23T00:00:00Z"
+      },
+      "create": {
+        "argv": [
+          "runpodctl",
+          "pod",
+          "create",
+          "--compute-type",
+          "cpu",
+          "--image",
+          "ubuntu:22.04",
+          "--name",
+          "cyrene-teams-cloud-replace-with-task-id"
+        ],
+        "timeoutSeconds": 120
+      },
+      "readback": {
+        "argv": ["runpodctl", "pod", "list", "--all", "--output", "json"],
+        "timeoutSeconds": 60,
+        "itemsPointer": "",
+        "markerPointer": "/name",
+        "markerValue": "cyrene-teams-cloud-replace-with-task-id",
+        "markerInArgv": false,
+        "referencePointer": "/id"
+      },
+      "exercise": [
+        {
+          "name": "read_pod_detail",
+          "action": {
+            "argv": ["runpodctl", "pod", "get", "{resource_ref}"],
+            "timeoutSeconds": 60
+          },
+          "readback": {
+            "argv": ["runpodctl", "pod", "list", "--all", "--output", "json"],
+            "timeoutSeconds": 60,
+            "itemsPointer": "",
+            "markerPointer": "/name",
+            "markerValue": "cyrene-teams-cloud-replace-with-task-id",
+            "markerInArgv": false,
+            "referencePointer": "/id",
+            "expectedPointer": "/name",
+            "expectedValue": "cyrene-teams-cloud-replace-with-task-id"
+          }
+        }
+      ],
+      "cleanup": {
+        "argv": ["runpodctl", "pod", "delete", "{resource_ref}"],
+        "timeoutSeconds": 120
+      },
+      "cleanupReadback": {
+        "argv": ["runpodctl", "pod", "list", "--all", "--output", "json"],
+        "timeoutSeconds": 60,
+        "itemsPointer": "",
+        "markerPointer": "/name",
+        "markerValue": "cyrene-teams-cloud-replace-with-task-id",
+        "markerInArgv": false
+      }
+    }
+  ]
+}

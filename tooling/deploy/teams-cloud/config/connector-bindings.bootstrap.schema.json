@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-connector-bindings-bootstrap-v1.schema.json",
+  "title": "Bootstrap-only empty Navigator connector map",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "bindings"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "bindings": {"type": "array", "maxItems": 0}
+  }
+}

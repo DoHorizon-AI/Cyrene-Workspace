@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-connector-bindings-v1.schema.json",
+  "title": "Navigator launcher-owned Exchange connector bindings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "bindings"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["bindingId", "connectionRef", "providerId", "profileRef", "tools"],
+        "properties": {
+          "bindingId": {"type": "string", "minLength": 1},
+          "connectionRef": {"type": "string", "format": "uuid"},
+          "providerId": {"enum": ["github", "huggingface", "azure", "gcp", "runpod"]},
+          "profileRef": {"type": "string", "minLength": 1},
+          "tools": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["toolId", "operationId", "resourceProjection", "mutating"],
+              "properties": {
+                "toolId": {"type": "string", "minLength": 1},
+                "operationId": {"type": "string", "minLength": 1},
+                "resourceProjection": {
+                  "enum": ["empty", "profile", "github_repository", "github_pull_request", "github_ci", "github_commit", "github_issue", "huggingface_models_list", "huggingface_datasets_list", "huggingface_spaces_list", "huggingface_repository", "cloud_target", "cloud_operation"]
+                },
+                "mutating": {"type": "boolean"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1.7
+
+ARG NODE_BASE_IMAGE
+FROM ${NODE_BASE_IMAGE} AS build
+
+ARG DSH_REPOSITORY=https://github.com/deepseek-ai/deepseek-harness.git
+ARG DSH_TAG=dsh-v0.2.0-rc.2
+ARG DSH_COMMIT=639ed015397290b3745d163aafe02ffee4aa3f84
+ARG CODEBUDDY_PACKAGE=@tencent-ai/codebuddy-code@2.163.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates git python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
+
+WORKDIR /app
+COPY Cyrene-Services/Cyrene-Navigator/harness/ ./harness/
+COPY Cyrene-Services/Cyrene-Navigator/scripts/ ./scripts/
+COPY Cyrene-Services/Cyrene-Navigator/src/ ./src/
+
+RUN git clone --depth=1 --branch "$DSH_TAG" "$DSH_REPOSITORY" /opt/dsh \
+    && test "$(git -C /opt/dsh rev-parse HEAD)" = "$DSH_COMMIT" \
+    && node /app/scripts/prepare-harness.mjs --root=/opt/dsh --install --build --link \
+    && node /opt/dsh/node_modules/typescript/bin/tsc -p /app/harness/tsconfig.json --pretty false \
+    && rm -rf /opt/dsh/.git
+
+FROM ${NODE_BASE_IMAGE} AS runtime
+
+ARG CODEBUDDY_PACKAGE=@tencent-ai/codebuddy-code@2.163.0
+
+ENV NODE_ENV=production \
+    PORT=8080 \
+    HOST=0.0.0.0 \
+    HOME=/home/navigator \
+    CYRENE_HARNESS_MODEL_SOURCE=codebuddy \
+    CYRENE_HARNESS_MODEL=glm-5.3-flash \
+    CODEBUDDY_CONFIG_DIR=/home/navigator/.codebuddy \
+    DISABLE_AUTOUPDATER=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl git python3 libnss3 libnspr4 libatk1.0-0 \
+    libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
+    libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 \
+    libcairo2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --global "$CODEBUDDY_PACKAGE" \
+    && codebuddy --version | grep -F '2.163.0' \
+    && groupadd --system --gid 10001 navigator \
+    && useradd --system --uid 10001 --gid navigator --create-home --home-dir /home/navigator --shell /usr/sbin/nologin navigator \
+    && install -d --owner=10001 --group=10001 --mode=0700 /home/navigator/.codebuddy /app/plugins /app/workspace
+
+WORKDIR /app
+COPY --from=build --chown=10001:10001 /app/harness/ ./harness/
+COPY --from=build --chown=10001:10001 /app/scripts/serve-executor.mjs ./scripts/serve-executor.mjs
+COPY --from=build --chown=10001:10001 /app/src/ ./src/
+COPY --from=build /opt/dsh /opt/dsh
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
+RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint
+
+USER 10001:10001
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:8080/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "node", "/app/scripts/serve-executor.mjs"]
+CMD ["--port", "8080", "--host", "0.0.0.0", "--plugins-dir", "/app/plugins"]

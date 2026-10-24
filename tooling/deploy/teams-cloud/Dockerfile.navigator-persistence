@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.7
+
+ARG UV_BASE_IMAGE
+ARG PYTHON_BASE_IMAGE
+FROM ${UV_BASE_IMAGE} AS uv-source
+
+FROM ${PYTHON_BASE_IMAGE} AS runtime
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    NAVIGATOR_DATABASE_PATH=/var/lib/cyrene-navigator/persistence.db \
+    NAVIGATOR_PRINCIPAL_CONFIG_FILE=/run/secrets/principal-config.json \
+    NAVIGATOR_HOST=0.0.0.0 \
+    PORT=8080
+
+COPY --from=uv-source /uv /uvx /usr/local/bin/
+RUN groupadd --system --gid 10001 navigator \
+    && useradd --system --uid 10001 --gid navigator --no-create-home --shell /usr/sbin/nologin navigator \
+    && install -d --owner=10001 --group=10001 --mode=0750 /app/scripts /var/lib/cyrene-navigator
+
+WORKDIR /app
+COPY Cyrene-Services/Cyrene-Navigator/pyproject.toml \
+     Cyrene-Services/Cyrene-Navigator/uv.lock \
+     Cyrene-Services/Cyrene-Navigator/README.md \
+     Cyrene-Services/Cyrene-Navigator/LICENSE ./
+COPY Cyrene-Services/Cyrene-Navigator/src ./src
+RUN uv sync --frozen --no-dev --no-editable
+COPY --chown=10001:10001 Cyrene-Services/Cyrene-Navigator/scripts/serve-persistence.py /app/scripts/serve-persistence.py
+COPY --chown=10001:10001 Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
+RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint
+
+USER 10001:10001
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD /opt/venv/bin/python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3)"
+ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "/opt/venv/bin/python", "/app/scripts/serve-persistence.py"]
+CMD ["--database", "/var/lib/cyrene-navigator/persistence.db", "--principal-config", "/run/secrets/principal-config.json", "--host", "0.0.0.0", "--port", "8080"]

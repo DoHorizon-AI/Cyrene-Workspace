@@ -1,0 +1,126 @@
+{
+  "$schema": "./acceptance-plan.schema.json",
+  "schemaVersion": "cyrene-cloud-acceptance-plan-v1",
+  "taskId": "replace-with-task-id",
+  "budgetUsd": 5.0,
+  "stage": "azure_gcp",
+  "owner": "REPLACE_WITH_OPERATOR_IDENTITY",
+  "resources": [
+    {
+      "id": "REPLACE_WITH_AZURE_RESOURCE_ID",
+      "provider": "azure",
+      "maxLifetimeSeconds": 900,
+      "ownership": {
+        "taskId": "replace-with-task-id",
+        "owner": "REPLACE_WITH_OPERATOR_IDENTITY",
+        "marker": "cyrene-teams-cloud-replace-with-task-id"
+      },
+      "pricing": {
+        "currency": "USD",
+        "upperBoundUsd": 1.0,
+        "quoteRef": "https://REPLACE_WITH_AZURE_PRICE_QUOTE",
+        "quotedAt": "2026-10-23T00:00:00Z"
+      },
+      "create": {
+        "argv": ["az", "resource", "create", "--resource-group", "REPLACE_WITH_APPROVED_RESOURCE_GROUP", "--tags", "cyreneTask=cyrene-teams-cloud-replace-with-task-id"],
+        "timeoutSeconds": 120
+      },
+      "readback": {
+        "argv": ["az", "resource", "list", "--resource-group", "REPLACE_WITH_APPROVED_RESOURCE_GROUP", "--tag", "cyreneTask=cyrene-teams-cloud-replace-with-task-id", "--output", "json"],
+        "timeoutSeconds": 60,
+        "itemsPointer": "",
+        "markerPointer": "/tags/cyreneTask",
+        "markerValue": "cyrene-teams-cloud-replace-with-task-id",
+        "referencePointer": "/id"
+      },
+      "exercise": [
+        {
+          "name": "REPLACE_WITH_VERIFIED_OPERATION",
+          "action": {
+            "argv": ["az", "resource", "show", "--ids", "{resource_ref}", "--output", "json"],
+            "timeoutSeconds": 120
+          },
+          "readback": {
+            "argv": ["az", "resource", "list", "--resource-group", "REPLACE_WITH_APPROVED_RESOURCE_GROUP", "--tag", "cyreneTask=cyrene-teams-cloud-replace-with-task-id", "--output", "json"],
+            "timeoutSeconds": 60,
+            "itemsPointer": "",
+            "markerPointer": "/tags/cyreneTask",
+            "markerValue": "cyrene-teams-cloud-replace-with-task-id",
+            "referencePointer": "/id",
+            "expectedPointer": "/properties/provisioningState",
+            "expectedValue": "Succeeded"
+          }
+        }
+      ],
+      "cleanup": {
+        "argv": ["az", "resource", "delete", "--ids", "{resource_ref}"],
+        "timeoutSeconds": 120
+      },
+      "cleanupReadback": {
+        "argv": ["az", "resource", "list", "--resource-group", "REPLACE_WITH_APPROVED_RESOURCE_GROUP", "--tag", "cyreneTask=cyrene-teams-cloud-replace-with-task-id", "--output", "json"],
+        "timeoutSeconds": 60,
+        "itemsPointer": "",
+        "markerPointer": "/tags/cyreneTask",
+        "markerValue": "cyrene-teams-cloud-replace-with-task-id"
+      }
+    },
+    {
+      "id": "REPLACE_WITH_GCP_RESOURCE_ID",
+      "provider": "gcp",
+      "maxLifetimeSeconds": 900,
+      "ownership": {
+        "taskId": "replace-with-task-id",
+        "owner": "REPLACE_WITH_OPERATOR_IDENTITY",
+        "marker": "cyrene-teams-cloud-replace-with-task-id"
+      },
+      "pricing": {
+        "currency": "USD",
+        "upperBoundUsd": 1.0,
+        "quoteRef": "https://REPLACE_WITH_GCP_PRICE_QUOTE",
+        "quotedAt": "2026-10-23T00:00:00Z"
+      },
+      "create": {
+        "argv": ["gcloud", "--project", "REPLACE_WITH_GCP_PROJECT", "compute", "instances", "create", "cyrene-teams-cloud-replace-with-task-id", "--zone", "REPLACE_WITH_APPROVED_ZONE", "--labels", "cyrene-task=cyrene-teams-cloud-replace-with-task-id"],
+        "timeoutSeconds": 120
+      },
+      "readback": {
+        "argv": ["gcloud", "--project", "REPLACE_WITH_GCP_PROJECT", "compute", "instances", "list", "--filter", "labels.cyrene-task=cyrene-teams-cloud-replace-with-task-id", "--format=json"],
+        "timeoutSeconds": 60,
+        "itemsPointer": "",
+        "markerPointer": "/labels/cyrene-task",
+        "markerValue": "cyrene-teams-cloud-replace-with-task-id",
+        "referencePointer": "/name"
+      },
+      "exercise": [
+        {
+          "name": "REPLACE_WITH_VERIFIED_OPERATION",
+          "action": {
+            "argv": ["gcloud", "--project", "REPLACE_WITH_GCP_PROJECT", "compute", "instances", "describe", "{resource_ref}", "--zone", "REPLACE_WITH_APPROVED_ZONE", "--format=json"],
+            "timeoutSeconds": 120
+          },
+          "readback": {
+            "argv": ["gcloud", "--project", "REPLACE_WITH_GCP_PROJECT", "compute", "instances", "list", "--filter", "labels.cyrene-task=cyrene-teams-cloud-replace-with-task-id", "--format=json"],
+            "timeoutSeconds": 60,
+            "itemsPointer": "",
+            "markerPointer": "/labels/cyrene-task",
+            "markerValue": "cyrene-teams-cloud-replace-with-task-id",
+            "referencePointer": "/name",
+            "expectedPointer": "/status",
+            "expectedValue": "RUNNING"
+          }
+        }
+      ],
+      "cleanup": {
+        "argv": ["gcloud", "--project", "REPLACE_WITH_GCP_PROJECT", "compute", "instances", "delete", "{resource_ref}", "--zone", "REPLACE_WITH_APPROVED_ZONE", "--quiet"],
+        "timeoutSeconds": 120
+      },
+      "cleanupReadback": {
+        "argv": ["gcloud", "--project", "REPLACE_WITH_GCP_PROJECT", "compute", "instances", "list", "--filter", "labels.cyrene-task=cyrene-teams-cloud-replace-with-task-id", "--format=json"],
+        "timeoutSeconds": 60,
+        "itemsPointer": "",
+        "markerPointer": "/labels/cyrene-task",
+        "markerValue": "cyrene-teams-cloud-replace-with-task-id"
+      }
+    }
+  ]
+}

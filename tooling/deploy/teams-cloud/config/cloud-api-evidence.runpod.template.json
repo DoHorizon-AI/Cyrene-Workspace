@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "cyrene-cloud-api-evidence-v1",
+  "taskId": "replace-with-task-id",
+  "owner": "00000000-0000-4000-8000-000000000001",
+  "stage": "runpod",
+  "status": "NOT_RUN",
+  "evidenceClass": "NOT_RUN",
+  "executionPath": "navigator_dsh_exchange_directplugin_api",
+  "verifiedAt": "",
+  "reservedUsd": 0.0,
+  "cumulativeReservedUsd": 0.0,
+  "previousEvidenceSha256": "",
+  "providers": [
+    {
+      "providerId": "runpod",
+      "identityStatus": "PENDING",
+      "authMode": "api_key",
+      "profileScopeDigestSha256": "",
+      "resources": [],
+      "writeOperations": []
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "bot_app_id": "REPLACE_WITH_TEAMS_BOT_APP_ID",
+  "tenant_id": "REPLACE_WITH_TENANT_ID",
+  "allowed_team_ids": ["REPLACE_WITH_TEAM_ID"],
+  "client_secret_env_ref": "TEAMS_BOT_CLIENT_SECRET",
+  "timeout_seconds": 10
+}

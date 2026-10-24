@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-api-evidence-v1.schema.json",
+  "title": "Closed Navigator to Exchange to provider API acceptance receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "taskId",
+    "owner",
+    "stage",
+    "status",
+    "evidenceClass",
+    "executionPath",
+    "verifiedAt",
+    "reservedUsd",
+    "cumulativeReservedUsd",
+    "previousEvidenceSha256",
+    "providers"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "cyrene-cloud-api-evidence-v1"},
+    "taskId": {"type": "string", "minLength": 3, "maxLength": 44, "pattern": "^[a-z][a-z0-9-]{2,43}$"},
+    "owner": {"type": "string", "format": "uuid"},
+    "stage": {"enum": ["azure_gcp", "runpod"]},
+    "status": {"enum": ["NOT_RUN", "VERIFIED"]},
+    "evidenceClass": {"enum": ["NOT_RUN", "REAL_PROVIDER_API"]},
+    "executionPath": {"const": "navigator_dsh_exchange_directplugin_api"},
+    "verifiedAt": {"anyOf": [{"const": ""}, {"type": "string", "format": "date-time"}]},
+    "reservedUsd": {"type": "number", "minimum": 0, "maximum": 5},
+    "cumulativeReservedUsd": {"type": "number", "minimum": 0, "maximum": 5},
+    "previousEvidenceSha256": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"},
+    "providers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/provider"}
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerId", "identityStatus", "authMode", "profileScopeDigestSha256", "resources", "writeOperations"],
+      "properties": {
+        "providerId": {"enum": ["azure", "gcp", "runpod"]},
+        "identityStatus": {"enum": ["PENDING", "VERIFIED"]},
+        "authMode": {"enum": ["managed_identity", "workload_identity_federation", "api_key"]},
+        "profileScopeDigestSha256": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"},
+        "resources": {"type": "array", "items": {"$ref": "#/$defs/resource"}},
+        "writeOperations": {"type": "array", "items": {"$ref": "#/$defs/writeOperation"}}
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ownership", "vendorRef", "desiredState", "actualState", "readiness", "cleanupAbsenceStatus", "cleanupReadbackAt"],
+      "properties": {
+        "ownership": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["taskId", "owner", "marker"],
+          "properties": {
+            "taskId": {"type": "string", "minLength": 3},
+            "owner": {"type": "string", "format": "uuid"},
+            "marker": {"type": "string", "minLength": 1}
+          }
+        },
+        "vendorRef": {"type": "string", "minLength": 1},
+        "desiredState": {"type": "string", "minLength": 1},
+        "actualState": {"type": "string", "minLength": 1},
+        "readiness": {"type": "string", "minLength": 1},
+        "cleanupAbsenceStatus": {"enum": ["PENDING", "ABSENT"]},
+        "cleanupReadbackAt": {"anyOf": [{"const": ""}, {"type": "string", "format": "date-time"}]}
+      }
+    },
+    "writeOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["toolId", "operationId", "requestDigestSha256", "resourceRef", "grantRef", "workOperationId", "outcome", "operationRef", "stateReadback", "resultDigestSha256"],
+      "properties": {
+        "toolId": {"type": "string", "minLength": 1},
+        "operationId": {"type": "string", "minLength": 1},
+        "requestDigestSha256": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"},
+        "resourceRef": {"type": "string", "minLength": 1},
+        "grantRef": {"type": "string", "minLength": 1},
+        "workOperationId": {"type": "string", "minLength": 1},
+        "outcome": {"enum": ["PENDING", "SUCCEEDED"]},
+        "operationRef": {"type": "string"},
+        "stateReadback": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "observedAt", "stateDigestSha256"],
+          "properties": {
+            "status": {"enum": ["PENDING", "VERIFIED"]},
+            "observedAt": {"anyOf": [{"const": ""}, {"type": "string", "format": "date-time"}]},
+            "stateDigestSha256": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"}
+          }
+        },
+        "resultDigestSha256": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "VERIFIED"}}},
+      "then": {
+        "properties": {
+          "evidenceClass": {"const": "REAL_PROVIDER_API"},
+          "verifiedAt": {"type": "string", "format": "date-time"},
+          "previousEvidenceSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "providers": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "VERIFIED"}, "stage": {"const": "azure_gcp"}}},
+      "then": {
+        "properties": {
+          "providers": {
+            "minItems": 2,
+            "maxItems": 2,
+            "contains": {"properties": {"providerId": {"const": "azure"}}},
+            "allOf": [{"contains": {"properties": {"providerId": {"const": "gcp"}}}}]
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "VERIFIED"}, "stage": {"const": "runpod"}}},
+      "then": {
+        "properties": {
+          "providers": {
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {"properties": {"providerId": {"const": "runpod"}}}
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "VERIFIED"}}},
+      "then": {
+        "properties": {
+          "providers": {
+            "items": {
+              "properties": {
+                "identityStatus": {"const": "VERIFIED"},
+                "profileScopeDigestSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "resources": {"minItems": 1},
+                "writeOperations": {"minItems": 1}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

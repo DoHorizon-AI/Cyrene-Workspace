@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "workspaceId": "REPLACE_WITH_AUTHORIZED_WORKSPACE_ID",
+  "issuer": "https://login.microsoftonline.com/REPLACE_WITH_TENANT_ID/v2.0",
+  "subjects": ["REPLACE_WITH_OWNER_AAD_OBJECT_ID"]
+}

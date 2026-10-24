@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-acceptance-evidence-v1.schema.json",
+  "title": "Cyrene connector acceptance evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "stage", "status", "evidenceClass", "verifiedAt", "taskId", "owner", "reservedUsd", "cumulativeReservedUsd", "providers"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schemaVersion": {"const": "cyrene-cloud-acceptance-evidence-v1"},
+    "stage": {"const": "github_hf"},
+    "status": {"enum": ["NOT_RUN", "VERIFIED"]},
+    "evidenceClass": {"enum": ["NOT_RUN", "REAL_PROVIDER_API"]},
+    "verifiedAt": {"anyOf": [{"const": ""}, {"type": "string", "format": "date-time"}]},
+    "taskId": {"type": "string", "minLength": 3, "maxLength": 44, "pattern": "^[a-z][a-z0-9-]{2,43}$"},
+    "owner": {"type": "string", "minLength": 1, "maxLength": 256},
+    "reservedUsd": {"const": 0.0},
+    "cumulativeReservedUsd": {"const": 0.0},
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["github", "huggingface"],
+      "properties": {
+        "github": {"$ref": "#/$defs/providerEvidence"},
+        "huggingface": {"$ref": "#/$defs/providerEvidence"}
+      }
+    }
+  },
+  "$defs": {
+    "providerEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identityStatus", "privateReadStatus", "writeReadbackStatus", "cleanupReadbackStatus", "resourceRef", "writeReadbackSha256", "cleanupReadbackAt"],
+      "properties": {
+        "identityStatus": {"enum": ["PENDING", "VERIFIED"]},
+        "privateReadStatus": {"enum": ["PENDING", "VERIFIED"]},
+        "writeReadbackStatus": {"enum": ["PENDING", "VERIFIED"]},
+        "cleanupReadbackStatus": {"enum": ["PENDING", "ABSENT"]},
+        "resourceRef": {"type": "string"},
+        "writeReadbackSha256": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"},
+        "cleanupReadbackAt": {"anyOf": [{"const": ""}, {"type": "string", "format": "date-time"}]}
+      }
+    },
+    "verifiedProviderEvidence": {
+      "allOf": [
+        {"$ref": "#/$defs/providerEvidence"},
+        {
+          "type": "object",
+          "properties": {
+            "identityStatus": {"const": "VERIFIED"},
+            "privateReadStatus": {"const": "VERIFIED"},
+            "writeReadbackStatus": {"const": "VERIFIED"},
+            "cleanupReadbackStatus": {"const": "ABSENT"},
+            "resourceRef": {"type": "string", "minLength": 1},
+            "writeReadbackSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "cleanupReadbackAt": {"type": "string", "format": "date-time"}
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "VERIFIED"}}},
+      "then": {
+        "properties": {
+          "evidenceClass": {"const": "REAL_PROVIDER_API"},
+          "verifiedAt": {"type": "string", "format": "date-time"},
+          "providers": {
+            "properties": {
+              "github": {"$ref": "#/$defs/verifiedProviderEvidence"},
+              "huggingface": {"$ref": "#/$defs/verifiedProviderEvidence"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

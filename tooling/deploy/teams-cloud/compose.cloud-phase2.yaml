@@ -1,0 +1,87 @@
+services:
+  exchange:
+    environment:
+      CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON: ${CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_PHASE2_JSON:?phase 2 Exchange config must add Azure and GCP profiles}
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_ACCOUNT_CONTEXT_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key,EXCHANGE_CLOUD_AUTH_CONTEXT_HMAC_KEY=/run/secrets/cloud-management-exchange-hmac-key
+    secrets:
+      - source: cloud-management-exchange-hmac-key
+        target: cloud-management-exchange-hmac-key
+    depends_on:
+      cloud-management-phase2:
+        condition: service_healthy
+
+  cloud-management-phase2:
+    image: ${CYRENE_IMAGE_CLOUD_MANAGEMENT:?build and lock the cloud provider image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    profiles: [cloud-phase2]
+    environment:
+      CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_CLOUD_MANAGEMENT_BINDING_ID:?cloud provider binding ID is required}
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_CLOUD_MANAGEMENT_PHASE2_CONFIGURATION_JSON:?phase 2 requires Azure and GCP profiles only}
+      AZURE_CLIENT_ID: ${CYRENE_AZURE_USER_ASSIGNED_IDENTITY_CLIENT_ID:?dedicated User Assigned Managed Identity is required}
+      CYRENE_CLOUD_MGMT_AZURE_SUBSCRIPTION_ID: ${CYRENE_AZURE_SUBSCRIPTION_ID:?Azure subscription scope is required}
+      CYRENE_SECRET_FILE_MAP: CYRENE_CLOUD_MGMT_EXCHANGE_KEY=/run/secrets/cloud-management-exchange-hmac-key
+      CYRENE_CLOUD_MGMT_STATE_DIR: /var/lib/cyrene/cloud-management
+      CYRENE_CLOUD_MGMT_GCP_WIF_CONFIG: /run/secrets/gcp-wif-credential-config
+    volumes:
+      - type: bind
+        source: ${CYRENE_CLOUD_ACCEPTANCE_DIR:?create the private cloud acceptance directory}
+        target: /run/cyrene/.artifacts/teams-cloud-20261023/acceptance
+      - cloud-management-state:/var/lib/cyrene/cloud-management
+    secrets:
+      - source: cloud-management-exchange-hmac-key
+        target: cloud-management-exchange-hmac-key
+      - source: gcp-wif-credential-config
+        target: gcp-wif-credential-config
+      - source: cloud-management-server-cert
+        target: cloud-management-server-cert
+      - source: cloud-management-server-key
+        target: cloud-management-server-key
+      - source: exchange-plugin-client-ca
+        target: cloud-management-client-ca
+      - source: exchange-plugin-root-ca
+        target: cloud-management-server-root-ca
+      - source: cloud-management-health-client-cert
+        target: cloud-management-health-client-cert
+      - source: cloud-management-health-client-key
+        target: cloud-management-health-client-key
+    expose:
+      - "7443"
+    networks:
+      cloud-management-private:
+        aliases: [cloud-management]
+      cloud-management-egress: {}
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: "0.10"
+    pids_limit: 128
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/bin/cyrene-plugin-grpc-health
+        - --target
+        - cloud-management:7443
+        - --plugin-id
+        - cyrene.providers.cloud-management
+        - --server-ca
+        - /run/secrets/cloud-management-server-root-ca
+        - --client-cert
+        - /run/secrets/cloud-management-health-client-cert
+        - --client-key
+        - /run/secrets/cloud-management-health-client-key
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+secrets:
+  cloud-management-exchange-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/cloud-management-exchange-hmac-key
+  gcp-wif-credential-config:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/gcp-wif-credential-config
