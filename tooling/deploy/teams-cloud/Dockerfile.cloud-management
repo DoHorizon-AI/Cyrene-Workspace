@@ -1,0 +1,107 @@
+# syntax=docker/dockerfile:1.7
+
+ARG PYTHON_BASE_IMAGE
+FROM ${PYTHON_BASE_IMAGE} AS runtime
+
+ARG AZURE_CLI_PACKAGE_VERSION=2.91.0-1~bookworm
+ARG AZURE_CLI_VERSION=2.91.0
+ARG AZURE_CLI_ARM64_SHA256=dcf43fcd7f4d538cf31c958e797e40be3e651dcacbb90de8c3aa2ab642a5ab0d
+ARG GCLOUD_CLI_VERSION=590.0.1
+ARG GCLOUD_CLI_ARM64_SHA256=c9e8618c9257b3289deb7cb5483479230d5d96230bd68a80fce17f592d0d3012
+ARG RUNPODCTL_VERSION=3.0.1
+ARG RUNPODCTL_ARM64_SHA256=7d75577b52950e40e1fbf6b34b8e1302d3d408e2f1d8637b5031c0f0b1089beb
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=1 \
+    CLOUDSDK_CORE_DISABLE_PROMPTS=1 \
+    PYTHONPATH=/app/Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/src:/app/Cyrene-Plugins-Official/sdk/python/cyrene_integration_contracts/src:/app/Cyrene-Plugins-Official/plugins/providers/cloud-management/src
+RUN groupadd --system --gid 10001 cloudprovider \
+    && useradd --system --uid 10001 --gid cloudprovider --no-create-home --shell /usr/sbin/nologin cloudprovider \
+    && install -d --owner=10001 --group=10001 --mode=0700 /var/lib/cyrene/cloud-management /app
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       ca-certificates curl gnupg tar \
+    && install -d --mode=0755 /etc/apt/keyrings \
+    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc -o /tmp/microsoft.asc \
+    && gpg --show-keys --with-colons /tmp/microsoft.asc \
+       | awk -F: '$1 == "fpr" { print $10 }' \
+       | grep -Fxq BC528686B50D79E339D3721CEB3E94ADBE1229CF \
+    && gpg --dearmor --yes -o /etc/apt/keyrings/microsoft.gpg /tmp/microsoft.asc \
+    && chmod 0644 /etc/apt/keyrings/microsoft.gpg \
+    && printf '%s\n' \
+       'deb [arch=arm64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/azure-cli/ bookworm main' \
+       > /etc/apt/sources.list.d/azure-cli.list \
+    && test "$(dpkg --print-architecture)" = arm64 \
+    && apt-get update \
+    && mkdir -p /tmp/azure-cli \
+    && cd /tmp/azure-cli \
+    && apt-get download "azure-cli=${AZURE_CLI_PACKAGE_VERSION}" \
+    && printf '%s  azure-cli_%s_arm64.deb\n' \
+       "${AZURE_CLI_ARM64_SHA256}" "${AZURE_CLI_PACKAGE_VERSION}" \
+       | sha256sum --check --status \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       "/tmp/azure-cli/azure-cli_${AZURE_CLI_PACKAGE_VERSION}_arm64.deb" \
+    && AZURE_CONFIG_DIR=/tmp/azure-build-config az version --output json \
+       | AZURE_CLI_VERSION="${AZURE_CLI_VERSION}" python -c \
+         'import json,os,sys; assert json.load(sys.stdin)["azure-cli"] == os.environ["AZURE_CLI_VERSION"]' \
+    && curl -fsSL \
+       "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-arm.tar.gz" \
+       -o /tmp/google-cloud-cli-linux-arm.tar.gz \
+    && printf '%s  /tmp/google-cloud-cli-linux-arm.tar.gz\n' \
+       "${GCLOUD_CLI_ARM64_SHA256}" | sha256sum --check --status \
+    && tar -xzf /tmp/google-cloud-cli-linux-arm.tar.gz -C /opt \
+    && test "$(cat /opt/google-cloud-sdk/VERSION)" = "${GCLOUD_CLI_VERSION}" \
+    && ln -s /opt/google-cloud-sdk/bin/gcloud /usr/bin/gcloud \
+    && CLOUDSDK_CONFIG=/tmp/gcloud-build-config gcloud version \
+       | grep -F "Google Cloud SDK ${GCLOUD_CLI_VERSION}" \
+    && curl -fsSL \
+       "https://github.com/runpod/runpodctl/releases/download/v${RUNPODCTL_VERSION}/runpodctl-linux-arm64.tar.gz" \
+       -o /tmp/runpodctl-linux-arm64.tar.gz \
+    && printf '%s  /tmp/runpodctl-linux-arm64.tar.gz\n' \
+       "${RUNPODCTL_ARM64_SHA256}" | sha256sum --check --status \
+    && tar -xzf /tmp/runpodctl-linux-arm64.tar.gz -C /tmp runpodctl \
+    && install -m 0755 /tmp/runpodctl /usr/bin/runpodctl \
+    && test -x /usr/bin/az \
+    && test -x /usr/bin/gcloud \
+    && test -x /usr/bin/runpodctl \
+    && HOME=/tmp/runpod-build-home /usr/bin/runpodctl --help >/dev/null \
+    && apt-get purge -y --auto-remove gnupg \
+    && rm -rf /var/lib/apt/lists/* /tmp/azure-cli /tmp/microsoft.asc \
+       /tmp/google-cloud-cli-linux-arm.tar.gz /tmp/runpodctl \
+       /tmp/runpodctl-linux-arm64.tar.gz /tmp/azure-build-config \
+       /tmp/gcloud-build-config /tmp/runpod-build-home \
+       /etc/apt/sources.list.d/azure-cli.list /etc/apt/keyrings/microsoft.gpg
+
+WORKDIR /app
+COPY Cyrene-Plugins-Official/plugins/providers/cloud-management/requirements.lock /tmp/cloud-management-requirements.lock
+COPY Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/src /app/Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/src
+COPY Cyrene-Plugins-Official/sdk/python/cyrene_integration_contracts/src /app/Cyrene-Plugins-Official/sdk/python/cyrene_integration_contracts/src
+COPY Cyrene-Plugins-Official/plugins/providers/cloud-management/src /app/Cyrene-Plugins-Official/plugins/providers/cloud-management/src
+COPY Cyrene-Plugins-Official/plugins/providers/cloud-management/plugin.manifest.json /app/Cyrene-Plugins-Official/plugins/providers/cloud-management/
+RUN python -m pip install --no-cache-dir -r /tmp/cloud-management-requirements.lock
+COPY --chown=10001:10001 Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
+COPY --chown=10001:10001 Cyrene-Workspace/tooling/deploy/teams-cloud/plugin_grpc_health_probe.py /usr/local/bin/cyrene-plugin-grpc-health
+COPY --chown=10001:10001 Cyrene-Workspace/tooling/deploy/teams-cloud/acceptance_budget.py /usr/local/libexec/cyrene-cloud-acceptance.py
+RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint /usr/local/bin/cyrene-plugin-grpc-health /usr/local/libexec/cyrene-cloud-acceptance.py
+
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.source=https://github.com/DoHorizon-AI/Cyrene-Plugins-Official \
+      org.opencontainers.image.revision=${SOURCE_REVISION} \
+      io.cyrene.azure-cli.version=${AZURE_CLI_VERSION} \
+      io.cyrene.azure-cli.arm64.sha256=${AZURE_CLI_ARM64_SHA256} \
+      io.cyrene.gcloud-cli.version=${GCLOUD_CLI_VERSION} \
+      io.cyrene.gcloud-cli.arm64.sha256=${GCLOUD_CLI_ARM64_SHA256} \
+      io.cyrene.runpodctl.version=${RUNPODCTL_VERSION} \
+      io.cyrene.runpodctl.arm64.sha256=${RUNPODCTL_ARM64_SHA256}
+USER 10001:10001
+EXPOSE 7443
+ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "python", "-m", "cyrene_plugin_runtime.server"]
+CMD ["--entrypoint", "cloud_management_provider.plugin:CloudManagementProvider", "--capability", "tool.provider.v1", "--interface-version", "1", "--listen", "cloud-management:7443", "--tls-cert-file", "/run/secrets/cloud-management-server-cert", "--tls-key-file", "/run/secrets/cloud-management-server-key", "--tls-client-ca-file", "/run/secrets/cloud-management-client-ca"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
+    CMD python /usr/local/bin/cyrene-plugin-grpc-health --target cloud-management:7443 \
+      --plugin-id cyrene.providers.cloud-management \
+      --server-ca /run/secrets/cloud-management-server-root-ca \
+      --client-cert /run/secrets/cloud-management-health-client-cert \
+      --client-key /run/secrets/cloud-management-health-client-key

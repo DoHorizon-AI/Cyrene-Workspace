@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUST_BASE_IMAGE
+ARG RUNTIME_BASE_IMAGE
+FROM ${RUST_BASE_IMAGE} AS build
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends make perl protobuf-compiler pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /source
+COPY Cyrene-Platform/Cargo.toml Cyrene-Platform/Cargo.lock Cyrene-Platform/rust-toolchain.toml ./
+COPY Cyrene-Platform/contracts ./contracts
+COPY Cyrene-Platform/kernel ./kernel
+COPY Cyrene-Platform/framework ./framework
+COPY Cyrene-Platform/runtime ./runtime
+COPY Cyrene-Platform/agents ./agents
+COPY Cyrene-Platform/adapters ./adapters
+COPY Cyrene-Platform/sdk/rust ./sdk/rust
+RUN cargo build --locked --release \
+      -p cy-workspace-authority-host --bin cy-workspace-connector-authority-host \
+      -p cy-workspace-postgres-storage --bin cy-workspace-directory-admin
+
+FROM ${RUNTIME_BASE_IMAGE} AS runtime
+
+ARG SOURCE_REPOSITORY=https://github.com/DoHorizon-AI/Cyrene-Platform
+ARG SOURCE_REVISION
+ENV CYRENE_WORKSPACE_CONNECTOR_AUTHORITY_LISTEN=0.0.0.0:50051 \
+    CYRENE_WORKSPACE_CONNECTOR_AUTHORITY_HEALTH_ADDR=127.0.0.1:8080 \
+    CYRENE_AUTHORITY_SIGNING_KEY_ID= \
+    CYRENE_AUTHORITY_SIGNING_KEY_FILE=/run/secrets/authority-signing-key \
+    CYRENE_AUTHORITY_TLS_CERT_FILE=/run/secrets/authority-tls-cert \
+    CYRENE_AUTHORITY_TLS_KEY_FILE=/run/secrets/authority-tls-key \
+    CYRENE_AUTHORITY_TLS_CLIENT_CA_FILE=/run/secrets/authority-tls-client-ca \
+    CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL_FILE=/run/secrets/directory-runtime-reader-database-url
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl libssl3 python3-minimal \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home cyrene
+COPY --from=build --chown=10001:10001 /source/target/release/cy-workspace-connector-authority-host /usr/local/bin/cy-workspace-connector-authority-host
+COPY --from=build --chown=10001:10001 /source/target/release/cy-workspace-directory-admin /usr/local/bin/cy-workspace-directory-admin
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/maintainer_subjects.py /usr/local/bin/cyrene-maintainer-subjects
+RUN chmod 0555 /usr/local/bin/cyrene-maintainer-subjects
+RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint
+LABEL org.opencontainers.image.source=${SOURCE_REPOSITORY} org.opencontainers.image.revision=${SOURCE_REVISION}
+USER 10001:10001
+EXPOSE 50051 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+    CMD curl --fail --silent --show-error http://127.0.0.1:8080/health
+ENTRYPOINT ["/usr/local/bin/cy-workspace-connector-authority-host"]

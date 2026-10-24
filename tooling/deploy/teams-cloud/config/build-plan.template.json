@@ -1,0 +1,159 @@
+{
+  "schemaVersion": "cyrene-teams-cloud-build-v1",
+  "taskId": "teams-cloud-20261023",
+  "targetPlatform": "linux/arm64",
+  "sources": {
+    "workspace": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Workspace.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Workspace"
+    },
+    "navigator": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Navigator.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Services/Cyrene-Navigator"
+    },
+    "exchange": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Exchange.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Services/Cyrene-Exchange"
+    },
+    "platform": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Platform.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Platform"
+    },
+    "plugins": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Plugins-Official"
+    },
+    "dsh": {
+      "remote": "https://github.com/deepseek-ai/deepseek-harness.git",
+      "commit": "639ed015397290b3745d163aafe02ffee4aa3f84",
+      "checkoutPath": "deepseek-harness"
+    }
+  },
+  "images": [
+    {
+      "service": "dsh-executor",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.dsh-executor",
+      "context": ".",
+      "sourceRepos": ["workspace", "navigator", "dsh"],
+      "sourceLabelRepo": "navigator",
+      "buildArgs": {
+        "NODE_BASE_IMAGE": "node:24.13.0-bookworm-slim@sha256:4660b1ca8b28d6d1906fd644abe34b2ed81d15434d26d845ef0aced307cf4b6f",
+        "CODEBUDDY_PACKAGE": "@tencent-ai/codebuddy-code@2.163.0",
+        "DSH_REPOSITORY": "https://github.com/deepseek-ai/deepseek-harness.git",
+        "DSH_TAG": "dsh-v0.2.0-rc.2",
+        "DSH_COMMIT": "639ed015397290b3745d163aafe02ffee4aa3f84"
+      }
+    },
+    {
+      "service": "navigator-persistence",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.navigator-persistence",
+      "context": ".",
+      "sourceRepos": ["workspace", "navigator"],
+      "sourceLabelRepo": "navigator",
+      "buildArgs": {
+        "UV_BASE_IMAGE": "ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc",
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    },
+    {
+      "service": "teams-ingress",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.teams-ingress",
+      "context": ".",
+      "sourceRepos": ["workspace", "plugins"],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    },
+    {
+      "service": "github-issues-provider",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.github-issues",
+      "context": ".",
+      "sourceRepos": ["workspace", "plugins"],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db",
+        "GH_CLI_VERSION": "2.102.1",
+        "GH_CLI_ARM64_SHA256": "5019b3cc6e8a03bb4d88600f8dbda2add8e6407705c159b0c63151036e77a1af"
+      }
+    },
+    {
+      "service": "huggingface-provider",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.huggingface",
+      "context": ".",
+      "sourceRepos": ["workspace", "plugins"],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    },
+    {
+      "service": "exchange",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.exchange-integration",
+      "context": ".",
+      "sourceRepos": ["workspace", "exchange", "plugins"],
+      "sourceLabelRepo": "exchange",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db",
+        "UV_BASE_IMAGE": "ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc"
+      }
+    },
+    {
+      "service": "account-center",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.account-center",
+      "context": ".",
+      "sourceRepos": ["workspace", "plugins"],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    },
+    {
+      "service": "cloud-management",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.cloud-management",
+      "context": ".",
+      "sourceRepos": ["workspace", "plugins"],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db",
+        "AZURE_CLI_PACKAGE_VERSION": "2.91.0-1~bookworm",
+        "AZURE_CLI_VERSION": "2.91.0",
+        "AZURE_CLI_ARM64_SHA256": "dcf43fcd7f4d538cf31c958e797e40be3e651dcacbb90de8c3aa2ab642a5ab0d",
+        "GCLOUD_CLI_VERSION": "590.0.1",
+        "GCLOUD_CLI_ARM64_SHA256": "c9e8618c9257b3289deb7cb5483479230d5d96230bd68a80fce17f592d0d3012",
+        "RUNPODCTL_VERSION": "3.0.1",
+        "RUNPODCTL_ARM64_SHA256": "7d75577b52950e40e1fbf6b34b8e1302d3d408e2f1d8637b5031c0f0b1089beb"
+      }
+    },
+    {
+      "service": "workspace-authority",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.workspace-authority",
+      "context": ".",
+      "sourceRepos": ["workspace", "platform"],
+      "sourceLabelRepo": "platform",
+      "buildArgs": {
+        "RUST_BASE_IMAGE": "rust:1.96.1-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3",
+        "RUNTIME_BASE_IMAGE": "debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8"
+      }
+    },
+    {
+      "service": "directory-role-bootstrap",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.directory-role-bootstrap",
+      "context": ".",
+      "sourceRepos": ["workspace"],
+      "sourceLabelRepo": "workspace",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    }
+  ],
+  "externalImages": {
+    "CADDY": "caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d",
+    "POSTGRES": "postgres:16.10-bookworm@sha256:38471f330eb885e04de130b768d6db4e10469e2311879c7e5c699f6d2d8a1c74"
+  }
+}

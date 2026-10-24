@@ -1,0 +1,80 @@
+# syntax=docker/dockerfile:1.7
+
+ARG PYTHON_BASE_IMAGE
+FROM ${PYTHON_BASE_IMAGE} AS runtime
+
+ARG GH_CLI_VERSION=2.102.1
+ARG GH_CLI_ARM64_SHA256=5019b3cc6e8a03bb4d88600f8dbda2add8e6407705c159b0c63151036e77a1af
+ENV PYTHONPATH=/app/Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/src:/app/Cyrene-Plugins-Official/sdk/python/cyrene_account_center_contracts/src:/app/Cyrene-Plugins-Official/plugins/providers/github-issues/src \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN groupadd --system --gid 10001 githubprovider \
+    && useradd --system --uid 10001 --gid githubprovider --no-create-home --shell /usr/sbin/nologin githubprovider \
+    && install -d --owner=10001 --group=10001 --mode=0750 /app
+
+WORKDIR /app/Cyrene-Plugins-Official
+COPY Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/src ./sdk/python/cyrene_plugin_runtime/src
+COPY Cyrene-Plugins-Official/sdk/python/cyrene_account_center_contracts/src ./sdk/python/cyrene_account_center_contracts/src
+COPY Cyrene-Plugins-Official/plugins/providers/github-issues/requirements.lock \
+     Cyrene-Plugins-Official/plugins/providers/github-issues/pyproject.toml \
+     Cyrene-Plugins-Official/plugins/providers/github-issues/README.md \
+     Cyrene-Plugins-Official/plugins/providers/github-issues/plugin.manifest.json \
+     Cyrene-Plugins-Official/plugins/providers/github-issues/configuration.schema.json \
+     ./plugins/providers/github-issues/
+COPY Cyrene-Plugins-Official/plugins/providers/github-issues/src ./plugins/providers/github-issues/src
+RUN python -m pip install --no-cache-dir -r /app/Cyrene-Plugins-Official/plugins/providers/github-issues/requirements.lock
+RUN GH_CLI_VERSION="${GH_CLI_VERSION}" GH_CLI_ARM64_SHA256="${GH_CLI_ARM64_SHA256}" python - <<'PY'
+import hashlib
+import io
+import os
+import subprocess
+import tarfile
+from pathlib import Path
+from urllib.request import urlopen
+
+version = os.environ["GH_CLI_VERSION"]
+expected_sha256 = os.environ["GH_CLI_ARM64_SHA256"]
+url = f"https://github.com/cli/cli/releases/download/v{version}/gh_{version}_linux_arm64.tar.gz"
+with urlopen(url, timeout=60) as response:
+    archive = response.read(64 * 1024 * 1024 + 1)
+if len(archive) > 64 * 1024 * 1024 or hashlib.sha256(archive).hexdigest() != expected_sha256:
+    raise SystemExit("GitHub CLI ARM64 release digest verification failed")
+member_name = f"gh_{version}_linux_arm64/bin/gh"
+with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as bundle:
+    member = next((item for item in bundle.getmembers() if item.name == member_name), None)
+    if member is None or not member.isfile() or member.size > 64 * 1024 * 1024:
+        raise SystemExit("GitHub CLI ARM64 release archive has an unexpected layout")
+    source = bundle.extractfile(member)
+    if source is None:
+        raise SystemExit("GitHub CLI ARM64 binary is unavailable")
+    binary = source.read(64 * 1024 * 1024 + 1)
+if len(binary) != member.size:
+    raise SystemExit("GitHub CLI ARM64 binary length is invalid")
+target = Path("/usr/local/bin/gh")
+target.write_bytes(binary)
+target.chmod(0o755)
+version_output = subprocess.check_output([str(target), "--version"], text=True)
+if not version_output.startswith(f"gh version {version} "):
+    raise SystemExit("GitHub CLI reported an unexpected version")
+PY
+
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/plugin_grpc_health_probe.py /usr/local/bin/cyrene-plugin-grpc-health
+RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint /usr/local/bin/cyrene-plugin-grpc-health
+
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.source=https://github.com/DoHorizon-AI/Cyrene-Plugins-Official \
+      io.cyrene.github-cli.version=${GH_CLI_VERSION} \
+      io.cyrene.github-cli.arm64.sha256=${GH_CLI_ARM64_SHA256} \
+      org.opencontainers.image.revision=${SOURCE_REVISION}
+USER 10001:10001
+EXPOSE 7443
+ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "python", "-m", "cyrene_plugin_runtime.server"]
+CMD ["--entrypoint", "github_issues_provider.plugin:GitHubIssuesProvider", "--capability", "tool.provider.v1", "--interface-version", "1", "--listen", "github-issues:7443", "--tls-cert-file", "/run/secrets/github-issues-server-cert", "--tls-key-file", "/run/secrets/github-issues-server-key", "--tls-client-ca-file", "/run/secrets/github-issues-client-ca"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
+      CMD python /usr/local/bin/cyrene-plugin-grpc-health \
+      --target github-issues:7443 --plugin-id cyrene.providers.github-issues \
+      --server-ca /run/secrets/github-issues-health-server-ca \
+      --client-cert /run/secrets/github-issues-health-client-cert \
+      --client-key /run/secrets/github-issues-health-client-key

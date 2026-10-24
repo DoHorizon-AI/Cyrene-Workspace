@@ -1,0 +1,29 @@
+services:
+  exchange:
+    environment:
+      CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON: ${CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_PHASE3_JSON:?phase 3 Exchange config must add Azure, GCP, and RunPod profiles}
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_ACCOUNT_CONTEXT_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key,EXCHANGE_CLOUD_AUTH_CONTEXT_HMAC_KEY=/run/secrets/cloud-management-exchange-hmac-key
+    secrets:
+      - source: cloud-management-exchange-hmac-key
+        target: cloud-management-exchange-hmac-key
+    depends_on:
+      cloud-management-phase2:
+        condition: service_healthy
+
+  cloud-management-phase2:
+    profiles: [runpod]
+    environment:
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_CLOUD_MANAGEMENT_PHASE3_CONFIGURATION_JSON:?phase 3 config must add RunPod to accepted Azure and GCP profiles}
+      CYRENE_SECRET_FILE_MAP: CYRENE_CLOUD_MGMT_EXCHANGE_KEY=/run/secrets/cloud-management-exchange-hmac-key,CYRENE_CLOUD_MGMT_RUNPOD_API_KEY=/run/secrets/runpod-api-key
+      CYRENE_CLOUD_MGMT_RUNPOD_API_KEY_FILE: /run/secrets/runpod-api-key
+    secrets:
+      - source: runpod-api-key
+        target: runpod-api-key
+
+secrets:
+  cloud-management-exchange-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/cloud-management-exchange-hmac-key
+  gcp-wif-credential-config:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/gcp-wif-credential-config
+  runpod-api-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/runpod-api-key

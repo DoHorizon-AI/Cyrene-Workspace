@@ -1,0 +1,22 @@
+{
+	auto_https disable_redirects
+}
+
+{$TEAMS_FQDN} {
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	route {
+		@teams_callback {
+			path /api/messages
+			method POST
+		}
+		reverse_proxy @teams_callback teams-ingress:3978
+
+		@wrong_method path /api/messages
+		respond @wrong_method "method not allowed" 405
+		respond "not found" 404
+	}
+}

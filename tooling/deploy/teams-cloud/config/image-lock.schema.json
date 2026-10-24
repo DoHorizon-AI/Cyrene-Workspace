@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-image-lock-v1.schema.json",
+  "title": "Cyrene Teams cloud ARM64 image lock",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "taskId", "targetPlatform", "state", "sources", "baseImages", "externalImages", "images", "createdAt"],
+  "properties": {
+    "schemaVersion": {"const": "cyrene-teams-cloud-image-lock-v1"},
+    "taskId": {"type": "string", "minLength": 1},
+    "targetPlatform": {"const": "linux/arm64"},
+    "state": {"enum": ["LOCAL_ONLY", "PUBLISHED"]},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "planSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sources": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["remote", "commit", "tree"],
+        "properties": {
+          "remote": {"type": "string", "format": "uri"},
+          "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+        }
+      }
+    },
+    "baseImages": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/resolvedImage"}
+    },
+    "externalImages": {
+      "type": "object",
+      "additionalProperties": {
+        "allOf": [
+          {"$ref": "#/$defs/resolvedImage"},
+          {
+            "type": "object",
+            "required": ["localImage", "imageId", "sizeBytes"],
+            "properties": {
+              "localImage": {"type": "string", "minLength": 1},
+              "imageId": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "sizeBytes": {"type": "integer", "minimum": 1}
+            }
+          }
+        ]
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["service", "image", "imageId", "platform", "sizeBytes", "sourceCommits", "registryDigest"],
+        "properties": {
+          "service": {"type": "string", "minLength": 1},
+          "image": {"type": "string", "minLength": 1},
+          "imageId": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "platform": {"const": "linux/arm64"},
+          "sizeBytes": {"type": "integer", "minimum": 1},
+          "sourceCommits": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+          },
+          "registryDigest": {
+            "oneOf": [
+              {"type": "null"},
+              {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+            ]
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"state": {"const": "PUBLISHED"}}},
+      "then": {
+        "properties": {
+          "images": {
+            "items": {
+              "properties": {
+                "registryDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "resolvedImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "immutableReference", "indexReference", "indexDigest", "arm64ManifestDigest", "platform"],
+      "properties": {
+        "reference": {"type": "string", "minLength": 1},
+        "immutableReference": {"type": "string", "minLength": 1},
+        "indexReference": {"type": "string", "minLength": 1},
+        "indexDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "arm64ManifestDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "platform": {"const": "linux/arm64"},
+        "localImage": {"type": "string", "minLength": 1},
+        "imageId": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "sizeBytes": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

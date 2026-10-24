@@ -1,0 +1,32 @@
+{
+  "$schema": "./acceptance-evidence.schema.json",
+  "schemaVersion": "cyrene-cloud-acceptance-evidence-v1",
+  "stage": "github_hf",
+  "status": "NOT_RUN",
+  "evidenceClass": "NOT_RUN",
+  "verifiedAt": "",
+  "taskId": "replace-with-task-id",
+  "owner": "REPLACE_WITH_OPERATOR_IDENTITY",
+  "reservedUsd": 0.0,
+  "cumulativeReservedUsd": 0.0,
+  "providers": {
+    "github": {
+      "identityStatus": "PENDING",
+      "privateReadStatus": "PENDING",
+      "writeReadbackStatus": "PENDING",
+      "cleanupReadbackStatus": "PENDING",
+      "resourceRef": "",
+      "writeReadbackSha256": "",
+      "cleanupReadbackAt": ""
+    },
+    "huggingface": {
+      "identityStatus": "PENDING",
+      "privateReadStatus": "PENDING",
+      "writeReadbackStatus": "PENDING",
+      "cleanupReadbackStatus": "PENDING",
+      "resourceRef": "",
+      "writeReadbackSha256": "",
+      "cleanupReadbackAt": ""
+    }
+  }
+}

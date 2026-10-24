@@ -8,10 +8,12 @@ installed product runtime.
 | Directory | Responsibility |
 | --- | --- |
 | [`acceptance/`](acceptance/README.md) | Real-environment acceptance tools and evidence runners. |
+| [`deploy/teams-cloud/`](deploy/teams-cloud/README.md) | Guarded ARM64 Teams cloud deployment bundle, image locking, preflight, and bounded cleanup. |
 
 | 目录 | 职责 |
 | --- | --- |
 | [`acceptance/`](acceptance/README.md) | 真实环境验收工具与证据记录器。 |
+| [`deploy/teams-cloud/`](deploy/teams-cloud/README.md) | 受控 ARM64 Teams 云部署包、镜像锁定、预检和限额资源清理。 |
 
 Read the directory README before running any tool. Tools must state which host
 actions they perform and preserve a clear boundary between observation and

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-tool-catalog-bootstrap-v1.schema.json",
+  "title": "Bootstrap-only empty Exchange provider tool catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "items"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "items": {"type": "array", "maxItems": 0}
+  }
+}
