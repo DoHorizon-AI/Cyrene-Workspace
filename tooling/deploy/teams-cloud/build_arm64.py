@@ -2,9 +2,9 @@
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  📄 build_arm64.py                                                       │
 │  Module: tooling.deploy.teams_cloud.build_arm64                         │
-│  Role: Build from exact remote Git commits and record real ARM64 images. │
+│  Role: Build exact remote commits and record full ARM64 image footprints.│
 │                                                                          │
-│  模块职责：从精确远端提交构建 ARM64 镜像并记录真实制品身份。             │
+│  模块职责：从精确远端提交构建 ARM64 镜像并记录完整本地磁盘占用。       │
 └──────────────────────────────────────────────────────────────────────────┘
 """
 
@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -35,6 +36,12 @@ REMOTE_ALLOWLIST = {
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SECRET_ARG_RE = re.compile(r"(secret|token|password|private.?key|credential)", re.IGNORECASE)
+MAX_IMAGE_SAVE_ARCHIVE_BYTES = 32 * 1024**3
+MAX_IMAGE_SAVE_MEMBERS = 8192
+MAX_OCI_JSON_BYTES = 4 * 1024**2
+MAX_OCI_MANIFESTS = 64
+MAX_OCI_INDEX_DEPTH = 4
+MAX_OCI_LAYERS = 512
 
 
 class BuildError(ValueError):
@@ -288,7 +295,15 @@ def _workspace_is_exact_and_clean(plan: dict[str, Any], workspace_root: Path) ->
 
 
 def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, Any]:
-    """Build all plan images from remote snapshots and write a local image lock."""
+    """Build pinned images and lock their post-unpack local Docker store footprints.
+
+    `sizeBytes` is the larger of Docker's materialized image size and
+    `SizeRootFs + compressed OCI layers`; it never records the pre-unpack layer-only
+    size returned immediately after Buildx import.
+
+    中文：从固定远端提交构建镜像，并记录解包后的本地 Docker 存储估算。
+    `sizeBytes` 取解包镜像大小与“完整根文件系统 + 压缩层”中的较大值。
+    """
 
     plan = validate_plan(plan_path)
     workspace_root = Path(__file__).resolve().parents[3]
@@ -331,11 +346,12 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
         for image_key, reference in plan.get("externalImages", {}).items():
             resolved = resolve_image(reference)
             _run(["docker", "pull", "--platform", "linux/arm64", resolved["immutableReference"]])
-            image_id, image_size = _inspect_local_image(resolved["immutableReference"])
             local_name = (
                 f"cyrene-pinned/{image_key.lower()}:{resolved['indexDigest'].split(':', 1)[1][:12]}"
             )
             _run(["docker", "image", "tag", resolved["immutableReference"], local_name])
+            image_id, _initial_size = _inspect_local_image(local_name)
+            image_size = _measure_local_image_store_bytes(local_name, image_id)["sizeBytes"]
             resolved["localImage"] = local_name
             resolved["imageId"] = image_id
             resolved["sizeBytes"] = image_size
@@ -405,9 +421,7 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
                 inspect["Id"]
             ):
                 raise BuildError(f"built image {service} has no content-addressed local image ID")
-            image_size = inspect.get("Size")
-            if not isinstance(image_size, int) or image_size <= 0:
-                raise BuildError(f"built image {service} has no measured local image size")
+            image_size = _measure_local_image_store_bytes(image_ref, inspect["Id"])["sizeBytes"]
             labels = inspect.get("Config", {}).get("Labels") or {}
             expected_revision = source_commits[build_row["sourceLabelRepo"]]
             if labels.get("org.opencontainers.image.revision") != expected_revision:
@@ -467,6 +481,391 @@ def _inspect_local_image(reference: str, docker_prefix: list[str] | None = None)
     if platform_value not in {"linux/arm64", "linux/aarch64"}:
         raise BuildError(f"image {reference} reports {platform_value}, expected linux/arm64")
     return inspect.get("Id", ""), int(inspect.get("Size", 0))
+
+
+def _read_oci_json_member(
+    archive: tarfile.TarFile, members: dict[str, tarfile.TarInfo], name: str
+) -> tuple[dict[str, Any], bytes]:
+    """Read one bounded regular JSON member from a Docker OCI image archive."""
+
+    member = members.get(name)
+    if member is None or not member.isfile() or member.size > MAX_OCI_JSON_BYTES:
+        raise BuildError(f"Docker image archive metadata is missing or oversized: {name}")
+    stream = archive.extractfile(member)
+    if stream is None:
+        raise BuildError(f"Docker image archive metadata is unreadable: {name}")
+    raw = stream.read(MAX_OCI_JSON_BYTES + 1)
+    if len(raw) != member.size or len(raw) > MAX_OCI_JSON_BYTES:
+        raise BuildError(f"Docker image archive metadata is truncated: {name}")
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise BuildError(f"Docker image archive metadata is invalid JSON: {name}") from error
+    if not isinstance(document, dict):
+        raise BuildError(f"Docker image archive metadata is not an object: {name}")
+    return document, raw
+
+
+def _verify_archive_blob(
+    archive: tarfile.TarFile,
+    members: dict[str, tarfile.TarInfo],
+    digest: str,
+    expected_size: int,
+) -> None:
+    """Verify one content-addressed OCI blob without extracting it to disk."""
+
+    if not IMAGE_DIGEST_RE.fullmatch(digest) or expected_size <= 0:
+        raise BuildError("Docker image archive contains a malformed layer descriptor")
+    member = members.get("blobs/sha256/" + digest.partition(":")[2])
+    if member is None or not member.isfile() or member.size != expected_size:
+        raise BuildError("Docker image archive is missing a declared content-addressed blob")
+    stream = archive.extractfile(member)
+    if stream is None:
+        raise BuildError("Docker image archive blob is unreadable")
+    hasher = hashlib.sha256()
+    bytes_read = 0
+    while True:
+        chunk = stream.read(1024 * 1024)
+        if not chunk:
+            break
+        bytes_read += len(chunk)
+        if bytes_read > expected_size:
+            raise BuildError("Docker image archive blob exceeds its declared size")
+        hasher.update(chunk)
+    if bytes_read != expected_size or "sha256:" + hasher.hexdigest() != digest:
+        raise BuildError("Docker image archive blob failed its content digest check")
+
+
+def _compressed_oci_layer_bytes(
+    reference: str,
+    expected_image_id: str,
+    docker_prefix: list[str] | None = None,
+) -> int:
+    """Validate and total unique compressed OCI layers from `docker image save`.
+
+    中文：核验镜像归档中的内容摘要，并统计唯一压缩层的实际字节数。
+    """
+
+    prefix = docker_prefix or ["docker"]
+    command = [*prefix, "image", "save", reference]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise BuildError("could not start Docker image archive export") from error
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        raise BuildError("Docker image archive export has no output stream")
+
+    try:
+        with tempfile.TemporaryFile(prefix="cyrene-image-save-") as saved_archive:
+            archive_bytes = 0
+            while True:
+                chunk = process.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                archive_bytes += len(chunk)
+                if archive_bytes > MAX_IMAGE_SAVE_ARCHIVE_BYTES:
+                    process.terminate()
+                    raise BuildError("Docker image archive exceeds its bounded size")
+                saved_archive.write(chunk)
+            process.stdout.close()
+            exit_code = process.wait()
+            if exit_code != 0:
+                raise BuildError(f"Docker image archive export failed ({exit_code})")
+            if archive_bytes == 0:
+                raise BuildError("Docker image archive export was empty")
+            saved_archive.seek(0)
+            with tarfile.open(fileobj=saved_archive, mode="r:") as archive:
+                try:
+                    archive_members = archive.getmembers()
+                except (tarfile.TarError, OSError) as error:
+                    raise BuildError("Docker image archive directory is invalid") from error
+                if len(archive_members) > MAX_IMAGE_SAVE_MEMBERS:
+                    raise BuildError("Docker image archive contains too many entries")
+                members: dict[str, tarfile.TarInfo] = {}
+                for member in archive_members:
+                    member_path = PurePosixPath(member.name)
+                    if member_path.is_absolute() or ".." in member_path.parts:
+                        raise BuildError("Docker image archive contains an unsafe member path")
+                    if member.name in members:
+                        raise BuildError("Docker image archive contains duplicate member paths")
+                    members[member.name] = member
+
+                layout, _layout_bytes = _read_oci_json_member(archive, members, "oci-layout")
+                if layout.get("imageLayoutVersion") != "1.0.0":
+                    raise BuildError("Docker image archive uses an unsupported OCI layout version")
+                index, _index_bytes = _read_oci_json_member(archive, members, "index.json")
+                if index.get("schemaVersion") != 2:
+                    raise BuildError("Docker image archive OCI index is invalid")
+                matching_manifests: list[tuple[dict[str, Any], dict[str, Any]]] = []
+                seen_descriptors: set[str] = set()
+                descriptor_count = 0
+
+                def visit_descriptor(descriptor: Any, depth: int) -> None:
+                    """Follow bounded OCI indexes to one platform-matched image manifest."""
+
+                    nonlocal descriptor_count
+                    if not isinstance(descriptor, dict):
+                        raise BuildError("Docker image archive OCI index descriptor is invalid")
+                    descriptor_count += 1
+                    if descriptor_count > MAX_OCI_MANIFESTS:
+                        raise BuildError("Docker image archive OCI index has too many descriptors")
+                    digest, descriptor_size = descriptor.get("digest"), descriptor.get("size")
+                    if (
+                        not isinstance(digest, str)
+                        or not IMAGE_DIGEST_RE.fullmatch(digest)
+                        or not isinstance(descriptor_size, int)
+                        or isinstance(descriptor_size, bool)
+                        or descriptor_size <= 0
+                        or descriptor_size > MAX_OCI_JSON_BYTES
+                    ):
+                        raise BuildError("Docker image archive OCI descriptor is invalid")
+
+                    platform_info = descriptor.get("platform")
+                    if platform_info is not None:
+                        if not isinstance(platform_info, dict):
+                            raise BuildError("Docker image archive descriptor platform is invalid")
+                        os_name, architecture = (
+                            platform_info.get("os"),
+                            platform_info.get("architecture"),
+                        )
+                        if not isinstance(os_name, str) or not isinstance(architecture, str):
+                            return
+                        if os_name == "unknown" or architecture == "unknown":
+                            return
+                        if os_name != "linux" or architecture not in {"arm64", "aarch64"}:
+                            return
+                    if digest in seen_descriptors:
+                        return
+                    seen_descriptors.add(digest)
+
+                    document, document_bytes = _read_oci_json_member(
+                        archive,
+                        members,
+                        "blobs/sha256/" + digest.partition(":")[2],
+                    )
+                    if (
+                        len(document_bytes) != descriptor_size
+                        or "sha256:" + hashlib.sha256(document_bytes).hexdigest() != digest
+                    ):
+                        raise BuildError(
+                            "Docker image archive OCI descriptor failed its digest check"
+                        )
+
+                    nested_descriptors = document.get("manifests")
+                    if nested_descriptors is not None:
+                        if (
+                            depth >= MAX_OCI_INDEX_DEPTH
+                            or document.get("schemaVersion") != 2
+                            or not isinstance(nested_descriptors, list)
+                            or not nested_descriptors
+                            or len(nested_descriptors) > MAX_OCI_MANIFESTS
+                        ):
+                            raise BuildError("Docker image archive nested OCI index is invalid")
+                        for nested in nested_descriptors:
+                            visit_descriptor(nested, depth + 1)
+                        return
+
+                    manifest = document
+                    if document.get("schemaVersion") != 2 or not isinstance(
+                        document.get("layers"), list
+                    ):
+                        raise BuildError("Docker image archive descriptor is not an image manifest")
+                    config_descriptor = manifest.get("config")
+                    if not isinstance(config_descriptor, dict):
+                        raise BuildError("Docker image archive manifest has no config descriptor")
+                    config_digest = config_descriptor.get("digest")
+                    config_size = config_descriptor.get("size")
+                    if (
+                        not isinstance(config_digest, str)
+                        or not IMAGE_DIGEST_RE.fullmatch(config_digest)
+                        or not isinstance(config_size, int)
+                        or isinstance(config_size, bool)
+                        or config_size <= 0
+                        or config_size > MAX_OCI_JSON_BYTES
+                    ):
+                        raise BuildError("Docker image archive config descriptor is invalid")
+                    if digest != expected_image_id and config_digest != expected_image_id:
+                        return
+                    config, config_bytes = _read_oci_json_member(
+                        archive,
+                        members,
+                        "blobs/sha256/" + config_digest.partition(":")[2],
+                    )
+                    if (
+                        len(config_bytes) != config_size
+                        or "sha256:" + hashlib.sha256(config_bytes).hexdigest() != config_digest
+                    ):
+                        raise BuildError("Docker image archive config failed its digest check")
+                    if config.get("os") != "linux" or config.get("architecture") not in {
+                        "arm64",
+                        "aarch64",
+                    }:
+                        raise BuildError("Docker image archive config is not linux/arm64")
+                    matching_manifests.append((manifest, config))
+
+                descriptors = index.get("manifests")
+                if (
+                    not isinstance(descriptors, list)
+                    or not descriptors
+                    or len(descriptors) > MAX_OCI_MANIFESTS
+                ):
+                    raise BuildError("Docker image archive OCI index is invalid")
+                for descriptor in descriptors:
+                    visit_descriptor(descriptor, 0)
+
+                if len(matching_manifests) != 1:
+                    raise BuildError(
+                        "Docker image archive does not contain exactly one manifest for the locked image ID"
+                    )
+                manifest, config = matching_manifests[0]
+                layers = manifest.get("layers")
+                if not isinstance(layers, list) or len(layers) > MAX_OCI_LAYERS:
+                    raise BuildError("Docker image archive layer list is invalid")
+                rootfs = config.get("rootfs")
+                diff_ids = rootfs.get("diff_ids") if isinstance(rootfs, dict) else None
+                if (
+                    not isinstance(diff_ids, list)
+                    or len(diff_ids) != len(layers)
+                    or any(
+                        not isinstance(diff_id, str) or not IMAGE_DIGEST_RE.fullmatch(diff_id)
+                        for diff_id in diff_ids
+                    )
+                ):
+                    raise BuildError("Docker image archive config does not match its layer count")
+                layer_sizes: dict[str, int] = {}
+                accepted_layer_prefixes = (
+                    "application/vnd.oci.image.layer.",
+                    "application/vnd.oci.image.layer.nondistributable.",
+                    "application/vnd.docker.image.rootfs.diff.",
+                )
+                for layer in layers:
+                    if not isinstance(layer, dict):
+                        raise BuildError("Docker image archive layer descriptor is invalid")
+                    digest, size, media_type = (
+                        layer.get("digest"),
+                        layer.get("size"),
+                        layer.get("mediaType"),
+                    )
+                    if (
+                        not isinstance(digest, str)
+                        or not IMAGE_DIGEST_RE.fullmatch(digest)
+                        or not isinstance(size, int)
+                        or isinstance(size, bool)
+                        or size <= 0
+                        or size > MAX_IMAGE_SAVE_ARCHIVE_BYTES
+                        or not isinstance(media_type, str)
+                        or not media_type.startswith(accepted_layer_prefixes)
+                    ):
+                        raise BuildError("Docker image archive layer descriptor is malformed")
+                    previous = layer_sizes.setdefault(digest, size)
+                    if previous != size:
+                        raise BuildError(
+                            "Docker image archive repeats a layer digest with new size"
+                        )
+
+                if not layer_sizes:
+                    raise BuildError("Docker image archive contains no content layers")
+                for digest, size in layer_sizes.items():
+                    _verify_archive_blob(archive, members, digest, size)
+                return sum(layer_sizes.values())
+    except (OSError, tarfile.TarError) as error:
+        raise BuildError("Docker image archive could not be measured safely") from error
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def _measure_local_image_store_bytes(
+    reference: str,
+    expected_image_id: str,
+    docker_prefix: list[str] | None = None,
+) -> dict[str, int]:
+    """Measure a conservative full ARM64 image footprint without starting its entrypoint.
+
+    A labelled, no-network container is created but never started so Docker can report
+    `SizeRootFs`. The final estimate also includes compressed OCI blobs and is removed
+    in `finally` by its unique container ID.
+
+    中文：创建不联网且不启动的临时容器，让 Docker 展开镜像并读取完整根文件系统大小；
+    再加上压缩 OCI 层，并在 `finally` 中按本次容器 ID 清理。
+    """
+
+    prefix = docker_prefix or ["docker"]
+    probe_name = "cyrene-size-probe-" + uuid.uuid4().hex
+    probe_created = False
+    probe_reference = probe_name
+    try:
+        container_id = _run(
+            [
+                *prefix,
+                "container",
+                "create",
+                "--platform",
+                "linux/arm64",
+                "--network",
+                "none",
+                "--name",
+                probe_name,
+                "--label",
+                "io.cyrene.teams-cloud.size-probe=" + probe_name,
+                reference,
+            ],
+            capture=True,
+        ).strip()
+        probe_created = True
+        if not container_id or not re.fullmatch(r"[0-9a-f]{12,64}", container_id):
+            raise BuildError("Docker did not return a valid image-size probe container ID")
+        probe_reference = container_id
+        container_info = json.loads(
+            _run(
+                [*prefix, "container", "inspect", "--size", container_id],
+                capture=True,
+            )
+        )
+        if not isinstance(container_info, list) or len(container_info) != 1:
+            raise BuildError("Docker image-size probe returned an invalid container record")
+        info = container_info[0]
+        if info.get("Image") != expected_image_id:
+            raise BuildError("Docker image-size probe points at a different local image ID")
+        probe_config = info.get("Config")
+        probe_labels = probe_config.get("Labels") if isinstance(probe_config, dict) else None
+        if (
+            not isinstance(probe_labels, dict)
+            or probe_labels.get("io.cyrene.teams-cloud.size-probe") != probe_name
+        ):
+            raise BuildError(
+                "Docker image-size probe container is missing its unique ownership label"
+            )
+        state = info.get("State")
+        if not isinstance(state, dict) or state.get("Status") != "created" or state.get("Running"):
+            raise BuildError("Docker image-size probe container was started unexpectedly")
+        rootfs_size = info.get("SizeRootFs")
+        if not isinstance(rootfs_size, int) or isinstance(rootfs_size, bool) or rootfs_size <= 0:
+            raise BuildError("Docker did not report an unpacked root filesystem size")
+        local_id, materialized_image_size = _inspect_local_image(reference, prefix)
+        if local_id != expected_image_id:
+            raise BuildError("local image changed while measuring its root filesystem")
+        compressed_layer_bytes = _compressed_oci_layer_bytes(reference, expected_image_id, prefix)
+        return {
+            "sizeBytes": max(materialized_image_size, rootfs_size + compressed_layer_bytes),
+            "unpackedRootFsBytes": rootfs_size,
+            "compressedLayerBytes": compressed_layer_bytes,
+            "materializedImageBytes": materialized_image_size,
+        }
+    finally:
+        if probe_created:
+            _run([*prefix, "container", "rm", probe_reference], capture=True)
 
 
 def _image_local_id(reference: str, docker_prefix: list[str] | None = None) -> str:

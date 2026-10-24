@@ -21,7 +21,7 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `config/requirements.huggingface-cli.lock` | Hash-locked ARM64/Python 3.12 `hf` CLI dependency closure / 固定哈希的 ARM64/Python 3.12 `hf` CLI 依赖闭包 |
 | `config/acceptance-plan.schema.json`, `config/acceptance-plan*.template.json`, `config/acceptance-evidence.template.json`, `config/cloud-api-evidence.*` | USD 5 cumulative reservations, closed real-API stage receipts, and exact cleanup actions / 5 美元跨阶段预算、正式 API 阶段回执和精确清理动作 |
 | `config/connector-bindings*.json`, `config/connector-tool-catalog*.json` | Bootstrap-only empty maps plus production schemas for Exchange-issued bindings and live provider tool catalogs / 仅限引导阶段的空映射，以及 Exchange 绑定与实时 Provider 工具目录的生产 Schema |
-| `build_arm64.py` | Fetch exact remote commits, build ARM64 images, and record image IDs / 获取精确远端提交、构建 ARM64 镜像并记录镜像 ID |
+| `build_arm64.py` | Fetch exact remote commits, build ARM64 images, and record image IDs and materialized disk footprints / 获取精确远端提交、构建 ARM64 镜像并记录镜像 ID 与落盘占用 |
 | `transfer_arm64.py` | Enforce strict SSH/capacity gates and stream locked images directly into Docker / 严格核验 SSH 和容量门槛，并将锁定镜像直接流式导入 Docker |
 | `preflight.py` | Read-only host, image, config, secret, stage-evidence, tool-catalog, and ingress checks / 只读核验主机、镜像、配置、密钥、阶段回执、工具目录和入口 |
 | `plugin_grpc_health_probe.py` | Verify private DirectPluginRuntime mTLS health and plugin identity / 通过内网 mTLS 核验 DirectPluginRuntime 健康状态与插件身份 |
