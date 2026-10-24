@@ -34,7 +34,7 @@ ENV CYRENE_WORKSPACE_CONNECTOR_AUTHORITY_LISTEN=0.0.0.0:50051 \
     CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL_FILE=/run/secrets/directory-runtime-reader-database-url
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates curl libssl3 python3-minimal \
+    && apt-get install --yes --no-install-recommends ca-certificates curl libssl3 python3 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home cyrene
 COPY --from=build --chown=10001:10001 /source/target/release/cy-workspace-connector-authority-host /usr/local/bin/cy-workspace-connector-authority-host
