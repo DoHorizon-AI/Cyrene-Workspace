@@ -20,6 +20,8 @@ This directory contains the canonical, current-first documentation for the Cyren
 ## 2. Engineering & Developer Guides
 - [**QUICKSTART.md**](QUICKSTART.md): Prerequisites, bootstrap, and developer onboarding.
 - [**DEVELOPMENT.md**](DEVELOPMENT.md): Multi-repo topology, agent worktree isolation, JetBrains IDE integration, and quality gates.
+- [**TEAMS_CHAT_PRIVACY.md**](TEAMS_CHAT_PRIVACY.md): Internal Teams assistant data processing, storage, and contact notice.
+- [**TEAMS_CHAT_USAGE.md**](TEAMS_CHAT_USAGE.md): Internal Teams assistant usage and connector-operation guidance.
 - [**TASK_LIFECYCLE.md**](TASK_LIFECYCLE.md): Cross-tool delivery requirements, guarded cleanup, and preserved unfinished work. 跨工具交付、安全清理与未完成任务保留规则。
 - [**DATA_TOOLS_TRIAL.md**](DATA_TOOLS_TRIAL.md): Linux Catalyst/Echo trial launcher, optional UI, remote binding, backup, and cleanup.
 - [**CATALYST_V02_WORKFLOW.md**](CATALYST_V02_WORKFLOW.md): Catalyst-only source review, isolated OCR setup, one-call local model acceptance, dual-profile publishing, and restart recovery.
@@ -65,6 +67,8 @@ This directory contains the canonical, current-first documentation for the Cyren
 ## 2. 工程与开发者指南
 - [**QUICKSTART.md**](QUICKSTART.md)：前置条件、引导流程和开发者入门。
 - [**DEVELOPMENT.md**](DEVELOPMENT.md)：多仓库拓扑、Agent 工作树隔离、JetBrains IDE 集成和质量门禁。
+- [**TEAMS_CHAT_PRIVACY.md**](TEAMS_CHAT_PRIVACY.md)：Teams 助手处理信息、存储和联系渠道的内部说明。
+- [**TEAMS_CHAT_USAGE.md**](TEAMS_CHAT_USAGE.md)：Teams 助手使用方式与连接器操作说明。
 - [**DATA_TOOLS_TRIAL.md**](DATA_TOOLS_TRIAL.md)：Linux Catalyst/Echo 试用启动器、可选 UI、远程绑定、备份和清理。
 - [**CATALYST_V02_WORKFLOW.md**](CATALYST_V02_WORKFLOW.md)：Catalyst-only 来源审核、隔离 OCR 配置、单次本地模型验收、双制品发布和重启恢复。
 - [**Component update packaging**](../packaging/service-bundle.md)：Linux 组件更新器、已验证目录元数据和不可变服务打包。
