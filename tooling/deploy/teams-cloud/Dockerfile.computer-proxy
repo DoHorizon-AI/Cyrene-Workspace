@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.7
+
+ARG CADDY_BASE_IMAGE
+FROM ${CADDY_BASE_IMAGE}
+
+USER root
+RUN apk add --no-cache libcap \
+    && setcap -r /usr/bin/caddy \
+    && test -z "$(getcap /usr/bin/caddy)" \
+    && apk del libcap
+
+ENV HOME=/tmp
+USER 10001:10001
+EXPOSE 7443
+ENTRYPOINT ["caddy"]
+CMD ["run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

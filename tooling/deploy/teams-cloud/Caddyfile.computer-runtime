@@ -1,0 +1,16 @@
+{
+	admin off
+	auto_https off
+}
+
+# Exchange is the only TLS client. Caddy terminates mTLS and forwards private h2c.
+# Only the isolated computer runtime can attach to the upstream network.
+:7443 {
+	tls /run/secrets/computer-runtime-proxy-server-cert /run/secrets/computer-runtime-proxy-server-key {
+		client_auth {
+			mode require_and_verify
+			trust_pool file /run/secrets/exchange-plugin-client-ca
+		}
+	}
+	reverse_proxy h2c://computer-runtime:50051
+}

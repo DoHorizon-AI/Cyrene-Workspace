@@ -26,6 +26,21 @@
         }
       }
     },
+    "binaryArtifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "version", "sha256", "sizeBytes", "stagingPath"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$"},
+          "version": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "sizeBytes": {"type": "integer", "minimum": 1},
+          "stagingPath": {"type": "string", "minLength": 1}
+        }
+      }
+    },
     "baseImages": {
       "type": "object",
       "additionalProperties": {"$ref": "#/$defs/resolvedImage"}
@@ -64,6 +79,11 @@
             "type": "object",
             "minProperties": 1,
             "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+          },
+          "binaryArtifacts": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$"}},
+          "binaryArtifactDigests": {
+            "type": "object",
+            "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
           },
           "registryDigest": {
             "oneOf": [

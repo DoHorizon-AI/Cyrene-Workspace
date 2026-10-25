@@ -62,6 +62,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**Exchange Integration v1 部署与验收**](EXCHANGE_INTEGRATION_V1_DEPLOYMENT.md)：安装模式、Platform Package Runtime 选择、主机配置和 NOT_RUN 原生验收门禁。
 - [**Teams 云端部署**](TEAMS_CLOUD_DEPLOYMENT.md)：ARM64 镜像锁定、独立 Teams ingress、Directory owner 维护、分阶段 Provider、回滚和有界成本验收。
 - [**可选 MXC 执行**](MXC_EXECUTION.md)：固定版本的命令沙箱、真实隔离探测、既有执行权属和部署限制。
+- [**主动助手 v1 部署配置**](TEAMS_CLOUD_DEPLOYMENT.md)：默认模型、Teams 持续聊天、持久工作流、GitHub 主动观察和低权限电脑执行边界。
 - [**模块化发行 ADR**](ADR_MODULAR_DISTRIBUTION_V01.md)：Ubuntu 工作负载选择、签名发布、部署边界与安装后验收门禁。
 
 ---
