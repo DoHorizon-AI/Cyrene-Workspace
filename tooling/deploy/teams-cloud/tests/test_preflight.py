@@ -34,6 +34,7 @@ transfer = importlib.import_module("transfer_arm64")
 
 DEPLOYMENT_ROOT = Path(__file__).resolve().parents[1]
 UUID = "00000000-0000-4000-8000-000000000001"
+UUID_2 = "00000000-0000-4000-8000-000000000002"
 
 
 @pytest.mark.parametrize("memory_mib", [3584, 3893])
@@ -91,14 +92,22 @@ def test_host_recognition_still_rejects_smaller_memory_guests(
         transfer._remote_facts(["ssh"])
 
 
-def _binding(provider: str, operation: str, projection: str, mutating: bool) -> dict[str, Any]:
+def _binding(
+    provider: str,
+    operation: str,
+    projection: str,
+    mutating: bool,
+    *,
+    connection_ref: str = UUID,
+    profile_ref: str | None = None,
+) -> dict[str, Any]:
     """Return one synthetic Exchange binding for a canonical operation."""
 
     return {
-        "bindingId": f"exchange-{provider}-{UUID}",
-        "connectionRef": UUID,
+        "bindingId": f"exchange-{provider}-{connection_ref}",
+        "connectionRef": connection_ref,
         "providerId": provider,
-        "profileRef": f"{provider}-primary",
+        "profileRef": profile_ref or f"{provider}-primary",
         "tools": [
             {
                 "toolId": preflight.CONNECTOR_OPERATION_POLICIES[operation][0],
@@ -108,6 +117,138 @@ def _binding(provider: str, operation: str, projection: str, mutating: bool) -> 
             }
         ],
     }
+
+
+def test_connector_bindings_allow_multiple_connections_for_one_profile(tmp_path: Path) -> None:
+    """Allow Exchange connections to share a profile while keeping distinct IDs."""
+
+    bindings = tmp_path / "bindings.json"
+    bindings.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "bindings": [
+                    _binding(
+                        "github",
+                        "github.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=UUID,
+                        profile_ref="github-shared-account",
+                    ),
+                    _binding(
+                        "github",
+                        "github.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=UUID_2,
+                        profile_ref="github-shared-account",
+                    ),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    preflight._validate_connector_bindings(bindings, {"github"})
+
+
+def test_connector_bindings_reject_duplicate_connection_across_profiles(
+    tmp_path: Path,
+) -> None:
+    """Reject one Exchange connection UUID repeated under different profile labels."""
+
+    bindings = tmp_path / "duplicate-connection.json"
+    bindings.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "bindings": [
+                    _binding(
+                        "github",
+                        "github.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=UUID,
+                        profile_ref="github-primary",
+                    ),
+                    _binding(
+                        "github",
+                        "github.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=UUID,
+                        profile_ref="github-secondary",
+                    ),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(preflight.PreflightError, match="connection UUIDs must be unique"):
+        preflight._validate_connector_bindings(bindings, {"github"})
+
+
+def test_connector_bindings_reject_duplicate_connection_across_providers(
+    tmp_path: Path,
+) -> None:
+    """Keep Exchange connection UUID uniqueness global across providers."""
+
+    bindings = tmp_path / "cross-provider-duplicate-connection.json"
+    bindings.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "bindings": [
+                    _binding(
+                        "github",
+                        "github.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=UUID,
+                    ),
+                    _binding(
+                        "huggingface",
+                        "huggingface.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=UUID,
+                    ),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(preflight.PreflightError, match="connection UUIDs must be unique"):
+        preflight._validate_connector_bindings(bindings, {"github", "huggingface"})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("bindingId", "replace-with-binding"),
+        ("profileRef", "replace-with-profile"),
+        ("connectionRef", "<connection>"),
+        ("toolId", "replace-with-tool"),
+    ],
+)
+def test_connector_bindings_reject_placeholders_in_machine_fields(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """Keep placeholder rejection for binding identity and fixed tool IDs."""
+
+    binding = _binding("github", "github.branch.get", "github_branch", False)
+    if field == "toolId":
+        binding["tools"][0][field] = value
+    else:
+        binding[field] = value
+    bindings = tmp_path / "placeholder-binding.json"
+    bindings.write_text(json.dumps({"schemaVersion": 1, "bindings": [binding]}), encoding="utf-8")
+
+    with pytest.raises(preflight.PreflightError, match="still contains a placeholder"):
+        preflight._validate_connector_bindings(bindings, {"github"})
 
 
 def test_vendor_cli_bindings_require_canonical_mutating_profile_scope(tmp_path: Path) -> None:
@@ -120,7 +261,13 @@ def test_vendor_cli_bindings_require_canonical_mutating_profile_scope(tmp_path: 
                 "schemaVersion": 1,
                 "bindings": [
                     _binding("github", "github.vendor.cli.execute", "profile", True),
-                    _binding("huggingface", "huggingface.vendor.cli.execute", "profile", True),
+                    _binding(
+                        "huggingface",
+                        "huggingface.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=UUID_2,
+                    ),
                 ],
             }
         ),
@@ -1029,7 +1176,7 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
                     {
                         "id": binding["tools"][0]["toolId"],
                         "name": "List repositories",
-                        "description": "List repositories from the linked profile.",
+                        "description": "Read cyrene/assistant/<task> repositories from this profile.",
                         "readOnly": True,
                         "inputSchema": {
                             "type": "object",
@@ -1047,6 +1194,22 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
     preflight._validate_connector_tool_catalog(
         catalog_file, bindings_file, {"github", "huggingface"}
     )
+
+    for schema_path, placeholder_value in (
+        (("properties", "profile_ref", "default"), "replace-with-profile"),
+        (("properties", "profile_ref", "enum"), ["replace-with-profile"]),
+        (("required",), ["replace-with-required-field"]),
+    ):
+        with_placeholder = json.loads(json.dumps(catalog))
+        schema = with_placeholder["items"][0]["tools"][0]["inputSchema"]
+        for field in schema_path[:-1]:
+            schema = schema[field]
+        schema[schema_path[-1]] = placeholder_value
+        catalog_file.write_text(json.dumps(with_placeholder))
+        with pytest.raises(preflight.PreflightError, match="unsupported schema"):
+            preflight._validate_connector_tool_catalog(
+                catalog_file, bindings_file, {"github", "huggingface"}
+            )
 
     wrong_access = json.loads(json.dumps(catalog))
     wrong_access["items"][0]["tools"][0]["readOnly"] = False

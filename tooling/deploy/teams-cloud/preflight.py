@@ -617,7 +617,7 @@ CONNECTOR_TARGET_ARGUMENTS = {
 def _validate_connector_bindings(
     path: Path, expected_providers: set[str], *, allow_empty: bool = False
 ) -> None:
-    """Require exact Exchange-issued stage bindings and canonical operation maps."""
+    """Require globally unique Exchange connections and canonical operation maps."""
 
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -635,7 +635,8 @@ def _validate_connector_bindings(
         raise PreflightError("Navigator needs at least one Exchange-issued GitHub or HF binding")
     if not bindings and allow_empty:
         return
-    seen: set[tuple[str, str]] = set()
+    seen_connection_refs: set[str] = set()
+    seen_binding_ids: set[str] = set()
     supported_providers = {"github", "huggingface", "azure", "gcp", "runpod", "computer"}
     for binding in bindings:
         if (
@@ -664,10 +665,12 @@ def _validate_connector_bindings(
             raise PreflightError(
                 "Navigator binding ID does not match the Exchange-issued connection/provider"
             )
-        key = (binding["providerId"], profile)
-        if key in seen:
-            raise PreflightError("Navigator provider profile bindings must be unique")
-        seen.add(key)
+        if connection in seen_connection_refs:
+            raise PreflightError("Navigator connection UUIDs must be unique across bindings")
+        if binding["bindingId"] in seen_binding_ids:
+            raise PreflightError("Navigator binding IDs must be unique")
+        seen_connection_refs.add(connection)
+        seen_binding_ids.add(binding["bindingId"])
         tools = binding.get("tools")
         if not isinstance(tools, list) or not tools:
             raise PreflightError("Navigator bindings need fixed tool-operation mappings")
@@ -746,7 +749,7 @@ def _validate_connector_tool_catalog(
         or not isinstance(catalog.get("items"), list)
         or not isinstance(bindings, dict)
         or not isinstance(bindings.get("bindings"), list)
-        or PLACEHOLDER_RE.search(json.dumps(catalog, sort_keys=True))
+        or _catalog_contains_configuration_placeholder(catalog)
     ):
         raise PreflightError("Exchange connector tool catalog has an unsupported schema")
     items = catalog["items"]
@@ -849,6 +852,38 @@ def _validate_connector_tool_catalog(
                     )
             if operation_id == "github.actions.rerun_failed":
                 _validate_github_rerun_input_schema(catalog_tools[tool_id]["inputSchema"])
+
+
+def _catalog_contains_configuration_placeholder(catalog: Any) -> bool:
+    """Reject machine-value placeholders while allowing angle-bracket tool prose."""
+
+    if not isinstance(catalog, dict):
+        return bool(PLACEHOLDER_RE.search(json.dumps(catalog, sort_keys=True)))
+
+    filtered_catalog = dict(catalog)
+    items = catalog.get("items")
+    if isinstance(items, list):
+        filtered_items: list[Any] = []
+        for item in items:
+            if not isinstance(item, dict):
+                filtered_items.append(item)
+                continue
+            filtered_item = dict(item)
+            tools = item.get("tools")
+            if isinstance(tools, list):
+                filtered_tools: list[Any] = []
+                for tool in tools:
+                    if isinstance(tool, dict):
+                        filtered_tools.append(
+                            {key: value for key, value in tool.items() if key != "description"}
+                        )
+                    else:
+                        filtered_tools.append(tool)
+                filtered_item["tools"] = filtered_tools
+            filtered_items.append(filtered_item)
+        filtered_catalog["items"] = filtered_items
+
+    return bool(PLACEHOLDER_RE.search(json.dumps(filtered_catalog, sort_keys=True)))
 
 
 def _validate_github_rerun_input_schema(schema: dict[str, Any]) -> None:
