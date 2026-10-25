@@ -14,6 +14,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import namedtuple
@@ -504,7 +505,7 @@ def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() 
     assert environment["CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED"] == "false"
     assert environment["CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP"] == "true"
     assert environment["CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS"] == "2"
-    assert environment["CYRENE_WORKFLOWS_ENABLED"] == "true"
+    assert environment["CYRENE_WORKFLOWS_ENABLED"] == "${CYRENE_WORKFLOWS_ENABLED:-false}"
     assert not any("MCP" in name.upper() for name in environment)
     assert navigator["read_only"] is True
     assert navigator["cap_drop"] == ["ALL"]
@@ -536,6 +537,10 @@ def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() 
     preflight._validate_workflow_definition_disabled(workflow)
     assert (
         "CYRENE_HF_ENABLED=false"
+        in (DEPLOYMENT_ROOT / "config" / "codebuddy-acp.env.template").read_text()
+    )
+    assert (
+        "CYRENE_WORKFLOWS_ENABLED=false"
         in (DEPLOYMENT_ROOT / "config" / "codebuddy-acp.env.template").read_text()
     )
 
@@ -583,11 +588,87 @@ def test_workflows_engine_does_not_enable_a_definition() -> None:
         preflight._validate_workflow_definition_disabled({"enabled": True})
 
 
+@pytest.mark.parametrize("model", ["glm-5.3-flash", "deepseek-v4.1-flash"])
+def test_codebuddy_acp_workflow_metadata_matches_selected_native_model(model: str) -> None:
+    """Keep ACP WorkFlow metadata aligned with its runtime model and no-fallback policy."""
+
+    compose = {
+        "services": {
+            "navigator": {
+                "environment": {
+                    "CYRENE_HARNESS_EXECUTION_BACKEND": "codebuddy-acp",
+                    "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL": model,
+                }
+            }
+        }
+    }
+    workflow = {
+        "modelPolicy": {
+            "preferredProvider": "codebuddy",
+            "preferredModel": model,
+            "fallback": "configured_no_additional_spend",
+        }
+    }
+    preflight._validate_workflow_model_policy(compose, workflow)
+
+    workflow["modelPolicy"]["preferredProvider"] = "antigravity"
+    with pytest.raises(preflight.PreflightError, match="native model and no-spend metadata"):
+        preflight._validate_workflow_model_policy(compose, workflow)
+
+
 def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
     """Keep the per-run host bridge token out of environment, mounts, and CLI overrides."""
 
     valid = yaml.safe_load((DEPLOYMENT_ROOT / "compose.codebuddy-acp.yaml").read_text())
+    navigator = valid["services"]["navigator"]
+    navigator["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "false"
+    navigator["volumes"] = [
+        {
+            "type": "bind",
+            "source": "/private/secrets/codebuddy",
+            "target": "/home/navigator/.codebuddy",
+            "read_only": False,
+        },
+        {
+            "type": "volume",
+            "source": "cyrene-teams-cloud_navigator-sessions",
+            "target": "/var/lib/cyrene-navigator",
+        },
+        {
+            "type": "bind",
+            "source": "/private/config",
+            "target": "/run/teams-authorization",
+            "read_only": True,
+        },
+    ]
+    navigator["secrets"] = [
+        {"source": name, "target": name}
+        for name in (
+            "navigator-exchange-hmac-key",
+            "navigator-session-token",
+            "teams-navigator-hmac-key",
+            "internal-service-root-ca",
+        )
+    ]
+    navigator["configs"] = [
+        {"source": "connector-bindings", "target": "/run/config/connector-bindings.json"},
+        {
+            "source": "connector-tool-catalog",
+            "target": "/run/config/connector-tool-catalog.json",
+        },
+        {
+            "source": "responsibility-targets",
+            "target": "/run/config/responsibility-targets.v1.json",
+        },
+    ]
     preflight._validate_codebuddy_acp_boundary(valid)
+
+    enabled_workflows = json.loads(json.dumps(valid))
+    enabled_workflows["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "true"
+    preflight._validate_codebuddy_acp_boundary(enabled_workflows)
+    enabled_workflows["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "yes"
+    with pytest.raises(preflight.PreflightError, match="explicitly false or true"):
+        preflight._validate_codebuddy_acp_boundary(enabled_workflows)
 
     with_mcp_environment = json.loads(json.dumps(valid))
     with_mcp_environment["services"]["navigator"]["environment"][
@@ -609,6 +690,18 @@ def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
     ]
     with pytest.raises(preflight.PreflightError, match="legacy Antigravity model home"):
         preflight._validate_codebuddy_acp_boundary(with_legacy_home)
+
+    with_extra_host_bind = json.loads(json.dumps(valid))
+    with_extra_host_bind["services"]["navigator"]["volumes"].append(
+        {
+            "type": "bind",
+            "source": "/host/private",
+            "target": "/run/extra",
+            "read_only": True,
+        }
+    )
+    with pytest.raises(preflight.PreflightError, match="only its approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(with_extra_host_bind)
 
     with_custom_command = json.loads(json.dumps(valid))
     with_custom_command["services"]["navigator"]["command"] = ["sh", "-c", "codebuddy"]
@@ -1946,6 +2039,211 @@ def _exchange_configuration(providers: set[str]) -> dict[str, Any]:
     }
 
 
+@pytest.mark.parametrize("huggingface_enabled", [False, True])
+def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, huggingface_enabled: bool
+) -> None:
+    """Feed actual Compose-rendered values into the ACP, HF, and computer preflight gates."""
+
+    docker = preflight.shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker Compose config is required for rendered-profile validation")
+    safe_environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path / "home"),
+        "DOCKER_CONFIG": str(tmp_path / "docker-config"),
+    }
+    Path(safe_environment["HOME"]).mkdir()
+    Path(safe_environment["DOCKER_CONFIG"]).mkdir()
+    version = subprocess.run(
+        [docker, "compose", "version"],
+        capture_output=True,
+        check=False,
+        env=safe_environment,
+        text=True,
+    )
+    if version.returncode != 0:
+        pytest.skip("Docker Compose plugin is not installed")
+
+    config_dir = tmp_path / "config"
+    secrets_dir = tmp_path / "secrets"
+    codebuddy_home = secrets_dir / "codebuddy"
+    config_dir.mkdir()
+    secrets_dir.mkdir()
+    codebuddy_home.mkdir()
+    caddyfile = tmp_path / "Caddyfile.computer-runtime"
+    caddyfile.write_text(
+        "mode require_and_verify\n"
+        "trust_pool file /run/secrets/exchange-plugin-client-ca\n"
+        "reverse_proxy h2c://computer-runtime:50051\n",
+        encoding="utf-8",
+    )
+    staging_caddyfile = tmp_path / "Caddyfile.staging"
+    staging_caddyfile.write_text("# synthetic Compose config probe\n", encoding="utf-8")
+    responsibility_targets = config_dir / "responsibility-targets.v1.json"
+    responsibility_targets.write_text("{}\n", encoding="utf-8")
+    oauth_source = tmp_path / "huggingface-oauth.json"
+    oauth_source.write_text("{}\n", encoding="utf-8")
+
+    tenant_id = "00000000-0000-4000-8000-000000000003"
+    organization_id = "00000000-0000-4000-8000-000000000001"
+    workspace_id = "00000000-0000-4000-8000-000000000002"
+    integration = _exchange_configuration({"hf"} if huggingface_enabled else set())
+    integration["hostSecretRefs"] = {
+        "tls/plugin-root": "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
+        "tls/exchange-plugin-client-cert": "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE",
+        "tls/exchange-plugin-client-key": "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE",
+    }
+    integration["connectorHost"]["computerRunner"] = {
+        "profileRef": "computer-workspace-main",
+        "connectionRef": "00000000-0000-4000-8000-000000000004",
+        "organizationId": organization_id,
+        "workspaceId": workspace_id,
+        "expectedIssuer": f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        "directPlugin": {
+            "bindingId": "computer-runtime",
+            "connectionRef": "grpcs://computer-runtime-proxy:7443",
+            "transport": "mtls",
+            "mtls": {
+                "rootCertificateRef": "tls/plugin-root",
+                "clientCertificateRef": "tls/exchange-plugin-client-cert",
+                "clientKeyRef": "tls/exchange-plugin-client-key",
+            },
+        },
+        "maxCommandTimeoutMs": 600000,
+        "maxFileBytes": 1048576,
+        "maxReadBytes": 65536,
+        "maxDirectoryDepth": 32,
+    }
+
+    compose_files = [
+        DEPLOYMENT_ROOT / "compose.yaml",
+        *([DEPLOYMENT_ROOT / "compose.huggingface.yaml"] if huggingface_enabled else []),
+        DEPLOYMENT_ROOT / "compose.computer-runtime.yaml",
+        DEPLOYMENT_ROOT / "compose.codebuddy-acp.yaml",
+    ]
+    compose_text = "\n".join(path.read_text(encoding="utf-8") for path in compose_files)
+    variable_names = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_text))
+    values: dict[str, str] = {}
+    values.update(
+        {
+            "CYRENE_HF_ENABLED": "true" if huggingface_enabled else "false",
+            "CYRENE_CONFIG_DIR": str(config_dir),
+            "CYRENE_SECRETS_DIR": str(secrets_dir),
+            "CYRENE_CODEBUDDY_HOME": str(codebuddy_home),
+            "CYRENE_CADDYFILE": str(staging_caddyfile),
+            "CYRENE_COMPUTER_CADDYFILE": str(caddyfile),
+            "CYRENE_RESPONSIBILITY_TARGETS_HOST_FILE": str(responsibility_targets),
+            "CYRENE_HF_OAUTH_BOOTSTRAP_FILE": str(oauth_source),
+            "CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND": "codebuddy",
+            "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL": "glm-5.3-flash",
+            "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED": "false",
+            "CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP": "true",
+            "CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL": "",
+            "CYRENE_HARNESS_MODEL": "",
+            "CYRENE_HARNESS_MODEL_SOURCE": "",
+            "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "2",
+            "CYRENE_WORKFLOWS_ENABLED": "false",
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                integration, separators=(",", ":")
+            ),
+            "CYRENE_ACCOUNT_CENTER_CONFIGURATION_JSON": "{}",
+            "CYRENE_GITHUB_ISSUES_CONFIGURATION_JSON": "{}",
+            "CYRENE_TEAMS_CONNECTOR_CONFIGURATION_JSON": "{}",
+            "CYRENE_HUGGINGFACE_CONFIGURATION_JSON": "{}",
+            "CYRENE_ORGANIZATION_ID": organization_id,
+            "CYRENE_WORKSPACE_ID": workspace_id,
+            "CYRENE_AUTHORITY_AAD_TENANT_ID": tenant_id,
+            "TEAMS_TENANT_ID": tenant_id,
+            "CYRENE_PUBLIC_BIND": "127.0.0.1",
+            "CYRENE_HTTPS_PORT": "18443",
+            "CYRENE_AUTHORITY_EXCHANGE_MTLS_SHA256": "a" * 64,
+            "CYRENE_TEAMS_EXCHANGE_CONNECTION_REF": "00000000-0000-4000-8000-000000000020",
+            "CYRENE_TEAMS_EXCHANGE_PROFILE_REF": "teams-primary",
+            "CYRENE_COMPUTER_COMMAND_DEFAULT_TIMEOUT_MS": "30000",
+            "CYRENE_COMPUTER_COMMAND_MAX_TIMEOUT_MS": "600000",
+            "CYRENE_COMPUTER_MAX_OUTPUT_BYTES": "65536",
+            "CYRENE_COMPUTER_MAX_FILE_BYTES": "1048576",
+            "CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES": "2048",
+            "CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH": "32",
+            "CYRENE_COMPUTER_MAX_ARTIFACT_BYTES": "16777216",
+        }
+    )
+    for name in variable_names:
+        if name in values:
+            continue
+        if "IMAGE" in name or name == "CYRENE_CADDY_IMAGE" or name == "CYRENE_POSTGRES_IMAGE":
+            values[name] = "ghcr.io/cyrene/compose-probe:latest"
+        elif name.endswith("_JSON") and name not in values:
+            values[name] = "{}"
+        elif name.endswith("_ID"):
+            values[name] = "00000000-0000-4000-8000-000000000010"
+        elif name.endswith("_SHA256"):
+            values[name] = "a" * 64
+        elif name in {"TEAMS_FQDN"}:
+            values[name] = "teams.example.invalid"
+        elif name in {"TEAMS_ALLOWED_TEAM_IDS"}:
+            values[name] = "team-probe"
+        elif name.endswith("_PORT"):
+            values[name] = "18443"
+        elif name.endswith(("_DIR", "_FILE")) or "CADDYFILE" in name:
+            path = tmp_path / name.lower()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if name.endswith("_DIR"):
+                path.mkdir(exist_ok=True)
+            else:
+                path.touch(exist_ok=True)
+            values[name] = str(path)
+        else:
+            values[name] = "synthetic-value"
+
+    for compose_file in compose_files:
+        document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        for section in ("secrets", "configs"):
+            for row in document.get(section, {}).values():
+                template_path = row.get("file") if isinstance(row, dict) else None
+                if not isinstance(template_path, str):
+                    continue
+                resolved = re.sub(
+                    r"\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}",
+                    lambda match: values[match.group(1)],
+                    template_path,
+                )
+                path = Path(resolved)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(exist_ok=True)
+
+    env_file = tmp_path / "compose-probe.env"
+    env_file.write_text(
+        "".join(f"{name}={value}\n" for name, value in sorted(values.items())),
+        encoding="utf-8",
+    )
+    isolated_environment = dict(safe_environment)
+
+    def compose_config(argv: list[str], *, capture: bool = True) -> str:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            env=isolated_environment,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    monkeypatch.setattr(preflight, "_run", compose_config)
+    rendered = preflight._compose_config([docker], compose_files, [env_file])
+    assert ("huggingface" in rendered["services"]) is huggingface_enabled
+    runner = rendered["services"]["computer-runtime"]
+    proxy = rendered["services"]["computer-runtime-proxy"]
+    assert preflight._memory_limit_bytes(runner["mem_limit"]) == 512 * preflight.MIB
+    assert preflight._cpu_limit_decimal(runner["cpus"]) == preflight.Decimal("0.10")
+    assert preflight._memory_limit_bytes(proxy["mem_limit"]) == 64 * preflight.MIB
+    assert preflight._cpu_limit_decimal(proxy["cpus"]) == preflight.Decimal("0.05")
+    preflight._validate_profile_stage(rendered, "stage1")
+    preflight._validate_codebuddy_acp_boundary(rendered)
+
+
 def test_exchange_cloud_profiles_follow_compose_overlay_stage() -> None:
     """Keep Azure/GCP and RunPod absent from earlier Exchange profile maps."""
 
@@ -2190,9 +2488,44 @@ def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path
     }
     path = tmp_path / "connector-bootstrap.json"
     path.write_text(json.dumps(document), encoding="utf-8")
-    preflight._validate_connector_bootstrap_config(path, huggingface_enabled=False)
-    with pytest.raises(preflight.PreflightError, match="must match CYRENE_HF_ENABLED"):
-        preflight._validate_connector_bootstrap_config(path, huggingface_enabled=True)
+    expected_actor = preflight._connector_bootstrap_actor(
+        {
+            "services": {
+                "navigator": {
+                    "environment": {"TEAMS_TENANT_ID": "00000000-0000-4000-8000-000000000001"}
+                },
+                "directory-operator": {
+                    "environment": {
+                        "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": UUID,
+                    }
+                },
+                "workspace-authority": {
+                    "environment": {
+                        "CYRENE_ORGANIZATION_ID": "organization-test",
+                        "CYRENE_WORKSPACE_ID": "workspace-test",
+                    }
+                },
+            }
+        }
+    )
+    assert expected_actor == document["actor"]
+    preflight._validate_connector_bootstrap_config(
+        path, huggingface_enabled=False, expected_actor=expected_actor
+    )
+    with pytest.raises(
+        preflight.PreflightError, match="approved Directory owner and CYRENE_HF_ENABLED"
+    ):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=True, expected_actor=expected_actor
+        )
+
+    document["actor"]["subject"] = "00000000-0000-4000-8000-000000000099"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="approved Directory owner"):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=False, expected_actor=expected_actor
+        )
+    document["actor"]["subject"] = expected_actor["subject"]
 
     document["huggingface"] = {
         "profileAlias": "hf-primary",
@@ -2202,9 +2535,13 @@ def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path
         "credentialSecretRef": "huggingface/connector-token",
     }
     path.write_text(json.dumps(document), encoding="utf-8")
-    with pytest.raises(preflight.PreflightError, match="must match CYRENE_HF_ENABLED"):
-        preflight._validate_connector_bootstrap_config(path, huggingface_enabled=False)
-    preflight._validate_connector_bootstrap_config(path, huggingface_enabled=True)
+    with pytest.raises(preflight.PreflightError, match="approved Directory owner"):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=False, expected_actor=expected_actor
+        )
+    preflight._validate_connector_bootstrap_config(
+        path, huggingface_enabled=True, expected_actor=expected_actor
+    )
 
 
 def test_huggingface_oauth_source_matches_closed_account_center_dto(tmp_path: Path) -> None:

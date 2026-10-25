@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -1052,8 +1053,8 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
         or runner.get("cap_add")
         or "no-new-privileges:true" not in runner.get("security_opt", [])
         or set(runner.get("tmpfs", [])) != expected_tmpfs
-        or runner.get("mem_limit") != "512m"
-        or runner.get("cpus") != "0.10"
+        or _memory_limit_bytes(runner.get("mem_limit")) != 512 * MIB
+        or _cpu_limit_decimal(runner.get("cpus")) != Decimal("0.10")
         or runner.get("secrets")
         or runner.get("configs")
         or not isinstance(runner_volumes, list)
@@ -1081,8 +1082,8 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
         or "ALL" not in proxy.get("cap_drop", [])
         or proxy.get("cap_add")
         or "no-new-privileges:true" not in proxy.get("security_opt", [])
-        or proxy.get("mem_limit") != "64m"
-        or proxy.get("cpus") != "0.05"
+        or _memory_limit_bytes(proxy.get("mem_limit")) != 64 * MIB
+        or _cpu_limit_decimal(proxy.get("cpus")) != Decimal("0.05")
         or proxy.get("secrets") is None
         or {row.get("source") for row in proxy.get("secrets", []) if isinstance(row, dict)}
         != {
@@ -1122,6 +1123,40 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
         )
 
     _validate_computer_exchange_profile(compose)
+
+
+def _memory_limit_bytes(value: Any) -> int | None:
+    """Normalize Docker Compose memory limits to bytes without accepting fractions."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if not isinstance(value, str):
+        return None
+    if value.isdecimal():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    match = re.fullmatch(r"([1-9][0-9]*)([kKmMgG])", value)
+    if match is None:
+        return None
+    amount = int(match.group(1))
+    suffix = match.group(2).lower()
+    return amount * {"k": 1024, "m": MIB, "g": GIB}[suffix]
+
+
+def _cpu_limit_decimal(value: Any) -> Decimal | None:
+    """Normalize string/numeric CPU limits for exact security-boundary comparisons."""
+
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite() or parsed <= 0:
+        return None
+    return parsed
 
 
 def _computer_runtime_storage_report(compose: dict[str, Any]) -> dict[str, Any]:
@@ -1533,7 +1568,25 @@ def _validate_account_center_config(
             )
 
 
-def _validate_connector_bootstrap_config(path: Path, *, huggingface_enabled: bool) -> None:
+def _connector_bootstrap_actor(config: dict[str, Any]) -> dict[str, Any]:
+    """Derive the bootstrap actor from the same Directory/Teams owner scope as preflight."""
+
+    services = config.get("services", {})
+    navigator = services.get("navigator", {}).get("environment", {})
+    authority = services.get("workspace-authority", {}).get("environment", {})
+    operator = services.get("directory-operator", {}).get("environment", {})
+    tenant_id = navigator.get("TEAMS_TENANT_ID")
+    return {
+        "issuer": f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        "subject": operator.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID"),
+        "organizationId": authority.get("CYRENE_ORGANIZATION_ID"),
+        "workspaceId": authority.get("CYRENE_WORKSPACE_ID"),
+    }
+
+
+def _validate_connector_bootstrap_config(
+    path: Path, *, huggingface_enabled: bool, expected_actor: dict[str, Any]
+) -> None:
     """Require the private Exchange bootstrap input to match the selected provider set."""
 
     try:
@@ -1548,11 +1601,14 @@ def _validate_connector_bootstrap_config(path: Path, *, huggingface_enabled: boo
         or not required <= set(document)
         or set(document) - (required | {"huggingface"})
         or document.get("schemaVersion") != 1
+        or not isinstance(document.get("actor"), dict)
+        or set(document["actor"]) != {"issuer", "subject", "organizationId", "workspaceId"}
+        or document["actor"] != expected_actor
         or PLACEHOLDER_RE.search(json.dumps(document, sort_keys=True))
         or ("huggingface" in document) != huggingface_enabled
     ):
         raise PreflightError(
-            "private connector bootstrap provider set must match CYRENE_HF_ENABLED"
+            "private connector bootstrap actor and provider set must match the approved Directory owner and CYRENE_HF_ENABLED"
         )
 
 
@@ -1710,21 +1766,15 @@ def _validate_compose(
             if mode not in {"stage2", "stage3", "cutover"} or active_phase not in profiles:
                 continue
         memory_value = service.get("mem_limit")
-        if isinstance(memory_value, int) and memory_value > 0:
-            amount_mib = memory_value / MIB
-        elif isinstance(memory_value, str) and re.fullmatch(r"[0-9]+[kKmMgG]", memory_value):
-            amount = int(memory_value[:-1])
-            suffix = memory_value[-1].lower()
-            amount_mib = amount * {"k": 1 / 1024, "m": 1, "g": 1024}[suffix]
-        elif isinstance(memory_value, str) and memory_value.isdecimal() and int(memory_value) > 0:
-            amount_mib = int(memory_value) / MIB
-        else:
+        memory_bytes = _memory_limit_bytes(memory_value)
+        if memory_bytes is None:
             raise PreflightError(f"Compose service {name} lacks a finite memory limit")
+        amount_mib = memory_bytes / MIB
         memory += amount_mib
-        try:
-            cpus += float(service.get("cpus"))
-        except (TypeError, ValueError) as error:
-            raise PreflightError(f"Compose service {name} lacks a finite CPU limit") from error
+        cpu_limit = _cpu_limit_decimal(service.get("cpus"))
+        if cpu_limit is None:
+            raise PreflightError(f"Compose service {name} lacks a finite CPU limit")
+        cpus += float(cpu_limit)
     if memory > max_memory_mib:
         raise PreflightError(
             f"Compose cgroup memory limits total {memory:.0f} MiB, above {max_memory_mib} MiB"
@@ -1901,6 +1951,7 @@ def _validate_secrets_and_configs(
             _validate_connector_bootstrap_config(
                 path,
                 huggingface_enabled=huggingface_enabled,
+                expected_actor=_connector_bootstrap_actor(config),
             )
         elif path.suffix == ".json":
             try:
@@ -2078,8 +2129,8 @@ def _validate_codebuddy_acp_boundary(config: dict[str, Any]) -> None:
     volumes = navigator.get("volumes", [])
     secrets = navigator.get("secrets", [])
     configs = navigator.get("configs", [])
-    if environment.get("CYRENE_WORKFLOWS_ENABLED") != "true":
-        raise PreflightError("CodeBuddy ACP requires the Workflows engine for owner-approved work")
+    if environment.get("CYRENE_WORKFLOWS_ENABLED") not in {"false", "true"}:
+        raise PreflightError("CodeBuddy ACP Workflows engine must be explicitly false or true")
     if (
         navigator.get("read_only") is not True
         or "ALL" not in navigator.get("cap_drop", [])
@@ -2115,6 +2166,60 @@ def _validate_codebuddy_acp_boundary(config: dict[str, Any]) -> None:
         )
     if any(isinstance(row, dict) and row.get("target") == "/home/navigator" for row in volumes):
         raise PreflightError("CodeBuddy ACP must not mount the legacy Antigravity model home")
+    _validate_codebuddy_acp_mount_boundary(navigator)
+
+
+def _validate_codebuddy_acp_mount_boundary(navigator: dict[str, Any]) -> None:
+    """Keep ACP Navigator mounts, secrets, and configs to the reviewed base set."""
+
+    volumes = navigator.get("volumes", [])
+    by_target = {
+        row.get("target"): row for row in volumes if isinstance(row, dict) and row.get("target")
+    }
+    allowed_targets = {
+        "/home/navigator/.codebuddy",
+        "/var/lib/cyrene-navigator",
+        "/run/teams-authorization",
+    }
+    session_volume = by_target.get("/var/lib/cyrene-navigator", {})
+    codebuddy_home = by_target.get("/home/navigator/.codebuddy", {})
+    actor_projection = by_target.get("/run/teams-authorization", {})
+    secrets = navigator.get("secrets", [])
+    configs = navigator.get("configs", [])
+    secret_pairs = {
+        (row.get("source"), row.get("target")) for row in secrets if isinstance(row, dict)
+    }
+    config_pairs = {
+        (row.get("source"), row.get("target")) for row in configs if isinstance(row, dict)
+    }
+    if (
+        len(volumes) != 3
+        or set(by_target) != allowed_targets
+        or codebuddy_home.get("type") != "bind"
+        or codebuddy_home.get("read_only", False) is not False
+        or session_volume.get("type") != "volume"
+        or not str(session_volume.get("source", "")).endswith("navigator-sessions")
+        or actor_projection.get("type") != "bind"
+        or actor_projection.get("read_only") is not True
+        or secret_pairs
+        != {
+            ("navigator-exchange-hmac-key", "navigator-exchange-hmac-key"),
+            ("navigator-session-token", "navigator-session-token"),
+            ("teams-navigator-hmac-key", "teams-navigator-hmac-key"),
+            ("internal-service-root-ca", "internal-service-root-ca"),
+        }
+        or len(secrets) != 4
+        or config_pairs
+        != {
+            ("connector-bindings", "/run/config/connector-bindings.json"),
+            ("connector-tool-catalog", "/run/config/connector-tool-catalog.json"),
+            ("responsibility-targets", "/run/config/responsibility-targets.v1.json"),
+        }
+        or len(configs) != 3
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP Navigator must keep only its approved login, session, and Teams authorization mounts"
+        )
 
 
 def _validate_codebuddy_mount(config: dict[str, Any], secrets_dir: Path) -> None:
@@ -2374,6 +2479,7 @@ def _validate_github_workflow_allowlist(compose: dict[str, Any], config_dir: Pat
     targets_document = read_private_json(targets_path, "Navigator responsibility targets")
     workflow = read_private_json(workflow_path, "Navigator responsibility WorkFlow")
     _validate_workflow_definition_disabled(workflow)
+    _validate_workflow_model_policy(compose, workflow)
     if (
         set(inventory) != {"schemaVersion", "observedAt", "source", "repositories", "excluded"}
         or inventory.get("schemaVersion") != 1
@@ -2606,6 +2712,24 @@ def _validate_workflow_definition_disabled(workflow: dict[str, Any]) -> None:
     if workflow.get("enabled") is not False:
         raise PreflightError(
             "Navigator WorkFlow definition must remain disabled until real acceptance"
+        )
+
+
+def _validate_workflow_model_policy(compose: dict[str, Any], workflow: dict[str, Any]) -> None:
+    """Require ACP workflow metadata to describe its native model without fallback."""
+
+    navigator = compose.get("services", {}).get("navigator", {})
+    environment = navigator.get("environment", {}) if isinstance(navigator, dict) else {}
+    if environment.get("CYRENE_HARNESS_EXECUTION_BACKEND") != "codebuddy-acp":
+        return
+    expected = {
+        "preferredProvider": "codebuddy",
+        "preferredModel": environment.get("CYRENE_HARNESS_CODEBUDDY_ACP_MODEL"),
+        "fallback": "configured_no_additional_spend",
+    }
+    if workflow.get("modelPolicy") != expected:
+        raise PreflightError(
+            "CodeBuddy ACP WorkFlow modelPolicy must use its configured native model and no-spend metadata"
         )
 
 
