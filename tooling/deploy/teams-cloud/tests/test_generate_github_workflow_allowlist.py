@@ -165,6 +165,10 @@ def _task_artifact(tmp_path: Path) -> Path:
                 },
             ]
         },
+        "authorization": {
+            "threadBindingId": "UNBOUND_PENDING_OWNER_THREAD",
+            "ownerTaskId": "UNBOUND_PENDING_OWNER_TASK",
+        },
         "enabled": False,
     }
     _write_private_json(artifact / generator.WORKFLOW_NAME, workflow)

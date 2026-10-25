@@ -435,7 +435,7 @@ def test_codebuddy_acp_model_profile_is_native_and_closed() -> None:
         "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED": "false",
         "CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP": "true",
         "CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL": "",
-        "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "1",
+        "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "2",
     }
     preflight._validate_model_runtime_config(environment)
 
@@ -456,7 +456,16 @@ def test_codebuddy_acp_model_profile_is_native_and_closed() -> None:
         ("CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED", "true", "disable model fallback"),
         ("CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP", "false", "no-paid-topup declaration"),
         ("CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL", "deepseek-v4.1-flash", "legacy fallback model"),
-        ("CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS", "3", "two-CPU deployment profile"),
+        (
+            "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS",
+            "1",
+            "two bounded foreground/background task slots",
+        ),
+        (
+            "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS",
+            "3",
+            "two bounded foreground/background task slots",
+        ),
     ]
     for key, value, error in invalid_profiles:
         invalid = dict(environment)
@@ -494,8 +503,8 @@ def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() 
     )
     assert environment["CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED"] == "false"
     assert environment["CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP"] == "true"
+    assert environment["CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS"] == "2"
     assert environment["CYRENE_WORKFLOWS_ENABLED"] == "true"
-    assert "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS" not in environment
     assert not any("MCP" in name.upper() for name in environment)
     assert navigator["read_only"] is True
     assert navigator["cap_drop"] == ["ALL"]
@@ -525,6 +534,43 @@ def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() 
     )
     assert workflow["enabled"] is False
     preflight._validate_workflow_definition_disabled(workflow)
+    assert (
+        "CYRENE_HF_ENABLED=false"
+        in (DEPLOYMENT_ROOT / "config" / "codebuddy-acp.env.template").read_text()
+    )
+
+
+def test_github_only_compose_has_no_hf_service_seed_or_provider_secrets() -> None:
+    """Keep Hf provider, bootstrap seed, and Hf-only credentials in an explicit overlay."""
+
+    base = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text())
+    huggingface = yaml.safe_load((DEPLOYMENT_ROOT / "compose.huggingface.yaml").read_text())
+    optional_secrets = set(preflight.HUGGINGFACE_OPTIONAL_SECRET_NAMES)
+    assert "huggingface" not in base["services"]
+    assert "huggingface" in huggingface["services"]
+    assert (
+        base["services"]["account-center"]["labels"]["com.cyrene.huggingface-enabled"]
+        == "${CYRENE_HF_ENABLED:-true}"
+    )
+    assert not optional_secrets & set(base["secrets"])
+    assert set(huggingface["secrets"]) == optional_secrets
+    assert "huggingface-oauth.json" not in {
+        row.get("target")
+        for row in base["services"]["account-center"].get("secrets", [])
+        if isinstance(row, dict)
+    }
+    assert not any("huggingface" in name for name in base["services"]["exchange"]["depends_on"])
+
+    github_only_bootstrap = json.loads(
+        (
+            DEPLOYMENT_ROOT / "config" / "private-connector-bootstrap.github-only.template.json"
+        ).read_text()
+    )
+    assert set(github_only_bootstrap) == {"schemaVersion", "actor", "github"}
+    assert (
+        "CYRENE_HF_ENABLED=false"
+        in (DEPLOYMENT_ROOT / "config" / "github-only.env.template").read_text()
+    )
 
 
 def test_workflows_engine_does_not_enable_a_definition() -> None:
@@ -656,6 +702,71 @@ def test_responsibility_targets_require_current_binding_and_exact_safe_grants(
     config_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
     with pytest.raises(preflight.PreflightError, match="contain only the approved actions"):
         preflight._validate_responsibility_targets(config_path, bindings_path)
+
+
+def test_bootstrap_allows_only_the_named_pending_github_binding_and_workflow_id(
+    tmp_path: Path,
+) -> None:
+    """Allow a closed pending target skeleton before Exchange exports real bindings."""
+
+    template_path = DEPLOYMENT_ROOT / "config" / "responsibility-targets.v1.template.json"
+    target = json.loads(template_path.read_text(encoding="utf-8"))["targets"][0]
+    target.update(
+        {
+            "id": "123456789",
+            "label": "DoHorizon-AI/Cyrene-Test",
+            "bindingId": "UNBOUND_PENDING_EXCHANGE_GITHUB_REBIND",
+            "uri": "https://github.com/DoHorizon-AI/Cyrene-Test",
+        }
+    )
+    targets_path = tmp_path / "responsibility-targets.v1.json"
+    bindings_path = tmp_path / "connector-bindings.json"
+    targets_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
+    bindings_path.write_text('{"schemaVersion":1,"bindings":[]}', encoding="utf-8")
+    preflight._validate_responsibility_targets(targets_path, bindings_path, allow_pending=True)
+
+    with pytest.raises(preflight.PreflightError, match="current Exchange GitHub binding"):
+        preflight._validate_responsibility_targets(targets_path, bindings_path)
+
+    target["bindingId"] = "UNBOUND_NOT_APPROVED"
+    targets_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="current Exchange GitHub binding"):
+        preflight._validate_responsibility_targets(targets_path, bindings_path, allow_pending=True)
+
+
+def test_bootstrap_accepts_missing_owner_thread_ids_only_while_workflow_is_disabled(
+    tmp_path: Path,
+) -> None:
+    """Keep first-chat thread/task IDs pending until a real owner conversation exists."""
+
+    artifact_root = tmp_path / ".artifacts" / "teams-cloud-test"
+    config_dir = artifact_root / "config"
+    config_dir.mkdir(parents=True)
+    preflight._validate_optional_workflow_definition_disabled(config_dir)
+
+    workflow_path = artifact_root / "proactive-assistant-workflow.v2.json"
+    workflow_path.write_text(
+        json.dumps(
+            {
+                "enabled": False,
+                "authorization": {
+                    "threadBindingId": "UNBOUND_PENDING_OWNER_THREAD",
+                    "ownerTaskId": "UNBOUND_PENDING_OWNER_TASK",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    workflow_path.chmod(0o600)
+    preflight._validate_optional_workflow_definition_disabled(config_dir)
+
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow["enabled"] = True
+    workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
+    with pytest.raises(
+        preflight.PreflightError, match="must remain disabled until real acceptance"
+    ):
+        preflight._validate_optional_workflow_definition_disabled(config_dir)
 
 
 @pytest.mark.parametrize("computer_runner_enabled", [False, True])
@@ -941,6 +1052,107 @@ def test_connector_provider_allowlist_is_stage_aware(mode: str, expected: set[st
     assert preflight._expected_connector_providers({}, mode) == expected
     proactive = {"services": {"computer-runtime": {}}}
     assert preflight._expected_connector_providers(proactive, mode) == expected | {"computer"}
+
+
+def test_github_only_provider_allowlists_exclude_every_hf_binding_and_profile() -> None:
+    """Make the explicit no-HF mode an exact GitHub-only connector and Exchange scope."""
+
+    github_only = {
+        "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "false"}},
+            "computer-runtime": {},
+        }
+    }
+    assert preflight._expected_connector_providers(github_only, "stage1") == {
+        "github",
+        "computer",
+    }
+    assert preflight._expected_exchange_providers(github_only, "stage1") == set()
+    assert preflight._validate_huggingface_profile_selection(github_only, "bootstrap") is False
+    assert preflight._validate_huggingface_profile_selection(github_only, "stage1") is False
+
+    with_overlay = json.loads(json.dumps(github_only))
+    with_overlay["services"]["huggingface"] = {}
+    with pytest.raises(preflight.PreflightError, match="must not include the HF provider service"):
+        preflight._validate_huggingface_profile_selection(with_overlay, "stage1")
+
+    enabled_without_overlay = json.loads(json.dumps(github_only))
+    enabled_without_overlay["services"]["account-center"]["labels"][
+        "com.cyrene.huggingface-enabled"
+    ] = "true"
+    with pytest.raises(preflight.PreflightError, match="requires compose.huggingface.yaml"):
+        preflight._validate_huggingface_profile_selection(enabled_without_overlay, "stage1")
+
+    with pytest.raises(preflight.PreflightError, match="only for bootstrap and stage-1 staging"):
+        preflight._validate_huggingface_profile_selection(github_only, "stage2")
+
+
+def test_exchange_github_only_stage_requires_an_empty_hf_profile_map() -> None:
+    """Keep Exchange's authorization profile targets GitHub-only while HF is disabled."""
+
+    document = {
+        "platformAuthority": {"connectorWorkload": {"connectionRef": "grpcs://authority:7443"}},
+        "accountCenter": {
+            "connectionRef": "grpcs://account-center:7443",
+            "transport": "mtls",
+            "callerId": "exchange-service",
+            "signingKeyRef": "account/signing",
+        },
+        "githubIssues": {
+            "connectionRef": "grpcs://github-issues:7443",
+            "transport": "mtls",
+            "callerId": "exchange-service",
+            "signingKeyRef": "account/signing",
+        },
+        "connectorHost": {
+            "teamsMessages": {
+                "directPlugin": {
+                    "connectionRef": "grpcs://teams-provider:7443",
+                    "transport": "mtls",
+                }
+            }
+        },
+        "authorizationCloud": {"profiles": {}},
+    }
+    config = {
+        "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "false"}},
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(document)
+                }
+            },
+        }
+    }
+    preflight._validate_exchange_profile_stage(config, "stage1")
+
+    document["authorizationCloud"]["profiles"]["hf-primary"] = {
+        "provider": "hf",
+        "directPlugin": {
+            "connectionRef": "grpcs://huggingface:7443",
+            "transport": "mtls",
+        },
+    }
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(document)
+    with pytest.raises(preflight.PreflightError, match=r"must be exactly \[\] for this stage"):
+        preflight._validate_exchange_profile_stage(config, "stage1")
+
+
+def test_huggingface_secrets_are_in_the_optional_inventory_section() -> None:
+    """Keep all HF credentials out of the base phase-one secret requirement."""
+
+    inventory = json.loads((DEPLOYMENT_ROOT / "config" / "secret-files.template.json").read_text())
+    required = set(inventory["requiredBeforePhase1"])
+    optional = set(inventory["requiredBeforeHuggingFace"])
+    assert not required & preflight.HUGGINGFACE_OPTIONAL_SECRET_NAMES
+    assert optional == preflight.HUGGINGFACE_OPTIONAL_SECRET_NAMES - {
+        "account-center-huggingface-oauth-source"
+    }
+    assert inventory["requiredBeforeHuggingFacePrivateFiles"] == [
+        "onboarding/private/huggingface-oauth.json"
+    ]
 
 
 def test_secret_entrypoint_adds_internal_ca_without_replacing_public_roots(
@@ -1786,6 +1998,8 @@ def test_stage3_reuses_one_cloud_provider_state_owner() -> None:
 
     config = {
         "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "true"}},
+            "huggingface": {},
             "exchange": {
                 "environment": {
                     "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
@@ -1916,6 +2130,81 @@ def test_account_center_uses_oauth_file_reference_and_no_hf_token_env() -> None:
     service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
     with pytest.raises(preflight.PreflightError, match="must not be copied"):
         preflight._validate_account_center_config(service)
+
+
+def test_account_center_accepts_github_only_config_without_hf_sources_or_mounts() -> None:
+    """Allow Account Center to bootstrap GitHub when no HF authorization exists."""
+
+    service = _account_center_oauth_service()
+    config = json.loads(service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"])
+    config["provider_secret_file_refs"] = []
+    config["hostSecretFileRefs"] = {}
+    service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    service["secrets"] = []
+    service["networks"] = {"account-private": {}, "github-account-center-private": {}}
+    preflight._validate_account_center_config(service, huggingface_enabled=False)
+
+    config["provider_secret_file_refs"] = ["huggingface/connector-token"]
+    config["hostSecretFileRefs"] = {
+        "huggingface/connector-token": "/run/secrets/huggingface-oauth.json"
+    }
+    service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    with pytest.raises(preflight.PreflightError, match="no Hugging Face refs or profiles"):
+        preflight._validate_account_center_config(service, huggingface_enabled=False)
+
+    config["provider_secret_file_refs"] = []
+    config["hostSecretFileRefs"] = {}
+    service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    service["environment"]["CYRENE_SECRET_FILE_MAP"] += (
+        ",CYRENE_ACCOUNT_CENTER_HF_PROVIDER_HMAC_KEY=/run/secrets/account-center-hf-provider-hmac-key"
+    )
+    service["secrets"] = [
+        {
+            "source": "account-center-hf-provider-hmac-key",
+            "target": "account-center-hf-provider-hmac-key",
+        }
+    ]
+    with pytest.raises(preflight.PreflightError, match="must not mount Hugging Face secrets"):
+        preflight._validate_account_center_config(service, huggingface_enabled=False)
+
+
+def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path: Path) -> None:
+    """Accept the real GitHub-only Exchange input and reject HF target leakage."""
+
+    document = {
+        "schemaVersion": 1,
+        "actor": {
+            "issuer": "https://login.microsoftonline.com/00000000-0000-4000-8000-000000000001/v2.0",
+            "subject": UUID,
+            "organizationId": "organization-test",
+            "workspaceId": "workspace-test",
+        },
+        "github": {
+            "installationId": "12345",
+            "expectedAccessMode": "workspace_operator",
+            "profileIdempotencyKey": "teams-cloud-github-installation",
+            "repositories": [
+                {"repositoryId": "123456789", "owner": "DoHorizon-AI", "name": "Cyrene"}
+            ],
+        },
+    }
+    path = tmp_path / "connector-bootstrap.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    preflight._validate_connector_bootstrap_config(path, huggingface_enabled=False)
+    with pytest.raises(preflight.PreflightError, match="must match CYRENE_HF_ENABLED"):
+        preflight._validate_connector_bootstrap_config(path, huggingface_enabled=True)
+
+    document["huggingface"] = {
+        "profileAlias": "hf-primary",
+        "targetAlias": "hf-primary-target",
+        "expectedAccessMode": "workspace_operator",
+        "profileIdempotencyKey": "teams-cloud-huggingface-primary",
+        "credentialSecretRef": "huggingface/connector-token",
+    }
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="must match CYRENE_HF_ENABLED"):
+        preflight._validate_connector_bootstrap_config(path, huggingface_enabled=False)
+    preflight._validate_connector_bootstrap_config(path, huggingface_enabled=True)
 
 
 def test_huggingface_oauth_source_matches_closed_account_center_dto(tmp_path: Path) -> None:
