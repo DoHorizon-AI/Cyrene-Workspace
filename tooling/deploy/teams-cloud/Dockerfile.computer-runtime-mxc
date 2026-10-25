@@ -5,6 +5,7 @@
 ARG RUST_BASE_IMAGE=rust:1.96.1-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3
 ARG RUNTIME_BASE_IMAGE=debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 FROM ${RUST_BASE_IMAGE} AS build
+ARG TARGETARCH
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends build-essential pkg-config libssl-dev \
@@ -14,8 +15,12 @@ WORKDIR /source
 COPY Cyrene-Plugins-Official/contracts/proto ./contracts/proto
 COPY Cyrene-Plugins-Official/contracts/rust/cyrene-plugin-contracts ./contracts/rust/cyrene-plugin-contracts
 COPY Cyrene-Plugins-Official/runtime/rust ./runtime/rust
-RUN cargo build --locked --release --manifest-path runtime/rust/cyrene-plugin-server/Cargo.toml --features mxc --bin cyrene-plugin-server \
-    && cargo build --locked --release --manifest-path runtime/rust/cyrene-computer-runtime/Cargo.toml --features mxc --bin cyrene-mxc-exec
+RUN --mount=type=cache,id=cyrene-mxc-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cyrene-mxc-build-${TARGETARCH},target=/build-target,sharing=locked \
+    cargo build --locked --release --jobs 2 --target-dir /build-target --manifest-path runtime/rust/cyrene-plugin-server/Cargo.toml --features mxc --bin cyrene-plugin-server \
+    && cargo build --locked --release --jobs 2 --target-dir /build-target --manifest-path runtime/rust/cyrene-computer-runtime/Cargo.toml --features mxc --bin cyrene-mxc-exec \
+    && install -D --mode=0555 /build-target/release/cyrene-plugin-server /output/cyrene-plugin-server \
+    && install -D --mode=0555 /build-target/release/cyrene-mxc-exec /output/cyrene-mxc-exec
 
 FROM ${RUNTIME_BASE_IMAGE} AS bubblewrap-build
 RUN apt-get update \
@@ -51,8 +56,8 @@ RUN apt-get update \
     && useradd --system --uid 10001 --gid cyrene --create-home --home-dir /home/cyrene --shell /usr/sbin/nologin cyrene \
     && install -d --owner=10001 --group=10001 --mode=0750 /workspace /var/lib/cyrene/artifacts
 
-COPY --from=build /source/runtime/rust/cyrene-plugin-server/target/release/cyrene-plugin-server /usr/local/bin/cyrene-plugin-server
-COPY --from=build /source/runtime/rust/cyrene-computer-runtime/target/release/cyrene-mxc-exec /usr/local/bin/cyrene-mxc-exec
+COPY --from=build /output/cyrene-plugin-server /usr/local/bin/cyrene-plugin-server
+COPY --from=build /output/cyrene-mxc-exec /usr/local/bin/cyrene-mxc-exec
 COPY --from=bubblewrap-build /output/bwrap /usr/local/bin/bwrap
 COPY --from=bubblewrap-build /source/bubblewrap-0.13.1/COPYING /usr/share/doc/cyrene/bubblewrap-COPYING
 COPY --from=bubblewrap-build /source/bubblewrap-0.13.1.tar.xz /usr/share/doc/cyrene/bubblewrap-0.13.1.tar.xz
