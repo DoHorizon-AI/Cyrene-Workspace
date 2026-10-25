@@ -251,9 +251,9 @@ Complete one owner Teams chat while the engine is off. Verify the resulting real
 
 Workflows engine 关闭期间，先完成一次 owner Teams 聊天。核实实际创建的 Teams thread binding 和持久 Work Task ID，把这两个真实值写入仍保持禁用的 host manifest，然后重新运行 Stage 1 预检。打开 engine 前，先查询真实 Work API，确认所有已存储 v2 definition 都不存在或为 disabled；若发现任何 enabled definition，先停下并通过获授权的 Work API 处理。只有单独通过 owner 验收后，才将 `CYRENE_WORKFLOWS_ENABLED=true`，重新运行 Stage 1 预检并重建 Navigator。随后通过可信 owner writer 调用 Work API `PUT`，在内存中把 disabled host candidate 的 `enabled` 改为 true；紧接着用 `GET` 回读 collection，核实同一 ID 已持久保存为 enabled。`.artifacts` 中的候选文件仍保持 disabled，因此后续预检继续验证预期的 gate manifest。
 
-Read the persisted WorkFlow collection over the internal TLS service. The command runs inside Navigator Persistence and reads its already-mounted owner-scoped session secret plus internal CA; it prints counts only, never the token or full workflow data:
+Read the persisted WorkFlow collection over the internal TLS service. The current Work API contract returns one unpaginated `{"items":[...]}` v2 collection. The script rejects any other top-level shape, pagination marker, non-v2 item, or non-boolean `enabled` value; if the API contract changes, update the reader to exhaust every page before enabling the engine. The command runs inside Navigator Persistence and reads its already-mounted owner-scoped session secret plus internal CA; it prints counts only, never the token or full workflow data:
 
-通过内网 TLS 查询持久 WorkFlow collection。命令在 Navigator Persistence 容器内运行，从已挂载的 owner scope session secret 文件和内部 CA 读取凭据；只输出数量，不打印 token 或完整 workflow 内容：
+通过内网 TLS 查询持久 WorkFlow collection。当前 Work API 契约以单个、不分页的 `{"items":[...]}` 返回 v2 collection。脚本会拒绝其他顶层结构、分页标记、非 v2 item 或非布尔 `enabled`；若 API 契约发生变化，必须先改为完整读取所有页再启用 engine。命令在 Navigator Persistence 容器内运行，从已挂载的 owner scope session secret 文件和内部 CA 读取凭据；只输出数量，不打印 token 或完整 workflow 内容：
 
 ```sh
 sudo -n docker compose \
@@ -282,7 +282,24 @@ request = urllib.request.Request(
 )
 context = ssl.create_default_context(cafile="/run/secrets/internal-service-root-ca")
 with urllib.request.urlopen(request, context=context, timeout=10) as response:
-    items = json.load(response).get("items", [])
+    collection = json.load(response)
+if not isinstance(collection, dict) or set(collection) != {"items"}:
+    raise SystemExit("Work API v2 collection response has an unknown or paginated shape")
+items = collection["items"]
+if not isinstance(items, list):
+    raise SystemExit("Work API v2 collection items must be an array")
+for item in items:
+    if (
+        not isinstance(item, dict)
+        or not isinstance(item.get("id"), str)
+        or not item["id"]
+        or type(item.get("version")) is not int
+        or item["version"] != 2
+        or type(item.get("enabled")) is not bool
+    ):
+        raise SystemExit("Work API v2 collection contains an invalid workflow record")
+if len({item["id"] for item in items}) != len(items):
+    raise SystemExit("Work API v2 collection contains duplicate workflow IDs")
 not_disabled = [item for item in items if item.get("enabled") is not False]
 if not_disabled:
     raise SystemExit("Work API contains a non-disabled or invalid definition; keep the engine off")
@@ -377,7 +394,19 @@ if saved.get("id") != workflow_id or saved.get("enabled") is not True:
     raise SystemExit("Work API did not persist the enabled definition")
 list_request = urllib.request.Request(f"{base}?definitionVersion=2", headers=headers)
 with urllib.request.urlopen(list_request, context=context, timeout=20) as response:
-    items = json.load(response).get("items", [])
+    collection = json.load(response)
+if not isinstance(collection, dict) or set(collection) != {"items"}:
+    raise SystemExit("Work API activation read-back has an unknown or paginated shape")
+items = collection["items"]
+if not isinstance(items, list) or any(
+    not isinstance(item, dict)
+    or not isinstance(item.get("id"), str)
+    or type(item.get("version")) is not int
+    or item["version"] != 2
+    or type(item.get("enabled")) is not bool
+    for item in items
+):
+    raise SystemExit("Work API activation read-back contains an invalid v2 collection")
 matches = [item for item in items if item.get("id") == workflow_id]
 if len(matches) != 1 or matches[0].get("enabled") is not True:
     raise SystemExit("Work API read-back did not verify activation")

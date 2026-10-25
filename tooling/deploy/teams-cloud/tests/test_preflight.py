@@ -620,23 +620,27 @@ def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
     """Keep the per-run host bridge token out of environment, mounts, and CLI overrides."""
 
     valid = yaml.safe_load((DEPLOYMENT_ROOT / "compose.codebuddy-acp.yaml").read_text())
+    secrets_dir = Path("/private/secrets")
+    config_dir = Path("/private/config")
+    valid["name"] = "cyrene-teams-cloud"
+    valid["volumes"] = {"navigator-sessions": {"name": "cyrene-teams-cloud_navigator-sessions"}}
     navigator = valid["services"]["navigator"]
     navigator["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "false"
     navigator["volumes"] = [
         {
             "type": "bind",
-            "source": "/private/secrets/codebuddy",
+            "source": str(secrets_dir / "codebuddy"),
             "target": "/home/navigator/.codebuddy",
             "read_only": False,
         },
         {
             "type": "volume",
-            "source": "cyrene-teams-cloud_navigator-sessions",
+            "source": "navigator-sessions",
             "target": "/var/lib/cyrene-navigator",
         },
         {
             "type": "bind",
-            "source": "/private/config",
+            "source": str(config_dir),
             "target": "/run/teams-authorization",
             "read_only": True,
         },
@@ -661,35 +665,47 @@ def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
             "target": "/run/config/responsibility-targets.v1.json",
         },
     ]
-    preflight._validate_codebuddy_acp_boundary(valid)
+    preflight._validate_codebuddy_acp_boundary(
+        valid, secrets_dir=secrets_dir, config_dir=config_dir
+    )
 
     enabled_workflows = json.loads(json.dumps(valid))
     enabled_workflows["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "true"
-    preflight._validate_codebuddy_acp_boundary(enabled_workflows)
+    preflight._validate_codebuddy_acp_boundary(
+        enabled_workflows, secrets_dir=secrets_dir, config_dir=config_dir
+    )
     enabled_workflows["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "yes"
     with pytest.raises(preflight.PreflightError, match="explicitly false or true"):
-        preflight._validate_codebuddy_acp_boundary(enabled_workflows)
+        preflight._validate_codebuddy_acp_boundary(
+            enabled_workflows, secrets_dir=secrets_dir, config_dir=config_dir
+        )
 
     with_mcp_environment = json.loads(json.dumps(valid))
     with_mcp_environment["services"]["navigator"]["environment"][
         "CYRENE_HARNESS_CODEBUDDY_ACP_MCP_CONFIG"
     ] = "/run/config/mcp.json"
     with pytest.raises(preflight.PreflightError, match="not be injected through Compose env"):
-        preflight._validate_codebuddy_acp_boundary(with_mcp_environment)
+        preflight._validate_codebuddy_acp_boundary(
+            with_mcp_environment, secrets_dir=secrets_dir, config_dir=config_dir
+        )
 
     with_mcp_mount = json.loads(json.dumps(valid))
     with_mcp_mount["services"]["navigator"]["volumes"] = [
         {"type": "bind", "source": "/private/mcp.json", "target": "/run/mcp.json"}
     ]
     with pytest.raises(preflight.PreflightError, match="stay out of Compose mounts and secrets"):
-        preflight._validate_codebuddy_acp_boundary(with_mcp_mount)
+        preflight._validate_codebuddy_acp_boundary(
+            with_mcp_mount, secrets_dir=secrets_dir, config_dir=config_dir
+        )
 
     with_legacy_home = json.loads(json.dumps(valid))
     with_legacy_home["services"]["navigator"]["volumes"] = [
         {"type": "bind", "source": "/private/model-home", "target": "/home/navigator"}
     ]
     with pytest.raises(preflight.PreflightError, match="legacy Antigravity model home"):
-        preflight._validate_codebuddy_acp_boundary(with_legacy_home)
+        preflight._validate_codebuddy_acp_boundary(
+            with_legacy_home, secrets_dir=secrets_dir, config_dir=config_dir
+        )
 
     with_extra_host_bind = json.loads(json.dumps(valid))
     with_extra_host_bind["services"]["navigator"]["volumes"].append(
@@ -701,17 +717,59 @@ def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
         }
     )
     with pytest.raises(preflight.PreflightError, match="only its approved login, session"):
-        preflight._validate_codebuddy_acp_boundary(with_extra_host_bind)
+        preflight._validate_codebuddy_acp_boundary(
+            with_extra_host_bind, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_foreign_actor_source = json.loads(json.dumps(valid))
+    actor_mount = next(
+        row
+        for row in with_foreign_actor_source["services"]["navigator"]["volumes"]
+        if row.get("target") == "/run/teams-authorization"
+    )
+    actor_mount["source"] = "/host/other-config"
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_foreign_actor_source, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_foreign_codebuddy_source = json.loads(json.dumps(valid))
+    codebuddy_mount = next(
+        row
+        for row in with_foreign_codebuddy_source["services"]["navigator"]["volumes"]
+        if row.get("target") == "/home/navigator/.codebuddy"
+    )
+    codebuddy_mount["source"] = "/host/other-codebuddy-state"
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_foreign_codebuddy_source, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_foreign_session_volume = json.loads(json.dumps(valid))
+    session_mount = next(
+        row
+        for row in with_foreign_session_volume["services"]["navigator"]["volumes"]
+        if row.get("target") == "/var/lib/cyrene-navigator"
+    )
+    session_mount["source"] = "other-session-volume"
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_foreign_session_volume, secrets_dir=secrets_dir, config_dir=config_dir
+        )
 
     with_custom_command = json.loads(json.dumps(valid))
     with_custom_command["services"]["navigator"]["command"] = ["sh", "-c", "codebuddy"]
     with pytest.raises(preflight.PreflightError, match="Navigator-owned fixed CLI invocation"):
-        preflight._validate_codebuddy_acp_boundary(with_custom_command)
+        preflight._validate_codebuddy_acp_boundary(
+            with_custom_command, secrets_dir=secrets_dir, config_dir=config_dir
+        )
 
     with_unbounded_temp = json.loads(json.dumps(valid))
     with_unbounded_temp["services"]["navigator"]["tmpfs"] = ["/tmp:rw,nosuid,nodev,size=1g"]
     with pytest.raises(preflight.PreflightError, match="bounded 128 MiB temporary storage"):
-        preflight._validate_codebuddy_acp_boundary(with_unbounded_temp)
+        preflight._validate_codebuddy_acp_boundary(
+            with_unbounded_temp, secrets_dir=secrets_dir, config_dir=config_dir
+        )
 
 
 def test_proactive_navigator_hardening_requires_read_only_root_and_dropped_caps() -> None:
@@ -2241,7 +2299,9 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
     assert preflight._memory_limit_bytes(proxy["mem_limit"]) == 64 * preflight.MIB
     assert preflight._cpu_limit_decimal(proxy["cpus"]) == preflight.Decimal("0.05")
     preflight._validate_profile_stage(rendered, "stage1")
-    preflight._validate_codebuddy_acp_boundary(rendered)
+    preflight._validate_codebuddy_acp_boundary(
+        rendered, secrets_dir=secrets_dir, config_dir=config_dir
+    )
 
 
 def test_exchange_cloud_profiles_follow_compose_overlay_stage() -> None:

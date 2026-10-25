@@ -2118,7 +2118,9 @@ def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
         raise PreflightError("Navigator task concurrency must fit the two-CPU deployment profile")
 
 
-def _validate_codebuddy_acp_boundary(config: dict[str, Any]) -> None:
+def _validate_codebuddy_acp_boundary(
+    config: dict[str, Any], *, secrets_dir: Path, config_dir: Path
+) -> None:
     """Keep the ACP bridge private to Navigator and out of Compose credentials.
 
     中文：MCP bridge 配置由 Navigator 在容器内逐次生成；禁止通过 Compose 注入 token 或文件挂载。
@@ -2166,10 +2168,21 @@ def _validate_codebuddy_acp_boundary(config: dict[str, Any]) -> None:
         )
     if any(isinstance(row, dict) and row.get("target") == "/home/navigator" for row in volumes):
         raise PreflightError("CodeBuddy ACP must not mount the legacy Antigravity model home")
-    _validate_codebuddy_acp_mount_boundary(navigator)
+    _validate_codebuddy_acp_mount_boundary(
+        config,
+        navigator,
+        secrets_dir=secrets_dir,
+        config_dir=config_dir,
+    )
 
 
-def _validate_codebuddy_acp_mount_boundary(navigator: dict[str, Any]) -> None:
+def _validate_codebuddy_acp_mount_boundary(
+    config: dict[str, Any],
+    navigator: dict[str, Any],
+    *,
+    secrets_dir: Path,
+    config_dir: Path,
+) -> None:
     """Keep ACP Navigator mounts, secrets, and configs to the reviewed base set."""
 
     volumes = navigator.get("volumes", [])
@@ -2184,6 +2197,16 @@ def _validate_codebuddy_acp_mount_boundary(navigator: dict[str, Any]) -> None:
     session_volume = by_target.get("/var/lib/cyrene-navigator", {})
     codebuddy_home = by_target.get("/home/navigator/.codebuddy", {})
     actor_projection = by_target.get("/run/teams-authorization", {})
+    project_name = config.get("name")
+    volume_definitions = config.get("volumes", {})
+    volume_definition = (
+        volume_definitions.get("navigator-sessions", {})
+        if isinstance(volume_definitions, dict)
+        else {}
+    )
+    expected_volume_name = (
+        f"{project_name}_navigator-sessions" if isinstance(project_name, str) else None
+    )
     secrets = navigator.get("secrets", [])
     configs = navigator.get("configs", [])
     secret_pairs = {
@@ -2197,10 +2220,20 @@ def _validate_codebuddy_acp_mount_boundary(navigator: dict[str, Any]) -> None:
         or set(by_target) != allowed_targets
         or codebuddy_home.get("type") != "bind"
         or codebuddy_home.get("read_only", False) is not False
+        or not isinstance(codebuddy_home.get("source"), str)
+        or not codebuddy_home.get("source")
+        or Path(str(codebuddy_home.get("source", ""))).resolve()
+        != (secrets_dir / "codebuddy").resolve()
         or session_volume.get("type") != "volume"
-        or not str(session_volume.get("source", "")).endswith("navigator-sessions")
+        or session_volume.get("source") != "navigator-sessions"
+        or not isinstance(project_name, str)
+        or not isinstance(volume_definition, dict)
+        or volume_definition.get("name") != expected_volume_name
         or actor_projection.get("type") != "bind"
         or actor_projection.get("read_only") is not True
+        or not isinstance(actor_projection.get("source"), str)
+        or not actor_projection.get("source")
+        or Path(str(actor_projection.get("source", ""))).resolve() != config_dir.resolve()
         or secret_pairs
         != {
             ("navigator-exchange-hmac-key", "navigator-exchange-hmac-key"),
@@ -3601,7 +3634,11 @@ def run_preflight(
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
     execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
     if execution_backend == "codebuddy-acp":
-        _validate_codebuddy_acp_boundary(config)
+        _validate_codebuddy_acp_boundary(
+            config,
+            secrets_dir=secrets_dir.resolve(),
+            config_dir=config_dir.resolve(),
+        )
     if navigator_environment.get("CYRENE_RESPONSIBILITY_TARGETS_FILE"):
         if mode == "bootstrap":
             _validate_optional_workflow_definition_disabled(config_dir.resolve())
