@@ -2160,6 +2160,7 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
     tenant_id = "00000000-0000-4000-8000-000000000003"
     organization_id = "00000000-0000-4000-8000-000000000001"
     workspace_id = "00000000-0000-4000-8000-000000000002"
+    operator_id = "00000000-0000-4000-8000-000000000005"
     integration = _exchange_configuration({"hf"} if huggingface_enabled else set())
     integration["hostSecretRefs"] = {
         "tls/plugin-root": "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
@@ -2225,6 +2226,7 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
             "CYRENE_HUGGINGFACE_CONFIGURATION_JSON": "{}",
             "CYRENE_ORGANIZATION_ID": organization_id,
             "CYRENE_WORKSPACE_ID": workspace_id,
+            "CYRENE_DIRECTORY_OPERATOR_ACTOR_ID": operator_id,
             "CYRENE_AUTHORITY_AAD_TENANT_ID": tenant_id,
             "TEAMS_TENANT_ID": tenant_id,
             "CYRENE_PUBLIC_BIND": "127.0.0.1",
@@ -2291,8 +2293,10 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
         encoding="utf-8",
     )
     isolated_environment = dict(safe_environment)
+    compose_argv: list[str] = []
 
     def compose_config(argv: list[str], *, capture: bool = True) -> str:
+        compose_argv.extend(argv)
         result = subprocess.run(
             argv,
             capture_output=True,
@@ -2305,7 +2309,66 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
 
     monkeypatch.setattr(preflight, "_run", compose_config)
     rendered = preflight._compose_config([docker], compose_files, [env_file])
+    assert compose_argv[-3:] == ["config", "--format", "json"]
+    rendered_profiles = {
+        compose_argv[index + 1]
+        for index, argument in enumerate(compose_argv[:-1])
+        if argument == "--profile"
+    }
+    assert "directory-operator" in rendered_profiles
+    assert "directory-bootstrap" not in rendered_profiles
     assert ("huggingface" in rendered["services"]) is huggingface_enabled
+    assert "directory-operator" in rendered["services"]
+    assert "directory-migrate" not in rendered["services"]
+    assert "directory-runtime-role-bootstrap" not in rendered["services"]
+    expected_actor = preflight._connector_bootstrap_actor(rendered)
+    assert expected_actor == {
+        "issuer": f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        "subject": operator_id,
+        "organizationId": organization_id,
+        "workspaceId": workspace_id,
+    }
+    connector_bootstrap_path = config_dir / "connector-bootstrap.json"
+    assert Path(rendered["configs"]["connector-bootstrap"]["file"]) == (connector_bootstrap_path)
+    connector_bootstrap_document = {
+        "schemaVersion": 1,
+        "actor": expected_actor,
+        "github": {
+            "installationId": "12345",
+            "expectedAccessMode": "workspace_operator",
+            "profileIdempotencyKey": "teams-cloud-github-installation",
+            "repositories": [
+                {
+                    "repositoryId": "123456789",
+                    "owner": "DoHorizon-AI",
+                    "name": "Cyrene",
+                }
+            ],
+        },
+    }
+    if huggingface_enabled:
+        connector_bootstrap_document["huggingface"] = {
+            "profileAlias": "hf-primary",
+            "targetAlias": "hf-primary-target",
+            "expectedAccessMode": "workspace_operator",
+            "profileIdempotencyKey": "teams-cloud-huggingface-primary",
+            "credentialSecretRef": "huggingface/connector-token",
+        }
+    connector_bootstrap_path.write_text(json.dumps(connector_bootstrap_document), encoding="utf-8")
+    preflight._validate_connector_bootstrap_config(
+        connector_bootstrap_path,
+        huggingface_enabled=huggingface_enabled,
+        expected_actor=expected_actor,
+    )
+    wrong_owner_document = json.loads(json.dumps(connector_bootstrap_document))
+    wrong_owner_document["actor"]["subject"] = "00000000-0000-4000-8000-000000000099"
+    connector_bootstrap_path.write_text(json.dumps(wrong_owner_document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="approved Directory owner"):
+        preflight._validate_connector_bootstrap_config(
+            connector_bootstrap_path,
+            huggingface_enabled=huggingface_enabled,
+            expected_actor=expected_actor,
+        )
     authority_service = rendered["services"]["workspace-authority"]
     exchange_service = rendered["services"]["exchange"]
     authority_networks = authority_service["networks"]
