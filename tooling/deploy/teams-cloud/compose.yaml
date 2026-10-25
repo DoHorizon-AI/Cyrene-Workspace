@@ -191,6 +191,21 @@ services:
     pull_policy: never
     restart: unless-stopped
     logging: *default-logging
+    command:
+      - --entrypoint
+      - account_center.plugin:AccountCenterPlugin
+      - --capability
+      - account.center.v1
+      - --interface-version
+      - "1"
+      - --listen
+      - 0.0.0.0:7443
+      - --tls-cert-file
+      - /run/secrets/account-center-server-cert
+      - --tls-key-file
+      - /run/secrets/account-center-server-key
+      - --tls-client-ca-file
+      - /run/secrets/account-center-client-ca
     labels:
       com.cyrene.huggingface-enabled: ${CYRENE_HF_ENABLED:-true}
     environment:
@@ -465,6 +480,21 @@ services:
     pull_policy: never
     restart: unless-stopped
     logging: *default-logging
+    command:
+      - --entrypoint
+      - github_issues_provider.plugin:GitHubIssuesProvider
+      - --capability
+      - tool.provider.v1
+      - --interface-version
+      - "1"
+      - --listen
+      - 0.0.0.0:7443
+      - --tls-cert-file
+      - /run/secrets/github-issues-server-cert
+      - --tls-key-file
+      - /run/secrets/github-issues-server-key
+      - --tls-client-ca-file
+      - /run/secrets/github-issues-client-ca
     environment:
       CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_GITHUB_ISSUES_BINDING_ID:?GitHub provider binding ID is required}
       CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_GITHUB_ISSUES_CONFIGURATION_JSON:?configure the exact GitHub App installation and repositories}
@@ -565,7 +595,7 @@ services:
       - --interface-version
       - "1"
       - --listen
-      - teams-provider:7443
+      - 0.0.0.0:7443
       - --tls-cert-file
       - /run/secrets/teams-connector-server-cert
       - --tls-key-file

@@ -949,6 +949,26 @@ def _validate_huggingface_profile_selection(compose: dict[str, Any], mode: str) 
     return huggingface_enabled
 
 
+def _validate_provider_listener_addresses(compose: dict[str, Any]) -> None:
+    """Require multi-network DirectPlugin providers to bind all container interfaces."""
+
+    services = compose.get("services", {})
+    for service_name in ("account-center", "github-issues", "teams-provider"):
+        service = services.get(service_name)
+        command = service.get("command") if isinstance(service, dict) else None
+        if not isinstance(command, list) or any(not isinstance(part, str) for part in command):
+            raise PreflightError(f"{service_name} must declare its fixed provider command")
+        listen_indexes = [index for index, part in enumerate(command) if part == "--listen"]
+        if (
+            len(listen_indexes) != 1
+            or listen_indexes[0] + 1 >= len(command)
+            or command[listen_indexes[0] + 1] != "0.0.0.0:7443"
+        ):
+            raise PreflightError(
+                f"{service_name} must listen on 0.0.0.0:7443 for all private networks"
+            )
+
+
 def _validate_profile_stage(compose: dict[str, Any], mode: str) -> None:
     """Verify that optional provider profiles are attached only in their stage overlay."""
 
@@ -3640,6 +3660,7 @@ def run_preflight(
     )
     _validate_internal_https_topology(config)
     _validate_profile_stage(config, mode)
+    _validate_provider_listener_addresses(config)
     _validate_secrets_and_configs(config, secrets_dir.resolve(), config_dir.resolve(), mode)
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
     execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")

@@ -71,7 +71,7 @@ LABEL org.opencontainers.image.source=https://github.com/DoHorizon-AI/Cyrene-Plu
 USER 10001:10001
 EXPOSE 7443
 ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "python", "-m", "cyrene_plugin_runtime.server"]
-CMD ["--entrypoint", "github_issues_provider.plugin:GitHubIssuesProvider", "--capability", "tool.provider.v1", "--interface-version", "1", "--listen", "github-issues:7443", "--tls-cert-file", "/run/secrets/github-issues-server-cert", "--tls-key-file", "/run/secrets/github-issues-server-key", "--tls-client-ca-file", "/run/secrets/github-issues-client-ca"]
+CMD ["--entrypoint", "github_issues_provider.plugin:GitHubIssuesProvider", "--capability", "tool.provider.v1", "--interface-version", "1", "--listen", "0.0.0.0:7443", "--tls-cert-file", "/run/secrets/github-issues-server-cert", "--tls-key-file", "/run/secrets/github-issues-server-key", "--tls-client-ca-file", "/run/secrets/github-issues-client-ca"]
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
       CMD python /usr/local/bin/cyrene-plugin-grpc-health \
       --target github-issues:7443 --plugin-id cyrene.providers.github-issues \
