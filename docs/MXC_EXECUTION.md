@@ -31,13 +31,13 @@ docker run --rm --network none --read-only --user 10001:10001 \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --memory 512m --memory-swap 512m --cpus 0.10 --pids-limit 128 \
   --tmpfs /tmp:rw,nosuid,nodev,size=64m \
-  --tmpfs /workspace:rw,nosuid,nodev,size=192m \
+  --tmpfs /workspace:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=192m \
   --entrypoint /usr/local/bin/cyrene-mxc-exec \
   "$CYRENE_COMPUTER_RUNTIME_IMAGE_ID" \
   --probe --standalone-probe --workspace-root /workspace
 ```
 
-The generated `images.env` contains local image tags; the probe uses the locked `imageId` directly so that a later tag change cannot select another image. A failed probe blocks activation; it does not authorize changing the container's permissions.
+The generated `images.env` contains local image tags; the probe uses the locked `imageId` directly so that a later tag change cannot select another image. Workspace and artifact tmpfs mounts require explicit UID/GID 10001 and mode 0700; mounting over the image directories otherwise leaves root-owned scratch storage that the service cannot write. Keep the existing 192 MiB workspace and 64 MiB artifact bounds. A failed probe blocks activation; it does not authorize changing the container's isolation permissions.
 
 ## Acceptance limits
 
@@ -62,7 +62,7 @@ Linux 使用共享内核的进程命名空间隔离。工作区由宿主配置�
 
 启用时，先固定包含私有协议 2 和父进程身份核对的 Plugins 已合并源码。在私有 ARM64 构建计划中只将 `computer-runtime` 的 Dockerfile 改为上述可选文件，继续固定基础镜像、实际镜像摘要、架构和大小。同一 PID 命名空间的 shell 启动探测时，使用 `cyrene-mxc-exec --probe --expected-parent-pid "$$" --workspace-root /workspace`。如果 helper 自身作为容器 PID 1 入口，则使用上方完整 Docker 命令的 `--probe --standalone-probe` 模式，仅运行固定的 10 秒探测。正常服务会显式传入自己的 PID，PID 1 服务也可执行；父身份不符仍然拒绝。安装了 Bubblewrap、构建成功或版本查询成功均不能替代真实探测。
 
-将 `CYRENE_IMAGE_LOCK` 设为生成的 `image-lock.json` 绝对路径，再运行上方命令；它直接取出 `computer-runtime` 对应的内容寻址 `imageId`。`images.env` 中保存的是本机镜像标签，标签可以变化，因此独立探测始终使用锁内的镜像 ID。
+将 `CYRENE_IMAGE_LOCK` 设为生成的 `image-lock.json` 绝对路径，再运行上方命令；它直接取出 `computer-runtime` 对应的内容寻址 `imageId`。`images.env` 中保存的是本机镜像标签，标签可以变化，因此独立探测始终使用锁内的镜像 ID。工作区及 artifact 的 tmpfs 须显式指定 UID/GID 10001 和 0700 权限；否则挂载后成为 root 所有，服务无法写入。工作区 192 MiB、artifact 64 MiB 的容量不变。
 
 现有 Compose 的非 root、只读根目录、drop ALL、no-new-privileges、私有 mTLS、资源限制及临时存储规则不放宽。目标环境不支持时，继续使用普通 managed 镜像，等待单独评审的宿主配置；不自动增加特权、SYS_ADMIN、关闭安全配置或修改宿主 sysctl。镜像保留 Bubblewrap 原版许可证及完整源码包，随镜像锁一同保留。
 

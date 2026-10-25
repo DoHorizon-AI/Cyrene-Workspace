@@ -60,7 +60,7 @@ COPY --from=build /output/cyrene-plugin-server /usr/local/bin/cyrene-plugin-serv
 COPY --from=build /output/cyrene-mxc-exec /usr/local/bin/cyrene-mxc-exec
 COPY --from=bubblewrap-build /output/bwrap /usr/local/bin/bwrap
 COPY --from=bubblewrap-build /source/bubblewrap-0.13.1/COPYING /usr/share/doc/cyrene/bubblewrap-COPYING
-COPY --from=bubblewrap-build /source/bubblewrap-0.13.1.tar.xz /usr/share/doc/cyrene/bubblewrap-0.13.1.tar.xz
+COPY --from=bubblewrap-build --chmod=0444 /source/bubblewrap-0.13.1.tar.xz /usr/share/doc/cyrene/bubblewrap-0.13.1.tar.xz
 COPY Cyrene-Plugins-Official/THIRD_PARTY_NOTICES.md /usr/share/doc/cyrene/THIRD_PARTY_NOTICES.md
 RUN chmod 0555 /usr/local/bin/cyrene-plugin-server /usr/local/bin/cyrene-mxc-exec /usr/local/bin/bwrap
 
