@@ -1000,8 +1000,8 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
     runner_volumes = runner.get("volumes", [])
     expected_tmpfs = {
         "/tmp:rw,nosuid,nodev,size=64m",
-        "/workspace:rw,nosuid,nodev,size=192m",
-        "/var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m",
+        "/workspace:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=192m",
+        "/var/lib/cyrene/artifacts:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=64m",
     }
     if (
         runner.get("user") != "10001:10001"

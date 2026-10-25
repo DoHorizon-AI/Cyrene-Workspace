@@ -289,8 +289,8 @@ def test_computer_runtime_requires_private_runner_and_mtls_proxy(tmp_path: Path)
                 "security_opt": ["no-new-privileges:true"],
                 "tmpfs": [
                     "/tmp:rw,nosuid,nodev,size=64m",
-                    "/workspace:rw,nosuid,nodev,size=192m",
-                    "/var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m",
+                    "/workspace:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=192m",
+                    "/var/lib/cyrene/artifacts:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=64m",
                 ],
                 "networks": {"computer-runtime-private": {}},
                 "volumes": [],
@@ -330,10 +330,14 @@ def test_computer_runtime_requires_private_runner_and_mtls_proxy(tmp_path: Path)
     }
     preflight._validate_computer_runtime_boundary(config)
 
-    config["services"]["computer-runtime"]["tmpfs"][1] = "/workspace:rw,nosuid,nodev,size=512m"
+    config["services"]["computer-runtime"]["tmpfs"][1] = (
+        "/workspace:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=512m"
+    )
     with pytest.raises(preflight.PreflightError, match="bounded scratch tmpfs"):
         preflight._validate_computer_runtime_boundary(config)
-    config["services"]["computer-runtime"]["tmpfs"][1] = "/workspace:rw,nosuid,nodev,size=192m"
+    config["services"]["computer-runtime"]["tmpfs"][1] = (
+        "/workspace:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=192m"
+    )
 
     exchange_environment = config["services"]["exchange"]["environment"]
     integration = json.loads(exchange_environment["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"])
@@ -359,8 +363,8 @@ def test_computer_runtime_scratch_is_ephemeral_and_navigator_state_stays_persist
     runner = runner_compose["services"]["computer-runtime"]
     assert set(runner["tmpfs"]) == {
         "/tmp:rw,nosuid,nodev,size=64m",
-        "/workspace:rw,nosuid,nodev,size=192m",
-        "/var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m",
+        "/workspace:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=192m",
+        "/var/lib/cyrene/artifacts:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=64m",
     }
     assert sum(int(row.rsplit("size=", 1)[1].removesuffix("m")) for row in runner["tmpfs"]) == 320
     assert runner.get("volumes", []) == []
