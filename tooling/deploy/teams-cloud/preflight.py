@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -52,6 +53,17 @@ HEX32_SECRET_NAMES = {
     "account-center-hf-provider-hmac-key",
     "cloud-management-exchange-hmac-key",
     "exchange-hf-auth-context-hmac-key",
+}
+HUGGINGFACE_OPTIONAL_SECRET_NAMES = {
+    "account-center-hf-provider-hmac-key",
+    "account-center-huggingface-oauth-source",
+    "exchange-hf-auth-context-hmac-key",
+    "huggingface-server-cert",
+    "huggingface-server-key",
+    "huggingface-health-client-cert",
+    "huggingface-health-client-key",
+    "huggingface-account-center-client-cert",
+    "huggingface-account-center-client-key",
 }
 PEM_PRIVATE_KEY_NAMES = {
     "authority-tls-key",
@@ -881,21 +893,33 @@ def _schema_contains_credential_field(value: Any) -> bool:
     return False
 
 
+def _huggingface_enabled(config: dict[str, Any]) -> bool:
+    """Read the explicit HF deployment selection from the non-secret Compose label."""
+
+    account_center = config.get("services", {}).get("account-center", {})
+    labels = account_center.get("labels", {}) if isinstance(account_center, dict) else {}
+    enabled = labels.get("com.cyrene.huggingface-enabled", "true")
+    if enabled not in {"true", "false"}:
+        raise PreflightError("CYRENE_HF_ENABLED must be exactly true or false")
+    return enabled == "true"
+
+
 def _expected_connector_providers(config: dict[str, Any], mode: str) -> set[str]:
     """Derive the only provider bindings that may be mounted for a deployment stage."""
 
     has_computer_runner = "computer-runtime" in config.get("services", {})
+    providers = {"github"} | ({"huggingface"} if _huggingface_enabled(config) else set())
     if mode in {"stage1", "staging"}:
-        return {"github", "huggingface"} | ({"computer"} if has_computer_runner else set())
+        return providers | ({"computer"} if has_computer_runner else set())
     if mode == "stage2":
-        return {"github", "huggingface", "azure", "gcp"} | (
-            {"computer"} if has_computer_runner else set()
-        )
+        return providers | {"azure", "gcp"} | ({"computer"} if has_computer_runner else set())
     if mode == "stage3":
-        return {"github", "huggingface", "azure", "gcp", "runpod"} | (
-            {"computer"} if has_computer_runner else set()
+        return (
+            providers
+            | {"azure", "gcp", "runpod"}
+            | ({"computer"} if has_computer_runner else set())
         )
-    providers = {"github", "huggingface"} | ({"computer"} if has_computer_runner else set())
+    providers.update({"computer"} if has_computer_runner else set())
     services = config.get("services", {})
     cloud_service = services.get("cloud-management-phase2")
     if isinstance(cloud_service, dict):
@@ -905,10 +929,29 @@ def _expected_connector_providers(config: dict[str, Any], mode: str) -> set[str]
     return providers
 
 
+def _validate_huggingface_profile_selection(compose: dict[str, Any], mode: str) -> bool:
+    """Require the HF overlay to match its explicit selection and phase."""
+
+    huggingface_enabled = _huggingface_enabled(compose)
+    has_huggingface_service = "huggingface" in compose.get("services", {})
+    if huggingface_enabled != has_huggingface_service:
+        if huggingface_enabled:
+            raise PreflightError(
+                "HF-enabled deployment requires compose.huggingface.yaml and its real OAuth seed"
+            )
+        raise PreflightError(
+            "GitHub-only deployment must not include the HF provider service or its secret overlay"
+        )
+    if not huggingface_enabled and mode not in {"bootstrap", "staging", "stage1"}:
+        raise PreflightError("Hugging Face may be disabled only for bootstrap and stage-1 staging")
+    return huggingface_enabled
+
+
 def _validate_profile_stage(compose: dict[str, Any], mode: str) -> None:
     """Verify that optional provider profiles are attached only in their stage overlay."""
 
     services = compose.get("services", {})
+    _validate_huggingface_profile_selection(compose, mode)
     _validate_exchange_profile_stage(compose, mode)
     _validate_computer_runtime_boundary(compose)
     if mode in {"staging", "stage1"} and ("cloud-management-phase2" in services):
@@ -1010,8 +1053,8 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
         or runner.get("cap_add")
         or "no-new-privileges:true" not in runner.get("security_opt", [])
         or set(runner.get("tmpfs", [])) != expected_tmpfs
-        or runner.get("mem_limit") != "512m"
-        or runner.get("cpus") != "0.10"
+        or _memory_limit_bytes(runner.get("mem_limit")) != 512 * MIB
+        or _cpu_limit_decimal(runner.get("cpus")) != Decimal("0.10")
         or runner.get("secrets")
         or runner.get("configs")
         or not isinstance(runner_volumes, list)
@@ -1039,8 +1082,8 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
         or "ALL" not in proxy.get("cap_drop", [])
         or proxy.get("cap_add")
         or "no-new-privileges:true" not in proxy.get("security_opt", [])
-        or proxy.get("mem_limit") != "64m"
-        or proxy.get("cpus") != "0.05"
+        or _memory_limit_bytes(proxy.get("mem_limit")) != 64 * MIB
+        or _cpu_limit_decimal(proxy.get("cpus")) != Decimal("0.05")
         or proxy.get("secrets") is None
         or {row.get("source") for row in proxy.get("secrets", []) if isinstance(row, dict)}
         != {
@@ -1080,6 +1123,40 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
         )
 
     _validate_computer_exchange_profile(compose)
+
+
+def _memory_limit_bytes(value: Any) -> int | None:
+    """Normalize Docker Compose memory limits to bytes without accepting fractions."""
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if not isinstance(value, str):
+        return None
+    if value.isdecimal():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    match = re.fullmatch(r"([1-9][0-9]*)([kKmMgG])", value)
+    if match is None:
+        return None
+    amount = int(match.group(1))
+    suffix = match.group(2).lower()
+    return amount * {"k": 1024, "m": MIB, "g": GIB}[suffix]
+
+
+def _cpu_limit_decimal(value: Any) -> Decimal | None:
+    """Normalize string/numeric CPU limits for exact security-boundary comparisons."""
+
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite() or parsed <= 0:
+        return None
+    return parsed
 
 
 def _computer_runtime_storage_report(compose: dict[str, Any]) -> dict[str, Any]:
@@ -1220,13 +1297,13 @@ def _validate_computer_exchange_profile(compose: dict[str, Any]) -> None:
 def _expected_exchange_providers(compose: dict[str, Any], mode: str) -> set[str]:
     """Return the exact Exchange host-profile providers enabled in one phase."""
 
+    providers = {"hf"} if _huggingface_enabled(compose) else set()
     if mode in {"stage1", "staging"}:
-        return {"hf"}
+        return providers
     if mode == "stage2":
-        return {"hf", "azure", "gcp"}
+        return providers | {"azure", "gcp"}
     if mode == "stage3":
-        return {"hf", "azure", "gcp", "runpod"}
-    providers = {"hf"}
+        return providers | {"azure", "gcp", "runpod"}
     services = compose.get("services", {})
     cloud_service = services.get("cloud-management-phase2")
     if isinstance(cloud_service, dict):
@@ -1392,8 +1469,10 @@ def _verify_uami(client_id: Any) -> None:
         )
 
 
-def _validate_account_center_config(service: dict[str, Any]) -> None:
-    """Ensure GitHub and fresh HF OAuth credentials stay in host-managed files."""
+def _validate_account_center_config(
+    service: dict[str, Any], *, huggingface_enabled: bool = True
+) -> None:
+    """Keep GitHub credentials host-managed and make HF references explicitly optional."""
 
     environment = service.get("environment", {})
     encoded = environment.get("CYRENE_CAPABILITY_CONFIGURATION_JSON", "")
@@ -1410,15 +1489,40 @@ def _validate_account_center_config(service: dict[str, Any]) -> None:
         raise PreflightError(
             "Account Center must use the dedicated GitHub App private-key reference"
         )
-    provider_file_refs = config.get("provider_secret_file_refs")
-    file_refs = config.get("hostSecretFileRefs")
-    if provider_file_refs != ["huggingface/connector-token"] or file_refs != {
-        "huggingface/connector-token": "/run/secrets/huggingface-oauth.json"
-    }:
-        raise PreflightError(
-            "Account Center must resolve the Hugging Face OAuth seed from its dedicated secret file"
+    provider_file_refs = config.get("provider_secret_file_refs", [])
+    file_refs = config.get("hostSecretFileRefs", {})
+    provider_secret_refs = config.get("provider_secret_refs", [])
+    if (
+        not isinstance(provider_file_refs, list)
+        or not isinstance(file_refs, dict)
+        or not isinstance(provider_secret_refs, list)
+    ):
+        raise PreflightError("Account Center provider secret references are invalid")
+    if huggingface_enabled:
+        if provider_file_refs != ["huggingface/connector-token"] or file_refs != {
+            "huggingface/connector-token": "/run/secrets/huggingface-oauth.json"
+        }:
+            raise PreflightError(
+                "HF-enabled Account Center must resolve its real OAuth seed from the private secret file"
+            )
+    else:
+        huggingface_refs = any(
+            "huggingface" in str(reference).lower()
+            or "huggingface" in str(env_name).lower()
+            or "hf_provider" in str(env_name).lower()
+            for reference, env_name in refs.items()
         )
-    if config.get("provider_secret_refs", []) or any(
+        if (
+            provider_file_refs
+            or file_refs
+            or provider_secret_refs
+            or huggingface_refs
+            or config.get("huggingface_provider_caller_id") is not None
+        ):
+            raise PreflightError(
+                "GitHub-only Account Center configuration must contain no Hugging Face refs or profiles"
+            )
+    if provider_secret_refs or any(
         reference in refs
         for reference in (
             "huggingface/connector-token",
@@ -1441,11 +1545,70 @@ def _validate_account_center_config(service: dict[str, Any]) -> None:
     mapped_names = {part.split("=", 1)[0] for part in mappings if "=" in part}
     if any(name not in mapped_names for name in refs.values()):
         raise PreflightError("Account Center hostSecretRefs must resolve to mounted secret files")
-    if not isinstance(file_refs, dict) or set(file_refs.values()) != {
-        "/run/secrets/huggingface-oauth.json"
-    }:
+    if huggingface_enabled:
+        if not isinstance(file_refs, dict) or set(file_refs.values()) != {
+            "/run/secrets/huggingface-oauth.json"
+        }:
+            raise PreflightError(
+                "Account Center Hugging Face file reference must use its private mount"
+            )
+    else:
+        mounted_hf_secrets = {
+            row.get("target") for row in service.get("secrets", []) if isinstance(row, dict)
+        } & {"account-center-hf-provider-hmac-key", "huggingface-oauth.json"}
+        map_values = environment.get("CYRENE_SECRET_FILE_MAP", "").lower()
+        networks = service.get("networks", {})
+        if (
+            mounted_hf_secrets
+            or "hf_provider" in map_values
+            or any("huggingface" in str(name).lower() for name in networks)
+        ):
+            raise PreflightError(
+                "GitHub-only Account Center must not mount Hugging Face secrets or networks"
+            )
+
+
+def _connector_bootstrap_actor(config: dict[str, Any]) -> dict[str, Any]:
+    """Derive the bootstrap actor from the same Directory/Teams owner scope as preflight."""
+
+    services = config.get("services", {})
+    navigator = services.get("navigator", {}).get("environment", {})
+    authority = services.get("workspace-authority", {}).get("environment", {})
+    operator = services.get("directory-operator", {}).get("environment", {})
+    tenant_id = navigator.get("TEAMS_TENANT_ID")
+    return {
+        "issuer": f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        "subject": operator.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID"),
+        "organizationId": authority.get("CYRENE_ORGANIZATION_ID"),
+        "workspaceId": authority.get("CYRENE_WORKSPACE_ID"),
+    }
+
+
+def _validate_connector_bootstrap_config(
+    path: Path, *, huggingface_enabled: bool, expected_actor: dict[str, Any]
+) -> None:
+    """Require the private Exchange bootstrap input to match the selected provider set."""
+
+    try:
+        document = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError("private connector bootstrap configuration is invalid JSON") from error
+    required = {"schemaVersion", "actor", "github"}
+    if (
+        not isinstance(document, dict)
+        or not required <= set(document)
+        or set(document) - (required | {"huggingface"})
+        or document.get("schemaVersion") != 1
+        or not isinstance(document.get("actor"), dict)
+        or set(document["actor"]) != {"issuer", "subject", "organizationId", "workspaceId"}
+        or document["actor"] != expected_actor
+        or PLACEHOLDER_RE.search(json.dumps(document, sort_keys=True))
+        or ("huggingface" in document) != huggingface_enabled
+    ):
         raise PreflightError(
-            "Account Center Hugging Face file reference must use its private mount"
+            "private connector bootstrap actor and provider set must match the approved Directory owner and CYRENE_HF_ENABLED"
         )
 
 
@@ -1603,21 +1766,15 @@ def _validate_compose(
             if mode not in {"stage2", "stage3", "cutover"} or active_phase not in profiles:
                 continue
         memory_value = service.get("mem_limit")
-        if isinstance(memory_value, int) and memory_value > 0:
-            amount_mib = memory_value / MIB
-        elif isinstance(memory_value, str) and re.fullmatch(r"[0-9]+[kKmMgG]", memory_value):
-            amount = int(memory_value[:-1])
-            suffix = memory_value[-1].lower()
-            amount_mib = amount * {"k": 1 / 1024, "m": 1, "g": 1024}[suffix]
-        elif isinstance(memory_value, str) and memory_value.isdecimal() and int(memory_value) > 0:
-            amount_mib = int(memory_value) / MIB
-        else:
+        memory_bytes = _memory_limit_bytes(memory_value)
+        if memory_bytes is None:
             raise PreflightError(f"Compose service {name} lacks a finite memory limit")
+        amount_mib = memory_bytes / MIB
         memory += amount_mib
-        try:
-            cpus += float(service.get("cpus"))
-        except (TypeError, ValueError) as error:
-            raise PreflightError(f"Compose service {name} lacks a finite CPU limit") from error
+        cpu_limit = _cpu_limit_decimal(service.get("cpus"))
+        if cpu_limit is None:
+            raise PreflightError(f"Compose service {name} lacks a finite CPU limit")
+        cpus += float(cpu_limit)
     if memory > max_memory_mib:
         raise PreflightError(
             f"Compose cgroup memory limits total {memory:.0f} MiB, above {max_memory_mib} MiB"
@@ -1701,6 +1858,14 @@ def _validate_secrets_and_configs(
                 f"private {name} directory must be owner-only and owned by UID 10001"
             )
     resolved_secrets = config.get("secrets", {})
+    huggingface_enabled = _huggingface_enabled(config)
+    present_huggingface_secrets = set(resolved_secrets) & HUGGINGFACE_OPTIONAL_SECRET_NAMES
+    if huggingface_enabled and present_huggingface_secrets != HUGGINGFACE_OPTIONAL_SECRET_NAMES:
+        raise PreflightError(
+            "HF-enabled Compose must define its complete provider and OAuth secrets"
+        )
+    if not huggingface_enabled and present_huggingface_secrets:
+        raise PreflightError("GitHub-only Compose must not define Hugging Face secrets")
     phase_secrets = {
         "cloud-management-exchange-hmac-key": {"stage2", "stage3", "cutover"},
         "gcp-wif-credential-config": {"stage2", "stage3", "cutover"},
@@ -1777,7 +1942,17 @@ def _validate_secrets_and_configs(
         elif path.name == "navigator-principal-config.json":
             _validate_principal_configuration(path, config.get("services", {}))
         elif path.name == "responsibility-targets.v1.json":
-            _validate_responsibility_targets(path, config_dir / "connector-bindings.json")
+            _validate_responsibility_targets(
+                path,
+                config_dir / "connector-bindings.json",
+                allow_pending=mode == "bootstrap",
+            )
+        elif path.name == "connector-bootstrap.json":
+            _validate_connector_bootstrap_config(
+                path,
+                huggingface_enabled=huggingface_enabled,
+                expected_actor=_connector_bootstrap_actor(config),
+            )
         elif path.suffix == ".json":
             try:
                 document = json.loads(path.read_text(encoding="utf-8"))
@@ -1788,7 +1963,10 @@ def _validate_secrets_and_configs(
     _validate_actor_projection(config_dir / "teams-actor-subjects.json", config.get("services", {}))
     account_center = config.get("services", {}).get("account-center")
     if isinstance(account_center, dict):
-        _validate_account_center_config(account_center)
+        _validate_account_center_config(
+            account_center,
+            huggingface_enabled=huggingface_enabled,
+        )
     cloud_service = config.get("services", {}).get("cloud-management-phase2")
     if isinstance(cloud_service, dict) and mode in {"stage2", "stage3", "cutover"}:
         _validate_cloud_acceptance_mount(cloud_service)
@@ -1798,9 +1976,10 @@ def _validate_secrets_and_configs(
         for row in service.get("secrets", [])
         if isinstance(row, dict) and row.get("source") == "account-center-huggingface-oauth-source"
     ]
-    if oauth_mounts != ["account-center"]:
+    expected_oauth_mounts = ["account-center"] if huggingface_enabled else []
+    if oauth_mounts != expected_oauth_mounts:
         raise PreflightError(
-            "Hugging Face OAuth bootstrap secret must mount only into Account Center"
+            "Hugging Face OAuth bootstrap secret mounts must match the selected provider profile"
         )
     teams_provider = config.get("services", {}).get("teams-provider")
     navigator = config.get("services", {}).get("navigator")
@@ -1883,11 +2062,37 @@ def _validate_identity_scope(config: dict[str, Any], actor_projection_path: Path
 
 
 def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
-    """Require real approved models, no paid fallback top-up, and foreground/background slots."""
+    """Validate the selected DSH or native CodeBuddy ACP model path."""
 
+    backend = navigator.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
     source = navigator.get("CYRENE_HARNESS_MODEL_SOURCE")
     model = navigator.get("CYRENE_HARNESS_MODEL")
     concurrency = navigator.get("CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS")
+    if backend == "codebuddy-acp":
+        if source not in {None, ""} or model not in {None, ""}:
+            raise PreflightError(
+                "CodeBuddy ACP must not select the legacy Harness model source or model"
+            )
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND") != "codebuddy":
+            raise PreflightError("CodeBuddy ACP command must be exactly the native codebuddy CLI")
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_ACP_MODEL") not in {
+            "glm-5.3-flash",
+            "deepseek-v4.1-flash",
+        }:
+            raise PreflightError("CodeBuddy ACP model must be an approved GLM or DeepSeek profile")
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED") != "false":
+            raise PreflightError("CodeBuddy ACP must disable model fallback")
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP") != "true":
+            raise PreflightError("CodeBuddy ACP requires the owner no-paid-topup declaration")
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL") not in {None, ""}:
+            raise PreflightError("CodeBuddy ACP must not configure a legacy fallback model")
+        if concurrency != "2":
+            raise PreflightError(
+                "CodeBuddy ACP requires two bounded foreground/background task slots"
+            )
+        return
+    if backend != "dsh":
+        raise PreflightError("Navigator execution backend must be dsh or codebuddy-acp")
     if source == "antigravity":
         if model != "gemini-3.8-flash-medium":
             raise PreflightError("proactive Navigator must use Antigravity gemini-3.8-flash-medium")
@@ -1911,6 +2116,143 @@ def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
         )
     if concurrency not in {"1", "2"}:
         raise PreflightError("Navigator task concurrency must fit the two-CPU deployment profile")
+
+
+def _validate_codebuddy_acp_boundary(
+    config: dict[str, Any], *, secrets_dir: Path, config_dir: Path
+) -> None:
+    """Keep the ACP bridge private to Navigator and out of Compose credentials.
+
+    中文：MCP bridge 配置由 Navigator 在容器内逐次生成；禁止通过 Compose 注入 token 或文件挂载。
+    """
+
+    navigator = config.get("services", {}).get("navigator", {})
+    environment = navigator.get("environment", {})
+    volumes = navigator.get("volumes", [])
+    secrets = navigator.get("secrets", [])
+    configs = navigator.get("configs", [])
+    if environment.get("CYRENE_WORKFLOWS_ENABLED") not in {"false", "true"}:
+        raise PreflightError("CodeBuddy ACP Workflows engine must be explicitly false or true")
+    if (
+        navigator.get("read_only") is not True
+        or "ALL" not in navigator.get("cap_drop", [])
+        or "no-new-privileges:true" not in navigator.get("security_opt", [])
+        or "/tmp:rw,nosuid,nodev,size=128m" not in navigator.get("tmpfs", [])
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP requires a read-only root, dropped capabilities, and bounded 128 MiB temporary storage"
+        )
+    if navigator.get("command") or navigator.get("entrypoint"):
+        raise PreflightError("CodeBuddy ACP must retain the Navigator-owned fixed CLI invocation")
+    if (
+        navigator.get("privileged") is True
+        or navigator.get("cap_add")
+        or navigator.get("ports")
+        or navigator.get("network_mode") == "host"
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP must keep the existing low-privilege private service boundary"
+        )
+    if any("MCP" in str(name).upper() for name in environment):
+        raise PreflightError(
+            "CodeBuddy ACP MCP configuration must not be injected through Compose env"
+        )
+    if any(
+        "MCP" in str(value).upper()
+        for row in [*volumes, *secrets, *configs]
+        if isinstance(row, dict)
+        for value in row.values()
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP MCP configuration must stay out of Compose mounts and secrets"
+        )
+    if any(isinstance(row, dict) and row.get("target") == "/home/navigator" for row in volumes):
+        raise PreflightError("CodeBuddy ACP must not mount the legacy Antigravity model home")
+    _validate_codebuddy_acp_mount_boundary(
+        config,
+        navigator,
+        secrets_dir=secrets_dir,
+        config_dir=config_dir,
+    )
+
+
+def _validate_codebuddy_acp_mount_boundary(
+    config: dict[str, Any],
+    navigator: dict[str, Any],
+    *,
+    secrets_dir: Path,
+    config_dir: Path,
+) -> None:
+    """Keep ACP Navigator mounts, secrets, and configs to the reviewed base set."""
+
+    volumes = navigator.get("volumes", [])
+    by_target = {
+        row.get("target"): row for row in volumes if isinstance(row, dict) and row.get("target")
+    }
+    allowed_targets = {
+        "/home/navigator/.codebuddy",
+        "/var/lib/cyrene-navigator",
+        "/run/teams-authorization",
+    }
+    session_volume = by_target.get("/var/lib/cyrene-navigator", {})
+    codebuddy_home = by_target.get("/home/navigator/.codebuddy", {})
+    actor_projection = by_target.get("/run/teams-authorization", {})
+    project_name = config.get("name")
+    volume_definitions = config.get("volumes", {})
+    volume_definition = (
+        volume_definitions.get("navigator-sessions", {})
+        if isinstance(volume_definitions, dict)
+        else {}
+    )
+    expected_volume_name = (
+        f"{project_name}_navigator-sessions" if isinstance(project_name, str) else None
+    )
+    secrets = navigator.get("secrets", [])
+    configs = navigator.get("configs", [])
+    secret_pairs = {
+        (row.get("source"), row.get("target")) for row in secrets if isinstance(row, dict)
+    }
+    config_pairs = {
+        (row.get("source"), row.get("target")) for row in configs if isinstance(row, dict)
+    }
+    if (
+        len(volumes) != 3
+        or set(by_target) != allowed_targets
+        or codebuddy_home.get("type") != "bind"
+        or codebuddy_home.get("read_only", False) is not False
+        or not isinstance(codebuddy_home.get("source"), str)
+        or not codebuddy_home.get("source")
+        or Path(str(codebuddy_home.get("source", ""))).resolve()
+        != (secrets_dir / "codebuddy").resolve()
+        or session_volume.get("type") != "volume"
+        or session_volume.get("source") != "navigator-sessions"
+        or not isinstance(project_name, str)
+        or not isinstance(volume_definition, dict)
+        or volume_definition.get("name") != expected_volume_name
+        or actor_projection.get("type") != "bind"
+        or actor_projection.get("read_only") is not True
+        or not isinstance(actor_projection.get("source"), str)
+        or not actor_projection.get("source")
+        or Path(str(actor_projection.get("source", ""))).resolve() != config_dir.resolve()
+        or secret_pairs
+        != {
+            ("navigator-exchange-hmac-key", "navigator-exchange-hmac-key"),
+            ("navigator-session-token", "navigator-session-token"),
+            ("teams-navigator-hmac-key", "teams-navigator-hmac-key"),
+            ("internal-service-root-ca", "internal-service-root-ca"),
+        }
+        or len(secrets) != 4
+        or config_pairs
+        != {
+            ("connector-bindings", "/run/config/connector-bindings.json"),
+            ("connector-tool-catalog", "/run/config/connector-tool-catalog.json"),
+            ("responsibility-targets", "/run/config/responsibility-targets.v1.json"),
+        }
+        or len(configs) != 3
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP Navigator must keep only its approved login, session, and Teams authorization mounts"
+        )
 
 
 def _validate_codebuddy_mount(config: dict[str, Any], secrets_dir: Path) -> None:
@@ -2004,8 +2346,10 @@ def _validate_proactive_navigator_container(config: dict[str, Any]) -> None:
         )
 
 
-def _validate_responsibility_targets(path: Path, bindings_path: Path) -> None:
-    """Allow only current GitHub bindings and the bounded draft/CI responsibility grants."""
+def _validate_responsibility_targets(
+    path: Path, bindings_path: Path, *, allow_pending: bool = False
+) -> None:
+    """Allow current GitHub bindings, or explicit unresolved IDs during bootstrap only."""
 
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -2080,7 +2424,10 @@ def _validate_responsibility_targets(path: Path, bindings_path: Path) -> None:
             or label in seen_labels
             or target.get("uri") != f"https://github.com/{label}"
             or not isinstance(binding_id, str)
-            or binding_id not in github_bindings
+            or (
+                binding_id not in github_bindings
+                and not (allow_pending and binding_id == "UNBOUND_PENDING_EXCHANGE_GITHUB_REBIND")
+            )
         ):
             raise PreflightError(
                 "responsibility targets must use unique canonical repos and a current Exchange GitHub binding"
@@ -2105,13 +2452,19 @@ def _validate_responsibility_targets(path: Path, bindings_path: Path) -> None:
             expected = expected_grants[action_id]
             if action_id == "rerun_source_ci":
                 workflow_ids = grant.get("sourceWorkflowIds")
+                pending_workflow_ids = allow_pending and workflow_ids == [
+                    "REPLACE_WITH_APPROVED_SOURCE_WORKFLOW_ID"
+                ]
                 if (
                     not isinstance(workflow_ids, list)
                     or not workflow_ids
-                    or any(
-                        not isinstance(workflow_id, str)
-                        or not re.fullmatch(r"[1-9][0-9]{0,19}", workflow_id)
-                        for workflow_id in workflow_ids
+                    or (
+                        not pending_workflow_ids
+                        and any(
+                            not isinstance(workflow_id, str)
+                            or not re.fullmatch(r"[1-9][0-9]{0,19}", workflow_id)
+                            for workflow_id in workflow_ids
+                        )
                     )
                     or len(set(workflow_ids)) != len(workflow_ids)
                     or {**expected, "sourceWorkflowIds": workflow_ids} != grant
@@ -2158,6 +2511,8 @@ def _validate_github_workflow_allowlist(compose: dict[str, Any], config_dir: Pat
     )
     targets_document = read_private_json(targets_path, "Navigator responsibility targets")
     workflow = read_private_json(workflow_path, "Navigator responsibility WorkFlow")
+    _validate_workflow_definition_disabled(workflow)
+    _validate_workflow_model_policy(compose, workflow)
     if (
         set(inventory) != {"schemaVersion", "observedAt", "source", "repositories", "excluded"}
         or inventory.get("schemaVersion") != 1
@@ -2382,6 +2737,57 @@ def _validate_github_workflow_allowlist(compose: dict[str, Any], config_dir: Pat
         raise PreflightError(
             "Navigator WorkFlow rerun grant differs from the verified provider allowlist"
         )
+
+
+def _validate_workflow_definition_disabled(workflow: dict[str, Any]) -> None:
+    """Require owner acceptance before a scheduled WorkFlow definition can run."""
+
+    if workflow.get("enabled") is not False:
+        raise PreflightError(
+            "Navigator WorkFlow definition must remain disabled until real acceptance"
+        )
+
+
+def _validate_workflow_model_policy(compose: dict[str, Any], workflow: dict[str, Any]) -> None:
+    """Require ACP workflow metadata to describe its native model without fallback."""
+
+    navigator = compose.get("services", {}).get("navigator", {})
+    environment = navigator.get("environment", {}) if isinstance(navigator, dict) else {}
+    if environment.get("CYRENE_HARNESS_EXECUTION_BACKEND") != "codebuddy-acp":
+        return
+    expected = {
+        "preferredProvider": "codebuddy",
+        "preferredModel": environment.get("CYRENE_HARNESS_CODEBUDDY_ACP_MODEL"),
+        "fallback": "configured_no_additional_spend",
+    }
+    if workflow.get("modelPolicy") != expected:
+        raise PreflightError(
+            "CodeBuddy ACP WorkFlow modelPolicy must use its configured native model and no-spend metadata"
+        )
+
+
+def _validate_optional_workflow_definition_disabled(config_dir: Path) -> None:
+    """Check a present private workflow file without requiring stage-1 target inventory."""
+
+    path = config_dir.resolve().parent / "proactive-assistant-workflow.v2.json"
+    if not path.exists():
+        return
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or not _private_artifact(path)
+        or path.stat().st_mode & 0o077
+    ):
+        raise PreflightError("Navigator WorkFlow definition must be a private owner-only file")
+    try:
+        workflow = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError("Navigator WorkFlow definition is invalid JSON") from error
+    if not isinstance(workflow, dict):
+        raise PreflightError("Navigator WorkFlow definition must be a JSON object")
+    _validate_workflow_definition_disabled(workflow)
 
 
 def _validate_cloud_acceptance_mount(service: dict[str, Any]) -> None:
@@ -3226,11 +3632,25 @@ def run_preflight(
     _validate_profile_stage(config, mode)
     _validate_secrets_and_configs(config, secrets_dir.resolve(), config_dir.resolve(), mode)
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
+    execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
+    if execution_backend == "codebuddy-acp":
+        _validate_codebuddy_acp_boundary(
+            config,
+            secrets_dir=secrets_dir.resolve(),
+            config_dir=config_dir.resolve(),
+        )
     if navigator_environment.get("CYRENE_RESPONSIBILITY_TARGETS_FILE"):
-        _validate_github_workflow_allowlist(config, config_dir.resolve())
+        if mode == "bootstrap":
+            _validate_optional_workflow_definition_disabled(config_dir.resolve())
+        else:
+            _validate_github_workflow_allowlist(config, config_dir.resolve())
     _validate_identity_scope(config, config_dir.resolve() / "teams-actor-subjects.json")
-    if navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity":
-        _validate_model_home_mount(config)
+    if (
+        navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity"
+        or execution_backend == "codebuddy-acp"
+    ):
+        if navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity":
+            _validate_model_home_mount(config)
         _validate_proactive_navigator_container(config)
     _validate_stage_acceptance_receipts(
         mode=mode,

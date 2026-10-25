@@ -20,9 +20,38 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 build = __import__("build_arm64")
+
+
+def test_computer_proxy_compose_uses_the_image_lock_generated_key(tmp_path: Path) -> None:
+    """Keep the proxy service reference aligned with build_arm64's canonical lock variable."""
+
+    output = tmp_path / "images.env"
+    build._write_compose_env(
+        output,
+        {
+            "images": [
+                {
+                    "service": "computer-runtime-proxy",
+                    "image": "cyrene/computer-runtime-proxy:test",
+                }
+            ],
+            "externalImages": {},
+        },
+    )
+    assert "CYRENE_IMAGE_COMPUTER_RUNTIME_PROXY=cyrene/computer-runtime-proxy:test" in (
+        output.read_text(encoding="utf-8")
+    )
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    compose = yaml.safe_load(
+        (deployment_root / "compose.computer-runtime.yaml").read_text(encoding="utf-8")
+    )
+    image = compose["services"]["computer-runtime-proxy"]["image"]
+    assert image.startswith("${CYRENE_IMAGE_COMPUTER_RUNTIME_PROXY:")
 
 
 def _plan() -> dict[str, Any]:

@@ -64,7 +64,7 @@ services:
       start_period: 30s
 
   computer-runtime-proxy:
-    image: ${CYRENE_IMAGE_COMPUTER_PROXY:?build and lock the hardened computer proxy image first}
+    image: ${CYRENE_IMAGE_COMPUTER_RUNTIME_PROXY:?build and lock the hardened computer proxy image first}
     pull_policy: never
     restart: unless-stopped
     logging: *computer-runtime-logging

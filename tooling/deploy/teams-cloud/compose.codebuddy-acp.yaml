@@ -1,0 +1,33 @@
+services:
+  navigator:
+    labels:
+      com.cyrene.runtime.profile: codebuddy-acp
+      com.cyrene.navigator.primary-model: ${CYRENE_HARNESS_CODEBUDDY_ACP_MODEL:-glm-5.3-flash}
+      com.cyrene.navigator.primary-provider: codebuddy-acp
+      com.cyrene.navigator.run-count-limit: none
+    environment:
+      CYRENE_HARNESS_EXECUTION_BACKEND: codebuddy-acp
+      CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND: ${CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND:-codebuddy}
+      CYRENE_HARNESS_CODEBUDDY_ACP_MODEL: ${CYRENE_HARNESS_CODEBUDDY_ACP_MODEL:-glm-5.3-flash}
+      CYRENE_HARNESS_MODEL_SOURCE: ""
+      CYRENE_HARNESS_MODEL: ""
+      CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED: "false"
+      CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP: "true"
+      CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL: ""
+      CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS: "2"
+      CYRENE_WORKFLOWS_ENABLED: ${CYRENE_WORKFLOWS_ENABLED:-false}
+      CYRENE_RESPONSIBILITY_TARGETS_FILE: /run/config/responsibility-targets.v1.json
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m
+    configs:
+      - source: responsibility-targets
+        target: /run/config/responsibility-targets.v1.json
+
+configs:
+  responsibility-targets:
+    file: ${CYRENE_RESPONSIBILITY_TARGETS_HOST_FILE:?provision the owner-only host responsibility target config}

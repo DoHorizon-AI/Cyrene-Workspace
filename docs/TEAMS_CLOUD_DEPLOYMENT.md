@@ -16,9 +16,9 @@ The production gate is native Linux ARM64, at least 2 CPUs and the nominal 4 GiB
 
 ## Private inputs and identities / 私有配置与身份
 
-Copy `config/runtime.env.template`, `config/secret-files.template.json`, `config/navigator-principal-config.template.json`, `config/teams-actor-subjects.template.json`, `config/teams-connector.template.json`, `config/connector-bindings.schema.json`, `config/connector-bindings.bootstrap.schema.json`, `config/connector-bindings.empty.template.json`, `config/connector-tool-catalog.schema.json`, `config/connector-tool-catalog.bootstrap.schema.json`, `config/connector-tool-catalog.empty.template.json`, `config/private-connector-bootstrap.template.json`, `config/cloud-api-evidence.schema.json`, both `config/cloud-api-evidence.*.template.json` files, and `config/build-plan.template.json` to a task directory under the umbrella `Cyrene/.artifacts/teams-cloud-<task>/`. The deployment config and receipt directories must remain outside every source worktree. Replace each template only with verified non-secret values; keep credential material in separate owner-only files under the matching private `secrets/` directory.
+Copy `config/runtime.env.template`, `config/secret-files.template.json`, `config/navigator-principal-config.template.json`, `config/teams-actor-subjects.template.json`, `config/teams-connector.template.json`, `config/connector-bindings.schema.json`, `config/connector-bindings.bootstrap.schema.json`, `config/connector-bindings.empty.template.json`, `config/connector-tool-catalog.schema.json`, `config/connector-tool-catalog.bootstrap.schema.json`, `config/connector-tool-catalog.empty.template.json`, the bootstrap template for the selected provider mode (`config/private-connector-bootstrap.github-only.template.json` or `config/private-connector-bootstrap.template.json`), `config/cloud-api-evidence.schema.json`, both `config/cloud-api-evidence.*.template.json` files, and `config/build-plan.template.json` to a task directory under the umbrella `Cyrene/.artifacts/teams-cloud-<task>/`. The deployment config and receipt directories must remain outside every source worktree. Replace each template only with verified non-secret values; keep credential material in separate owner-only files under the matching private `secrets/` directory.
 
-将 `config/runtime.env.template`、`config/secret-files.template.json`、`config/navigator-principal-config.template.json`、`config/teams-actor-subjects.template.json`、`config/teams-connector.template.json`、`config/connector-bindings.schema.json`、`config/connector-bindings.bootstrap.schema.json`、`config/connector-bindings.empty.template.json`、`config/connector-tool-catalog.schema.json`、`config/connector-tool-catalog.bootstrap.schema.json`、`config/connector-tool-catalog.empty.template.json`、`config/private-connector-bootstrap.template.json`、`config/cloud-api-evidence.schema.json`、两个 `config/cloud-api-evidence.*.template.json` 文件和 `config/build-plan.template.json` 复制到 umbrella 的 `Cyrene/.artifacts/teams-cloud-<task>/` 任务目录。部署配置和回执目录必须位于所有源码工作树之外。模板只填入已核实的非敏感值；凭据分别放在对应私有 `secrets/` 目录中，并设置为仅所有者可读。
+将 `config/runtime.env.template`、`config/secret-files.template.json`、`config/navigator-principal-config.template.json`、`config/teams-actor-subjects.template.json`、`config/teams-connector.template.json`、`config/connector-bindings.schema.json`、`config/connector-bindings.bootstrap.schema.json`、`config/connector-bindings.empty.template.json`、`config/connector-tool-catalog.schema.json`、`config/connector-tool-catalog.bootstrap.schema.json`、`config/connector-tool-catalog.empty.template.json`、所选 Provider 模式对应的 bootstrap 模板（`config/private-connector-bootstrap.github-only.template.json` 或 `config/private-connector-bootstrap.template.json`）、`config/cloud-api-evidence.schema.json`、两个 `config/cloud-api-evidence.*.template.json` 文件和 `config/build-plan.template.json` 复制到 umbrella 的 `Cyrene/.artifacts/teams-cloud-<task>/` 任务目录。部署配置和回执目录必须位于所有源码工作树之外。模板只填入已核实的非敏感值；凭据分别放在对应私有 `secrets/` 目录中，并设置为仅所有者可读。
 
 The three Directory URLs have separate PostgreSQL logins and mounts:
 
@@ -46,6 +46,379 @@ The private `navigator-principal-config.json` configures this owner as a trusted
 
 私有 `navigator-principal-config.json` 将该 owner 配置为可信的持久 Work writer（`can_takeover: true`），使 Navigator 能持久化任务并接纳 Teams 事件。其 `product_directory` 与 `product_service_credentials` 仍保持为空；Work writer 凭据不授予连接器权限。连接器授权仍由 Directory 成员关系和每次调用时新签发的 Authority grant 决定。
 
+## GitHub-only bootstrap and Stage 1 / GitHub-only bootstrap 与 Stage 1
+
+The default runtime template selects `CYRENE_HF_ENABLED=true`; this requires the separate `compose.huggingface.yaml` overlay and real HF OAuth seed, provider credentials, binding, and tool catalog. To stage GitHub first, create `$ARTIFACTS/github-only.env` from `config/github-only.env.template` and set `CYRENE_HF_ENABLED=false`. For CodeBuddy ACP, also copy `config/codebuddy-acp.env.template` to `$ARTIFACTS/codebuddy-acp.env`; it selects the same GitHub-only mode, the two bounded foreground/background slots, and `CYRENE_WORKFLOWS_ENABLED=false`. Load the GitHub-only env file last and do not include `compose.huggingface.yaml`.
+
+Use the prepared GitHub-only Account Center JSON, an Exchange integration config whose `authorizationCloud.profiles` is empty and whose `connectorHost.computerRunner` matches the selected computer-runtime overlay, and `config/private-connector-bootstrap.github-only.template.json`. Populate its actor from the same Directory owner, issuer, organization, and Workspace as the Teams admission projection; preflight rejects a different in-scope operator before Exchange can link a profile. Exchange's bootstrap schema makes the `huggingface` entry optional, and Account Center accepts an empty provider-secret-file-ref list. The `secret-files.template.json` divides the base Phase 1 credentials from HF-only credentials. In GitHub-only mode, Compose has no HF provider, OAuth source mount, HF-only HMAC/mTLS secret, or HF network; preflight requires the Account Center configuration, Exchange profiles, connector bindings, targets, and tool catalog to contain no HF entry. The ACP computer connector may remain enabled and is checked separately; its Exchange binding and live tools are included in the exported Stage 1 map/catalog.
+
+The bootstrap preflight accepts the exact `UNBOUND_PENDING_EXCHANGE_GITHUB_REBIND` target marker and `REPLACE_WITH_APPROVED_SOURCE_WORKFLOW_ID` source-workflow marker only in `bootstrap` mode. It remains `BOOTSTRAP_ONLY_NOT_FULL_READY`. The private workflow file may be absent or remain disabled with pending owner thread/task IDs. Bootstrap preflight does not require the live GitHub workflow inventory or full responsibility allowlist; Stage 1 does.
+
+For CodeBuddy ACP, copy the disabled workflow template to `$ARTIFACTS/proactive-assistant-workflow.v2.json` and set its `modelPolicy` to the configured native ACP profile: `{"preferredProvider":"codebuddy","preferredModel":"glm-5.3-flash","fallback":"configured_no_additional_spend"}` (use the selected `deepseek-v4.1-flash` value when that model is selected). This three-field value is WorkFlow metadata only; ACP fallback remains disabled in Compose and does not turn on the DSH model selector. Stage 1 preflight requires the metadata to match the selected CodeBuddy model.
+
+CodeBuddy ACP 路径将禁用 workflow 模板复制为 `$ARTIFACTS/proactive-assistant-workflow.v2.json`，并把 `modelPolicy` 设置为所选原生 ACP 配置：`{"preferredProvider":"codebuddy","preferredModel":"glm-5.3-flash","fallback":"configured_no_additional_spend"}`（选择 `deepseek-v4.1-flash` 时将模型值改为该项）。这三个字段只是 WorkFlow 元数据；Compose 中 ACP fallback 仍关闭，也不会启用 DSH model selector。Stage 1 预检会要求其与实际 CodeBuddy 模型一致。
+
+For the ACP path, run the same profile selection for bootstrap and Stage 1. The Compose and env-file arguments shown here are the complete selection used for both checks and service startup:
+
+ACP 路径的 bootstrap 与 Stage 1 使用相同 profile。下面的 Compose 文件和 env 文件参数用于预检与服务启动，保持一致：
+
+```sh
+sudo -n install -o 10001 -g 10001 -m 0600 \
+  tooling/deploy/teams-cloud/config/github-only.env.template \
+  "$ARTIFACTS/github-only.env"
+sudo -n install -o 10001 -g 10001 -m 0600 \
+  tooling/deploy/teams-cloud/config/codebuddy-acp.env.template \
+  "$ARTIFACTS/codebuddy-acp.env"
+sudo -n install -o 10001 -g 10001 -m 0600 \
+  tooling/deploy/teams-cloud/config/proactive-assistant-workflow.v2.template.json \
+  "$ARTIFACTS/proactive-assistant-workflow.v2.json"
+sudo -n -e "$ARTIFACTS/proactive-assistant-workflow.v2.json"
+sudo -n install -o 10001 -g 10001 -m 0600 \
+  tooling/deploy/teams-cloud/config/private-connector-bootstrap.github-only.template.json \
+  "$ARTIFACTS/config/connector-bootstrap.json"
+sudo -n -e "$ARTIFACTS/config/connector-bootstrap.json"
+
+sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
+  --mode bootstrap \
+  --compose-file tooling/deploy/teams-cloud/compose.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  --image-lock "$ARTIFACTS/build/image-lock.json" \
+  --secrets-dir "$ARTIFACTS/secrets" \
+  --config-dir "$ARTIFACTS/config"
+
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  up -d workspace-authority account-center github-issues teams-provider exchange
+```
+
+Run Exchange's local plan first. It verifies the Directory role and emits the actual GitHub profile reference without linking it or writing a connection. Read that owner-only plan privately, then add only the returned GitHub `profileRef` to `workspace_operator_profile_refs` in the private Account Center JSON supplied as `CYRENE_ACCOUNT_CENTER_CONFIGURATION_JSON`. Preserve its App and host-secret mappings; keep both `provider_secret_file_refs` and `hostSecretFileRefs` empty, and add no HF profile. Recreate Account Center so the explicit shared-profile allowlist is active before applying the bootstrap.
+
+先运行 Exchange 本地计划命令。它会校验 Directory role 并返回真实 GitHub profile reference，但不会链接 profile 或写入 connection。私下核对仅 owner 可读的计划后，只把返回的 GitHub `profileRef` 加到 `CYRENE_ACCOUNT_CENTER_CONFIGURATION_JSON` 对应私有 Account Center 配置中的 `workspace_operator_profile_refs`。保留 App 与 host-secret 映射；`provider_secret_file_refs` 和 `hostSecretFileRefs` 都保持空数组/空对象，不添加 HF profile。随后重建 Account Center，使明确授权的共享 profile allowlist 生效，再执行 bootstrap。
+
+```sh
+install -d -m 0700 "$ARTIFACTS/acceptance"
+umask 077
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  run --rm --no-deps exchange integrations bootstrap-connectors \
+  --integration-database /data/integrations.sqlite3 \
+  --private-config /run/config/connector-bootstrap.json \
+  --plan-only > "$ARTIFACTS/acceptance/connector-bootstrap-plan.json"
+
+# Add the exact returned GitHub profileRef; do not derive or guess it.
+sudo -n -e "$ARTIFACTS/runtime.env"
+
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  up -d --force-recreate account-center
+
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  stop exchange
+
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  run --rm --no-deps exchange integrations bootstrap-connectors \
+  --integration-database /data/integrations.sqlite3 \
+  --private-config /run/config/connector-bootstrap.json
+
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  up -d exchange
+
+temporary="$(mktemp)"
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  exec -T exchange \
+  /app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-exchange integrations connector-bindings \
+  --integration-database /data/integrations.sqlite3 \
+  --issuer "$EXPECTED_ISSUER" --subject "$OWNER_AAD_ID" \
+  --organization-id "$ORGANIZATION_ID" --workspace-id "$WORKSPACE_ID" > "$temporary"
+sudo -n install -o 10001 -g 10001 -m 0600 "$temporary" \
+  "$ARTIFACTS/config/.connector-bindings.json.tmp"
+sudo -n mv -f "$ARTIFACTS/config/.connector-bindings.json.tmp" \
+  "$ARTIFACTS/config/connector-bindings.json"
+rm -f "$temporary"
+
+temporary="$(mktemp)"
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  exec -T exchange \
+  /usr/local/bin/cyrene-secret-env-entrypoint \
+  /app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-exchange integrations connector-tool-catalog \
+  --integration-database /data/integrations.sqlite3 \
+  --issuer "$EXPECTED_ISSUER" --subject "$OWNER_AAD_ID" \
+  --organization-id "$ORGANIZATION_ID" --workspace-id "$WORKSPACE_ID" > "$temporary"
+sudo -n install -o 10001 -g 10001 -m 0600 "$temporary" \
+  "$ARTIFACTS/config/.connector-tool-catalog.json.tmp"
+sudo -n mv -f "$ARTIFACTS/config/.connector-tool-catalog.json.tmp" \
+  "$ARTIFACTS/config/connector-tool-catalog.json"
+rm -f "$temporary"
+```
+
+The apply command must return `directoryRoleVerified` and the real GitHub profile/connection identifiers. The two exporters read Exchange's durable state and live provider schemas; do not hand-create binding IDs, tool rows, or computer references. For ACP, the resulting launcher map/catalog must contain the approved GitHub and computer bindings and no Hugging Face entry. Then refresh the verified nine-repository source-workflow inventory, generate the matching provider/workflow allowlists, and replace pending GitHub target/workflow markers with the returned binding and verified source IDs. Stage 1 preflight requires the exact current bindings, repository scopes, and tool schemas.
+
+apply 命令必须返回 `directoryRoleVerified` 和真实 GitHub profile/connection 标识。两个 exporter 从 Exchange 持久状态及实时 Provider schema 读取数据；不要手工创建 binding ID、tool 行或 computer 引用。ACP 导出的 launcher map/catalog 必须包含核准的 GitHub 与 computer binding，且没有 Hugging Face 项。随后刷新已核实的九仓库 source-workflow inventory，生成匹配的 Provider/workflow allowlist，并使用真实 binding 与已核实的 source ID 替换 pending GitHub target/workflow 标记。Stage 1 预检会要求当前 binding、仓库范围和工具 schema 精确匹配。
+
+For CodeBuddy ACP, repeat preflight with `--mode stage1` and the same base, computer-runtime, and CodeBuddy Compose files plus the same runtime, image, CodeBuddy, and GitHub-only env files shown above; do not add the HF overlay. Then start the selected Stage 1 services with that same Compose/env selection. The complete host, image, owner/admission, repository, tool authorization, MCP, and secret-boundary checks still apply.
+
+CodeBuddy ACP 路径在绑定和工具目录完成后，以相同的基础、computer-runtime、CodeBuddy Compose 文件，以及相同 runtime、image、CodeBuddy、GitHub-only env 文件运行 `--mode stage1` 预检；不要加入 HF overlay。随后使用同一 Compose/env 组合启动 Stage 1 服务。宿主机、镜像、owner/admission、仓库、工具授权、MCP 和 secret 边界检查仍全部适用。
+
+```sh
+sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
+  --mode stage1 \
+  --compose-file tooling/deploy/teams-cloud/compose.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  --image-lock "$ARTIFACTS/build/image-lock.json" \
+  --secrets-dir "$ARTIFACTS/secrets" \
+  --config-dir "$ARTIFACTS/config"
+
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  --profile public-ingress up -d \
+  navigator-persistence navigator teams-ingress teams-public-ingress
+```
+
+Stage 1 startup uses the same Compose/env selection and starts Navigator with `CYRENE_WORKFLOWS_ENABLED=false`. The owner-only workflow JSON is a preflight manifest under `.artifacts`; it is not mounted into Navigator. Preflight requires this candidate to remain `enabled:false` before and after runtime activation. The durable definitions live separately in the Navigator Persistence Work API, so the disabled-manifest check does not block an authorized API update or claim that the stored definition is disabled.
+
+Stage 1 启动使用相同 Compose/env 组合，并以 `CYRENE_WORKFLOWS_ENABLED=false` 启动 Navigator。owner-only workflow JSON 是 `.artifacts` 下供预检使用的 manifest，不会挂载到 Navigator。运行激活前后，预检都要求该候选文件保持 `enabled:false`。持久 workflow definition 独立存储在 Navigator Persistence Work API；因此，disabled manifest 检查不会阻止经过授权的 API 更新，也不代表 live definition 已禁用。
+
+Complete one owner Teams chat while the engine is off. Verify the resulting real Teams thread binding and durable Work Task ID, copy those exact values into the disabled host manifest, and rerun Stage 1 preflight. Before switching the engine on, query the actual Work API and require every stored v2 definition to be absent or disabled. If any stored definition is enabled, stop and resolve it through the authorized Work API before continuing. Only after the separate owner acceptance should you set `CYRENE_WORKFLOWS_ENABLED=true`, rerun Stage 1 preflight, and recreate Navigator. Then send the disabled host candidate with `enabled:true` in memory through the trusted owner writer, using the Work API `PUT`; immediately `GET` the collection and verify the same ID is stored as enabled. The `.artifacts` file remains disabled, so later preflight continues to validate the intended gate manifest.
+
+Workflows engine 关闭期间，先完成一次 owner Teams 聊天。核实实际创建的 Teams thread binding 和持久 Work Task ID，把这两个真实值写入仍保持禁用的 host manifest，然后重新运行 Stage 1 预检。打开 engine 前，先查询真实 Work API，确认所有已存储 v2 definition 都不存在或为 disabled；若发现任何 enabled definition，先停下并通过获授权的 Work API 处理。只有单独通过 owner 验收后，才将 `CYRENE_WORKFLOWS_ENABLED=true`，重新运行 Stage 1 预检并重建 Navigator。随后通过可信 owner writer 调用 Work API `PUT`，在内存中把 disabled host candidate 的 `enabled` 改为 true；紧接着用 `GET` 回读 collection，核实同一 ID 已持久保存为 enabled。`.artifacts` 中的候选文件仍保持 disabled，因此后续预检继续验证预期的 gate manifest。
+
+Read the persisted WorkFlow collection over the internal TLS service. The current Work API contract returns one unpaginated `{"items":[...]}` v2 collection. The script rejects any other top-level shape, pagination marker, non-v2 item, or non-boolean `enabled` value; if the API contract changes, update the reader to exhaust every page before enabling the engine. The command runs inside Navigator Persistence and reads its already-mounted owner-scoped session secret plus internal CA; it prints counts only, never the token or full workflow data:
+
+通过内网 TLS 查询持久 WorkFlow collection。当前 Work API 契约以单个、不分页的 `{"items":[...]}` 返回 v2 collection。脚本会拒绝其他顶层结构、分页标记、非 v2 item 或非布尔 `enabled`；若 API 契约发生变化，必须先改为完整读取所有页再启用 engine。命令在 Navigator Persistence 容器内运行，从已挂载的 owner scope session secret 文件和内部 CA 读取凭据；只输出数量，不打印 token 或完整 workflow 内容：
+
+```sh
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  exec -T -e WORKFLOW_WORKSPACE_ID="$WORKSPACE_ID" navigator-persistence \
+  /opt/venv/bin/python - <<'PY'
+import json
+import os
+import ssl
+import urllib.parse
+import urllib.request
+
+workspace = urllib.parse.quote(os.environ["WORKFLOW_WORKSPACE_ID"], safe="")
+url = f"https://navigator-persistence:8080/api/v1/workspaces/{workspace}/work/workflows?definitionVersion=2"
+with open("/run/secrets/navigator-session-token", encoding="utf-8") as secret:
+    token = secret.read().strip()
+request = urllib.request.Request(
+    url,
+    headers={"Authorization": "Bearer " + token},
+)
+context = ssl.create_default_context(cafile="/run/secrets/internal-service-root-ca")
+with urllib.request.urlopen(request, context=context, timeout=10) as response:
+    collection = json.load(response)
+if not isinstance(collection, dict) or set(collection) != {"items"}:
+    raise SystemExit("Work API v2 collection response has an unknown or paginated shape")
+items = collection["items"]
+if not isinstance(items, list):
+    raise SystemExit("Work API v2 collection items must be an array")
+for item in items:
+    if (
+        not isinstance(item, dict)
+        or not isinstance(item.get("id"), str)
+        or not item["id"]
+        or type(item.get("version")) is not int
+        or item["version"] != 2
+        or type(item.get("enabled")) is not bool
+    ):
+        raise SystemExit("Work API v2 collection contains an invalid workflow record")
+if len({item["id"] for item in items}) != len(items):
+    raise SystemExit("Work API v2 collection contains duplicate workflow IDs")
+not_disabled = [item for item in items if item.get("enabled") is not False]
+if not_disabled:
+    raise SystemExit("Work API contains a non-disabled or invalid definition; keep the engine off")
+print(json.dumps({"definitionCount": len(items), "disabledCount": len(items)}))
+PY
+```
+
+After owner acceptance and the all-disabled read-back, change the one private ACP env value to `CYRENE_WORKFLOWS_ENABLED=true`, run the same `--mode stage1` preflight with the same Compose/env arguments, and recreate only Navigator. The preflight still reads the disabled host candidate; the enabled engine has no work to schedule until the approved definition is written.
+
+owner 验收通过且 live definition 全部 absent/disabled 后，将私有 ACP env 中唯一的该项改为 `CYRENE_WORKFLOWS_ENABLED=true`；用相同 Compose/env 参数重新运行 `--mode stage1` 预检，再只重建 Navigator。此时预检仍读取 disabled host candidate；在写入获批的 enabled definition 前，engine 没有可调度的责任工作流。
+
+```sh
+sudo -n -e "$ARTIFACTS/codebuddy-acp.env"
+
+sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
+  --mode stage1 \
+  --compose-file tooling/deploy/teams-cloud/compose.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  --image-lock "$ARTIFACTS/build/image-lock.json" \
+  --secrets-dir "$ARTIFACTS/secrets" \
+  --config-dir "$ARTIFACTS/config"
+
+sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  up -d --force-recreate navigator
+```
+
+Activate only after that owner approval and engine restart. This command reads the still-disabled host candidate, changes only its in-memory `enabled` field, writes it over stdin to the internal Work API, then reads the stored v2 collection back. The service bearer remains inside Navigator Persistence; no token or workflow JSON is put in a command argument. The durable API update is separate from the unchanged disabled preflight manifest.
+
+只在 owner 验收及 engine 重启完成后激活。命令读取仍为 disabled 的 host candidate，只在内存中改 `enabled` 字段，通过 stdin 写入内网 Work API，并立即回读持久 v2 collection。service bearer 留在 Navigator Persistence 容器内；token 与 workflow JSON 都不会放入命令参数。持久 API 更新与未改变的 disabled 预检 manifest 相互独立。
+
+```sh
+umask 077
+temporary="$(mktemp "$ARTIFACTS/acceptance/workflow-activation.XXXXXX")"
+sudo -n python3 - "$ARTIFACTS/proactive-assistant-workflow.v2.json" > "$temporary" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    workflow = json.load(source)
+if workflow.get("enabled") is not False:
+    raise SystemExit("host preflight candidate must remain disabled")
+workflow["enabled"] = True
+json.dump(workflow, sys.stdout, separators=(",", ":"))
+sys.stdout.write("\n")
+PY
+
+sudo -n cat "$temporary" | sudo -n docker compose \
+  --env-file "$ARTIFACTS/runtime.env" \
+  --env-file "$ARTIFACTS/build/images.env" \
+  --env-file "$ARTIFACTS/codebuddy-acp.env" \
+  --env-file "$ARTIFACTS/github-only.env" \
+  -f tooling/deploy/teams-cloud/compose.yaml \
+  -f tooling/deploy/teams-cloud/compose.computer-runtime.yaml \
+  -f tooling/deploy/teams-cloud/compose.codebuddy-acp.yaml \
+  exec -T -e WORKFLOW_WORKSPACE_ID="$WORKSPACE_ID" navigator-persistence \
+  /opt/venv/bin/python -c '
+import json
+import os
+import ssl
+import sys
+import urllib.parse
+import urllib.request
+
+workspace = urllib.parse.quote(os.environ["WORKFLOW_WORKSPACE_ID"], safe="")
+base = f"https://navigator-persistence:8080/api/v1/workspaces/{workspace}/work/workflows"
+workflow = json.load(sys.stdin)
+if workflow.get("version") != 2 or workflow.get("enabled") is not True:
+    raise SystemExit("activation payload must be an enabled WorkFlow v2 definition")
+workflow_id = workflow["id"]
+path = base + "/" + urllib.parse.quote(workflow_id, safe="") + "?definitionVersion=2"
+context = ssl.create_default_context(cafile="/run/secrets/internal-service-root-ca")
+with open("/run/secrets/navigator-session-token", encoding="utf-8") as secret:
+    token = secret.read().strip()
+headers = {"Authorization": "Bearer " + token}
+body = json.dumps(workflow, separators=(",", ":")).encode()
+request = urllib.request.Request(path, data=body, headers={**headers, "Content-Type": "application/json"}, method="PUT")
+with urllib.request.urlopen(request, context=context, timeout=20) as response:
+    saved = json.load(response)
+if saved.get("id") != workflow_id or saved.get("enabled") is not True:
+    raise SystemExit("Work API did not persist the enabled definition")
+list_request = urllib.request.Request(f"{base}?definitionVersion=2", headers=headers)
+with urllib.request.urlopen(list_request, context=context, timeout=20) as response:
+    collection = json.load(response)
+if not isinstance(collection, dict) or set(collection) != {"items"}:
+    raise SystemExit("Work API activation read-back has an unknown or paginated shape")
+items = collection["items"]
+if not isinstance(items, list) or any(
+    not isinstance(item, dict)
+    or not isinstance(item.get("id"), str)
+    or type(item.get("version")) is not int
+    or item["version"] != 2
+    or type(item.get("enabled")) is not bool
+    for item in items
+):
+    raise SystemExit("Work API activation read-back contains an invalid v2 collection")
+matches = [item for item in items if item.get("id") == workflow_id]
+if len(matches) != 1 or matches[0].get("enabled") is not True:
+    raise SystemExit("Work API read-back did not verify activation")
+print(json.dumps({"workflowId": workflow_id, "enabled": True}))
+'
+rm -f "$temporary"
+```
+
+Do not start Stage 2/3 or cutover while HF is disabled. When HF authorization is approved, use `CYRENE_HF_ENABLED=true`, add `compose.huggingface.yaml`, and provide the real private OAuth seed plus the HF provider secrets, Account Center profile, Exchange bootstrap/profile, binding, and live catalog. Preflight rejects a missing seed or any incomplete HF gate.
+
+HF 仍禁用时不得进入 Stage 2/3 或切换。HF 授权获批后，使用 `CYRENE_HF_ENABLED=true`、加入 `compose.huggingface.yaml`，并提供真实私有 OAuth seed、HF Provider secret、Account Center profile、Exchange bootstrap/profile、binding 和实时 catalog。缺 seed 或任一 HF 门槛不完整时，预检会拒绝。
+
 ## Build and lock / 构建与锁定
 
 Use a clean, committed Workspace source tree and fill every `sources.*.commit` in the private build plan with the exact reviewed remote SHA. The DSH commit must equal the `DSH_COMMIT` build argument. The builder fetches and archives those commits into a temporary context; it never copies from the dirty umbrella checkout, sibling worktrees, or a personal `~/.codebuddy` directory. It resolves each base and external image tag to a registry index digest and its unique ARM64 child manifest, then records each produced image ID, source SHA, `linux/arm64` platform, and measured size.
@@ -69,13 +442,17 @@ python tooling/deploy/teams-cloud/build_arm64.py verify-local \
 
 The opt-in v1 stack adds `compose.proactive-assistant-v1.yaml` and `compose.computer-runtime.yaml` to the base file. The former sets Antigravity `gemini-3.8-flash-medium` as the regular model, with the configured CodeBuddy fallback only when the provider profile has `CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP=true`. There are no per-day, per-turn, run-count, or repair-count gates. The executor keeps two bounded task slots (one reserved for foreground chat and one for background work); individual provider/tool operations retain their own timeouts and upstream limits, while a durable Work Task has no total-run timeout by default. This preserves ordinary Teams chat while a scheduled responsibility job runs.
 
+For the native CodeBuddy ACP option, use `compose.yaml`, `compose.computer-runtime.yaml`, then `compose.codebuddy-acp.yaml`, with `config/codebuddy-acp.env.template` loaded after the private runtime env. Do not combine this overlay with `compose.proactive-assistant-v1.yaml`. It selects `CYRENE_HARNESS_EXECUTION_BACKEND=codebuddy-acp`, the exact `codebuddy` executable, and only `glm-5.3-flash` or `deepseek-v4.1-flash`; the legacy Harness model source is cleared and its fallback is disabled. The existing owner-only CodeBuddy CLI state remains in `secrets/codebuddy`; preflight verifies the directory owner/mode without reading its files or proving the vendor account identity. `CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP=true` is an owner deployment declaration. CodeBuddy's published CLI interface does not provide a verified control that prevents account-credit use, so do not treat that variable as a billing guarantee.
+
+Navigator constructs the host-owned MCP bridge for each ACP run inside the container, writes its token-bearing configuration to a 0600 temporary file, passes only the path to `codebuddy`, and removes the file at termination. The profile supplies no MCP JSON, token, secret, or file mount through Compose. The CLI invocation remains Navigator-owned and uses stdio ACP, an empty built-in tools list, and strict MCP configuration. The overlay retains the base Navigator memory/CPU limits and adds the same read-only root, dropped capabilities, no-new-privileges setting, and bounded 128 MiB `/tmp` used by the existing proactive profile.
+
 The Antigravity profile template is model-only: no shell tools, MCP servers, subagents, browser automation, or added plugins. Keep the CLI login/cache home at `CYRENE_MODEL_HOME` under the private task artifact directory, owned by UID 10001 and mode 0700. Keep Navigator task/session state in its persistent `navigator-sessions` volume. Keep the separate CodeBuddy provider profile under the private `secrets/codebuddy` path. Neither profile nor any provider token is copied into an image. Back up these profile directories and the business-state volumes separately, encrypt backups at rest, and retain the owner-only permissions when restoring.
 
 The responsibility target file is host-managed configuration, not model output. Copy `config/responsibility-targets.v1.template.json` to the private `config/responsibility-targets.v1.json`; populate the ten exact public repository IDs from canonical `repositories.yaml` plus current GitHub App installation scope, then replace the unbound marker only after Exchange re-issues the GitHub profile binding for the complete approved set. Run `generate_github_workflow_allowlist.py --artifact-dir "$ARTIFACTS"` after the verified workflow inventory and ten-repository targets exist. It writes the same nine-repository IDs into the provider fragment `config/github-issues-source-workflow-ids.v1.json`, each Navigator target's `sourceWorkflowIds`, and the v2 workflow action. Merge only the fragment's `source_workflow_ids` member into the complete private GitHub provider JSON used for `CYRENE_GITHUB_ISSUES_CONFIGURATION_JSON`; preserve its existing App, Account Center, secret-reference, and repository configuration. Preflight compares the provider's exact ten-repository profile, this fragment, the verified inventory, and both Navigator grant layers; missing, extra, or mismatched IDs fail closed. This delivery bundle includes an owner-only generated list at `.artifacts/proactive-assistant-v1-20261024/config/responsibility-targets.v1.json`; its binding marker is intentionally unresolved because the existing production connector profile covers only a smaller scope. Do not enable the workflow or change the active runtime until the rebind is completed and read back. The target grant allows draft work only on `develop`, using task branches under `cyrene/assistant/`; failed source CI can be rerun only on those task branches and only for the explicit per-repository `sourceWorkflowIds` allowlist. The Workspace rerun grant is omitted because its CI workflow also creates immutable release artifacts. `pathPrefixes: ["**"]` means any repository-relative source path; the GitHub provider still independently denies hidden, control, deployment, and production paths. No issue update grant is provisioned.
 
 The current GitHub App installation covers 19 repositories. Keep the provider profile and Navigator targets restricted to the ten approved Cyrene repositories; record narrowing the App installation itself as an operator follow-up before production. The approved DH-Skills acceptance profile remains a separate single-repository test and does not require changing App permissions in this deployment step.
 
-Use `config/proactive-assistant-workflow.v2.template.json` as the disabled workflow definition template. Populate its target IDs and current binding IDs from the host target file, and fill `authorization.threadBindingId` plus `authorization.ownerTaskId` from a freshly verified owner Teams thread. Keep `enabled:false` until both IDs and connector grants are confirmed. Register through Navigator Workflows v2 (`PUT /api/v1/workspaces/{workspaceId}/work/workflows/{id}?definitionVersion=2`). The durable workflow polls GitHub every five minutes UTC; its first poll records a baseline without notification. It reviews all ten repositories at 09:00 and 17:00 America/New_York, sends at most one daily digest at 09:00, stays quiet on unchanged results from 22:00 to 08:00, and reports blocked goals, owner decisions, or service/auth outages immediately to the responsibility thread. It cannot merge, release, change production, or create new spend.
+Use `config/proactive-assistant-workflow.v2.template.json` as the disabled host preflight manifest. Populate its target IDs and current binding IDs from the host target file, and fill `authorization.threadBindingId` plus `authorization.ownerTaskId` from the freshly verified owner Teams thread. Keep `enabled:false`. This `.artifacts` file is not mounted into Navigator; preflight reads it from the host and requires it to stay disabled. Durable definitions are stored separately through the Navigator Persistence Work API. For CodeBuddy ACP, keep `CYRENE_WORKFLOWS_ENABLED=false` through the first owner chat, then query `GET /api/v1/workspaces/{workspaceId}/work/workflows?definitionVersion=2` and verify all stored v2 definitions are absent or disabled before switching the engine on. After separate owner approval, set the engine to true and restart Navigator, then submit the approved definition with `enabled:true` through `PUT /api/v1/workspaces/{workspaceId}/work/workflows/{id}?definitionVersion=2` and verify the stored state with another GET. The earlier GitHub-only section gives the exact private local commands. Later preflight checks still validate the unchanged disabled host manifest; it does not read the Work API or claim runtime activation state. The durable workflow polls GitHub every five minutes UTC; its first poll records a baseline without notification. It reviews all ten repositories at 09:00 and 17:00 America/New_York, sends at most one daily digest at 09:00, stays quiet on unchanged results from 22:00 to 08:00, and reports blocked goals, owner decisions, or service/auth outages immediately to the responsibility thread. It cannot merge, release, change production, or create new spend.
 
 The computer runner exposes only four fixed model tools through an mTLS Caddy proxy on private Docker networks: `computer.command.execute`, `computer.file.read`, `computer.file.write`, and `computer.directory.list`. It does not expose artifact create/get tools. Its Exchange binding is optional host configuration: merge `config/computer-runner.integration-fragment.v1.template.json` into the generated `CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON` root, preserving existing connectors. Resolve the stable connection UUID, Directory organization/workspace IDs, tenant issuer, and certificate files from the live host before enabling it; the fragment's placeholders must never pass preflight. Compose provides Exchange with the existing plugin CA/client certificate/key paths and keeps the runner free of those credentials. The runner runs as UID/GID 10001 with a read-only root, no Linux capabilities, no credentials, no model profile, no Docker socket, and no external network. Its only writable paths are memory-backed scratch filesystems capped at 192 MiB for `/workspace`, 64 MiB for artifacts, and 64 MiB for `/tmp` (320 MiB total). These paths are ephemeral and are lost on runner restart or replacement; artifact references do not survive and must not be treated as durable. The runtime's internal 16 MiB artifact limit does not make artifact APIs available in this Teams v1 profile. Navigator task/session/operation state remains in Navigator Persistence; model and connector credentials remain in their existing service-owned persistent stores and are not mounted in the runner. The runner cgroup is capped at 512 MiB RAM and 0.10 CPU. Limits are 30-second default and 10-minute maximum command timeouts, 64 KiB per stdout/stderr stream, 64 KiB file reads, 1 MiB file writes, 2,048 directory entries, and depth 32. This is a low-privilege operational boundary, not a hostile-code sandbox: use CI for heavy builds and high-risk commands. V1 provides one shared workspace per runner and has no per-task filesystem isolation or call serialization. The scheduled responsibility workflow uses typed GitHub tools only; do not add background computer actions or permit concurrent computer tasks until Navigator/Exchange enforces single-writer coordination.
 
@@ -87,11 +464,15 @@ Before enabling background work, back up the current service configuration, imag
 
 主动助手 v1 需要显式叠加 `compose.proactive-assistant-v1.yaml` 和 `compose.computer-runtime.yaml`。默认模型是 Antigravity `gemini-3.8-flash-medium`；CodeBuddy 只作为已配置的无额外付费回退。聊天、轮次、每日运行和修复次数都没有上限；并发槽位、单次供应商/工具超时和上游限制仍然生效。Navigator 持久化 Work Task 不设置默认总时限，因此用户聊天可与一个后台任务并行。
 
+原生 CodeBuddy ACP 是独立可选项，按顺序叠加 `compose.yaml`、`compose.computer-runtime.yaml` 和 `compose.codebuddy-acp.yaml`，并在私有 runtime env 后加载 `config/codebuddy-acp.env.template`。不要与 `compose.proactive-assistant-v1.yaml` 叠加。它选择 `CYRENE_HARNESS_EXECUTION_BACKEND=codebuddy-acp`、精确的 `codebuddy` 可执行文件，以及 `glm-5.3-flash` 或 `deepseek-v4.1-flash`；旧 Harness model source 会清空，fallback 关闭。CodeBuddy CLI 状态继续保存在服务专属 owner-only `secrets/codebuddy` 中；预检验证目录 owner/权限，但不读取文件，也不能证明供应商账号身份。`CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP=true` 是 owner 的部署声明。CodeBuddy 已发布的 CLI 接口没有经过验证的设置可阻止账号 credits 被使用，因此不能把该变量当作扣费保证。
+
+Navigator 在容器内为每次 ACP 调用创建 host-owned MCP bridge，将含 token 的配置写入权限为 0600 的临时文件，只把文件路径交给 `codebuddy`，并在调用结束后清理。Compose 不提供 MCP JSON、token、secret 或文件挂载。CLI 调用仍由 Navigator 固定，使用 stdio ACP、空的内置 tools 列表和 strict MCP 配置。该 overlay 保持基础 Navigator 的内存/CPU 上限，并采用现有主动助手的只读根目录、删除 capabilities、no-new-privileges 和有界 128 MiB `/tmp`。
+
 Antigravity CLI 使用私有 task artifact 下 UID 10001 所有、权限为 0700 的 `CYRENE_MODEL_HOME`；CodeBuddy profile 保存在独立的私有 `secrets/codebuddy`；Navigator 会话和业务状态在持久化卷中。不要把任一供应商登录目录或 token 打进镜像。备份时分开保存并加密模型授权目录、Navigator 业务状态和服务配置，恢复后继续保持 owner-only 权限。
 
 仓库目标配置只由宿主机维护。所有十个仓库的 ID 来自 Workspace 规范拓扑和当前 GitHub App 安装范围；现有生产 Exchange binding 范围较小，必须先重新绑定并回读后才能替换 `UNBOUND_PENDING_EXCHANGE_GITHUB_REBIND`。核实 workflow 清单和十仓库目标配置就绪后，运行 `generate_github_workflow_allowlist.py --artifact-dir "$ARTIFACTS"`。它会把同一组九仓库 CI workflow ID 写入 Provider 片段 `config/github-issues-source-workflow-ids.v1.json`、各 Navigator 仓库授权和 v2 工作流动作。将 Provider 片段的 `source_workflow_ids` 成员合并进 `CYRENE_GITHUB_ISSUES_CONFIGURATION_JSON` 对应的完整私有 JSON，保留现有 App、Account Center、secret refs 和仓库配置。预检会对照核实清单、Provider 精确十仓库 profile 和两层 Navigator grant；缺失、多余或不一致的 ID 都会阻止部署。当前 GitHub App 安装覆盖 19 个仓库；Provider profile 与 Navigator 目标仍限制为核准的十个 Cyrene 仓库。将缩小 App 安装范围记录为生产前运维后续；已批准的 DH-Skills 验收是独立单仓库测试，本阶段不要求修改 App 权限。
 
-在绑定和 Teams owner 帖子/Task 标识就绪前，工作流保持 `enabled:false`。工作流每五分钟读取开放事项，首次只建立静默基线；每天纽约时间 09:00 和 17:00 汇总审查，每天最多推送一份 09:00 摘要，22:00 至 08:00 对未变化状态保持安静。阻塞、需要 owner 决策或服务/授权中断会立即发到责任帖子。仅允许 `develop` 到 `cyrene/assistant/` 下生成草稿 PR；重跑 CI 只允许明确列出的源 CI workflow 和同一命名空间内的分支。Workspace 的候选 workflow 会产出不可变发行物，因此不授予自动重跑；Issue 状态更新、合并、发布、生产变更和新支出都不在默认授权内。
+使用 `config/proactive-assistant-workflow.v2.template.json` 作为 disabled host preflight manifest。根据 host target file 填入 target ID 和 current binding ID；从已核实的 owner Teams thread 填入 `authorization.threadBindingId` 与 `authorization.ownerTaskId`，并保持 `enabled:false`。这个 `.artifacts` 文件不会挂载到 Navigator；预检从宿主读取且要求它保持禁用。持久 definition 通过独立的 Navigator Persistence Work API 保存。CodeBuddy ACP 在首次 owner 聊天期间保持 `CYRENE_WORKFLOWS_ENABLED=false`；启用引擎前，先用 `GET /api/v1/workspaces/{workspaceId}/work/workflows?definitionVersion=2` 查询真实 Work API，确认所有 v2 definition 均不存在或 disabled。owner 单独验收后，设置 engine 为 true 并重启 Navigator，再通过 `PUT /api/v1/workspaces/{workspaceId}/work/workflows/{id}?definitionVersion=2` 提交 `enabled:true` 的获批 definition，并用另一次 GET 核实持久状态。上方 GitHub-only 章节给出了精确的私有本地命令。后续预检继续检查未改变的 disabled host manifest；它不会读取 Work API，也不会声称 live runtime 状态。持久工作流每五分钟读取开放事项，首次只建立静默基线；每天纽约时间 09:00 和 17:00 汇总审查，每天最多推送一份 09:00 摘要，22:00 至 08:00 对未变化状态保持安静。阻塞、需要 owner 决策或服务/授权中断会立即发到责任帖子。仅允许 `develop` 到 `cyrene/assistant/` 下生成草稿 PR；重跑 CI 只允许明确列出的源 CI workflow 和同一命名空间内的分支。Workspace 候选 workflow 会产出不可变发行物，因此不授予自动重跑；Issue 状态更新、合并、发布、生产变更和新支出都不在默认授权内。
 
 电脑执行服务位于单独的低权限容器中，通过内网 mTLS 代理只暴露四个模型工具：`computer.command.execute`、`computer.file.read`、`computer.file.write` 和 `computer.directory.list`；不暴露 artifact create/get 工具。Exchange 绑定属于可选的宿主配置：将 `config/computer-runner.integration-fragment.v1.template.json` 合并进已生成的 `CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON` 根对象，并保留现有连接器配置。启用前必须从实际主机核实连接 UUID、Directory 组织/工作区 ID、租户 issuer 和证书文件；片段中的占位值不能通过预检。Compose 通过现有只读挂载把插件 CA、Exchange 客户端证书和密钥路径交给 Exchange；运行器本身没有这些凭据。运行器 UID/GID 为 10001，根目录只读，无 Linux capability、无模型/供应商凭据、无 Docker socket、无外网。它的可写路径是总计 320 MiB 的内存 scratch 文件系统：`/workspace` 上限 192 MiB、artifact 64 MiB、`/tmp` 64 MiB。所有路径都是临时的，运行器重启或替换后内容会丢失；artifact 引用不会跨重启保留，也不能当成持久 artifact。运行时内部的 16 MiB artifact 限额不代表 Teams v1 profile 开放了 artifact API。Navigator Task/session/operation 状态仍保存在 Navigator Persistence；模型和连接器凭据仍由各自现有服务持久化管理，运行器不会挂载这些数据。运行器 cgroup 上限为 512 MiB 内存和 0.10 CPU。单条命令默认 30 秒、最多 10 分钟；stdout/stderr 各 64 KiB、单次文件读取 64 KiB、写入 1 MiB、目录最多 2,048 项/深度 32。该版本所有调用共享同一个工作目录，尚无按 Task 隔离或并发调用串行机制。主动责任工作流只用 GitHub typed tools；新增会调用电脑执行器的后台流程前，必须先由 Navigator/Exchange 强制单写者协调。高风险或大构建仍交给 CI。
 
@@ -114,7 +495,11 @@ sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACT
   --profile directory-bootstrap -f compose.yaml run --rm directory-runtime-role-bootstrap
 ```
 
-### Cold start: connector bootstrap before Navigator / 冷启动：先配置连接器，再启动 Navigator
+### HF-enabled cold start: connector bootstrap before Navigator / 启用 HF 的冷启动：先配置连接器，再启动 Navigator
+
+This section documents the optional HF-enabled path. It requires owner-approved HF authorization, the real OAuth seed, the HF provider secrets, and the current HF binding/catalog. For GitHub-only bootstrap and Stage 1, follow the preceding section and do not run the HF-specific bootstrap, service, or stage commands below. The two paths use distinct bootstrap inputs and Compose selections.
+
+本节说明可选的 HF-enabled 路径，要求 owner 已批准 HF 授权，并准备真实 OAuth seed、HF Provider 凭据和当前 binding/catalog。GitHub-only bootstrap 与 Stage 1 请遵循前一节，不要执行下方 HF 专属 bootstrap、服务或阶段命令。两种模式使用不同的 bootstrap 输入和 Compose 文件组合。
 
 Set `ARTIFACTS`, `OWNER_AAD_ID`, `EXPECTED_ISSUER`, `ORGANIZATION_ID`, and `WORKSPACE_ID` in the operator shell from the verified private deployment config. Do not source credential files or print their contents.
 
@@ -124,7 +509,7 @@ Provision the private `config/` and `secrets/` directories for the fixed contain
 
 全量预检前，先为容器固定运行用户 UID `10001` 配置私有 `config/` 与 `secrets/` 目录，权限 `0700`。每个 Compose 挂载配置文件都必须归 UID `10001` 所有，权限为 `0400` 或 `0600`，且 owner 可读。预检会检查这些条件；运维用户所有的 `0600` 文件对 Navigator、Exchange 或 Authority 不可读，因此会被拒绝。runtime env/build 回执可以由主机运维用户持有，但挂载到服务的 config/secrets 目录树属于服务账号。
 
-Create the bootstrap-only config files as the runtime UID, then edit the non-secret bootstrap values through the root editor. Fill only the verified owner/workspace, GitHub App installation and repository IDs, stable idempotency keys, and HF target aliases. The file contains no tokens. Empty bindings and catalog files are only for dependency bootstrap; both are rejected by every staging, stage, and cutover preflight.
+Create the bootstrap-only config files as the runtime UID, then edit the non-secret bootstrap values through the root editor. In this HF-enabled path, fill only the verified owner/workspace, GitHub App installation and repository IDs, stable idempotency keys, and approved HF target aliases. The file contains no tokens. Empty bindings and catalog files are only for dependency bootstrap; both are rejected by every staging, stage, and cutover preflight.
 
 ```sh
 sudo -n install -d -o 10001 -g 10001 -m 0700 \
@@ -156,6 +541,7 @@ sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACT
 sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
   --mode bootstrap \
   --compose-file tooling/deploy/teams-cloud/compose.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.huggingface.yaml \
   --env-file "$ARTIFACTS/runtime.env" \
   --env-file "$ARTIFACTS/build/images.env" \
   --image-lock "$ARTIFACTS/build/image-lock.json" \
@@ -169,7 +555,8 @@ Start only the services required to authorize and create profiles. Do not start 
 
 ```sh
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  -f compose.yaml up -d workspace-authority account-center github-issues huggingface teams-provider exchange
+  -f compose.yaml -f compose.huggingface.yaml \
+  up -d workspace-authority account-center github-issues huggingface teams-provider exchange
 ```
 
 Use the Exchange one-shot to produce a plan. It obtains a fresh Directory grant and returns the actual stable profile references and connection UUIDs without linking an account or writing a connection. Read the output privately, then add the exact returned GitHub and HF `profileRef` values to Account Center's private `workspace_operator_profile_refs` list. Recreate Account Center so the explicit shared-profile opt-in is active before the actual link.
@@ -180,13 +567,14 @@ Use the Exchange one-shot to produce a plan. It obtains a fresh Directory grant 
 install -d -m 700 "$ARTIFACTS/acceptance"
 umask 077
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  -f compose.yaml run --rm --no-deps exchange integrations bootstrap-connectors \
+  -f compose.yaml -f compose.huggingface.yaml \
+  run --rm --no-deps exchange integrations bootstrap-connectors \
   --integration-database /data/integrations.sqlite3 \
   --private-config /run/config/connector-bootstrap.json \
   --plan-only > "$ARTIFACTS/acceptance/connector-bootstrap-plan.json"
 
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  -f compose.yaml up -d --force-recreate account-center
+  -f compose.yaml -f compose.huggingface.yaml up -d --force-recreate account-center
 ```
 
 After verifying the planned refs and the active Account Center profile allowlist, run the same bootstrap once without `--plan-only`. Verify the returned `directoryRoleVerified`, healthy linked profiles, and connection IDs. Then export the real launcher map for the exact issuer, owner subject, and workspace to a same-directory temporary file and atomically replace `connector-bindings.json`. The exporter reads Exchange's durable SQLite rows; do not hand-create or guess connection IDs. Next, call the private Exchange `connector-tool-catalog` exporter. It queries the actual configured provider runtimes through Exchange's mTLS clients and returns only their tool schemas and safe metadata; it is a local CLI operation, not a debug HTTP endpoint. Replace `connector-tool-catalog.json` atomically with that output. Stage-1 preflight requires a non-empty matching GitHub/HF binding map and tool catalog; each tool ID and read/write bit must agree with the fixed binding policy.
@@ -195,20 +583,21 @@ After verifying the planned refs and the active Account Center profile allowlist
 
 ```sh
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  -f compose.yaml stop exchange
+  -f compose.yaml -f compose.huggingface.yaml stop exchange
 
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  -f compose.yaml run --rm --no-deps exchange integrations bootstrap-connectors \
+  -f compose.yaml -f compose.huggingface.yaml \
+  run --rm --no-deps exchange integrations bootstrap-connectors \
   --integration-database /data/integrations.sqlite3 \
   --private-config /run/config/connector-bootstrap.json
 
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  -f compose.yaml up -d exchange
+  -f compose.yaml -f compose.huggingface.yaml up -d exchange
 
 umask 077
 temporary="$(mktemp)"
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  -f compose.yaml exec -T exchange \
+  -f compose.yaml -f compose.huggingface.yaml exec -T exchange \
   /app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-exchange integrations connector-bindings \
   --integration-database /data/integrations.sqlite3 \
   --issuer "$EXPECTED_ISSUER" --subject "$OWNER_AAD_ID" \
@@ -221,7 +610,7 @@ rm -f "$temporary"
 
 temporary="$(mktemp)"
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  -f compose.yaml exec -T exchange \
+  -f compose.yaml -f compose.huggingface.yaml exec -T exchange \
   /usr/local/bin/cyrene-secret-env-entrypoint \
   /app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-exchange integrations connector-tool-catalog \
   --integration-database /data/integrations.sqlite3 \
@@ -242,6 +631,7 @@ Run the stage-1 preflight only after the map is present, then start Navigator Pe
 sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
   --mode stage1 \
   --compose-file tooling/deploy/teams-cloud/compose.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.huggingface.yaml \
   --env-file "$ARTIFACTS/runtime.env" \
   --env-file "$ARTIFACTS/build/images.env" \
   --image-lock "$ARTIFACTS/build/image-lock.json" \
@@ -249,7 +639,7 @@ sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
   --config-dir "$ARTIFACTS/config"
 
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  --profile public-ingress -f compose.yaml up -d \
+  --profile public-ingress -f compose.yaml -f compose.huggingface.yaml up -d \
   navigator-persistence navigator teams-ingress teams-public-ingress
 ```
 
@@ -269,30 +659,32 @@ Run the staged service profiles only after their preceding acceptance receipts a
 
 ```sh
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  --profile public-ingress -f compose.yaml up -d
+  --profile public-ingress -f compose.yaml -f compose.huggingface.yaml up -d
 
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
   --profile public-ingress --profile cloud-phase2 \
-  -f compose.yaml -f compose.cloud-phase2.yaml up -d
+  -f compose.yaml -f compose.huggingface.yaml -f compose.cloud-phase2.yaml up -d
 
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
   --profile public-ingress --profile runpod \
-  -f compose.yaml -f compose.cloud-phase2.yaml -f compose.runpod.yaml up -d
+  -f compose.yaml -f compose.huggingface.yaml \
+  -f compose.cloud-phase2.yaml -f compose.runpod.yaml up -d
 ```
 
 只有前一阶段回执已核验后，才启用下一阶段服务 profile。Stage 2 增加 Azure/GCP overlay。Stage 3 加载两个 overlay 文件，但只启用 `runpod` profile；它改为配置同一个 `cloud-management-phase2` 服务，并让持久云 Provider 状态卷保持唯一写入者。
 
 ```sh
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
-  --profile public-ingress -f compose.yaml up -d
+  --profile public-ingress -f compose.yaml -f compose.huggingface.yaml up -d
 
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
   --profile public-ingress --profile cloud-phase2 \
-  -f compose.yaml -f compose.cloud-phase2.yaml up -d
+  -f compose.yaml -f compose.huggingface.yaml -f compose.cloud-phase2.yaml up -d
 
 sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACTS/build/images.env" \
   --profile public-ingress --profile runpod \
-  -f compose.yaml -f compose.cloud-phase2.yaml -f compose.runpod.yaml up -d
+  -f compose.yaml -f compose.huggingface.yaml \
+  -f compose.cloud-phase2.yaml -f compose.runpod.yaml up -d
 ```
 
 The staged Caddy file uses an internal certificate and a high loopback-only HTTPS port. Only `teams-public-ingress` may publish a host port; the public route accepts `POST /api/messages` and rejects every other path or method. Navigator, Directory Authority, Exchange, Account Center, and providers remain on private Compose networks. Production publishes TCP 443 only, uses ACME TLS-ALPN, disables the HTTP-01 challenge, and leaves host port 80 unchanged and closed. The production preflight rejects `Caddyfile.staging` and `tls internal`. Bind to the public NIC address only after DNS, the Bot callback URL, and host port checks are ready. Preserve the old Docker stack during staging and rollback by stopping only the new ingress before restoring the old listener.
@@ -301,11 +693,11 @@ Staging Caddy 使用内部证书和仅监听 loopback 的高位 HTTPS 端口。�
 
 ## Connector stages and budget / 连接器阶段与预算
 
-1. **Teams, GitHub, Hugging Face.** Use the service-owned GitHub App key through Account Center. Hugging Face uses a newly authorized device-OAuth bootstrap file; never copy the old personal OAuth token file. Keep the bootstrap under private onboarding storage and mount it read-only into Account Center only. Account Center persists profile credentials encrypted in its durable database; keep the source owner-only for restarts and reauthentication until a later config rollout removes its file reference and mount. Generate the Exchange connector map and live provider tool catalog from the verified owner/workspace. Verify private reads, a bounded API write, read-back, and deletion before enabling cloud-provider profiles.
+1. **Teams, GitHub, and optional Hugging Face.** GitHub-only Stage 1 needs only the service-owned GitHub App key through Account Center. When HF authorization is approved, use a newly authorized device-OAuth bootstrap file; never copy the old personal OAuth token file. Keep the bootstrap under private onboarding storage and mount it read-only into Account Center only. Account Center persists profile credentials encrypted in its durable database; keep the source owner-only for restarts and reauthentication until a later config rollout removes its file reference and mount. Generate the Exchange connector map and live provider tool catalog from the verified owner/workspace. Verify private reads, a bounded API write, read-back, and deletion before enabling cloud-provider profiles.
 2. **Azure and GCP.** Add only Azure and GCP profiles using the dedicated User Assigned Managed Identity and the GCP Workload Identity Federation config. Use the formal DSH → Exchange → DirectPlugin API path for the identity check, enumeration, detail, bounded create/lifecycle, status read-back, and cleanup. Native vendor CLIs may make read-only queries against those API-created resources; do not create a second copy through CLI.
 3. **RunPod Pods.** Add the API key and RunPod profile only after the Azure/GCP API evidence is `VERIFIED`. Test Pod lifecycle, logs, readiness, and deletion through the formal API path. CLI probes remain read-only. Serverless is out of this stage.
 
-1. **Teams、GitHub、Hugging Face。** 通过 Account Center 使用服务专用 GitHub App 密钥。Hugging Face 使用新授权的 device-OAuth bootstrap 文件；不得复制旧个人 OAuth token 文件。bootstrap 文件只保存在私有 onboarding 目录，只读挂载到 Account Center。Account Center 会将 profile 凭据加密保存到持久数据库；在后续配置发布同时移除文件引用和挂载前，需将源文件保持 owner-only，以支持重启和重新授权。用已核验 owner/workspace 导出 Exchange 连接映射和真实 Provider 工具目录。依次验收私有读取、受限 API 写入、回读和删除，然后才开放云 Provider profile。
+1. **Teams、GitHub 和可选 Hugging Face。** GitHub-only Stage 1 只需通过 Account Center 使用服务专属 GitHub App 密钥。HF 授权获批后，使用新授权的 device-OAuth bootstrap 文件；不得复制旧个人 OAuth token 文件。bootstrap 文件只保存在私有 onboarding 目录，只读挂载到 Account Center。Account Center 会将 profile 凭据加密保存到持久数据库；在后续配置发布同时移除文件引用和挂载前，需将源文件保持 owner-only，以支持重启和重新授权。用已核验 owner/workspace 导出 Exchange 连接映射和真实 Provider 工具目录。依次验收私有读取、受限 API 写入、回读和删除，然后才开放云 Provider profile。
 2. **Azure、GCP。** 仅增加 Azure 与 GCP profile，使用专用 User Assigned Managed Identity 和 GCP Workload Identity Federation 配置。身份、资源枚举、详情、受限创建/生命周期、状态回读和清理均走正式 DSH → Exchange → DirectPlugin API；原生供应商 CLI 只对 API 创建的资源执行只读查询，不重复创建资源。
 3. **RunPod Pods。** Azure/GCP API 证据标记为 `VERIFIED` 后再提供 API key 并添加 RunPod profile。通过正式 API 路径验收 Pod 生命周期、日志、就绪状态和删除；CLI 探测保持只读。Serverless 不在此阶段。
 
@@ -341,6 +733,7 @@ Stage 3 预检还需要已验证的 Azure/GCP API 回执。公网切换需要相
 sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
   --mode stage3 \
   --compose-file tooling/deploy/teams-cloud/compose.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.huggingface.yaml \
   --compose-file tooling/deploy/teams-cloud/compose.cloud-phase2.yaml \
   --compose-file tooling/deploy/teams-cloud/compose.runpod.yaml \
   --env-file "$ARTIFACTS/runtime.env" \
@@ -353,6 +746,7 @@ sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
 sudo -n python3 tooling/deploy/teams-cloud/preflight.py \
   --mode cutover \
   --compose-file tooling/deploy/teams-cloud/compose.yaml \
+  --compose-file tooling/deploy/teams-cloud/compose.huggingface.yaml \
   --compose-file tooling/deploy/teams-cloud/compose.cloud-phase2.yaml \
   --compose-file tooling/deploy/teams-cloud/compose.runpod.yaml \
   --env-file "$ARTIFACTS/runtime.env" \

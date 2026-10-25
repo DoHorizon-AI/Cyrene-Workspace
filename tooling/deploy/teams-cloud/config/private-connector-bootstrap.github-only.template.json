@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "actor": {
+    "issuer": "https://login.microsoftonline.com/<tenant-uuid>/v2.0",
+    "subject": "<lowercase-aad-object-uuid>",
+    "organizationId": "<authority-organization-id>",
+    "workspaceId": "<authority-workspace-id>"
+  },
+  "github": {
+    "installationId": "<github-app-installation-id>",
+    "expectedAccessMode": "workspace_operator",
+    "profileIdempotencyKey": "teams-cloud-github-installation",
+    "repositories": [
+      {
+        "repositoryId": "<numeric-github-repository-id>",
+        "owner": "<repository-owner>",
+        "name": "<repository-name>"
+      }
+    ]
+  }
+}

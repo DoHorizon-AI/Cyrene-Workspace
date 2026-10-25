@@ -1,0 +1,122 @@
+x-huggingface-logging: &huggingface-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  account-center:
+    environment:
+      CYRENE_SECRET_FILE_MAP: CYRENE_ACCOUNT_CENTER_ENCRYPTION_KEY=/run/secrets/account-center-encryption-key,CYRENE_ACCOUNT_CENTER_EXCHANGE_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,CYRENE_ACCOUNT_CENTER_GITHUB_PROVIDER_HMAC_KEY=/run/secrets/account-center-github-provider-hmac-key,CYRENE_ACCOUNT_CENTER_HF_PROVIDER_HMAC_KEY=/run/secrets/account-center-hf-provider-hmac-key,CYRENE_ACCOUNT_CENTER_GITHUB_APP_PRIVATE_KEY=/run/secrets/account-center-github-app-private-key
+    secrets:
+      - source: account-center-hf-provider-hmac-key
+        target: account-center-hf-provider-hmac-key
+      - source: account-center-huggingface-oauth-source
+        target: huggingface-oauth.json
+    networks:
+      - huggingface-account-center-private
+
+  exchange:
+    environment:
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_ACCOUNT_CONTEXT_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key
+    secrets:
+      - source: exchange-hf-auth-context-hmac-key
+        target: exchange-hf-auth-context-hmac-key
+    networks:
+      - huggingface-exchange-private
+    depends_on:
+      huggingface:
+        condition: service_healthy
+
+  huggingface:
+    image: ${CYRENE_IMAGE_HUGGINGFACE_PROVIDER:?build and lock the Hugging Face provider image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *huggingface-logging
+    environment:
+      CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_HUGGINGFACE_BINDING_ID:?Hugging Face provider binding ID is required}
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_HUGGINGFACE_CONFIGURATION_JSON:?configure the exact Hugging Face profiles and repositories}
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key,HF_ACCOUNT_CENTER_PROVIDER_HMAC_KEY=/run/secrets/account-center-hf-provider-hmac-key,HF_ACCOUNT_CENTER_ROOT_CERTIFICATE=/run/secrets/exchange-plugin-root-ca,HF_ACCOUNT_CENTER_CLIENT_CERTIFICATE=/run/secrets/huggingface-account-center-client-cert,HF_ACCOUNT_CENTER_CLIENT_KEY=/run/secrets/huggingface-account-center-client-key
+    secrets:
+      - source: exchange-hf-auth-context-hmac-key
+        target: exchange-hf-auth-context-hmac-key
+      - source: account-center-hf-provider-hmac-key
+        target: account-center-hf-provider-hmac-key
+      - source: exchange-plugin-root-ca
+        target: exchange-plugin-root-ca
+      - source: exchange-plugin-root-ca
+        target: huggingface-health-server-ca
+      - source: huggingface-account-center-client-cert
+        target: huggingface-account-center-client-cert
+      - source: huggingface-account-center-client-key
+        target: huggingface-account-center-client-key
+      - source: huggingface-server-cert
+        target: huggingface-server-cert
+      - source: huggingface-server-key
+        target: huggingface-server-key
+      - source: exchange-plugin-client-ca
+        target: huggingface-client-ca
+      - source: huggingface-health-client-cert
+        target: huggingface-health-client-cert
+      - source: huggingface-health-client-key
+        target: huggingface-health-client-key
+    expose:
+      - "7443"
+    networks:
+      huggingface-exchange-private:
+        aliases: [huggingface]
+      huggingface-account-center-private: {}
+      huggingface-egress: {}
+    depends_on:
+      account-center:
+        condition: service_healthy
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.10"
+    pids_limit: 96
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /usr/local/bin/cyrene-plugin-grpc-health
+        - --target
+        - huggingface:7443
+        - --plugin-id
+        - cyrene.providers.huggingface
+        - --server-ca
+        - /run/secrets/huggingface-health-server-ca
+        - --client-cert
+        - /run/secrets/huggingface-health-client-cert
+        - --client-key
+        - /run/secrets/huggingface-health-client-key
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+
+networks:
+  huggingface-exchange-private:
+    internal: true
+  huggingface-account-center-private:
+    internal: true
+  huggingface-egress: {}
+
+secrets:
+  account-center-hf-provider-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/account-center-hf-provider-hmac-key
+  account-center-huggingface-oauth-source:
+    file: ${CYRENE_HF_OAUTH_BOOTSTRAP_FILE:?provision the private Hugging Face OAuth bootstrap file}
+  huggingface-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-server-cert
+  huggingface-server-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-server-key
+  huggingface-health-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-health-client-cert
+  huggingface-health-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-health-client-key
+  huggingface-account-center-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-account-center-client-cert
+  huggingface-account-center-client-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/huggingface-account-center-client-key
+  exchange-hf-auth-context-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-hf-auth-context-hmac-key

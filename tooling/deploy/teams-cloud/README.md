@@ -19,10 +19,13 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `compose.cloud-phase2.yaml`, `compose.runpod.yaml` | Opt-in Azure/GCP then RunPod on the same single cloud-provider service / 在同一个云 Provider 服务上按阶段启用 Azure/GCP 和 RunPod |
 | `Dockerfile.*` | Source-built ARM64 service images with fixed runtime entrypoints / 从固定源码构建 ARM64 服务镜像并锁定运行入口 |
 | `config/requirements.huggingface-cli.lock` | Hash-locked ARM64/Python 3.12 `hf` CLI dependency closure / 固定哈希的 ARM64/Python 3.12 `hf` CLI 依赖闭包 |
+| `compose.huggingface.yaml`, `config/github-only.env.template` | Explicit HF-enabled overlay or auditable GitHub-only selection / 显式 HF overlay 或可审计的 GitHub-only 选择 |
 | `compose.proactive-assistant-v1.yaml`, `compose.computer-runtime.yaml`, `Dockerfile.computer-runtime`, `Dockerfile.computer-proxy` | Opt-in unlimited conversational model profile, private ephemeral computer runner, and mTLS-only bridge / 可选的不限聊天次数模型配置、内网临时电脑执行容器与仅 mTLS 桥接 |
+| `compose.codebuddy-acp.yaml`, `config/codebuddy-acp.env.template` | Explicit native CodeBuddy ACP profile with a closed command/model selector / 显式启用原生 CodeBuddy ACP，并限制命令和模型选择 |
 | `config/responsibility-targets.v1.schema.json`, `config/responsibility-targets.v1.template.json`, `config/proactive-assistant-workflow.v2.template.json` | Host-owned repository grants and disabled Workflows v2 template / 宿主机维护的仓库授权与默认禁用的 Workflows v2 模板 |
 | `config/computer-runner.integration-fragment.v1.template.json` | Non-secret Exchange host binding fragment for the mTLS computer runner / 电脑执行器 mTLS 连接器的非敏感 Exchange 宿主绑定片段 |
 | `generate_github_workflow_allowlist.py` | Derive matching private GitHub provider and Navigator rerun grants from one verified nine-repository inventory / 从同一份九仓库核实清单生成匹配的 GitHub Provider 与 Navigator 重跑授权 |
+| `config/private-connector-bootstrap.github-only.template.json` | Exchange GitHub-only bootstrap input with no HF profile or credential ref / 不含 HF profile 和凭据引用的 Exchange GitHub-only bootstrap 输入 |
 | Generated `.artifacts/<task>/config/github-issues-source-workflow-ids.v1.json` | Owner-only provider configuration fragment; merge its `source_workflow_ids` into the complete private GitHub provider configuration / 仅 owner 可读的 Provider 配置片段；将 `source_workflow_ids` 合并到完整私有 GitHub Provider 配置 |
 | `config/antigravity-model-only-profile.template.md`, `config/proactive-assistant-v1.env.template` | Model-only CLI profile and Antigravity/CodeBuddy runtime defaults / 仅模型 CLI profile 与 Antigravity/CodeBuddy 运行时默认值 |
 | `prepare_production_runtime.py` | Produce a production-only DSH/Navigator dependency closure without development caches / 构建不含开发缓存的 DSH/Navigator 生产依赖集合 |
@@ -44,9 +47,21 @@ the exact source SHA for every repository. The builder snapshots remote Git
 commits into a temporary directory; it never copies files from sibling working
 trees or a user's home directory.
 
-The proactive profile is not part of the default stack. It must be added explicitly after the base Compose file; include the computer-runtime overlay for the same deployment. Do not enable the scheduled workflow until the host target list has been rebound and the verified owner Teams thread identifiers have been filled. Current-VM capacity and external acceptance remain separate live checks.
+`runtime.env.template` defaults `CYRENE_HF_ENABLED=true`; the HF-enabled path requires `compose.huggingface.yaml`, the real owner-only OAuth seed, current HF binding, and the live HF tool catalog. For GitHub-only bootstrap or Stage 1 staging, load `config/github-only.env.template` after `runtime.env` and omit the HF Compose overlay. Use the GitHub-only Account Center config, `config/private-connector-bootstrap.github-only.template.json`, and an Exchange `authorizationCloud.profiles` map with no HF entries. Preflight requires no HF provider service, source secret, provider secret references, connector binding, target, or catalog entry in that mode. HF-disabled mode is limited to bootstrap and Stage 1/staging; later phases require the HF-enabled gates.
 
-主动助手 profile 不会进入默认服务栈，必须在基础 Compose 文件后显式添加，并同时包含 computer-runtime overlay。GitHub 仓库绑定重新核验完成、且已填写经验证的 owner Teams 帖子标识前，不得启用定时工作流。当前 VM 容量和外部验收仍须独立实时核验。
+`runtime.env.template` 默认将 `CYRENE_HF_ENABLED=true`；启用 HF 时必须显式加入 `compose.huggingface.yaml`，并提供真实 owner-only OAuth seed、当前 HF binding 和实时 HF tool catalog。GitHub-only bootstrap 或 Stage 1 staging 应在 `runtime.env` 后加载 `config/github-only.env.template`，并省略 HF Compose overlay。使用 GitHub-only Account Center 配置、`config/private-connector-bootstrap.github-only.template.json`，并确保 Exchange 的 `authorizationCloud.profiles` 不含 HF 项。该模式下，预检要求没有 HF Provider 服务、source secret、provider secret refs、connector binding、target 或 catalog 项。HF-disabled 仅适用于 bootstrap 和 Stage 1/staging；后续阶段必须先通过 HF-enabled 门槛。
+
+The GitHub-only cold-start order is: initialize the Directory owner; run `--mode bootstrap` with empty connector bindings/catalog and the GitHub-only bootstrap input; let Exchange produce the real GitHub profile/connection; update the GH-only Account Center allowlist; export the real GitHub and computer bindings/tool catalog; then generate the verified nine-repository workflow allowlist and replace pending target bindings. Bootstrap preflight accepts only the named pending binding/source-workflow markers and returns `BOOTSTRAP_ONLY_NOT_FULL_READY`. Stage 1 requires live bindings, the exact repository allowlist, and matching tool schemas. For CodeBuddy ACP, `CYRENE_WORKFLOWS_ENABLED` defaults to `false`; keep the host WorkFlow candidate disabled through the first owner Teams chat, then read the actual Work API and require all stored v2 definitions to be absent or disabled. The host candidate remains disabled as a preflight manifest while owner-authorized activation is persisted separately through Work API PUT and GET read-back.
+
+GitHub-only 冷启动顺序为：先初始化 Directory owner；使用空的 connector binding/catalog 和 GitHub-only bootstrap 输入运行 `--mode bootstrap`；由 Exchange 返回真实 GitHub profile/connection；更新仅含 GitHub profile 的 Account Center allowlist；导出真实 GitHub 与 computer binding/tool catalog；再生成核实过的九仓库 workflow allowlist 并替换 pending target binding。Bootstrap 预检只接受明确列出的 pending binding/source-workflow 标记，并返回 `BOOTSTRAP_ONLY_NOT_FULL_READY`。Stage 1 要求实时 binding、精确仓库 allowlist 和匹配的 tool schema。CodeBuddy ACP 的 `CYRENE_WORKFLOWS_ENABLED` 默认是 `false`；首次 owner Teams 聊天期间保持 host WorkFlow 候选禁用，再读取实际 Work API，确认所有持久 v2 definition 均不存在或 disabled。host candidate 持续作为 disabled preflight manifest；owner 授权后的启用通过独立 Work API PUT 保存，并用 GET 回读确认。
+
+The Antigravity and CodeBuddy ACP model profiles are optional and mutually exclusive. The CodeBuddy ACP profile uses the base file, `compose.computer-runtime.yaml`, then `compose.codebuddy-acp.yaml`; load `config/codebuddy-acp.env.template` after the private runtime env. This template selects GitHub-only mode until HF authorization is completed, defaults the Workflows engine off, selects only the native `codebuddy` CLI and `glm-5.3-flash` or `deepseek-v4.1-flash`, clears the legacy Harness model source, disables fallback, keeps two bounded foreground/background slots, and uses the service-owned `secrets/codebuddy` login directory. Its WorkFlow `modelPolicy` must use `preferredProvider=codebuddy`, the selected ACP model, and the metadata literal `fallback=configured_no_additional_spend`; the last field does not enable the disabled runtime fallback. Navigator owns the fixed ACP flags and writes each host-MCP bridge configuration to a private 0600 temporary file; Compose must not inject MCP JSON, tokens, or mounts. `CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP=true` is a required owner declaration, not a CodeBuddy CLI billing guarantee. Preflight checks the login directory's owner/mode without reading credentials or contacting CodeBuddy.
+
+The proactive profile is not part of the default stack. Add exactly one model profile after the base Compose file and include the computer-runtime overlay for that deployment. For CodeBuddy ACP, the Workflows engine defaults off; before turning it on, read the durable Work API and verify every stored definition is absent or disabled. The host workflow file is a separate preflight manifest that stays `enabled:false`; after owner acceptance, the authorized Work API write and read-back update the durable definition. Do not activate a schedule before the host target list and owner thread/task IDs are verified. Current-VM capacity and external acceptance remain separate live checks.
+
+Antigravity 与 CodeBuddy ACP 模型 profile 都是可选项，且不能叠加。CodeBuddy ACP 需要按顺序使用基础文件、`compose.computer-runtime.yaml`、`compose.codebuddy-acp.yaml`，并在私有 runtime env 后加载 `config/codebuddy-acp.env.template`。模板默认设置 `CYRENE_WORKFLOWS_ENABLED=false`；owner chat 和实际 Work API 定义 read-back 完成前保持关闭。workflow v2 的 `modelPolicy` 使用 `preferredProvider=codebuddy`、当前 ACP 模型，以及只作为元数据的 `fallback=configured_no_additional_spend`，这不会开启 DSH fallback。它只选择原生 `codebuddy` CLI 和 `glm-5.3-flash` 或 `deepseek-v4.1-flash`，清空旧 Harness model source、关闭运行时 fallback，并沿用服务专属的 `secrets/codebuddy` 登录目录。Navigator 固定 ACP 参数，并为每次调用在私有临时文件中写入权限为 0600 的 host-MCP bridge 配置；Compose 不得注入 MCP JSON、token 或挂载。`CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP=true` 是 owner 必填声明，不是 CodeBuddy CLI 的扣费保证。预检只验证登录目录 owner/权限，不读取凭据，也不联系 CodeBuddy。
+
+主动助手 profile 不会进入默认服务栈。每个部署只显式添加一种模型 profile，并同时包含 computer-runtime overlay。`CYRENE_WORKFLOWS_ENABLED` 控制调度引擎；它与 Work API 中持久化的单个 definition `enabled` 状态相互独立。owner/target/connector 验收之前 definition 必须保持禁用；打开引擎前还须读回确认 Work API 中没有启用定义。当前 VM 容量和外部验收仍须独立实时核验。
 
 The Teams v1 computer profile exposes only `computer.command.execute`, `computer.file.read`, `computer.file.write`, and `computer.directory.list`; artifact create/get tools are not exposed. Its 320 MiB total scratch budget is tmpfs-only (`/workspace` 192 MiB, artifacts 64 MiB, `/tmp` 64 MiB), so workspace files and any artifact references are lost on runner restart or replacement. Preflight reports `computerRuntimeStorage.lifetime=EPHEMERAL`, `workspaceClearedOnRestart=true`, and `artifactRefsSurviveRestart=false` when the runner is configured, or `NOT_PRESENT` when it is absent. This scratch lifecycle is separate from durable Navigator task/session/operation state and the existing service-owned credential stores. No Docker restart test was run during package preparation.
 
@@ -61,14 +76,16 @@ private client-CA bundle, and mTLS health checks. The public Caddyfile accepts
 only `POST /api/messages`, uses the ACME TLS-ALPN challenge, and leaves host port
 80 closed.
 
-Hugging Face uses a fresh device-OAuth bootstrap selected by this production
-bundle. Its private JSON file stays outside the secret directory and is mounted
-read-only into Account Center only. Account Center persists profile credentials
-encrypted in its durable database; retain the bootstrap file owner-only for
-restarts and reauthentication until a later config rollout removes both the
-file reference and mount. The preflight validates the closed DTO and target
-repository scope without printing token values.
+When HF is enabled, it uses a fresh device-OAuth bootstrap selected by the HF
+Compose overlay. Its private JSON file stays outside the secret directory and
+is mounted read-only into Account Center only. Account Center persists profile
+credentials encrypted in its durable database; retain the bootstrap file
+owner-only for restarts and reauthentication until a later config rollout
+removes both the file reference and mount. The preflight validates the closed
+DTO and target repository scope without printing token values. GitHub-only mode
+contains no OAuth secret mount, HF provider service, HF Exchange profile,
+binding, or tool catalog.
 
 基础 Compose 文件只为回调入口发布 TCP 443。Exchange、Navigator、Directory Authority、Account Center 和所有 DirectPluginRuntime 均留在私有网络；Provider 使用各自服务证书、私有 client-CA bundle 和 mTLS 健康探针。公网 Caddyfile 只接受 `POST /api/messages`，使用 ACME TLS-ALPN challenge，并保持宿主机 80 端口关闭。
 
-本生产部署包固定使用新授权的 Hugging Face device-OAuth bootstrap。私有 JSON 文件保存在 secrets 目录之外，只读挂载到 Account Center。Account Center 会将 profile 凭据加密保存到持久数据库；在后续配置发布同时移除文件引用和挂载前，需将 bootstrap 文件保持 owner-only，以支持重启和重新授权。预检会校验封闭 DTO 与目标仓库范围，不会输出 token 内容。
+启用 HF 时，使用 HF Compose overlay 选择新的 device-OAuth bootstrap。私有 JSON 文件保存在 secrets 目录之外，只读挂载到 Account Center。Account Center 会将 profile 凭据加密保存到持久数据库；在后续配置发布同时移除文件引用和挂载前，需将 bootstrap 文件保持 owner-only，以支持重启和重新授权。预检会校验封闭 DTO 与目标仓库范围，不会输出 token 内容。GitHub-only 模式不包含 OAuth secret 挂载、HF Provider 服务、Exchange HF profile、binding 或 tool catalog。

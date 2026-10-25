@@ -14,6 +14,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 from collections import namedtuple
@@ -411,6 +412,366 @@ def test_proactive_model_profile_has_gemini_and_no_paid_fallback() -> None:
         preflight._validate_model_runtime_config(environment)
 
 
+def test_legacy_dsh_codebuddy_model_profile_remains_compatible() -> None:
+    """Keep the existing DSH-to-CodeBuddy model adapter as the default backend."""
+
+    preflight._validate_model_runtime_config(
+        {
+            "CYRENE_HARNESS_MODEL_SOURCE": "codebuddy",
+            "CYRENE_HARNESS_MODEL": "glm-5.3-flash",
+            "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "1",
+        }
+    )
+
+
+def test_codebuddy_acp_model_profile_is_native_and_closed() -> None:
+    """Accept only the fixed native CLI, approved models, and explicit no-top-up policy."""
+
+    environment = {
+        "CYRENE_HARNESS_EXECUTION_BACKEND": "codebuddy-acp",
+        "CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND": "codebuddy",
+        "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL": "glm-5.3-flash",
+        "CYRENE_HARNESS_MODEL_SOURCE": "",
+        "CYRENE_HARNESS_MODEL": "",
+        "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED": "false",
+        "CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP": "true",
+        "CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL": "",
+        "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "2",
+    }
+    preflight._validate_model_runtime_config(environment)
+
+    environment["CYRENE_HARNESS_CODEBUDDY_ACP_MODEL"] = "deepseek-v4.1-flash"
+    preflight._validate_model_runtime_config(environment)
+
+    invalid_profiles = [
+        ("CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND", "codebuddy --acp", "command must be exactly"),
+        ("CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND", "/usr/bin/codebuddy", "command must be exactly"),
+        (
+            "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL",
+            "gemini-3.8-flash-medium",
+            "approved GLM or DeepSeek",
+        ),
+        ("CYRENE_HARNESS_MODEL_SOURCE", "codebuddy", "legacy Harness model source"),
+        ("CYRENE_HARNESS_MODEL_SOURCE", "antigravity", "legacy Harness model source"),
+        ("CYRENE_HARNESS_MODEL", "glm-5.3-flash", "legacy Harness model source"),
+        ("CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED", "true", "disable model fallback"),
+        ("CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP", "false", "no-paid-topup declaration"),
+        ("CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL", "deepseek-v4.1-flash", "legacy fallback model"),
+        (
+            "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS",
+            "1",
+            "two bounded foreground/background task slots",
+        ),
+        (
+            "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS",
+            "3",
+            "two bounded foreground/background task slots",
+        ),
+    ]
+    for key, value, error in invalid_profiles:
+        invalid = dict(environment)
+        invalid[key] = value
+        with pytest.raises(preflight.PreflightError, match=error):
+            preflight._validate_model_runtime_config(invalid)
+
+    with pytest.raises(preflight.PreflightError, match="backend must be dsh or codebuddy-acp"):
+        preflight._validate_model_runtime_config(
+            {"CYRENE_HARNESS_EXECUTION_BACKEND": "antigravity"}
+        )
+
+
+def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() -> None:
+    """Keep ACP selection explicit, credentials host-owned, and existing service budgets intact."""
+
+    base = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text())
+    profile = yaml.safe_load((DEPLOYMENT_ROOT / "compose.codebuddy-acp.yaml").read_text())
+    assert set(profile["services"]) == {"navigator"}
+    navigator = profile["services"]["navigator"]
+    environment = navigator["environment"]
+    base_navigator = base["services"]["navigator"]
+    merged_environment = {
+        **base_navigator["environment"],
+        **environment,
+    }
+    assert merged_environment["CYRENE_HARNESS_EXECUTION_BACKEND"] == "codebuddy-acp"
+    assert merged_environment["CYRENE_HARNESS_MODEL_SOURCE"] == ""
+    assert merged_environment["CYRENE_HARNESS_MODEL"] == ""
+    assert environment["CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND"] == (
+        "${CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND:-codebuddy}"
+    )
+    assert environment["CYRENE_HARNESS_CODEBUDDY_ACP_MODEL"] == (
+        "${CYRENE_HARNESS_CODEBUDDY_ACP_MODEL:-glm-5.3-flash}"
+    )
+    assert environment["CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED"] == "false"
+    assert environment["CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP"] == "true"
+    assert environment["CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS"] == "2"
+    assert environment["CYRENE_WORKFLOWS_ENABLED"] == "${CYRENE_WORKFLOWS_ENABLED:-false}"
+    assert not any("MCP" in name.upper() for name in environment)
+    assert navigator["read_only"] is True
+    assert navigator["cap_drop"] == ["ALL"]
+    assert navigator["security_opt"] == ["no-new-privileges:true"]
+    assert navigator["tmpfs"] == ["/tmp:rw,nosuid,nodev,size=128m"]
+    for key in (
+        "image",
+        "command",
+        "entrypoint",
+        "ports",
+        "privileged",
+        "cap_add",
+        "mem_limit",
+        "cpus",
+        "secrets",
+        "volumes",
+    ):
+        assert key not in navigator
+    assert profile["configs"]["responsibility-targets"]["file"].startswith(
+        "${CYRENE_RESPONSIBILITY_TARGETS_HOST_FILE:"
+    )
+    assert base_navigator["mem_limit"] == "768m"
+    assert base_navigator["cpus"] == "0.65"
+
+    workflow = json.loads(
+        (DEPLOYMENT_ROOT / "config" / "proactive-assistant-workflow.v2.template.json").read_text()
+    )
+    assert workflow["enabled"] is False
+    preflight._validate_workflow_definition_disabled(workflow)
+    assert (
+        "CYRENE_HF_ENABLED=false"
+        in (DEPLOYMENT_ROOT / "config" / "codebuddy-acp.env.template").read_text()
+    )
+    assert (
+        "CYRENE_WORKFLOWS_ENABLED=false"
+        in (DEPLOYMENT_ROOT / "config" / "codebuddy-acp.env.template").read_text()
+    )
+
+
+def test_github_only_compose_has_no_hf_service_seed_or_provider_secrets() -> None:
+    """Keep Hf provider, bootstrap seed, and Hf-only credentials in an explicit overlay."""
+
+    base = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text())
+    huggingface = yaml.safe_load((DEPLOYMENT_ROOT / "compose.huggingface.yaml").read_text())
+    optional_secrets = set(preflight.HUGGINGFACE_OPTIONAL_SECRET_NAMES)
+    assert "huggingface" not in base["services"]
+    assert "huggingface" in huggingface["services"]
+    assert (
+        base["services"]["account-center"]["labels"]["com.cyrene.huggingface-enabled"]
+        == "${CYRENE_HF_ENABLED:-true}"
+    )
+    assert not optional_secrets & set(base["secrets"])
+    assert set(huggingface["secrets"]) == optional_secrets
+    assert "huggingface-oauth.json" not in {
+        row.get("target")
+        for row in base["services"]["account-center"].get("secrets", [])
+        if isinstance(row, dict)
+    }
+    assert not any("huggingface" in name for name in base["services"]["exchange"]["depends_on"])
+
+    github_only_bootstrap = json.loads(
+        (
+            DEPLOYMENT_ROOT / "config" / "private-connector-bootstrap.github-only.template.json"
+        ).read_text()
+    )
+    assert set(github_only_bootstrap) == {"schemaVersion", "actor", "github"}
+    assert (
+        "CYRENE_HF_ENABLED=false"
+        in (DEPLOYMENT_ROOT / "config" / "github-only.env.template").read_text()
+    )
+
+
+def test_workflows_engine_does_not_enable_a_definition() -> None:
+    """Keep scheduled execution disabled until the real owner and connector gates pass."""
+
+    preflight._validate_workflow_definition_disabled({"enabled": False})
+    with pytest.raises(
+        preflight.PreflightError, match="must remain disabled until real acceptance"
+    ):
+        preflight._validate_workflow_definition_disabled({"enabled": True})
+
+
+@pytest.mark.parametrize("model", ["glm-5.3-flash", "deepseek-v4.1-flash"])
+def test_codebuddy_acp_workflow_metadata_matches_selected_native_model(model: str) -> None:
+    """Keep ACP WorkFlow metadata aligned with its runtime model and no-fallback policy."""
+
+    compose = {
+        "services": {
+            "navigator": {
+                "environment": {
+                    "CYRENE_HARNESS_EXECUTION_BACKEND": "codebuddy-acp",
+                    "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL": model,
+                }
+            }
+        }
+    }
+    workflow = {
+        "modelPolicy": {
+            "preferredProvider": "codebuddy",
+            "preferredModel": model,
+            "fallback": "configured_no_additional_spend",
+        }
+    }
+    preflight._validate_workflow_model_policy(compose, workflow)
+
+    workflow["modelPolicy"]["preferredProvider"] = "antigravity"
+    with pytest.raises(preflight.PreflightError, match="native model and no-spend metadata"):
+        preflight._validate_workflow_model_policy(compose, workflow)
+
+
+def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
+    """Keep the per-run host bridge token out of environment, mounts, and CLI overrides."""
+
+    valid = yaml.safe_load((DEPLOYMENT_ROOT / "compose.codebuddy-acp.yaml").read_text())
+    secrets_dir = Path("/private/secrets")
+    config_dir = Path("/private/config")
+    valid["name"] = "cyrene-teams-cloud"
+    valid["volumes"] = {"navigator-sessions": {"name": "cyrene-teams-cloud_navigator-sessions"}}
+    navigator = valid["services"]["navigator"]
+    navigator["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "false"
+    navigator["volumes"] = [
+        {
+            "type": "bind",
+            "source": str(secrets_dir / "codebuddy"),
+            "target": "/home/navigator/.codebuddy",
+            "read_only": False,
+        },
+        {
+            "type": "volume",
+            "source": "navigator-sessions",
+            "target": "/var/lib/cyrene-navigator",
+        },
+        {
+            "type": "bind",
+            "source": str(config_dir),
+            "target": "/run/teams-authorization",
+            "read_only": True,
+        },
+    ]
+    navigator["secrets"] = [
+        {"source": name, "target": name}
+        for name in (
+            "navigator-exchange-hmac-key",
+            "navigator-session-token",
+            "teams-navigator-hmac-key",
+            "internal-service-root-ca",
+        )
+    ]
+    navigator["configs"] = [
+        {"source": "connector-bindings", "target": "/run/config/connector-bindings.json"},
+        {
+            "source": "connector-tool-catalog",
+            "target": "/run/config/connector-tool-catalog.json",
+        },
+        {
+            "source": "responsibility-targets",
+            "target": "/run/config/responsibility-targets.v1.json",
+        },
+    ]
+    preflight._validate_codebuddy_acp_boundary(
+        valid, secrets_dir=secrets_dir, config_dir=config_dir
+    )
+
+    enabled_workflows = json.loads(json.dumps(valid))
+    enabled_workflows["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "true"
+    preflight._validate_codebuddy_acp_boundary(
+        enabled_workflows, secrets_dir=secrets_dir, config_dir=config_dir
+    )
+    enabled_workflows["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "yes"
+    with pytest.raises(preflight.PreflightError, match="explicitly false or true"):
+        preflight._validate_codebuddy_acp_boundary(
+            enabled_workflows, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_mcp_environment = json.loads(json.dumps(valid))
+    with_mcp_environment["services"]["navigator"]["environment"][
+        "CYRENE_HARNESS_CODEBUDDY_ACP_MCP_CONFIG"
+    ] = "/run/config/mcp.json"
+    with pytest.raises(preflight.PreflightError, match="not be injected through Compose env"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_mcp_environment, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_mcp_mount = json.loads(json.dumps(valid))
+    with_mcp_mount["services"]["navigator"]["volumes"] = [
+        {"type": "bind", "source": "/private/mcp.json", "target": "/run/mcp.json"}
+    ]
+    with pytest.raises(preflight.PreflightError, match="stay out of Compose mounts and secrets"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_mcp_mount, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_legacy_home = json.loads(json.dumps(valid))
+    with_legacy_home["services"]["navigator"]["volumes"] = [
+        {"type": "bind", "source": "/private/model-home", "target": "/home/navigator"}
+    ]
+    with pytest.raises(preflight.PreflightError, match="legacy Antigravity model home"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_legacy_home, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_extra_host_bind = json.loads(json.dumps(valid))
+    with_extra_host_bind["services"]["navigator"]["volumes"].append(
+        {
+            "type": "bind",
+            "source": "/host/private",
+            "target": "/run/extra",
+            "read_only": True,
+        }
+    )
+    with pytest.raises(preflight.PreflightError, match="only its approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_extra_host_bind, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_foreign_actor_source = json.loads(json.dumps(valid))
+    actor_mount = next(
+        row
+        for row in with_foreign_actor_source["services"]["navigator"]["volumes"]
+        if row.get("target") == "/run/teams-authorization"
+    )
+    actor_mount["source"] = "/host/other-config"
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_foreign_actor_source, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_foreign_codebuddy_source = json.loads(json.dumps(valid))
+    codebuddy_mount = next(
+        row
+        for row in with_foreign_codebuddy_source["services"]["navigator"]["volumes"]
+        if row.get("target") == "/home/navigator/.codebuddy"
+    )
+    codebuddy_mount["source"] = "/host/other-codebuddy-state"
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_foreign_codebuddy_source, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_foreign_session_volume = json.loads(json.dumps(valid))
+    session_mount = next(
+        row
+        for row in with_foreign_session_volume["services"]["navigator"]["volumes"]
+        if row.get("target") == "/var/lib/cyrene-navigator"
+    )
+    session_mount["source"] = "other-session-volume"
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_foreign_session_volume, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_custom_command = json.loads(json.dumps(valid))
+    with_custom_command["services"]["navigator"]["command"] = ["sh", "-c", "codebuddy"]
+    with pytest.raises(preflight.PreflightError, match="Navigator-owned fixed CLI invocation"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_custom_command, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+    with_unbounded_temp = json.loads(json.dumps(valid))
+    with_unbounded_temp["services"]["navigator"]["tmpfs"] = ["/tmp:rw,nosuid,nodev,size=1g"]
+    with pytest.raises(preflight.PreflightError, match="bounded 128 MiB temporary storage"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_unbounded_temp, secrets_dir=secrets_dir, config_dir=config_dir
+        )
+
+
 def test_proactive_navigator_hardening_requires_read_only_root_and_dropped_caps() -> None:
     """Keep model credentials out of the writable runtime root and drop all Linux capabilities."""
 
@@ -492,6 +853,71 @@ def test_responsibility_targets_require_current_binding_and_exact_safe_grants(
     config_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
     with pytest.raises(preflight.PreflightError, match="contain only the approved actions"):
         preflight._validate_responsibility_targets(config_path, bindings_path)
+
+
+def test_bootstrap_allows_only_the_named_pending_github_binding_and_workflow_id(
+    tmp_path: Path,
+) -> None:
+    """Allow a closed pending target skeleton before Exchange exports real bindings."""
+
+    template_path = DEPLOYMENT_ROOT / "config" / "responsibility-targets.v1.template.json"
+    target = json.loads(template_path.read_text(encoding="utf-8"))["targets"][0]
+    target.update(
+        {
+            "id": "123456789",
+            "label": "DoHorizon-AI/Cyrene-Test",
+            "bindingId": "UNBOUND_PENDING_EXCHANGE_GITHUB_REBIND",
+            "uri": "https://github.com/DoHorizon-AI/Cyrene-Test",
+        }
+    )
+    targets_path = tmp_path / "responsibility-targets.v1.json"
+    bindings_path = tmp_path / "connector-bindings.json"
+    targets_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
+    bindings_path.write_text('{"schemaVersion":1,"bindings":[]}', encoding="utf-8")
+    preflight._validate_responsibility_targets(targets_path, bindings_path, allow_pending=True)
+
+    with pytest.raises(preflight.PreflightError, match="current Exchange GitHub binding"):
+        preflight._validate_responsibility_targets(targets_path, bindings_path)
+
+    target["bindingId"] = "UNBOUND_NOT_APPROVED"
+    targets_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="current Exchange GitHub binding"):
+        preflight._validate_responsibility_targets(targets_path, bindings_path, allow_pending=True)
+
+
+def test_bootstrap_accepts_missing_owner_thread_ids_only_while_workflow_is_disabled(
+    tmp_path: Path,
+) -> None:
+    """Keep first-chat thread/task IDs pending until a real owner conversation exists."""
+
+    artifact_root = tmp_path / ".artifacts" / "teams-cloud-test"
+    config_dir = artifact_root / "config"
+    config_dir.mkdir(parents=True)
+    preflight._validate_optional_workflow_definition_disabled(config_dir)
+
+    workflow_path = artifact_root / "proactive-assistant-workflow.v2.json"
+    workflow_path.write_text(
+        json.dumps(
+            {
+                "enabled": False,
+                "authorization": {
+                    "threadBindingId": "UNBOUND_PENDING_OWNER_THREAD",
+                    "ownerTaskId": "UNBOUND_PENDING_OWNER_TASK",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    workflow_path.chmod(0o600)
+    preflight._validate_optional_workflow_definition_disabled(config_dir)
+
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+    workflow["enabled"] = True
+    workflow_path.write_text(json.dumps(workflow), encoding="utf-8")
+    with pytest.raises(
+        preflight.PreflightError, match="must remain disabled until real acceptance"
+    ):
+        preflight._validate_optional_workflow_definition_disabled(config_dir)
 
 
 @pytest.mark.parametrize("computer_runner_enabled", [False, True])
@@ -777,6 +1203,107 @@ def test_connector_provider_allowlist_is_stage_aware(mode: str, expected: set[st
     assert preflight._expected_connector_providers({}, mode) == expected
     proactive = {"services": {"computer-runtime": {}}}
     assert preflight._expected_connector_providers(proactive, mode) == expected | {"computer"}
+
+
+def test_github_only_provider_allowlists_exclude_every_hf_binding_and_profile() -> None:
+    """Make the explicit no-HF mode an exact GitHub-only connector and Exchange scope."""
+
+    github_only = {
+        "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "false"}},
+            "computer-runtime": {},
+        }
+    }
+    assert preflight._expected_connector_providers(github_only, "stage1") == {
+        "github",
+        "computer",
+    }
+    assert preflight._expected_exchange_providers(github_only, "stage1") == set()
+    assert preflight._validate_huggingface_profile_selection(github_only, "bootstrap") is False
+    assert preflight._validate_huggingface_profile_selection(github_only, "stage1") is False
+
+    with_overlay = json.loads(json.dumps(github_only))
+    with_overlay["services"]["huggingface"] = {}
+    with pytest.raises(preflight.PreflightError, match="must not include the HF provider service"):
+        preflight._validate_huggingface_profile_selection(with_overlay, "stage1")
+
+    enabled_without_overlay = json.loads(json.dumps(github_only))
+    enabled_without_overlay["services"]["account-center"]["labels"][
+        "com.cyrene.huggingface-enabled"
+    ] = "true"
+    with pytest.raises(preflight.PreflightError, match="requires compose.huggingface.yaml"):
+        preflight._validate_huggingface_profile_selection(enabled_without_overlay, "stage1")
+
+    with pytest.raises(preflight.PreflightError, match="only for bootstrap and stage-1 staging"):
+        preflight._validate_huggingface_profile_selection(github_only, "stage2")
+
+
+def test_exchange_github_only_stage_requires_an_empty_hf_profile_map() -> None:
+    """Keep Exchange's authorization profile targets GitHub-only while HF is disabled."""
+
+    document = {
+        "platformAuthority": {"connectorWorkload": {"connectionRef": "grpcs://authority:7443"}},
+        "accountCenter": {
+            "connectionRef": "grpcs://account-center:7443",
+            "transport": "mtls",
+            "callerId": "exchange-service",
+            "signingKeyRef": "account/signing",
+        },
+        "githubIssues": {
+            "connectionRef": "grpcs://github-issues:7443",
+            "transport": "mtls",
+            "callerId": "exchange-service",
+            "signingKeyRef": "account/signing",
+        },
+        "connectorHost": {
+            "teamsMessages": {
+                "directPlugin": {
+                    "connectionRef": "grpcs://teams-provider:7443",
+                    "transport": "mtls",
+                }
+            }
+        },
+        "authorizationCloud": {"profiles": {}},
+    }
+    config = {
+        "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "false"}},
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(document)
+                }
+            },
+        }
+    }
+    preflight._validate_exchange_profile_stage(config, "stage1")
+
+    document["authorizationCloud"]["profiles"]["hf-primary"] = {
+        "provider": "hf",
+        "directPlugin": {
+            "connectionRef": "grpcs://huggingface:7443",
+            "transport": "mtls",
+        },
+    }
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(document)
+    with pytest.raises(preflight.PreflightError, match=r"must be exactly \[\] for this stage"):
+        preflight._validate_exchange_profile_stage(config, "stage1")
+
+
+def test_huggingface_secrets_are_in_the_optional_inventory_section() -> None:
+    """Keep all HF credentials out of the base phase-one secret requirement."""
+
+    inventory = json.loads((DEPLOYMENT_ROOT / "config" / "secret-files.template.json").read_text())
+    required = set(inventory["requiredBeforePhase1"])
+    optional = set(inventory["requiredBeforeHuggingFace"])
+    assert not required & preflight.HUGGINGFACE_OPTIONAL_SECRET_NAMES
+    assert optional == preflight.HUGGINGFACE_OPTIONAL_SECRET_NAMES - {
+        "account-center-huggingface-oauth-source"
+    }
+    assert inventory["requiredBeforeHuggingFacePrivateFiles"] == [
+        "onboarding/private/huggingface-oauth.json"
+    ]
 
 
 def test_secret_entrypoint_adds_internal_ca_without_replacing_public_roots(
@@ -1570,6 +2097,213 @@ def _exchange_configuration(providers: set[str]) -> dict[str, Any]:
     }
 
 
+@pytest.mark.parametrize("huggingface_enabled", [False, True])
+def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, huggingface_enabled: bool
+) -> None:
+    """Feed actual Compose-rendered values into the ACP, HF, and computer preflight gates."""
+
+    docker = preflight.shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker Compose config is required for rendered-profile validation")
+    safe_environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path / "home"),
+        "DOCKER_CONFIG": str(tmp_path / "docker-config"),
+    }
+    Path(safe_environment["HOME"]).mkdir()
+    Path(safe_environment["DOCKER_CONFIG"]).mkdir()
+    version = subprocess.run(
+        [docker, "compose", "version"],
+        capture_output=True,
+        check=False,
+        env=safe_environment,
+        text=True,
+    )
+    if version.returncode != 0:
+        pytest.skip("Docker Compose plugin is not installed")
+
+    config_dir = tmp_path / "config"
+    secrets_dir = tmp_path / "secrets"
+    codebuddy_home = secrets_dir / "codebuddy"
+    config_dir.mkdir()
+    secrets_dir.mkdir()
+    codebuddy_home.mkdir()
+    caddyfile = tmp_path / "Caddyfile.computer-runtime"
+    caddyfile.write_text(
+        "mode require_and_verify\n"
+        "trust_pool file /run/secrets/exchange-plugin-client-ca\n"
+        "reverse_proxy h2c://computer-runtime:50051\n",
+        encoding="utf-8",
+    )
+    staging_caddyfile = tmp_path / "Caddyfile.staging"
+    staging_caddyfile.write_text("# synthetic Compose config probe\n", encoding="utf-8")
+    responsibility_targets = config_dir / "responsibility-targets.v1.json"
+    responsibility_targets.write_text("{}\n", encoding="utf-8")
+    oauth_source = tmp_path / "huggingface-oauth.json"
+    oauth_source.write_text("{}\n", encoding="utf-8")
+
+    tenant_id = "00000000-0000-4000-8000-000000000003"
+    organization_id = "00000000-0000-4000-8000-000000000001"
+    workspace_id = "00000000-0000-4000-8000-000000000002"
+    integration = _exchange_configuration({"hf"} if huggingface_enabled else set())
+    integration["hostSecretRefs"] = {
+        "tls/plugin-root": "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
+        "tls/exchange-plugin-client-cert": "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE",
+        "tls/exchange-plugin-client-key": "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE",
+    }
+    integration["connectorHost"]["computerRunner"] = {
+        "profileRef": "computer-workspace-main",
+        "connectionRef": "00000000-0000-4000-8000-000000000004",
+        "organizationId": organization_id,
+        "workspaceId": workspace_id,
+        "expectedIssuer": f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        "directPlugin": {
+            "bindingId": "computer-runtime",
+            "connectionRef": "grpcs://computer-runtime-proxy:7443",
+            "transport": "mtls",
+            "mtls": {
+                "rootCertificateRef": "tls/plugin-root",
+                "clientCertificateRef": "tls/exchange-plugin-client-cert",
+                "clientKeyRef": "tls/exchange-plugin-client-key",
+            },
+        },
+        "maxCommandTimeoutMs": 600000,
+        "maxFileBytes": 1048576,
+        "maxReadBytes": 65536,
+        "maxDirectoryDepth": 32,
+    }
+
+    compose_files = [
+        DEPLOYMENT_ROOT / "compose.yaml",
+        *([DEPLOYMENT_ROOT / "compose.huggingface.yaml"] if huggingface_enabled else []),
+        DEPLOYMENT_ROOT / "compose.computer-runtime.yaml",
+        DEPLOYMENT_ROOT / "compose.codebuddy-acp.yaml",
+    ]
+    compose_text = "\n".join(path.read_text(encoding="utf-8") for path in compose_files)
+    variable_names = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_text))
+    values: dict[str, str] = {}
+    values.update(
+        {
+            "CYRENE_HF_ENABLED": "true" if huggingface_enabled else "false",
+            "CYRENE_CONFIG_DIR": str(config_dir),
+            "CYRENE_SECRETS_DIR": str(secrets_dir),
+            "CYRENE_CODEBUDDY_HOME": str(codebuddy_home),
+            "CYRENE_CADDYFILE": str(staging_caddyfile),
+            "CYRENE_COMPUTER_CADDYFILE": str(caddyfile),
+            "CYRENE_RESPONSIBILITY_TARGETS_HOST_FILE": str(responsibility_targets),
+            "CYRENE_HF_OAUTH_BOOTSTRAP_FILE": str(oauth_source),
+            "CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND": "codebuddy",
+            "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL": "glm-5.3-flash",
+            "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED": "false",
+            "CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP": "true",
+            "CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL": "",
+            "CYRENE_HARNESS_MODEL": "",
+            "CYRENE_HARNESS_MODEL_SOURCE": "",
+            "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "2",
+            "CYRENE_WORKFLOWS_ENABLED": "false",
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                integration, separators=(",", ":")
+            ),
+            "CYRENE_ACCOUNT_CENTER_CONFIGURATION_JSON": "{}",
+            "CYRENE_GITHUB_ISSUES_CONFIGURATION_JSON": "{}",
+            "CYRENE_TEAMS_CONNECTOR_CONFIGURATION_JSON": "{}",
+            "CYRENE_HUGGINGFACE_CONFIGURATION_JSON": "{}",
+            "CYRENE_ORGANIZATION_ID": organization_id,
+            "CYRENE_WORKSPACE_ID": workspace_id,
+            "CYRENE_AUTHORITY_AAD_TENANT_ID": tenant_id,
+            "TEAMS_TENANT_ID": tenant_id,
+            "CYRENE_PUBLIC_BIND": "127.0.0.1",
+            "CYRENE_HTTPS_PORT": "18443",
+            "CYRENE_AUTHORITY_EXCHANGE_MTLS_SHA256": "a" * 64,
+            "CYRENE_TEAMS_EXCHANGE_CONNECTION_REF": "00000000-0000-4000-8000-000000000020",
+            "CYRENE_TEAMS_EXCHANGE_PROFILE_REF": "teams-primary",
+            "CYRENE_COMPUTER_COMMAND_DEFAULT_TIMEOUT_MS": "30000",
+            "CYRENE_COMPUTER_COMMAND_MAX_TIMEOUT_MS": "600000",
+            "CYRENE_COMPUTER_MAX_OUTPUT_BYTES": "65536",
+            "CYRENE_COMPUTER_MAX_FILE_BYTES": "1048576",
+            "CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES": "2048",
+            "CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH": "32",
+            "CYRENE_COMPUTER_MAX_ARTIFACT_BYTES": "16777216",
+        }
+    )
+    for name in variable_names:
+        if name in values:
+            continue
+        if "IMAGE" in name or name == "CYRENE_CADDY_IMAGE" or name == "CYRENE_POSTGRES_IMAGE":
+            values[name] = "ghcr.io/cyrene/compose-probe:latest"
+        elif name.endswith("_JSON") and name not in values:
+            values[name] = "{}"
+        elif name.endswith("_ID"):
+            values[name] = "00000000-0000-4000-8000-000000000010"
+        elif name.endswith("_SHA256"):
+            values[name] = "a" * 64
+        elif name in {"TEAMS_FQDN"}:
+            values[name] = "teams.example.invalid"
+        elif name in {"TEAMS_ALLOWED_TEAM_IDS"}:
+            values[name] = "team-probe"
+        elif name.endswith("_PORT"):
+            values[name] = "18443"
+        elif name.endswith(("_DIR", "_FILE")) or "CADDYFILE" in name:
+            path = tmp_path / name.lower()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if name.endswith("_DIR"):
+                path.mkdir(exist_ok=True)
+            else:
+                path.touch(exist_ok=True)
+            values[name] = str(path)
+        else:
+            values[name] = "synthetic-value"
+
+    for compose_file in compose_files:
+        document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        for section in ("secrets", "configs"):
+            for row in document.get(section, {}).values():
+                template_path = row.get("file") if isinstance(row, dict) else None
+                if not isinstance(template_path, str):
+                    continue
+                resolved = re.sub(
+                    r"\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}",
+                    lambda match: values[match.group(1)],
+                    template_path,
+                )
+                path = Path(resolved)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(exist_ok=True)
+
+    env_file = tmp_path / "compose-probe.env"
+    env_file.write_text(
+        "".join(f"{name}={value}\n" for name, value in sorted(values.items())),
+        encoding="utf-8",
+    )
+    isolated_environment = dict(safe_environment)
+
+    def compose_config(argv: list[str], *, capture: bool = True) -> str:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            check=False,
+            env=isolated_environment,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    monkeypatch.setattr(preflight, "_run", compose_config)
+    rendered = preflight._compose_config([docker], compose_files, [env_file])
+    assert ("huggingface" in rendered["services"]) is huggingface_enabled
+    runner = rendered["services"]["computer-runtime"]
+    proxy = rendered["services"]["computer-runtime-proxy"]
+    assert preflight._memory_limit_bytes(runner["mem_limit"]) == 512 * preflight.MIB
+    assert preflight._cpu_limit_decimal(runner["cpus"]) == preflight.Decimal("0.10")
+    assert preflight._memory_limit_bytes(proxy["mem_limit"]) == 64 * preflight.MIB
+    assert preflight._cpu_limit_decimal(proxy["cpus"]) == preflight.Decimal("0.05")
+    preflight._validate_profile_stage(rendered, "stage1")
+    preflight._validate_codebuddy_acp_boundary(
+        rendered, secrets_dir=secrets_dir, config_dir=config_dir
+    )
+
+
 def test_exchange_cloud_profiles_follow_compose_overlay_stage() -> None:
     """Keep Azure/GCP and RunPod absent from earlier Exchange profile maps."""
 
@@ -1622,6 +2356,8 @@ def test_stage3_reuses_one_cloud_provider_state_owner() -> None:
 
     config = {
         "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "true"}},
+            "huggingface": {},
             "exchange": {
                 "environment": {
                     "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
@@ -1752,6 +2488,120 @@ def test_account_center_uses_oauth_file_reference_and_no_hf_token_env() -> None:
     service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
     with pytest.raises(preflight.PreflightError, match="must not be copied"):
         preflight._validate_account_center_config(service)
+
+
+def test_account_center_accepts_github_only_config_without_hf_sources_or_mounts() -> None:
+    """Allow Account Center to bootstrap GitHub when no HF authorization exists."""
+
+    service = _account_center_oauth_service()
+    config = json.loads(service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"])
+    config["provider_secret_file_refs"] = []
+    config["hostSecretFileRefs"] = {}
+    service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    service["secrets"] = []
+    service["networks"] = {"account-private": {}, "github-account-center-private": {}}
+    preflight._validate_account_center_config(service, huggingface_enabled=False)
+
+    config["provider_secret_file_refs"] = ["huggingface/connector-token"]
+    config["hostSecretFileRefs"] = {
+        "huggingface/connector-token": "/run/secrets/huggingface-oauth.json"
+    }
+    service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    with pytest.raises(preflight.PreflightError, match="no Hugging Face refs or profiles"):
+        preflight._validate_account_center_config(service, huggingface_enabled=False)
+
+    config["provider_secret_file_refs"] = []
+    config["hostSecretFileRefs"] = {}
+    service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    service["environment"]["CYRENE_SECRET_FILE_MAP"] += (
+        ",CYRENE_ACCOUNT_CENTER_HF_PROVIDER_HMAC_KEY=/run/secrets/account-center-hf-provider-hmac-key"
+    )
+    service["secrets"] = [
+        {
+            "source": "account-center-hf-provider-hmac-key",
+            "target": "account-center-hf-provider-hmac-key",
+        }
+    ]
+    with pytest.raises(preflight.PreflightError, match="must not mount Hugging Face secrets"):
+        preflight._validate_account_center_config(service, huggingface_enabled=False)
+
+
+def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path: Path) -> None:
+    """Accept the real GitHub-only Exchange input and reject HF target leakage."""
+
+    document = {
+        "schemaVersion": 1,
+        "actor": {
+            "issuer": "https://login.microsoftonline.com/00000000-0000-4000-8000-000000000001/v2.0",
+            "subject": UUID,
+            "organizationId": "organization-test",
+            "workspaceId": "workspace-test",
+        },
+        "github": {
+            "installationId": "12345",
+            "expectedAccessMode": "workspace_operator",
+            "profileIdempotencyKey": "teams-cloud-github-installation",
+            "repositories": [
+                {"repositoryId": "123456789", "owner": "DoHorizon-AI", "name": "Cyrene"}
+            ],
+        },
+    }
+    path = tmp_path / "connector-bootstrap.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    expected_actor = preflight._connector_bootstrap_actor(
+        {
+            "services": {
+                "navigator": {
+                    "environment": {"TEAMS_TENANT_ID": "00000000-0000-4000-8000-000000000001"}
+                },
+                "directory-operator": {
+                    "environment": {
+                        "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": UUID,
+                    }
+                },
+                "workspace-authority": {
+                    "environment": {
+                        "CYRENE_ORGANIZATION_ID": "organization-test",
+                        "CYRENE_WORKSPACE_ID": "workspace-test",
+                    }
+                },
+            }
+        }
+    )
+    assert expected_actor == document["actor"]
+    preflight._validate_connector_bootstrap_config(
+        path, huggingface_enabled=False, expected_actor=expected_actor
+    )
+    with pytest.raises(
+        preflight.PreflightError, match="approved Directory owner and CYRENE_HF_ENABLED"
+    ):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=True, expected_actor=expected_actor
+        )
+
+    document["actor"]["subject"] = "00000000-0000-4000-8000-000000000099"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="approved Directory owner"):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=False, expected_actor=expected_actor
+        )
+    document["actor"]["subject"] = expected_actor["subject"]
+
+    document["huggingface"] = {
+        "profileAlias": "hf-primary",
+        "targetAlias": "hf-primary-target",
+        "expectedAccessMode": "workspace_operator",
+        "profileIdempotencyKey": "teams-cloud-huggingface-primary",
+        "credentialSecretRef": "huggingface/connector-token",
+    }
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="approved Directory owner"):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=False, expected_actor=expected_actor
+        )
+    preflight._validate_connector_bootstrap_config(
+        path, huggingface_enabled=True, expected_actor=expected_actor
+    )
 
 
 def test_huggingface_oauth_source_matches_closed_account_center_dto(tmp_path: Path) -> None:
