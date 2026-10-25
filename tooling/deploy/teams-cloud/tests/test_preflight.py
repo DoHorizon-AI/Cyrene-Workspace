@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib
 import json
@@ -20,6 +21,7 @@ import sys
 from collections import namedtuple
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -2397,6 +2399,47 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
     preflight._validate_codebuddy_acp_boundary(
         rendered, secrets_dir=secrets_dir, config_dir=config_dir
     )
+    assert rendered["services"]["teams-provider"]["healthcheck"]["timeout"] == "20s"
+    assert rendered["services"]["account-center"]["healthcheck"]["timeout"] == "5s"
+    assert rendered["services"]["github-issues"]["healthcheck"]["timeout"] == "5s"
+
+
+def test_account_center_encryption_key_matches_locked_runtime_encodings() -> None:
+    """Accept only the Plugin runtime's canonical standard-base64 and hex keys."""
+
+    key_bytes = bytes([0xFB, 0xFF]) * 16
+    standard_base64 = base64.b64encode(key_bytes)
+    urlsafe_base64 = base64.urlsafe_b64encode(key_bytes)
+    assert b"+" in standard_base64 and b"/" in standard_base64
+    assert standard_base64.endswith(b"=")
+    assert b"-" in urlsafe_base64 and b"_" in urlsafe_base64
+
+    def secret_file_probe(value: bytes) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_symlink=lambda: False,
+            is_file=lambda: True,
+            stat=lambda: SimpleNamespace(st_mode=0o100600, st_uid=10001, st_size=len(value)),
+            read_bytes=lambda: value,
+        )
+
+    preflight._secret_file(secret_file_probe(standard_base64), "account-center-encryption-key")
+    preflight._secret_file(
+        secret_file_probe(key_bytes.hex().encode("ascii")), "account-center-encryption-key"
+    )
+
+    invalid_values = (
+        urlsafe_base64,
+        base64.b64encode(key_bytes[:-1]),
+        b"base64:" + standard_base64,
+        standard_base64[:-2] + b"!?=",
+        b"hex:" + key_bytes.hex().encode("ascii"),
+    )
+    for value in invalid_values:
+        with pytest.raises(
+            preflight.PreflightError, match="Account Center encryption key"
+        ) as error:
+            preflight._secret_file(secret_file_probe(value), "account-center-encryption-key")
+        assert value.decode("ascii") not in str(error.value)
 
 
 def test_exchange_cloud_profiles_follow_compose_overlay_stage() -> None:
