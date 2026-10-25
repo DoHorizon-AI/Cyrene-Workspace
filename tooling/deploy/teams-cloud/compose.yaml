@@ -598,7 +598,7 @@ services:
         - --client-key
         - /run/secrets/teams-connector-health-client-key
       interval: 15s
-      timeout: 5s
+      timeout: 20s
       retries: 8
       start_period: 45s
 

@@ -203,14 +203,16 @@ def _secret_file(path: Path, expected_name: str) -> None:
         )
     if expected_name == "teams-navigator-hmac-key" and not re.fullmatch(rb"[0-9a-fA-F]{64}", value):
         raise PreflightError("Teams-Navigator key must be ASCII hex64 without a trailing newline")
-    if expected_name == "account-center-encryption-key":
+    if expected_name == "account-center-encryption-key" and not re.fullmatch(
+        rb"[0-9a-fA-F]{64}", value
+    ):
         try:
-            decoded = base64.urlsafe_b64decode(value)
+            decoded = base64.b64decode(value, validate=True)
         except (ValueError, binascii.Error) as error:
             raise PreflightError(
-                "Account Center encryption key must be a Fernet URL-safe base64 key"
+                "Account Center encryption key must be canonical standard base64 or 64 hex characters"
             ) from error
-        if len(decoded) != 32 or base64.urlsafe_b64encode(decoded) != value:
+        if len(decoded) != 32 or base64.b64encode(decoded) != value:
             raise PreflightError("Account Center encryption key must encode exactly 32 bytes")
     if expected_name in PEM_PRIVATE_KEY_NAMES and not (
         value.startswith(b"-----BEGIN ") and b"PRIVATE KEY-----" in value[:128]
