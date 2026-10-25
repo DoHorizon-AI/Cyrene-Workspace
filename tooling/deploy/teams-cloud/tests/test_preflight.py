@@ -1242,7 +1242,9 @@ def test_exchange_github_only_stage_requires_an_empty_hf_profile_map() -> None:
     """Keep Exchange's authorization profile targets GitHub-only while HF is disabled."""
 
     document = {
-        "platformAuthority": {"connectorWorkload": {"connectionRef": "grpcs://authority:7443"}},
+        "platformAuthority": {
+            "connectorWorkload": {"connectionRef": "grpcs://workspace-authority:7443"}
+        },
         "accountCenter": {
             "connectionRef": "grpcs://account-center:7443",
             "transport": "mtls",
@@ -1277,6 +1279,16 @@ def test_exchange_github_only_stage_requires_an_empty_hf_profile_map() -> None:
     }
     preflight._validate_exchange_profile_stage(config, "stage1")
 
+    document["platformAuthority"]["connectorWorkload"]["connectionRef"] = "grpcs://authority:7443"
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(document)
+    with pytest.raises(preflight.PreflightError, match="private Authority service"):
+        preflight._validate_exchange_profile_stage(config, "stage1")
+
+    document["platformAuthority"]["connectorWorkload"]["connectionRef"] = (
+        "grpcs://workspace-authority:7443"
+    )
     document["authorizationCloud"]["profiles"]["hf-primary"] = {
         "provider": "hf",
         "directPlugin": {
@@ -2065,7 +2077,9 @@ def _exchange_configuration(providers: set[str]) -> dict[str, Any]:
     }
     return {
         "schemaVersion": 1,
-        "platformAuthority": {"connectorWorkload": {"connectionRef": "grpcs://authority:7443"}},
+        "platformAuthority": {
+            "connectorWorkload": {"connectionRef": "grpcs://workspace-authority:7443"}
+        },
         "accountCenter": {
             "bindingId": "host-account-center-binding",
             "connectionRef": "grpcs://account-center:7443",
@@ -2292,6 +2306,24 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
     monkeypatch.setattr(preflight, "_run", compose_config)
     rendered = preflight._compose_config([docker], compose_files, [env_file])
     assert ("huggingface" in rendered["services"]) is huggingface_enabled
+    authority_service = rendered["services"]["workspace-authority"]
+    exchange_service = rendered["services"]["exchange"]
+    authority_networks = authority_service["networks"]
+    exchange_networks = exchange_service["networks"]
+    assert "exchange-authority-private" in authority_networks
+    assert "exchange-authority-private" in exchange_networks
+    assert "authority" not in authority_networks["exchange-authority-private"].get("aliases", [])
+    assert "authority" in authority_networks["directory-private"].get("aliases", [])
+    rendered_exchange_configuration = json.loads(
+        exchange_service["environment"]["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"]
+    )
+    authority_connection_ref = rendered_exchange_configuration["platformAuthority"][
+        "connectorWorkload"
+    ]["connectionRef"]
+    assert authority_connection_ref == "grpcs://workspace-authority:7443"
+    authority_hostname = authority_connection_ref.split("://", 1)[1].split(":", 1)[0]
+    assert authority_hostname == "workspace-authority"
+    assert exchange_service["depends_on"]["workspace-authority"]["condition"] == "service_healthy"
     runner = rendered["services"]["computer-runtime"]
     proxy = rendered["services"]["computer-runtime-proxy"]
     assert preflight._memory_limit_bytes(runner["mem_limit"]) == 512 * preflight.MIB
