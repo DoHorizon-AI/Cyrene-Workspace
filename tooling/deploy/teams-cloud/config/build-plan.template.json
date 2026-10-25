@@ -67,7 +67,7 @@
       "sourceLabelRepo": "plugins",
       "buildArgs": {
         "RUST_BASE_IMAGE": "rust:1.96.1-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3",
-        "RUNTIME_BASE_IMAGE": "debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3"
+        "RUNTIME_BASE_IMAGE": "debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8"
       }
     },
     {

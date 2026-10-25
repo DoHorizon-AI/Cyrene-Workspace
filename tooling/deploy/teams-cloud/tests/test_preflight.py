@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 preflight = importlib.import_module("preflight")
@@ -286,17 +287,14 @@ def test_computer_runtime_requires_private_runner_and_mtls_proxy(tmp_path: Path)
                 "read_only": True,
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges:true"],
-                "tmpfs": ["/tmp:rw,nosuid,nodev,size=64m"],
-                "volumes": [
-                    {"type": "volume", "source": "computer-workspace", "target": "/workspace"},
-                    {
-                        "type": "volume",
-                        "source": "computer-artifacts",
-                        "target": "/var/lib/cyrene/artifacts",
-                    },
+                "tmpfs": [
+                    "/tmp:rw,nosuid,nodev,size=64m",
+                    "/workspace:rw,nosuid,nodev,size=192m",
+                    "/var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m",
                 ],
                 "networks": {"computer-runtime-private": {}},
-                "mem_limit": "384m",
+                "volumes": [],
+                "mem_limit": "512m",
                 "cpus": "0.10",
             },
             "computer-runtime-proxy": {
@@ -324,13 +322,18 @@ def test_computer_runtime_requires_private_runner_and_mtls_proxy(tmp_path: Path)
                 },
             },
         },
-        "volumes": {"computer-workspace": {}, "computer-artifacts": {}},
+        "volumes": {},
         "networks": {
             "computer-runtime-private": {"internal": True},
             "exchange-computer-private": {"internal": True},
         },
     }
     preflight._validate_computer_runtime_boundary(config)
+
+    config["services"]["computer-runtime"]["tmpfs"][1] = "/workspace:rw,nosuid,nodev,size=512m"
+    with pytest.raises(preflight.PreflightError, match="bounded scratch tmpfs"):
+        preflight._validate_computer_runtime_boundary(config)
+    config["services"]["computer-runtime"]["tmpfs"][1] = "/workspace:rw,nosuid,nodev,size=192m"
 
     exchange_environment = config["services"]["exchange"]["environment"]
     integration = json.loads(exchange_environment["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"])
@@ -344,6 +347,26 @@ def test_computer_runtime_requires_private_runner_and_mtls_proxy(tmp_path: Path)
     config["services"]["computer-runtime"]["secrets"] = ["github-app-private-key"]
     with pytest.raises(preflight.PreflightError, match="no credentials"):
         preflight._validate_computer_runtime_boundary(config)
+
+
+def test_computer_runtime_scratch_is_ephemeral_and_navigator_state_stays_persistent() -> None:
+    """Pin the runner tmpfs budget while preserving the base Navigator state volume."""
+
+    base_compose = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    runner_compose = yaml.safe_load(
+        (DEPLOYMENT_ROOT / "compose.computer-runtime.yaml").read_text(encoding="utf-8")
+    )
+    runner = runner_compose["services"]["computer-runtime"]
+    assert set(runner["tmpfs"]) == {
+        "/tmp:rw,nosuid,nodev,size=64m",
+        "/workspace:rw,nosuid,nodev,size=192m",
+        "/var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m",
+    }
+    assert sum(int(row.rsplit("size=", 1)[1].removesuffix("m")) for row in runner["tmpfs"]) == 320
+    assert runner.get("volumes", []) == []
+
+    persistence_volumes = base_compose["services"]["navigator-persistence"]["volumes"]
+    assert "navigator-sessions:/var/lib/cyrene-navigator" in persistence_volumes
 
 
 def test_empty_connector_bindings_are_bootstrap_only(tmp_path: Path) -> None:
@@ -467,10 +490,11 @@ def test_responsibility_targets_require_current_binding_and_exact_safe_grants(
         preflight._validate_responsibility_targets(config_path, bindings_path)
 
 
+@pytest.mark.parametrize("computer_runner_enabled", [False, True])
 def test_bootstrap_preflight_is_explicitly_not_full_ready(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, computer_runner_enabled: bool
 ) -> None:
-    """Return a distinct non-ready state for the empty-binding dependency bootstrap."""
+    """Return bootstrap status and the configured computer scratch lifetime."""
 
     artifact_root = tmp_path / ".artifacts" / "teams-cloud-test"
     config_dir = artifact_root / "config"
@@ -489,11 +513,10 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
 
     monkeypatch.setattr(preflight, "_validate_host", lambda _required: (4096, 10.0))
     monkeypatch.setattr(preflight, "check_local_lock", lambda *_args: None)
-    monkeypatch.setattr(
-        preflight,
-        "_compose_config",
-        lambda *_args: {"services": {"exchange": {"image": "locked:test"}}},
-    )
+    services = {"exchange": {"image": "locked:test"}}
+    if computer_runner_enabled:
+        services["computer-runtime"] = {}
+    monkeypatch.setattr(preflight, "_compose_config", lambda *_args: {"services": services})
     monkeypatch.setattr(preflight, "_validate_compose", lambda *_args: (100.0, 0.2))
     monkeypatch.setattr(preflight, "_parse_memavailable", lambda: 2048)
     monkeypatch.setattr(
@@ -538,6 +561,18 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
     )
     assert report["status"] == "BOOTSTRAP_ONLY_NOT_FULL_READY"
     assert report["deploymentReady"] is False
+    if computer_runner_enabled:
+        assert report["computerRuntimeStorage"] == {
+            "lifetime": "EPHEMERAL",
+            "workspaceClearedOnRestart": True,
+            "artifactRefsSurviveRestart": False,
+        }
+    else:
+        assert report["computerRuntimeStorage"] == {
+            "lifetime": "NOT_PRESENT",
+            "workspaceClearedOnRestart": None,
+            "artifactRefsSurviveRestart": None,
+        }
 
 
 def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
@@ -621,7 +656,18 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
             "github.pull_request.draft.create",
             ("repository_id", "repository", "head_branch", "base_branch"),
         ),
-        ("github.actions.rerun_failed", ("repository_id", "repository", "run_id")),
+        (
+            "github.actions.rerun_failed",
+            (
+                "repository_id",
+                "repository",
+                "run_id",
+                "expected_workflow_id",
+                "expected_head_branch",
+                "expected_head_sha",
+                "expected_attempt",
+            ),
+        ),
         ("computer.command.execute", ("workspace_ref",)),
         ("computer.file.read", ("workspace_ref", "path", "length")),
         ("computer.file.write", ("workspace_ref", "path")),
@@ -631,7 +677,7 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
 def test_connector_catalog_requires_exact_target_locator_fields(
     tmp_path: Path, operation: str, target_fields: tuple[str, ...]
 ) -> None:
-    """Require every projected repository/resource locator in the exported schema."""
+    """Require every projected locator and rerun receipt field in the exported schema."""
 
     binding = _binding(
         "computer" if operation.startswith("computer.") else "github",
@@ -645,6 +691,25 @@ def test_connector_catalog_requires_exact_target_locator_fields(
         "required": list(target_fields),
         "additionalProperties": False,
     }
+    if operation == "github.actions.rerun_failed":
+        input_schema["properties"].update(
+            {
+                "expected_workflow_id": {
+                    "type": "string",
+                    "pattern": r"^[1-9][0-9]{0,19}$",
+                },
+                "expected_head_branch": {"type": "string", "maxLength": 255},
+                "expected_head_sha": {
+                    "type": "string",
+                    "pattern": r"^[0-9a-fA-F]{40}$",
+                },
+                "expected_attempt": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2_147_483_647,
+                },
+            }
+        )
     tool = binding["tools"][0]
     catalog_item = {
         "bindingId": binding["bindingId"],
@@ -676,10 +741,22 @@ def test_connector_catalog_requires_exact_target_locator_fields(
     catalog_file.write_text(
         json.dumps({"schemaVersion": 1, "items": [catalog_item]}), encoding="utf-8"
     )
-    with pytest.raises(preflight.PreflightError, match="require every projected target locator"):
+    with pytest.raises(
+        preflight.PreflightError, match="require every canonical target and evidence"
+    ):
         preflight._validate_connector_tool_catalog(
             catalog_file, bindings_file, {binding["providerId"]}
         )
+    if operation == "github.actions.rerun_failed":
+        input_schema["required"] = list(target_fields)
+        input_schema["properties"]["expected_workflow_id"]["pattern"] = r"^[0-9]+$"
+        catalog_file.write_text(
+            json.dumps({"schemaVersion": 1, "items": [catalog_item]}), encoding="utf-8"
+        )
+        with pytest.raises(preflight.PreflightError, match="numeric workflow ID"):
+            preflight._validate_connector_tool_catalog(
+                catalog_file, bindings_file, {binding["providerId"]}
+            )
 
 
 @pytest.mark.parametrize(
@@ -1373,7 +1450,7 @@ def test_memavailable_distinguishes_staging_measurement_from_cutover() -> None:
         mode="stage1",
         config=config,
         available_mib=2263,
-        cgroup_budget_mib=2880,
+        cgroup_budget_mib=3008,
         minimum_available_mib=1024,
     )
     assert stage1["status"] == "READY_FOR_STAGING_MEASUREMENT"
@@ -1384,14 +1461,14 @@ def test_memavailable_distinguishes_staging_measurement_from_cutover() -> None:
             mode="stage2",
             config=config,
             available_mib=1407,
-            cgroup_budget_mib=3264,
+            cgroup_budget_mib=3392,
             minimum_available_mib=1024,
         )
     cutover = preflight._memory_headroom(
         mode="cutover",
         config=config,
         available_mib=1024,
-        cgroup_budget_mib=3264,
+        cgroup_budget_mib=3392,
         minimum_available_mib=1024,
     )
     assert cutover["status"] == "READY"

@@ -19,9 +19,11 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `compose.cloud-phase2.yaml`, `compose.runpod.yaml` | Opt-in Azure/GCP then RunPod on the same single cloud-provider service / 在同一个云 Provider 服务上按阶段启用 Azure/GCP 和 RunPod |
 | `Dockerfile.*` | Source-built ARM64 service images with fixed runtime entrypoints / 从固定源码构建 ARM64 服务镜像并锁定运行入口 |
 | `config/requirements.huggingface-cli.lock` | Hash-locked ARM64/Python 3.12 `hf` CLI dependency closure / 固定哈希的 ARM64/Python 3.12 `hf` CLI 依赖闭包 |
-| `compose.proactive-assistant-v1.yaml`, `compose.computer-runtime.yaml`, `Dockerfile.computer-runtime`, `Dockerfile.computer-proxy` | Opt-in unlimited conversational model profile, private computer runner, and mTLS-only bridge / 可选的不限聊天次数模型配置、内网电脑执行容器与仅 mTLS 桥接 |
+| `compose.proactive-assistant-v1.yaml`, `compose.computer-runtime.yaml`, `Dockerfile.computer-runtime`, `Dockerfile.computer-proxy` | Opt-in unlimited conversational model profile, private ephemeral computer runner, and mTLS-only bridge / 可选的不限聊天次数模型配置、内网临时电脑执行容器与仅 mTLS 桥接 |
 | `config/responsibility-targets.v1.schema.json`, `config/responsibility-targets.v1.template.json`, `config/proactive-assistant-workflow.v2.template.json` | Host-owned repository grants and disabled Workflows v2 template / 宿主机维护的仓库授权与默认禁用的 Workflows v2 模板 |
 | `config/computer-runner.integration-fragment.v1.template.json` | Non-secret Exchange host binding fragment for the mTLS computer runner / 电脑执行器 mTLS 连接器的非敏感 Exchange 宿主绑定片段 |
+| `generate_github_workflow_allowlist.py` | Derive matching private GitHub provider and Navigator rerun grants from one verified nine-repository inventory / 从同一份九仓库核实清单生成匹配的 GitHub Provider 与 Navigator 重跑授权 |
+| Generated `.artifacts/<task>/config/github-issues-source-workflow-ids.v1.json` | Owner-only provider configuration fragment; merge its `source_workflow_ids` into the complete private GitHub provider configuration / 仅 owner 可读的 Provider 配置片段；将 `source_workflow_ids` 合并到完整私有 GitHub Provider 配置 |
 | `config/antigravity-model-only-profile.template.md`, `config/proactive-assistant-v1.env.template` | Model-only CLI profile and Antigravity/CodeBuddy runtime defaults / 仅模型 CLI profile 与 Antigravity/CodeBuddy 运行时默认值 |
 | `prepare_production_runtime.py` | Produce a production-only DSH/Navigator dependency closure without development caches / 构建不含开发缓存的 DSH/Navigator 生产依赖集合 |
 | `config/acceptance-plan.schema.json`, `config/acceptance-plan*.template.json`, `config/acceptance-evidence.template.json`, `config/cloud-api-evidence.*` | USD 5 cumulative reservations, closed real-API stage receipts, and exact cleanup actions / 5 美元跨阶段预算、正式 API 阶段回执和精确清理动作 |
@@ -45,6 +47,10 @@ trees or a user's home directory.
 The proactive profile is not part of the default stack. It must be added explicitly after the base Compose file; include the computer-runtime overlay for the same deployment. Do not enable the scheduled workflow until the host target list has been rebound and the verified owner Teams thread identifiers have been filled. Current-VM capacity and external acceptance remain separate live checks.
 
 主动助手 profile 不会进入默认服务栈，必须在基础 Compose 文件后显式添加，并同时包含 computer-runtime overlay。GitHub 仓库绑定重新核验完成、且已填写经验证的 owner Teams 帖子标识前，不得启用定时工作流。当前 VM 容量和外部验收仍须独立实时核验。
+
+The Teams v1 computer profile exposes only `computer.command.execute`, `computer.file.read`, `computer.file.write`, and `computer.directory.list`; artifact create/get tools are not exposed. Its 320 MiB total scratch budget is tmpfs-only (`/workspace` 192 MiB, artifacts 64 MiB, `/tmp` 64 MiB), so workspace files and any artifact references are lost on runner restart or replacement. Preflight reports `computerRuntimeStorage.lifetime=EPHEMERAL`, `workspaceClearedOnRestart=true`, and `artifactRefsSurviveRestart=false` when the runner is configured, or `NOT_PRESENT` when it is absent. This scratch lifecycle is separate from durable Navigator task/session/operation state and the existing service-owned credential stores. No Docker restart test was run during package preparation.
+
+Teams v1 电脑执行 profile 只开放 `computer.command.execute`、`computer.file.read`、`computer.file.write` 和 `computer.directory.list`；不开放 artifact create/get 工具。总计 320 MiB 的 scratch 仅使用 tmpfs（`/workspace` 192 MiB、artifacts 64 MiB、`/tmp` 64 MiB），因此运行器重启或替换后工作区文件和 artifact 引用都会丢失。运行器已配置时，preflight 会报告 `computerRuntimeStorage.lifetime=EPHEMERAL`、`workspaceClearedOnRestart=true`、`artifactRefsSurviveRestart=false`；未配置时报告 `NOT_PRESENT`。这些临时目录与持久的 Navigator Task/session/operation 状态及现有服务负责的凭据存储相互独立。本轮打包准备没有运行 Docker 重启验收。
 
 只从干净且已提交的 Workspace 检出目录执行源码构建，并为每个仓库提供精确源 SHA。构建器把远端 Git 提交快照到临时目录；不会复制同级脏工作树或用户主目录中的文件。
 

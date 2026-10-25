@@ -9,6 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /source
+COPY Cyrene-Plugins-Official/contracts/proto ./contracts/proto
 COPY Cyrene-Plugins-Official/contracts/rust/cyrene-plugin-contracts ./contracts/rust/cyrene-plugin-contracts
 COPY Cyrene-Plugins-Official/runtime/rust ./runtime/rust
 RUN cargo build --locked --release --manifest-path runtime/rust/cyrene-plugin-server/Cargo.toml
@@ -25,7 +26,6 @@ ENV CYRENE_COMPUTER_WORKSPACE_ROOT=/workspace \
     CYRENE_COMPUTER_MAX_OUTPUT_BYTES=65536 \
     CYRENE_COMPUTER_MAX_FILE_BYTES=1048576 \
     CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES=2048 \
-    CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH=32 \
     CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH=32 \
     CYRENE_COMPUTER_MAX_ARTIFACT_BYTES=16777216
 

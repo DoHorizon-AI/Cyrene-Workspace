@@ -557,6 +557,7 @@ CONNECTOR_OPERATION_POLICIES = {
     "cloud.vendor.cli.execute": ("cloud_vendor_cli", "profile", True),
 }
 
+# This map guards the complete required catalog input, including rerun evidence fields.
 CONNECTOR_TARGET_ARGUMENTS = {
     "github.issues.search": ("repository_id", "repository"),
     "github.actions.jobs.list": ("repository_id", "repository", "run_id"),
@@ -583,7 +584,15 @@ CONNECTOR_TARGET_ARGUMENTS = {
         "head_branch",
         "base_branch",
     ),
-    "github.actions.rerun_failed": ("repository_id", "repository", "run_id"),
+    "github.actions.rerun_failed": (
+        "repository_id",
+        "repository",
+        "run_id",
+        "expected_workflow_id",
+        "expected_head_branch",
+        "expected_head_sha",
+        "expected_attempt",
+    ),
     "computer.command.execute": ("workspace_ref",),
     "computer.file.read": ("workspace_ref", "path", "length"),
     "computer.file.write": ("workspace_ref", "path"),
@@ -702,7 +711,7 @@ def _validate_connector_tool_catalog(
     *,
     allow_empty: bool = False,
 ) -> None:
-    """Bind an Exchange-exported tool catalog to the exact host connection map."""
+    """Bind Exchange tool schemas to the exact host map and required operation evidence."""
 
     try:
         catalog = json.loads(
@@ -808,6 +817,7 @@ def _validate_connector_tool_catalog(
                 raise PreflightError(
                     "Exchange tool read/write metadata conflicts with the fixed operation map"
                 )
+            operation_id = mapped["operationId"]
             target_fields = CONNECTOR_TARGET_ARGUMENTS.get(mapped["operationId"])
             if target_fields:
                 schema = catalog_tools[tool_id]["inputSchema"]
@@ -821,8 +831,40 @@ def _validate_connector_tool_catalog(
                     )
                 ):
                     raise PreflightError(
-                        "GitHub operation schema must require every projected target locator field"
+                        "GitHub operation schema must require every canonical target and evidence argument"
                     )
+            if operation_id == "github.actions.rerun_failed":
+                _validate_github_rerun_input_schema(catalog_tools[tool_id]["inputSchema"])
+
+
+def _validate_github_rerun_input_schema(schema: dict[str, Any]) -> None:
+    """Require typed workflow/run evidence and a bounded assistant-branch locator."""
+
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        raise PreflightError("GitHub rerun schema must define typed expected run evidence")
+    workflow_id = properties.get("expected_workflow_id")
+    head_branch = properties.get("expected_head_branch")
+    head_sha = properties.get("expected_head_sha")
+    attempt = properties.get("expected_attempt")
+    if (
+        not isinstance(workflow_id, dict)
+        or workflow_id.get("type") != "string"
+        or workflow_id.get("pattern") != r"^[1-9][0-9]{0,19}$"
+        or not isinstance(head_branch, dict)
+        or head_branch.get("type") != "string"
+        or head_branch.get("maxLength") != 255
+        or not isinstance(head_sha, dict)
+        or head_sha.get("type") != "string"
+        or head_sha.get("pattern") != r"^[0-9a-fA-F]{40}$"
+        or not isinstance(attempt, dict)
+        or attempt.get("type") != "integer"
+        or attempt.get("minimum") != 1
+        or attempt.get("maximum") != 2_147_483_647
+    ):
+        raise PreflightError(
+            "GitHub rerun schema must require a numeric workflow ID, bounded branch, exact SHA, and positive attempt"
+        )
 
 
 def _schema_contains_credential_field(value: Any) -> bool:
@@ -956,33 +998,30 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
             "computer runtime resource and file limits do not match the approved transport cap"
         )
     runner_volumes = runner.get("volumes", [])
-    allowed_targets = {"/workspace", "/var/lib/cyrene/artifacts"}
+    expected_tmpfs = {
+        "/tmp:rw,nosuid,nodev,size=64m",
+        "/workspace:rw,nosuid,nodev,size=192m",
+        "/var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m",
+    }
     if (
         runner.get("user") != "10001:10001"
         or runner.get("read_only") is not True
         or "ALL" not in runner.get("cap_drop", [])
         or runner.get("cap_add")
         or "no-new-privileges:true" not in runner.get("security_opt", [])
-        or not any(str(row).split(":", 1)[0] == "/tmp" for row in runner.get("tmpfs", []))
-        or runner.get("mem_limit") != "384m"
+        or set(runner.get("tmpfs", [])) != expected_tmpfs
+        or runner.get("mem_limit") != "512m"
         or runner.get("cpus") != "0.10"
         or runner.get("secrets")
         or runner.get("configs")
         or not isinstance(runner_volumes, list)
-        or {row.get("target") for row in runner_volumes if isinstance(row, dict)} != allowed_targets
-        or any(
-            not isinstance(row, dict) or row.get("type") != "volume" or row.get("read_only") is True
-            for row in runner_volumes
-        )
+        or runner_volumes
         or set(runner.get("networks", {})) != {"computer-runtime-private"}
         or runner.get("ports")
     ):
         raise PreflightError(
-            "computer runner must have only its workspace/artifact volumes, no credentials, and one private network"
+            "computer runner must use bounded scratch tmpfs, no credentials, and one private network"
         )
-    volumes = compose.get("volumes", {})
-    if not all(name in volumes for name in ("computer-workspace", "computer-artifacts")):
-        raise PreflightError("computer runner requires separate workspace and artifact volumes")
     networks = compose.get("networks", {})
     if any(
         not isinstance(networks.get(name), dict) or networks[name].get("internal") is not True
@@ -1041,6 +1080,22 @@ def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
         )
 
     _validate_computer_exchange_profile(compose)
+
+
+def _computer_runtime_storage_report(compose: dict[str, Any]) -> dict[str, Any]:
+    """Declare the configured lifetime of the optional computer runtime scratch paths."""
+
+    if "computer-runtime" in compose.get("services", {}):
+        return {
+            "lifetime": "EPHEMERAL",
+            "workspaceClearedOnRestart": True,
+            "artifactRefsSurviveRestart": False,
+        }
+    return {
+        "lifetime": "NOT_PRESENT",
+        "workspaceClearedOnRestart": None,
+        "artifactRefsSurviveRestart": None,
+    }
 
 
 def _validate_computer_exchange_profile(compose: dict[str, Any]) -> None:
@@ -2070,6 +2125,265 @@ def _validate_responsibility_targets(path: Path, bindings_path: Path) -> None:
                 )
 
 
+def _validate_github_workflow_allowlist(compose: dict[str, Any], config_dir: Path) -> None:
+    """Require one verified source-CI inventory to match provider and Navigator rerun scopes."""
+
+    artifact_root = config_dir.resolve().parent
+    inventory_path = artifact_root / "github-source-workflows.json"
+    provider_fragment_path = config_dir / "github-issues-source-workflow-ids.v1.json"
+    targets_path = config_dir / "responsibility-targets.v1.json"
+    workflow_path = artifact_root / "proactive-assistant-workflow.v2.json"
+
+    def read_private_json(path: Path, label: str) -> dict[str, Any]:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or not _private_artifact(path)
+            or path.stat().st_mode & 0o077
+        ):
+            raise PreflightError(f"{label} must be an owner-only file under private .artifacts")
+        try:
+            document = json.loads(
+                path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise PreflightError(f"{label} is invalid JSON") from error
+        if not isinstance(document, dict):
+            raise PreflightError(f"{label} must be a JSON object")
+        return document
+
+    inventory = read_private_json(inventory_path, "GitHub source-workflow inventory")
+    provider_fragment = read_private_json(
+        provider_fragment_path, "GitHub provider workflow fragment"
+    )
+    targets_document = read_private_json(targets_path, "Navigator responsibility targets")
+    workflow = read_private_json(workflow_path, "Navigator responsibility WorkFlow")
+    if (
+        set(inventory) != {"schemaVersion", "observedAt", "source", "repositories", "excluded"}
+        or inventory.get("schemaVersion") != 1
+        or isinstance(inventory.get("schemaVersion"), bool)
+        or not isinstance(inventory.get("observedAt"), str)
+        or inventory.get("source")
+        != "GitHub REST GET /repos/{owner}/{repo}/actions/workflows?per_page=100"
+    ):
+        raise PreflightError("GitHub source-workflow inventory has an unsupported schema or source")
+    source_repositories = inventory.get("repositories")
+    excluded_repositories = inventory.get("excluded")
+    if (
+        not isinstance(source_repositories, dict)
+        or len(source_repositories) != 9
+        or not isinstance(excluded_repositories, dict)
+        or set(excluded_repositories) != {"DoHorizon-AI/Cyrene-Workspace"}
+        or not isinstance(excluded_repositories["DoHorizon-AI/Cyrene-Workspace"], dict)
+        or not isinstance(excluded_repositories["DoHorizon-AI/Cyrene-Workspace"].get("reason"), str)
+        or not excluded_repositories["DoHorizon-AI/Cyrene-Workspace"]["reason"]
+    ):
+        raise PreflightError(
+            "source-workflow inventory must cover nine source repos and exclude Workspace"
+        )
+
+    target_rows = targets_document.get("targets")
+    if (
+        targets_document.get("schemaVersion") != 1
+        or isinstance(targets_document.get("schemaVersion"), bool)
+        or not isinstance(target_rows, list)
+        or len(target_rows) != 10
+    ):
+        raise PreflightError(
+            "source-workflow inventory requires the exact ten Navigator repository targets"
+        )
+    targets_by_label: dict[str, dict[str, Any]] = {}
+    targets_by_id: dict[str, dict[str, Any]] = {}
+    for target in target_rows:
+        if not isinstance(target, dict):
+            raise PreflightError("Navigator repository target is malformed")
+        label = target.get("label")
+        repository_id = target.get("id")
+        if (
+            not isinstance(label, str)
+            or label in targets_by_label
+            or not isinstance(repository_id, str)
+            or repository_id in targets_by_id
+        ):
+            raise PreflightError("Navigator repository target labels and IDs must be unique")
+        targets_by_label[label] = target
+        targets_by_id[repository_id] = target
+    expected_labels = set(source_repositories) | {"DoHorizon-AI/Cyrene-Workspace"}
+    if set(targets_by_label) != expected_labels:
+        raise PreflightError(
+            "verified source-workflow repos do not match the exact ten Navigator targets"
+        )
+
+    expected_ids_by_repo: dict[str, list[str]] = {}
+    all_workflow_ids: set[str] = set()
+    for label, row in source_repositories.items():
+        if (
+            not isinstance(label, str)
+            or not isinstance(row, dict)
+            or set(row) != {"id", "name", "path"}
+            or not isinstance(row.get("id"), str)
+            or not re.fullmatch(r"[1-9][0-9]{0,19}", row["id"])
+            or row.get("path")
+            not in {
+                ".github/workflows/ci.yml",
+                ".github/workflows/public-ci.yml",
+            }
+            or not isinstance(row.get("name"), str)
+            or not row["name"]
+            or row["id"] in all_workflow_ids
+        ):
+            raise PreflightError(
+                "source-workflow inventory contains a duplicate or non-source workflow ID"
+            )
+        all_workflow_ids.add(row["id"])
+        repository_id = targets_by_label[label]["id"]
+        if not isinstance(repository_id, str) or not re.fullmatch(r"[1-9][0-9]*", repository_id):
+            raise PreflightError("source-workflow repository target has an invalid numeric ID")
+        expected_ids_by_repo[repository_id] = [row["id"]]
+
+    workspace_target = targets_by_label["DoHorizon-AI/Cyrene-Workspace"]
+    workspace_grants = workspace_target.get("actionGrants", [])
+    if any(
+        isinstance(grant, dict) and grant.get("id") == "rerun_source_ci"
+        for grant in workspace_grants
+    ):
+        raise PreflightError("Workspace must remain excluded from source-CI rerun grants")
+    for label in source_repositories:
+        target = targets_by_label[label]
+        grants = target.get("actionGrants", [])
+        matches = [
+            grant
+            for grant in grants
+            if isinstance(grant, dict) and grant.get("id") == "rerun_source_ci"
+        ]
+        if (
+            len(matches) != 1
+            or matches[0].get("sourceWorkflowIds") != expected_ids_by_repo[target["id"]]
+        ):
+            raise PreflightError(
+                "Navigator per-repository rerun grant differs from the verified inventory"
+            )
+        if matches[0].get("branchPrefixes") != ["cyrene/assistant/"]:
+            raise PreflightError(
+                "Navigator CI reruns must stay on the assistant task-branch namespace"
+            )
+
+    expected_provider_map = expected_ids_by_repo
+    if (
+        set(provider_fragment) != {"source_workflow_ids"}
+        or provider_fragment.get("source_workflow_ids") != expected_provider_map
+    ):
+        raise PreflightError(
+            "private GitHub provider workflow fragment differs from the verified inventory"
+        )
+    github_service = compose.get("services", {}).get("github-issues", {})
+    provider_environment = github_service.get("environment", {})
+    try:
+        provider_configuration = json.loads(
+            provider_environment.get("CYRENE_CAPABILITY_CONFIGURATION_JSON", ""),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError("GitHub provider activation configuration is invalid JSON") from error
+    if not isinstance(provider_configuration, dict):
+        raise PreflightError("GitHub provider activation configuration must be an object")
+    provider_rows = provider_configuration.get("repositories")
+    if not isinstance(provider_rows, list) or len(provider_rows) != 10:
+        raise PreflightError(
+            "GitHub provider profile must be narrowed to the exact ten Cyrene repos"
+        )
+    provider_repository_ids: set[str] = set()
+    for row in provider_rows:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("repository_id"), str)
+            or row["repository_id"] not in targets_by_id
+            or row["repository_id"] in provider_repository_ids
+        ):
+            raise PreflightError(
+                "GitHub provider profile contains an extra or duplicate repository"
+            )
+        target = targets_by_id[row["repository_id"]]
+        if (
+            row.get("owner") != target["label"].split("/", 1)[0]
+            or row.get("name") != target["label"].split("/", 1)[1]
+        ):
+            raise PreflightError(
+                "GitHub provider repository identity differs from Navigator targets"
+            )
+        provider_repository_ids.add(row["repository_id"])
+    if provider_repository_ids != set(targets_by_id):
+        raise PreflightError(
+            "GitHub provider profile does not cover exactly the ten Navigator targets"
+        )
+    if provider_configuration.get("source_workflow_ids") != expected_provider_map:
+        raise PreflightError("GitHub provider activation workflow IDs differ from Navigator grants")
+
+    workflow_targets = workflow.get("targets")
+    workflow_policy = workflow.get("actionPolicy")
+    allowed_actions = (
+        workflow_policy.get("allowedActions") if isinstance(workflow_policy, dict) else None
+    )
+    if (
+        not isinstance(workflow_targets, list)
+        or len(workflow_targets) != 10
+        or not isinstance(allowed_actions, list)
+    ):
+        raise PreflightError("Navigator WorkFlow targets and action grants are incomplete")
+    workflow_target_ids: set[str] = set()
+    for target in workflow_targets:
+        if not isinstance(target, dict):
+            raise PreflightError("Navigator WorkFlow target is malformed")
+        repository_id = target.get("id")
+        if (
+            target.get("kind") != "github_repository"
+            or not isinstance(repository_id, str)
+            or repository_id not in targets_by_id
+            or repository_id in workflow_target_ids
+            or target.get("label") != targets_by_id[repository_id]["label"]
+            or target.get("uri") != targets_by_id[repository_id]["uri"]
+            or target.get("bindingId") != targets_by_id[repository_id]["bindingId"]
+        ):
+            raise PreflightError("Navigator WorkFlow targets do not match host repository targets")
+        workflow_target_ids.add(repository_id)
+    if workflow_target_ids != set(targets_by_id):
+        raise PreflightError(
+            "Navigator WorkFlow must include the exact ten host repository targets"
+        )
+    rerun_actions = [
+        action
+        for action in allowed_actions
+        if isinstance(action, dict) and action.get("id") == "rerun_source_ci"
+    ]
+    expected_target_ids = set(expected_provider_map)
+    expected_workflow_ids = sorted(all_workflow_ids)
+    if len(rerun_actions) != 1:
+        raise PreflightError(
+            "Navigator WorkFlow rerun grant differs from the verified provider allowlist"
+        )
+    rerun_action = rerun_actions[0]
+    workflow_target_ids = rerun_action.get("targetIds")
+    if (
+        not isinstance(workflow_target_ids, list)
+        or any(not isinstance(item, str) for item in workflow_target_ids)
+        or len(set(workflow_target_ids)) != len(workflow_target_ids)
+    ):
+        raise PreflightError("Navigator WorkFlow rerun action has invalid target IDs")
+    if (
+        rerun_action.get("action") != "rerun_source_ci"
+        or set(workflow_target_ids) != expected_target_ids
+        or rerun_action.get("sourceWorkflowIds") != expected_workflow_ids
+        or rerun_action.get("branchPrefixes") != ["cyrene/assistant/"]
+        or rerun_action.get("baseBranches") != []
+        or rerun_action.get("pathPrefixes") != []
+        or rerun_action.get("issueNumbers") != []
+        or rerun_action.get("permittedOperations") != ["github.actions.rerun_failed"]
+    ):
+        raise PreflightError(
+            "Navigator WorkFlow rerun grant differs from the verified provider allowlist"
+        )
+
+
 def _validate_cloud_acceptance_mount(service: dict[str, Any]) -> None:
     """Require only the private acceptance ledger directory in the provider container."""
 
@@ -2911,8 +3225,10 @@ def run_preflight(
     _validate_internal_https_topology(config)
     _validate_profile_stage(config, mode)
     _validate_secrets_and_configs(config, secrets_dir.resolve(), config_dir.resolve(), mode)
-    _validate_identity_scope(config, config_dir.resolve() / "teams-actor-subjects.json")
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
+    if navigator_environment.get("CYRENE_RESPONSIBILITY_TARGETS_FILE"):
+        _validate_github_workflow_allowlist(config, config_dir.resolve())
+    _validate_identity_scope(config, config_dir.resolve() / "teams-actor-subjects.json")
     if navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity":
         _validate_model_home_mount(config)
         _validate_proactive_navigator_container(config)
@@ -2942,6 +3258,7 @@ def run_preflight(
         "composeCgroupMemoryLimitMiB": round(cgroup_budget_mib),
         "composeCgroupCpuLimit": round(_cgroup_cpus, 2),
         "runtimeRssByServiceMiB": runtime_rss,
+        "computerRuntimeStorage": _computer_runtime_storage_report(config),
         "serviceCount": len(config["services"]),
         "imageLock": str(image_lock.resolve()),
     }

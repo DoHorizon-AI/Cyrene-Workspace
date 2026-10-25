@@ -55,6 +55,24 @@ def _plan() -> dict[str, Any]:
     }
 
 
+def test_computer_runtime_build_plan_copies_the_plugin_proto_tree() -> None:
+    """Keep the generated DirectPluginRuntime proto available to the pinned Cargo build."""
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    plan = json.loads((deployment_root / "config" / "build-plan.template.json").read_text())
+    image = next(row for row in plan["images"] if row["service"] == "computer-runtime")
+    authority = next(row for row in plan["images"] if row["service"] == "workspace-authority")
+    dockerfile = (deployment_root / "Dockerfile.computer-runtime").read_text()
+
+    assert "plugins" in image["sourceRepos"]
+    runtime_base = image["buildArgs"]["RUNTIME_BASE_IMAGE"]
+    assert runtime_base == authority["buildArgs"]["RUNTIME_BASE_IMAGE"]
+    runtime_digest = runtime_base.rsplit("@sha256:", 1)[1]
+    assert len(runtime_digest) == 64
+    assert all(character in "0123456789abcdef" for character in runtime_digest)
+    assert "COPY Cyrene-Plugins-Official/contracts/proto ./contracts/proto" in dockerfile
+
+
 def test_build_plan_requires_digest_pinned_base_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -68,6 +86,21 @@ def test_build_plan_requires_digest_pinned_base_images(
     plan = _plan()
     plan["images"][0]["buildArgs"]["PYTHON_BASE_IMAGE"] = "python:3.12-slim"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    with pytest.raises(build.BuildError, match="pin a registry digest"):
+        build.validate_plan(plan_path)
+
+
+@pytest.mark.parametrize("digest", ["b" * 63, "g" * 64, "b" * 65])
+def test_build_plan_rejects_base_image_digests_unless_exactly_64_hex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, digest: str
+) -> None:
+    """Reject truncated, non-hex, and oversized fixed-image SHA-256 digests."""
+
+    plan = _plan()
+    plan["images"][0]["buildArgs"]["PYTHON_BASE_IMAGE"] = f"python:3.12-slim@sha256:{digest}"
+    plan_path = tmp_path / "build-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    monkeypatch.setattr(build, "_private_artifact", lambda _path: True)
     with pytest.raises(build.BuildError, match="pin a registry digest"):
         build.validate_plan(plan_path)
 

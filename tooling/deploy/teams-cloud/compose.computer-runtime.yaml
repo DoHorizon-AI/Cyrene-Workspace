@@ -39,19 +39,14 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=64m
-    volumes:
-      - type: volume
-        source: computer-workspace
-        target: /workspace
-      - type: volume
-        source: computer-artifacts
-        target: /var/lib/cyrene/artifacts
+      - /workspace:rw,nosuid,nodev,size=192m
+      - /var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m
     expose:
       - "50051"
     networks:
       - computer-runtime-private
-    mem_limit: 384m
-    memswap_limit: 384m
+    mem_limit: 512m
+    memswap_limit: 512m
     cpus: "0.10"
     pids_limit: 128
     healthcheck:
@@ -114,10 +109,6 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
-
-volumes:
-  computer-workspace:
-  computer-artifacts:
 
 networks:
   exchange-computer-private:
