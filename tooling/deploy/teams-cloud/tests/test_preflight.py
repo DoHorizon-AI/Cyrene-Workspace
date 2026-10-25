@@ -1240,8 +1240,8 @@ def test_github_only_provider_allowlists_exclude_every_hf_binding_and_profile() 
         preflight._validate_huggingface_profile_selection(github_only, "stage2")
 
 
-def test_exchange_github_only_stage_requires_an_empty_hf_profile_map() -> None:
-    """Keep Exchange's authorization profile targets GitHub-only while HF is disabled."""
+def test_exchange_github_only_stage_omits_authorization_cloud_without_providers() -> None:
+    """Match Exchange's optional auth-cloud contract when GitHub-only has no cloud targets."""
 
     document = {
         "platformAuthority": {
@@ -1267,7 +1267,6 @@ def test_exchange_github_only_stage_requires_an_empty_hf_profile_map() -> None:
                 }
             }
         },
-        "authorizationCloud": {"profiles": {}},
     }
     config = {
         "services": {
@@ -1291,18 +1290,13 @@ def test_exchange_github_only_stage_requires_an_empty_hf_profile_map() -> None:
     document["platformAuthority"]["connectorWorkload"]["connectionRef"] = (
         "grpcs://workspace-authority:7443"
     )
-    document["authorizationCloud"]["profiles"]["hf-primary"] = {
-        "provider": "hf",
-        "directPlugin": {
-            "connectionRef": "grpcs://huggingface:7443",
-            "transport": "mtls",
-        },
-    }
-    config["services"]["exchange"]["environment"][
-        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
-    ] = json.dumps(document)
-    with pytest.raises(preflight.PreflightError, match=r"must be exactly \[\] for this stage"):
-        preflight._validate_exchange_profile_stage(config, "stage1")
+    for profiles in ({}, {"hf-primary": {"provider": "hf"}}):
+        document["authorizationCloud"] = {"profiles": profiles}
+        config["services"]["exchange"]["environment"][
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+        ] = json.dumps(document)
+        with pytest.raises(preflight.PreflightError, match="must be omitted"):
+            preflight._validate_exchange_profile_stage(config, "stage1")
 
 
 def test_huggingface_secrets_are_in_the_optional_inventory_section() -> None:
@@ -2077,7 +2071,7 @@ def _exchange_configuration(providers: set[str]) -> dict[str, Any]:
         "gcp": {"provider": "gcp", "directPlugin": cloud_target},
         "runpod": {"provider": "runpod", "directPlugin": cloud_target},
     }
-    return {
+    document = {
         "schemaVersion": 1,
         "platformAuthority": {
             "connectorWorkload": {"connectionRef": "grpcs://workspace-authority:7443"}
@@ -2105,12 +2099,14 @@ def _exchange_configuration(providers: set[str]) -> dict[str, Any]:
                 }
             }
         },
-        "authorizationCloud": {
+    }
+    if providers:
+        document["authorizationCloud"] = {
             "profiles": {
                 f"{provider}-primary": profile_templates[provider] for provider in sorted(providers)
             }
-        },
-    }
+        }
+    return document
 
 
 @pytest.mark.parametrize("huggingface_enabled", [False, True])
@@ -2382,6 +2378,12 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
     rendered_exchange_configuration = json.loads(
         exchange_service["environment"]["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"]
     )
+    if huggingface_enabled:
+        assert set(rendered_exchange_configuration["authorizationCloud"]["profiles"]) == {
+            "hf-primary"
+        }
+    else:
+        assert "authorizationCloud" not in rendered_exchange_configuration
     authority_connection_ref = rendered_exchange_configuration["platformAuthority"][
         "connectorWorkload"
     ]["connectionRef"]
@@ -2457,6 +2459,12 @@ def test_exchange_cloud_profiles_follow_compose_overlay_stage() -> None:
         }
     }
     preflight._validate_exchange_profile_stage(phase1, "stage1")
+    missing_phase1_profiles = json.loads(json.dumps(phase1))
+    missing_phase1_profiles["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(_exchange_configuration(set()))
+    with pytest.raises(preflight.PreflightError, match="phase-scoped cloud provider profile map"):
+        preflight._validate_exchange_profile_stage(missing_phase1_profiles, "stage1")
 
     phase2 = {
         "services": {
