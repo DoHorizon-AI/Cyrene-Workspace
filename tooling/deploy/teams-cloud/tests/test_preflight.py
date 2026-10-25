@@ -965,6 +965,7 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
     for name in (
         "_validate_internal_https_topology",
         "_validate_profile_stage",
+        "_validate_provider_listener_addresses",
         "_validate_secrets_and_configs",
         "_validate_identity_scope",
         "_validate_stage_acceptance_receipts",
@@ -2398,12 +2399,59 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
     assert preflight._memory_limit_bytes(proxy["mem_limit"]) == 64 * preflight.MIB
     assert preflight._cpu_limit_decimal(proxy["cpus"]) == preflight.Decimal("0.05")
     preflight._validate_profile_stage(rendered, "stage1")
+    preflight._validate_provider_listener_addresses(rendered)
     preflight._validate_codebuddy_acp_boundary(
         rendered, secrets_dir=secrets_dir, config_dir=config_dir
     )
     assert rendered["services"]["teams-provider"]["healthcheck"]["timeout"] == "20s"
     assert rendered["services"]["account-center"]["healthcheck"]["timeout"] == "5s"
     assert rendered["services"]["github-issues"]["healthcheck"]["timeout"] == "5s"
+    provider_networks = {
+        "account-center": {
+            "account-private",
+            "github-account-center-private",
+            "account-egress",
+        },
+        "github-issues": {
+            "github-exchange-private",
+            "github-account-center-private",
+            "github-egress",
+        },
+        "teams-provider": {"teams-provider-private", "teams-provider-egress"},
+    }
+    if huggingface_enabled:
+        provider_networks["account-center"].add("huggingface-account-center-private")
+    dockerfiles = {
+        "account-center": "Dockerfile.account-center",
+        "github-issues": "Dockerfile.github-issues",
+    }
+    for service_name, expected_networks in provider_networks.items():
+        assert service_name in rendered["services"]
+        service = rendered["services"][service_name]
+        command = service["command"]
+        assert set(service["networks"]) == expected_networks
+        assert not service.get("ports")
+        if service_name in dockerfiles:
+            dockerfile_lines = (
+                (DEPLOYMENT_ROOT / dockerfiles[service_name])
+                .read_text(encoding="utf-8")
+                .splitlines()
+            )
+            dockerfile_command = next(line for line in dockerfile_lines if line.startswith("CMD ["))
+            assert command == json.loads(dockerfile_command.removeprefix("CMD "))
+        listen_index = command.index("--listen")
+        assert command[listen_index + 1] == "0.0.0.0:7443"
+        health_test = service["healthcheck"]["test"]
+        target_index = health_test.index("--target")
+        assert health_test[target_index + 1] == f"{service_name}:7443"
+        assert {"--server-ca", "--client-cert", "--client-key"} <= set(health_test)
+
+    for service_name in provider_networks:
+        invalid_listener = json.loads(json.dumps(rendered))
+        command = invalid_listener["services"][service_name]["command"]
+        command[command.index("--listen") + 1] = f"{service_name}:7443"
+        with pytest.raises(preflight.PreflightError, match="must listen on 0.0.0.0:7443"):
+            preflight._validate_provider_listener_addresses(invalid_listener)
 
 
 def test_account_center_encryption_key_matches_locked_runtime_encodings() -> None:

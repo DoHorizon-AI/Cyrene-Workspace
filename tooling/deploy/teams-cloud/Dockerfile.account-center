@@ -28,7 +28,7 @@ LABEL org.opencontainers.image.revision=${SOURCE_REVISION}
 USER 10001:10001
 EXPOSE 7443
 ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "python", "-m", "cyrene_plugin_runtime.server"]
-CMD ["--entrypoint", "account_center.plugin:AccountCenterPlugin", "--capability", "account.center.v1", "--interface-version", "1", "--listen", "account-center:7443", "--tls-cert-file", "/run/secrets/account-center-server-cert", "--tls-key-file", "/run/secrets/account-center-server-key", "--tls-client-ca-file", "/run/secrets/account-center-client-ca"]
+CMD ["--entrypoint", "account_center.plugin:AccountCenterPlugin", "--capability", "account.center.v1", "--interface-version", "1", "--listen", "0.0.0.0:7443", "--tls-cert-file", "/run/secrets/account-center-server-cert", "--tls-key-file", "/run/secrets/account-center-server-key", "--tls-client-ca-file", "/run/secrets/account-center-client-ca"]
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
     CMD python /usr/local/bin/cyrene-plugin-grpc-health --target account-center:7443 \
       --plugin-id cyrene.accounts.account-center \
