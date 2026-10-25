@@ -1883,11 +1883,37 @@ def _validate_identity_scope(config: dict[str, Any], actor_projection_path: Path
 
 
 def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
-    """Require real approved models, no paid fallback top-up, and foreground/background slots."""
+    """Validate the selected DSH or native CodeBuddy ACP model path."""
 
+    backend = navigator.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
     source = navigator.get("CYRENE_HARNESS_MODEL_SOURCE")
     model = navigator.get("CYRENE_HARNESS_MODEL")
     concurrency = navigator.get("CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS")
+    if backend == "codebuddy-acp":
+        if source not in {None, ""} or model not in {None, ""}:
+            raise PreflightError(
+                "CodeBuddy ACP must not select the legacy Harness model source or model"
+            )
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND") != "codebuddy":
+            raise PreflightError("CodeBuddy ACP command must be exactly the native codebuddy CLI")
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_ACP_MODEL") not in {
+            "glm-5.3-flash",
+            "deepseek-v4.1-flash",
+        }:
+            raise PreflightError("CodeBuddy ACP model must be an approved GLM or DeepSeek profile")
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED") != "false":
+            raise PreflightError("CodeBuddy ACP must disable model fallback")
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP") != "true":
+            raise PreflightError("CodeBuddy ACP requires the owner no-paid-topup declaration")
+        if navigator.get("CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL") not in {None, ""}:
+            raise PreflightError("CodeBuddy ACP must not configure a legacy fallback model")
+        if concurrency not in {"1", "2"}:
+            raise PreflightError(
+                "CodeBuddy ACP task concurrency must fit the two-CPU deployment profile"
+            )
+        return
+    if backend != "dsh":
+        raise PreflightError("Navigator execution backend must be dsh or codebuddy-acp")
     if source == "antigravity":
         if model != "gemini-3.8-flash-medium":
             raise PreflightError("proactive Navigator must use Antigravity gemini-3.8-flash-medium")
@@ -1911,6 +1937,56 @@ def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
         )
     if concurrency not in {"1", "2"}:
         raise PreflightError("Navigator task concurrency must fit the two-CPU deployment profile")
+
+
+def _validate_codebuddy_acp_boundary(config: dict[str, Any]) -> None:
+    """Keep the ACP bridge private to Navigator and out of Compose credentials.
+
+    中文：MCP bridge 配置由 Navigator 在容器内逐次生成；禁止通过 Compose 注入 token 或文件挂载。
+    """
+
+    navigator = config.get("services", {}).get("navigator", {})
+    environment = navigator.get("environment", {})
+    volumes = navigator.get("volumes", [])
+    secrets = navigator.get("secrets", [])
+    configs = navigator.get("configs", [])
+    if environment.get("CYRENE_WORKFLOWS_ENABLED") != "true":
+        raise PreflightError("CodeBuddy ACP requires the Workflows engine for owner-approved work")
+    if (
+        navigator.get("read_only") is not True
+        or "ALL" not in navigator.get("cap_drop", [])
+        or "no-new-privileges:true" not in navigator.get("security_opt", [])
+        or "/tmp:rw,nosuid,nodev,size=128m" not in navigator.get("tmpfs", [])
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP requires a read-only root, dropped capabilities, and bounded 128 MiB temporary storage"
+        )
+    if navigator.get("command") or navigator.get("entrypoint"):
+        raise PreflightError("CodeBuddy ACP must retain the Navigator-owned fixed CLI invocation")
+    if (
+        navigator.get("privileged") is True
+        or navigator.get("cap_add")
+        or navigator.get("ports")
+        or navigator.get("network_mode") == "host"
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP must keep the existing low-privilege private service boundary"
+        )
+    if any("MCP" in str(name).upper() for name in environment):
+        raise PreflightError(
+            "CodeBuddy ACP MCP configuration must not be injected through Compose env"
+        )
+    if any(
+        "MCP" in str(value).upper()
+        for row in [*volumes, *secrets, *configs]
+        if isinstance(row, dict)
+        for value in row.values()
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP MCP configuration must stay out of Compose mounts and secrets"
+        )
+    if any(isinstance(row, dict) and row.get("target") == "/home/navigator" for row in volumes):
+        raise PreflightError("CodeBuddy ACP must not mount the legacy Antigravity model home")
 
 
 def _validate_codebuddy_mount(config: dict[str, Any], secrets_dir: Path) -> None:
@@ -2158,6 +2234,7 @@ def _validate_github_workflow_allowlist(compose: dict[str, Any], config_dir: Pat
     )
     targets_document = read_private_json(targets_path, "Navigator responsibility targets")
     workflow = read_private_json(workflow_path, "Navigator responsibility WorkFlow")
+    _validate_workflow_definition_disabled(workflow)
     if (
         set(inventory) != {"schemaVersion", "observedAt", "source", "repositories", "excluded"}
         or inventory.get("schemaVersion") != 1
@@ -2381,6 +2458,15 @@ def _validate_github_workflow_allowlist(compose: dict[str, Any], config_dir: Pat
     ):
         raise PreflightError(
             "Navigator WorkFlow rerun grant differs from the verified provider allowlist"
+        )
+
+
+def _validate_workflow_definition_disabled(workflow: dict[str, Any]) -> None:
+    """Require owner acceptance before a scheduled WorkFlow definition can run."""
+
+    if workflow.get("enabled") is not False:
+        raise PreflightError(
+            "Navigator WorkFlow definition must remain disabled until real acceptance"
         )
 
 
@@ -3226,11 +3312,18 @@ def run_preflight(
     _validate_profile_stage(config, mode)
     _validate_secrets_and_configs(config, secrets_dir.resolve(), config_dir.resolve(), mode)
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
+    execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
+    if execution_backend == "codebuddy-acp":
+        _validate_codebuddy_acp_boundary(config)
     if navigator_environment.get("CYRENE_RESPONSIBILITY_TARGETS_FILE"):
         _validate_github_workflow_allowlist(config, config_dir.resolve())
     _validate_identity_scope(config, config_dir.resolve() / "teams-actor-subjects.json")
-    if navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity":
-        _validate_model_home_mount(config)
+    if (
+        navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity"
+        or execution_backend == "codebuddy-acp"
+    ):
+        if navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity":
+            _validate_model_home_mount(config)
         _validate_proactive_navigator_container(config)
     _validate_stage_acceptance_receipts(
         mode=mode,

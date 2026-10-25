@@ -411,6 +411,170 @@ def test_proactive_model_profile_has_gemini_and_no_paid_fallback() -> None:
         preflight._validate_model_runtime_config(environment)
 
 
+def test_legacy_dsh_codebuddy_model_profile_remains_compatible() -> None:
+    """Keep the existing DSH-to-CodeBuddy model adapter as the default backend."""
+
+    preflight._validate_model_runtime_config(
+        {
+            "CYRENE_HARNESS_MODEL_SOURCE": "codebuddy",
+            "CYRENE_HARNESS_MODEL": "glm-5.3-flash",
+            "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "1",
+        }
+    )
+
+
+def test_codebuddy_acp_model_profile_is_native_and_closed() -> None:
+    """Accept only the fixed native CLI, approved models, and explicit no-top-up policy."""
+
+    environment = {
+        "CYRENE_HARNESS_EXECUTION_BACKEND": "codebuddy-acp",
+        "CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND": "codebuddy",
+        "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL": "glm-5.3-flash",
+        "CYRENE_HARNESS_MODEL_SOURCE": "",
+        "CYRENE_HARNESS_MODEL": "",
+        "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED": "false",
+        "CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP": "true",
+        "CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL": "",
+        "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "1",
+    }
+    preflight._validate_model_runtime_config(environment)
+
+    environment["CYRENE_HARNESS_CODEBUDDY_ACP_MODEL"] = "deepseek-v4.1-flash"
+    preflight._validate_model_runtime_config(environment)
+
+    invalid_profiles = [
+        ("CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND", "codebuddy --acp", "command must be exactly"),
+        ("CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND", "/usr/bin/codebuddy", "command must be exactly"),
+        (
+            "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL",
+            "gemini-3.8-flash-medium",
+            "approved GLM or DeepSeek",
+        ),
+        ("CYRENE_HARNESS_MODEL_SOURCE", "codebuddy", "legacy Harness model source"),
+        ("CYRENE_HARNESS_MODEL_SOURCE", "antigravity", "legacy Harness model source"),
+        ("CYRENE_HARNESS_MODEL", "glm-5.3-flash", "legacy Harness model source"),
+        ("CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED", "true", "disable model fallback"),
+        ("CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP", "false", "no-paid-topup declaration"),
+        ("CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL", "deepseek-v4.1-flash", "legacy fallback model"),
+        ("CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS", "3", "two-CPU deployment profile"),
+    ]
+    for key, value, error in invalid_profiles:
+        invalid = dict(environment)
+        invalid[key] = value
+        with pytest.raises(preflight.PreflightError, match=error):
+            preflight._validate_model_runtime_config(invalid)
+
+    with pytest.raises(preflight.PreflightError, match="backend must be dsh or codebuddy-acp"):
+        preflight._validate_model_runtime_config(
+            {"CYRENE_HARNESS_EXECUTION_BACKEND": "antigravity"}
+        )
+
+
+def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() -> None:
+    """Keep ACP selection explicit, credentials host-owned, and existing service budgets intact."""
+
+    base = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text())
+    profile = yaml.safe_load((DEPLOYMENT_ROOT / "compose.codebuddy-acp.yaml").read_text())
+    assert set(profile["services"]) == {"navigator"}
+    navigator = profile["services"]["navigator"]
+    environment = navigator["environment"]
+    base_navigator = base["services"]["navigator"]
+    merged_environment = {
+        **base_navigator["environment"],
+        **environment,
+    }
+    assert merged_environment["CYRENE_HARNESS_EXECUTION_BACKEND"] == "codebuddy-acp"
+    assert merged_environment["CYRENE_HARNESS_MODEL_SOURCE"] == ""
+    assert merged_environment["CYRENE_HARNESS_MODEL"] == ""
+    assert environment["CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND"] == (
+        "${CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND:-codebuddy}"
+    )
+    assert environment["CYRENE_HARNESS_CODEBUDDY_ACP_MODEL"] == (
+        "${CYRENE_HARNESS_CODEBUDDY_ACP_MODEL:-glm-5.3-flash}"
+    )
+    assert environment["CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED"] == "false"
+    assert environment["CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP"] == "true"
+    assert environment["CYRENE_WORKFLOWS_ENABLED"] == "true"
+    assert "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS" not in environment
+    assert not any("MCP" in name.upper() for name in environment)
+    assert navigator["read_only"] is True
+    assert navigator["cap_drop"] == ["ALL"]
+    assert navigator["security_opt"] == ["no-new-privileges:true"]
+    assert navigator["tmpfs"] == ["/tmp:rw,nosuid,nodev,size=128m"]
+    for key in (
+        "image",
+        "command",
+        "entrypoint",
+        "ports",
+        "privileged",
+        "cap_add",
+        "mem_limit",
+        "cpus",
+        "secrets",
+        "volumes",
+    ):
+        assert key not in navigator
+    assert profile["configs"]["responsibility-targets"]["file"].startswith(
+        "${CYRENE_RESPONSIBILITY_TARGETS_HOST_FILE:"
+    )
+    assert base_navigator["mem_limit"] == "768m"
+    assert base_navigator["cpus"] == "0.65"
+
+    workflow = json.loads(
+        (DEPLOYMENT_ROOT / "config" / "proactive-assistant-workflow.v2.template.json").read_text()
+    )
+    assert workflow["enabled"] is False
+    preflight._validate_workflow_definition_disabled(workflow)
+
+
+def test_workflows_engine_does_not_enable_a_definition() -> None:
+    """Keep scheduled execution disabled until the real owner and connector gates pass."""
+
+    preflight._validate_workflow_definition_disabled({"enabled": False})
+    with pytest.raises(
+        preflight.PreflightError, match="must remain disabled until real acceptance"
+    ):
+        preflight._validate_workflow_definition_disabled({"enabled": True})
+
+
+def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
+    """Keep the per-run host bridge token out of environment, mounts, and CLI overrides."""
+
+    valid = yaml.safe_load((DEPLOYMENT_ROOT / "compose.codebuddy-acp.yaml").read_text())
+    preflight._validate_codebuddy_acp_boundary(valid)
+
+    with_mcp_environment = json.loads(json.dumps(valid))
+    with_mcp_environment["services"]["navigator"]["environment"][
+        "CYRENE_HARNESS_CODEBUDDY_ACP_MCP_CONFIG"
+    ] = "/run/config/mcp.json"
+    with pytest.raises(preflight.PreflightError, match="not be injected through Compose env"):
+        preflight._validate_codebuddy_acp_boundary(with_mcp_environment)
+
+    with_mcp_mount = json.loads(json.dumps(valid))
+    with_mcp_mount["services"]["navigator"]["volumes"] = [
+        {"type": "bind", "source": "/private/mcp.json", "target": "/run/mcp.json"}
+    ]
+    with pytest.raises(preflight.PreflightError, match="stay out of Compose mounts and secrets"):
+        preflight._validate_codebuddy_acp_boundary(with_mcp_mount)
+
+    with_legacy_home = json.loads(json.dumps(valid))
+    with_legacy_home["services"]["navigator"]["volumes"] = [
+        {"type": "bind", "source": "/private/model-home", "target": "/home/navigator"}
+    ]
+    with pytest.raises(preflight.PreflightError, match="legacy Antigravity model home"):
+        preflight._validate_codebuddy_acp_boundary(with_legacy_home)
+
+    with_custom_command = json.loads(json.dumps(valid))
+    with_custom_command["services"]["navigator"]["command"] = ["sh", "-c", "codebuddy"]
+    with pytest.raises(preflight.PreflightError, match="Navigator-owned fixed CLI invocation"):
+        preflight._validate_codebuddy_acp_boundary(with_custom_command)
+
+    with_unbounded_temp = json.loads(json.dumps(valid))
+    with_unbounded_temp["services"]["navigator"]["tmpfs"] = ["/tmp:rw,nosuid,nodev,size=1g"]
+    with pytest.raises(preflight.PreflightError, match="bounded 128 MiB temporary storage"):
+        preflight._validate_codebuddy_acp_boundary(with_unbounded_temp)
+
+
 def test_proactive_navigator_hardening_requires_read_only_root_and_dropped_caps() -> None:
     """Keep model credentials out of the writable runtime root and drop all Linux capabilities."""
 
