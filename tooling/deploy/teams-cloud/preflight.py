@@ -1824,14 +1824,15 @@ def _memory_headroom(
 def _compose_config(
     docker_prefix: list[str], compose_files: list[Path], env_files: list[Path]
 ) -> dict[str, Any]:
-    """Render Compose locally without starting or changing any service."""
+    """Render Compose profiles locally for validation without starting any service."""
 
     argv = [*docker_prefix, "compose"]
     for env_file in env_files:
         argv.extend(["--env-file", str(env_file.resolve())])
     for compose_file in compose_files:
         argv.extend(["--file", str(compose_file.resolve())])
-    for profile in ("public-ingress", "cloud-phase2", "runpod"):
+    # Resolve the stable owner ID for actor validation without launching the operator service.
+    for profile in ("public-ingress", "cloud-phase2", "runpod", "directory-operator"):
         argv.extend(["--profile", profile])
     argv.extend(["config", "--format", "json"])
     output = _run(argv)
