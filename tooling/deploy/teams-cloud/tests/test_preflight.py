@@ -353,6 +353,13 @@ def test_computer_binding_is_limited_to_fixed_workspace_operations(
     )
     preflight._validate_connector_bindings(bindings_file, {"computer"})
 
+    binding["tools"][0]["resourceProjection"] = "profile"
+    bindings_file.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": [binding]}), encoding="utf-8"
+    )
+    with pytest.raises(preflight.PreflightError, match="not canonical"):
+        preflight._validate_connector_bindings(bindings_file, {"computer"})
+
 
 def test_computer_runtime_requires_private_runner_and_mtls_proxy(tmp_path: Path) -> None:
     """Reject credential mounts or public networks on the command/file runner."""
@@ -478,6 +485,30 @@ def test_computer_runtime_requires_private_runner_and_mtls_proxy(tmp_path: Path)
             "exchange-computer-private": {"internal": True},
         },
     }
+    preflight._validate_computer_exchange_profile(config)
+
+    wrong_workspace = json.loads(
+        config["services"]["exchange"]["environment"][
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+        ]
+    )
+    wrong_workspace["connectorHost"]["computerRunner"]["workspaceId"] = (
+        "00000000-0000-4000-8000-000000000006"
+    )
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(wrong_workspace)
+    with pytest.raises(preflight.PreflightError, match="owner-approved workspace"):
+        preflight._validate_computer_exchange_profile(config)
+
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(
+        {
+            "hostSecretRefs": host_secret_refs,
+            "connectorHost": {"computerRunner": computer_profile},
+        }
+    )
     preflight._validate_computer_runtime_boundary(config)
 
     config["services"]["computer-runtime"]["tmpfs"][1] = (
@@ -1230,6 +1261,61 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
         )
 
 
+def test_computer_catalog_uses_exchange_provider_schema_without_host_scope_input(
+    tmp_path: Path,
+) -> None:
+    """Accept the Exchange file-read input shape with workspace scope held by its profile."""
+
+    binding = _binding("computer", "computer.file.read", "computer_file", False)
+    schema = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "maxLength": 1024, "x-maxUtf8Bytes": 4096},
+            "length": {"type": "integer", "minimum": 0, "maximum": 65536},
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": (1 << 63) - 1,
+            },
+        },
+        "required": ["path", "length"],
+        "additionalProperties": False,
+    }
+    bindings_file = tmp_path / "computer-bindings.json"
+    catalog_file = tmp_path / "computer-catalog.json"
+    bindings_file.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": [binding]}), encoding="utf-8"
+    )
+    catalog_file.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "items": [
+                    {
+                        "bindingId": binding["bindingId"],
+                        "capabilityId": "tool.provider.v1",
+                        "providerId": "computer",
+                        "connectionRef": UUID,
+                        "profileRef": binding["profileRef"],
+                        "tools": [
+                            {
+                                "id": binding["tools"][0]["toolId"],
+                                "name": "Read computer file",
+                                "description": "Read a bounded file range from the host workspace.",
+                                "readOnly": True,
+                                "inputSchema": schema,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    preflight._validate_connector_tool_catalog(catalog_file, bindings_file, {"computer"})
+
+
 @pytest.mark.parametrize(
     ("operation", "target_fields"),
     [
@@ -1264,16 +1350,16 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
                 "expected_attempt",
             ),
         ),
-        ("computer.command.execute", ("workspace_ref",)),
-        ("computer.file.read", ("workspace_ref", "path", "length")),
-        ("computer.file.write", ("workspace_ref", "path")),
-        ("computer.directory.list", ("workspace_ref", "path")),
+        ("computer.command.execute", ("command",)),
+        ("computer.file.read", ("path", "length")),
+        ("computer.file.write", ("path", "content_base64", "overwrite")),
+        ("computer.directory.list", ("path",)),
     ],
 )
 def test_connector_catalog_requires_exact_target_locator_fields(
     tmp_path: Path, operation: str, target_fields: tuple[str, ...]
 ) -> None:
-    """Require every projected locator and rerun receipt field in the exported schema."""
+    """Require provider input fields without requiring host-injected computer scope."""
 
     binding = _binding(
         "computer" if operation.startswith("computer.") else "github",
@@ -1338,7 +1424,7 @@ def test_connector_catalog_requires_exact_target_locator_fields(
         json.dumps({"schemaVersion": 1, "items": [catalog_item]}), encoding="utf-8"
     )
     with pytest.raises(
-        preflight.PreflightError, match="require every canonical target and evidence"
+        preflight.PreflightError, match="require every canonical input and evidence"
     ):
         preflight._validate_connector_tool_catalog(
             catalog_file, bindings_file, {binding["providerId"]}

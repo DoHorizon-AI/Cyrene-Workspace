@@ -571,8 +571,9 @@ CONNECTOR_OPERATION_POLICIES = {
     "cloud.vendor.cli.execute": ("cloud_vendor_cli", "profile", True),
 }
 
-# This map guards the complete required catalog input, including rerun evidence fields.
-CONNECTOR_TARGET_ARGUMENTS = {
+# Provider-owned catalog inputs, including GitHub rerun evidence fields.
+# Exchange derives computer workspace scope from its host-owned profile, outside tool schemas.
+CONNECTOR_PROVIDER_REQUIRED_ARGUMENTS = {
     "github.issues.search": ("repository_id", "repository"),
     "github.actions.jobs.list": ("repository_id", "repository", "run_id"),
     "github.actions.job.logs.read": (
@@ -607,10 +608,10 @@ CONNECTOR_TARGET_ARGUMENTS = {
         "expected_head_sha",
         "expected_attempt",
     ),
-    "computer.command.execute": ("workspace_ref",),
-    "computer.file.read": ("workspace_ref", "path", "length"),
-    "computer.file.write": ("workspace_ref", "path"),
-    "computer.directory.list": ("workspace_ref", "path"),
+    "computer.command.execute": ("command",),
+    "computer.file.read": ("path", "length"),
+    "computer.file.write": ("path", "content_base64", "overwrite"),
+    "computer.directory.list": ("path",),
 }
 
 
@@ -835,7 +836,7 @@ def _validate_connector_tool_catalog(
                     "Exchange tool read/write metadata conflicts with the fixed operation map"
                 )
             operation_id = mapped["operationId"]
-            target_fields = CONNECTOR_TARGET_ARGUMENTS.get(mapped["operationId"])
+            target_fields = CONNECTOR_PROVIDER_REQUIRED_ARGUMENTS.get(mapped["operationId"])
             if target_fields:
                 schema = catalog_tools[tool_id]["inputSchema"]
                 properties = schema.get("properties")
@@ -848,7 +849,7 @@ def _validate_connector_tool_catalog(
                     )
                 ):
                     raise PreflightError(
-                        "GitHub operation schema must require every canonical target and evidence argument"
+                        "provider operation schema must require every canonical input and evidence argument"
                     )
             if operation_id == "github.actions.rerun_failed":
                 _validate_github_rerun_input_schema(catalog_tools[tool_id]["inputSchema"])
