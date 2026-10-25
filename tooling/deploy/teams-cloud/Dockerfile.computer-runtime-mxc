@@ -68,6 +68,7 @@ LABEL org.opencontainers.image.source=${SOURCE_REPOSITORY} \
     org.opencontainers.image.revision=${SOURCE_REVISION} \
     com.cyrene.computer.execution-backend=mxc \
     com.cyrene.computer.mxc-sdk-version=1.0.1 \
+    com.cyrene.computer.mxc-helper-protocol=2 \
     com.cyrene.computer.bubblewrap-version=0.13.1
 USER 10001:10001
 EXPOSE 50051

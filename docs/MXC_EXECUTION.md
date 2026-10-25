@@ -14,12 +14,27 @@ The backend requires Linux user namespaces, a usable rootless Bubblewrap install
 
 ## Build and enable
 
-1. Merge and pin the Plugin revision that contains the `mxc` Cargo feature, `cyrene-mxc-exec` helper, and both updated lockfiles. Pin the Workspace revision as usual.
+1. Merge and pin the Plugin revision that contains the `mxc` Cargo feature, `cyrene-mxc-exec` helper with private control protocol 2 and verified supervisor PIDs, and both updated lockfiles. Pin the Workspace revision as usual.
 2. In the private ARM64 build plan, change only the `computer-runtime` image's `dockerfile` to `Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.computer-runtime-mxc`. Keep the normal immutable Rust/runtime base image arguments and the existing `sourceRepos` entries. Build using `build_arm64.py`; record the actual image ID, source revisions, architecture, and footprint. This is an explicit alternative image, not a default-profile change.
-3. Before enabling the image, run its helper under the exact intended container restrictions and workspace mounts. The helper is `/usr/local/bin/cyrene-mxc-exec --probe --workspace-root /workspace`; it runs a bounded real namespace probe and prints its fixed success marker only after verified completion. The server repeats the probe at startup. A successful `bwrap --version`, image build, or health-check binary alone is insufficient.
+3. Before enabling the image, run its helper under the exact intended container restrictions and workspace mounts. When a shell is the supervisor in the same PID namespace, use `/usr/local/bin/cyrene-mxc-exec --probe --expected-parent-pid "$$" --workspace-root /workspace`. When starting the helper itself as the container entrypoint at PID 1, use `--probe --standalone-probe --workspace-root /workspace`. This special mode permits only a fixed 10-second probe. The server always passes and verifies its own PID for ordinary probes and commands; a legitimate service at PID 1 is supported. The helper prints `CYRENE_MXC_PROBE_OK backend=mxc sdk=1.0.1 containment=bubblewrap bwrap=0.13.1` only after verified completion. A version query, image build, or health-check binary alone is insufficient.
 4. Use the existing computer-runtime Compose overlay, private mTLS proxy, non-root user, read-only root, dropped capabilities, `no-new-privileges`, resource caps, and bounded scratch tmpfs unchanged. Pass the regular deployment preflight. If containment is unavailable, keep the ordinary managed image until a separately reviewed host profile is available. Do not add `privileged`, `SYS_ADMIN`, an unconfined security profile, or host sysctl changes as an automatic workaround.
 
 The image keeps the original Bubblewrap `COPYING` and complete, unmodified source archive in `/usr/share/doc/cyrene/`. Retain those alongside the source/image lock when redistributing the image.
+
+An independent container-entrypoint probe uses the existing limits and no credentials:
+
+```bash
+docker run --rm --network none --read-only --user 10001:10001 \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  --memory 512m --memory-swap 512m --cpus 0.10 --pids-limit 128 \
+  --tmpfs /tmp:rw,nosuid,nodev,size=64m \
+  --tmpfs /workspace:rw,nosuid,nodev,size=192m \
+  --entrypoint /usr/local/bin/cyrene-mxc-exec \
+  "$CYRENE_IMAGE_COMPUTER_RUNTIME" \
+  --probe --standalone-probe --workspace-root /workspace
+```
+
+Use the immutable image reference from the private image lock. A failed probe blocks activation; it does not authorize changing the container's permissions.
 
 ## Acceptance limits
 
@@ -42,7 +57,7 @@ Linux 使用共享内核的进程命名空间隔离。工作区由宿主配置�
 
 普通与流式命令共用同一后端，保留超时、取消、输出上限、完整输出哈希和真实退出结果。私有启动标记及终态回执用于识别沙箱未启动的情况。选择 MXC 后，缺依赖、命名空间不可用、helper 缺失或探测失败都会明确报错，不自动退回普通 shell。Bubblewrap 至少要求 0.12.0，以覆盖官方已公布的启动阶段符号链接修复；镜像内实际固定为 0.13.1。
 
-启用时，在私有 ARM64 构建计划中只将 `computer-runtime` 的 Dockerfile 改为上述可选文件，继续固定已合并源码、基础镜像、实际镜像摘要、架构和大小。先在目标容器的实际权限及挂载条件下运行 `cyrene-mxc-exec --probe --workspace-root /workspace`；服务启动时也会执行真实探测。安装了 Bubblewrap、构建成功或版本查询成功均不能替代该探测。
+启用时，先固定包含私有协议 2 和父进程身份核对的 Plugins 已合并源码。在私有 ARM64 构建计划中只将 `computer-runtime` 的 Dockerfile 改为上述可选文件，继续固定基础镜像、实际镜像摘要、架构和大小。同一 PID 命名空间的 shell 启动探测时，使用 `cyrene-mxc-exec --probe --expected-parent-pid "$$" --workspace-root /workspace`。如果 helper 自身作为容器 PID 1 入口，则使用上方完整 Docker 命令的 `--probe --standalone-probe` 模式，仅运行固定的 10 秒探测。正常服务会显式传入自己的 PID，PID 1 服务也可执行；父身份不符仍然拒绝。安装了 Bubblewrap、构建成功或版本查询成功均不能替代真实探测。
 
 现有 Compose 的非 root、只读根目录、drop ALL、no-new-privileges、私有 mTLS、资源限制及临时存储规则不放宽。目标环境不支持时，继续使用普通 managed 镜像，等待单独评审的宿主配置；不自动增加特权、SYS_ADMIN、关闭安全配置或修改宿主 sysctl。镜像保留 Bubblewrap 原版许可证及完整源码包，随镜像锁一同保留。
 
