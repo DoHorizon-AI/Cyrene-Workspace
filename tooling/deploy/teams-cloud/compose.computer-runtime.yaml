@@ -39,8 +39,8 @@ services:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=64m
-      - /workspace:rw,nosuid,nodev,size=192m
-      - /var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m
+      - /workspace:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=192m
+      - /var/lib/cyrene/artifacts:rw,nosuid,nodev,uid=10001,gid=10001,mode=0700,size=64m
     expose:
       - "50051"
     networks:
