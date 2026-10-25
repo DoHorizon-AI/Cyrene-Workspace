@@ -666,11 +666,12 @@ def _validate_connector_bindings(
             raise PreflightError(
                 "Navigator binding ID does not match the Exchange-issued connection/provider"
             )
-        if connection in seen_connection_refs:
+        connection_key = connection.lower()
+        if connection_key in seen_connection_refs:
             raise PreflightError("Navigator connection UUIDs must be unique across bindings")
         if binding["bindingId"] in seen_binding_ids:
             raise PreflightError("Navigator binding IDs must be unique")
-        seen_connection_refs.add(connection)
+        seen_connection_refs.add(connection_key)
         seen_binding_ids.add(binding["bindingId"])
         tools = binding.get("tools")
         if not isinstance(tools, list) or not tools:

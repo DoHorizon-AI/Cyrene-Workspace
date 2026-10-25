@@ -225,6 +225,42 @@ def test_connector_bindings_reject_duplicate_connection_across_providers(
         preflight._validate_connector_bindings(bindings, {"github", "huggingface"})
 
 
+def test_connector_bindings_normalize_connection_uuid_case_for_uniqueness(
+    tmp_path: Path,
+) -> None:
+    """Match Navigator's case-insensitive UUID uniqueness rule."""
+
+    connection = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+    bindings = tmp_path / "case-variant-connection.json"
+    bindings.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "bindings": [
+                    _binding(
+                        "github",
+                        "github.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=connection,
+                    ),
+                    _binding(
+                        "github",
+                        "github.vendor.cli.execute",
+                        "profile",
+                        True,
+                        connection_ref=connection.upper(),
+                    ),
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(preflight.PreflightError, match="connection UUIDs must be unique"):
+        preflight._validate_connector_bindings(bindings, {"github"})
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
