@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 preflight = importlib.import_module("preflight")
@@ -145,6 +146,229 @@ def test_vendor_cli_bindings_require_canonical_mutating_profile_scope(tmp_path: 
         preflight._validate_connector_bindings(wrong_tool_id, {"github", "huggingface"})
 
 
+@pytest.mark.parametrize(
+    ("operation", "projection", "mutating"),
+    [
+        ("github.issues.search", "github_repository", False),
+        ("github.actions.jobs.list", "github_actions_run", False),
+        ("github.actions.job.logs.read", "github_actions_job", False),
+        ("github.branch.get", "github_branch", False),
+        ("github.file.get", "github_file", False),
+        ("github.pull_request.draft.find", "github_pull_request_draft", False),
+        ("github.branch.create", "github_branch", True),
+        ("github.branch.delete", "github_branch", True),
+        ("github.file.commit", "github_file", True),
+        ("github.pull_request.draft.create", "github_pull_request_draft", True),
+        ("github.actions.rerun_failed", "github_actions_run", True),
+    ],
+)
+def test_proactive_github_operations_use_fixed_target_projections(
+    tmp_path: Path, operation: str, projection: str, mutating: bool
+) -> None:
+    """Pin target identifiers and write classification for proactive GitHub tools."""
+
+    binding = _binding("github", operation, projection, mutating)
+    bindings_file = tmp_path / "github-bindings.json"
+    bindings_file.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": [binding]}), encoding="utf-8"
+    )
+    preflight._validate_connector_bindings(bindings_file, {"github"})
+
+    binding["tools"][0]["resourceProjection"] = "github_issue"
+    bindings_file.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": [binding]}), encoding="utf-8"
+    )
+    with pytest.raises(preflight.PreflightError, match="not canonical"):
+        preflight._validate_connector_bindings(bindings_file, {"github"})
+
+
+@pytest.mark.parametrize(
+    ("operation", "projection", "mutating"),
+    [
+        ("computer.command.execute", "computer_workspace", True),
+        ("computer.file.read", "computer_file", False),
+        ("computer.file.write", "computer_file", True),
+        ("computer.directory.list", "computer_directory", False),
+    ],
+)
+def test_computer_binding_is_limited_to_fixed_workspace_operations(
+    tmp_path: Path, operation: str, projection: str, mutating: bool
+) -> None:
+    """Pin the low-privilege computer tool IDs, workspace projections, and write bits."""
+
+    binding = _binding("computer", operation, projection, mutating)
+    bindings_file = tmp_path / "computer-bindings.json"
+    bindings_file.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": [binding]}), encoding="utf-8"
+    )
+    preflight._validate_connector_bindings(bindings_file, {"computer"})
+
+
+def test_computer_runtime_requires_private_runner_and_mtls_proxy(tmp_path: Path) -> None:
+    """Reject credential mounts or public networks on the command/file runner."""
+
+    caddyfile = tmp_path / "Caddyfile.computer-runtime"
+    caddyfile.write_text(
+        "mode require_and_verify\n"
+        "trust_pool file /run/secrets/exchange-plugin-client-ca\n"
+        "reverse_proxy h2c://computer-runtime:50051\n",
+        encoding="utf-8",
+    )
+    runner_environment = {
+        "CYRENE_COMPUTER_WORKSPACE_ROOT": "/workspace",
+        "CYRENE_COMPUTER_ARTIFACT_ROOT": "/var/lib/cyrene/artifacts",
+        "CYRENE_COMPUTER_COMMAND_DEFAULT_TIMEOUT_MS": "30000",
+        "CYRENE_COMPUTER_COMMAND_MAX_TIMEOUT_MS": "600000",
+        "CYRENE_COMPUTER_MAX_OUTPUT_BYTES": "65536",
+        "CYRENE_COMPUTER_MAX_FILE_BYTES": "1048576",
+        "CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES": "2048",
+        "CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH": "32",
+        "CYRENE_COMPUTER_MAX_ARTIFACT_BYTES": "16777216",
+    }
+    computer_profile = {
+        "profileRef": "computer-workspace-main",
+        "connectionRef": "00000000-0000-4000-8000-000000000004",
+        "organizationId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000002",
+        "expectedIssuer": "https://login.microsoftonline.com/00000000-0000-4000-8000-000000000003/v2.0",
+        "directPlugin": {
+            "bindingId": "computer-runtime",
+            "connectionRef": "grpcs://computer-runtime-proxy:7443",
+            "transport": "mtls",
+            "mtls": {
+                "rootCertificateRef": "tls/plugin-root",
+                "clientCertificateRef": "tls/exchange-plugin-client-cert",
+                "clientKeyRef": "tls/exchange-plugin-client-key",
+            },
+        },
+        "maxCommandTimeoutMs": 600000,
+        "maxFileBytes": 1048576,
+        "maxReadBytes": 65536,
+        "maxDirectoryDepth": 32,
+    }
+    host_secret_refs = {
+        "tls/plugin-root": "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
+        "tls/exchange-plugin-client-cert": "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE",
+        "tls/exchange-plugin-client-key": "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE",
+    }
+    config = {
+        "services": {
+            "navigator": {
+                "environment": {"TEAMS_TENANT_ID": "00000000-0000-4000-8000-000000000003"}
+            },
+            "workspace-authority": {
+                "environment": {
+                    "CYRENE_ORGANIZATION_ID": "00000000-0000-4000-8000-000000000001",
+                    "CYRENE_WORKSPACE_ID": "00000000-0000-4000-8000-000000000002",
+                }
+            },
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                        {
+                            "hostSecretRefs": host_secret_refs,
+                            "connectorHost": {"computerRunner": computer_profile},
+                        }
+                    ),
+                    "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE": "/run/secrets/exchange-plugin-root-ca",
+                    "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE": "/run/secrets/exchange-plugin-client-cert",
+                    "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE": "/run/secrets/exchange-plugin-client-key",
+                },
+                "secrets": [
+                    {"target": "exchange-plugin-root-ca"},
+                    {"target": "exchange-plugin-client-cert"},
+                    {"target": "exchange-plugin-client-key"},
+                ],
+                "networks": {"exchange-computer-private": {}},
+            },
+            "computer-runtime": {
+                "environment": runner_environment,
+                "user": "10001:10001",
+                "read_only": True,
+                "cap_drop": ["ALL"],
+                "security_opt": ["no-new-privileges:true"],
+                "tmpfs": [
+                    "/tmp:rw,nosuid,nodev,size=64m",
+                    "/workspace:rw,nosuid,nodev,size=192m",
+                    "/var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m",
+                ],
+                "networks": {"computer-runtime-private": {}},
+                "volumes": [],
+                "mem_limit": "512m",
+                "cpus": "0.10",
+            },
+            "computer-runtime-proxy": {
+                "read_only": True,
+                "cap_drop": ["ALL"],
+                "security_opt": ["no-new-privileges:true"],
+                "mem_limit": "64m",
+                "cpus": "0.05",
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": str(caddyfile),
+                        "target": "/etc/caddy/Caddyfile",
+                        "read_only": True,
+                    }
+                ],
+                "secrets": [
+                    {"source": "computer-runtime-proxy-server-cert"},
+                    {"source": "computer-runtime-proxy-server-key"},
+                    {"source": "exchange-plugin-client-ca"},
+                ],
+                "networks": {
+                    "exchange-computer-private": {},
+                    "computer-runtime-private": {},
+                },
+            },
+        },
+        "volumes": {},
+        "networks": {
+            "computer-runtime-private": {"internal": True},
+            "exchange-computer-private": {"internal": True},
+        },
+    }
+    preflight._validate_computer_runtime_boundary(config)
+
+    config["services"]["computer-runtime"]["tmpfs"][1] = "/workspace:rw,nosuid,nodev,size=512m"
+    with pytest.raises(preflight.PreflightError, match="bounded scratch tmpfs"):
+        preflight._validate_computer_runtime_boundary(config)
+    config["services"]["computer-runtime"]["tmpfs"][1] = "/workspace:rw,nosuid,nodev,size=192m"
+
+    exchange_environment = config["services"]["exchange"]["environment"]
+    integration = json.loads(exchange_environment["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"])
+    integration["connectorHost"]["computerRunner"]["maxReadBytes"] = 1048576
+    exchange_environment["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"] = json.dumps(integration)
+    with pytest.raises(preflight.PreflightError, match="operation limits"):
+        preflight._validate_computer_runtime_boundary(config)
+
+    integration["connectorHost"]["computerRunner"] = computer_profile
+    exchange_environment["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"] = json.dumps(integration)
+    config["services"]["computer-runtime"]["secrets"] = ["github-app-private-key"]
+    with pytest.raises(preflight.PreflightError, match="no credentials"):
+        preflight._validate_computer_runtime_boundary(config)
+
+
+def test_computer_runtime_scratch_is_ephemeral_and_navigator_state_stays_persistent() -> None:
+    """Pin the runner tmpfs budget while preserving the base Navigator state volume."""
+
+    base_compose = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    runner_compose = yaml.safe_load(
+        (DEPLOYMENT_ROOT / "compose.computer-runtime.yaml").read_text(encoding="utf-8")
+    )
+    runner = runner_compose["services"]["computer-runtime"]
+    assert set(runner["tmpfs"]) == {
+        "/tmp:rw,nosuid,nodev,size=64m",
+        "/workspace:rw,nosuid,nodev,size=192m",
+        "/var/lib/cyrene/artifacts:rw,nosuid,nodev,size=64m",
+    }
+    assert sum(int(row.rsplit("size=", 1)[1].removesuffix("m")) for row in runner["tmpfs"]) == 320
+    assert runner.get("volumes", []) == []
+
+    persistence_volumes = base_compose["services"]["navigator-persistence"]["volumes"]
+    assert "navigator-sessions:/var/lib/cyrene-navigator" in persistence_volumes
+
+
 def test_empty_connector_bindings_are_bootstrap_only(tmp_path: Path) -> None:
     """Allow an empty map only while the non-ready dependency bootstrap is being prepared."""
 
@@ -165,10 +389,112 @@ def test_compose_configs_must_be_readable_by_runtime_uid_10001() -> None:
         preflight._validate_runtime_config_metadata(10001, 0o100000, "connector-bindings.json")
 
 
-def test_bootstrap_preflight_is_explicitly_not_full_ready(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_proactive_model_profile_has_gemini_and_no_paid_fallback() -> None:
+    """Require the real default model and a bounded backup while chat has priority."""
+
+    environment = {
+        "CYRENE_HARNESS_MODEL_SOURCE": "antigravity",
+        "CYRENE_HARNESS_MODEL": "gemini-3.8-flash-medium",
+        "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED": "true",
+        "CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP": "true",
+        "CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL": "glm-5.3-flash",
+        "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "2",
+    }
+    preflight._validate_model_runtime_config(environment)
+
+    environment["CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP"] = "false"
+    with pytest.raises(preflight.PreflightError, match="no-additional-spend"):
+        preflight._validate_model_runtime_config(environment)
+
+
+def test_proactive_navigator_hardening_requires_read_only_root_and_dropped_caps() -> None:
+    """Keep model credentials out of the writable runtime root and drop all Linux capabilities."""
+
+    config = {
+        "services": {
+            "navigator": {
+                "read_only": True,
+                "cap_drop": ["ALL"],
+                "security_opt": ["no-new-privileges:true"],
+                "tmpfs": ["/tmp:rw,nosuid,nodev,size=128m"],
+                "environment": {
+                    "CYRENE_RESPONSIBILITY_TARGETS_FILE": "/run/config/responsibility-targets.v1.json"
+                },
+                "configs": [
+                    {
+                        "source": "responsibility-targets",
+                        "target": "/run/config/responsibility-targets.v1.json",
+                    }
+                ],
+            }
+        }
+    }
+    preflight._validate_proactive_navigator_container(config)
+    config["services"]["navigator"]["read_only"] = False
+    with pytest.raises(preflight.PreflightError, match="read-only root"):
+        preflight._validate_proactive_navigator_container(config)
+
+
+def test_responsibility_targets_require_current_binding_and_exact_safe_grants(
+    tmp_path: Path,
 ) -> None:
-    """Return a distinct non-ready state for the empty-binding dependency bootstrap."""
+    """Reject unbound targets or grants that exceed the reviewed draft/CI operation set."""
+
+    binding_id = f"exchange-github-{UUID}"
+    bindings_path = tmp_path / "bindings.json"
+    bindings_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "bindings": [_binding("github", "github.branch.get", "github_branch", False)],
+            }
+        ),
+        encoding="utf-8",
+    )
+    template_path = DEPLOYMENT_ROOT / "config" / "responsibility-targets.v1.template.json"
+    target = json.loads(template_path.read_text(encoding="utf-8"))["targets"][0]
+    target.update(
+        {
+            "id": "123456789",
+            "label": "DoHorizon-AI/Cyrene-Test",
+            "bindingId": binding_id,
+            "uri": "https://github.com/DoHorizon-AI/Cyrene-Test",
+        }
+    )
+    next(grant for grant in target["actionGrants"] if grant["id"] == "rerun_source_ci")[
+        "sourceWorkflowIds"
+    ] = ["1234567890"]
+    config_path = tmp_path / "responsibility-targets.v1.json"
+    config_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
+    preflight._validate_responsibility_targets(config_path, bindings_path)
+
+    target["bindingId"] = "UNBOUND_PENDING_EXCHANGE_GITHUB_REBIND"
+    config_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="current Exchange GitHub binding"):
+        preflight._validate_responsibility_targets(config_path, bindings_path)
+
+    target["bindingId"] = binding_id
+    target["actionGrants"].append(
+        {
+            "id": "update_issue_progress",
+            "action": "update_issue_progress",
+            "baseBranches": [],
+            "branchPrefixes": [],
+            "pathPrefixes": [],
+            "issueNumbers": [7],
+            "permittedOperations": ["github.issue.comment.create"],
+        }
+    )
+    config_path.write_text(json.dumps({"schemaVersion": 1, "targets": [target]}), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="contain only the approved actions"):
+        preflight._validate_responsibility_targets(config_path, bindings_path)
+
+
+@pytest.mark.parametrize("computer_runner_enabled", [False, True])
+def test_bootstrap_preflight_is_explicitly_not_full_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, computer_runner_enabled: bool
+) -> None:
+    """Return bootstrap status and the configured computer scratch lifetime."""
 
     artifact_root = tmp_path / ".artifacts" / "teams-cloud-test"
     config_dir = artifact_root / "config"
@@ -187,11 +513,10 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
 
     monkeypatch.setattr(preflight, "_validate_host", lambda _required: (4096, 10.0))
     monkeypatch.setattr(preflight, "check_local_lock", lambda *_args: None)
-    monkeypatch.setattr(
-        preflight,
-        "_compose_config",
-        lambda *_args: {"services": {"exchange": {"image": "locked:test"}}},
-    )
+    services = {"exchange": {"image": "locked:test"}}
+    if computer_runner_enabled:
+        services["computer-runtime"] = {}
+    monkeypatch.setattr(preflight, "_compose_config", lambda *_args: {"services": services})
     monkeypatch.setattr(preflight, "_validate_compose", lambda *_args: (100.0, 0.2))
     monkeypatch.setattr(preflight, "_parse_memavailable", lambda: 2048)
     monkeypatch.setattr(
@@ -236,6 +561,18 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
     )
     assert report["status"] == "BOOTSTRAP_ONLY_NOT_FULL_READY"
     assert report["deploymentReady"] is False
+    if computer_runner_enabled:
+        assert report["computerRuntimeStorage"] == {
+            "lifetime": "EPHEMERAL",
+            "workspaceClearedOnRestart": True,
+            "artifactRefsSurviveRestart": False,
+        }
+    else:
+        assert report["computerRuntimeStorage"] == {
+            "lifetime": "NOT_PRESENT",
+            "workspaceClearedOnRestart": None,
+            "artifactRefsSurviveRestart": None,
+        }
 
 
 def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
@@ -298,6 +635,131 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
 
 
 @pytest.mark.parametrize(
+    ("operation", "target_fields"),
+    [
+        ("github.issues.search", ("repository_id", "repository")),
+        ("github.actions.jobs.list", ("repository_id", "repository", "run_id")),
+        (
+            "github.actions.job.logs.read",
+            ("repository_id", "repository", "run_id", "job_id"),
+        ),
+        ("github.branch.get", ("repository_id", "repository", "branch")),
+        ("github.branch.create", ("repository_id", "repository", "branch")),
+        ("github.branch.delete", ("repository_id", "repository", "branch")),
+        ("github.file.get", ("repository_id", "repository", "branch", "path")),
+        ("github.file.commit", ("repository_id", "repository", "branch", "path")),
+        (
+            "github.pull_request.draft.find",
+            ("repository_id", "repository", "head_branch", "base_branch"),
+        ),
+        (
+            "github.pull_request.draft.create",
+            ("repository_id", "repository", "head_branch", "base_branch"),
+        ),
+        (
+            "github.actions.rerun_failed",
+            (
+                "repository_id",
+                "repository",
+                "run_id",
+                "expected_workflow_id",
+                "expected_head_branch",
+                "expected_head_sha",
+                "expected_attempt",
+            ),
+        ),
+        ("computer.command.execute", ("workspace_ref",)),
+        ("computer.file.read", ("workspace_ref", "path", "length")),
+        ("computer.file.write", ("workspace_ref", "path")),
+        ("computer.directory.list", ("workspace_ref", "path")),
+    ],
+)
+def test_connector_catalog_requires_exact_target_locator_fields(
+    tmp_path: Path, operation: str, target_fields: tuple[str, ...]
+) -> None:
+    """Require every projected locator and rerun receipt field in the exported schema."""
+
+    binding = _binding(
+        "computer" if operation.startswith("computer.") else "github",
+        operation,
+        preflight.CONNECTOR_OPERATION_POLICIES[operation][1],
+        preflight.CONNECTOR_OPERATION_POLICIES[operation][2],
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {field: {"type": "string"} for field in target_fields},
+        "required": list(target_fields),
+        "additionalProperties": False,
+    }
+    if operation == "github.actions.rerun_failed":
+        input_schema["properties"].update(
+            {
+                "expected_workflow_id": {
+                    "type": "string",
+                    "pattern": r"^[1-9][0-9]{0,19}$",
+                },
+                "expected_head_branch": {"type": "string", "maxLength": 255},
+                "expected_head_sha": {
+                    "type": "string",
+                    "pattern": r"^[0-9a-fA-F]{40}$",
+                },
+                "expected_attempt": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 2_147_483_647,
+                },
+            }
+        )
+    tool = binding["tools"][0]
+    catalog_item = {
+        "bindingId": binding["bindingId"],
+        "capabilityId": "tool.provider.v1",
+        "providerId": binding["providerId"],
+        "connectionRef": UUID,
+        "profileRef": binding["profileRef"],
+        "tools": [
+            {
+                "id": tool["toolId"],
+                "name": "Typed GitHub operation",
+                "description": "A fixed operation scoped to one target.",
+                "readOnly": not tool["mutating"],
+                "inputSchema": input_schema,
+            }
+        ],
+    }
+    bindings_file = tmp_path / "github-bindings.json"
+    catalog_file = tmp_path / "github-catalog.json"
+    bindings_file.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": [binding]}), encoding="utf-8"
+    )
+    catalog_file.write_text(
+        json.dumps({"schemaVersion": 1, "items": [catalog_item]}), encoding="utf-8"
+    )
+    preflight._validate_connector_tool_catalog(catalog_file, bindings_file, {binding["providerId"]})
+
+    input_schema["required"] = list(target_fields[:-1])
+    catalog_file.write_text(
+        json.dumps({"schemaVersion": 1, "items": [catalog_item]}), encoding="utf-8"
+    )
+    with pytest.raises(
+        preflight.PreflightError, match="require every canonical target and evidence"
+    ):
+        preflight._validate_connector_tool_catalog(
+            catalog_file, bindings_file, {binding["providerId"]}
+        )
+    if operation == "github.actions.rerun_failed":
+        input_schema["required"] = list(target_fields)
+        input_schema["properties"]["expected_workflow_id"]["pattern"] = r"^[0-9]+$"
+        catalog_file.write_text(
+            json.dumps({"schemaVersion": 1, "items": [catalog_item]}), encoding="utf-8"
+        )
+        with pytest.raises(preflight.PreflightError, match="numeric workflow ID"):
+            preflight._validate_connector_tool_catalog(
+                catalog_file, bindings_file, {binding["providerId"]}
+            )
+
+
+@pytest.mark.parametrize(
     ("mode", "expected"),
     [
         ("stage1", {"github", "huggingface"}),
@@ -309,6 +771,8 @@ def test_connector_provider_allowlist_is_stage_aware(mode: str, expected: set[st
     """Do not let a later cloud provider enter the earlier acceptance stage."""
 
     assert preflight._expected_connector_providers({}, mode) == expected
+    proactive = {"services": {"computer-runtime": {}}}
+    assert preflight._expected_connector_providers(proactive, mode) == expected | {"computer"}
 
 
 def test_secret_entrypoint_adds_internal_ca_without_replacing_public_roots(
@@ -986,7 +1450,7 @@ def test_memavailable_distinguishes_staging_measurement_from_cutover() -> None:
         mode="stage1",
         config=config,
         available_mib=2263,
-        cgroup_budget_mib=2432,
+        cgroup_budget_mib=3008,
         minimum_available_mib=1024,
     )
     assert stage1["status"] == "READY_FOR_STAGING_MEASUREMENT"
@@ -997,14 +1461,14 @@ def test_memavailable_distinguishes_staging_measurement_from_cutover() -> None:
             mode="stage2",
             config=config,
             available_mib=1407,
-            cgroup_budget_mib=2816,
+            cgroup_budget_mib=3392,
             minimum_available_mib=1024,
         )
     cutover = preflight._memory_headroom(
         mode="cutover",
         config=config,
         available_mib=1024,
-        cgroup_budget_mib=2816,
+        cgroup_budget_mib=3392,
         minimum_available_mib=1024,
     )
     assert cutover["status"] == "READY"
