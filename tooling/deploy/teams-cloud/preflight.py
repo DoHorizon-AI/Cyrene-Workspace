@@ -1371,14 +1371,21 @@ def _validate_exchange_profile_stage(compose: dict[str, Any], mode: str) -> None
         raise PreflightError(
             "Exchange core Account Center/GitHub/Teams bindings do not match private mTLS services"
         )
+    expected_providers = _expected_exchange_providers(compose, mode)
+    if not expected_providers:
+        if "authorizationCloud" in document:
+            raise PreflightError(
+                "Exchange authorizationCloud must be omitted when no cloud provider profiles are expected"
+            )
+        return
+
     cloud = document.get("authorizationCloud")
     profiles = cloud.get("profiles") if isinstance(cloud, dict) else None
     if not isinstance(profiles, dict):
-        raise PreflightError("Exchange requires the phase-scoped Hugging Face profile map")
+        raise PreflightError("Exchange requires the phase-scoped cloud provider profile map")
     actual_providers = {
         profile.get("provider") for profile in profiles.values() if isinstance(profile, dict)
     }
-    expected_providers = _expected_exchange_providers(compose, mode)
     if actual_providers != expected_providers:
         raise PreflightError(
             f"Exchange cloud profiles must be exactly {sorted(expected_providers)} for this stage"
