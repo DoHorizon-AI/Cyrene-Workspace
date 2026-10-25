@@ -1341,7 +1341,7 @@ def _validate_exchange_profile_stage(compose: dict[str, Any], mode: str) -> None
     platform_workload = authority["connectorWorkload"]
     if (
         not isinstance(platform_workload, dict)
-        or platform_workload.get("connectionRef") != "grpcs://authority:7443"
+        or platform_workload.get("connectionRef") != "grpcs://workspace-authority:7443"
     ):
         raise PreflightError(
             "Exchange connector workload must target the private Authority service"
