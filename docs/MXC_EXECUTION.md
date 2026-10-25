@@ -21,20 +21,23 @@ The backend requires Linux user namespaces, a usable rootless Bubblewrap install
 
 The image keeps the original Bubblewrap `COPYING` and complete, unmodified source archive in `/usr/share/doc/cyrene/`. Retain those alongside the source/image lock when redistributing the image.
 
-An independent container-entrypoint probe uses the existing limits and no credentials:
+An independent container-entrypoint probe uses the existing limits and no credentials. Set `CYRENE_IMAGE_LOCK` to the absolute path of the generated `image-lock.json`; the command below selects the Computer Runtime's content-addressed `imageId` from that lock:
 
 ```bash
+CYRENE_COMPUTER_RUNTIME_IMAGE_ID="$(
+  python3 -c 'import json, sys; print(next(row["imageId"] for row in json.load(open(sys.argv[1]))["images"] if row["service"] == "computer-runtime"))' "$CYRENE_IMAGE_LOCK"
+)"
 docker run --rm --network none --read-only --user 10001:10001 \
   --cap-drop ALL --security-opt no-new-privileges:true \
   --memory 512m --memory-swap 512m --cpus 0.10 --pids-limit 128 \
   --tmpfs /tmp:rw,nosuid,nodev,size=64m \
   --tmpfs /workspace:rw,nosuid,nodev,size=192m \
   --entrypoint /usr/local/bin/cyrene-mxc-exec \
-  "$CYRENE_IMAGE_COMPUTER_RUNTIME" \
+  "$CYRENE_COMPUTER_RUNTIME_IMAGE_ID" \
   --probe --standalone-probe --workspace-root /workspace
 ```
 
-Use the immutable image reference from the private image lock. A failed probe blocks activation; it does not authorize changing the container's permissions.
+The generated `images.env` contains local image tags; the probe uses the locked `imageId` directly so that a later tag change cannot select another image. A failed probe blocks activation; it does not authorize changing the container's permissions.
 
 ## Acceptance limits
 
@@ -58,6 +61,8 @@ Linux 使用共享内核的进程命名空间隔离。工作区由宿主配置�
 普通与流式命令共用同一后端，保留超时、取消、输出上限、完整输出哈希和真实退出结果。私有启动标记及终态回执用于识别沙箱未启动的情况。选择 MXC 后，缺依赖、命名空间不可用、helper 缺失或探测失败都会明确报错，不自动退回普通 shell。Bubblewrap 至少要求 0.12.0，以覆盖官方已公布的启动阶段符号链接修复；镜像内实际固定为 0.13.1。
 
 启用时，先固定包含私有协议 2 和父进程身份核对的 Plugins 已合并源码。在私有 ARM64 构建计划中只将 `computer-runtime` 的 Dockerfile 改为上述可选文件，继续固定基础镜像、实际镜像摘要、架构和大小。同一 PID 命名空间的 shell 启动探测时，使用 `cyrene-mxc-exec --probe --expected-parent-pid "$$" --workspace-root /workspace`。如果 helper 自身作为容器 PID 1 入口，则使用上方完整 Docker 命令的 `--probe --standalone-probe` 模式，仅运行固定的 10 秒探测。正常服务会显式传入自己的 PID，PID 1 服务也可执行；父身份不符仍然拒绝。安装了 Bubblewrap、构建成功或版本查询成功均不能替代真实探测。
+
+将 `CYRENE_IMAGE_LOCK` 设为生成的 `image-lock.json` 绝对路径，再运行上方命令；它直接取出 `computer-runtime` 对应的内容寻址 `imageId`。`images.env` 中保存的是本机镜像标签，标签可以变化，因此独立探测始终使用锁内的镜像 ID。
 
 现有 Compose 的非 root、只读根目录、drop ALL、no-new-privileges、私有 mTLS、资源限制及临时存储规则不放宽。目标环境不支持时，继续使用普通 managed 镜像，等待单独评审的宿主配置；不自动增加特权、SYS_ADMIN、关闭安全配置或修改宿主 sysctl。镜像保留 Bubblewrap 原版许可证及完整源码包，随镜像锁一同保留。
 
