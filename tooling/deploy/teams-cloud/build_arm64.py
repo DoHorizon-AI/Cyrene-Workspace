@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -37,6 +38,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SECRET_ARG_RE = re.compile(r"(secret|token|password|private.?key|credential)", re.IGNORECASE)
 MAX_IMAGE_SAVE_ARCHIVE_BYTES = 32 * 1024**3
+MAX_BINARY_ARTIFACT_BYTES = 512 * 1024**2
 MAX_IMAGE_SAVE_MEMBERS = 8192
 MAX_OCI_JSON_BYTES = 4 * 1024**2
 MAX_OCI_MANIFESTS = 64
@@ -89,6 +91,16 @@ def _safe_relative(value: Any, name: str, *, allow_dot: bool = False) -> PurePos
     return path
 
 
+def _file_sha256(path: Path) -> str:
+    """Hash one regular build input without loading it into memory."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def validate_plan(path: Path) -> dict[str, Any]:
     """Validate exact source refs and build definitions before using Docker."""
 
@@ -121,6 +133,51 @@ def validate_plan(path: Path) -> dict[str, Any]:
         if not isinstance(commit, str) or not SHA_RE.fullmatch(commit):
             raise BuildError(f"source {alias} is missing an exact 40-character commit SHA")
         _safe_relative(source.get("checkoutPath"), f"source {alias} checkoutPath")
+
+    binary_artifacts = plan.get("binaryArtifacts", [])
+    if not isinstance(binary_artifacts, list):
+        raise BuildError("binaryArtifacts must be an array")
+    asset_ids: set[str] = set()
+    staging_paths: set[str] = set()
+    for asset in binary_artifacts:
+        if not isinstance(asset, dict) or set(asset) != {
+            "id",
+            "version",
+            "sourcePath",
+            "sha256",
+            "stagingPath",
+        }:
+            raise BuildError("binary artifact entries must match the closed asset schema")
+        asset_id = asset.get("id")
+        if not isinstance(asset_id, str) or not re.fullmatch(r"[a-z][a-z0-9-]{1,62}", asset_id):
+            raise BuildError("binary artifact id must be a stable lowercase identifier")
+        if asset_id in asset_ids:
+            raise BuildError(f"duplicate binary artifact id: {asset_id}")
+        version = asset.get("version")
+        if not isinstance(version, str) or not re.fullmatch(r"[0-9][A-Za-z0-9.+_-]{0,63}", version):
+            raise BuildError(f"binary artifact {asset_id} requires an explicit version")
+        digest = asset.get("sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise BuildError(f"binary artifact {asset_id} requires a SHA-256 digest")
+        source_path = asset.get("sourcePath")
+        if not isinstance(source_path, str) or not Path(source_path).is_absolute():
+            raise BuildError(f"binary artifact {asset_id} sourcePath must be absolute")
+        source_file = Path(source_path)
+        if (
+            source_file.is_symlink()
+            or not source_file.is_file()
+            or not _private_artifact(source_file)
+        ):
+            raise BuildError(
+                f"binary artifact {asset_id} must be a regular file under the private umbrella .artifacts directory"
+            )
+        relative = _safe_relative(
+            asset.get("stagingPath"), f"binary artifact {asset_id} stagingPath"
+        )
+        if relative.as_posix() in staging_paths:
+            raise BuildError(f"binary artifacts collide at {relative.as_posix()}")
+        staging_paths.add(relative.as_posix())
+        asset_ids.add(asset_id)
 
     images = plan.get("images")
     if not isinstance(images, list) or not images:
@@ -155,6 +212,13 @@ def validate_plan(path: Path) -> dict[str, Any]:
                 r".+@sha256:[0-9a-f]{64}", value
             ):
                 raise BuildError(f"image {service} base image {key} must pin a registry digest")
+        image_assets = image.get("binaryArtifacts", [])
+        if (
+            not isinstance(image_assets, list)
+            or any(asset_id not in asset_ids for asset_id in image_assets)
+            or len(set(image_assets)) != len(image_assets)
+        ):
+            raise BuildError(f"image {service} references an unknown or duplicated binary artifact")
         _safe_relative(image.get("sourceLabelRepo"), f"image {service} sourceLabelRepo")
         if image["sourceLabelRepo"] not in aliases:
             raise BuildError(
@@ -173,6 +237,35 @@ def validate_plan(path: Path) -> dict[str, Any]:
         if not isinstance(reference, str) or not re.fullmatch(r".+@sha256:[0-9a-f]{64}", reference):
             raise BuildError(f"external image {name} must pin a registry digest")
     return plan
+
+
+def _copy_binary_artifact(asset: dict[str, Any], staging_root: Path) -> dict[str, Any]:
+    """Verify and stage one owner-supplied binary under a safe context path."""
+
+    source = Path(asset["sourcePath"])
+    relative = _safe_relative(asset["stagingPath"], f"binary artifact {asset['id']} stagingPath")
+    destination = staging_root / relative
+    if destination.exists() or destination.is_symlink():
+        raise BuildError(f"binary artifact staging path collides: {relative.as_posix()}")
+    size = source.stat().st_size
+    if size <= 0 or size > MAX_BINARY_ARTIFACT_BYTES:
+        raise BuildError(f"binary artifact {asset['id']} has an invalid size")
+    actual = _file_sha256(source)
+    if actual != asset["sha256"]:
+        raise BuildError(f"binary artifact {asset['id']} failed its pinned SHA-256 check")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    os.chmod(destination, 0o555)
+    copied_digest = _file_sha256(destination)
+    if copied_digest != actual:
+        raise BuildError(f"staged binary artifact {asset['id']} changed during copy")
+    return {
+        "id": asset["id"],
+        "version": asset["version"],
+        "sha256": actual,
+        "sizeBytes": size,
+        "stagingPath": relative.as_posix(),
+    }
 
 
 def _image_platform(raw: bytes) -> tuple[str, str]:
@@ -335,6 +428,7 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
         "createdAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "planSha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
         "sources": {},
+        "binaryArtifacts": [],
         "baseImages": {},
         "externalImages": {},
         "images": [],
@@ -343,6 +437,11 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
         staging_root = Path(temporary)
         for alias, source in plan["sources"].items():
             lock["sources"][alias] = _archive_remote_source(alias, source, staging_root)
+        artifact_by_id: dict[str, dict[str, Any]] = {}
+        for asset in plan.get("binaryArtifacts", []):
+            verified = _copy_binary_artifact(asset, staging_root)
+            lock["binaryArtifacts"].append(verified)
+            artifact_by_id[verified["id"]] = verified
         for image_key, reference in plan.get("externalImages", {}).items():
             resolved = resolve_image(reference)
             _run(["docker", "pull", "--platform", "linux/arm64", resolved["immutableReference"]])
@@ -378,6 +477,17 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
                 resolved_args[key] = resolved["immutableReference"] if resolved else value
                 if resolved:
                     base_rows[key] = resolved
+            image_asset_ids = build_row.get("binaryArtifacts", [])
+            image_asset_digests: dict[str, str] = {}
+            for asset_id in image_asset_ids:
+                asset = artifact_by_id[asset_id]
+                build_arg = "ASSET_" + re.sub(r"[^A-Z0-9]", "_", asset_id.upper()) + "_SHA256"
+                if build_arg in resolved_args:
+                    raise BuildError(
+                        f"image {service} duplicates generated build argument {build_arg}"
+                    )
+                resolved_args[build_arg] = asset["sha256"]
+                image_asset_digests[asset_id] = asset["sha256"]
             tag_sha = lock["sources"][build_row["sourceLabelRepo"]]["commit"][:12]
             image_ref = f"cyrene/{service}:{plan['taskId']}-{tag_sha}"
             argv = [
@@ -409,6 +519,15 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
             )
             for alias, commit in sorted(source_commits.items()):
                 argv.extend(["--label", f"io.cyrene.source.{alias}.revision={commit}"])
+            for asset_id, digest in sorted(image_asset_digests.items()):
+                argv.extend(["--label", f"io.cyrene.binary-asset.{asset_id}.sha256={digest}"])
+                argv.extend(
+                    [
+                        "--label",
+                        f"io.cyrene.binary-asset.{asset_id}.version="
+                        + artifact_by_id[asset_id]["version"],
+                    ]
+                )
             argv.append(str(context))
             _run(argv)
             inspect = json.loads(_run(["docker", "image", "inspect", image_ref], capture=True))[0]
@@ -429,6 +548,18 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
             for alias, commit in source_commits.items():
                 if labels.get(f"io.cyrene.source.{alias}.revision") != commit:
                     raise BuildError(f"built image {service} lost source provenance for {alias}")
+            for asset_id, digest in image_asset_digests.items():
+                if labels.get(f"io.cyrene.binary-asset.{asset_id}.sha256") != digest:
+                    raise BuildError(
+                        f"built image {service} lost provenance for binary asset {asset_id}"
+                    )
+                if (
+                    labels.get(f"io.cyrene.binary-asset.{asset_id}.version")
+                    != artifact_by_id[asset_id]["version"]
+                ):
+                    raise BuildError(
+                        f"built image {service} lost version for binary asset {asset_id}"
+                    )
             lock["baseImages"].update(base_rows)
             lock["images"].append(
                 {
@@ -438,6 +569,8 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
                     "platform": "linux/arm64",
                     "sizeBytes": image_size,
                     "sourceCommits": source_commits,
+                    "binaryArtifacts": image_asset_ids,
+                    "binaryArtifactDigests": image_asset_digests,
                     "registryDigest": None,
                 }
             )
@@ -889,7 +1022,43 @@ def check_local_lock(lock_path: Path, docker_prefix: list[str] | None = None) ->
         raise BuildError("unsupported image lock or target platform")
     if not lock.get("images"):
         raise BuildError("image lock contains no built images")
+    artifact_rows = lock.get("binaryArtifacts", [])
+    if not isinstance(artifact_rows, list):
+        raise BuildError("image lock binaryArtifacts must be an array")
+    artifact_by_id: dict[str, dict[str, Any]] = {}
+    for artifact in artifact_rows:
+        if (
+            not isinstance(artifact, dict)
+            or not isinstance(artifact.get("id"), str)
+            or not isinstance(artifact.get("version"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(artifact.get("sha256", "")))
+            or not isinstance(artifact.get("sizeBytes"), int)
+            or artifact["sizeBytes"] <= 0
+            or not isinstance(artifact.get("stagingPath"), str)
+        ):
+            raise BuildError("image lock contains a malformed binary artifact record")
+        if artifact["id"] in artifact_by_id:
+            raise BuildError(f"image lock repeats binary artifact {artifact['id']}")
+        _safe_relative(artifact["stagingPath"], f"binary artifact {artifact['id']} stagingPath")
+        artifact_by_id[artifact["id"]] = artifact
     for row in lock["images"]:
+        image_artifacts = row.get("binaryArtifacts", [])
+        image_digests = row.get("binaryArtifactDigests", {})
+        if (
+            not isinstance(image_artifacts, list)
+            or len(set(image_artifacts)) != len(image_artifacts)
+            or not isinstance(image_digests, dict)
+            or set(image_digests) != set(image_artifacts)
+        ):
+            raise BuildError(
+                f"image binary artifact references are malformed for {row.get('service')}"
+            )
+        for artifact_id in image_artifacts:
+            artifact = artifact_by_id.get(artifact_id)
+            if artifact is None or image_digests.get(artifact_id) != artifact["sha256"]:
+                raise BuildError(
+                    f"image binary artifact digest does not match lock for {row.get('service')}"
+                )
         if not isinstance(row.get("sizeBytes"), int) or row["sizeBytes"] <= 0:
             raise BuildError(f"image size is missing from lock for {row.get('service')}")
         if row.get("registryDigest") is not None and not IMAGE_DIGEST_RE.fullmatch(
@@ -898,9 +1067,23 @@ def check_local_lock(lock_path: Path, docker_prefix: list[str] | None = None) ->
             raise BuildError(f"published digest is malformed for {row.get('service')}")
         if lock["state"] == "PUBLISHED" and row.get("registryDigest") is None:
             raise BuildError(f"published lock has no registry digest for {row.get('service')}")
-        actual = _image_local_id(row["image"], docker_prefix)
+        inspected = json.loads(
+            _run([*(docker_prefix or ["docker"]), "image", "inspect", row["image"]], capture=True)
+        )[0]
+        actual = inspected.get("Id")
         if actual != row.get("imageId"):
             raise BuildError(f"local image ID no longer matches lock for {row.get('service')}")
+        labels = inspected.get("Config", {}).get("Labels") or {}
+        for artifact_id in image_artifacts:
+            artifact = artifact_by_id[artifact_id]
+            if (
+                labels.get(f"io.cyrene.binary-asset.{artifact_id}.sha256") != artifact["sha256"]
+                or labels.get(f"io.cyrene.binary-asset.{artifact_id}.version")
+                != artifact["version"]
+            ):
+                raise BuildError(
+                    f"local image labels do not match binary asset {artifact_id} for {row.get('service')}"
+                )
     for key, row in lock.get("externalImages", {}).items():
         if not IMAGE_DIGEST_RE.fullmatch(row.get("indexDigest", "")):
             raise BuildError(f"external image {key} has no immutable registry digest")

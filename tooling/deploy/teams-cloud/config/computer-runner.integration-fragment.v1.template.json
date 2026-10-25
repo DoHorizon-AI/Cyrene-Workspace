@@ -1,0 +1,30 @@
+{
+  "hostSecretRefs": {
+    "tls/plugin-root": "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
+    "tls/exchange-plugin-client-cert": "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE",
+    "tls/exchange-plugin-client-key": "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE"
+  },
+  "connectorHost": {
+    "computerRunner": {
+      "profileRef": "computer-workspace-main",
+      "connectionRef": "REPLACE_WITH_STABLE_LOGICAL_CONNECTION_UUID",
+      "organizationId": "REPLACE_WITH_DIRECTORY_ORGANIZATION_UUID",
+      "workspaceId": "REPLACE_WITH_DIRECTORY_WORKSPACE_UUID",
+      "expectedIssuer": "https://login.microsoftonline.com/REPLACE_WITH_TENANT_UUID/v2.0",
+      "directPlugin": {
+        "bindingId": "computer-runtime",
+        "connectionRef": "grpcs://computer-runtime-proxy:7443",
+        "transport": "mtls",
+        "mtls": {
+          "rootCertificateRef": "tls/plugin-root",
+          "clientCertificateRef": "tls/exchange-plugin-client-cert",
+          "clientKeyRef": "tls/exchange-plugin-client-key"
+        }
+      },
+      "maxCommandTimeoutMs": 600000,
+      "maxFileBytes": 1048576,
+      "maxReadBytes": 65536,
+      "maxDirectoryDepth": 32
+    }
+  }
+}

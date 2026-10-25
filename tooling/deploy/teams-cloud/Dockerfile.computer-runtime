@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUST_BASE_IMAGE
+ARG RUNTIME_BASE_IMAGE
+FROM ${RUST_BASE_IMAGE} AS build
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /source
+COPY Cyrene-Plugins-Official/contracts/rust/cyrene-plugin-contracts ./contracts/rust/cyrene-plugin-contracts
+COPY Cyrene-Plugins-Official/runtime/rust ./runtime/rust
+RUN cargo build --locked --release --manifest-path runtime/rust/cyrene-plugin-server/Cargo.toml
+
+FROM ${RUNTIME_BASE_IMAGE} AS runtime
+
+ARG SOURCE_REPOSITORY=https://github.com/DoHorizon-AI/Cyrene-Plugins-Official
+ARG SOURCE_REVISION
+
+ENV CYRENE_COMPUTER_WORKSPACE_ROOT=/workspace \
+    CYRENE_COMPUTER_ARTIFACT_ROOT=/var/lib/cyrene/artifacts \
+    CYRENE_COMPUTER_COMMAND_DEFAULT_TIMEOUT_MS=30000 \
+    CYRENE_COMPUTER_COMMAND_MAX_TIMEOUT_MS=600000 \
+    CYRENE_COMPUTER_MAX_OUTPUT_BYTES=65536 \
+    CYRENE_COMPUTER_MAX_FILE_BYTES=1048576 \
+    CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES=2048 \
+    CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH=32 \
+    CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH=32 \
+    CYRENE_COMPUTER_MAX_ARTIFACT_BYTES=16777216
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends bash ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 cyrene \
+    && useradd --system --uid 10001 --gid cyrene --create-home --home-dir /home/cyrene --shell /usr/sbin/nologin cyrene \
+    && install -d --owner=10001 --group=10001 --mode=0750 /workspace /var/lib/cyrene/artifacts
+
+COPY --from=build --chown=10001:10001 /source/runtime/rust/cyrene-plugin-server/target/release/cyrene-plugin-server /usr/local/bin/cyrene-plugin-server
+RUN chmod 0555 /usr/local/bin/cyrene-plugin-server
+
+LABEL org.opencontainers.image.source=${SOURCE_REPOSITORY} org.opencontainers.image.revision=${SOURCE_REVISION}
+USER 10001:10001
+EXPOSE 50051
+HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
+    CMD ["/usr/local/bin/cyrene-plugin-server", "--health-check", "--host", "127.0.0.1", "--port", "50051"]
+ENTRYPOINT ["/usr/local/bin/cyrene-plugin-server"]
+CMD ["--host", "0.0.0.0", "--port", "50051"]

@@ -1,0 +1,132 @@
+x-default-logging: &computer-runtime-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  exchange:
+    environment:
+      EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE: /run/secrets/exchange-plugin-root-ca
+      EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE: /run/secrets/exchange-plugin-client-cert
+      EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE: /run/secrets/exchange-plugin-client-key
+    networks:
+      - exchange-computer-private
+    depends_on:
+      computer-runtime-proxy:
+        condition: service_healthy
+
+  computer-runtime:
+    image: ${CYRENE_IMAGE_COMPUTER_RUNTIME:?build and lock the isolated computer runtime image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *computer-runtime-logging
+    environment:
+      CYRENE_COMPUTER_WORKSPACE_ROOT: /workspace
+      CYRENE_COMPUTER_ARTIFACT_ROOT: /var/lib/cyrene/artifacts
+      CYRENE_COMPUTER_COMMAND_DEFAULT_TIMEOUT_MS: ${CYRENE_COMPUTER_COMMAND_DEFAULT_TIMEOUT_MS:-30000}
+      CYRENE_COMPUTER_COMMAND_MAX_TIMEOUT_MS: ${CYRENE_COMPUTER_COMMAND_MAX_TIMEOUT_MS:-600000}
+      CYRENE_COMPUTER_MAX_OUTPUT_BYTES: ${CYRENE_COMPUTER_MAX_OUTPUT_BYTES:-65536}
+      CYRENE_COMPUTER_MAX_FILE_BYTES: ${CYRENE_COMPUTER_MAX_FILE_BYTES:-1048576}
+      CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES: ${CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES:-2048}
+      CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH: ${CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH:-32}
+      CYRENE_COMPUTER_MAX_ARTIFACT_BYTES: ${CYRENE_COMPUTER_MAX_ARTIFACT_BYTES:-16777216}
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m
+    volumes:
+      - type: volume
+        source: computer-workspace
+        target: /workspace
+      - type: volume
+        source: computer-artifacts
+        target: /var/lib/cyrene/artifacts
+    expose:
+      - "50051"
+    networks:
+      - computer-runtime-private
+    mem_limit: 384m
+    memswap_limit: 384m
+    cpus: "0.10"
+    pids_limit: 128
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/cyrene-plugin-server
+        - --health-check
+        - --host
+        - 127.0.0.1
+        - --port
+        - "50051"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+
+  computer-runtime-proxy:
+    image: ${CYRENE_IMAGE_COMPUTER_PROXY:?build and lock the hardened computer proxy image first}
+    pull_policy: never
+    restart: unless-stopped
+    logging: *computer-runtime-logging
+    environment:
+      HOME: /tmp/caddy-home
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=32m
+    volumes:
+      - type: bind
+        source: ${CYRENE_COMPUTER_CADDYFILE:-./Caddyfile.computer-runtime}
+        target: /etc/caddy/Caddyfile
+        read_only: true
+    secrets:
+      - source: computer-runtime-proxy-server-cert
+        target: computer-runtime-proxy-server-cert
+      - source: computer-runtime-proxy-server-key
+        target: computer-runtime-proxy-server-key
+      - source: exchange-plugin-client-ca
+        target: exchange-plugin-client-ca
+    expose:
+      - "7443"
+    networks:
+      exchange-computer-private:
+        aliases: [computer-runtime-proxy]
+      computer-runtime-private: {}
+    depends_on:
+      computer-runtime:
+        condition: service_healthy
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.05"
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  computer-workspace:
+  computer-artifacts:
+
+networks:
+  exchange-computer-private:
+    internal: true
+  computer-runtime-private:
+    internal: true
+
+secrets:
+  computer-runtime-proxy-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/computer-runtime-proxy-server-cert
+  computer-runtime-proxy-server-key:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/computer-runtime-proxy-server-key

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "id": "REPLACE_WITH_DECIMAL_GITHUB_REPOSITORY_ID",
+      "label": "OWNER/REPOSITORY",
+      "bindingId": "UNBOUND_PENDING_EXCHANGE_GITHUB_REBIND",
+      "uri": "https://github.com/OWNER/REPOSITORY",
+      "actionGrants": [
+        {
+          "id": "draft_pull_request",
+          "action": "draft_pull_request",
+          "baseBranches": ["develop"],
+          "branchPrefixes": ["cyrene/assistant/"],
+          "pathPrefixes": ["**"],
+          "issueNumbers": [],
+          "sourceWorkflowIds": [],
+          "permittedOperations": [
+            "github.branch.create",
+            "github.file.commit",
+            "github.pull_request.draft.create"
+          ]
+        },
+        {
+          "id": "rerun_source_ci",
+          "action": "rerun_source_ci",
+          "baseBranches": [],
+          "branchPrefixes": ["cyrene/assistant/"],
+          "pathPrefixes": [],
+          "issueNumbers": [],
+          "sourceWorkflowIds": ["REPLACE_WITH_APPROVED_SOURCE_WORKFLOW_ID"],
+          "permittedOperations": ["github.actions.rerun_failed"]
+        }
+      ]
+    }
+  ]
+}

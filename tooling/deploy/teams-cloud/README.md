@@ -19,6 +19,11 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `compose.cloud-phase2.yaml`, `compose.runpod.yaml` | Opt-in Azure/GCP then RunPod on the same single cloud-provider service / 在同一个云 Provider 服务上按阶段启用 Azure/GCP 和 RunPod |
 | `Dockerfile.*` | Source-built ARM64 service images with fixed runtime entrypoints / 从固定源码构建 ARM64 服务镜像并锁定运行入口 |
 | `config/requirements.huggingface-cli.lock` | Hash-locked ARM64/Python 3.12 `hf` CLI dependency closure / 固定哈希的 ARM64/Python 3.12 `hf` CLI 依赖闭包 |
+| `compose.proactive-assistant-v1.yaml`, `compose.computer-runtime.yaml`, `Dockerfile.computer-runtime`, `Dockerfile.computer-proxy` | Opt-in unlimited conversational model profile, private computer runner, and mTLS-only bridge / 可选的不限聊天次数模型配置、内网电脑执行容器与仅 mTLS 桥接 |
+| `config/responsibility-targets.v1.schema.json`, `config/responsibility-targets.v1.template.json`, `config/proactive-assistant-workflow.v2.template.json` | Host-owned repository grants and disabled Workflows v2 template / 宿主机维护的仓库授权与默认禁用的 Workflows v2 模板 |
+| `config/computer-runner.integration-fragment.v1.template.json` | Non-secret Exchange host binding fragment for the mTLS computer runner / 电脑执行器 mTLS 连接器的非敏感 Exchange 宿主绑定片段 |
+| `config/antigravity-model-only-profile.template.md`, `config/proactive-assistant-v1.env.template` | Model-only CLI profile and Antigravity/CodeBuddy runtime defaults / 仅模型 CLI profile 与 Antigravity/CodeBuddy 运行时默认值 |
+| `prepare_production_runtime.py` | Produce a production-only DSH/Navigator dependency closure without development caches / 构建不含开发缓存的 DSH/Navigator 生产依赖集合 |
 | `config/acceptance-plan.schema.json`, `config/acceptance-plan*.template.json`, `config/acceptance-evidence.template.json`, `config/cloud-api-evidence.*` | USD 5 cumulative reservations, closed real-API stage receipts, and exact cleanup actions / 5 美元跨阶段预算、正式 API 阶段回执和精确清理动作 |
 | `config/connector-bindings*.json`, `config/connector-tool-catalog*.json` | Bootstrap-only empty maps plus production schemas for Exchange-issued bindings and live provider tool catalogs / 仅限引导阶段的空映射，以及 Exchange 绑定与实时 Provider 工具目录的生产 Schema |
 | `build_arm64.py` | Fetch exact remote commits, build ARM64 images, and record image IDs and materialized disk footprints / 获取精确远端提交、构建 ARM64 镜像并记录镜像 ID 与落盘占用 |
@@ -36,6 +41,10 @@ Run the source build only from a clean, committed Workspace checkout and provide
 the exact source SHA for every repository. The builder snapshots remote Git
 commits into a temporary directory; it never copies files from sibling working
 trees or a user's home directory.
+
+The proactive profile is not part of the default stack. It must be added explicitly after the base Compose file; include the computer-runtime overlay for the same deployment. Do not enable the scheduled workflow until the host target list has been rebound and the verified owner Teams thread identifiers have been filled. Current-VM capacity and external acceptance remain separate live checks.
+
+主动助手 profile 不会进入默认服务栈，必须在基础 Compose 文件后显式添加，并同时包含 computer-runtime overlay。GitHub 仓库绑定重新核验完成、且已填写经验证的 owner Teams 帖子标识前，不得启用定时工作流。当前 VM 容量和外部验收仍须独立实时核验。
 
 只从干净且已提交的 Workspace 检出目录执行源码构建，并为每个仓库提供精确源 SHA。构建器把远端 Git 提交快照到临时目录；不会复制同级脏工作树或用户主目录中的文件。
 

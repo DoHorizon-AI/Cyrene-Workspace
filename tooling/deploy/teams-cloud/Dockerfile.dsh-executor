@@ -24,16 +24,29 @@ RUN git clone --depth=1 --branch "$DSH_TAG" "$DSH_REPOSITORY" /opt/dsh \
     && node /opt/dsh/node_modules/typescript/bin/tsc -p /app/harness/tsconfig.json --pretty false \
     && rm -rf /opt/dsh/.git
 
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/prepare_production_runtime.py /tmp/prepare-production-runtime.py
+WORKDIR /opt/dsh
+RUN python3 /tmp/prepare-production-runtime.py --upstream /opt/dsh --harness /app/harness \
+    && corepack pnpm --filter @cyrene/navigator-harness deploy --prod --legacy --ignore-scripts /opt/dsh/runtime \
+    && node /opt/dsh/runtime/node_modules/@deepseek-ai/dsh-subprocess-local/scripts/ensure-spawn-helper.mjs \
+    && mkdir -p /opt/dsh/vendor/node_modules/@deepseek-ai \
+    && ln -sfn ../../cosmokit /opt/dsh/vendor/node_modules/@deepseek-ai/cosmokit \
+    && test -f /opt/dsh/runtime/dist/serve.js \
+    && test -f /opt/dsh/runtime/dist/workflows/runtime.js \
+    && test -e /opt/dsh/runtime/node_modules/@deepseek-ai/dsh-subprocess-local \
+    && test -e /opt/dsh/runtime/node_modules/@deepseek-ai/dsh-schedule
+
 FROM ${NODE_BASE_IMAGE} AS runtime
 
 ARG CODEBUDDY_PACKAGE=@tencent-ai/codebuddy-code@2.163.0
+ARG ASSET_ANTIGRAVITY_CLI_SHA256
 
 ENV NODE_ENV=production \
     PORT=8080 \
     HOST=0.0.0.0 \
     HOME=/home/navigator \
-    CYRENE_HARNESS_MODEL_SOURCE=codebuddy \
-    CYRENE_HARNESS_MODEL=glm-5.3-flash \
+    CYRENE_HARNESS_MODEL_SOURCE=antigravity \
+    CYRENE_HARNESS_MODEL=gemini-3.8-flash-medium \
     CODEBUDDY_CONFIG_DIR=/home/navigator/.codebuddy \
     DISABLE_AUTOUPDATER=1
 
@@ -49,13 +62,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --system --uid 10001 --gid navigator --create-home --home-dir /home/navigator --shell /usr/sbin/nologin navigator \
     && install -d --owner=10001 --group=10001 --mode=0700 /home/navigator/.codebuddy /app/plugins /app/workspace
 
+COPY --chmod=0555 runtime-artifacts/antigravity/agy /usr/local/bin/agy
+RUN printf '%s  %s\n' "$ASSET_ANTIGRAVITY_CLI_SHA256" /usr/local/bin/agy | sha256sum --check --status \
+    && /usr/local/bin/agy --version | grep -F '1.4.7'
+
 WORKDIR /app
-COPY --from=build --chown=10001:10001 /app/harness/ ./harness/
+COPY --from=build --chown=10001:10001 /app/harness/package.json ./harness/package.json
+COPY --from=build --chown=10001:10001 /app/harness/cordis.patch.yml ./harness/cordis.patch.yml
 COPY --from=build --chown=10001:10001 /app/scripts/serve-executor.mjs ./scripts/serve-executor.mjs
 COPY --from=build --chown=10001:10001 /app/src/ ./src/
-COPY --from=build /opt/dsh /opt/dsh
+COPY --from=build /opt/dsh/runtime/node_modules /opt/dsh/runtime/node_modules
+COPY --from=build /opt/dsh/vendor/cosmokit /opt/dsh/vendor/cosmokit
+COPY --from=build /opt/dsh/vendor/schemastery /opt/dsh/vendor/schemastery
+COPY --from=build /opt/dsh/runtime/dist ./harness/dist
+COPY --from=build /opt/dsh/runtime/presets ./harness/presets
 COPY Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
-RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint
+RUN mkdir -p /opt/dsh/vendor/node_modules/@deepseek-ai \
+    && ln -sfn ../../cosmokit /opt/dsh/vendor/node_modules/@deepseek-ai/cosmokit \
+    && ln -s /opt/dsh/runtime/node_modules /app/node_modules \
+    && chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint
 
 USER 10001:10001
 EXPOSE 8080

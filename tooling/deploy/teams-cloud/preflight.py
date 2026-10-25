@@ -72,6 +72,7 @@ PEM_PRIVATE_KEY_NAMES = {
     "teams-connector-health-client-key",
     "cloud-management-server-key",
     "cloud-management-health-client-key",
+    "computer-runtime-proxy-server-key",
     "account-center-github-app-private-key",
 }
 PEM_CERTIFICATE_NAMES = {
@@ -100,6 +101,7 @@ PEM_CERTIFICATE_NAMES = {
     "teams-connector-health-client-cert",
     "cloud-management-server-cert",
     "cloud-management-health-client-cert",
+    "computer-runtime-proxy-server-cert",
 }
 PLACEHOLDER_RE = re.compile(
     r"(replace[_ -]?with|example\.invalid|changeme|placeholder|<[^>]+>)", re.IGNORECASE
@@ -497,14 +499,41 @@ CONNECTOR_OPERATION_POLICIES = {
     "github.repository.list": ("github.repository.list", "profile", False),
     "github.repository.get": ("github.repository.get", "github_repository", False),
     "github.branches.list": ("github.branches.list", "github_repository", False),
+    "github.issues.search": ("github.issues.search", "github_repository", False),
     "github.pull_requests.list": ("github.pull_requests.list", "github_repository", False),
     "github.pull_request.get": ("github.pull_request.get", "github_pull_request", False),
     "github.actions.runs.list": ("github.actions.runs.list", "github_repository", False),
+    "github.actions.jobs.list": ("github.actions.jobs.list", "github_actions_run", False),
+    "github.actions.job.logs.read": ("github.actions.job.logs.read", "github_actions_job", False),
     "github.ci.status": ("github.ci.status", "github_commit", False),
     "github.issue.get": ("github.issue.get", "github_issue", False),
+    "github.branch.get": ("github.branch.get", "github_branch", False),
+    "github.file.get": ("github.file.get", "github_file", False),
+    "github.pull_request.draft.find": (
+        "github.pull_request.draft.find",
+        "github_pull_request_draft",
+        False,
+    ),
+    "github.branch.create": ("github.branch.create", "github_branch", True),
+    "github.branch.delete": ("github.branch.delete", "github_branch", True),
+    "github.file.commit": ("github.file.commit", "github_file", True),
+    "github.pull_request.draft.create": (
+        "github.pull_request.draft.create",
+        "github_pull_request_draft",
+        True,
+    ),
+    "github.actions.rerun_failed": (
+        "github.actions.rerun_failed",
+        "github_actions_run",
+        True,
+    ),
     "github.issue.comment.create": ("github.issue.comment.create", "github_issue", True),
     "github.issue.state.update": ("github.issue.state.update", "github_issue", True),
     "github.vendor.cli.execute": ("github_vendor_cli", "profile", True),
+    "computer.command.execute": ("computer.command.execute", "computer_workspace", True),
+    "computer.file.read": ("computer.file.read", "computer_file", False),
+    "computer.file.write": ("computer.file.write", "computer_file", True),
+    "computer.directory.list": ("computer.directory.list", "computer_directory", False),
     "huggingface.models.list": ("huggingface.models.list", "profile", False),
     "huggingface.datasets.list": ("huggingface.datasets.list", "profile", False),
     "huggingface.spaces.list": ("huggingface.spaces.list", "profile", False),
@@ -526,6 +555,39 @@ CONNECTOR_OPERATION_POLICIES = {
     "cloud.operation.logs.read": ("cloud_operation_logs", "cloud_operation", False),
     "cloud.operation.cancel": ("cloud_operation_cancel", "cloud_operation", True),
     "cloud.vendor.cli.execute": ("cloud_vendor_cli", "profile", True),
+}
+
+CONNECTOR_TARGET_ARGUMENTS = {
+    "github.issues.search": ("repository_id", "repository"),
+    "github.actions.jobs.list": ("repository_id", "repository", "run_id"),
+    "github.actions.job.logs.read": (
+        "repository_id",
+        "repository",
+        "run_id",
+        "job_id",
+    ),
+    "github.branch.get": ("repository_id", "repository", "branch"),
+    "github.branch.create": ("repository_id", "repository", "branch"),
+    "github.branch.delete": ("repository_id", "repository", "branch"),
+    "github.file.get": ("repository_id", "repository", "branch", "path"),
+    "github.file.commit": ("repository_id", "repository", "branch", "path"),
+    "github.pull_request.draft.find": (
+        "repository_id",
+        "repository",
+        "head_branch",
+        "base_branch",
+    ),
+    "github.pull_request.draft.create": (
+        "repository_id",
+        "repository",
+        "head_branch",
+        "base_branch",
+    ),
+    "github.actions.rerun_failed": ("repository_id", "repository", "run_id"),
+    "computer.command.execute": ("workspace_ref",),
+    "computer.file.read": ("workspace_ref", "path", "length"),
+    "computer.file.write": ("workspace_ref", "path"),
+    "computer.directory.list": ("workspace_ref", "path"),
 }
 
 
@@ -551,7 +613,7 @@ def _validate_connector_bindings(
     if not bindings and allow_empty:
         return
     seen: set[tuple[str, str]] = set()
-    supported_providers = {"github", "huggingface", "azure", "gcp", "runpod"}
+    supported_providers = {"github", "huggingface", "azure", "gcp", "runpod", "computer"}
     for binding in bindings:
         if (
             not isinstance(binding, dict)
@@ -608,6 +670,7 @@ def _validate_connector_bindings(
             provider_matches = (
                 (provider == "github" and operation.startswith("github."))
                 or (provider == "huggingface" and operation.startswith("huggingface."))
+                or (provider == "computer" and operation.startswith("computer."))
                 or (provider in {"azure", "gcp", "runpod"} and operation.startswith("cloud."))
             )
             if (
@@ -745,6 +808,21 @@ def _validate_connector_tool_catalog(
                 raise PreflightError(
                     "Exchange tool read/write metadata conflicts with the fixed operation map"
                 )
+            target_fields = CONNECTOR_TARGET_ARGUMENTS.get(mapped["operationId"])
+            if target_fields:
+                schema = catalog_tools[tool_id]["inputSchema"]
+                properties = schema.get("properties")
+                required = schema.get("required")
+                if (
+                    not isinstance(properties, dict)
+                    or not isinstance(required, list)
+                    or any(
+                        field not in properties or field not in required for field in target_fields
+                    )
+                ):
+                    raise PreflightError(
+                        "GitHub operation schema must require every projected target locator field"
+                    )
 
 
 def _schema_contains_credential_field(value: Any) -> bool:
@@ -764,13 +842,18 @@ def _schema_contains_credential_field(value: Any) -> bool:
 def _expected_connector_providers(config: dict[str, Any], mode: str) -> set[str]:
     """Derive the only provider bindings that may be mounted for a deployment stage."""
 
+    has_computer_runner = "computer-runtime" in config.get("services", {})
     if mode in {"stage1", "staging"}:
-        return {"github", "huggingface"}
+        return {"github", "huggingface"} | ({"computer"} if has_computer_runner else set())
     if mode == "stage2":
-        return {"github", "huggingface", "azure", "gcp"}
+        return {"github", "huggingface", "azure", "gcp"} | (
+            {"computer"} if has_computer_runner else set()
+        )
     if mode == "stage3":
-        return {"github", "huggingface", "azure", "gcp", "runpod"}
-    providers = {"github", "huggingface"}
+        return {"github", "huggingface", "azure", "gcp", "runpod"} | (
+            {"computer"} if has_computer_runner else set()
+        )
+    providers = {"github", "huggingface"} | ({"computer"} if has_computer_runner else set())
     services = config.get("services", {})
     cloud_service = services.get("cloud-management-phase2")
     if isinstance(cloud_service, dict):
@@ -785,6 +868,7 @@ def _validate_profile_stage(compose: dict[str, Any], mode: str) -> None:
 
     services = compose.get("services", {})
     _validate_exchange_profile_stage(compose, mode)
+    _validate_computer_runtime_boundary(compose)
     if mode in {"staging", "stage1"} and ("cloud-management-phase2" in services):
         raise PreflightError(
             "cloud provider services must not be included before the preceding-stage evidence"
@@ -838,6 +922,244 @@ def _validate_profile_stage(compose: dict[str, Any], mode: str) -> None:
                 raise PreflightError(
                     "RunPod CLI must read its key from the stage-3 mounted secret file"
                 )
+
+
+def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
+    """Require a low-privilege runner and mTLS proxy with no credentials on the runner."""
+
+    services = compose.get("services", {})
+    runner = services.get("computer-runtime")
+    proxy = services.get("computer-runtime-proxy")
+    if runner is None and proxy is None:
+        return
+    if not isinstance(runner, dict) or not isinstance(proxy, dict):
+        raise PreflightError("computer runtime and its mTLS proxy must be deployed together")
+
+    runner_environment = runner.get("environment", {})
+    expected_environment = {
+        "CYRENE_COMPUTER_WORKSPACE_ROOT": "/workspace",
+        "CYRENE_COMPUTER_ARTIFACT_ROOT": "/var/lib/cyrene/artifacts",
+        "CYRENE_COMPUTER_COMMAND_DEFAULT_TIMEOUT_MS": "30000",
+        "CYRENE_COMPUTER_COMMAND_MAX_TIMEOUT_MS": "600000",
+        "CYRENE_COMPUTER_MAX_OUTPUT_BYTES": "65536",
+        "CYRENE_COMPUTER_MAX_FILE_BYTES": "1048576",
+        "CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES": "2048",
+        "CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH": "32",
+        "CYRENE_COMPUTER_MAX_ARTIFACT_BYTES": "16777216",
+    }
+    if (
+        not isinstance(runner_environment, dict)
+        or set(runner_environment) != set(expected_environment)
+        or any(runner_environment.get(key) != value for key, value in expected_environment.items())
+    ):
+        raise PreflightError(
+            "computer runtime resource and file limits do not match the approved transport cap"
+        )
+    runner_volumes = runner.get("volumes", [])
+    allowed_targets = {"/workspace", "/var/lib/cyrene/artifacts"}
+    if (
+        runner.get("user") != "10001:10001"
+        or runner.get("read_only") is not True
+        or "ALL" not in runner.get("cap_drop", [])
+        or runner.get("cap_add")
+        or "no-new-privileges:true" not in runner.get("security_opt", [])
+        or not any(str(row).split(":", 1)[0] == "/tmp" for row in runner.get("tmpfs", []))
+        or runner.get("mem_limit") != "384m"
+        or runner.get("cpus") != "0.10"
+        or runner.get("secrets")
+        or runner.get("configs")
+        or not isinstance(runner_volumes, list)
+        or {row.get("target") for row in runner_volumes if isinstance(row, dict)} != allowed_targets
+        or any(
+            not isinstance(row, dict) or row.get("type") != "volume" or row.get("read_only") is True
+            for row in runner_volumes
+        )
+        or set(runner.get("networks", {})) != {"computer-runtime-private"}
+        or runner.get("ports")
+    ):
+        raise PreflightError(
+            "computer runner must have only its workspace/artifact volumes, no credentials, and one private network"
+        )
+    volumes = compose.get("volumes", {})
+    if not all(name in volumes for name in ("computer-workspace", "computer-artifacts")):
+        raise PreflightError("computer runner requires separate workspace and artifact volumes")
+    networks = compose.get("networks", {})
+    if any(
+        not isinstance(networks.get(name), dict) or networks[name].get("internal") is not True
+        for name in ("computer-runtime-private", "exchange-computer-private")
+    ):
+        raise PreflightError("computer runner and Exchange proxy networks must be internal-only")
+
+    proxy_networks = set(proxy.get("networks", {}))
+    proxy_volumes = proxy.get("volumes", [])
+    if (
+        proxy_networks != {"computer-runtime-private", "exchange-computer-private"}
+        or proxy.get("ports")
+        or proxy.get("privileged") is True
+        or proxy.get("read_only") is not True
+        or "ALL" not in proxy.get("cap_drop", [])
+        or proxy.get("cap_add")
+        or "no-new-privileges:true" not in proxy.get("security_opt", [])
+        or proxy.get("mem_limit") != "64m"
+        or proxy.get("cpus") != "0.05"
+        or proxy.get("secrets") is None
+        or {row.get("source") for row in proxy.get("secrets", []) if isinstance(row, dict)}
+        != {
+            "computer-runtime-proxy-server-cert",
+            "computer-runtime-proxy-server-key",
+            "exchange-plugin-client-ca",
+        }
+    ):
+        raise PreflightError(
+            "computer mTLS proxy must have exact private networks and certificates"
+        )
+    caddyfiles = [
+        row
+        for row in proxy_volumes
+        if isinstance(row, dict) and row.get("target") == "/etc/caddy/Caddyfile"
+    ]
+    if (
+        len(proxy_volumes) != 1
+        or len(caddyfiles) != 1
+        or caddyfiles[0].get("type") != "bind"
+        or caddyfiles[0].get("read_only") is not True
+    ):
+        raise PreflightError("computer mTLS proxy must bind one read-only Caddyfile")
+    caddyfile = Path(caddyfiles[0].get("source", ""))
+    try:
+        text = caddyfile.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise PreflightError("computer mTLS proxy Caddyfile is unavailable") from error
+    required_lines = (
+        "mode require_and_verify",
+        "trust_pool file /run/secrets/exchange-plugin-client-ca",
+        "reverse_proxy h2c://computer-runtime:50051",
+    )
+    if any(required not in text for required in required_lines):
+        raise PreflightError(
+            "computer proxy must require Exchange mTLS and forward only to private h2c"
+        )
+
+    _validate_computer_exchange_profile(compose)
+
+
+def _validate_computer_exchange_profile(compose: dict[str, Any]) -> None:
+    """Bind the private Exchange runner profile to the internal mTLS proxy and limits."""
+
+    services = compose.get("services", {})
+    exchange = services.get("exchange", {})
+    environment = exchange.get("environment", {})
+    try:
+        configuration = json.loads(
+            environment.get("CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON", ""),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError(
+            "Exchange computer runner integration config is invalid JSON"
+        ) from error
+    connector_host = configuration.get("connectorHost") if isinstance(configuration, dict) else None
+    computer = connector_host.get("computerRunner") if isinstance(connector_host, dict) else None
+    host_secret_refs = (
+        configuration.get("hostSecretRefs") if isinstance(configuration, dict) else None
+    )
+    if (
+        not isinstance(computer, dict)
+        or set(computer)
+        != {
+            "profileRef",
+            "connectionRef",
+            "organizationId",
+            "workspaceId",
+            "expectedIssuer",
+            "directPlugin",
+            "maxCommandTimeoutMs",
+            "maxFileBytes",
+            "maxReadBytes",
+            "maxDirectoryDepth",
+        }
+        or not isinstance(host_secret_refs, dict)
+        or PLACEHOLDER_RE.search(json.dumps(configuration, sort_keys=True))
+    ):
+        raise PreflightError(
+            "Exchange must configure a complete host-owned computer runner profile without placeholders"
+        )
+    uuid_pattern = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    tenant_id = services.get("navigator", {}).get("environment", {}).get("TEAMS_TENANT_ID")
+    organization_id = (
+        services.get("workspace-authority", {}).get("environment", {}).get("CYRENE_ORGANIZATION_ID")
+    )
+    workspace_id = (
+        services.get("workspace-authority", {}).get("environment", {}).get("CYRENE_WORKSPACE_ID")
+    )
+    expected_issuer = f"https://login.microsoftonline.com/{tenant_id}/v2.0"
+    if (
+        computer.get("profileRef") != "computer-workspace-main"
+        or not isinstance(computer.get("connectionRef"), str)
+        or not re.fullmatch(uuid_pattern, computer["connectionRef"])
+        or computer.get("organizationId") != organization_id
+        or not isinstance(organization_id, str)
+        or not re.fullmatch(uuid_pattern, organization_id)
+        or computer.get("workspaceId") != workspace_id
+        or not isinstance(workspace_id, str)
+        or not re.fullmatch(uuid_pattern, workspace_id)
+        or computer.get("expectedIssuer") != expected_issuer
+        or computer.get("maxCommandTimeoutMs") != 600000
+        or isinstance(computer.get("maxCommandTimeoutMs"), bool)
+        or computer.get("maxFileBytes") != 1048576
+        or isinstance(computer.get("maxFileBytes"), bool)
+        or computer.get("maxReadBytes") != 65536
+        or isinstance(computer.get("maxReadBytes"), bool)
+        or computer.get("maxDirectoryDepth") != 32
+        or isinstance(computer.get("maxDirectoryDepth"), bool)
+    ):
+        raise PreflightError(
+            "Exchange computer runner profile identity or operation limits do not match the owner-approved workspace"
+        )
+    plugin = computer.get("directPlugin")
+    if (
+        not isinstance(plugin, dict)
+        or set(plugin) != {"bindingId", "connectionRef", "transport", "mtls"}
+        or plugin.get("bindingId") != "computer-runtime"
+        or plugin.get("connectionRef") != "grpcs://computer-runtime-proxy:7443"
+        or plugin.get("transport") != "mtls"
+        or plugin.get("mtls")
+        != {
+            "rootCertificateRef": "tls/plugin-root",
+            "clientCertificateRef": "tls/exchange-plugin-client-cert",
+            "clientKeyRef": "tls/exchange-plugin-client-key",
+        }
+    ):
+        raise PreflightError("Exchange computer runner must use the internal proxy with mTLS")
+    secret_paths = {
+        "tls/plugin-root": (
+            "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
+            "/run/secrets/exchange-plugin-root-ca",
+            "exchange-plugin-root-ca",
+        ),
+        "tls/exchange-plugin-client-cert": (
+            "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE",
+            "/run/secrets/exchange-plugin-client-cert",
+            "exchange-plugin-client-cert",
+        ),
+        "tls/exchange-plugin-client-key": (
+            "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE",
+            "/run/secrets/exchange-plugin-client-key",
+            "exchange-plugin-client-key",
+        ),
+    }
+    mounted_secrets = _service_secret_targets(exchange)
+    for secret_ref, (environment_name, path, secret_target) in secret_paths.items():
+        if (
+            host_secret_refs.get(secret_ref) != environment_name
+            or environment.get(environment_name) != path
+            or secret_target not in mounted_secrets
+        ):
+            raise PreflightError(
+                "Exchange computer runner hostSecretRefs must resolve only to its mounted mTLS files"
+            )
+    if "exchange-computer-private" not in exchange.get("networks", {}):
+        raise PreflightError("Exchange must use the internal computer proxy network")
 
 
 def _expected_exchange_providers(compose: dict[str, Any], mode: str) -> set[str]:
@@ -1366,6 +1688,7 @@ def _validate_secrets_and_configs(
         _secret_file(path, path.name)
     _validate_directory_database_urls(secrets_dir)
     _validate_internal_service_certificates(secrets_dir)
+    _validate_computer_proxy_certificate(config, secrets_dir)
     _validate_exchange_authority_identity(config, secrets_dir)
     resolved_configs = config.get("configs", {})
     for config_name, row in resolved_configs.items():
@@ -1398,6 +1721,8 @@ def _validate_secrets_and_configs(
             )
         elif path.name == "navigator-principal-config.json":
             _validate_principal_configuration(path, config.get("services", {}))
+        elif path.name == "responsibility-targets.v1.json":
+            _validate_responsibility_targets(path, config_dir / "connector-bindings.json")
         elif path.suffix == ".json":
             try:
                 document = json.loads(path.read_text(encoding="utf-8"))
@@ -1447,7 +1772,7 @@ def _validate_runtime_config_metadata(owner_uid: int, mode: int, name: str) -> N
 
 
 def _validate_identity_scope(config: dict[str, Any], actor_projection_path: Path) -> None:
-    """Require one tenant, one team, one owner, and the explicit CodeBuddy model source."""
+    """Require one tenant, one team, one owner, and an approved model profile."""
 
     services = config.get("services", {})
     navigator = services.get("navigator", {}).get("environment", {})
@@ -1499,14 +1824,38 @@ def _validate_identity_scope(config: dict[str, Any], actor_projection_path: Path
         raise PreflightError(
             "Directory operator owner must be present in the dynamic Teams admission projection"
         )
-    if navigator.get("CYRENE_HARNESS_MODEL_SOURCE") != "codebuddy" or navigator.get(
-        "CYRENE_HARNESS_MODEL"
-    ) not in {"glm-5.3-flash", "deepseek-v4.1-flash"}:
+    _validate_model_runtime_config(navigator)
+
+
+def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
+    """Require real approved models, no paid fallback top-up, and foreground/background slots."""
+
+    source = navigator.get("CYRENE_HARNESS_MODEL_SOURCE")
+    model = navigator.get("CYRENE_HARNESS_MODEL")
+    concurrency = navigator.get("CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS")
+    if source == "antigravity":
+        if model != "gemini-3.8-flash-medium":
+            raise PreflightError("proactive Navigator must use Antigravity gemini-3.8-flash-medium")
+        if (
+            navigator.get("CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED") != "true"
+            or navigator.get("CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP") != "true"
+            or navigator.get("CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL")
+            not in {"glm-5.3-flash", "deepseek-v4.1-flash"}
+        ):
+            raise PreflightError(
+                "proactive Navigator fallback must be an approved no-additional-spend CodeBuddy model"
+            )
+        if concurrency != "2":
+            raise PreflightError(
+                "proactive Navigator requires two bounded slots for foreground chat and background work"
+            )
+        return
+    if source != "codebuddy" or model not in {"glm-5.3-flash", "deepseek-v4.1-flash"}:
         raise PreflightError(
-            "production Navigator must use the explicit CodeBuddy model source and an approved model"
+            "Navigator must use an explicitly approved real model source and model"
         )
-    if navigator.get("CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS") != "1":
-        raise PreflightError("the 2-vCPU host profile permits only one active Navigator task")
+    if concurrency not in {"1", "2"}:
+        raise PreflightError("Navigator task concurrency must fit the two-CPU deployment profile")
 
 
 def _validate_codebuddy_mount(config: dict[str, Any], secrets_dir: Path) -> None:
@@ -1541,6 +1890,184 @@ def _validate_codebuddy_mount(config: dict[str, Any], secrets_dir: Path) -> None
         raise PreflightError(
             "service-owned CodeBuddy directory must be owner-only and owned by UID 10001"
         )
+
+
+def _validate_model_home_mount(config: dict[str, Any]) -> None:
+    """Keep Antigravity credentials and CLI caches in a private persistent home volume."""
+
+    navigator = config.get("services", {}).get("navigator", {})
+    matches = [
+        row
+        for row in navigator.get("volumes", [])
+        if isinstance(row, dict) and row.get("target") == "/home/navigator"
+    ]
+    if len(matches) != 1:
+        raise PreflightError("Antigravity requires one separate persistent Navigator model home")
+    volume = matches[0]
+    path = Path(volume.get("source", ""))
+    if (
+        volume.get("type") != "bind"
+        or volume.get("read_only") is True
+        or not _private_artifact(path)
+        or path.is_symlink()
+        or not path.is_dir()
+    ):
+        raise PreflightError("Navigator model home must be a writable private artifact directory")
+    metadata = path.stat()
+    if metadata.st_uid != 10001 or metadata.st_mode & 0o077:
+        raise PreflightError("Navigator model home must be owner-only and owned by UID 10001")
+
+
+def _validate_proactive_navigator_container(config: dict[str, Any]) -> None:
+    """Restrict Navigator writes to explicit state/auth mounts and drop Linux capabilities."""
+
+    navigator = config.get("services", {}).get("navigator", {})
+    caps = navigator.get("cap_drop", [])
+    security = navigator.get("security_opt", [])
+    tmpfs = navigator.get("tmpfs", [])
+    if (
+        navigator.get("read_only") is not True
+        or "ALL" not in caps
+        or "no-new-privileges:true" not in security
+        or not any(str(row).split(":", 1)[0] == "/tmp" for row in tmpfs)
+    ):
+        raise PreflightError(
+            "proactive Navigator requires a read-only root, dropped capabilities, and bounded temporary storage"
+        )
+    target_path = navigator.get("environment", {}).get("CYRENE_RESPONSIBILITY_TARGETS_FILE")
+    config_mounts = navigator.get("configs", [])
+    target_mounts = [
+        row
+        for row in config_mounts
+        if isinstance(row, dict)
+        and row.get("source") == "responsibility-targets"
+        and row.get("target") == "/run/config/responsibility-targets.v1.json"
+    ]
+    if target_path != "/run/config/responsibility-targets.v1.json" or len(target_mounts) != 1:
+        raise PreflightError(
+            "proactive Navigator must read host-owned responsibility targets from its read-only config mount"
+        )
+
+
+def _validate_responsibility_targets(path: Path, bindings_path: Path) -> None:
+    """Allow only current GitHub bindings and the bounded draft/CI responsibility grants."""
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        bindings = json.loads(bindings_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PreflightError(
+            "responsibility targets or connector bindings are invalid JSON"
+        ) from error
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schemaVersion", "targets"}
+        or document.get("schemaVersion") != 1
+        or isinstance(document.get("schemaVersion"), bool)
+        or not isinstance(document.get("targets"), list)
+        or not isinstance(bindings, dict)
+        or not isinstance(bindings.get("bindings"), list)
+    ):
+        raise PreflightError("responsibility targets have an unsupported schema")
+    github_bindings = {
+        row.get("bindingId")
+        for row in bindings["bindings"]
+        if isinstance(row, dict) and row.get("providerId") == "github"
+    }
+    if not document["targets"]:
+        raise PreflightError("responsibility targets must include the approved repository set")
+    seen_ids: set[str] = set()
+    seen_labels: set[str] = set()
+    expected_grants = {
+        "draft_pull_request": {
+            "id": "draft_pull_request",
+            "action": "draft_pull_request",
+            "baseBranches": ["develop"],
+            "branchPrefixes": ["cyrene/assistant/"],
+            "pathPrefixes": ["**"],
+            "issueNumbers": [],
+            "sourceWorkflowIds": [],
+            "permittedOperations": [
+                "github.branch.create",
+                "github.file.commit",
+                "github.pull_request.draft.create",
+            ],
+        },
+        "rerun_source_ci": {
+            "id": "rerun_source_ci",
+            "action": "rerun_source_ci",
+            "baseBranches": [],
+            "branchPrefixes": ["cyrene/assistant/"],
+            "pathPrefixes": [],
+            "issueNumbers": [],
+            "sourceWorkflowIds": None,
+            "permittedOperations": ["github.actions.rerun_failed"],
+        },
+    }
+    for target in document["targets"]:
+        if not isinstance(target, dict) or set(target) != {
+            "id",
+            "label",
+            "bindingId",
+            "uri",
+            "actionGrants",
+        }:
+            raise PreflightError("responsibility target does not match its closed schema")
+        repository_id = target.get("id")
+        label = target.get("label")
+        binding_id = target.get("bindingId")
+        if (
+            not isinstance(repository_id, str)
+            or not re.fullmatch(r"[1-9][0-9]*", repository_id)
+            or repository_id in seen_ids
+            or not isinstance(label, str)
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", label)
+            or label in seen_labels
+            or target.get("uri") != f"https://github.com/{label}"
+            or not isinstance(binding_id, str)
+            or binding_id not in github_bindings
+        ):
+            raise PreflightError(
+                "responsibility targets must use unique canonical repos and a current Exchange GitHub binding"
+            )
+        seen_ids.add(repository_id)
+        seen_labels.add(label)
+        grants = target.get("actionGrants")
+        if not isinstance(grants, list) or not grants or len(grants) > len(expected_grants):
+            raise PreflightError(
+                "responsibility grants must include draft work and contain only the approved actions"
+            )
+        grant_map = {
+            row.get("id"): row for row in grants if isinstance(row, dict) and row.get("id")
+        }
+        if len(grant_map) != len(grants) or not set(grant_map) <= set(expected_grants):
+            raise PreflightError(
+                "responsibility grants must include draft work and contain only the approved actions"
+            )
+        if "draft_pull_request" not in grant_map:
+            raise PreflightError("every responsibility target must grant the approved draft action")
+        for action_id, grant in grant_map.items():
+            expected = expected_grants[action_id]
+            if action_id == "rerun_source_ci":
+                workflow_ids = grant.get("sourceWorkflowIds")
+                if (
+                    not isinstance(workflow_ids, list)
+                    or not workflow_ids
+                    or any(
+                        not isinstance(workflow_id, str)
+                        or not re.fullmatch(r"[1-9][0-9]{0,19}", workflow_id)
+                        for workflow_id in workflow_ids
+                    )
+                    or len(set(workflow_ids)) != len(workflow_ids)
+                    or {**expected, "sourceWorkflowIds": workflow_ids} != grant
+                ):
+                    raise PreflightError(
+                        "CI rerun grants require explicit source workflow IDs and the approved assistant branch prefix"
+                    )
+            elif grant != expected:
+                raise PreflightError(
+                    "responsibility grants must contain only the approved assistant draft and CI actions"
+                )
 
 
 def _validate_cloud_acceptance_mount(service: dict[str, Any]) -> None:
@@ -1671,6 +2198,37 @@ def _validate_internal_service_certificates(secrets_dir: Path) -> None:
         private_key_public_key = _run(["openssl", "pkey", "-in", str(private_key), "-pubout"])
         if certificate_public_key != private_key_public_key:
             raise PreflightError(f"{prefix} TLS certificate and private key do not match")
+
+
+def _validate_computer_proxy_certificate(config: dict[str, Any], secrets_dir: Path) -> None:
+    """Verify the Caddy proxy leaf certificate, key pair, and Exchange-facing DNS SAN."""
+
+    if "computer-runtime-proxy" not in config.get("services", {}):
+        return
+    certificate = secrets_dir / "computer-runtime-proxy-server-cert"
+    private_key = secrets_dir / "computer-runtime-proxy-server-key"
+    root = secrets_dir / "exchange-plugin-root-ca"
+    _run(["openssl", "verify", "-CAfile", str(root), str(certificate)])
+    _run(
+        [
+            "openssl",
+            "x509",
+            "-in",
+            str(certificate),
+            "-noout",
+            "-checkhost",
+            "computer-runtime-proxy",
+        ]
+    )
+    subject_alt_names = _run(
+        ["openssl", "x509", "-in", str(certificate), "-noout", "-ext", "subjectAltName"]
+    )
+    if "DNS:computer-runtime-proxy" not in subject_alt_names:
+        raise PreflightError("computer proxy certificate lacks its Exchange-facing DNS SAN")
+    certificate_public_key = _run(["openssl", "x509", "-in", str(certificate), "-pubkey", "-noout"])
+    private_key_public_key = _run(["openssl", "pkey", "-in", str(private_key), "-pubout"])
+    if certificate_public_key != private_key_public_key:
+        raise PreflightError("computer proxy TLS certificate and private key do not match")
 
 
 def _validate_exchange_authority_identity(config: dict[str, Any], secrets_dir: Path) -> None:
@@ -2354,6 +2912,10 @@ def run_preflight(
     _validate_profile_stage(config, mode)
     _validate_secrets_and_configs(config, secrets_dir.resolve(), config_dir.resolve(), mode)
     _validate_identity_scope(config, config_dir.resolve() / "teams-actor-subjects.json")
+    navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
+    if navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity":
+        _validate_model_home_mount(config)
+        _validate_proactive_navigator_container(config)
     _validate_stage_acceptance_receipts(
         mode=mode,
         config=config,
@@ -2405,8 +2967,8 @@ def main() -> int:
     parser.add_argument("--runpod-ledger", type=Path)
     parser.add_argument("--runpod-api-evidence", type=Path)
     parser.add_argument("--docker-prefix", nargs="+", default=["sudo", "-n", "docker"])
-    parser.add_argument("--max-memory-mib", type=int, default=3072)
-    parser.add_argument("--max-cpus", type=float, default=1.8)
+    parser.add_argument("--max-memory-mib", type=int, default=3584)
+    parser.add_argument("--max-cpus", type=float, default=1.95)
     parser.add_argument("--required-free-gib", type=float, default=2.0)
     parser.add_argument("--minimum-mem-available-mib", type=int, default=1024)
     arguments = parser.parse_args()

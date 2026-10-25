@@ -1,0 +1,36 @@
+services:
+  navigator:
+    labels:
+      com.cyrene.runtime.profile: proactive-assistant-v1
+      com.cyrene.navigator.primary-model: gemini-3.8-flash-medium
+      com.cyrene.navigator.primary-provider: antigravity
+      com.cyrene.navigator.run-count-limit: none
+    environment:
+      CYRENE_HARNESS_MODEL_SOURCE: ${CYRENE_HARNESS_MODEL_SOURCE:-antigravity}
+      CYRENE_HARNESS_MODEL: ${CYRENE_HARNESS_MODEL:-gemini-3.8-flash-medium}
+      CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED: ${CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED:?set the configured CodeBuddy fallback policy}
+      CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP: ${CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP:?paid top-ups must remain disabled}
+      CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL: ${CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL:?set an approved CodeBuddy fallback model}
+      CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS: ${CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS:-2}
+      CYRENE_WORKFLOWS_ENABLED: "true"
+      CYRENE_RESPONSIBILITY_TARGETS_FILE: /run/config/responsibility-targets.v1.json
+      DSH_HOME: /var/lib/cyrene-navigator/dsh
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m
+    volumes:
+      - type: bind
+        source: ${CYRENE_MODEL_HOME:?provision the separate model CLI home}
+        target: /home/navigator
+        read_only: false
+    configs:
+      - source: responsibility-targets
+        target: /run/config/responsibility-targets.v1.json
+
+configs:
+  responsibility-targets:
+    file: ${CYRENE_RESPONSIBILITY_TARGETS_HOST_FILE:?provision the owner-only host responsibility target config}

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "kind": "github_repository",
+      "id": "REPLACE_WITH_DECIMAL_GITHUB_REPOSITORY_ID",
+      "label": "OWNER/REPOSITORY",
+      "uri": "https://github.com/OWNER/REPOSITORY",
+      "bindingId": "UNBOUND_PENDING_EXCHANGE_GITHUB_REBIND"
+    }
+  ]
+}

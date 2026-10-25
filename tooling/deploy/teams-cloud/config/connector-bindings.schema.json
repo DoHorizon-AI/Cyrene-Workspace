@@ -17,7 +17,7 @@
         "properties": {
           "bindingId": {"type": "string", "minLength": 1},
           "connectionRef": {"type": "string", "format": "uuid"},
-          "providerId": {"enum": ["github", "huggingface", "azure", "gcp", "runpod"]},
+          "providerId": {"enum": ["github", "huggingface", "azure", "gcp", "runpod", "computer"]},
           "profileRef": {"type": "string", "minLength": 1},
           "tools": {
             "type": "array",
@@ -30,7 +30,7 @@
                 "toolId": {"type": "string", "minLength": 1},
                 "operationId": {"type": "string", "minLength": 1},
                 "resourceProjection": {
-                  "enum": ["empty", "profile", "github_repository", "github_pull_request", "github_ci", "github_commit", "github_issue", "huggingface_models_list", "huggingface_datasets_list", "huggingface_spaces_list", "huggingface_repository", "cloud_target", "cloud_operation"]
+                  "enum": ["empty", "profile", "github_repository", "github_pull_request", "github_ci", "github_commit", "github_issue", "github_actions_run", "github_actions_job", "github_branch", "github_file", "github_pull_request_draft", "huggingface_models_list", "huggingface_datasets_list", "huggingface_spaces_list", "huggingface_repository", "computer_workspace", "computer_file", "computer_directory", "cloud_target", "cloud_operation"]
                 },
                 "mutating": {"type": "boolean"}
               }

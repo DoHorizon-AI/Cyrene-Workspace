@@ -86,6 +86,62 @@ def test_build_plan_rejects_tag_only_external_images(
         build.validate_plan(plan_path)
 
 
+def test_build_plan_pins_private_binary_assets_to_one_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Require an explicit artifact digest and an image reference for the CLI asset."""
+
+    source = tmp_path / "private" / "agy"
+    source.parent.mkdir()
+    source.write_bytes(b"approved arm64 cli")
+    plan = _plan()
+    asset_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    plan["binaryArtifacts"] = [
+        {
+            "id": "antigravity-cli",
+            "version": "1.4.7",
+            "sourcePath": str(source),
+            "sha256": asset_digest,
+            "stagingPath": "runtime-artifacts/antigravity/agy",
+        }
+    ]
+    plan["images"][0]["binaryArtifacts"] = ["antigravity-cli"]
+    plan_path = tmp_path / "build-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    monkeypatch.setattr(build, "_private_artifact", lambda _path: True)
+    assert build.validate_plan(plan_path)["binaryArtifacts"][0]["id"] == "antigravity-cli"
+
+    plan["images"][0]["binaryArtifacts"] = ["missing-cli"]
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    with pytest.raises(build.BuildError, match="unknown or duplicated binary artifact"):
+        build.validate_plan(plan_path)
+
+
+def test_binary_artifact_copy_checks_digest_and_preserves_staging_path(tmp_path: Path) -> None:
+    """Reject mutated CLI bytes and stage a verified private input under the build context."""
+
+    source = tmp_path / "agy"
+    source.write_bytes(b"approved arm64 cli")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    asset = {
+        "id": "antigravity-cli",
+        "version": "1.4.7",
+        "sourcePath": str(source),
+        "sha256": digest,
+        "stagingPath": "runtime-artifacts/antigravity/agy",
+    }
+    staging = tmp_path / "staging"
+    record = build._copy_binary_artifact(asset, staging)
+    staged = staging / "runtime-artifacts/antigravity/agy"
+    assert staged.read_bytes() == source.read_bytes()
+    assert record["sha256"] == digest
+    assert staged.stat().st_mode & 0o777 == 0o555
+
+    asset["sha256"] = "0" * 64
+    with pytest.raises(build.BuildError, match="failed its pinned SHA-256"):
+        build._copy_binary_artifact(asset, tmp_path / "rejected")
+
+
 def _oci_archive(
     *,
     duplicate_layer: bool = False,
