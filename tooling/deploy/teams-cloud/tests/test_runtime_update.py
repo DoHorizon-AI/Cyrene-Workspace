@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -74,6 +75,59 @@ def _edge_status(*, paused: bool, revision: int, active: int = 0) -> dict[str, A
         "oldest_pending_at": None,
         "last_delivered_at": None,
     }
+
+
+def _internal_probe_container(
+    *,
+    container_id: str,
+    service: str,
+    token_path: str,
+    token_source: Path,
+) -> dict[str, Any]:
+    """Build Docker inspect metadata for one locked service and read-only token bind."""
+
+    return {
+        "Id": container_id,
+        "Image": OLD_IMAGE_ID,
+        "Config": {
+            "Image": f"cyrene/{service}:locked-test",
+            "Labels": {
+                "com.docker.compose.project": "cyrene-teams-cloud",
+                "com.docker.compose.service": service,
+            },
+        },
+        "State": {"Running": True, "Paused": False},
+        "HostConfig": {"NetworkMode": "cyrene-teams-cloud_private-network"},
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": str(token_source.resolve()),
+                "Destination": token_path,
+                "RW": False,
+            }
+        ],
+    }
+
+
+def _internal_probe_inspect_output(metadata: dict[str, Any]) -> str:
+    """Serialize only the target identity/network/mount fields read by the probe gate."""
+
+    config = metadata["Config"]
+    state = metadata["State"]
+    host_config = metadata["HostConfig"]
+    return "\n".join(
+        json.dumps(value)
+        for value in (
+            metadata["Id"],
+            metadata["Image"],
+            config["Image"],
+            config["Labels"],
+            state["Running"],
+            state["Paused"],
+            host_config["NetworkMode"],
+            metadata["Mounts"],
+        )
+    )
 
 
 def _active_service(container_id: str, image_id: str, image_ref: str) -> dict[str, Any]:
@@ -1183,11 +1237,22 @@ def test_internal_status_validation_preserves_the_json_document() -> None:
 
 
 def test_final_delivery_readback_consumes_current_status_http_envelope(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Use the real GET/status helper and validator through the final APPLIED check."""
 
     document = _edge_status(paused=False, revision=2)
+    token_path = "/run/secrets/teams-delivery-admin-token"
+    token_source = tmp_path / "delivery-admin-token"
+    token_source.write_text("test-only-token", encoding="ascii")
+    token_source.chmod(0o400)
+    metadata = _internal_probe_container(
+        container_id=OLD_CONTAINER_ID,
+        service="teams-ingress",
+        token_path=token_path,
+        token_source=token_source,
+    )
 
     def run_command(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         url = next(
@@ -1201,6 +1266,11 @@ def test_final_delivery_readback_consumes_current_status_http_envelope(
             "",
         )
 
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: _internal_probe_inspect_output(metadata),
+    )
     monkeypatch.setattr(runtime_update, "_run_command", run_command)
     journal = {
         "edge": {
@@ -1529,6 +1599,368 @@ def test_internal_http_bridge_preserves_nonempty_plugins_spool_timestamps(
     assert isinstance(bridge["document"]["last_delivered_at"], float)
     assert server.visited == [("/_internal/teams/delivery/status", "Bearer test-only-bearer")]
     assert "test-only-bearer" not in response.stdout
+
+
+def test_internal_http_bridge_enforces_total_request_deadline(
+    tmp_path: Path,
+) -> None:
+    """Exit the ephemeral probe process when a peer exceeds its total deadline."""
+
+    class SlowHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            try:
+                time.sleep(1)
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+            except BrokenPipeError:
+                return
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SlowHandler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("test-only-bearer", encoding="ascii")
+    token_file.chmod(0o600)
+    started = time.monotonic()
+    try:
+        response = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                runtime_update._INTERNAL_HTTP_SCRIPT,
+                str(token_file),
+                f"http://127.0.0.1:{server.server_port}/_internal/teams/delivery/status",
+                "GET",
+                "0.2",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    assert response.returncode != 0
+    assert response.stdout == ""
+    assert time.monotonic() - started < 2.5
+
+
+@pytest.mark.parametrize("service", ["teams-ingress", "navigator"])
+def test_internal_status_probe_uses_locked_image_and_only_target_token_mount(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    service: str,
+) -> None:
+    """Launch a bounded sidecar on the target netns with one read-only token bind."""
+
+    container_id = OLD_CONTAINER_ID
+    token_path = (
+        "/run/secrets/teams-delivery-admin-token"
+        if service == "teams-ingress"
+        else runtime_update.NAVIGATOR_TOKEN_FILE
+    )
+    token_source = tmp_path / f"{service}-admin-token"
+    token_source.write_text("do-not-export-test-token", encoding="ascii")
+    token_source.chmod(0o400)
+    metadata = _internal_probe_container(
+        container_id=container_id,
+        service=service,
+        token_path=token_path,
+        token_source=token_source,
+    )
+    status_document = (
+        _edge_status(paused=False, revision=7)
+        if service == "teams-ingress"
+        else _native_navigator_status("accepting")
+    )
+    inspect_calls: list[list[str]] = []
+    run_calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def inspect(argv: list[str], **_kwargs: Any) -> str:
+        inspect_calls.append(argv)
+        return _internal_probe_inspect_output(metadata)
+
+    def run_command(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        run_calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps({"httpStatus": 200, "document": status_document}),
+            "",
+        )
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", inspect)
+    monkeypatch.setattr(runtime_update, "_run_command", run_command)
+    path = (
+        "/_internal/teams/delivery/status"
+        if service == "teams-ingress"
+        else "/internal/v1/executor/drain"
+    )
+
+    response = runtime_update._call_internal_api(
+        ["docker"],
+        container_id,
+        service=service,
+        method="GET",
+        path=path,
+        body=None,
+        timeout_seconds=15,
+    )
+
+    assert len(inspect_calls) == 1
+    assert inspect_calls[0][:3] == ["docker", "inspect", "--format"]
+    assert inspect_calls[0][-1] == container_id
+    assert ".Config.Env" not in inspect_calls[0][3]
+    assert response["_httpStatus"] == 200
+    assert response.get("paused", response.get("mode")) in {False, "accepting"}
+    assert len(run_calls) == 1
+    argv, options = run_calls[0]
+    assert argv[:3] == ["docker", "run", "--rm"]
+    assert "--pull=never" in argv
+    assert argv[argv.index("--network") + 1] == f"container:{container_id}"
+    assert argv[argv.index("--entrypoint") + 1] == "python3"
+    assert argv[argv.index("--user") + 1] == "10001:10001"
+    assert "--read-only" in argv
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert argv[argv.index("--security-opt") + 1] == "no-new-privileges:true"
+    assert argv[argv.index("--memory") + 1] == "64m"
+    assert argv[argv.index("--memory-swap") + 1] == "64m"
+    assert argv[argv.index("--cpus") + 1] == "0.1"
+    assert argv[argv.index("--pids-limit") + 1] == "32"
+    assert argv[argv.index("--mount") + 1] == (
+        f"type=bind,src={token_source.resolve()},dst={token_path},readonly"
+    )
+    assert argv.count("--mount") == 1
+    image_index = argv.index(OLD_IMAGE_ID)
+    assert argv[image_index + 1] == "-c"
+    assert argv[-1] == "13.0"
+    assert "--publish" not in argv and "-p" not in argv and "--label" not in argv
+    assert options["timeout_seconds"] == 15
+    assert options["external_mutation"] is False
+    assert "do-not-export-test-token" not in repr(argv)
+    assert "do-not-export-test-token" not in json.dumps(response)
+
+
+def test_internal_control_post_http_200_returns_validated_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Send one CAS request through the bounded sidecar and retain its HTTP envelope."""
+
+    container_id = OLD_CONTAINER_ID
+    token_path = "/run/secrets/teams-delivery-admin-token"
+    token_source = tmp_path / "admin-token"
+    token_source.write_text("test-only-token", encoding="ascii")
+    token_source.chmod(0o400)
+    metadata = _internal_probe_container(
+        container_id=container_id,
+        service="teams-ingress",
+        token_path=token_path,
+        token_source=token_source,
+    )
+    body = {"holder": OPERATION_ID, "expected_revision": 4}
+    document = {"paused": True, "revision": 5}
+    run_options: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: _internal_probe_inspect_output(metadata),
+    )
+
+    def successful_probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        run_options.append(kwargs)
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps({"httpStatus": 200, "document": document}),
+            "",
+        )
+
+    monkeypatch.setattr(runtime_update, "_run_command", successful_probe)
+    response = runtime_update._call_internal_api(
+        ["docker"],
+        container_id,
+        service="teams-ingress",
+        method="POST",
+        path="/_internal/teams/delivery/pause",
+        body=body,
+        timeout_seconds=15,
+    )
+
+    assert response == {"paused": True, "revision": 5, "_httpStatus": 200}
+    assert len(run_options) == 1
+    assert run_options[0]["external_mutation"] is True
+    assert run_options[0]["input_data"] == json.dumps(body, sort_keys=True, separators=(",", ":"))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("duplicate-token-mount", "missing or ambiguous"),
+        ("writable-token-mount", "not a read-only file bind"),
+        ("ambiguous-token-source", "not a read-only file bind"),
+        ("wrong-service-label", "target identity is unavailable"),
+        ("bad-image-id", "target identity is unavailable"),
+        ("stopped-target", "target identity is unavailable"),
+        ("host-network", "target identity is unavailable"),
+    ],
+)
+def test_internal_status_probe_rejects_unverified_target_or_token_mount(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    """Refuse ambiguous mounts, wrong target identity, and unsafe network state."""
+
+    container_id = OLD_CONTAINER_ID
+    token_path = "/run/secrets/teams-delivery-admin-token"
+    token_source = tmp_path / (
+        "admin,token" if mutation == "ambiguous-token-source" else "admin-token"
+    )
+    token_source.write_text("test-only-token", encoding="ascii")
+    token_source.chmod(0o400)
+    metadata = _internal_probe_container(
+        container_id=container_id,
+        service="teams-ingress",
+        token_path=token_path,
+        token_source=token_source,
+    )
+    if mutation == "duplicate-token-mount":
+        metadata["Mounts"].append(copy.deepcopy(metadata["Mounts"][0]))
+    elif mutation == "writable-token-mount":
+        metadata["Mounts"][0]["RW"] = True
+    elif mutation == "wrong-service-label":
+        metadata["Config"]["Labels"]["com.docker.compose.service"] = "exchange"
+    elif mutation == "bad-image-id":
+        metadata["Image"] = "not-an-image-id"
+    elif mutation == "stopped-target":
+        metadata["State"]["Running"] = False
+    elif mutation == "host-network":
+        metadata["HostConfig"]["NetworkMode"] = "host"
+
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: _internal_probe_inspect_output(metadata),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_run_command",
+        lambda *_args, **_kwargs: pytest.fail("unsafe target must not start a probe container"),
+    )
+    with pytest.raises(runtime_update.RuntimeUpdateError, match=message):
+        runtime_update._call_internal_api(
+            ["docker"],
+            container_id,
+            service="teams-ingress",
+            method="GET",
+            path="/_internal/teams/delivery/status",
+            body=None,
+            timeout_seconds=15,
+        )
+
+
+def test_internal_control_post_timeout_remains_outcome_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Propagate Docker run timeout as unknown so the caller cannot replay a POST."""
+
+    container_id = OLD_CONTAINER_ID
+    token_path = "/run/secrets/teams-delivery-admin-token"
+    token_source = tmp_path / "admin-token"
+    token_source.write_text("test-only-token", encoding="ascii")
+    token_source.chmod(0o400)
+    metadata = _internal_probe_container(
+        container_id=container_id,
+        service="teams-ingress",
+        token_path=token_path,
+        token_source=token_source,
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: _internal_probe_inspect_output(metadata),
+    )
+
+    def timed_out(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(runtime_update.subprocess, "run", timed_out)
+    with pytest.raises(
+        runtime_update.RuntimeUpdateOutcomeUnknown, match="daemon outcome is unknown"
+    ):
+        runtime_update._call_internal_api(
+            ["docker"],
+            container_id,
+            service="teams-ingress",
+            method="POST",
+            path="/_internal/teams/delivery/pause",
+            body={"holder": OPERATION_ID, "expected_revision": 1},
+            timeout_seconds=15,
+        )
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        (2, json.dumps({"bridgeError": "internal_request_failed"})),
+        (0, json.dumps({"httpStatus": 503, "document": {}})),
+    ],
+)
+def test_internal_control_post_failure_is_not_retried_or_reported_as_known_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+) -> None:
+    """Treat bridge failure or non-success POST status as an unknown operation result."""
+
+    container_id = OLD_CONTAINER_ID
+    token_path = "/run/secrets/teams-delivery-admin-token"
+    token_source = tmp_path / "admin-token"
+    token_source.write_text("test-only-token", encoding="ascii")
+    token_source.chmod(0o400)
+    metadata = _internal_probe_container(
+        container_id=container_id,
+        service="teams-ingress",
+        token_path=token_path,
+        token_source=token_source,
+    )
+    run_options: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: _internal_probe_inspect_output(metadata),
+    )
+
+    def failed_probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        run_options.append(kwargs)
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+    monkeypatch.setattr(runtime_update, "_run_command", failed_probe)
+    with pytest.raises(runtime_update.RuntimeUpdateOutcomeUnknown, match="outcome is unknown"):
+        runtime_update._call_internal_api(
+            ["docker"],
+            container_id,
+            service="teams-ingress",
+            method="POST",
+            path="/_internal/teams/delivery/pause",
+            body={"holder": OPERATION_ID, "expected_revision": 1},
+            timeout_seconds=15,
+        )
+    assert len(run_options) == 1
+    assert run_options[0]["external_mutation"] is True
 
 
 def test_lost_edge_resume_reply_reacquires_the_pause_with_a_fresh_cas_revision(

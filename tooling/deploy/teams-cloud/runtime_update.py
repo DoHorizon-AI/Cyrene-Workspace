@@ -3786,6 +3786,7 @@ def _decode_json_output(text: str, label: str) -> Any:
 
 _INTERNAL_HTTP_SCRIPT = r"""
 import json
+import signal
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -3797,6 +3798,8 @@ class RejectRedirectHandler(HTTPRedirectHandler):
 
 token_path, url, method = sys.argv[1:4]
 request_timeout = float(sys.argv[4])
+# Keep the one-shot container bounded even if a peer sends a slow response.
+signal.setitimer(signal.ITIMER_REAL, request_timeout)
 try:
     token = Path(token_path).read_text(encoding="ascii").strip()
     payload = sys.stdin.read(65537)
@@ -3845,6 +3848,94 @@ except (OSError, UnicodeError, ValueError, URLError):
 """
 
 
+def _internal_control_probe_target(
+    docker_prefix: list[str],
+    container_id: str,
+    *,
+    service: str,
+    token_path: str,
+) -> tuple[str, str, str]:
+    """Resolve one running target image and its sole read-only control token mount."""
+
+    inspect_format = (
+        "{{json .Id}}\n"
+        "{{json .Image}}\n"
+        "{{json .Config.Image}}\n"
+        "{{json .Config.Labels}}\n"
+        "{{json .State.Running}}\n"
+        "{{json .State.Paused}}\n"
+        "{{json .HostConfig.NetworkMode}}\n"
+        "{{json .Mounts}}"
+    )
+    output = _checked_stdout(
+        [*docker_prefix, "inspect", "--format", inspect_format, container_id],
+        label="internal control target inspection",
+        timeout_seconds=15,
+    )
+    try:
+        inspected = [
+            _decode_json_output(line, "internal control target metadata")
+            for line in output.splitlines()
+        ]
+    except RuntimeUpdateError as error:
+        raise RuntimeUpdateError("internal control target inspection is malformed") from error
+    if len(inspected) != 8:
+        raise RuntimeUpdateError("internal control target inspection is incomplete")
+    actual_id, image_id, image_ref, labels, running, paused, network_mode, mounts = inspected
+    project = labels.get("com.docker.compose.project") if isinstance(labels, dict) else None
+    service_label = labels.get("com.docker.compose.service") if isinstance(labels, dict) else None
+    if (
+        not isinstance(actual_id, str)
+        or FULL_CONTAINER_ID_RE.fullmatch(actual_id) is None
+        or not actual_id.startswith(container_id)
+        or not isinstance(image_id, str)
+        or IMAGE_ID_RE.fullmatch(image_id) is None
+        or not isinstance(image_ref, str)
+        or not image_ref
+        or not isinstance(project, str)
+        or not project
+        or service_label != service
+        or running is not True
+        or paused is not False
+        or not isinstance(network_mode, str)
+        or not network_mode
+        or network_mode == "host"
+        or not isinstance(mounts, list)
+    ):
+        raise RuntimeUpdateError("internal control target identity is unavailable")
+
+    token_mounts = [
+        mount
+        for mount in mounts
+        if isinstance(mount, dict) and mount.get("Destination") == token_path
+    ]
+    if len(token_mounts) != 1:
+        raise RuntimeUpdateError("internal control token mount is missing or ambiguous")
+    mount = token_mounts[0]
+    token_source = mount.get("Source")
+    if (
+        mount.get("Type") != "bind"
+        or mount.get("RW") is not False
+        or not isinstance(token_source, str)
+        or not Path(token_source).is_absolute()
+        or any(character in token_source for character in ',\r\n"')
+    ):
+        raise RuntimeUpdateError("internal control token mount is not a read-only file bind")
+    token_source_path = Path(token_source)
+    try:
+        source_metadata = token_source_path.lstat()
+        resolved_source = token_source_path.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeUpdateError("internal control token source is unavailable") from error
+    if (
+        stat.S_ISLNK(source_metadata.st_mode)
+        or not stat.S_ISREG(source_metadata.st_mode)
+        or resolved_source != token_source_path
+    ):
+        raise RuntimeUpdateError("internal control token source is not a regular file")
+    return actual_id, image_id, str(resolved_source)
+
+
 def _call_internal_api(
     docker_prefix: list[str],
     container_id: str,
@@ -3879,13 +3970,41 @@ def _call_internal_api(
         raise RuntimeUpdateError("internal control service is unsupported")
     if (method, path) not in allowed or method not in {"GET", "POST"}:
         raise RuntimeUpdateError("internal control route is outside the closed allowlist")
+    target_id, image_id, token_source = _internal_control_probe_target(
+        docker_prefix,
+        container_id,
+        service=service,
+        token_path=token_path,
+    )
     request_body = "" if body is None else json.dumps(body, sort_keys=True, separators=(",", ":"))
     argv = [
         *docker_prefix,
-        "exec",
-        "-i",
-        container_id,
+        "run",
+        "--rm",
+        "--pull=never",
+        "--interactive",
+        "--network",
+        f"container:{target_id}",
+        "--entrypoint",
         "python3",
+        "--user",
+        "10001:10001",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--memory",
+        "64m",
+        "--memory-swap",
+        "64m",
+        "--cpus",
+        "0.1",
+        "--pids-limit",
+        "32",
+        "--mount",
+        f"type=bind,src={token_source},dst={token_path},readonly",
+        image_id,
         "-c",
         _INTERNAL_HTTP_SCRIPT,
         token_path,
@@ -3893,21 +4012,51 @@ def _call_internal_api(
         method,
         str(max(1.0, timeout_seconds - 2.0)),
     ]
-    result = _run_command(argv, input_data=request_body, timeout_seconds=timeout_seconds)
+    result = _run_command(
+        argv,
+        input_data=request_body,
+        timeout_seconds=timeout_seconds,
+        external_mutation=method == "POST",
+    )
     if result.returncode != 0:
+        if method == "POST":
+            raise RuntimeUpdateOutcomeUnknown(
+                f"internal {service} POST probe failed; operation outcome is unknown"
+            )
         raise RuntimeUpdateError(f"internal {service} control request did not complete")
-    envelope = _decode_json_output(result.stdout, f"internal {service} control request")
+    try:
+        envelope = _decode_json_output(result.stdout, f"internal {service} control request")
+    except RuntimeUpdateError as error:
+        if method == "POST":
+            raise RuntimeUpdateOutcomeUnknown(
+                f"internal {service} POST probe returned an unreadable response"
+            ) from error
+        raise
     if not isinstance(envelope, dict) or set(envelope) not in (
         {"httpStatus", "document"},
         {"bridgeError"},
     ):
+        if method == "POST":
+            raise RuntimeUpdateOutcomeUnknown(
+                f"internal {service} POST probe response is ambiguous"
+            )
         raise RuntimeUpdateError(f"internal {service} control response is malformed")
     if "bridgeError" in envelope:
+        if method == "POST":
+            raise RuntimeUpdateOutcomeUnknown(f"internal {service} POST probe outcome is unknown")
         raise RuntimeUpdateError(f"internal {service} control request failed")
     if not isinstance(envelope.get("httpStatus"), int) or not isinstance(
         envelope.get("document"), dict
     ):
+        if method == "POST":
+            raise RuntimeUpdateOutcomeUnknown(
+                f"internal {service} POST probe response is ambiguous"
+            )
         raise RuntimeUpdateError(f"internal {service} control response is malformed")
+    if method == "POST" and envelope["httpStatus"] != 200:
+        raise RuntimeUpdateOutcomeUnknown(
+            f"internal {service} POST returned a non-success status; operation outcome is unknown"
+        )
     response = dict(envelope["document"])
     response["_httpStatus"] = envelope["httpStatus"]
     return response
