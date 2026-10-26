@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import http.client
 import ipaddress
 import itertools
 import json
@@ -29,6 +30,10 @@ from build_arm64 import BuildError
 CANARY_STATUS = "CANARY_READY_NOT_ACCEPTED"
 CANARY_BLOCKED_STATUS = "CANARY_BLOCKED"
 ACCEPTED_PROBE_NAME = "REAL_VM_INTERNAL_DIRECT_CODEBUDDY_ACP"
+ACTIVE_CADDYFILE = Path("/etc/caddy/Caddyfile")
+CADDY_SYSTEMD_UNIT = "caddy.service"
+CADDY_ADMIN_ADDRESS = ("127.0.0.1", 2019)
+MAX_CADDY_ADMIN_CONFIG_BYTES = 4 * 1024**2
 
 
 class CanaryGateError(ValueError):
@@ -110,6 +115,74 @@ def _adapt_caddyfile(caddy_binary: str, caddyfile: Path) -> dict[str, Any]:
     if not isinstance(adapted, dict):
         raise CanaryGateError("Caddy returned an unsupported adapted configuration")
     return adapted
+
+
+def _verify_live_caddy_process(
+    *,
+    active_file: Path,
+    caddy_binary: str,
+    proc_root: Path = Path("/proc"),
+) -> None:
+    """Tie the active systemd Caddy process to the fixed Caddyfile path."""
+
+    if active_file.resolve() != ACTIVE_CADDYFILE.resolve():
+        raise CanaryGateError("live Caddy configuration must be /etc/caddy/Caddyfile")
+    _checked_command(
+        ["systemctl", "is-active", "--quiet", CADDY_SYSTEMD_UNIT],
+        "Caddy systemd active-state readback",
+    )
+    pid_text = _checked_command(
+        ["systemctl", "show", CADDY_SYSTEMD_UNIT, "--property=MainPID", "--value"],
+        "Caddy systemd process readback",
+    ).strip()
+    if not pid_text.isdigit() or int(pid_text) <= 1:
+        raise CanaryGateError("Caddy systemd unit has no active main process")
+    process_root = proc_root / pid_text
+    try:
+        arguments = [
+            value.decode("utf-8")
+            for value in (process_root / "cmdline").read_bytes().split(b"\0")
+            if value
+        ]
+        process_binary = (process_root / "exe").resolve()
+    except (OSError, UnicodeDecodeError) as error:
+        raise CanaryGateError("live Caddy process arguments are unreadable") from error
+    config_positions = [index for index, value in enumerate(arguments) if value == "--config"]
+    if (
+        process_binary != Path(caddy_binary).resolve()
+        or len(arguments) < 2
+        or arguments[1] != "run"
+        or "--resume" in arguments
+        or len(config_positions) != 1
+        or config_positions[0] + 1 >= len(arguments)
+        or Path(arguments[config_positions[0] + 1]).resolve() != active_file.resolve()
+    ):
+        raise CanaryGateError("live Caddy process does not load the selected file without --resume")
+
+
+def _read_live_caddy_config() -> dict[str, Any]:
+    """Fetch the active configuration from Caddy's loopback-only read API."""
+
+    connection = http.client.HTTPConnection(*CADDY_ADMIN_ADDRESS, timeout=5.0)
+    try:
+        connection.request("GET", "/config/")
+        response = connection.getresponse()
+        if response.status != 200:
+            raise CanaryGateError("Caddy admin API did not return its active configuration")
+        payload = response.read(MAX_CADDY_ADMIN_CONFIG_BYTES + 1)
+        if len(payload) > MAX_CADDY_ADMIN_CONFIG_BYTES:
+            raise CanaryGateError("Caddy admin configuration exceeds the read limit")
+    except (OSError, http.client.HTTPException) as error:
+        raise CanaryGateError("Caddy loopback admin configuration read failed") from error
+    finally:
+        connection.close()
+    try:
+        config = json.loads(payload, object_pairs_hook=preflight._unique_json_object)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise CanaryGateError("Caddy admin API returned invalid configuration JSON") from error
+    if not isinstance(config, dict):
+        raise CanaryGateError("Caddy admin API configuration is not a JSON object")
+    return config
 
 
 def _route_match_combinations(
@@ -240,39 +313,6 @@ def _valid_dns_name(value: str) -> bool:
     )
 
 
-def _tls_tree_has_value(value: Any, *, expected: str, accepted_keys: set[str]) -> bool:
-    """Find an exact TLS field value under known Caddy JSON keys."""
-
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key in accepted_keys and (
-                child == expected or (isinstance(child, list) and expected in child)
-            ):
-                return True
-            if _tls_tree_has_value(child, expected=expected, accepted_keys=accepted_keys):
-                return True
-    elif isinstance(value, list):
-        return any(
-            _tls_tree_has_value(child, expected=expected, accepted_keys=accepted_keys)
-            for child in value
-        )
-    return False
-
-
-def _contains_insecure_tls_option(value: Any) -> bool:
-    """Reject any adapted TLS subtree that disables certificate verification."""
-
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key in {"insecure_skip_verify", "tls_insecure_skip_verify"} and child is True:
-                return True
-            if _contains_insecure_tls_option(child):
-                return True
-    elif isinstance(value, list):
-        return any(_contains_insecure_tls_option(child) for child in value)
-    return False
-
-
 def _at_path(document: Any, path: tuple[str | int, ...]) -> Any:
     """Return one adapted JSON node by its stable object/list path."""
 
@@ -313,29 +353,38 @@ def _verify_candidate_caddy(
     if not isinstance(upstreams, list) or len(upstreams) != 1:
         raise CanaryGateError("candidate callback must have exactly one HTTPS upstream")
     upstream = upstreams[0]
-    if not isinstance(upstream, dict) or upstream.get("dial") != "127.0.0.1:18443":
-        raise CanaryGateError("candidate callback must target loopback port 18443")
+    if (
+        not isinstance(upstream, dict)
+        or set(upstream) != {"dial"}
+        or upstream.get("dial") != "127.0.0.1:18443"
+    ):
+        raise CanaryGateError(
+            "candidate callback upstream must be only loopback dial 127.0.0.1:18443"
+        )
     transport = candidate_handler.get("transport")
-    tls = transport.get("tls") if isinstance(transport, dict) else None
     if (
         not isinstance(transport, dict)
+        or set(transport) != {"protocol", "tls"}
         or transport.get("protocol") != "http"
-        or not isinstance(tls, dict)
+        or not isinstance(transport.get("tls"), dict)
     ):
-        raise CanaryGateError("candidate callback must use the HTTPS HTTP transport")
+        raise CanaryGateError(
+            "candidate callback transport must contain only HTTP protocol and TLS"
+        )
+    tls = transport["tls"]
     hostname = candidate_hosts[0]
-    if not _tls_tree_has_value(
-        tls, expected=hostname, accepted_keys={"server_name", "tls_server_name"}
-    ):
+    if set(tls) != {"ca", "server_name"}:
+        raise CanaryGateError("candidate backend TLS options are outside the CA/SNI allowlist")
+    if tls.get("server_name") != hostname:
         raise CanaryGateError("candidate backend TLS must use the callback hostname as SNI")
-    if not _tls_tree_has_value(
-        tls,
-        expected=str(backend_ca_file),
-        accepted_keys={"root_ca_pem_files", "pem_files", "ca_certificates"},
+    ca = tls.get("ca")
+    if (
+        not isinstance(ca, dict)
+        or set(ca) != {"pem_files", "provider"}
+        or ca.get("provider") != "file"
+        or ca.get("pem_files") != [str(backend_ca_file)]
     ):
-        raise CanaryGateError("candidate backend TLS must trust the selected public CA file")
-    if _contains_insecure_tls_option(tls):
-        raise CanaryGateError("candidate backend TLS must verify the certificate chain")
+        raise CanaryGateError("candidate backend TLS must trust only the selected public CA file")
 
     if _normalized_caddy(source, source_path) != _normalized_caddy(candidate, candidate_path):
         raise CanaryGateError("candidate Caddy changes routes outside the callback upstream/TLS")
@@ -373,8 +422,11 @@ def _validate_caddy_inputs(
         or receipt.get("otherProxyRoutesChanged") is not False
     ):
         raise CanaryGateError("candidate Caddyfile does not match its unchanged-source receipt")
+    _verify_live_caddy_process(active_file=active_file, caddy_binary=caddy_binary)
     source = _adapt_caddyfile(caddy_binary, source_file)
     candidate = _adapt_caddyfile(caddy_binary, candidate_file)
+    if _read_live_caddy_config() != source:
+        raise CanaryGateError("live Caddy admin configuration differs from the active Caddyfile")
     hostname, _hosts = _verify_candidate_caddy(
         source=source,
         candidate=candidate,
@@ -707,7 +759,6 @@ def run_canary_gate(
     image_lock_path: Path,
     secrets_dir: Path,
     config_dir: Path,
-    active_caddyfile: Path,
     source_caddyfile: Path,
     candidate_caddyfile: Path,
     caddy_receipt: Path,
@@ -785,7 +836,7 @@ def run_canary_gate(
     # 第二阶段：比较现有与候选宿主机 Caddy 配置。
     hostname, source_digest, candidate_digest = _validate_caddy_inputs(
         source_file=source_caddyfile,
-        active_file=active_caddyfile,
+        active_file=ACTIVE_CADDYFILE,
         candidate_file=candidate_caddyfile,
         receipt_file=caddy_receipt,
         backend_ca_file=backend_ca_file,
@@ -855,7 +906,6 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--image-lock", type=Path, required=True)
     parser.add_argument("--secrets-dir", type=Path, required=True)
     parser.add_argument("--config-dir", type=Path, required=True)
-    parser.add_argument("--active-caddyfile", type=Path, required=True)
     parser.add_argument("--source-caddyfile", type=Path, required=True)
     parser.add_argument("--candidate-caddyfile", type=Path, required=True)
     parser.add_argument("--caddy-receipt", type=Path, required=True)
@@ -885,7 +935,6 @@ def main() -> int:
             image_lock_path=arguments.image_lock.resolve(),
             secrets_dir=arguments.secrets_dir.resolve(),
             config_dir=arguments.config_dir.resolve(),
-            active_caddyfile=arguments.active_caddyfile.resolve(),
             source_caddyfile=arguments.source_caddyfile.resolve(),
             candidate_caddyfile=arguments.candidate_caddyfile.resolve(),
             caddy_receipt=arguments.caddy_receipt.resolve(),

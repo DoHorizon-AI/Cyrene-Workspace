@@ -59,7 +59,7 @@ def _adapted(
                 "protocol": "http",
                 "tls": {
                     "server_name": HOST,
-                    "root_ca_pem_files": [ca_path],
+                    "ca": {"provider": "file", "pem_files": [ca_path]},
                 },
             }
             if candidate
@@ -131,10 +131,15 @@ def test_caddy_compare_rejects_any_other_front_change() -> None:
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ("upstream", "loopback port 18443"),
+        ("upstream", "upstream must be only loopback dial"),
         ("sni", "callback hostname as SNI"),
-        ("ca", "selected public CA file"),
-        ("skip_verify", "verify the certificate chain"),
+        ("ca", "trust only the selected public CA file"),
+        ("extra_ca", "trust only the selected public CA file"),
+        ("wrong_trust_provider", "trust only the selected public CA file"),
+        ("extra_tls_option", "outside the CA/SNI allowlist"),
+        ("except_ports", "outside the CA/SNI allowlist"),
+        ("extra_transport_option", "only HTTP protocol and TLS"),
+        ("extra_upstream_option", "upstream must be only loopback dial"),
     ],
 )
 def test_caddy_compare_rejects_unsafe_backend_transport(change: str, message: str) -> None:
@@ -150,9 +155,19 @@ def test_caddy_compare_rejects_unsafe_backend_transport(change: str, message: st
     elif change == "sni":
         callback["transport"]["tls"]["server_name"] = "wrong.example.test"
     elif change == "ca":
-        callback["transport"]["tls"]["root_ca_pem_files"] = ["/tmp/other-ca.pem"]
-    elif change == "skip_verify":
+        callback["transport"]["tls"]["ca"]["pem_files"] = ["/tmp/other-ca.pem"]
+    elif change == "extra_ca":
+        callback["transport"]["tls"]["ca"]["pem_files"].append("/tmp/other-ca.pem")
+    elif change == "wrong_trust_provider":
+        callback["transport"]["tls"]["ca"]["provider"] = "system"
+    elif change == "extra_tls_option":
         callback["transport"]["tls"]["insecure_skip_verify"] = True
+    elif change == "except_ports":
+        callback["transport"]["tls"]["except_ports"] = ["18443"]
+    elif change == "extra_transport_option":
+        callback["transport"]["keepalive"] = "off"
+    elif change == "extra_upstream_option":
+        callback["upstreams"][0]["max_requests"] = 1
 
     with pytest.raises(canary.CanaryGateError, match=message):
         canary._verify_candidate_caddy(
@@ -228,6 +243,8 @@ def test_caddyfile_receipt_binds_the_exact_source_and_candidate_hashes(
             ca_path=str(ca_file),
         ),
     )
+    monkeypatch.setattr(canary, "_verify_live_caddy_process", lambda **_kwargs: None)
+    monkeypatch.setattr(canary, "_read_live_caddy_config", lambda: _adapted(candidate=False))
 
     hostname, source_hash, candidate_hash = canary._validate_caddy_inputs(
         active_file=active,
@@ -263,6 +280,143 @@ def test_caddyfile_receipt_binds_the_exact_source_and_candidate_hashes(
             backend_ca_file=ca_file,
             caddy_binary="caddy",
         )
+
+
+def test_live_caddy_admin_readback_must_equal_active_file_adaptation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Refuse a valid candidate if Caddy's in-memory config differs from its active file."""
+
+    monkeypatch.setattr(canary.preflight, "_private_artifact", lambda _path: True)
+    source = tmp_path / "baseline.Caddyfile"
+    active = tmp_path / "active.Caddyfile"
+    candidate = tmp_path / "candidate.Caddyfile"
+    receipt = tmp_path / "receipt.json"
+    ca_file = tmp_path / "ca.pem"
+    source.write_text("baseline\n", encoding="utf-8")
+    active.write_text("baseline\n", encoding="utf-8")
+    candidate.write_text("candidate\n", encoding="utf-8")
+    ca_file.write_text("public ca\n", encoding="utf-8")
+    receipt.write_text(
+        json.dumps(
+            {
+                "sourceSha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "candidateSha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+                "activeConfigChanged": False,
+                "otherProxyRoutesChanged": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        canary,
+        "_adapt_caddyfile",
+        lambda _binary, path: _adapted(candidate=path == candidate, ca_path=str(ca_file)),
+    )
+    monkeypatch.setattr(canary, "_verify_live_caddy_process", lambda **_kwargs: None)
+    monkeypatch.setattr(canary, "_read_live_caddy_config", lambda: {"apps": {}})
+
+    with pytest.raises(canary.CanaryGateError, match="admin configuration differs"):
+        canary._validate_caddy_inputs(
+            active_file=active,
+            source_file=source,
+            candidate_file=candidate,
+            receipt_file=receipt,
+            backend_ca_file=ca_file,
+            caddy_binary="caddy",
+        )
+
+
+def test_live_caddy_process_must_load_fixed_config_without_resume(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Tie the active path to Caddy's systemd MainPID and reject resume mode."""
+
+    binary = tmp_path / "caddy"
+    binary.write_bytes(b"caddy binary fixture")
+    proc_root = tmp_path / "proc"
+    process_root = proc_root / "4321"
+    process_root.mkdir(parents=True)
+    (process_root / "exe").symlink_to(binary)
+    commandline = process_root / "cmdline"
+    command = [
+        str(binary),
+        "run",
+        "--environ",
+        "--config",
+        str(canary.ACTIVE_CADDYFILE),
+    ]
+    commandline.write_bytes(b"\0".join(value.encode() for value in command) + b"\0")
+
+    def checked(argv: list[str], _label: str, **_kwargs: Any) -> str:
+        if argv == ["systemctl", "is-active", "--quiet", canary.CADDY_SYSTEMD_UNIT]:
+            return ""
+        if argv == [
+            "systemctl",
+            "show",
+            canary.CADDY_SYSTEMD_UNIT,
+            "--property=MainPID",
+            "--value",
+        ]:
+            return "4321\n"
+        raise AssertionError("unexpected systemd read command")
+
+    monkeypatch.setattr(canary, "_checked_command", checked)
+    canary._verify_live_caddy_process(
+        active_file=canary.ACTIVE_CADDYFILE,
+        caddy_binary=str(binary),
+        proc_root=proc_root,
+    )
+
+    commandline.write_bytes(b"\0".join(value.encode() for value in [*command, "--resume"]) + b"\0")
+    with pytest.raises(canary.CanaryGateError, match="does not load the selected file"):
+        canary._verify_live_caddy_process(
+            active_file=canary.ACTIVE_CADDYFILE,
+            caddy_binary=str(binary),
+            proc_root=proc_root,
+        )
+
+    with pytest.raises(canary.CanaryGateError, match="must be /etc/caddy/Caddyfile"):
+        canary._verify_live_caddy_process(
+            active_file=tmp_path / "arbitrary.Caddyfile",
+            caddy_binary=str(binary),
+            proc_root=proc_root,
+        )
+
+
+def test_live_caddy_configuration_uses_loopback_read_only_admin_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read active Caddy state through a local GET and never issue an admin mutation."""
+
+    expected = _adapted(candidate=False)
+    requests: list[tuple[str, str]] = []
+
+    class Response:
+        status = 200
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(expected).encode()
+
+    class Connection:
+        def __init__(self, host: str, port: int, *, timeout: float) -> None:
+            assert (host, port) == canary.CADDY_ADMIN_ADDRESS
+            assert timeout == 5.0
+
+        def request(self, method: str, path: str) -> None:
+            requests.append((method, path))
+
+        def getresponse(self) -> Response:
+            return Response()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(canary.http.client, "HTTPConnection", Connection)
+    assert canary._read_live_caddy_config() == expected
+    assert requests == [("GET", "/config/")]
 
 
 @pytest.mark.parametrize("with_ca", [False, True])
@@ -608,7 +762,6 @@ def test_readiness_result_never_means_deployment_acceptance(
         image_lock_path=tmp_path / "image-lock.json",
         secrets_dir=tmp_path / "secrets",
         config_dir=tmp_path / "config",
-        active_caddyfile=tmp_path / "active.Caddyfile",
         source_caddyfile=tmp_path / "baseline.Caddyfile",
         candidate_caddyfile=tmp_path / "candidate.Caddyfile",
         caddy_receipt=tmp_path / "receipt.json",
