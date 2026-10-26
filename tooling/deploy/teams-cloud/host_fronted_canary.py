@@ -539,6 +539,36 @@ def _locked_image_ids(image_lock: dict[str, Any]) -> dict[str, str]:
     return images
 
 
+def _locked_navigator_image_id(image_lock: dict[str, Any], *, navigator_image: str) -> str:
+    """Return the exact DSH executor image ID used by Compose's Navigator service.
+
+    The build plan and image lock use the canonical ``dsh-executor`` identity;
+    Compose exposes that image as ``navigator``.
+    构建计划和镜像锁使用 canonical ``dsh-executor`` 名称，Compose 服务名则是 ``navigator``。
+    """
+
+    images = image_lock.get("images")
+    if not isinstance(images, list):
+        raise CanaryGateError("image lock has no valid image list for Navigator")
+    if not isinstance(navigator_image, str) or not navigator_image:
+        raise CanaryGateError("rendered Compose Navigator image is missing")
+    executor_images = [
+        row for row in images if isinstance(row, dict) and row.get("service") == "dsh-executor"
+    ]
+    if len(executor_images) != 1:
+        raise CanaryGateError(
+            "image lock must contain exactly one dsh-executor image for Navigator"
+        )
+    if executor_images[0].get("image") != navigator_image:
+        raise CanaryGateError(
+            "locked dsh-executor image does not match rendered Compose Navigator image"
+        )
+    image_id = executor_images[0].get("imageId")
+    if not isinstance(image_id, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None:
+        raise CanaryGateError("image lock contains a malformed Navigator image ID")
+    return image_id
+
+
 def _expected_stage1_services(compose: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Select long-running base services plus the public callback profile for Stage 1."""
 
@@ -669,6 +699,7 @@ def _verify_acp_probe(
     result_file: Path,
     script_file: Path,
     image_lock: dict[str, Any],
+    navigator_image: str,
     configured_model: str,
     now: datetime,
     maximum_age: timedelta,
@@ -690,14 +721,7 @@ def _verify_acp_probe(
         raise CanaryGateError("official CodeBuddy ACP probe is AUTH_REQUIRED")
     _require_regular_file(result_file, "native ACP probe result", private=True)
     _require_regular_file(script_file, "native ACP probe script", private=True)
-    navigator_images = [
-        row
-        for row in image_lock.get("images", [])
-        if isinstance(row, dict) and row.get("service") == "navigator"
-    ]
-    if len(navigator_images) != 1:
-        raise CanaryGateError("image lock must contain exactly one Navigator image")
-    expected_image_id = navigator_images[0].get("imageId")
+    expected_image_id = _locked_navigator_image_id(image_lock, navigator_image=navigator_image)
     plan_time = _parse_utc_timestamp(plan.get("at"), "ACP probe plan")
     recorded_at = probe_result.get("recordedAt")
     if recorded_at is None:
@@ -843,6 +867,15 @@ def run_canary_gate(
     ):
         raise CanaryGateError("canonical Stage 1 preflight did not return its expected status")
     compose = preflight._compose_config(docker_prefix, compose_files, env_files)
+    compose_services = compose.get("services")
+    navigator_service = (
+        compose_services.get("navigator") if isinstance(compose_services, dict) else None
+    )
+    navigator_image = (
+        navigator_service.get("image") if isinstance(navigator_service, dict) else None
+    )
+    if not isinstance(navigator_image, str) or not navigator_image:
+        raise CanaryGateError("rendered Compose Navigator image is missing")
     service_states = _verify_service_containers(
         compose=compose,
         image_lock=image_lock,
@@ -889,6 +922,7 @@ def run_canary_gate(
         result_file=acp_result_path,
         script_file=acp_script_path,
         image_lock=image_lock,
+        navigator_image=navigator_image,
         configured_model=(
             compose.get("services", {})
             .get("navigator", {})

@@ -27,6 +27,13 @@ canary = __import__("host_fronted_canary")
 HOST = "bot.example.test"
 CA_PATH = "/var/lib/cyrene/staging-root.crt"
 IMAGE_ID = "sha256:" + "a" * 64
+NAVIGATOR_IMAGE = "navigator:test"
+
+
+def _navigator_image_lock() -> dict[str, Any]:
+    """Return the sanitized build-lock row backing Compose's Navigator service."""
+
+    return {"images": [{"service": "dsh-executor", "image": NAVIGATOR_IMAGE, "imageId": IMAGE_ID}]}
 
 
 def _proxy(
@@ -632,6 +639,46 @@ def _probe_documents(
     return plan, result
 
 
+def test_navigator_image_lookup_uses_unique_canonical_build_service() -> None:
+    """Resolve Compose Navigator through the canonical DSH executor lock entry."""
+
+    assert (
+        canary._locked_navigator_image_id(_navigator_image_lock(), navigator_image=NAVIGATOR_IMAGE)
+        == IMAGE_ID
+    )
+
+
+@pytest.mark.parametrize(
+    "images",
+    [
+        [],
+        [{"service": "navigator", "image": "navigator:test", "imageId": IMAGE_ID}],
+        [
+            {"service": "dsh-executor", "image": "navigator:test", "imageId": IMAGE_ID},
+            {"service": "dsh-executor", "image": "navigator:other", "imageId": IMAGE_ID},
+        ],
+    ],
+    ids=["missing-canonical-service", "compose-alias-is-not-lock-identity", "duplicate-service"],
+)
+def test_navigator_image_lookup_rejects_missing_or_ambiguous_build_service(
+    images: list[dict[str, str]],
+) -> None:
+    """Reject absent, Compose-only, and duplicate canonical executor lock rows."""
+
+    with pytest.raises(canary.CanaryGateError, match="exactly one dsh-executor"):
+        canary._locked_navigator_image_id({"images": images}, navigator_image=NAVIGATOR_IMAGE)
+
+
+def test_navigator_image_lookup_requires_exact_compose_image_reference() -> None:
+    """Require the unique canonical lock row to be the image rendered for Navigator."""
+
+    image_lock = _navigator_image_lock()
+    image_lock["images"][0]["image"] = "navigator:other"
+
+    with pytest.raises(canary.CanaryGateError, match="does not match rendered Compose"):
+        canary._locked_navigator_image_id(image_lock, navigator_image=NAVIGATOR_IMAGE)
+
+
 def test_codebuddy_probe_pass_requires_nonce_roundtrip_and_locked_image(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -651,7 +698,8 @@ def test_codebuddy_probe_pass_requires_nonce_roundtrip_and_locked_image(
         result={"processExitCode": 0, "result": inner_result},
         result_file=result_file,
         script_file=script,
-        image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+        image_lock=_navigator_image_lock(),
+        navigator_image=NAVIGATOR_IMAGE,
         configured_model="glm-5.3-flash",
         now=now,
         maximum_age=timedelta(minutes=30),
@@ -678,7 +726,8 @@ def test_legacy_flat_codebuddy_probe_uses_result_file_time(
         result=result,
         result_file=result_file,
         script_file=script,
-        image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+        image_lock=_navigator_image_lock(),
+        navigator_image=NAVIGATOR_IMAGE,
         configured_model="glm-5.3-flash",
         now=now,
         maximum_age=timedelta(minutes=30),
@@ -708,7 +757,8 @@ def test_nested_codebuddy_probe_requires_embedded_completion_timestamp(
             result={"processExitCode": 0, "result": inner_result},
             result_file=result_file,
             script_file=script,
-            image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+            image_lock=_navigator_image_lock(),
+            navigator_image=NAVIGATOR_IMAGE,
             configured_model="glm-5.3-flash",
             now=now,
             maximum_age=timedelta(minutes=30),
@@ -738,7 +788,8 @@ def test_stale_legacy_flat_probe_is_blocked_by_file_time(
             result=result,
             result_file=result_file,
             script_file=script,
-            image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+            image_lock=_navigator_image_lock(),
+            navigator_image=NAVIGATOR_IMAGE,
             configured_model="glm-5.3-flash",
             now=now,
             maximum_age=timedelta(minutes=30),
@@ -764,7 +815,8 @@ def test_codebuddy_auth_required_blocks_canary_readiness(
             result={"processExitCode": 2, "result": inner_result},
             result_file=result_file,
             script_file=script,
-            image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+            image_lock=_navigator_image_lock(),
+            navigator_image=NAVIGATOR_IMAGE,
             configured_model="glm-5.3-flash",
             now=now,
             maximum_age=timedelta(minutes=30),
@@ -790,7 +842,8 @@ def test_codebuddy_probe_must_match_the_configured_model(
             result=result,
             result_file=result_file,
             script_file=script,
-            image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+            image_lock=_navigator_image_lock(),
+            navigator_image=NAVIGATOR_IMAGE,
             configured_model="deepseek-v4.1-flash",
             now=now,
             maximum_age=timedelta(minutes=30),
@@ -805,9 +858,9 @@ def test_readiness_result_never_means_deployment_acceptance(
 
     monkeypatch.setattr(canary, "_validate_private_inputs", lambda **_kwargs: None)
     ingress_image_id = "sha256:" + "3" * 64
-    image_lock = {
-        "images": [{"service": "navigator", "imageId": IMAGE_ID}],
-        "externalImages": {"caddy": {"localImage": "caddy:test", "imageId": ingress_image_id}},
+    image_lock = _navigator_image_lock()
+    image_lock["externalImages"] = {
+        "caddy": {"localImage": "caddy:test", "imageId": ingress_image_id}
     }
     plan = {"status": "reviewed"}
     result = {"status": "AUTH_REQUIRED"}
