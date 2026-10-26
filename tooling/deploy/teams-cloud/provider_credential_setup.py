@@ -268,6 +268,8 @@ def _private_directory(path: Path, *, create: bool = False) -> Path:
 def _atomic_private_write(path: Path, payload: bytes, *, mode: int) -> None:
     """Atomically create or replace one UID 10001 owner-only private file."""
 
+    if os.geteuid() != OWNER_UID:
+        raise SetupError("private_output_owner_invalid")
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise SetupError("private_output_invalid")
     if path.exists():
@@ -292,10 +294,6 @@ def _atomic_private_write(path: Path, payload: bytes, *, mode: int) -> None:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            os.chown(temporary, OWNER_UID, -1)
-        elif hasattr(os, "geteuid") and os.geteuid() != OWNER_UID:
-            raise SetupError("private_output_owner_invalid")
         os.replace(temporary, path)
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
@@ -558,6 +556,8 @@ def _write_hf_candidate_bundle(
 ) -> tuple[str, Path, Path, Path, str]:
     """Atomically publish an owner-only env/seed bundle with an empty config target."""
 
+    if os.geteuid() != OWNER_UID:
+        raise SetupError("private_output_owner_invalid")
     lines, values = _read_private_runtime_env(active_env_file)
     repositories = _canonical_hf_repositories(seed["target_scope"]["repositories"])
     candidate_id = uuid.uuid4().hex
@@ -566,10 +566,6 @@ def _write_hf_candidate_bundle(
     )
     staging = Path(tempfile.mkdtemp(prefix=".pending-", dir=parent))
     os.chmod(staging, 0o700)
-    if os.geteuid() == 0:
-        os.chown(staging, OWNER_UID, -1)
-    elif os.geteuid() != OWNER_UID:
-        raise SetupError("private_output_owner_invalid")
     final_directory = parent / candidate_id
     candidate_seed = staging / "huggingface-oauth.json"
     candidate_env = staging / "runtime.env"
@@ -657,6 +653,8 @@ def _write_runpod_candidate_bundle(
 ) -> tuple[str, Path, Path, Path, str, str]:
     """Publish a validated Runpod key and matching env without touching active secrets."""
 
+    if os.geteuid() != OWNER_UID:
+        raise SetupError("private_output_owner_invalid")
     lines, _values = _read_private_runtime_env(active_env_file)
     candidate_id = uuid.uuid4().hex
     parent = _private_directory(
@@ -664,10 +662,6 @@ def _write_runpod_candidate_bundle(
     )
     staging = Path(tempfile.mkdtemp(prefix=".pending-", dir=parent))
     os.chmod(staging, 0o700)
-    if os.geteuid() == 0:
-        os.chown(staging, OWNER_UID, -1)
-    elif os.geteuid() != OWNER_UID:
-        raise SetupError("private_output_owner_invalid")
     final_directory = parent / candidate_id
     candidate_env = staging / "runtime.env"
     candidate_key = staging / "runpod-api-key"

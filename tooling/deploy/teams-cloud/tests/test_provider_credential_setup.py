@@ -759,6 +759,24 @@ def test_runpod_candidate_requires_an_active_env_input_before_provider_probe(
     assert not (artifacts / "onboarding" / "private" / "provider-candidates").exists()
 
 
+def test_candidate_writers_reject_root_before_creating_owner_only_outputs(
+    private_dirs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The helper is UID-10001-only and does not publish root-owned config children."""
+
+    artifacts, _secrets = private_dirs
+    active_env = _write_active_runtime_env(artifacts)
+    monkeypatch.setattr(setup, "OWNER_UID", 10001)
+    monkeypatch.setattr(setup.os, "geteuid", lambda: 0)
+
+    with pytest.raises(setup.SetupError, match="private_output_owner_invalid"):
+        setup._write_hf_candidate_bundle(artifacts, active_env, _seed_document())
+    with pytest.raises(setup.SetupError, match="private_output_owner_invalid"):
+        setup._write_runpod_candidate_bundle(artifacts, active_env, FAKE_RUNPOD_KEY)
+
+    assert not (artifacts / "onboarding" / "private" / "provider-candidates").exists()
+
+
 @pytest.mark.parametrize(
     ("status", "expected_error"),
     [
