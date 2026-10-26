@@ -30,7 +30,7 @@ import preflight
 import runtime_update
 from build_arm64 import BuildError
 
-PLAN_SCHEMA = "cyrene-teams-stage-transition-plan-v1"
+PLAN_SCHEMA = "cyrene-teams-stage-transition-plan-v2"
 JOURNAL_SCHEMA = "cyrene-teams-stage-transition-journal-v1"
 SELECTION_SCHEMA = "cyrene-teams-runtime-selection-v2"
 DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/stage-transition")
@@ -1484,17 +1484,39 @@ def _live_service_inventory(
             "project live service inventory is incomplete: " + ", ".join(missing)
         )
     if published_container_ids:
+        published_values = {
+            str(item.get("published", ""))
+            for service in expected.values()
+            for item in service.get("ports", [])
+            if isinstance(item, dict)
+        }
+        if (
+            len(published_container_ids) != 1
+            or len(published_values) != 1
+            or not next(iter(published_values)).isdigit()
+        ):
+            raise StageTransitionError(
+                "active Teams ingress must have one exact published TCP port"
+            )
+        published_port = next(iter(published_values))
         published = runtime_update._checked_stdout(
-            [*docker_prefix, "ps", "--filter", "publish=443", "--format", "{{.ID}}"],
-            label="public ingress port ownership",
+            [
+                *docker_prefix,
+                "ps",
+                "--filter",
+                f"publish={published_port}",
+                "--format",
+                "{{.ID}}",
+            ],
+            label="Teams ingress published port ownership",
         )
         port_ids = [value.strip() for value in published.splitlines() if value.strip()]
         if len(published_container_ids) != 1 or len(port_ids) != 1:
             raise StageTransitionError(
-                "TCP 443 is not uniquely owned by the active project ingress"
+                f"published TCP {published_port} is not uniquely owned by the active project ingress"
             )
         if not port_ids[0].startswith(published_container_ids[0][:12]):
-            raise StageTransitionError("TCP 443 has a non-project owner")
+            raise StageTransitionError(f"published TCP {published_port} has a non-project owner")
     return by_service
 
 
@@ -2006,6 +2028,9 @@ def create_plan(
     max_cpus: float,
     required_free_gib: float,
     minimum_mem_available_mib: int,
+    ingress_exposure: str = "public-cutover",
+    host_caddy_binary: str = "/usr/local/bin/caddy",
+    openssl_binary: str = "openssl",
 ) -> dict[str, Any]:
     """Build a private, read-only plan bound to current containers and exact candidate files."""
 
@@ -2014,6 +2039,14 @@ def create_plan(
         raise StageTransitionError(
             "phase must be provider-bootstrap or issued-connector-activation"
         )
+    if ingress_exposure not in {"public-cutover", "host-fronted-staging"}:
+        raise StageTransitionError(
+            "ingress exposure must be public-cutover or host-fronted-staging"
+        )
+    if not isinstance(host_caddy_binary, str) or not host_caddy_binary:
+        raise StageTransitionError("host Caddy executable path is malformed")
+    if not isinstance(openssl_binary, str) or not openssl_binary:
+        raise StageTransitionError("OpenSSL executable path is malformed")
     runtime_update._validate_docker_prefix(docker_prefix)
     if not 60 <= drain_timeout_seconds <= 900 or not 30 <= health_timeout_seconds <= 600:
         raise StageTransitionError("drain/health timeouts are outside their bounded ranges")
@@ -2154,6 +2187,9 @@ def create_plan(
                 if notification_provenance_file is not None
                 else None
             ),
+            ingress_exposure=ingress_exposure,
+            host_caddy_binary=host_caddy_binary,
+            openssl_binary=openssl_binary,
         )
     except (OSError, preflight.PreflightError, BuildError, subprocess.SubprocessError) as error:
         raise StageTransitionError(
@@ -2295,6 +2331,10 @@ def create_plan(
         "candidatePreflight": {
             "mode": candidate_preflight["mode"],
             "phase": candidate_preflight["connectorAuthPhase"],
+            "ingressExposure": ingress_exposure,
+            "hostCaddyBinary": host_caddy_binary,
+            "opensslBinary": openssl_binary,
+            "hostFrontedIngressReadiness": candidate_preflight.get("hostFrontedIngressReadiness"),
             "credentialReadOnlyRuntimeReady": candidate_preflight["credentialReadOnlyRuntimeReady"],
             "fullCloudWriteDeploymentReady": candidate_preflight["fullCloudWriteDeploymentReady"],
             "lifecycleAcceptance": candidate_preflight["lifecycleAcceptance"],
@@ -2426,11 +2466,46 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if (
         not isinstance(readiness, dict)
         or readiness.get("mode") != "connector-auth-readonly"
+        or readiness.get("ingressExposure") not in {"public-cutover", "host-fronted-staging"}
+        or not isinstance(readiness.get("hostCaddyBinary"), str)
+        or not readiness["hostCaddyBinary"]
+        or not isinstance(readiness.get("opensslBinary"), str)
+        or not readiness["opensslBinary"]
         or readiness.get("credentialReadOnlyRuntimeReady") is not True
         or readiness.get("fullCloudWriteDeploymentReady") is not False
         or readiness.get("lifecycleAcceptance") != "NOT_RUN"
     ):
         raise StageTransitionError("stage transition candidate readiness record is malformed")
+    host_fronted_readiness = readiness.get("hostFrontedIngressReadiness")
+    if readiness["ingressExposure"] == "host-fronted-staging":
+        if (
+            not isinstance(host_fronted_readiness, dict)
+            or host_fronted_readiness.get("schemaVersion")
+            != "cyrene-host-fronted-ingress-readiness-v1"
+            or host_fronted_readiness.get("status") != "HOST_FRONTED_STAGING_READY"
+            or host_fronted_readiness.get("ingressExposure") != "host-fronted-staging"
+            or host_fronted_readiness.get("accepted") is not False
+            or host_fronted_readiness.get("deploymentReady") is not False
+            or host_fronted_readiness.get("publicCallbackPostApply") != "NOT_RUN"
+            or host_fronted_readiness.get("backendTls") != "PASS"
+            or host_fronted_readiness.get("backendUnsignedCallbackHttpStatus") != 401
+            or host_fronted_readiness.get("publicTls") != "PASS"
+            or host_fronted_readiness.get("publicUnsignedCallbackHttpStatus") != 401
+            or any(
+                not isinstance(host_fronted_readiness.get(field), str)
+                or SHA256_RE.fullmatch(host_fronted_readiness[field]) is None
+                for field in (
+                    "activeCaddyfileSha256",
+                    "caddyBinarySha256",
+                    "backendCaSha256",
+                )
+            )
+            or not isinstance(host_fronted_readiness.get("ingressImageId"), str)
+            or IMAGE_ID_RE.fullmatch(host_fronted_readiness["ingressImageId"]) is None
+        ):
+            raise StageTransitionError("host-fronted ingress readiness record is malformed")
+    elif host_fronted_readiness is not None:
+        raise StageTransitionError("public-cutover plan must not contain host-fronted readiness")
     exchange_readiness = plan.get("exchangeReadiness")
     if (
         not isinstance(exchange_readiness, dict)
@@ -2591,6 +2666,9 @@ def _candidate_preflight(plan: dict[str, Any]) -> dict[str, Any]:
                 if paths.get("notificationProvenanceFile") is not None
                 else None
             ),
+            ingress_exposure=readiness["ingressExposure"],
+            host_caddy_binary=readiness["hostCaddyBinary"],
+            openssl_binary=readiness["opensslBinary"],
         )
     except (OSError, preflight.PreflightError, BuildError, subprocess.SubprocessError) as error:
         raise StageTransitionError("fresh connector auth read-only preflight failed") from error
@@ -2612,6 +2690,15 @@ def _candidate_preflight(plan: dict[str, Any]) -> dict[str, Any]:
     }
     if observed_notification != expected_notification:
         raise StageTransitionError("notification anchor/profile changed after planning")
+    planned_host_readiness = readiness.get("hostFrontedIngressReadiness")
+    current_host_readiness = result.get("hostFrontedIngressReadiness")
+    if planned_host_readiness is None:
+        if current_host_readiness is not None:
+            raise StageTransitionError("candidate ingress exposure changed after planning")
+    elif not isinstance(current_host_readiness, dict) or {
+        key: value for key, value in current_host_readiness.items() if key != "checkedAtUtc"
+    } != {key: value for key, value in planned_host_readiness.items() if key != "checkedAtUtc"}:
+        raise StageTransitionError("live host-fronted readiness changed after planning")
     return result
 
 
@@ -4508,6 +4595,13 @@ def _add_common_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-cpus", type=float, default=1.95)
     parser.add_argument("--required-free-gib", type=float, default=2.0)
     parser.add_argument("--minimum-mem-available-mib", type=int, default=MEMORY_RESERVE_DEFAULT_MIB)
+    parser.add_argument(
+        "--ingress-exposure",
+        choices=("public-cutover", "host-fronted-staging"),
+        default="public-cutover",
+    )
+    parser.add_argument("--host-caddy-binary", default="/usr/local/bin/caddy")
+    parser.add_argument("--openssl-binary", default="openssl")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -4588,6 +4682,9 @@ def main(argv: list[str] | None = None) -> int:
                 max_cpus=arguments.max_cpus,
                 required_free_gib=arguments.required_free_gib,
                 minimum_mem_available_mib=arguments.minimum_mem_available_mib,
+                ingress_exposure=arguments.ingress_exposure,
+                host_caddy_binary=arguments.host_caddy_binary,
+                openssl_binary=arguments.openssl_binary,
             )
         elif arguments.command == "apply":
             result = apply_plan_file(

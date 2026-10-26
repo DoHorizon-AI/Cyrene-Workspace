@@ -62,6 +62,82 @@ def _mount_service(image: str, *, executor: bool = False) -> dict[str, Any]:
     return row
 
 
+def test_apply_preflight_rechecks_frozen_host_fronted_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ignore only the new check timestamp and block changed host Caddy/CA state."""
+
+    planned_host = {
+        "schemaVersion": "cyrene-host-fronted-ingress-readiness-v1",
+        "status": "HOST_FRONTED_STAGING_READY",
+        "ingressExposure": "host-fronted-staging",
+        "accepted": False,
+        "deploymentReady": False,
+        "hostname": "bot.example.test",
+        "ingressImageId": _image_id(1),
+        "activeCaddyfileSha256": "a" * 64,
+        "caddyBinarySha256": "b" * 64,
+        "backendCaSha256": "c" * 64,
+        "backendTls": "PASS",
+        "backendUnsignedCallbackHttpStatus": 401,
+        "publicTls": "PASS",
+        "publicUnsignedCallbackHttpStatus": 401,
+        "publicCallbackPostApply": "NOT_RUN",
+        "fullTeamsAcceptance": "NOT_RUN",
+        "checkedAtUtc": "2026-10-26T12:00:00+00:00",
+    }
+    fresh_host = {**planned_host, "checkedAtUtc": "2026-10-26T12:01:00+00:00"}
+    result = {
+        "credentialReadOnlyRuntimeReady": True,
+        "fullCloudWriteDeploymentReady": False,
+        "lifecycleAcceptance": "NOT_RUN",
+        "expectedProviderScopeDigests": {},
+        "huggingfaceRepositoryScopeDigestSha256": "d" * 64,
+        "hostFrontedIngressReadiness": fresh_host,
+    }
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        stage_transition.preflight,
+        "run_preflight",
+        lambda **kwargs: captured.update(kwargs) or result,
+    )
+    plan = {
+        "phase": "provider-bootstrap",
+        "candidateInputPaths": {"connectorAuthTaskId": "task-123"},
+        "candidateInputs": {
+            "connectorAuthEvidence": {"path": "/private/evidence.json"},
+            "huggingfaceSeed": {"path": "/private/hf-seed.json"},
+            "composeFiles": [{"path": "/private/compose.yaml"}],
+            "envFiles": [{"path": "/private/runtime.env"}],
+            "imageLock": {"path": "/private/image-lock.json"},
+        },
+        "activeSecretsDir": "/private/secrets",
+        "candidateConfigDir": "/private/config",
+        "policy": {"dockerPrefix": ["docker"]},
+        "candidatePreflight": {
+            "ingressExposure": "host-fronted-staging",
+            "hostCaddyBinary": "/usr/local/bin/caddy",
+            "opensslBinary": "openssl",
+            "hostFrontedIngressReadiness": planned_host,
+            "expectedProviderScopeDigests": {},
+            "huggingfaceRepositoryScopeDigestSha256": "d" * 64,
+            "notificationInputs": {},
+            "maxMemoryMiB": 3584,
+            "maxCpus": 1.95,
+            "requiredFreeGiB": 2.0,
+            "minimumMemAvailableMiB": 1024,
+        },
+    }
+
+    assert stage_transition._candidate_preflight(plan) == result
+    assert captured["ingress_exposure"] == "host-fronted-staging"
+    assert captured["host_caddy_binary"] == "/usr/local/bin/caddy"
+
+    result["hostFrontedIngressReadiness"] = {**fresh_host, "backendCaSha256": "e" * 64}
+    with pytest.raises(stage_transition.StageTransitionError, match="live host-fronted readiness"):
+        stage_transition._candidate_preflight(plan)
+
+
 def _lock(rows: list[tuple[str, str, int]]) -> dict[str, Any]:
     """Build one synthetic image lock with immutable service IDs."""
 
@@ -578,6 +654,10 @@ def test_same_plan_apply_rechecks_journal_under_lock_and_never_overwrites_recove
         },
         "candidatePreflight": {
             "mode": "connector-auth-readonly",
+            "ingressExposure": "public-cutover",
+            "hostCaddyBinary": "/usr/local/bin/caddy",
+            "opensslBinary": "openssl",
+            "hostFrontedIngressReadiness": None,
             "credentialReadOnlyRuntimeReady": True,
             "fullCloudWriteDeploymentReady": False,
             "lifecycleAcceptance": "NOT_RUN",

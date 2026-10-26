@@ -445,6 +445,63 @@ def _verify_candidate_caddy(
     return hostname, source_hosts
 
 
+def _verify_existing_host_fronted_caddy(
+    *,
+    adapted: dict[str, Any],
+    expected_hostname: str,
+) -> tuple[str, Path]:
+    """Verify the already-active callback route without requiring a previous Caddyfile."""
+
+    _path, handler, hosts = _find_callback_proxy(adapted, "active host Caddy")
+    if hosts != (expected_hostname,):
+        raise CanaryGateError(
+            "active host Caddy callback hostname differs from the candidate Teams FQDN"
+        )
+    if set(handler) != {"handler", "upstreams", "transport", "headers"}:
+        raise CanaryGateError("active host Caddy callback handler exceeds the fixed route contract")
+    upstreams = handler.get("upstreams")
+    if (
+        not isinstance(upstreams, list)
+        or len(upstreams) != 1
+        or not isinstance(upstreams[0], dict)
+        or set(upstreams[0]) != {"dial"}
+        or upstreams[0].get("dial") != "127.0.0.1:18443"
+    ):
+        raise CanaryGateError(
+            "active host Caddy callback must proxy only to loopback 127.0.0.1:18443"
+        )
+    transport = handler.get("transport")
+    tls = transport.get("tls") if isinstance(transport, dict) else None
+    if (
+        not isinstance(transport, dict)
+        or set(transport) != {"protocol", "tls"}
+        or transport.get("protocol") != "http"
+        or not isinstance(tls, dict)
+        or set(tls) != {"ca", "server_name"}
+        or tls.get("server_name") != expected_hostname
+    ):
+        raise CanaryGateError("active host Caddy backend must use exact callback-host TLS SNI")
+    ca = tls.get("ca")
+    pem_files = ca.get("pem_files") if isinstance(ca, dict) else None
+    if (
+        not isinstance(ca, dict)
+        or set(ca) != {"pem_files", "provider"}
+        or ca.get("provider") != "file"
+        or not isinstance(pem_files, list)
+        or len(pem_files) != 1
+        or not isinstance(pem_files[0], str)
+    ):
+        raise CanaryGateError("active host Caddy must trust exactly one backend CA file")
+    ca_file = Path(pem_files[0])
+    if not ca_file.is_absolute() or ca_file.is_symlink() or not ca_file.is_file():
+        raise CanaryGateError("active host Caddy backend CA path is not a regular absolute file")
+    if handler.get("headers") != {"request": {"set": {"Host": [expected_hostname]}}}:
+        raise CanaryGateError(
+            "active host Caddy callback must set only the literal public Host header"
+        )
+    return expected_hostname, ca_file
+
+
 def _validate_caddy_inputs(
     *,
     active_file: Path,
@@ -581,6 +638,59 @@ def _verify_backend_unsigned_callback_http(
     return len(body)
 
 
+def _verify_public_unsigned_callback_http(
+    *,
+    openssl_binary: str,
+    hostname: str,
+) -> int:
+    """Require a public unsigned callback to reach the Teams SDK and receive HTTP 401."""
+
+    request = (
+        f"POST /api/messages HTTP/1.1\r\n"
+        f"Host: {hostname}\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 2\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "{}"
+    ).encode("ascii")
+    try:
+        result = subprocess.run(
+            [
+                openssl_binary,
+                "s_client",
+                "-quiet",
+                "-connect",
+                f"{hostname}:443",
+                "-servername",
+                hostname,
+                "-verify_hostname",
+                hostname,
+                "-verify",
+                "5",
+                "-verify_return_error",
+            ],
+            check=False,
+            capture_output=True,
+            input=request,
+            timeout=20.0,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CanaryGateError(
+            "public unsigned callback HTTP probe could not be completed"
+        ) from error
+    if result.returncode != 0:
+        raise CanaryGateError("public unsigned callback HTTP probe failed TLS verification")
+    try:
+        header_block, body = result.stdout.split(b"\r\n\r\n", 1)
+        status_line = header_block.split(b"\r\n", 1)[0].decode("ascii")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise CanaryGateError("public callback did not return a valid HTTP response") from error
+    if re.fullmatch(r"HTTP/1\.[01] 401(?:[ \t].*)?", status_line) is None:
+        raise CanaryGateError("public unsigned callback must return HTTP 401 from the Teams SDK")
+    return len(body)
+
+
 def _verify_public_ca_file(ca_file: Path, openssl_binary: str) -> None:
     """Require the selected backend trust file to contain only public certificate data."""
 
@@ -597,6 +707,91 @@ def _verify_public_ca_file(ca_file: Path, openssl_binary: str) -> None:
     )
     if "CA:TRUE" not in certificate:
         raise CanaryGateError("backend trust certificate is not a certificate authority")
+
+
+def run_existing_host_fronted_readiness(
+    *,
+    expected_hostname: str,
+    ingress_image_id: str | None,
+    caddy_binary: str = "/usr/local/bin/caddy",
+    openssl_binary: str = "openssl",
+    active_file: Path = ACTIVE_CADDYFILE,
+) -> dict[str, Any]:
+    """Read and probe the existing host-fronted route without changing host or Compose state."""
+
+    if not _valid_dns_name(expected_hostname):
+        raise CanaryGateError("candidate Teams FQDN must be a concrete public DNS name")
+    if (
+        not isinstance(ingress_image_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", ingress_image_id) is None
+    ):
+        raise CanaryGateError("loopback ingress image identity is not verified")
+    _require_regular_file(active_file, "active host Caddyfile")
+    try:
+        binary_path = Path(caddy_binary).resolve(strict=True)
+    except OSError as error:
+        raise CanaryGateError("active host Caddy executable is unavailable") from error
+    if not binary_path.is_file():
+        raise CanaryGateError("active host Caddy executable is not a regular file")
+    _verify_live_caddy_process(active_file=active_file, caddy_binary=str(binary_path))
+    active_digest = _sha256_file(active_file)
+    adapted_file = _adapt_caddyfile(str(binary_path), active_file)
+    live_config = _read_live_caddy_config()
+    if live_config != adapted_file:
+        raise CanaryGateError("live host Caddy configuration differs from the active Caddyfile")
+    hostname, backend_ca_file = _verify_existing_host_fronted_caddy(
+        adapted=live_config,
+        expected_hostname=expected_hostname,
+    )
+    _verify_public_ca_file(backend_ca_file, openssl_binary)
+    backend_ca_digest = _sha256_file(backend_ca_file)
+    _verify_tls_handshake(
+        openssl_binary=openssl_binary,
+        connect="127.0.0.1:18443",
+        hostname=hostname,
+        ca_file=backend_ca_file,
+        label="host-fronted staging backend TLS",
+    )
+    backend_response_body_bytes = _verify_backend_unsigned_callback_http(
+        openssl_binary=openssl_binary,
+        hostname=hostname,
+        ca_file=backend_ca_file,
+    )
+    _verify_tls_handshake(
+        openssl_binary=openssl_binary,
+        connect=f"{hostname}:443",
+        hostname=hostname,
+        ca_file=None,
+        label="host-fronted public TLS",
+    )
+    public_response_body_bytes = _verify_public_unsigned_callback_http(
+        openssl_binary=openssl_binary,
+        hostname=hostname,
+    )
+    if _sha256_file(active_file) != active_digest:
+        raise CanaryGateError("active host Caddyfile changed during the readiness check")
+    _verify_live_caddy_process(active_file=active_file, caddy_binary=str(binary_path))
+    return {
+        "schemaVersion": "cyrene-host-fronted-ingress-readiness-v1",
+        "status": "HOST_FRONTED_STAGING_READY",
+        "ingressExposure": "host-fronted-staging",
+        "accepted": False,
+        "deploymentReady": False,
+        "hostname": hostname,
+        "ingressImageId": ingress_image_id,
+        "activeCaddyfileSha256": active_digest,
+        "caddyBinarySha256": _sha256_file(binary_path),
+        "backendCaSha256": backend_ca_digest,
+        "backendTls": "PASS",
+        "backendUnsignedCallbackHttpStatus": 401,
+        "backendUnsignedCallbackResponseBodyBytes": backend_response_body_bytes,
+        "publicTls": "PASS",
+        "publicUnsignedCallbackHttpStatus": 401,
+        "publicUnsignedCallbackResponseBodyBytes": public_response_body_bytes,
+        "publicCallbackPostApply": "NOT_RUN",
+        "fullTeamsAcceptance": "NOT_RUN",
+        "checkedAtUtc": datetime.now(UTC).isoformat(),
+    }
 
 
 def _inspect_json(docker_prefix: list[str], container_ids: list[str]) -> list[dict[str, Any]]:
