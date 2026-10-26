@@ -460,6 +460,102 @@ def test_mixed_mount_identity_uses_candidate_mounts_only_for_recreated_services(
     )
 
 
+def test_secret_mount_identity_uses_docker_destination_for_bare_compose_targets(
+    tmp_path: Path,
+) -> None:
+    """Normalize Compose secret leaves to Docker's absolute destination and keep configs literal."""
+
+    secret_a = tmp_path / "teams-delivery-admin-token"
+    secret_b = tmp_path / "exchange-tls-cert"
+    secret_c = tmp_path / "absolute-secret-target"
+    config_file = tmp_path / "connector-bootstrap.json"
+    for path, content in (
+        (secret_a, "private token"),
+        (secret_b, "public certificate"),
+        (secret_c, "absolute secret"),
+        (config_file, "{}"),
+    ):
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o400)
+    compose = {
+        "name": "cyrene-teams-cloud",
+        "services": {
+            "exchange": {
+                "secrets": [
+                    {
+                        "source": "teams-delivery-admin-token",
+                        "target": "teams-delivery-admin-token",
+                    },
+                    {"source": "exchange-tls-cert", "target": "exchange-tls-cert"},
+                    {
+                        "source": "absolute-secret-target",
+                        "target": "/etc/credentials/absolute-secret",
+                    },
+                ],
+                "configs": [
+                    {
+                        "source": "connector-bootstrap",
+                        "target": "/run/config/connector-bootstrap.json",
+                    }
+                ],
+            }
+        },
+        "secrets": {
+            "teams-delivery-admin-token": {"file": str(secret_a)},
+            "exchange-tls-cert": {"file": str(secret_b)},
+            "absolute-secret-target": {"file": str(secret_c)},
+        },
+        "configs": {"connector-bootstrap": {"file": str(config_file)}},
+    }
+
+    identity = stage_transition._expected_mount_identity(compose, "exchange")
+    assert {row["target"] for row in identity} == {
+        "/run/secrets/teams-delivery-admin-token",
+        "/run/secrets/exchange-tls-cert",
+        "/etc/credentials/absolute-secret",
+        "/run/config/connector-bootstrap.json",
+    }
+    stage_transition._validate_runtime_config_identity(
+        {"exchange": identity},
+        expected_services={"exchange"},
+        label="test runtime identity",
+    )
+    actual_docker_mounts = [
+        {
+            "Type": "bind",
+            "Source": str(path.resolve()),
+            "Destination": target,
+            "RW": False,
+        }
+        for path, target in (
+            (secret_a, "/run/secrets/teams-delivery-admin-token"),
+            (secret_b, "/run/secrets/exchange-tls-cert"),
+            (secret_c, "/etc/credentials/absolute-secret"),
+            (config_file, "/run/config/connector-bootstrap.json"),
+        )
+    ]
+    assert stage_transition._service_mounts_match(actual_docker_mounts, identity)
+    actual_docker_mounts[0]["Destination"] = "teams-delivery-admin-token"
+    assert not stage_transition._service_mounts_match(actual_docker_mounts, identity)
+
+    duplicate = json.loads(json.dumps(compose))
+    duplicate["services"]["exchange"]["secrets"].append(
+        {"source": "exchange-tls-cert", "target": "/run/secrets/teams-delivery-admin-token"}
+    )
+    duplicate_identity = stage_transition._expected_mount_identity(duplicate, "exchange")
+    with pytest.raises(stage_transition.StageTransitionError, match="mount identity is malformed"):
+        stage_transition._validate_runtime_config_identity(
+            {"exchange": duplicate_identity},
+            expected_services={"exchange"},
+            label="duplicate runtime identity",
+        )
+
+    ambiguous = json.loads(json.dumps(compose))
+    ambiguous["services"]["exchange"]["secrets"][0]["target"] = "nested/token"
+    with pytest.raises(stage_transition.StageTransitionError, match="secret target is malformed"):
+        stage_transition._expected_mount_identity(ambiguous, "exchange")
+
+
 def test_runtime_selection_v2_pins_static_config_but_not_live_profile_contents(
     tmp_path: Path,
 ) -> None:

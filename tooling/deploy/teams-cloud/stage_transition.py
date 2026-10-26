@@ -813,6 +813,21 @@ def _expected_mount_identity(compose: dict[str, Any], service_name: str) -> list
         for row in _mount_rows(service, field):
             name = row.get("source")
             target = row.get("target")
+            if (
+                field == "secrets"
+                and isinstance(target, str)
+                and not target.startswith("/")
+                and (
+                    not target
+                    or target in {".", ".."}
+                    or "/" in target
+                    or "\\" in target
+                    or "\x00" in target
+                )
+            ):
+                raise StageTransitionError(f"{service_name} Compose secret target is malformed")
+            if field == "secrets" and isinstance(target, str) and not target.startswith("/"):
+                target = f"/run/secrets/{target}"
             definition = definitions.get(name) if isinstance(name, str) else None
             source = definition.get("file") if isinstance(definition, dict) else None
             if not isinstance(source, str) or not isinstance(target, str):
