@@ -3561,9 +3561,7 @@ def _validate_owned_staging_ingress(
         or ports[0].get("host_ip") != "127.0.0.1"
         or ports[0].get("protocol", "tcp") != "tcp"
     ):
-        raise PreflightError(
-            "owned staging ingress must publish only 127.0.0.1:18443/tcp"
-        )
+        raise PreflightError("owned staging ingress must publish only 127.0.0.1:18443/tcp")
 
     image_ref = service.get("image")
     image_rows = [
@@ -3673,9 +3671,7 @@ def _validate_host_ports(
     listeners = _run(["ss", "-H", "-ltn"])
     if allow_owned_staging_ingress:
         staging_listeners = [
-            host
-            for host, port in _parse_listener_endpoints(listeners)
-            if port == "18443"
+            host for host, port in _parse_listener_endpoints(listeners) if port == "18443"
         ]
         if any(host != "127.0.0.1" for host in staging_listeners) or len(staging_listeners) > 1:
             raise PreflightError(
