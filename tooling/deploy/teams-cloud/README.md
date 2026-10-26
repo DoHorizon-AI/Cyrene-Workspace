@@ -34,6 +34,7 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `build_arm64.py` | Fetch exact remote commits, build ARM64 images, and record image IDs and materialized disk footprints / 获取精确远端提交、构建 ARM64 镜像并记录镜像 ID 与落盘占用 |
 | `transfer_arm64.py` | Enforce strict SSH/capacity gates and stream locked images directly into Docker / 严格核验 SSH 和容量门槛，并将锁定镜像直接流式导入 Docker |
 | `preflight.py` | Read-only host, image, config, secret, stage-evidence, tool-catalog, and ingress checks / 只读核验主机、镜像、配置、密钥、阶段回执、工具目录和入口 |
+| `runtime_update.py` | Owner-confirmed, drain-aware Navigator/Exchange update plan, apply, rollback recovery, and status / 需 owner 明确应用的 Navigator/Exchange 排空热更新计划、回滚恢复与状态查询 |
 | `host_fronted_canary.py` | Read-only readiness gate for an existing host Caddy front and the private locked ingress / 现有宿主机 Caddy 与锁定私有 ingress 的只读就绪门禁 |
 | `plugin_grpc_health_probe.py` | Verify private DirectPluginRuntime mTLS health and plugin identity / 通过内网 mTLS 核验 DirectPluginRuntime 健康状态与插件身份 |
 | `acceptance_budget.py` | Legacy CLI resource lifecycle runner for unrelated task IDs; rejects CLI mutation plans for this task / 供其他 task ID 使用的旧版 CLI 生命周期 runner；本任务会拒绝 CLI 资源变更计划 |
@@ -90,3 +91,35 @@ binding, or tool catalog.
 基础 Compose 文件只为回调入口发布 TCP 443。Exchange、Navigator、Directory Authority、Account Center 和所有 DirectPluginRuntime 均留在私有网络；Provider 使用各自服务证书、私有 client-CA bundle 和 mTLS 健康探针。公网 Caddyfile 只接受 `POST /api/messages`，使用 ACME TLS-ALPN challenge，并保持宿主机 80 端口关闭。
 
 启用 HF 时，使用 HF Compose overlay 选择新的 device-OAuth bootstrap。私有 JSON 文件保存在 secrets 目录之外，只读挂载到 Account Center。Account Center 会将 profile 凭据加密保存到持久数据库；在后续配置发布同时移除文件引用和挂载前，需将 bootstrap 文件保持 owner-only，以支持重启和重新授权。预检会校验封闭 DTO 与目标仓库范围，不会输出 token 内容。GitHub-only 模式不包含 OAuth secret 挂载、HF Provider 服务、Exchange HF profile、binding 或 tool catalog。
+
+### Runtime updater function index / 热更新函数索引
+
+| Function | Responsibility | Shared validation used |
+| --- | --- | --- |
+| `create_plan` | Write a read-only plan bound to active/candidate files, running container IDs, image IDs, and service state. | Calls `preflight.run_preflight` for both input sets in `stage1` mode with the existing owned-staging-ingress flag; that path validates host/capacity, Compose, secrets, provider scope, ingress, and Stage 1 config. `preflight.run_preflight` calls `build_arm64.check_local_lock` for each lock. |
+| `_resolve_plan_inputs` | Re-hash and render the reviewed inputs immediately before apply or recovery. | Apply reuses full Stage 1 preflight and `check_local_lock`; recovery reuses their configuration/image-lock checks while skipping only dynamic capacity thresholds, so a failed candidate cannot prevent restoration of the old image. |
+| `_inspect_project_services`, `_verify_live_network_membership` | Read Docker project inventory, immutable IDs, health, and actual network peers. | Extends existing deployment checks with the updater's standalone-caller contract; it does not start a second service or scheduler. |
+| `_validate_initial_runtime_state`, `_pause_edge`, `_drain_navigator` | Bind the fresh plan to Teams spool CAS state and drain the existing Navigator executor before replacement. | Uses the Plugins delivery-spool admin API and Navigator's existing service-Bearer drain API through container-local requests. |
+| `_update_target`, `_ensure_navigator_resumed` | Replace only `exchange` or `navigator` with `compose up --no-deps --pull never --no-build`, then read back image ID, health, and Navigator acceptance. | Reuses the plan's verified image-lock references and the runtime inventory helpers above. |
+| `_rollback_operation`, `resume_operation`, `operation_status` | Drain a running candidate before rollback, restore only reviewed old image IDs, or retain a `RECOVERY_REQUIRED` journal when state is unknown. | Uses the same lock, preflight, container, network, drain, and edge-CAS checks; recovery never repeats an uncertain replacement automatically. |
+
+`runtime_update.py` adds only the transaction sequencing and read-back checks needed for these single-service updates. Preflight remains authoritative for deployment configuration and provider/secret gates; image-lock verification remains in `build_arm64.py`.
+
+Runtime update commands run as root. They share one root-owned mode-0700 lock directory at `/run/cyrene-runtime-update`, with root-owned mode-0600 project lock files, independent of the selected journal directory. Rootless plan/apply/status/resume is rejected so a second host UID cannot bypass the single-writer lock. The CLI updates only `navigator` and `exchange`; it never replaces the Teams ingress.
+
+Use `plan` to bind the active deployment and candidate files, inspect the output plan and its SHA-256, then explicitly run `apply` with that digest. `status` reads the private journal. `resume` performs deterministic rollback only when no Docker mutation has an unresolved outcome. If Docker timed out or the process stopped after a persisted replacement/stop intent, `resume` reconfirms the Teams edge hold, leaves the operation in `RECOVERY_REQUIRED`, and does not repeat Compose or stop. An operator must first reconcile the exact Docker state; a transient read of the old image is not proof that a timed-out daemon request has ended.
+
+所有 runtime update 命令必须由 root 执行。它们共用 `/run/cyrene-runtime-update` 下 root 所有、权限 0700 的锁目录，以及 root 所有、权限 0600 的项目锁文件；锁与选择的 journal 目录无关。为避免其他主机 UID 绕过单写锁，CLI 会拒绝 rootless plan/apply/status/resume。CLI 只更新 `navigator` 和 `exchange`，不会替换 Teams ingress。
+
+先用 `plan` 绑定当前部署和候选文件，检查输出计划及其 SHA-256，再用该摘要明确执行 `apply`。`status` 读取私有 journal。只有不存在未决 Docker 操作时，`resume` 才会执行确定性回滚。如果 Docker 超时，或进程在已持久化替换/停止意图后退出，`resume` 会重新确认 Teams edge 仍被暂停，并保留 `RECOVERY_REQUIRED`；不会重放 Compose 或 stop。操作员必须先核对确切 Docker 状态；一次性读到旧镜像不能证明超时的 daemon 请求已经结束。
+
+| 函数 | 职责 | 复用的校验 |
+| --- | --- | --- |
+| `create_plan` | 生成绑定 active/candidate 文件、容器 ID、镜像 ID 与运行态的一次性只读计划。 | 对两组输入调用 `preflight.run_preflight(mode="stage1")`，沿用 owned staging ingress 显式选项；该入口负责主机/容量、Compose、密钥、Provider 范围、入口和 Stage 1 配置核验。`preflight.run_preflight` 通过 `build_arm64.check_local_lock` 核验每份镜像锁。 |
+| `_resolve_plan_inputs` | apply/recovery 前重新校验计划输入摘要并渲染 Compose。 | apply 复用完整 Stage 1 preflight 和 `check_local_lock`；recovery 保留配置/镜像锁校验，只跳过动态容量阈值，避免候选资源压力阻止旧镜像恢复。 |
+| `_inspect_project_services`, `_verify_live_network_membership` | 回读 Docker project、不可变镜像 ID、健康状态和真实网络 peer。 | 在既有部署检查之上增加 standalone caller 边界；不会启动第二个服务或 scheduler。 |
+| `_validate_initial_runtime_state`, `_pause_edge`, `_drain_navigator` | 将新计划绑定 Teams spool CAS 状态，并在替换前排空现有 Navigator executor。 | 通过容器内请求复用 Plugins delivery-spool admin API 和 Navigator 现有 service-Bearer drain API。 |
+| `_update_target`, `_ensure_navigator_resumed` | 使用 `compose up --no-deps --pull never --no-build` 仅替换 `exchange`/`navigator`，再回读镜像 ID、健康状态和 Navigator 接纳状态。 | 沿用计划中已核验的镜像锁引用和上述 runtime inventory helper。 |
+| `_rollback_operation`, `resume_operation`, `operation_status` | 回滚前排空仍运行的候选 Nav，只恢复已审核的旧镜像 ID；状态不明时持久记录 `RECOVERY_REQUIRED`。 | 复用相同镜像锁、preflight、容器、网络、drain 和 edge CAS 检查；不会自动重放结果不确定的替换。 |
+
+`runtime_update.py` 只实现这类单服务更新需要的事务顺序与回读；部署配置和 Provider/密钥门禁仍由 preflight 负责，镜像锁核验仍由 `build_arm64.py` 负责。

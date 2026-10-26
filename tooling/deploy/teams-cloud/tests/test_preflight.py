@@ -16,6 +16,7 @@ import importlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections import namedtuple
@@ -90,6 +91,135 @@ def test_host_recognition_still_rejects_smaller_memory_guests(
         preflight._validate_host(2.0)
     with pytest.raises(transfer.TransferError, match="below the pinned profile"):
         transfer._remote_facts(["ssh"])
+
+
+def test_teams_delivery_spool_requires_fixed_private_persistent_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accept only the private durable spool mount and ingress-only admin token."""
+
+    checked_sources: list[Path] = []
+    monkeypatch.setattr(
+        preflight,
+        "_validate_teams_delivery_state_directory",
+        lambda path: checked_sources.append(path),
+    )
+    config = {
+        "services": {
+            "teams-ingress": {
+                "environment": {
+                    "TEAMS_NAVIGATOR_DELIVERY_STATE_DIR": "/var/lib/cyrene/teams-delivery",
+                    "TEAMS_DELIVERY_ADMIN_TOKEN_FILE": "/run/secrets/teams-delivery-admin-token",
+                },
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": "/private/state/teams-delivery",
+                        "target": "/var/lib/cyrene/teams-delivery",
+                        "read_only": False,
+                    }
+                ],
+                "secrets": [
+                    {
+                        "source": "teams-delivery-admin-token",
+                        "target": "teams-delivery-admin-token",
+                    }
+                ],
+            },
+            "navigator": {"secrets": []},
+        }
+    }
+
+    preflight._validate_teams_delivery_spool(config)
+
+    assert checked_sources == [Path("/private/state/teams-delivery")]
+    assert "teams-delivery-admin-token" in preflight.SECRET_SIZE_MINIMUMS
+    assert "teams-delivery-admin-token" not in preflight.SECRET_CONTENT_VALIDATED_NAMES
+    secret_template = json.loads(
+        (DEPLOYMENT_ROOT / "config" / "secret-files.template.json").read_text()
+    )
+    assert "teams-delivery-admin-token" in secret_template["requiredBeforePhase1"]
+
+    invalid_configs = []
+    inline_token = json.loads(json.dumps(config))
+    inline_token["services"]["teams-ingress"]["environment"]["TEAMS_DELIVERY_ADMIN_TOKEN"] = "x"
+    invalid_configs.append(inline_token)
+    public_route = json.loads(json.dumps(config))
+    public_route["services"]["teams-ingress"]["ports"] = ["3978:3978"]
+    invalid_configs.append(public_route)
+    extra_admin_mount = json.loads(json.dumps(config))
+    extra_admin_mount["services"]["navigator"]["secrets"] = [
+        {"source": "teams-delivery-admin-token", "target": "delivery-admin-token"}
+    ]
+    invalid_configs.append(extra_admin_mount)
+    wrong_state_target = json.loads(json.dumps(config))
+    wrong_state_target["services"]["teams-ingress"]["volumes"][0]["target"] = "/tmp/spool"
+    invalid_configs.append(wrong_state_target)
+
+    for invalid in invalid_configs:
+        with pytest.raises(preflight.PreflightError, match="Teams delivery"):
+            preflight._validate_teams_delivery_spool(invalid)
+
+
+@pytest.mark.parametrize(
+    ("mode", "owner", "expected_error"),
+    [
+        (stat.S_IFDIR | 0o700, 10001, None),
+        (stat.S_IFDIR | 0o700, 10002, "UID 10001"),
+        (stat.S_IFDIR | 0o750, 10001, "mode 0700"),
+        (stat.S_IFLNK | 0o777, 10001, "non-symlink"),
+    ],
+)
+def test_teams_delivery_state_directory_is_exact_owner_only_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: int,
+    owner: int,
+    expected_error: str | None,
+) -> None:
+    """Fail closed when the host spool directory does not match ingress ownership."""
+
+    state_dir = Path("/private/state/teams-delivery")
+    monkeypatch.setattr(Path, "resolve", lambda self, strict=False: self)
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _self: SimpleNamespace(st_mode=mode, st_uid=owner),
+    )
+    if expected_error is None:
+        preflight._validate_teams_delivery_state_directory(state_dir)
+    else:
+        with pytest.raises(preflight.PreflightError, match=expected_error):
+            preflight._validate_teams_delivery_state_directory(state_dir)
+
+
+def test_teams_delivery_admin_token_preflight_checks_metadata_without_reading_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Validate the independent admin token's size and ownership without loading its bytes."""
+
+    token_file = tmp_path / "teams-delivery-admin-token"
+    token_file.write_bytes(b"x" * 32)
+    mode = stat.S_IFREG | 0o400
+    real_stat = Path.stat
+    real_read_bytes = Path.read_bytes
+
+    def fake_stat(path: Path, *, follow_symlinks: bool = True) -> Any:
+        if path == token_file:
+            return SimpleNamespace(st_mode=mode, st_uid=10001, st_size=32)
+        return real_stat(path, follow_symlinks=follow_symlinks)
+
+    def forbidden_read(path: Path) -> bytes:
+        if path == token_file:
+            raise AssertionError("preflight must not read the Teams delivery admin token")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    monkeypatch.setattr(Path, "read_bytes", forbidden_read)
+
+    preflight._secret_file(token_file, "teams-delivery-admin-token")
+    mode = stat.S_IFREG | 0o600
+    with pytest.raises(preflight.PreflightError, match="owner-read-only mode 0400"):
+        preflight._secret_file(token_file, "teams-delivery-admin-token")
 
 
 def _binding(
@@ -1220,6 +1350,119 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
             "workspaceClearedOnRestart": None,
             "artifactRefsSurviveRestart": None,
         }
+
+
+def test_stage1_recovery_preflight_skips_capacity_gates_but_keeps_configuration_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Allow recovery when a failed candidate consumed capacity without skipping static checks."""
+
+    artifact_root = tmp_path / ".artifacts" / "teams-cloud-recovery"
+    config_dir = artifact_root / "config"
+    secrets_dir = artifact_root / "secrets"
+    config_dir.mkdir(parents=True)
+    secrets_dir.mkdir()
+    environment_file = artifact_root / "runtime.env"
+    environment_file.write_text("TEST=1\n", encoding="utf-8")
+    environment_file.chmod(0o600)
+    image_lock = artifact_root / "image-lock.json"
+    image_lock.write_text(
+        json.dumps({"images": [{"image": "locked:test"}], "externalImages": {}}),
+        encoding="utf-8",
+    )
+    image_lock.chmod(0o600)
+
+    monkeypatch.setattr(preflight.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(preflight.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(preflight, "_parse_meminfo", lambda: 128)
+    monkeypatch.setattr(preflight, "_parse_memavailable", lambda: 64)
+    monkeypatch.setattr(
+        preflight.shutil,
+        "disk_usage",
+        lambda _path: type("Usage", (), {"free": 1024})(),
+    )
+    monkeypatch.setattr(preflight, "_validate_host", lambda *_args: pytest.fail("host gate ran"))
+    monkeypatch.setattr(
+        preflight, "_memory_headroom", lambda **_kwargs: pytest.fail("memory gate ran")
+    )
+    monkeypatch.setattr(preflight, "check_local_lock", lambda *_args: None)
+    monkeypatch.setattr(
+        preflight,
+        "_compose_config",
+        lambda *_args: {
+            "services": {
+                "navigator": {"environment": {}},
+                "exchange": {"environment": {}},
+            }
+        },
+    )
+    monkeypatch.setattr(preflight, "_validate_compose", lambda *_args: (100.0, 0.2))
+    for name in (
+        "_validate_internal_https_topology",
+        "_validate_profile_stage",
+        "_validate_provider_listener_addresses",
+        "_validate_teams_delivery_spool",
+        "_validate_secrets_and_configs",
+        "_validate_identity_scope",
+        "_validate_stage_acceptance_receipts",
+        "_validate_codebuddy_mount",
+        "_validate_host_ports",
+    ):
+        monkeypatch.setattr(preflight, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(preflight, "_validate_cutover_runtime", lambda *_args: {})
+
+    report = preflight.run_preflight(
+        mode="stage1",
+        compose_files=[tmp_path / "compose.yaml"],
+        env_files=[environment_file],
+        image_lock=image_lock,
+        secrets_dir=secrets_dir,
+        config_dir=config_dir,
+        github_hf_evidence=None,
+        azure_gcp_ledger=None,
+        runpod_ledger=None,
+        azure_gcp_api_evidence=None,
+        runpod_api_evidence=None,
+        docker_prefix=["docker"],
+        max_memory_mib=1024,
+        max_cpus=1.0,
+        required_free_gib=1000.0,
+        minimum_mem_available_mib=4096,
+        recovery_only=True,
+    )
+
+    assert report["status"] == "RECOVERY_CONFIGURATION_ONLY"
+    assert report["deploymentReady"] is False
+    assert report["memAvailableMiB"] == 64
+    assert report["rootFreeGiB"] == 0.0
+
+    monkeypatch.setattr(
+        preflight,
+        "_validate_internal_https_topology",
+        lambda *_args: (_ for _ in ()).throw(
+            preflight.PreflightError("static configuration failed")
+        ),
+    )
+    with pytest.raises(preflight.PreflightError, match="static configuration failed"):
+        preflight.run_preflight(
+            mode="stage1",
+            compose_files=[tmp_path / "compose.yaml"],
+            env_files=[environment_file],
+            image_lock=image_lock,
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+            github_hf_evidence=None,
+            azure_gcp_ledger=None,
+            runpod_ledger=None,
+            azure_gcp_api_evidence=None,
+            runpod_api_evidence=None,
+            docker_prefix=["docker"],
+            max_memory_mib=1024,
+            max_cpus=1.0,
+            required_free_gib=1000.0,
+            minimum_mem_available_mib=4096,
+            recovery_only=True,
+        )
 
 
 @pytest.mark.parametrize(
