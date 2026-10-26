@@ -496,6 +496,25 @@ def test_runtime_inventory_uses_real_stage1_selector_for_codebuddy_computer_comp
     assert "directory-migrate" not in compose["services"]
     assert "huggingface" not in compose["services"]
 
+    with_unapproved_service = copy.deepcopy(compose)
+    with_unapproved_service["services"]["unapproved-sidecar"] = {
+        "image": "example.test/unapproved-sidecar:test",
+        "restart": "unless-stopped",
+    }
+    with pytest.raises(
+        runtime_update.preflight.PreflightError,
+        match="unsupported active Stage 1 Compose service: unapproved-sidecar",
+    ):
+        runtime_update.preflight._expected_stage1_services(with_unapproved_service)
+
+    incomplete_computer_pair = copy.deepcopy(compose)
+    del incomplete_computer_pair["services"]["computer-runtime-proxy"]
+    with pytest.raises(
+        runtime_update.preflight.PreflightError,
+        match="computer runtime and proxy must be configured together",
+    ):
+        runtime_update.preflight._expected_stage1_services(incomplete_computer_pair)
+
     image_lock, container_ids, inspect_rows = _locked_compose_service_rows(compose, expected_names)
     _stub_project_container_readback(monkeypatch, container_ids, inspect_rows)
 
