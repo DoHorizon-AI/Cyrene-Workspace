@@ -116,6 +116,49 @@ binding, or tool catalog.
 
 connector-auth Provider bootstrap/activation 的私有 Exchange bootstrap 只有在候选 Cloud Management profile 确实存在时才可包含 `cloud` 数组。每项严格只有 `profileAlias`、`targetAlias`、`expectedAccessMode="workspace_operator"`；profile alias、identity 和 target 必须与 Exchange `authorizationCloud` 映射及 Cloud Management 阶段 Provider 集合对应。Stage 1 必须省略 `cloud`。
 
+### Phase-preserving image updates / 保留阶段状态的镜像更新
+
+An existing selector-v2 can receive a single Exchange or Navigator image update
+without changing its `provider-bootstrap` or `issued-connector-activation`
+configuration phase. Use `runtime_update.py stage-transition plan` with the current
+`--phase` and exactly one `--image-update-target exchange` or
+`--image-update-target navigator`. The selector must already exist and name the
+same phase. The plan keeps the service inventory, config and secret directories,
+config/secret manifests, HF seed, RunPod key, roles, and every service mount
+identity unchanged; only the selected image reference/ID and its build-lock row
+may change. External image locks and every non-target build row remain exact.
+
+Apply reuses the V2 ingress pause, Navigator drain, online Work SQLite snapshot,
+target health checks, full service/mount inventory, capacity gate, and atomic
+selector promotion. An Exchange-only update verifies live Exchange readiness
+after the candidate is healthy, then resumes the same Navigator process
+generation. During provider bootstrap, readiness compares the full live binding
+and tool-catalog projections to the frozen current config, without requiring
+future HF/cloud profiles to be issued. During issued-connector activation, it
+also verifies each configured provider's live profile/connection scope. A
+Navigator image update still requires a healthy fresh process instance. The V1
+`runtime_update.py plan --target exchange` command is for the Stage 1 inventory
+and does not update selector-v2; do not use it for an active 14-service
+selector-v2 deployment.
+
+现有 selector-v2 可在保留 `provider-bootstrap` 或
+`issued-connector-activation` 配置阶段的同时，只更新一个 Exchange 或
+Navigator 镜像。使用 `runtime_update.py stage-transition plan`，传入 selector
+当前的 `--phase`，并且只指定一个 `--image-update-target exchange` 或
+`--image-update-target navigator`。必须已有 selector-v2 且其 phase 与参数一致。
+计划固定服务集合、配置和 secrets 目录、配置/secret 清单、HF seed、RunPod key、
+角色以及每个服务的 mount identity；只允许目标镜像引用/ID 及对应 build lock 行
+变化。外部镜像锁和所有非目标 build 行必须保持完全一致。
+
+Apply 复用 V2 ingress pause、Navigator drain、在线 Work SQLite snapshot、目标健康
+检查、完整服务/mount 清单、容量门和原子 selector promotion。Exchange-only 更新
+会在候选 Exchange 健康后做 live readiness 检查，再恢复同一 Navigator process
+generation。Provider bootstrap 阶段将当前完整 live binding 和 tool catalog 与冻结
+配置逐项比较，不要求尚未签发的 HF/cloud profile；issued-connector-activation
+阶段还会核对各已配置 Provider 的 live profile/connection scope。Navigator 镜像更新
+仍要求健康的新 process instance。V1 `runtime_update.py plan --target exchange` 面向
+Stage 1 inventory，且不会推进 selector-v2；已有 14-service selector-v2 部署不可用该 V1 命令。
+
 ### Private provider credential setup / 私有 Provider 凭据配置
 
 The operator helper is a local-only page, not a credential service. Run it as UID

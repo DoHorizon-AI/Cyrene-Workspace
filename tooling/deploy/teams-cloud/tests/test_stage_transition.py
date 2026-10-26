@@ -277,6 +277,7 @@ def test_create_plan_consumes_statuses_after_transport_and_single_validation(
     )
 
     assert len(result["planSha256"]) == 64
+    assert "imageUpdateTarget" not in persisted_plan
     assert persisted_plan["edgeDelivery"]["revision"] == 7
     assert persisted_plan["navigatorDrain"]["instanceId"] == "11111111-1111-4111-8111-111111111111"
     assert len(requested_urls) == 2
@@ -612,6 +613,492 @@ def _active_and_bootstrap() -> tuple[
         ]
     )
     return active, candidate, active_lock, candidate_lock
+
+
+def _active_image_update(
+    target: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build a fixed 14-service selector state with one candidate image changed."""
+
+    _bootstrap_active, active, _bootstrap_lock, active_lock = _active_and_bootstrap()
+    active = copy.deepcopy(active)
+    active_lock = copy.deepcopy(active_lock)
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    lock_service = runtime_update.LOCK_SERVICE_FOR_TARGET[target]
+    candidate_ref = f"{target}:image-update"
+    candidate["services"][target]["image"] = candidate_ref
+    row = next(item for item in candidate_lock["images"] if item["service"] == lock_service)
+    row["image"] = candidate_ref
+    row["imageId"] = _image_id(50 if target == "exchange" else 51)
+    return active, candidate, active_lock, candidate_lock
+
+
+@pytest.mark.parametrize("target", ["exchange", "navigator"])
+def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
+    target: str,
+) -> None:
+    """Update one built image while preserving every service/configuration in the phase."""
+
+    active, candidate, active_lock, candidate_lock = _active_image_update(target)
+
+    targets, images = stage_transition._validate_phase_topology(
+        phase="issued-connector-activation",
+        image_update_target=target,
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+
+    assert targets == [target]
+    assert images[target]["active"]["imageId"] != images[target]["candidate"]["imageId"]
+    assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
+
+
+def test_image_update_rejects_config_and_non_target_image_changes() -> None:
+    """Keep image-update plans closed to one image reference and ID change."""
+
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    candidate["services"]["exchange"]["environment"]["NEW_ROLE"] = "unexpected"
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="only its selected service image"
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target="exchange",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    candidate["services"]["navigator"]["image"] = "navigator:unexpected"
+    candidate_lock["images"] = [
+        {**row, "image": "navigator:unexpected", "imageId": _image_id(52)}
+        if row["service"] == "dsh-executor"
+        else row
+        for row in candidate_lock["images"]
+    ]
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="only its selected service image"
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target="exchange",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    candidate_lock["images"] = [
+        {**row, "imageId": _image_id(52)} if row["service"] == "dsh-executor" else row
+        for row in candidate_lock["images"]
+    ]
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="only the selected built service"
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target="exchange",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    candidate_lock["externalImages"]["unexpected"] = {"imageId": _image_id(53)}
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="only the selected built service"
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target="exchange",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    candidate["services"]["unplanned-worker"] = _service("worker:v1")
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="exact active service inventory"
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target="exchange",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
+    """Require one real Exchange/Navigator image change and reject other targets."""
+
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    candidate["services"]["exchange"]["image"] = active["services"]["exchange"]["image"]
+    candidate_lock["images"] = copy.deepcopy(active_lock["images"])
+    with pytest.raises(stage_transition.StageTransitionError, match="distinct target reference"):
+        stage_transition._validate_phase_topology(
+            phase="provider-bootstrap",
+            image_update_target="exchange",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="must be Exchange or Navigator"
+    ):
+        stage_transition._validate_phase_topology(
+            phase="provider-bootstrap",
+            image_update_target="account-center",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def test_stage_transition_cli_closes_image_update_target_choices() -> None:
+    """Expose only the two existing services whose image updates have explicit V2 gates."""
+
+    parser = stage_transition._build_parser()
+    commands = next(action for action in parser._actions if action.dest == "command")
+    plan_parser = commands.choices["plan"]
+    image_target_action = next(
+        action
+        for action in plan_parser._actions
+        if "--image-update-target" in action.option_strings
+    )
+
+    assert image_target_action.choices == ["exchange", "navigator"]
+
+
+def test_stage_transition_cli_passes_image_update_target_to_plan_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Forward the explicit CLI target without changing the selected config phase."""
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(runtime_update, "_validate_docker_prefix", lambda _prefix: None)
+
+    def capture_plan(**kwargs: Any) -> dict[str, str]:
+        captured.update(kwargs)
+        return {"operationId": "operation-1", "planSha256": "a" * 64}
+
+    monkeypatch.setattr(stage_transition, "create_plan", capture_plan)
+    arguments = [
+        "plan",
+        "--phase",
+        "issued-connector-activation",
+        "--image-update-target",
+        "exchange",
+        "--active-compose-file",
+        str(tmp_path / "active-compose.yaml"),
+        "--active-env-file",
+        str(tmp_path / "active.env"),
+        "--active-image-lock",
+        str(tmp_path / "active-lock.json"),
+        "--candidate-compose-file",
+        str(tmp_path / "candidate-compose.yaml"),
+        "--candidate-env-file",
+        str(tmp_path / "candidate.env"),
+        "--candidate-image-lock",
+        str(tmp_path / "candidate-lock.json"),
+        "--secrets-dir",
+        str(tmp_path / "secrets"),
+        "--active-config-dir",
+        str(tmp_path / "config"),
+        "--candidate-config-dir",
+        str(tmp_path / "config"),
+        "--candidate-huggingface-seed",
+        str(tmp_path / "hf-seed.json"),
+        "--connector-auth-evidence",
+        str(tmp_path / "connector-evidence.json"),
+        "--connector-auth-task-id",
+        "task-1",
+        "--active-selection",
+        str(tmp_path / "runtime-selection.json"),
+        "--promote-selection",
+        str(tmp_path / "runtime-selection.json"),
+        "--backup-dir",
+        str(tmp_path / "backups"),
+        "--journal-dir",
+        str(tmp_path / "journals"),
+        "--output",
+        str(tmp_path / "plan.json"),
+    ]
+
+    assert stage_transition.main(arguments) == 0
+    assert captured["phase"] == "issued-connector-activation"
+    assert captured["image_update_target"] == "exchange"
+
+
+def _image_update_selection_inputs() -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]
+]:
+    """Build matching selector/config records for an image-only transition test."""
+
+    compose_files = [{"path": "/private/compose.yaml", "sha256": "a" * 64}]
+    env_files = [{"path": "/private/runtime.env", "sha256": "b" * 64}]
+    active_lock = {"path": "/private/active-image-lock.json", "sha256": "c" * 64}
+    candidate_lock = {"path": "/private/candidate-image-lock.json", "sha256": "d" * 64}
+    config_files = [{"path": "principal.json", "sha256": "e" * 64}]
+    secret_files = [{"name": "exchange-key", "sha256": "f" * 64}]
+    seed = {"path": "/private/hf-seed.json", "sha256": "1" * 64}
+    runpod_key = {"path": "/private/runpod-key", "sha256": "2" * 64}
+    identity = {"navigator": []}
+    active_inputs = {
+        "composeFiles": compose_files,
+        "envFiles": env_files,
+        "imageLock": active_lock,
+        "configDirectoryFiles": config_files,
+        "secretFiles": secret_files,
+    }
+    candidate_inputs = {
+        "composeFiles": compose_files,
+        "envFiles": env_files,
+        "imageLock": candidate_lock,
+        "configDirectoryFiles": config_files,
+        "secretFiles": secret_files,
+        "huggingfaceSeed": seed,
+        "runpodKey": runpod_key,
+    }
+    selection = {
+        "schemaVersion": stage_transition.SELECTION_SCHEMA,
+        "project": "cyrene-teams-cloud",
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "3" * 64,
+        "phase": "issued-connector-activation",
+        "composeFiles": compose_files,
+        "envFiles": env_files,
+        "imageLock": active_lock,
+        "secretsDir": "/private/secrets",
+        "configDir": "/private/config",
+        "huggingfaceSeed": seed,
+        "runpodKey": runpod_key,
+        "runtimeConfigIdentity": identity,
+        "updatedAtUtc": "2026-10-26T12:00:00+00:00",
+    }
+    selection_record = {
+        "path": "/private/runtime-selection.json",
+        "sha256": "4" * 64,
+        "document": selection,
+    }
+    runtime_identity = {"active": identity, "candidate": copy.deepcopy(identity)}
+    return active_inputs, candidate_inputs, selection_record, runtime_identity
+
+
+def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> None:
+    """Bind the image-only plan to the current phase, seed, directories, and mount map."""
+
+    active_inputs, candidate_inputs, selection, identity = _image_update_selection_inputs()
+    stage_transition._validate_image_update_selection_contract(
+        target="exchange",
+        phase="issued-connector-activation",
+        project="cyrene-teams-cloud",
+        selection_record=selection,
+        selection_path="/private/runtime-selection.json",
+        active_config_dir="/private/config",
+        candidate_config_dir="/private/config",
+        active_secrets_dir="/private/secrets",
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity=identity,
+    )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="match an existing runtime selector"
+    ):
+        stage_transition._validate_image_update_selection_contract(
+            target="exchange",
+            phase="provider-bootstrap",
+            project="cyrene-teams-cloud",
+            selection_record=selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity=identity,
+        )
+
+    changed_identity = copy.deepcopy(identity)
+    changed_identity["candidate"]["navigator"].append({"type": "bind"})
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="preserve every service mount identity"
+    ):
+        stage_transition._validate_image_update_selection_contract(
+            target="exchange",
+            phase="issued-connector-activation",
+            project="cyrene-teams-cloud",
+            selection_record=selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity=changed_identity,
+        )
+
+    with pytest.raises(stage_transition.StageTransitionError, match="existing runtime selector v2"):
+        stage_transition._validate_image_update_selection_contract(
+            target="exchange",
+            phase="issued-connector-activation",
+            project="cyrene-teams-cloud",
+            selection_record=None,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity=identity,
+        )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="config and secret directories"
+    ):
+        stage_transition._validate_image_update_selection_contract(
+            target="exchange",
+            phase="issued-connector-activation",
+            project="cyrene-teams-cloud",
+            selection_record=selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/candidate-config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity=identity,
+        )
+
+    changed_seed_inputs = copy.deepcopy(candidate_inputs)
+    changed_seed_inputs["huggingfaceSeed"]["path"] = "/private/other-hf-seed.json"
+    with pytest.raises(stage_transition.StageTransitionError, match="provider seed and key"):
+        stage_transition._validate_image_update_selection_contract(
+            target="exchange",
+            phase="issued-connector-activation",
+            project="cyrene-teams-cloud",
+            selection_record=selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=changed_seed_inputs,
+            runtime_config_identity=identity,
+        )
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [("exchange", "old"), ("navigator", "fresh"), (None, "fresh")],
+)
+def test_image_update_resumes_the_existing_executor_only_for_exchange(
+    monkeypatch: pytest.MonkeyPatch,
+    target: str | None,
+    expected: str,
+) -> None:
+    """Exchange-only updates resume the old generation; Navigator updates keep the fresh gate."""
+
+    observed: list[str] = []
+    monkeypatch.setattr(
+        stage_transition,
+        "_resume_old_executor_if_needed",
+        lambda **_kwargs: observed.append("old"),
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_resume_live_navigator",
+        lambda **_kwargs: observed.append("fresh"),
+    )
+
+    stage_transition._resume_executor_after_transition(
+        plan={"imageUpdateTarget": target} if target is not None else {},
+        journal={},
+        candidate_compose={},
+        docker_prefix=["docker"],
+    )
+
+    assert observed == [expected]
+
+
+@pytest.mark.parametrize(
+    ("phase", "target", "required"),
+    [
+        ("provider-bootstrap", "exchange", True),
+        ("provider-bootstrap", "navigator", False),
+        ("issued-connector-activation", "exchange", True),
+        ("issued-connector-activation", "navigator", True),
+        ("provider-bootstrap", None, False),
+        ("issued-connector-activation", None, True),
+    ],
+)
+def test_exchange_readiness_gate_tracks_phase_and_image_target(
+    phase: str,
+    target: str | None,
+    required: bool,
+) -> None:
+    """Bootstrap image updates verify only their frozen catalog; activation retains full readiness."""
+
+    assert stage_transition._exchange_readiness_required(phase, target) is required
+
+
+def test_exchange_image_update_records_readiness_from_the_candidate_container(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the post-update readiness probe targets the newly started Exchange image."""
+
+    candidate_id = "a" * 64
+    candidate_image_id = _image_id(60)
+    plan = {
+        "candidateServices": {"exchange": {"candidate": {"imageId": candidate_image_id}}},
+        "activeServices": {"exchange": {"containerId": "b" * 64, "imageId": _image_id(4)}},
+    }
+    journal = {
+        "targetProgress": {
+            "exchange": {
+                "candidateContainerId": candidate_id,
+                "candidateImageId": candidate_image_id,
+            }
+        },
+        "exchangeReadiness": {"verified": False, "receipt": None},
+    }
+    captured: dict[str, Any] = {}
+
+    def read_readiness(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"exchangeContainerId": kwargs["container_id"]}
+
+    monkeypatch.setattr(stage_transition, "_read_live_exchange_readiness", read_readiness)
+    monkeypatch.setattr(stage_transition, "_write_journal", lambda *_args: None)
+    stage_transition._record_exchange_readiness(
+        plan=plan,
+        compose={"name": "cyrene"},
+        journal=journal,
+        journal_path=tmp_path / "journal.json",
+        docker_prefix=["docker"],
+    )
+
+    assert captured["container_id"] == candidate_id
+    assert captured["image_id"] == candidate_image_id
+    assert journal["exchangeReadiness"]["verified"] is True
+    assert journal["exchangeReadiness"]["receipt"]["exchangeContainerId"] == candidate_id
 
 
 def test_cloud_management_tls_secret_overlay_allows_only_the_canonical_four_names() -> None:
@@ -1818,6 +2305,138 @@ def _exchange_readiness_fixture(tmp_path: Path) -> tuple[dict[str, Any], dict[st
         "catalog": {"schemaVersion": 1, "items": catalog_items},
     }
     return snapshot, compose
+
+
+def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
+    tmp_path: Path,
+) -> None:
+    """A bootstrap-phase image update verifies the current catalog without requiring future providers."""
+
+    snapshot, compose = _exchange_readiness_fixture(tmp_path)
+    bindings: list[dict[str, Any]] = []
+    catalog_items: list[dict[str, Any]] = []
+    existing = [("github", "github-connection", "github-profile", index) for index in range(10)]
+    existing.append(("computer", "computer-connection", "computer-profile", 10))
+    for provider, connection_ref, profile_ref, index in existing:
+        binding_id = f"legacy-{provider}-{index}"
+        tool_id = f"{provider}.readonly.{index}"
+        bindings.append(
+            {
+                "bindingId": binding_id,
+                "connectionRef": connection_ref,
+                "providerId": provider,
+                "profileRef": profile_ref,
+                "tools": [
+                    {
+                        "toolId": tool_id,
+                        "operationId": f"{provider}.list",
+                        "resourceProjection": f"{provider}_safe_summary",
+                        "mutating": False,
+                    }
+                ],
+            }
+        )
+        catalog_items.append(
+            {
+                "bindingId": binding_id,
+                "capabilityId": "tool.provider.v1",
+                "providerId": provider,
+                "connectionRef": connection_ref,
+                "profileRef": profile_ref,
+                "tools": [
+                    {
+                        "id": tool_id,
+                        "name": f"Read {provider} {index}",
+                        "description": "Read the already-issued scoped summary.",
+                        "readOnly": True,
+                        "inputSchema": {"type": "object", "additionalProperties": False},
+                    }
+                ],
+            }
+        )
+
+    bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
+    catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
+    bindings_path.write_text(json.dumps({"schemaVersion": 1, "bindings": bindings}))
+    catalog_document = {"schemaVersion": 1, "items": catalog_items}
+    catalog_path.write_text(json.dumps(catalog_document))
+    snapshot["profiles"] = [
+        {
+            "profileRef": "github-profile",
+            "profileAlias": "github-primary",
+            "providerId": "github",
+            "authStatus": "connected",
+            "accessMode": "actor_owned",
+            "targetScope": {"repositories": []},
+        },
+        {
+            "profileRef": "computer-profile",
+            "profileAlias": "computer-primary",
+            "providerId": "computer",
+            "accessMode": "workspace_operator",
+            "targetScope": {"targets": {}},
+        },
+    ]
+    snapshot["connections"] = [
+        {
+            "connectionRef": "github-connection",
+            "providerId": "github",
+            "profileRef": "github-profile",
+            "profileAlias": "github-primary",
+            "targetAlias": "github-read",
+            "accessMode": "actor_owned",
+            "readOnly": True,
+            "targetScope": {"repositories": []},
+        },
+        {
+            "connectionRef": "computer-connection",
+            "providerId": "computer",
+            "profileRef": "computer-profile",
+            "profileAlias": "computer-primary",
+            "targetAlias": "computer-read",
+            "accessMode": "workspace_operator",
+            "readOnly": True,
+            "targetScope": {"targetAlias": "computer-read", "targetRef": "desktop"},
+        },
+    ]
+    snapshot["bindings"] = bindings
+    snapshot["catalog"] = catalog_document
+
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase="provider-bootstrap",
+        image_update_target="exchange",
+    )
+
+    assert receipt["verifiedProviderIds"] == ["computer", "github"]
+    assert receipt["bindingCount"] == 11
+    assert receipt["profileCount"] == 2
+    assert receipt["connectionCount"] == 2
+    assert receipt["profileRefByProvider"] == {}
+
+    changed_snapshot = copy.deepcopy(snapshot)
+    changed_snapshot["bindings"][0]["tools"][0]["resourceProjection"] = "other_scope"
+    with pytest.raises(stage_transition.StageTransitionError, match="issued bindings differ"):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=changed_snapshot,
+            compose=compose,
+            phase="provider-bootstrap",
+            image_update_target="exchange",
+        )
+
+    changed_catalog = copy.deepcopy(snapshot)
+    changed_catalog["catalog"]["items"][0]["tools"][0]["inputSchema"] = {
+        "type": "object",
+        "properties": {"scope": {"type": "string"}},
+    }
+    with pytest.raises(stage_transition.StageTransitionError, match="live provider tool catalog"):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=changed_catalog,
+            compose=compose,
+            phase="provider-bootstrap",
+            image_update_target="exchange",
+        )
 
 
 def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
