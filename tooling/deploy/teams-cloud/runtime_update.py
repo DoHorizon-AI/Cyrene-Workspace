@@ -38,6 +38,14 @@ DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/runtime-update")
 GLOBAL_LOCK_DIRECTORY = Path("/run/cyrene-runtime-update")
 GLOBAL_LOCK_OWNER_UID = 0
 TARGET_ORDER = ("github-issues", "exchange", "navigator")
+STAGE_TRANSITION_TARGET_ORDER = (
+    "navigator-persistence",
+    "account-center",
+    "huggingface",
+    "cloud-management-phase2",
+    "exchange",
+    "navigator",
+)
 LEGACY_TARGETS_ONLY = ["exchange", "navigator"]
 ALLOWED_TARGETS = set(TARGET_ORDER)
 LOCK_SERVICE_FOR_TARGET = {
@@ -1341,6 +1349,33 @@ def _compose_up(
         "--pull",
         "never",
         "--no-build",
+        service,
+    ]
+    return _run_command(argv, timeout_seconds=timeout_seconds, external_mutation=True)
+
+
+def _compose_up_stage_transition(
+    *,
+    docker_prefix: list[str],
+    project: str,
+    compose_files: list[Path],
+    env_files: list[Path],
+    service: str,
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    """Replace one explicit Teams cloud phase service without dependencies or image I/O."""
+
+    if service not in STAGE_TRANSITION_TARGET_ORDER:
+        raise RuntimeUpdateError("service is outside the formal Teams cloud stage-transition order")
+    argv = [
+        *_compose_base_argv(docker_prefix, project, compose_files, env_files),
+        "up",
+        "--detach",
+        "--no-deps",
+        "--pull",
+        "never",
+        "--no-build",
+        "--force-recreate",
         service,
     ]
     return _run_command(argv, timeout_seconds=timeout_seconds, external_mutation=True)
@@ -4240,6 +4275,7 @@ def _verify_live_network_membership(
             "navigator-egress": {"navigator"},
             "account-private": {"exchange", "account-center"},
             "cloud-management-private": {"exchange", "cloud-management-phase2"},
+            "huggingface-exchange-private": {"exchange", "huggingface"},
             "exchange-authority-private": {"exchange", "workspace-authority"},
             "exchange-computer-private": {"exchange", "computer-runtime-proxy"},
             "github-exchange-private": {"exchange", "github-issues"},
@@ -4261,6 +4297,7 @@ def _verify_live_network_membership(
                 "navigator-teams-private",
                 "navigator-persistence-private",
                 "navigator-egress",
+                "huggingface-exchange-private",
             }
             and configured_peers != allowed
         ):
@@ -4357,8 +4394,14 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run a read-only plan, explicit bounded update, safe rollback recovery, or status query."""
 
+    arguments_list = list(sys.argv[1:] if argv is None else argv)
+    if arguments_list and arguments_list[0] == "stage-transition":
+        # Keep the v1 target contract closed; the separate v2 transaction owns provider topology.
+        import stage_transition
+
+        return stage_transition.main(arguments_list[1:])
     parser = _build_parser()
-    arguments = parser.parse_args(argv)
+    arguments = parser.parse_args(arguments_list)
     try:
         if arguments.command == "plan":
             docker_prefix = (
