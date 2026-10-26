@@ -597,6 +597,36 @@ def test_provider_bootstrap_uses_exact_service_delta_and_order() -> None:
     )
 
 
+def test_provider_bootstrap_continuation_keeps_already_migrated_persistence_image() -> None:
+    """Continue from the observed mixed baseline without recreating Persistence by image."""
+
+    active, candidate, _active_lock, candidate_lock = _active_and_bootstrap()
+    active["services"]["navigator-persistence"]["image"] = "persistence:v2"
+    active["services"]["account-center"]["environment"]["HF_ENABLED"] = "true"
+    active_lock = _lock(
+        [
+            ("navigator-persistence", "persistence:v2", 7),
+            ("dsh-executor", "navigator:v1", 2),
+            ("account-center", "account-center:v1", 3),
+            ("exchange", "exchange:v1", 4),
+            ("teams-ingress", "teams-ingress:v1", 5),
+            ("teams-public-ingress", "caddy:v1", 6),
+        ]
+    )
+
+    targets, images = stage_transition._validate_phase_topology(
+        phase="provider-bootstrap",
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+
+    assert "navigator-persistence" not in targets
+    assert images["navigator-persistence"]["active"] == images["navigator-persistence"]["candidate"]
+    assert {"huggingface", "cloud-management-phase2", "navigator"} <= set(targets)
+
+
 def test_provider_bootstrap_keeps_runpod_as_an_optional_cloud_profile() -> None:
     """The phase-two cloud service remains active with Azure/GCP before RunPod is configured."""
 
@@ -1374,6 +1404,97 @@ def test_sqlite_migration_pins_exact_additive_health_table_ddl() -> None:
         stage_transition._validate_database_migration_reports(before, current)
 
 
+def test_sqlite_migration_accepts_recreated_persistence_with_existing_schema_unchanged() -> None:
+    """A same-image Persistence recreate can pass the existing 25-to-25 preservation gate."""
+
+    sessions = _table_report(name="sessions", row_count=1, rows_digest="a" * 64)
+    health = _work_credential_health_table_report()
+    health["rowCount"] = 2
+    health["rowsDigest"] = "b" * 64
+    before = _sqlite_report_fixture(
+        {"sessions": sessions, "work_credential_authorization_health": health}
+    )
+    current_tables = copy.deepcopy(before["tables"])
+    for record in current_tables.values():
+        record["preservedRowsCount"] = record["rowCount"]
+        record["preservedRowsDigest"] = record["rowsDigest"]
+    current = _sqlite_report_fixture(current_tables)
+
+    stage_transition._validate_database_migration_reports(before, current)
+
+    assert current["migrationCompatibility"]["addedSchemaObjects"] == []
+    assert current["migrationCompatibility"]["preservedExistingTables"] == [
+        "sessions",
+        "work_credential_authorization_health",
+    ]
+
+
+def test_preexisting_persistence_candidate_requires_exact_health_schema_but_allows_rows() -> None:
+    """A reused candidate image requires the exact migrated table without assuming it is empty."""
+
+    image = {"imageRef": "persistence:v2", "imageId": _image_id(24)}
+    plan = {
+        "phase": "provider-bootstrap",
+        "candidateServices": {"navigator-persistence": {"active": image, "candidate": image}},
+    }
+    sessions = _table_report(name="sessions", row_count=1, rows_digest="a" * 64)
+    health = _work_credential_health_table_report()
+    health["rowCount"] = 2
+    health["rowsDigest"] = "b" * 64
+    report = _sqlite_report_fixture(
+        {"sessions": sessions, "work_credential_authorization_health": health}
+    )
+
+    checked = stage_transition._validate_bootstrap_persistence_baseline(plan, report)
+    assert checked is not None
+
+    assert checked["tables"]["work_credential_authorization_health"]["rowCount"] == 2
+    assert checked["schemaSha256"] == report["schemaSha256"]
+
+    missing = _sqlite_report_fixture(
+        {"sessions": _table_report(name="sessions", row_count=1, rows_digest="a" * 64)}
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="lacks its credential-health table"
+    ):
+        stage_transition._validate_bootstrap_persistence_baseline(plan, missing)
+
+    bad_ddl = copy.deepcopy(report)
+    bad_ddl["tables"]["work_credential_authorization_health"]["createSql"] = bad_ddl["tables"][
+        "work_credential_authorization_health"
+    ]["createSql"].replace(
+        "reminder_count INTEGER NOT NULL DEFAULT 0",
+        "reminder_count INTEGER NOT NULL DEFAULT 1",
+    )
+    ddl = bad_ddl["tables"]["work_credential_authorization_health"]["createSql"]
+    schema_row = next(
+        row
+        for row in bad_ddl["schemaObjects"]
+        if row["name"] == "work_credential_authorization_health"
+    )
+    schema_row["sql"] = ddl
+    bad_ddl["schemaSha256"] = stage_transition._sha256_bytes(
+        stage_transition._canonical_json(bad_ddl["schemaObjects"])
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="pinned Navigator 17700 schema"
+    ):
+        stage_transition._validate_bootstrap_persistence_baseline(plan, bad_ddl)
+
+    initial_upgrade = {
+        "phase": "provider-bootstrap",
+        "candidateServices": {
+            "navigator-persistence": {
+                "active": {"imageId": _image_id(1)},
+                "candidate": {"imageId": _image_id(2)},
+            }
+        },
+    }
+    assert (
+        stage_transition._validate_bootstrap_persistence_baseline(initial_upgrade, missing) is None
+    )
+
+
 def _exchange_readiness_fixture(tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build one redacted Exchange e704358 readiness snapshot and matching candidate inputs."""
 
@@ -1734,3 +1855,286 @@ def test_compose_stage_target_is_closed_and_never_pulls_or_builds(
             service="second-navigator",
             timeout_seconds=60,
         )
+
+
+def test_hf_failure_rolls_back_hf_but_never_downgrades_migrated_account_center(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep Account Center's candidate image after a later HF failure may follow schema v8."""
+
+    account_center_id = "a" * 64
+    huggingface_id = "b" * 64
+    account_center_image = _image_id(20)
+    huggingface_image = _image_id(21)
+    active_lock = _lock(
+        [
+            ("navigator-persistence", "persistence:v2", 7),
+            ("dsh-executor", "navigator:v1", 2),
+            ("account-center", "account-center:v1", 3),
+        ]
+    )
+    candidate_compose = {
+        "name": "cyrene-teams-cloud",
+        "services": {
+            "navigator-persistence": _mount_service("persistence:v2"),
+            "navigator": _mount_service("navigator:v1", executor=True),
+            "account-center": _service("account-center:v2"),
+            "huggingface": _service("huggingface:v2"),
+        },
+    }
+    plan = {
+        "project": "cyrene-teams-cloud",
+        "targets": ["account-center", "huggingface"],
+        "activeInputs": {"imageLock": {"path": "/private/active-lock.json"}},
+        "candidateInputs": {
+            "composeFiles": [{"path": "/private/candidate-compose.yaml"}],
+            "envFiles": [{"path": "/private/candidate.env"}],
+        },
+        "candidateServices": {
+            "account-center": {
+                "active": {"imageRef": "account-center:v1", "imageId": _image_id(3)},
+                "candidate": {"imageRef": "account-center:v2", "imageId": account_center_image},
+                "added": False,
+            },
+            "huggingface": {
+                "candidate": {"imageRef": "huggingface:v2", "imageId": huggingface_image},
+                "added": True,
+            },
+        },
+    }
+    journal = {
+        "state": "RUNNING",
+        "lastErrorCode": None,
+        "database": {"restorePerformed": False},
+        "targetProgress": {
+            "account-center": {
+                "phase": "APPLIED",
+                "oldContainerId": "c" * 64,
+                "candidateContainerId": account_center_id,
+                "added": False,
+                "applyIntent": False,
+                "rollbackIntent": False,
+            },
+            "huggingface": {
+                "phase": "CONTAINER_READBACK",
+                "oldContainerId": None,
+                "candidateContainerId": huggingface_id,
+                "added": True,
+                "applyIntent": True,
+                "rollbackIntent": False,
+            },
+        },
+    }
+    container_presence = iter([True, False])
+    commands: list[list[str]] = []
+    journal_phases: list[str] = []
+    inspection = [
+        {
+            "Id": huggingface_id,
+            "Image": huggingface_image,
+            "Config": {
+                "Image": "huggingface:v2",
+                "Labels": {
+                    "com.docker.compose.project": "cyrene-teams-cloud",
+                    "com.docker.compose.service": "huggingface",
+                },
+            },
+        }
+    ]
+
+    monkeypatch.setattr(runtime_update, "_load_lock", lambda _path: active_lock)
+    monkeypatch.setattr(stage_transition, "_lock_image_ids", lambda _lock: {})
+    monkeypatch.setattr(
+        stage_transition.preflight, "_compose_config", lambda *_args: candidate_compose
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_runtime_service_inventory",
+        lambda _compose: {"huggingface": candidate_compose["services"]["huggingface"]},
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_container_exists",
+        lambda _container_id, _prefix: next(container_presence),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: json.dumps(inspection),
+    )
+
+    def remove_huggingface(argv: list[str], **_kwargs: Any) -> SimpleNamespace:
+        commands.append(argv)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(runtime_update, "_run_command", remove_huggingface)
+    monkeypatch.setattr(
+        stage_transition,
+        "_compose_target_update",
+        lambda **_kwargs: pytest.fail("rollback must not recreate the old Account Center image"),
+    )
+
+    def write_journal(
+        _path: Path, document: dict[str, Any], phase: str, *, state: str | None = None
+    ) -> None:
+        document["phase"] = phase
+        if state is not None:
+            document["state"] = state
+        journal_phases.append(phase)
+
+    monkeypatch.setattr(stage_transition, "_write_journal", write_journal)
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="may have migrated durable SQLite"
+    ):
+        stage_transition._rollback_known_mutations(
+            plan=plan,
+            active_compose={"services": {}},
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+        )
+
+    assert commands == [["docker", "rm", "-f", huggingface_id]]
+    assert journal["targetProgress"]["huggingface"]["phase"] == "ROLLED_BACK"
+    assert journal["targetProgress"]["account-center"]["phase"] == "APPLIED"
+    assert journal["lastErrorCode"] == stage_transition.ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR
+    assert journal["state"] == "RECOVERY_REQUIRED"
+    assert journal["database"]["restorePerformed"] is False
+    assert "ACCOUNT_CENTER_SCHEMA_DOWNGRADE_BLOCKED" in journal_phases
+
+
+def test_account_center_startup_health_failure_keeps_apply_intent_and_blocks_downgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed initial AC health wait cannot assume that its DB migration did not commit."""
+
+    account_center_id = "d" * 64
+    account_center_image = _image_id(22)
+    candidate_compose = {
+        "name": "cyrene-teams-cloud",
+        "services": {
+            "navigator-persistence": _mount_service("persistence:v2"),
+            "navigator": _mount_service("navigator:v1", executor=True),
+            "account-center": _service("account-center:v2"),
+        },
+    }
+    plan = {
+        "project": "cyrene-teams-cloud",
+        "targets": ["account-center"],
+        "activeInputs": {"imageLock": {"path": "/private/active-lock.json"}},
+        "candidateInputs": {"composeFiles": [], "envFiles": []},
+        "candidateServices": {
+            "account-center": {
+                "active": {"imageRef": "account-center:v1", "imageId": _image_id(3)},
+                "candidate": {"imageRef": "account-center:v2", "imageId": account_center_image},
+                "added": False,
+            }
+        },
+        "policy": {"healthTimeoutSeconds": 30},
+    }
+    journal = {
+        "state": "RUNNING",
+        "lastErrorCode": None,
+        "database": {"restorePerformed": False},
+        "targetProgress": {
+            "account-center": {
+                "phase": "PREPARED",
+                "oldContainerId": "c" * 64,
+                "candidateContainerId": None,
+                "added": False,
+                "applyIntent": False,
+                "rollbackIntent": False,
+            }
+        },
+    }
+    compose_updates: list[bool] = []
+    journal_phases: list[str] = []
+    observed_candidate = {
+        "containerId": account_center_id,
+        "imageRef": "account-center:v2",
+        "imageId": account_center_image,
+        "health": "starting",
+        "networkNames": ["account-center-private"],
+    }
+
+    monkeypatch.setattr(
+        stage_transition,
+        "_runtime_service_inventory",
+        lambda _compose: {"account-center": candidate_compose["services"]["account-center"]},
+    )
+
+    def compose_update(**kwargs: Any) -> SimpleNamespace:
+        compose_updates.append(kwargs["use_candidate"])
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(stage_transition, "_compose_target_update", compose_update)
+    monkeypatch.setattr(
+        stage_transition, "_inspect_exact_service", lambda **_kwargs: observed_candidate
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_wait_for_target_service",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            stage_transition.StageTransitionError("account-center candidate health failed")
+        ),
+    )
+
+    def write_journal(
+        _path: Path, document: dict[str, Any], phase: str, *, state: str | None = None
+    ) -> None:
+        document["phase"] = phase
+        if state is not None:
+            document["state"] = state
+        journal_phases.append(phase)
+
+    monkeypatch.setattr(stage_transition, "_write_journal", write_journal)
+
+    with pytest.raises(stage_transition.StageTransitionError, match="candidate health failed"):
+        stage_transition._update_target(
+            plan=plan,
+            candidate_compose=candidate_compose,
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+            service_name="account-center",
+        )
+
+    assert journal["targetProgress"]["account-center"]["applyIntent"] is True
+    assert journal["targetProgress"]["account-center"]["candidateContainerId"] == account_center_id
+
+    monkeypatch.setattr(runtime_update, "_load_lock", lambda _path: {})
+    monkeypatch.setattr(stage_transition, "_lock_image_ids", lambda _lock: {})
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="may have migrated durable SQLite"
+    ):
+        stage_transition._rollback_known_mutations(
+            plan=plan,
+            active_compose={"services": {}},
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+        )
+
+    assert compose_updates == [True]
+    assert journal["lastErrorCode"] == stage_transition.ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR
+    assert journal["state"] == "RECOVERY_REQUIRED"
+    assert journal["database"]["restorePerformed"] is False
+    assert "ACCOUNT_CENTER_SCHEMA_DOWNGRADE_BLOCKED" in journal_phases
+
+
+def test_same_account_center_image_is_not_blocked_as_a_schema_downgrade() -> None:
+    """A config-only rollback to the same immutable image does not downgrade the DB schema."""
+
+    image = {"imageRef": "account-center:current", "imageId": _image_id(23)}
+    assert not stage_transition._account_center_image_downgrade_may_be_unsafe(
+        plan={"candidateServices": {"account-center": {"active": image, "candidate": image}}},
+        progress={
+            "phase": "APPLIED",
+            "applyIntent": False,
+            "rollbackIntent": False,
+            "candidateContainerId": "e" * 64,
+        },
+    )
