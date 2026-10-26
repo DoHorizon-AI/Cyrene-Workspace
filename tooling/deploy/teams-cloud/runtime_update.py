@@ -37,8 +37,14 @@ JOURNAL_SCHEMA = "cyrene-teams-runtime-update-journal-v1"
 DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/runtime-update")
 GLOBAL_LOCK_DIRECTORY = Path("/run/cyrene-runtime-update")
 GLOBAL_LOCK_OWNER_UID = 0
-ALLOWED_TARGETS = {"navigator", "exchange"}
-LOCK_SERVICE_FOR_TARGET = {"navigator": "dsh-executor", "exchange": "exchange"}
+TARGET_ORDER = ("github-issues", "exchange", "navigator")
+LEGACY_TARGETS_ONLY = ["exchange", "navigator"]
+ALLOWED_TARGETS = set(TARGET_ORDER)
+LOCK_SERVICE_FOR_TARGET = {
+    "github-issues": "github-issues-provider",
+    "navigator": "dsh-executor",
+    "exchange": "exchange",
+}
 CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
 FULL_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")
 IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -647,11 +653,15 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     }
     if not isinstance(policy, dict) or set(policy) != policy_fields:
         raise RuntimeUpdateError("runtime update policy is malformed")
-    expected_order = [target for target in ("exchange", "navigator") if target in plan["targets"]]
+    expected_order = [target for target in TARGET_ORDER if target in plan["targets"]]
+    targets_only = policy.get("targetsOnly") if isinstance(policy, dict) else None
+    legacy_targets_only_allowed = (
+        targets_only == LEGACY_TARGETS_ONLY and "github-issues" not in plan["targets"]
+    )
     if (
         policy.get("scope") != "standalone-teams"
         or policy.get("managedRuntimeMaintenance") != "UNMANAGED_REQUIRED"
-        or policy.get("targetsOnly") != ["exchange", "navigator"]
+        or (targets_only != list(TARGET_ORDER) and not legacy_targets_only_allowed)
         or policy.get("updateOrder") != expected_order
         or policy.get("edgeImageReplacement") is not False
         or policy.get("composeNoDeps") is not True
@@ -1320,7 +1330,9 @@ def _compose_up(
     """Replace one existing service from an exact input set without touching dependencies."""
 
     if service not in ALLOWED_TARGETS:
-        raise RuntimeUpdateError("Compose update target is outside navigator/exchange")
+        raise RuntimeUpdateError(
+            "Compose update target is outside the approved provider/Exchange/Navigator set"
+        )
     argv = [
         *_compose_base_argv(docker_prefix, project, compose_files, env_files),
         "up",
@@ -1982,7 +1994,7 @@ def _update_target(
     progress["phase"] = "UPDATED_HEALTHY"
     progress["newContainerId"] = current["containerId"]
     journal["updatedTargets"].append(target)
-    journal["updatedTargets"].sort(key=("exchange", "navigator").index)
+    journal["updatedTargets"].sort(key=TARGET_ORDER.index)
     journal.pop("currentTarget", None)
     _set_phase(journal, journal_path, f"{target.upper()}_HEALTHY")
 
@@ -2958,7 +2970,7 @@ def _rollback_operation(
     active_inputs = plan["activeInputs"]
     active_compose_files = _input_paths(active_inputs, "composeFiles")
     active_env_files = _input_paths(active_inputs, "envFiles")
-    for target in ("exchange", "navigator"):
+    for target in TARGET_ORDER:
         if target not in plan["targets"]:
             continue
         current = _read_transition_state(
@@ -3467,7 +3479,9 @@ def create_plan(
         or set(targets) - ALLOWED_TARGETS
         or len(set(targets)) != len(targets)
     ):
-        raise RuntimeUpdateError("targets must be a unique subset of navigator and exchange")
+        raise RuntimeUpdateError(
+            "targets must be a unique subset of github-issues, exchange, and navigator"
+        )
     _validate_docker_prefix(docker_prefix)
     ordered_targets = sorted(targets)
     if not 60 <= drain_timeout_seconds <= 900 or not 30 <= health_timeout_seconds <= 600:
@@ -3624,10 +3638,8 @@ def create_plan(
         "policy": {
             "scope": "standalone-teams",
             "managedRuntimeMaintenance": "UNMANAGED_REQUIRED",
-            "targetsOnly": ["exchange", "navigator"],
-            "updateOrder": [
-                target for target in ("exchange", "navigator") if target in ordered_targets
-            ],
+            "targetsOnly": list(TARGET_ORDER),
+            "updateOrder": [target for target in TARGET_ORDER if target in ordered_targets],
             "edgeImageReplacement": False,
             "composeNoDeps": True,
             "dockerPrefix": docker_prefix,
