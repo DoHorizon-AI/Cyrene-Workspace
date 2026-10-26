@@ -455,8 +455,11 @@ def _hf_candidate_env(
         or direct_plugin.get("transport") != "mtls"
     ):
         raise SetupError("huggingface_exchange_profile_invalid")
-    account_scopes = profile.setdefault("accountScopes", {})
-    if not isinstance(account_scopes, dict):
+    account_scopes = profile.get("accountScopes")
+    if account_scopes is None:
+        account_scopes = {}
+        profile["accountScopes"] = account_scopes
+    if not isinstance(account_scopes, dict) or set(account_scopes) - {"repositories"}:
         raise SetupError("huggingface_exchange_profile_invalid")
     account_scopes["repositories"] = [
         {
@@ -1457,7 +1460,7 @@ class ProviderSetupHandler(BaseHTTPRequestHandler):
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header(
             "Content-Security-Policy",
-            f"default-src 'none'; style-src 'nonce-{self.server.server_nonce}'; "
+            f"default-src 'none'; connect-src 'self'; style-src 'nonce-{self.server.server_nonce}'; "
             f"script-src 'nonce-{self.server.server_nonce}'; form-action 'self'; frame-ancestors 'none'",
         )
         self.end_headers()
@@ -1524,7 +1527,7 @@ class ProviderSetupHandler(BaseHTTPRequestHandler):
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header(
                     "Content-Security-Policy",
-                    f"default-src 'none'; style-src 'nonce-{self.server.server_nonce}'; script-src 'nonce-{self.server.server_nonce}'; form-action 'self'; frame-ancestors 'none'",
+                    f"default-src 'none'; connect-src 'self'; style-src 'nonce-{self.server.server_nonce}'; script-src 'nonce-{self.server.server_nonce}'; form-action 'self'; frame-ancestors 'none'",
                 )
                 self.send_header(
                     "Set-Cookie",

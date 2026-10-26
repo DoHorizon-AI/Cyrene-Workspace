@@ -96,7 +96,15 @@ def _write_active_runtime_env(artifacts: Path) -> Path:
                         "connectionRef": "grpcs://huggingface:7443",
                         "transport": "mtls",
                     },
-                    "accountScopes": {"existingScope": "retained"},
+                    "accountScopes": {
+                        "repositories": [
+                            {
+                                "repoType": "model",
+                                "repoId": "Qwen/Old-Model",
+                                "permissions": ["read"],
+                            }
+                        ]
+                    },
                 }
             }
         },
@@ -287,14 +295,15 @@ def test_hf_device_flow_search_and_selection_persists_only_a_scoped_seed(
     assert saved["candidateEnvSha256"] == hashlib.sha256(candidate_env.read_bytes()).hexdigest()
     assert seed["target_scope"]["repositories"] == [*expected_scope]
     hf_profile = exchange_candidate["authorizationCloud"]["profiles"]["hf-primary"]
-    assert hf_profile["accountScopes"]["existingScope"] == "retained"
-    assert hf_profile["accountScopes"]["repositories"] == [
-        {
-            "repoType": "model",
-            "repoId": "Qwen/Qwen2.5-0.5B-Instruct",
-            "permissions": ["read"],
-        }
-    ]
+    assert hf_profile["accountScopes"] == {
+        "repositories": [
+            {
+                "repoType": "model",
+                "repoId": "Qwen/Qwen2.5-0.5B-Instruct",
+                "permissions": ["read"],
+            }
+        ]
+    }
     assert provider_candidate["repositories"] == expected_scope
     assert provider_candidate["read_only"] is True
     assert provider_candidate["existingProviderSetting"] == "retained"
@@ -313,6 +322,7 @@ def test_hf_device_flow_search_and_selection_persists_only_a_scoped_seed(
     "expected_error",
     [
         "huggingface_exchange_profile_unavailable",
+        "huggingface_exchange_profile_invalid",
         "exchange_configuration_invalid",
     ],
 )
@@ -325,18 +335,24 @@ def test_hf_candidate_rejects_unregistered_or_ambiguous_source_without_publishin
     artifacts, secrets = private_dirs
     active_env = _write_active_runtime_env(artifacts)
     original = active_env.read_text(encoding="utf-8")
-    if expected_error == "huggingface_exchange_profile_unavailable":
+    if expected_error in {
+        "huggingface_exchange_profile_unavailable",
+        "huggingface_exchange_profile_invalid",
+    }:
+        invalid_profile = (
+            {"provider": "gcp", "directPlugin": {"connectionRef": "grpcs://huggingface:7443"}}
+            if expected_error == "huggingface_exchange_profile_unavailable"
+            else {
+                "provider": "hf",
+                "directPlugin": {
+                    "connectionRef": "grpcs://huggingface:7443",
+                    "transport": "mtls",
+                },
+                "accountScopes": {"repositories": [], "extra": "unsupported"},
+            }
+        )
         bad_exchange = json.dumps(
-            {
-                "authorizationCloud": {
-                    "profiles": {
-                        "hf-primary": {
-                            "provider": "gcp",
-                            "directPlugin": {"connectionRef": "grpcs://huggingface:7443"},
-                        }
-                    }
-                }
-            },
+            {"authorizationCloud": {"profiles": {"hf-primary": invalid_profile}}},
             separators=(",", ":"),
         )
         active_env.write_text(
@@ -751,9 +767,17 @@ def test_local_page_enforces_exact_host_origin_csrf_and_redacts_api_key(
         response = connection.getresponse()
         page = response.read().decode("utf-8")
         cookie = response.getheader("Set-Cookie").split(";", maxsplit=1)[0]
+        csp = response.getheader("Content-Security-Policy")
         csrf = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
         assert response.status == 200
+        assert "connect-src 'self'" in csp
         assert "Qwen2.5-0.5B-Instruct" in page
+
+        connection.request("GET", "/status", headers={"Cookie": cookie})
+        same_origin = connection.getresponse()
+        same_origin_status = json.loads(same_origin.read().decode("utf-8"))
+        assert same_origin.status == 200
+        assert same_origin_status["huggingfaceCandidateInput"] == "AVAILABLE"
 
         body = json.dumps({"csrf": csrf, "api_key": FAKE_RUNPOD_KEY})
         connection.request(
@@ -903,6 +927,18 @@ def test_credential_notice_overlay_is_optional_private_and_owner_scoped() -> Non
         "gcp",
         "runpod",
     ]
+    destination_properties = schema["properties"]["destination"]["properties"]
+    assert destination_properties["rootThreadId"]["pattern"] == "^0*[1-9][0-9]*$"
+    assert destination_properties["serviceUrl"]["maxLength"] == 512
+    assert schema["properties"]["pollIntervalMs"]["maximum"] == 900000
+    assert re.fullmatch(destination_properties["rootThreadId"]["pattern"], "0001792992696303")
+    assert re.fullmatch(
+        destination_properties["serviceUrl"]["pattern"],
+        "https://smba.trafficmanager.net/amer/",
+    )
+    assert not re.fullmatch(
+        destination_properties["serviceUrl"]["pattern"], "https://example.invalid/"
+    )
     assert template["exchange"] == {"profileRef": ""}
     assert set(exchange_template["systemNotification"]) == {
         "profileRef",
