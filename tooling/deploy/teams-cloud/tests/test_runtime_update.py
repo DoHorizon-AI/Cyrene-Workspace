@@ -1182,6 +1182,45 @@ def test_internal_status_validation_preserves_the_json_document() -> None:
     assert "_httpStatus" not in response
 
 
+def test_final_delivery_readback_consumes_current_status_http_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the real GET/status helper and validator through the final APPLIED check."""
+
+    document = _edge_status(paused=False, revision=2)
+
+    def run_command(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        url = next(
+            value for value in argv if isinstance(value, str) and value.startswith("http://")
+        )
+        assert url.endswith("/_internal/teams/delivery/status")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps({"httpStatus": 200, "document": document}),
+            "",
+        )
+
+    monkeypatch.setattr(runtime_update, "_run_command", run_command)
+    journal = {
+        "edge": {
+            "containerId": OLD_CONTAINER_ID,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "resumeRevision": 2,
+        }
+    }
+
+    result = runtime_update._verify_final_edge_delivery_readback(
+        journal=journal,
+        docker_prefix=["docker"],
+    )
+
+    assert result["paused"] is False
+    assert result["revision"] == 2
+    assert "_httpStatus" not in result
+
+
 @pytest.mark.parametrize(
     "status_name", ["accepting", "drainingActive", "drained", "resumedPolling"]
 )

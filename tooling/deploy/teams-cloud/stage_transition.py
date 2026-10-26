@@ -2269,7 +2269,6 @@ def create_plan(
     edge_status = runtime_update._current_edge_status(
         docker_prefix, edge_container["containerId"], timeout_seconds=15
     )
-    runtime_update._validate_edge_status(edge_status)
     if edge_status["paused"] is not False or edge_status["dead_count"] != 0:
         raise StageTransitionError(
             "Teams ingress must be accepting with no dead-letter events before planning"
@@ -2277,7 +2276,6 @@ def create_plan(
     navigator_status = runtime_update._current_navigator_status(
         docker_prefix, navigator_container["containerId"], timeout_seconds=15
     )
-    runtime_update._validate_navigator_status(navigator_status)
     if navigator_status["mode"] != "accepting":
         raise StageTransitionError("Navigator must be accepting before transition planning")
 
@@ -3687,7 +3685,6 @@ def _verify_active_baseline(
     edge = runtime_update._current_edge_status(
         docker_prefix, plan["edgeDelivery"]["containerId"], timeout_seconds=15
     )
-    runtime_update._validate_edge_status(edge)
     if (
         edge.get("paused") is not False
         or edge.get("revision") != plan["edgeDelivery"]["revision"]
@@ -3700,7 +3697,6 @@ def _verify_active_baseline(
     navigator = runtime_update._current_navigator_status(
         docker_prefix, plan["navigatorDrain"]["containerId"], timeout_seconds=15
     )
-    runtime_update._validate_navigator_status(navigator)
     if (
         navigator.get("mode") != "accepting"
         or navigator.get("instanceId") != plan["navigatorDrain"]["instanceId"]
@@ -3956,7 +3952,6 @@ def _resume_live_navigator(
     status = runtime_update._current_navigator_status(
         docker_prefix, nav["containerId"], timeout_seconds=15
     )
-    runtime_update._validate_navigator_status(status)
     if (
         status.get("mode") != "accepting"
         or status.get("instanceId") == journal["navigator"]["initialInstanceId"]
@@ -3986,7 +3981,6 @@ def _resume_old_executor_if_needed(
         current_id,
         timeout_seconds=15,
     )
-    runtime_update._validate_navigator_status(status)
     if (
         current_id == journal["navigator"]["initialContainerId"]
         and status.get("mode") == "draining"
@@ -4037,7 +4031,6 @@ def _verify_final_delivery_readback(
 
     edge = journal["edge"]
     status = runtime_update._current_edge_status(docker_prefix, edge["containerId"])
-    runtime_update._validate_edge_status(status)
     runtime_update._verify_edge_dead_count(edge, status["dead_count"], "final APPLIED readback")
     if (
         status["paused"] is not False
