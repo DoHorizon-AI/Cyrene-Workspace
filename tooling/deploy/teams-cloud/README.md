@@ -20,6 +20,8 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `Dockerfile.*` | Source-built ARM64 service images with fixed runtime entrypoints / 从固定源码构建 ARM64 服务镜像并锁定运行入口 |
 | `config/requirements.huggingface-cli.lock` | Hash-locked ARM64/Python 3.12 `hf` CLI dependency closure / 固定哈希的 ARM64/Python 3.12 `hf` CLI 依赖闭包 |
 | `compose.huggingface.yaml`, `config/github-only.env.template` | Explicit HF-enabled overlay or auditable GitHub-only selection / 显式 HF overlay 或可审计的 GitHub-only 选择 |
+| `provider_credential_setup.py` | Loopback-only HF device-OAuth repository picker and prevalidated Runpod API-key setup / 仅 loopback 的 HF 设备 OAuth 仓库选择与验证后写入 Runpod API key |
+| `compose.credential-notifications.yaml`, `config/teams-credential-notifications.schema.json`, `config/teams-credential-notifications.template.json`, `config/teams-credential-notifications-exchange-profile.schema.json`, `config/teams-credential-notifications-exchange-profile.template.json` | Optional fixed-owner, fixed-channel credential-health notices using Navigator's existing notification worker / 可选启用由 Navigator 现有通知 worker 投递的固定 owner、固定频道凭据状态提醒 |
 | `compose.proactive-assistant-v1.yaml`, `compose.computer-runtime.yaml`, `Dockerfile.computer-runtime`, `Dockerfile.computer-proxy` | Opt-in unlimited conversational model profile, private ephemeral computer runner, and mTLS-only bridge / 可选的不限聊天次数模型配置、内网临时电脑执行容器与仅 mTLS 桥接 |
 | `compose.codebuddy-acp.yaml`, `config/codebuddy-acp.env.template` | Explicit native CodeBuddy ACP profile with a closed command/model selector / 显式启用原生 CodeBuddy ACP，并限制命令和模型选择 |
 | `config/responsibility-targets.v1.schema.json`, `config/responsibility-targets.v1.template.json`, `config/proactive-assistant-workflow.v2.template.json` | Host-owned repository grants and disabled Workflows v2 template / 宿主机维护的仓库授权与默认禁用的 Workflows v2 模板 |
@@ -91,6 +93,88 @@ binding, or tool catalog.
 基础 Compose 文件只为回调入口发布 TCP 443。Exchange、Navigator、Directory Authority、Account Center 和所有 DirectPluginRuntime 均留在私有网络；Provider 使用各自服务证书、私有 client-CA bundle 和 mTLS 健康探针。公网 Caddyfile 只接受 `POST /api/messages`，使用 ACME TLS-ALPN challenge，并保持宿主机 80 端口关闭。
 
 启用 HF 时，使用 HF Compose overlay 选择新的 device-OAuth bootstrap。私有 JSON 文件保存在 secrets 目录之外，只读挂载到 Account Center。Account Center 会将 profile 凭据加密保存到持久数据库；在后续配置发布同时移除文件引用和挂载前，需将 bootstrap 文件保持 owner-only，以支持重启和重新授权。预检会校验封闭 DTO 与目标仓库范围，不会输出 token 内容。GitHub-only 模式不包含 OAuth secret 挂载、HF Provider 服务、Exchange HF profile、binding 或 tool catalog。
+
+### Private provider credential setup / 私有 Provider 凭据配置
+
+The operator helper is a local-only page, not a credential service. Run it as UID
+10001 on the deployment host, using the private artifact and secret directories
+already provisioned for that task. It binds only `127.0.0.1`; on a remote VM,
+reach it through an SSH local forward and open the exact `127.0.0.1` URL printed
+by the process. Do not put the page behind public Caddy or another public route.
+
+```bash
+sudo -u '#10001' -- python3 /absolute/path/to/Cyrene-Workspace/tooling/deploy/teams-cloud/provider_credential_setup.py \
+  --artifacts-dir /absolute/path/to/Cyrene/.artifacts/teams-cloud-task \
+  --secrets-dir /absolute/path/to/Cyrene/.artifacts/teams-cloud-task/secrets \
+  --active-env-file /absolute/path/to/Cyrene/.artifacts/teams-cloud-task/config/runtime.env \
+  --hf-seed /absolute/path/to/Cyrene/.artifacts/teams-cloud-task/onboarding/private/huggingface-oauth-bootstrap.json \
+  --port 51876
+```
+
+`--secrets-dir` is validated read-only and is never modified by the page. Both
+HF and Runpod writes go to new versioned directories beneath
+`onboarding/private/provider-candidates/`; each save returns the exact
+candidate `runtime.env` and provider file paths. Do not copy a candidate over
+the active env or active secrets. Use those returned paths in the reviewed
+stage-transition plan.
+
+If the helper runs on a remote VM, create a tunnel from the operator computer:
+
+```bash
+ssh -N -L 51876:127.0.0.1:51876 <VM-SSH-ALIAS>
+```
+
+Then browse to `http://127.0.0.1:51876/`. The page requires an exact loopback
+`Host`, matching `Origin`, a per-session CSRF token, and a SameSite/HttpOnly
+cookie. The HF flow uses the official device authorization endpoints. An
+existing owner-only seed can be loaded for repository selection without logging
+in again; a new device login starts only when the operator clicks the button.
+The server keeps access and refresh tokens in process memory, calls the Hub
+identity/repository APIs itself, and lists model, dataset, and Space namespaces
+without requiring a repository URL to be pasted. After the operator selects
+1–100 listed repositories, it writes a versioned owner-only candidate bundle
+containing a closed OAuth seed and a complete `runtime.env` candidate. The
+candidate synchronizes repository scope across the seed, the HF provider
+configuration, and the `hf-primary` Exchange profile. The active env file is
+read-only and is never overwritten. The page returns both candidate paths and
+the env-file SHA-256 for the formal stage-transition plan. No token, device
+code, request body, or provider response body is rendered or logged.
+
+Saving the candidate does not by itself update Account Center's durable profile
+or activate the new repository scope. The formal stage-transition plan must
+consume the exact candidate env and seed, and the verified owner must complete
+the existing Exchange profile-link/rotate action before the connector is
+considered active. Keep the seed owner-only for the configured recovery path;
+profile status and expiry are checked through Exchange's
+AuthorizationCloudRunner, which remains the only health poller.
+
+For Runpod, create a Restricted API key and enable only the Pod operations
+approved for the profile. The helper sends that candidate only to Runpod's
+read-only `GET /v2/pods?limit=1` endpoint, then atomically publishes a
+versioned private bundle containing `runtime.env` and `runpod-api-key` (UID
+10001, mode `0400`) after HTTP 200. The candidate env overrides only
+`CYRENE_RUNPOD_API_KEY_FILE`; the active secrets directory and active key stay
+unchanged. A 401, 403, rate limit, malformed response, or network failure
+publishes nothing. This probe confirms Pod-list access only; it does not prove
+write authorization. Pass the returned candidate env path and key path to the
+formal stage-transition plan. Cloud Management changes only after that reviewed
+apply recreates the locked service and reads back health.
+
+The credential notice overlay is optional and must remain absent until the
+Directory owner, Teams tenant/team/channel/thread/service URL, Exchange
+system-notification profile, and every provider connection ID come from verified
+private configuration. The Exchange profile is a fixed subprofile at
+`connectorHost.teamsMessages.systemNotification`; its `ownerSubject` and
+`fixedRoute` must exactly match the Navigator notification config, while its
+connection and service identity inherit from the existing Teams parent profile.
+Keep both templates' unregistered IDs empty and do not load the overlay with
+either template. The Navigator principal template keeps
+`can_publish_credential_health=false`; enable the role only after the fixed
+owner and destination have been verified. Notices reuse Navigator's existing
+system worker and outbox; this does not enable a general model-driven proactive
+workflow.
+
+HF 的 profile 仍由唯一的 Exchange AuthorizationCloudRunner 查询健康状态；Workspace 不会再创建第二个轮询器。`compose.credential-notifications.yaml` 是独立可选叠加层，只能在 Directory owner、Teams tenant/team/channel/thread/service URL、Exchange `connectorHost.teamsMessages.systemNotification` profile 和每个 provider connection ID 都来自真实私有配置后加载。Exchange 子profile中的 `ownerSubject` 与 `fixedRoute` 必须和 Navigator 通知配置逐字段一致，连接和服务身份继承既有 Teams 父profile。两个模板中的 ID 保持空值时不得加载 overlay。Navigator principal 模板默认 `can_publish_credential_health=false`；只有固定 owner/destination 完成核验后，才在私有 principal 配置中显式启用该角色。通知使用 Navigator 现有 system worker 和 outbox，不开启通用的模型主动工作流。
 
 ### Runtime updater function index / 热更新函数索引
 

@@ -26,4 +26,4 @@ secrets:
   gcp-wif-credential-config:
     file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/gcp-wif-credential-config
   runpod-api-key:
-    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/runpod-api-key
+    file: ${CYRENE_RUNPOD_API_KEY_FILE:?provision the private RunPod API key file}
