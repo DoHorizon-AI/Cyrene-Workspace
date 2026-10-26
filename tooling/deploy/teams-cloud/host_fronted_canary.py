@@ -152,12 +152,18 @@ def _verify_live_caddy_process(
         process_binary != Path(caddy_binary).resolve()
         or len(arguments) < 2
         or arguments[1] != "run"
-        or "--resume" in arguments
+        or any(_is_resume_flag(value) for value in arguments)
         or len(config_positions) != 1
         or config_positions[0] + 1 >= len(arguments)
         or Path(arguments[config_positions[0] + 1]).resolve() != active_file.resolve()
     ):
         raise CanaryGateError("live Caddy process does not load the selected file without --resume")
+
+
+def _is_resume_flag(argument: str) -> bool:
+    """Reject every Caddy CLI spelling of the saved-config resume flag."""
+
+    return argument.partition("=")[0] in {"-r", "-resume", "--resume"}
 
 
 def _read_live_caddy_config() -> dict[str, Any]:
@@ -427,6 +433,9 @@ def _validate_caddy_inputs(
     candidate = _adapt_caddyfile(caddy_binary, candidate_file)
     if _read_live_caddy_config() != source:
         raise CanaryGateError("live Caddy admin configuration differs from the active Caddyfile")
+    if _sha256_file(active_file) != source_digest:
+        raise CanaryGateError("active Caddyfile changed while the live configuration was checked")
+    _verify_live_caddy_process(active_file=active_file, caddy_binary=caddy_binary)
     hostname, _hosts = _verify_candidate_caddy(
         source=source,
         candidate=candidate,
@@ -657,6 +666,7 @@ def _verify_acp_probe(
     *,
     plan: dict[str, Any],
     result: dict[str, Any],
+    result_file: Path,
     script_file: Path,
     image_lock: dict[str, Any],
     configured_model: str,
@@ -667,15 +677,18 @@ def _verify_acp_probe(
 
     nested_result = result.get("result")
     if nested_result is None:
+        legacy_flat_result = True
         probe_result = result
         process_exit_code = result.get("dockerSshExitCode")
     elif isinstance(nested_result, dict):
+        legacy_flat_result = False
         probe_result = nested_result
         process_exit_code = result.get("processExitCode")
     else:
         raise CanaryGateError("native ACP probe result envelope is malformed")
     if probe_result.get("status") == "AUTH_REQUIRED":
         raise CanaryGateError("official CodeBuddy ACP probe is AUTH_REQUIRED")
+    _require_regular_file(result_file, "native ACP probe result", private=True)
     _require_regular_file(script_file, "native ACP probe script", private=True)
     navigator_images = [
         row
@@ -686,7 +699,17 @@ def _verify_acp_probe(
         raise CanaryGateError("image lock must contain exactly one Navigator image")
     expected_image_id = navigator_images[0].get("imageId")
     plan_time = _parse_utc_timestamp(plan.get("at"), "ACP probe plan")
-    result_time = _parse_utc_timestamp(probe_result.get("recordedAt"), "ACP probe result")
+    recorded_at = probe_result.get("recordedAt")
+    if recorded_at is None:
+        if not legacy_flat_result:
+            raise CanaryGateError(
+                "native ACP probe wrapper is missing its UTC completion timestamp"
+            )
+        try:
+            recorded_at = datetime.fromtimestamp(result_file.stat().st_mtime, UTC).isoformat()
+        except OSError as error:
+            raise CanaryGateError("native ACP probe result timestamp is unavailable") from error
+    result_time = _parse_utc_timestamp(recorded_at, "ACP probe result")
     age = now.astimezone(UTC) - result_time
     if age < timedelta(0) or age > maximum_age or result_time < plan_time:
         raise CanaryGateError("ACP probe result is stale or predates its reviewed plan")
@@ -863,6 +886,7 @@ def run_canary_gate(
     _verify_acp_probe(
         plan=acp_plan,
         result=acp_result,
+        result_file=acp_result_path,
         script_file=acp_script_path,
         image_lock=image_lock,
         configured_model=(

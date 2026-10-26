@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -328,9 +329,11 @@ def test_live_caddy_admin_readback_must_equal_active_file_adaptation(
         )
 
 
+@pytest.mark.parametrize("resume_flag", ["--resume", "-r", "--resume=true", "-r=true", "-resume"])
 def test_live_caddy_process_must_load_fixed_config_without_resume(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    resume_flag: str,
 ) -> None:
     """Tie the active path to Caddy's systemd MainPID and reject resume mode."""
 
@@ -370,7 +373,7 @@ def test_live_caddy_process_must_load_fixed_config_without_resume(
         proc_root=proc_root,
     )
 
-    commandline.write_bytes(b"\0".join(value.encode() for value in [*command, "--resume"]) + b"\0")
+    commandline.write_bytes(b"\0".join(value.encode() for value in [*command, resume_flag]) + b"\0")
     with pytest.raises(canary.CanaryGateError, match="does not load the selected file"):
         canary._verify_live_caddy_process(
             active_file=canary.ACTIVE_CADDYFILE,
@@ -641,15 +644,105 @@ def test_codebuddy_probe_pass_requires_nonce_roundtrip_and_locked_image(
     now = datetime.now(UTC)
     plan, inner_result = _probe_documents(script, status="PASS", now=now)
     inner_result.pop("dockerSshExitCode")
+    result_file = tmp_path / "native-probe-result.json"
+    result_file.write_text(json.dumps({"processExitCode": 0, "result": inner_result}))
     canary._verify_acp_probe(
         plan=plan,
         result={"processExitCode": 0, "result": inner_result},
+        result_file=result_file,
         script_file=script,
         image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
         configured_model="glm-5.3-flash",
         now=now,
         maximum_age=timedelta(minutes=30),
     )
+
+
+def test_legacy_flat_codebuddy_probe_uses_result_file_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Use owner-only file time only for the legacy flat probe-result format."""
+
+    monkeypatch.setattr(canary.preflight, "_private_artifact", lambda _path: True)
+    script = tmp_path / "probe.mjs"
+    script.write_text("sanitized probe\n", encoding="utf-8")
+    now = datetime.now(UTC)
+    plan, result = _probe_documents(script, status="PASS", now=now)
+    result.pop("recordedAt")
+    result_file = tmp_path / "native-probe-result.json"
+    result_file.write_text(json.dumps(result))
+    os.utime(result_file, (now.timestamp(), now.timestamp()))
+    canary._verify_acp_probe(
+        plan=plan,
+        result=result,
+        result_file=result_file,
+        script_file=script,
+        image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+        configured_model="glm-5.3-flash",
+        now=now,
+        maximum_age=timedelta(minutes=30),
+    )
+
+
+def test_nested_codebuddy_probe_requires_embedded_completion_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Do not use wrapper file time to repair a missing timestamp in the current envelope."""
+
+    monkeypatch.setattr(canary.preflight, "_private_artifact", lambda _path: True)
+    script = tmp_path / "probe.mjs"
+    script.write_text("sanitized probe\n", encoding="utf-8")
+    now = datetime.now(UTC)
+    plan, inner_result = _probe_documents(script, status="PASS", now=now)
+    inner_result.pop("dockerSshExitCode")
+    inner_result.pop("recordedAt")
+    result_file = tmp_path / "native-probe-result.json"
+    result_file.write_text(json.dumps({"processExitCode": 0, "result": inner_result}))
+    os.utime(result_file, (now.timestamp(), now.timestamp()))
+
+    with pytest.raises(canary.CanaryGateError, match="missing its UTC completion timestamp"):
+        canary._verify_acp_probe(
+            plan=plan,
+            result={"processExitCode": 0, "result": inner_result},
+            result_file=result_file,
+            script_file=script,
+            image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+            configured_model="glm-5.3-flash",
+            now=now,
+            maximum_age=timedelta(minutes=30),
+        )
+
+
+def test_stale_legacy_flat_probe_is_blocked_by_file_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Reject a legacy probe result whose filesystem timestamp exceeds the age limit."""
+
+    monkeypatch.setattr(canary.preflight, "_private_artifact", lambda _path: True)
+    script = tmp_path / "probe.mjs"
+    script.write_text("sanitized probe\n", encoding="utf-8")
+    now = datetime.now(UTC)
+    plan, result = _probe_documents(script, status="PASS", now=now - timedelta(hours=1))
+    result.pop("recordedAt")
+    result_file = tmp_path / "native-probe-result.json"
+    result_file.write_text(json.dumps(result))
+    stale_time = (now - timedelta(hours=1)).timestamp()
+    os.utime(result_file, (stale_time, stale_time))
+
+    with pytest.raises(canary.CanaryGateError, match="stale or predates"):
+        canary._verify_acp_probe(
+            plan=plan,
+            result=result,
+            result_file=result_file,
+            script_file=script,
+            image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
+            configured_model="glm-5.3-flash",
+            now=now,
+            maximum_age=timedelta(minutes=30),
+        )
 
 
 def test_codebuddy_auth_required_blocks_canary_readiness(
@@ -663,10 +756,13 @@ def test_codebuddy_auth_required_blocks_canary_readiness(
     script.write_text("sanitized probe\n", encoding="utf-8")
     now = datetime.now(UTC)
     plan, inner_result = _probe_documents(script, status="AUTH_REQUIRED", now=now)
+    result_file = tmp_path / "native-probe-result.json"
+    result_file.write_text(json.dumps({"processExitCode": 2, "result": inner_result}))
     with pytest.raises(canary.CanaryGateError, match="AUTH_REQUIRED"):
         canary._verify_acp_probe(
             plan=plan,
             result={"processExitCode": 2, "result": inner_result},
+            result_file=result_file,
             script_file=script,
             image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
             configured_model="glm-5.3-flash",
@@ -686,10 +782,13 @@ def test_codebuddy_probe_must_match_the_configured_model(
     script.write_text("sanitized probe\n", encoding="utf-8")
     now = datetime.now(UTC)
     plan, result = _probe_documents(script, status="PASS", now=now)
+    result_file = tmp_path / "native-probe-result.json"
+    result_file.write_text(json.dumps(result))
     with pytest.raises(canary.CanaryGateError, match="has not passed"):
         canary._verify_acp_probe(
             plan=plan,
             result=result,
+            result_file=result_file,
             script_file=script,
             image_lock={"images": [{"service": "navigator", "imageId": IMAGE_ID}]},
             configured_model="deepseek-v4.1-flash",
