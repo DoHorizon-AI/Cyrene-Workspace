@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
 ARG NODE_BASE_IMAGE
-FROM ${NODE_BASE_IMAGE} AS build
+FROM ${NODE_BASE_IMAGE} AS dsh-upstream
 
 ARG DSH_REPOSITORY=https://github.com/deepseek-ai/deepseek-harness.git
 ARG DSH_TAG=dsh-v0.2.0-rc.2
 ARG DSH_COMMIT=639ed015397290b3745d163aafe02ffee4aa3f84
-ARG CODEBUDDY_PACKAGE=@tencent-ai/codebuddy-code@2.163.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential ca-certificates git python3 python3-pip \
@@ -14,15 +13,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
 
 WORKDIR /app
-COPY Cyrene-Services/Cyrene-Navigator/harness/ ./harness/
-COPY Cyrene-Services/Cyrene-Navigator/scripts/ ./scripts/
-COPY Cyrene-Services/Cyrene-Navigator/src/ ./src/
+COPY Cyrene-Services/Cyrene-Navigator/harness/upstream.lock.json ./harness/upstream.lock.json
+COPY Cyrene-Services/Cyrene-Navigator/scripts/prepare-harness.mjs ./scripts/prepare-harness.mjs
 
+# Keep the pinned SDK build independent from frequently changing Navigator app sources.
+# 让固定上游 SDK 构建只依赖锁文件和准备脚本，避免应用改动击穿此缓存层。
 RUN git clone --depth=1 --branch "$DSH_TAG" "$DSH_REPOSITORY" /opt/dsh \
     && test "$(git -C /opt/dsh rev-parse HEAD)" = "$DSH_COMMIT" \
     && node /app/scripts/prepare-harness.mjs --root=/opt/dsh --install --build --link \
-    && node /opt/dsh/node_modules/typescript/bin/tsc -p /app/harness/tsconfig.json --pretty false \
     && rm -rf /opt/dsh/.git
+
+FROM dsh-upstream AS build
+
+COPY Cyrene-Services/Cyrene-Navigator/harness/ ./harness/
+COPY Cyrene-Services/Cyrene-Navigator/scripts/ ./scripts/
+COPY Cyrene-Services/Cyrene-Navigator/src/ ./src/
+# Restore the validated upstream package links after copying the application tree.
+# 复制应用源码后恢复上游已校验的依赖链接。
+COPY --from=dsh-upstream /app/harness/node_modules/ ./harness/node_modules/
+RUN node /opt/dsh/node_modules/typescript/bin/tsc -p /app/harness/tsconfig.json --pretty false
 
 COPY Cyrene-Workspace/tooling/deploy/teams-cloud/prepare_production_runtime.py /tmp/prepare-production-runtime.py
 WORKDIR /opt/dsh
