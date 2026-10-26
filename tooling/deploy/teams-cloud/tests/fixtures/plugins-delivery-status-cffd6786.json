@@ -1,0 +1,21 @@
+{
+  "producer": "DoHorizon-AI/Cyrene-Plugins-Official",
+  "producerCommit": "cffd6786fbbef74dcc0797fe33e760dbda5250a8",
+  "endpoint": "GET /_internal/teams/delivery/status",
+  "note": "Field names and JSON types match DeliveryStatus.as_dict. Times are deterministic epoch-second placeholders; this fixture is not a deployment receipt.",
+  "status": {
+    "paused": true,
+    "revision": 7,
+    "active_delivery_count": 0,
+    "queued_count": 1,
+    "leased_count": 0,
+    "retry_wait_count": 0,
+    "delivered_count": 1,
+    "rejected_count": 0,
+    "dead_count": 0,
+    "pending_bytes": 64,
+    "retained_body_bytes": 64,
+    "oldest_pending_at": 1792991936.462,
+    "last_delivered_at": 1792991801.25
+  }
+}

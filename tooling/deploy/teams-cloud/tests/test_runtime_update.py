@@ -32,6 +32,28 @@ NEW_IMAGE_ID = "sha256:" + "b" * 64
 OLD_CONTAINER_ID = "1" * 64
 NEW_CONTAINER_ID = "2" * 64
 OPERATION_ID = "00000000-0000-4000-8000-000000000001"
+NAVIGATOR_DRAIN_FIXTURE_PATH = (
+    Path(__file__).resolve().parent / "fixtures/navigator-drain-status-18baefba.json"
+)
+PLUGINS_DELIVERY_FIXTURE_PATH = (
+    Path(__file__).resolve().parent / "fixtures/plugins-delivery-status-cffd6786.json"
+)
+
+
+def _native_navigator_status(name: str) -> dict[str, Any]:
+    """Load a sanitized status shape copied from the pinned Navigator producer contract."""
+
+    fixture = json.loads(NAVIGATOR_DRAIN_FIXTURE_PATH.read_text(encoding="utf-8"))
+    assert fixture["producerCommit"] == "18baefba4f8e0c89b2ba335ea6f7d41251f1a85d"
+    return copy.deepcopy(fixture["statuses"][name])
+
+
+def _plugins_delivery_status() -> dict[str, Any]:
+    """Load the non-empty queue/timestamp shape returned by the pinned Plugins producer."""
+
+    fixture = json.loads(PLUGINS_DELIVERY_FIXTURE_PATH.read_text(encoding="utf-8"))
+    assert fixture["producerCommit"] == "cffd6786fbbef74dcc0797fe33e760dbda5250a8"
+    return copy.deepcopy(fixture["status"])
 
 
 def _edge_status(*, paused: bool, revision: int, active: int = 0) -> dict[str, Any]:
@@ -95,6 +117,41 @@ def test_runtime_plan_maps_compose_navigator_to_the_canonical_dsh_lock_row() -> 
             {"images": [{**lock["images"][0], "service": "navigator"}]},
             ["navigator"],
         )
+
+
+def test_edge_status_accepts_plugins_nonempty_queue_and_epoch_times() -> None:
+    """Validate the float timestamps emitted by the pinned Teams DeliveryStatus producer."""
+
+    response = {"_httpStatus": 200, **_plugins_delivery_status()}
+
+    runtime_update._validate_edge_status(response)
+
+    assert response["queued_count"] == 1
+    assert response["delivered_count"] == 1
+    assert response["oldest_pending_at"] == 1792991936.462
+    assert response["last_delivered_at"] == 1792991801.25
+    assert isinstance(response["oldest_pending_at"], float)
+    assert isinstance(response["last_delivered_at"], float)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("oldest_pending_at", True),
+        ("last_delivered_at", "1792991801.25"),
+        ("oldest_pending_at", -0.25),
+        ("last_delivered_at", float("inf")),
+        ("oldest_pending_at", float("nan")),
+    ],
+)
+def test_edge_status_rejects_invalid_plugins_timestamp_values(field: str, value: Any) -> None:
+    """Reject nonnumeric, boolean, negative, or non-finite timestamp values."""
+
+    response = {"_httpStatus": 200, **_plugins_delivery_status()}
+    response[field] = value
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="timestamps are malformed"):
+        runtime_update._validate_edge_status(response)
 
 
 def test_plan_cli_parses_the_noninteractive_docker_prefix_as_one_closed_choice() -> None:
@@ -544,26 +601,153 @@ def test_compose_timeout_is_classified_as_an_unknown_daemon_outcome(
 
 
 def test_internal_status_validation_preserves_the_json_document() -> None:
-    """Keep sanitized API status fields available after removing the HTTP envelope."""
+    """Keep native Navigator drain fields available after removing the HTTP envelope."""
 
-    response = {
-        "_httpStatus": 200,
-        "mode": "accepting",
-        "generation": 0,
-        "token": None,
-        "startedAt": None,
-        "instanceId": "instance-1",
-        "activeTasks": 0,
-        "queuedTasks": 2,
-        "notifications": {"pollingPaused": False, "inFlight": False},
-        "activeWorkDrained": False,
-    }
+    response = {"_httpStatus": 200, **_native_navigator_status("accepting")}
+    response["queuedTasks"] = 2
 
     runtime_update._validate_navigator_status(response)
 
     assert response["mode"] == "accepting"
     assert response["queuedTasks"] == 2
+    assert response["countsComplete"] is True
+    assert response["dispatches"] == {"active": 0, "waiting": 0}
     assert "_httpStatus" not in response
+
+
+@pytest.mark.parametrize(
+    "status_name", ["accepting", "drainingActive", "drained", "resumedPolling"]
+)
+def test_navigator_drain_validation_accepts_native_wire_fixture(status_name: str) -> None:
+    """Validate the complete JSON shape emitted by Navigator 18baefba, including resumed polling."""
+
+    response = {"_httpStatus": 200, **_native_navigator_status(status_name)}
+
+    runtime_update._validate_navigator_status(response)
+
+    assert response["countsComplete"] is True
+    assert set(response["dispatches"]) == {"active", "waiting"}
+    assert set(response["notifications"]) == {
+        "configured",
+        "pollingPaused",
+        "inFlight",
+    }
+    if status_name == "resumedPolling":
+        assert response["notifications"]["inFlight"] is True
+        assert response["activeWorkDrained"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda status: status.update(countsComplete=False), "counts are incomplete"),
+        (
+            lambda status: status["dispatches"].update(waiting=1),
+            "reported drained while active work remains",
+        ),
+        (
+            lambda status: status["notifications"].pop("configured"),
+            "notification drain status is malformed",
+        ),
+        (lambda status: status.update(startedAt="2026-10-26T00:00:00Z"), "timestamp is malformed"),
+    ],
+)
+def test_navigator_drain_validation_rejects_missing_or_false_native_fences(
+    mutation: Any, message: str
+) -> None:
+    """Fail closed when durable counts or process-local dispatch/notification fences are absent."""
+
+    status = _native_navigator_status("drained")
+    mutation(status)
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match=message):
+        runtime_update._validate_navigator_status({"_httpStatus": 200, **status})
+
+
+def test_drain_waits_for_complete_counts_and_zero_dispatches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Do not stop Navigator until durable counts, dispatch slots, and notifications are idle."""
+
+    accepting = _native_navigator_status("accepting")
+    draining_active = _native_navigator_status("drainingActive")
+    drained = _native_navigator_status("drained")
+    statuses = [accepting, drained]
+    calls: list[dict[str, Any]] = []
+
+    def current_status(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        response = {"_httpStatus": 200, **copy.deepcopy(statuses.pop(0))}
+        runtime_update._validate_navigator_status(response)
+        return response
+
+    def start_drain(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"_httpStatus": 200, **copy.deepcopy(draining_active)}
+
+    monkeypatch.setattr(runtime_update, "_current_navigator_status", current_status)
+    monkeypatch.setattr(runtime_update, "_call_internal_api", start_drain)
+    monkeypatch.setattr(runtime_update, "_set_phase", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_atomic_journal_write", lambda *_args: None)
+    monkeypatch.setattr(runtime_update.time, "sleep", lambda _seconds: None)
+    journal = {
+        "navigator": {
+            "initialGeneration": 0,
+            "initialContainerId": OLD_CONTAINER_ID,
+            "initialInstanceId": accepting["instanceId"],
+            "drainAttempt": None,
+        }
+    }
+
+    runtime_update._drain_navigator(
+        plan={"policy": {"drainTimeoutSeconds": 60}},
+        journal=journal,
+        journal_path=tmp_path / "operation.json",
+        docker_prefix=["docker"],
+    )
+
+    assert calls[0]["body"] == {}
+    assert journal["navigator"]["drained"] is True
+    assert journal["navigator"]["drainGeneration"] == 1
+    assert statuses == []
+
+
+def test_resume_uses_exact_native_generation_and_token_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Match the producer's closed resume DTO and allow notification polling to restart."""
+
+    draining = _native_navigator_status("drained")
+    resumed = _native_navigator_status("resumedPolling")
+    request: dict[str, Any] = {}
+
+    def current_status(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        response = {"_httpStatus": 200, **copy.deepcopy(draining)}
+        runtime_update._validate_navigator_status(response)
+        return response
+
+    def resume(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        request.update(kwargs)
+        return {"_httpStatus": 200, **copy.deepcopy(resumed)}
+
+    monkeypatch.setattr(runtime_update, "_current_navigator_status", current_status)
+    monkeypatch.setattr(runtime_update, "_call_internal_api", resume)
+
+    response = runtime_update._resume_navigator_instance(
+        docker_prefix=["docker"],
+        container_id=OLD_CONTAINER_ID,
+        instance_id=draining["instanceId"],
+        generation=draining["generation"],
+        timeout_seconds=30,
+    )
+
+    assert request["path"] == "/internal/v1/executor/drain/resume"
+    assert request["body"] == {
+        "generation": draining["generation"],
+        "token": draining["token"],
+    }
+    assert response["mode"] == "accepting"
+    assert response["notifications"]["inFlight"] is True
+    assert response["activeWorkDrained"] is False
 
 
 def test_internal_admin_http_bridge_rejects_redirects_without_forwarding_bearer(
@@ -624,6 +808,120 @@ def test_internal_admin_http_bridge_rejects_redirects_without_forwarding_bearer(
     assert response.returncode == 0
     assert json.loads(response.stdout)["httpStatus"] == 302
     assert server.visited == [("/internal/v1/executor/drain", "POST", "Bearer test-only-bearer")]
+    assert "test-only-bearer" not in response.stdout
+
+
+def test_internal_http_bridge_preserves_native_navigator_drain_fences(
+    tmp_path: Path,
+) -> None:
+    """Forward every field from the native Navigator status to the validating consumer."""
+
+    fixture = _native_navigator_status("drained")
+
+    class NativeDrainHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.server.visited.append((self.path, self.headers.get("Authorization")))
+            body = json.dumps(fixture, separators=(",", ":")).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), NativeDrainHandler)
+    server.visited = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("test-only-bearer", encoding="ascii")
+    token_file.chmod(0o600)
+    try:
+        response = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                runtime_update._INTERNAL_HTTP_SCRIPT,
+                str(token_file),
+                f"http://127.0.0.1:{server.server_port}/internal/v1/executor/drain",
+                "GET",
+                "2",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.returncode == 0
+    bridge = json.loads(response.stdout)
+    assert bridge["httpStatus"] == 200
+    assert bridge["document"] == fixture
+    assert server.visited == [("/internal/v1/executor/drain", "Bearer test-only-bearer")]
+    assert "test-only-bearer" not in response.stdout
+
+
+def test_internal_http_bridge_preserves_nonempty_plugins_spool_timestamps(
+    tmp_path: Path,
+) -> None:
+    """Keep producer epoch-second numbers intact through the container-local admin bridge."""
+
+    fixture = _plugins_delivery_status()
+
+    class DeliveryStatusHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.server.visited.append((self.path, self.headers.get("Authorization")))
+            body = json.dumps(fixture, separators=(",", ":")).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DeliveryStatusHandler)
+    server.visited = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("test-only-bearer", encoding="ascii")
+    token_file.chmod(0o600)
+    try:
+        response = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                runtime_update._INTERNAL_HTTP_SCRIPT,
+                str(token_file),
+                f"http://127.0.0.1:{server.server_port}/_internal/teams/delivery/status",
+                "GET",
+                "2",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.returncode == 0
+    bridge = json.loads(response.stdout)
+    assert bridge["httpStatus"] == 200
+    assert bridge["document"] == fixture
+    assert isinstance(bridge["document"]["oldest_pending_at"], float)
+    assert isinstance(bridge["document"]["last_delivered_at"], float)
+    assert server.visited == [("/_internal/teams/delivery/status", "Bearer test-only-bearer")]
     assert "test-only-bearer" not in response.stdout
 
 
@@ -809,17 +1107,8 @@ def test_candidate_drain_commit_is_recognized_after_recovery_phase_changes(
             },
         },
     }
-    current_status = {
-        "mode": "draining",
-        "generation": 1,
-        "token": "ephemeral-drain-token",
-        "startedAt": "2026-10-26T04:00:00+00:00",
-        "instanceId": "candidate-instance",
-        "activeTasks": 0,
-        "queuedTasks": 2,
-        "notifications": {"pollingPaused": True, "inFlight": False},
-        "activeWorkDrained": True,
-    }
+    current_status = _native_navigator_status("drained")
+    current_status["instanceId"] = "candidate-instance"
     monkeypatch.setattr(
         runtime_update,
         "_current_navigator_status",
@@ -1315,10 +1604,7 @@ def test_resume_restores_the_drained_old_image_before_candidate_compose_started(
         runtime_update,
         "_current_navigator_status",
         lambda *_args, **_kwargs: {
-            "mode": "accepting",
-            "generation": 0,
-            "token": None,
-            "startedAt": None,
+            **_native_navigator_status("accepting"),
             "instanceId": "fresh-instance",
         },
     )
@@ -1423,10 +1709,7 @@ def test_resume_completes_a_returned_old_image_restart_without_reissuing_compose
         runtime_update,
         "_current_navigator_status",
         lambda *_args, **_kwargs: {
-            "mode": "accepting",
-            "generation": 0,
-            "token": None,
-            "startedAt": None,
+            **_native_navigator_status("accepting"),
             "instanceId": "fresh-instance",
         },
     )
