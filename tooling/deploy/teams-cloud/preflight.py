@@ -187,6 +187,8 @@ def _secret_file(path: Path, expected_name: str) -> None:
     metadata = path.stat()
     if metadata.st_mode & 0o077:
         raise PreflightError(f"secret file permissions are too broad: {expected_name}")
+    if expected_name == "teams-delivery-admin-token" and stat.S_IMODE(metadata.st_mode) != 0o400:
+        raise PreflightError("Teams delivery admin token must use owner-read-only mode 0400")
     if not metadata.st_mode & 0o400:
         raise PreflightError(f"secret file is not readable by its container owner: {expected_name}")
     expected_owner = (
@@ -3890,6 +3892,7 @@ def run_preflight(
     required_free_gib: float,
     minimum_mem_available_mib: int,
     allow_owned_staging_ingress: bool = False,
+    recovery_only: bool = False,
 ) -> dict[str, Any]:
     """Perform all read-only gates before the operator starts or cuts over services."""
 
@@ -3897,6 +3900,8 @@ def run_preflight(
         raise PreflightError("mode must be bootstrap, staging, cutover, stage1, stage2, or stage3")
     if allow_owned_staging_ingress and mode not in {"stage1", "staging"}:
         raise PreflightError("owned staging ingress cannot be used for bootstrap or cutover")
+    if recovery_only and mode != "stage1":
+        raise PreflightError("recovery-only validation is limited to the Stage 1 standalone stack")
     if not _private_artifact(image_lock) or any(not _private_artifact(path) for path in env_files):
         raise PreflightError(
             "image locks and environment files must be stored under umbrella .artifacts"
@@ -3906,7 +3911,13 @@ def run_preflight(
             raise PreflightError("environment files must be regular owner-only files")
     if image_lock.is_symlink() or not image_lock.is_file() or image_lock.stat().st_mode & 0o077:
         raise PreflightError("image lock must be a regular owner-only file")
-    memory_mib, free_gib = _validate_host(required_free_gib)
+    if recovery_only:
+        if platform.system() != "Linux" or platform.machine().lower() not in {"aarch64", "arm64"}:
+            raise PreflightError("recovery host must remain native Linux ARM64")
+        memory_mib = _parse_meminfo()
+        free_gib = shutil.disk_usage("/").free / GIB
+    else:
+        memory_mib, free_gib = _validate_host(required_free_gib)
     check_local_lock(image_lock.resolve(), docker_prefix)
     image_lock_data = json.loads(image_lock.read_text(encoding="utf-8"))
     locked_images = {row["image"] for row in image_lock_data.get("images", [])}
@@ -3921,13 +3932,22 @@ def run_preflight(
         max_cpus,
         locked_images,
     )
-    memory = _memory_headroom(
-        mode=mode,
-        config=config,
-        available_mib=_parse_memavailable(),
-        cgroup_budget_mib=cgroup_budget_mib,
-        minimum_available_mib=minimum_mem_available_mib,
-    )
+    if recovery_only:
+        memory = {
+            "status": "RECOVERY_CONFIGURATION_ONLY",
+            "memAvailableMiB": _parse_memavailable(),
+            "minimumMemAvailableMiB": minimum_mem_available_mib,
+            "additionalPhaseMemoryMiB": 0,
+            "runtimeRssMeasurementRequired": False,
+        }
+    else:
+        memory = _memory_headroom(
+            mode=mode,
+            config=config,
+            available_mib=_parse_memavailable(),
+            cgroup_budget_mib=cgroup_budget_mib,
+            minimum_available_mib=minimum_mem_available_mib,
+        )
     _validate_internal_https_topology(config)
     _validate_profile_stage(config, mode)
     _validate_provider_listener_addresses(config)
@@ -3978,8 +3998,14 @@ def run_preflight(
     result = {
         **memory,
         "mode": mode,
-        "deploymentReady": mode != "bootstrap",
-        "status": "BOOTSTRAP_ONLY_NOT_FULL_READY" if mode == "bootstrap" else memory["status"],
+        "deploymentReady": mode != "bootstrap" and not recovery_only,
+        "status": (
+            "RECOVERY_CONFIGURATION_ONLY"
+            if recovery_only
+            else "BOOTSTRAP_ONLY_NOT_FULL_READY"
+            if mode == "bootstrap"
+            else memory["status"]
+        ),
         "hostArchitecture": platform.machine().lower(),
         "hostMemoryMiB": memory_mib,
         "rootFreeGiB": round(free_gib, 2),

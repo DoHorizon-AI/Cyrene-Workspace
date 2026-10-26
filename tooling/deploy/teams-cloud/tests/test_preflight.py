@@ -217,6 +217,9 @@ def test_teams_delivery_admin_token_preflight_checks_metadata_without_reading_by
     monkeypatch.setattr(Path, "read_bytes", forbidden_read)
 
     preflight._secret_file(token_file, "teams-delivery-admin-token")
+    mode = stat.S_IFREG | 0o600
+    with pytest.raises(preflight.PreflightError, match="owner-read-only mode 0400"):
+        preflight._secret_file(token_file, "teams-delivery-admin-token")
 
 
 def _binding(
@@ -1347,6 +1350,117 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
             "workspaceClearedOnRestart": None,
             "artifactRefsSurviveRestart": None,
         }
+
+
+def test_stage1_recovery_preflight_skips_capacity_gates_but_keeps_configuration_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Allow recovery when a failed candidate consumed capacity without skipping static checks."""
+
+    artifact_root = tmp_path / ".artifacts" / "teams-cloud-recovery"
+    config_dir = artifact_root / "config"
+    secrets_dir = artifact_root / "secrets"
+    config_dir.mkdir(parents=True)
+    secrets_dir.mkdir()
+    environment_file = artifact_root / "runtime.env"
+    environment_file.write_text("TEST=1\n", encoding="utf-8")
+    environment_file.chmod(0o600)
+    image_lock = artifact_root / "image-lock.json"
+    image_lock.write_text(
+        json.dumps({"images": [{"image": "locked:test"}], "externalImages": {}}),
+        encoding="utf-8",
+    )
+    image_lock.chmod(0o600)
+
+    monkeypatch.setattr(preflight.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(preflight.platform, "machine", lambda: "aarch64")
+    monkeypatch.setattr(preflight, "_parse_meminfo", lambda: 128)
+    monkeypatch.setattr(preflight, "_parse_memavailable", lambda: 64)
+    monkeypatch.setattr(
+        preflight.shutil,
+        "disk_usage",
+        lambda _path: type("Usage", (), {"free": 1024})(),
+    )
+    monkeypatch.setattr(preflight, "_validate_host", lambda *_args: pytest.fail("host gate ran"))
+    monkeypatch.setattr(
+        preflight, "_memory_headroom", lambda **_kwargs: pytest.fail("memory gate ran")
+    )
+    monkeypatch.setattr(preflight, "check_local_lock", lambda *_args: None)
+    monkeypatch.setattr(
+        preflight,
+        "_compose_config",
+        lambda *_args: {
+            "services": {
+                "navigator": {"environment": {}},
+                "exchange": {"environment": {}},
+            }
+        },
+    )
+    monkeypatch.setattr(preflight, "_validate_compose", lambda *_args: (100.0, 0.2))
+    for name in (
+        "_validate_internal_https_topology",
+        "_validate_profile_stage",
+        "_validate_provider_listener_addresses",
+        "_validate_teams_delivery_spool",
+        "_validate_secrets_and_configs",
+        "_validate_identity_scope",
+        "_validate_stage_acceptance_receipts",
+        "_validate_codebuddy_mount",
+        "_validate_host_ports",
+    ):
+        monkeypatch.setattr(preflight, name, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(preflight, "_validate_cutover_runtime", lambda *_args: {})
+
+    report = preflight.run_preflight(
+        mode="stage1",
+        compose_files=[tmp_path / "compose.yaml"],
+        env_files=[environment_file],
+        image_lock=image_lock,
+        secrets_dir=secrets_dir,
+        config_dir=config_dir,
+        github_hf_evidence=None,
+        azure_gcp_ledger=None,
+        runpod_ledger=None,
+        azure_gcp_api_evidence=None,
+        runpod_api_evidence=None,
+        docker_prefix=["docker"],
+        max_memory_mib=1024,
+        max_cpus=1.0,
+        required_free_gib=1000.0,
+        minimum_mem_available_mib=4096,
+        recovery_only=True,
+    )
+
+    assert report["status"] == "RECOVERY_CONFIGURATION_ONLY"
+    assert report["deploymentReady"] is False
+    assert report["memAvailableMiB"] == 64
+    assert report["rootFreeGiB"] == 0.0
+
+    monkeypatch.setattr(
+        preflight,
+        "_validate_internal_https_topology",
+        lambda *_args: (_ for _ in ()).throw(preflight.PreflightError("static configuration failed")),
+    )
+    with pytest.raises(preflight.PreflightError, match="static configuration failed"):
+        preflight.run_preflight(
+            mode="stage1",
+            compose_files=[tmp_path / "compose.yaml"],
+            env_files=[environment_file],
+            image_lock=image_lock,
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+            github_hf_evidence=None,
+            azure_gcp_ledger=None,
+            runpod_ledger=None,
+            azure_gcp_api_evidence=None,
+            runpod_api_evidence=None,
+            docker_prefix=["docker"],
+            max_memory_mib=1024,
+            max_cpus=1.0,
+            required_free_gib=1000.0,
+            minimum_mem_available_mib=4096,
+            recovery_only=True,
+        )
 
 
 @pytest.mark.parametrize(

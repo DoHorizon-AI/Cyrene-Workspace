@@ -35,6 +35,8 @@ from build_arm64 import BuildError
 PLAN_SCHEMA = "cyrene-teams-runtime-update-plan-v1"
 JOURNAL_SCHEMA = "cyrene-teams-runtime-update-journal-v1"
 DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/runtime-update")
+GLOBAL_LOCK_DIRECTORY = Path("/run/cyrene-runtime-update")
+GLOBAL_LOCK_OWNER_UID = 0
 ALLOWED_TARGETS = {"navigator", "exchange"}
 LOCK_SERVICE_FOR_TARGET = {"navigator": "dsh-executor", "exchange": "exchange"}
 CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
@@ -82,6 +84,10 @@ EDGE_STATUS_FIELDS = {
 
 class RuntimeUpdateError(ValueError):
     """A deployment input, runtime identity, or update phase failed closed."""
+
+
+class RuntimeUpdateOutcomeUnknown(RuntimeUpdateError):
+    """A timed-out Docker mutation may still be running in the daemon."""
 
 
 def _utc_now() -> str:
@@ -450,7 +456,12 @@ def _validate_standalone_callers(compose: dict[str, Any]) -> None:
                 network in exact_network_members and members != exact_network_members[network]
             ):
                 raise RuntimeUpdateError(f"network {network} has an unsupported service consumer")
-    if _network_services(compose, "navigator-exchange-private") != {"navigator", "exchange"}:
+    navigator_exchange_callers = {
+        name
+        for name in services
+        if "navigator-exchange-private" in _network_services(compose, name)
+    }
+    if navigator_exchange_callers != {"navigator", "exchange"}:
         raise RuntimeUpdateError(
             "Navigator must be the only business caller on its private Exchange network"
         )
@@ -486,8 +497,9 @@ def _run_preflight(
     max_cpus: float,
     required_free_gib: float,
     minimum_mem_available_mib: int,
+    recovery_only: bool = False,
 ) -> dict[str, Any]:
-    """Run the canonical, read-only Stage 1 preflight for one full input set."""
+    """Run canonical Stage 1 preflight, or its config-only recovery variant."""
 
     try:
         result = preflight.run_preflight(
@@ -508,10 +520,19 @@ def _run_preflight(
             required_free_gib=required_free_gib,
             minimum_mem_available_mib=minimum_mem_available_mib,
             allow_owned_staging_ingress=True,
+            recovery_only=recovery_only,
         )
     except (OSError, preflight.PreflightError, BuildError, subprocess.SubprocessError) as error:
         raise RuntimeUpdateError("canonical Stage 1 preflight blocked the update plan") from error
-    if result.get("mode") != "stage1" or result.get("deploymentReady") is not True:
+    if result.get("mode") != "stage1":
+        raise RuntimeUpdateError("canonical Stage 1 preflight did not return READY")
+    if recovery_only:
+        if (
+            result.get("deploymentReady") is not False
+            or result.get("status") != "RECOVERY_CONFIGURATION_ONLY"
+        ):
+            raise RuntimeUpdateError("canonical recovery preflight returned an invalid status")
+    elif result.get("deploymentReady") is not True:
         raise RuntimeUpdateError("canonical Stage 1 preflight did not return READY")
     return result
 
@@ -800,6 +821,7 @@ def _resolve_plan_inputs(
     docker_prefix: list[str],
     run_full_preflight: bool,
     inspect_active: bool = True,
+    recovery_only: bool = False,
 ) -> dict[str, Any]:
     """Re-hash and render every input, then enforce the active/candidate image contract."""
 
@@ -862,6 +884,7 @@ def _resolve_plan_inputs(
                 max_cpus=preflight_data["maxCpus"],
                 required_free_gib=preflight_data["requiredFreeGiB"],
                 minimum_mem_available_mib=preflight_data["minimumMemAvailableMiB"],
+                recovery_only=recovery_only,
             )
     active_services = (
         _inspect_project_services(
@@ -955,19 +978,87 @@ def _ensure_journal_directory(path: Path, *, create: bool) -> None:
         )
 
 
-@contextmanager
-def _operation_lock(journal_dir: Path) -> Iterator[None]:
-    """Serialize local updates without creating a second runtime coordinator."""
+def _require_update_operator() -> None:
+    """Keep every persistent update command under the one root-owned operator identity."""
 
-    lock_path = journal_dir / ".lock"
-    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    if os.geteuid() != GLOBAL_LOCK_OWNER_UID:
+        raise RuntimeUpdateError(
+            "runtime update plan/apply/status/resume must run as root to preserve one project lock"
+        )
+
+
+def _ensure_global_lock_directory() -> None:
+    """Create and verify the root-private run-time directory that owns project locks."""
+
+    parent = GLOBAL_LOCK_DIRECTORY.parent
+    try:
+        parent_metadata = parent.lstat()
+    except OSError as error:
+        raise RuntimeUpdateError("global runtime update lock parent is unavailable") from error
+    if (
+        not stat.S_ISDIR(parent_metadata.st_mode)
+        or parent_metadata.st_uid != GLOBAL_LOCK_OWNER_UID
+        or stat.S_IMODE(parent_metadata.st_mode) & 0o022
+    ):
+        raise RuntimeUpdateError("global runtime update lock parent is unsafe")
+    try:
+        GLOBAL_LOCK_DIRECTORY.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as error:
+        raise RuntimeUpdateError("global runtime update lock directory is unavailable") from error
+    try:
+        metadata = GLOBAL_LOCK_DIRECTORY.lstat()
+    except OSError as error:
+        raise RuntimeUpdateError("global runtime update lock directory is unavailable") from error
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != GLOBAL_LOCK_OWNER_UID
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or GLOBAL_LOCK_DIRECTORY.resolve(strict=True) != GLOBAL_LOCK_DIRECTORY
+    ):
+        raise RuntimeUpdateError("global runtime update lock directory must be root-owned mode 0700")
+
+
+@contextmanager
+def _operation_lock(project: str) -> Iterator[None]:
+    """Serialize every updater for one Compose project independent of journal location."""
+
+    _require_update_operator()
+    if not isinstance(project, str) or not project:
+        raise RuntimeUpdateError("Compose project is required for the global update lock")
+    _ensure_global_lock_directory()
+    lock_path = _operation_lock_path(project)
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
     descriptor: int | None = None
     try:
-        descriptor = os.open(lock_path, flags, 0o600)
+        created = False
+        before = None
+        try:
+            before = lock_path.lstat()
+        except FileNotFoundError:
+            pass
+        try:
+            descriptor = os.open(lock_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
+        except FileExistsError:
+            descriptor = os.open(lock_path, flags)
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
-            raise RuntimeUpdateError("runtime update lock is not a regular owner-owned file")
-        os.fchmod(descriptor, 0o600)
+        if before is not None and (before.st_dev, before.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise RuntimeUpdateError("runtime update lock changed inode while opening")
+        after = lock_path.lstat()
+        if (after.st_dev, after.st_ino) != (metadata.st_dev, metadata.st_ino):
+            raise RuntimeUpdateError("runtime update lock path changed while opening")
+        if created:
+            os.fchmod(descriptor, 0o600)
+            metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != GLOBAL_LOCK_OWNER_UID
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+        ):
+            raise RuntimeUpdateError("runtime update lock must be root-owned mode 0600")
     except RuntimeUpdateError:
         if descriptor is not None:
             os.close(descriptor)
@@ -982,13 +1073,20 @@ def _operation_lock(journal_dir: Path) -> Iterator[None]:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise RuntimeUpdateError("another runtime update operation is active") from error
+            raise RuntimeUpdateError("another runtime update operation is active for this project") from error
         yield
     finally:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+
+
+def _operation_lock_path(project: str) -> Path:
+    """Return the single root-owned lock path for one Compose project."""
+
+    project_digest = _sha256_bytes(project.encode("utf-8"))[:24]
+    return GLOBAL_LOCK_DIRECTORY / f"{project_digest}.lock"
 
 
 def _atomic_journal_write(path: Path, document: dict[str, Any]) -> None:
@@ -1080,21 +1178,26 @@ def _new_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "initialRevision": plan["edgeDelivery"]["revision"],
             "initialDeadCount": plan["edgeDelivery"]["deadCount"],
             "latestDeadCount": plan["edgeDelivery"]["deadCount"],
+            "pauseHolder": plan["operationId"],
+            "pauseIntent": False,
             "pauseRevision": None,
             "resumeRevision": None,
             "pauseHistory": [],
             "repauseExpectedRevision": None,
+            "repauseHolder": None,
         },
         "navigator": {
             "initialContainerId": plan["navigatorDrain"]["containerId"],
             "initialInstanceId": plan["navigatorDrain"]["instanceId"],
             "initialGeneration": plan["navigatorDrain"]["generation"],
+            "drainAttempt": None,
             "drainGeneration": None,
             "drained": False,
             "resumed": False,
             "replacementContainerId": None,
             "stop": None,
             "processRestart": None,
+            "restartIntent": None,
         },
         "targetProgress": {},
         "lastErrorCode": None,
@@ -1165,6 +1268,7 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
 def operation_status(journal_dir: Path, operation_id: str) -> dict[str, Any]:
     """Read one durable update phase without contacting containers or services."""
 
+    _require_update_operator()
     _ensure_journal_directory(journal_dir, create=False)
     journal = _read_journal(_journal_path(journal_dir, operation_id))
     return _journal_summary(journal)
@@ -1218,7 +1322,7 @@ def _compose_up(
         "--no-build",
         service,
     ]
-    return _run_command(argv, timeout_seconds=timeout_seconds)
+    return _run_command(argv, timeout_seconds=timeout_seconds, external_mutation=True)
 
 
 def _current_edge_status(
@@ -1269,7 +1373,10 @@ def _pause_edge(
     edge = journal["edge"]
     initial_revision = edge["initialRevision"]
     expected_paused_revision = initial_revision + 1
-    holder = journal["operationId"]
+    holder = edge.get("pauseHolder")
+    if not isinstance(holder, str) or not holder:
+        raise RuntimeUpdateError("Teams delivery pause holder is missing from the operation journal")
+    edge["pauseIntent"] = True
     _set_phase(journal, journal_path, "EDGE_PAUSE_REQUESTED")
     status = _current_edge_status(docker_prefix, edge["containerId"])
     if status["paused"]:
@@ -1327,38 +1434,72 @@ def _recover_edge_pause(
         status["paused"] is False
         and status["revision"] == edge["initialRevision"]
         and pause_revision is None
+        and edge.get("pauseIntent") is not True
     ):
         return
     if status["paused"]:
-        known_revisions = {edge["initialRevision"] + 1}
-        if isinstance(pause_revision, int):
-            known_revisions.add(pause_revision)
-        if isinstance(resume_revision, int):
-            known_revisions.add(resume_revision + 1)
         repause_expected_revision = edge.get("repauseExpectedRevision")
-        if isinstance(repause_expected_revision, int):
-            known_revisions.add(repause_expected_revision + 1)
-        if status["revision"] not in known_revisions:
+        if (
+            isinstance(repause_expected_revision, int)
+            and status["revision"] == repause_expected_revision + 1
+            and isinstance(edge.get("repauseHolder"), str)
+        ):
+            expected_revision = repause_expected_revision
+            holder = edge["repauseHolder"]
+        elif isinstance(pause_revision, int) and status["revision"] == pause_revision:
+            expected_revision = pause_revision - 1
+            holder = edge.get("pauseHolder")
+        elif (
+            pause_revision is None
+            and status["revision"] == edge["initialRevision"] + 1
+        ):
+            expected_revision = edge["initialRevision"]
+            holder = journal["operationId"]
+        else:
             raise RuntimeUpdateError("Teams delivery pause revision is not owned by this operation")
-        expected_revision = status["revision"] - 1
+        if not isinstance(holder, str) or not holder:
+            raise RuntimeUpdateError("Teams delivery pause holder is not journaled")
     else:
-        known_resume_revisions = set()
-        if isinstance(pause_revision, int):
-            known_resume_revisions.add(pause_revision + 1)
-        if isinstance(resume_revision, int):
-            known_resume_revisions.add(resume_revision)
-        if status["revision"] not in known_resume_revisions:
-            raise RuntimeUpdateError("Teams delivery was resumed under an unknown revision")
-        expected_revision = status["revision"]
-        edge["repauseExpectedRevision"] = expected_revision
-        _set_phase(journal, journal_path, "ROLLBACK_EDGE_REPAUSE_REQUESTED")
+        if (
+            pause_revision is None
+            and status["revision"] == edge["initialRevision"]
+            and edge.get("pauseIntent") is True
+        ):
+            expected_revision = status["revision"]
+            holder = edge.get("pauseHolder") or journal["operationId"]
+            if not isinstance(holder, str) or not holder:
+                raise RuntimeUpdateError("Teams delivery initial pause holder is not journaled")
+            _set_phase(journal, journal_path, "ROLLBACK_EDGE_PAUSE_REPLAY_REQUESTED")
+        else:
+            known_resume_revisions = set()
+            if isinstance(pause_revision, int):
+                known_resume_revisions.add(pause_revision + 1)
+            if isinstance(resume_revision, int):
+                known_resume_revisions.add(resume_revision)
+            if status["revision"] not in known_resume_revisions:
+                raise RuntimeUpdateError("Teams delivery was resumed under an unknown revision")
+            expected_revision = status["revision"]
+            pending_expected_revision = edge.get("repauseExpectedRevision")
+            pending_holder = edge.get("repauseHolder")
+            if pending_expected_revision == expected_revision and isinstance(pending_holder, str):
+                holder = pending_holder
+            else:
+                holder = str(
+                    uuid.uuid5(
+                        uuid.UUID(journal["operationId"]),
+                        f"teams-delivery-repause:{expected_revision}",
+                    )
+                )
+                edge["repauseExpectedRevision"] = expected_revision
+                edge["repauseHolder"] = holder
+            _set_phase(journal, journal_path, "ROLLBACK_EDGE_REPAUSE_REQUESTED")
     response = _call_internal_api(
         docker_prefix,
         edge["containerId"],
         service="teams-ingress",
         method="POST",
         path="/_internal/teams/delivery/pause",
-        body={"holder": journal["operationId"], "expected_revision": expected_revision},
+        body={"holder": holder, "expected_revision": expected_revision},
         timeout_seconds=timeout_seconds,
     )
     _validate_edge_status(response)
@@ -1370,8 +1511,10 @@ def _recover_edge_pause(
         raise RuntimeUpdateError("Teams delivery pause ownership could not be recovered")
     edge.setdefault("pauseHistory", []).append(response["revision"])
     edge["pauseRevision"] = response["revision"]
+    edge["pauseHolder"] = holder
     edge["resumeRevision"] = None
     edge["repauseExpectedRevision"] = None
+    edge["repauseHolder"] = None
     edge["latestDeadCount"] = response["dead_count"]
     _atomic_journal_write(journal_path, journal)
 
@@ -1389,6 +1532,17 @@ def _drain_navigator(
     initial_generation = navigator["initialGeneration"]
     expected_generation = initial_generation + 1
     container_id = navigator["initialContainerId"]
+    drain_attempt = navigator.get("drainAttempt")
+    expected_attempt = {
+        "containerId": container_id,
+        "instanceId": navigator["initialInstanceId"],
+        "initialGeneration": initial_generation,
+        "generation": expected_generation,
+    }
+    if drain_attempt is None:
+        navigator["drainAttempt"] = expected_attempt
+    elif drain_attempt != expected_attempt:
+        raise RuntimeUpdateError("Navigator drain intent does not match the reviewed plan")
     _set_phase(journal, journal_path, "NAVIGATOR_DRAIN_REQUESTED")
     status = _current_navigator_status(docker_prefix, container_id)
     if status["instanceId"] != navigator["initialInstanceId"]:
@@ -1505,13 +1659,16 @@ def _resume_edge(
             "Teams delivery pause no longer matches this operation's CAS holder"
         )
     _set_phase(journal, journal_path, "EDGE_RESUME_REQUESTED")
+    holder = edge.get("pauseHolder")
+    if not isinstance(holder, str) or not holder:
+        raise RuntimeUpdateError("Teams delivery resume holder is missing from the operation journal")
     response = _call_internal_api(
         docker_prefix,
         edge["containerId"],
         service="teams-ingress",
         method="POST",
         path="/_internal/teams/delivery/resume",
-        body={"holder": journal["operationId"], "expected_revision": pause_revision},
+        body={"holder": holder, "expected_revision": pause_revision},
         timeout_seconds=30,
     )
     _validate_edge_status(response)
@@ -1755,14 +1912,33 @@ def _update_target(
         candidate_inputs = plan["candidateInputs"]
         candidate_compose = _input_paths(candidate_inputs, "composeFiles")
         candidate_env = _input_paths(candidate_inputs, "envFiles")
-        command = _compose_up(
-            docker_prefix=docker_prefix,
-            project=plan["project"],
-            compose_files=candidate_compose,
-            env_files=candidate_env,
-            service=target,
-            timeout_seconds=plan["policy"]["healthTimeoutSeconds"] + 60,
-        )
+        try:
+            command = _compose_up(
+                docker_prefix=docker_prefix,
+                project=plan["project"],
+                compose_files=candidate_compose,
+                env_files=candidate_env,
+                service=target,
+                timeout_seconds=plan["policy"]["healthTimeoutSeconds"] + 60,
+            )
+        except RuntimeUpdateOutcomeUnknown:
+            progress["phase"] = "REPLACE_OUTCOME_UNKNOWN"
+            journal["unknownDockerMutation"] = {
+                "service": target,
+                "kind": "compose-up",
+                "requestedAtUtc": journal["updatedAtUtc"],
+                "oldContainerId": progress["oldContainerId"],
+                "oldImageId": progress["oldImageId"],
+                "candidateImageId": progress["candidateImageId"],
+            }
+            _set_phase(
+                journal,
+                journal_path,
+                "COMPOSE_UPDATE_OUTCOME_UNKNOWN",
+                state="RECOVERY_REQUIRED",
+                error_code="compose_update_outcome_unknown",
+            )
+            raise
         services = _operation_service_state(
             plan=plan,
             context=context,
@@ -1947,7 +2123,13 @@ def _recover_old_navigator_before_candidate_start(
     stop_record = journal.get("navigator", {}).get("stop")
     progress_phase = progress.get("phase") if isinstance(progress, dict) else None
     if (
-        progress_phase not in {"PREPARED", "STOP_FAILED_RECOVERED", "RECOVERY_OLD_IMAGE_RESTARTED"}
+        progress_phase
+        not in {
+            "PREPARED",
+            "ACTIVE_IMAGE_RESTART_REQUESTED",
+            "STOP_FAILED_RECOVERED",
+            "RECOVERY_OLD_IMAGE_RESTARTED",
+        }
         or not isinstance(stop_record, dict)
         or stop_record.get("containerId") != plan["activeServices"]["navigator"]["containerId"]
     ):
@@ -1963,7 +2145,7 @@ def _recover_old_navigator_before_candidate_start(
     active_image = _active_image_option(plan, "navigator")
     candidate_image = _candidate_image_option(plan, "navigator")
     if not containers:
-        if progress["phase"] != "PREPARED" or journal["phase"] not in {
+        if progress_phase != "PREPARED" or journal["phase"] not in {
             "NAVIGATOR_STOP_REQUESTED",
             "ROLLBACK_STARTING",
             "RECOVERY_REQUIRED",
@@ -1972,6 +2154,7 @@ def _recover_old_navigator_before_candidate_start(
                 "Navigator container is missing after candidate replacement may have begun"
             )
         stopped_container_id = stop_record["containerId"]
+        command_exit_code = None
     else:
         current = containers[0]
         if current["imageId"] == candidate_image["imageId"]:
@@ -1984,27 +2167,60 @@ def _recover_old_navigator_before_candidate_start(
                 "Navigator recovery found an image outside the reviewed old/candidate pair"
             )
         if current["running"]:
-            return False
-        if progress_phase != "PREPARED":
-            raise RuntimeUpdateError(
-                "Navigator stopped after a process restart; active work state cannot be proven"
+            if progress_phase != "ACTIVE_IMAGE_RESTART_REQUESTED":
+                return False
+            stopped_container_id = stop_record["containerId"]
+            command_exit_code = journal["navigator"].get("restartIntent", {}).get(
+                "composeCommandExitCode"
             )
-        expected_container_id = plan["activeServices"]["navigator"]["containerId"]
-        if current["containerId"] != expected_container_id:
+        elif progress_phase != "PREPARED":
             raise RuntimeUpdateError(
-                "stopped active Navigator container identity is not owned by this operation"
+                "Navigator stopped after an old-image restart intent; active work state cannot be proven"
             )
-        stopped_container_id = current["containerId"]
-
-    active_inputs = plan["activeInputs"]
-    command = _compose_up(
-        docker_prefix=docker_prefix,
-        project=plan["project"],
-        compose_files=_input_paths(active_inputs, "composeFiles"),
-        env_files=_input_paths(active_inputs, "envFiles"),
-        service="navigator",
-        timeout_seconds=plan["policy"]["healthTimeoutSeconds"] + 60,
-    )
+        else:
+            expected_container_id = plan["activeServices"]["navigator"]["containerId"]
+            if current["containerId"] != expected_container_id:
+                raise RuntimeUpdateError(
+                    "stopped active Navigator container identity is not owned by this operation"
+                )
+            stopped_container_id = current["containerId"]
+            command_exit_code = None
+    if progress_phase == "PREPARED":
+        _record_active_navigator_restart_intent(
+            journal=journal,
+            journal_path=journal_path,
+            stopped_container_id=stopped_container_id,
+            reason="interrupted_before_candidate",
+        )
+        active_inputs = plan["activeInputs"]
+        try:
+            command = _compose_up(
+                docker_prefix=docker_prefix,
+                project=plan["project"],
+                compose_files=_input_paths(active_inputs, "composeFiles"),
+                env_files=_input_paths(active_inputs, "envFiles"),
+                service="navigator",
+                timeout_seconds=plan["policy"]["healthTimeoutSeconds"] + 60,
+            )
+        except RuntimeUpdateOutcomeUnknown:
+            journal["unknownDockerMutation"] = {
+                "service": "navigator",
+                "kind": "compose-active-image-restart",
+                "requestedAtUtc": journal["navigator"]["restartIntent"]["requestedAtUtc"],
+                "stoppedContainerId": stopped_container_id,
+                "activeImageId": active_image["imageId"],
+            }
+            _set_phase(
+                journal,
+                journal_path,
+                "NAVIGATOR_RESTART_OUTCOME_UNKNOWN",
+                state="RECOVERY_REQUIRED",
+                error_code="navigator_restart_outcome_unknown",
+            )
+            raise
+        command_exit_code = command.returncode
+        journal["navigator"]["restartIntent"]["composeCommandExitCode"] = command_exit_code
+        _atomic_journal_write(journal_path, journal)
     image_overrides = {
         target: (
             _candidate_image_option(plan, target)
@@ -2049,21 +2265,13 @@ def _recover_old_navigator_before_candidate_start(
         raise RuntimeUpdateError(
             "recovered active Navigator is not accepting in a fresh generation"
         )
-    journal["navigator"]["processRestart"] = {
-        "stoppedContainerId": stopped_container_id,
-        "containerId": navigator["containerId"],
-        "instanceIdChanged": True,
-        "activeImageVerified": True,
-        "composeCommandExitCode": command.returncode,
-    }
-    journal["navigator"]["replacementContainerId"] = navigator["containerId"]
-    progress["phase"] = "RECOVERY_OLD_IMAGE_RESTARTED"
-    progress["newContainerId"] = navigator["containerId"]
-    _set_phase(
-        journal,
-        journal_path,
-        "NAVIGATOR_ACTIVE_IMAGE_RECOVERED_BEFORE_CANDIDATE_START",
-        state="ROLLING_BACK",
+    _complete_active_navigator_restart(
+        journal=journal,
+        journal_path=journal_path,
+        navigator=navigator,
+        instance_id=status["instanceId"],
+        compose_command_exit_code=command_exit_code,
+        terminal_target_phase="RECOVERY_OLD_IMAGE_RESTARTED",
     )
     return True
 
@@ -2085,6 +2293,72 @@ def _navigator_stop_is_graceful(command_exit_code: int | None, lifecycle: dict[s
     )
 
 
+def _record_active_navigator_restart_intent(
+    *,
+    journal: dict[str, Any],
+    journal_path: Path,
+    stopped_container_id: str,
+    reason: str,
+) -> None:
+    """Persist old-image restart ownership before Compose can create or start a container."""
+
+    if reason not in {"non_graceful_stop", "interrupted_before_candidate"}:
+        raise RuntimeUpdateError("active Navigator restart reason is unsupported")
+    progress = journal.get("targetProgress", {}).get("navigator")
+    if not isinstance(progress, dict):
+        raise RuntimeUpdateError("Navigator restart lacks a target progress record")
+    journal["navigator"]["restartIntent"] = {
+        "kind": "active-image-restart",
+        "reason": reason,
+        "stoppedContainerId": stopped_container_id,
+        "activeImageId": progress["oldImageId"],
+        "requestedAtUtc": _utc_now(),
+    }
+    progress["phase"] = "ACTIVE_IMAGE_RESTART_REQUESTED"
+    _set_phase(
+        journal,
+        journal_path,
+        "NAVIGATOR_ACTIVE_IMAGE_RESTART_REQUESTED",
+        state="ROLLING_BACK",
+    )
+
+
+def _complete_active_navigator_restart(
+    *,
+    journal: dict[str, Any],
+    journal_path: Path,
+    navigator: dict[str, Any],
+    instance_id: str,
+    compose_command_exit_code: int | None,
+    terminal_target_phase: str,
+) -> None:
+    """Record a freshly verified old-image process after its restart intent."""
+
+    if terminal_target_phase not in {"STOP_FAILED_RECOVERED", "RECOVERY_OLD_IMAGE_RESTARTED"}:
+        raise RuntimeUpdateError("active Navigator restart completion phase is unsupported")
+    intent = journal["navigator"].get("restartIntent")
+    if not isinstance(intent, dict) or intent.get("kind") != "active-image-restart":
+        raise RuntimeUpdateError("active Navigator restart intent is missing")
+    journal["navigator"]["processRestart"] = {
+        "stoppedContainerId": intent["stoppedContainerId"],
+        "containerId": navigator["containerId"],
+        "instanceId": instance_id,
+        "instanceIdChanged": True,
+        "activeImageVerified": True,
+        "composeCommandExitCode": compose_command_exit_code,
+    }
+    journal["navigator"]["replacementContainerId"] = navigator["containerId"]
+    progress = journal["targetProgress"]["navigator"]
+    progress["phase"] = terminal_target_phase
+    progress["newContainerId"] = navigator["containerId"]
+    _set_phase(
+        journal,
+        journal_path,
+        "NAVIGATOR_ACTIVE_IMAGE_RESTARTED",
+        state="ROLLING_BACK",
+    )
+
+
 def _stop_drained_navigator(
     *,
     plan: dict[str, Any],
@@ -2103,6 +2377,21 @@ def _stop_drained_navigator(
             or stop_record.get("graceful") is not True
         ):
             raise RuntimeUpdateError("Navigator has a prior incomplete or non-graceful stop record")
+        lifecycle = _inspect_container_state(docker_prefix, container_id)
+        if not (
+            lifecycle["Status"] == "exited"
+            and lifecycle["Running"] is False
+            and lifecycle["Paused"] is False
+            and lifecycle["Restarting"] is False
+            and lifecycle["OOMKilled"] is False
+            and lifecycle["ExitCode"] == 0
+            and lifecycle["Error"] == ""
+            and lifecycle["StartedAt"] == stop_record.get("startedAt")
+            and lifecycle["FinishedAt"] == stop_record.get("finishedAt")
+        ):
+            raise RuntimeUpdateError(
+                "Navigator stop read-back changed after the recorded graceful stop"
+            )
         return
     if not journal["navigator"].get("drained"):
         raise RuntimeUpdateError("Navigator must be drained before stopping its container")
@@ -2124,6 +2413,7 @@ def _stop_drained_navigator(
         "timeoutSeconds": 40,
         "commandExitCode": None,
         "exitCode": None,
+        "startedAt": None,
         "finishedAt": None,
         "oomKilled": None,
         "graceful": None,
@@ -2134,7 +2424,28 @@ def _stop_drained_navigator(
         result = _run_command(
             [*docker_prefix, "stop", "--time", "40", container_id],
             timeout_seconds=55,
+            external_mutation=True,
         )
+    except RuntimeUpdateOutcomeUnknown:
+        stop_record = journal["navigator"]["stop"]
+        stop_record["commandOutcomeUnknown"] = True
+        try:
+            observed_state = _inspect_container_state(docker_prefix, container_id)
+        except RuntimeUpdateError:
+            stop_record["observedStateReadable"] = False
+        else:
+            stop_record["observedStateReadable"] = True
+            stop_record["observedStatus"] = observed_state["Status"]
+            stop_record["observedExitCode"] = observed_state["ExitCode"]
+            stop_record["observedRunning"] = observed_state["Running"]
+        _set_phase(
+            journal,
+            journal_path,
+            "NAVIGATOR_STOP_OUTCOME_UNKNOWN",
+            state="RECOVERY_REQUIRED",
+            error_code="navigator_stop_outcome_unknown",
+        )
+        raise
     except RuntimeUpdateError as error:
         result = None
         command_error = error
@@ -2148,6 +2459,7 @@ def _stop_drained_navigator(
     stop_record["commandExitCode"] = result.returncode if result is not None else None
     stop_record["commandOutcomeUnknown"] = command_error is not None
     stop_record["exitCode"] = lifecycle["ExitCode"]
+    stop_record["startedAt"] = lifecycle["StartedAt"]
     stop_record["finishedAt"] = lifecycle["FinishedAt"]
     stop_record["oomKilled"] = lifecycle["OOMKilled"]
     stop_record["graceful"] = _navigator_stop_is_graceful(
@@ -2195,15 +2507,41 @@ def _restore_active_navigator_after_stop_failure(
 ) -> None:
     """Restart the reviewed active image after a non-graceful pre-replacement stop."""
 
-    active_inputs = plan["activeInputs"]
-    command = _compose_up(
-        docker_prefix=docker_prefix,
-        project=plan["project"],
-        compose_files=_input_paths(active_inputs, "composeFiles"),
-        env_files=_input_paths(active_inputs, "envFiles"),
-        service="navigator",
-        timeout_seconds=plan["policy"]["healthTimeoutSeconds"] + 60,
+    _record_active_navigator_restart_intent(
+        journal=journal,
+        journal_path=journal_path,
+        stopped_container_id=stopped_container_id,
+        reason="non_graceful_stop",
     )
+    active_inputs = plan["activeInputs"]
+    try:
+        command = _compose_up(
+            docker_prefix=docker_prefix,
+            project=plan["project"],
+            compose_files=_input_paths(active_inputs, "composeFiles"),
+            env_files=_input_paths(active_inputs, "envFiles"),
+            service="navigator",
+            timeout_seconds=plan["policy"]["healthTimeoutSeconds"] + 60,
+        )
+    except RuntimeUpdateOutcomeUnknown:
+        journal["unknownDockerMutation"] = {
+            "service": "navigator",
+            "kind": "compose-active-image-restart",
+            "requestedAtUtc": journal["navigator"]["restartIntent"]["requestedAtUtc"],
+            "stoppedContainerId": stopped_container_id,
+            "activeImageId": _active_image_option(plan, "navigator")["imageId"],
+        }
+        _set_phase(
+            journal,
+            journal_path,
+            "NAVIGATOR_RESTART_OUTCOME_UNKNOWN",
+            state="RECOVERY_REQUIRED",
+            error_code="navigator_restart_outcome_unknown",
+        )
+        raise
+    journal["navigator"]["restartIntent"]["composeCommandExitCode"] = command.returncode
+    journal["navigator"]["restartIntent"]["composeCommandReturnedAtUtc"] = _utc_now()
+    _atomic_journal_write(journal_path, journal)
     image_overrides = {target: _active_image_option(plan, target) for target in plan["targets"]}
     services = _read_transition_state(
         plan=plan,
@@ -2232,19 +2570,14 @@ def _restore_active_navigator_after_stop_failure(
         or status["instanceId"] == journal["navigator"]["initialInstanceId"]
     ):
         raise RuntimeUpdateError("restarted active Navigator is not in its fresh accepting state")
-    journal["navigator"]["processRestart"] = {
-        "stoppedContainerId": stopped_container_id,
-        "containerId": navigator["containerId"],
-        "instanceIdChanged": True,
-        "activeImageVerified": True,
-        "composeCommandExitCode": command.returncode,
-    }
-    journal["navigator"]["replacementContainerId"] = navigator["containerId"]
-    progress = journal.get("targetProgress", {}).get("navigator")
-    if isinstance(progress, dict):
-        progress["phase"] = "STOP_FAILED_RECOVERED"
-        progress["newContainerId"] = navigator["containerId"]
-    _set_phase(journal, journal_path, "NAVIGATOR_ACTIVE_IMAGE_RESTARTED_AFTER_STOP_FAILURE")
+    _complete_active_navigator_restart(
+        journal=journal,
+        journal_path=journal_path,
+        navigator=navigator,
+        instance_id=status["instanceId"],
+        compose_command_exit_code=command.returncode,
+        terminal_target_phase="STOP_FAILED_RECOVERED",
+    )
 
 
 def _ensure_navigator_resumed(
@@ -2354,17 +2687,17 @@ def _drain_current_navigator_for_rollback(
             and rollback_drain.get("containerId") == container_id
             and rollback_drain.get("instanceId") == status["instanceId"]
             and rollback_drain.get("generation") is None
+            and isinstance(rollback_drain.get("initialGeneration"), int)
             and status["generation"] == rollback_drain.get("initialGeneration", -1) + 1
-            and journal["phase"] == "ROLLBACK_NAVIGATOR_DRAIN_REQUESTED"
         ):
             expected_generation = status["generation"]
             rollback_drain["generation"] = expected_generation
             _atomic_journal_write(journal_path, journal)
         elif (
-            status["instanceId"] == journal["navigator"]["initialInstanceId"]
-            and journal["phase"]
-            in {"NAVIGATOR_DRAIN_REQUESTED", "ROLLBACK_NAVIGATOR_DRAIN_REQUESTED"}
-            and status["generation"] == journal["navigator"]["initialGeneration"] + 1
+            isinstance(journal["navigator"].get("drainAttempt"), dict)
+            and journal["navigator"]["drainAttempt"].get("containerId") == container_id
+            and journal["navigator"]["drainAttempt"].get("instanceId") == status["instanceId"]
+            and journal["navigator"]["drainAttempt"].get("generation") == status["generation"]
         ):
             expected_generation = status["generation"]
             journal["navigator"]["drainGeneration"] = expected_generation
@@ -2437,20 +2770,44 @@ def _resume_navigator_after_rollback(
             and isinstance(rollback_drain.get("generation"), int)
         ):
             known_generation = rollback_drain["generation"]
+        if (
+            known_generation is None
+            and isinstance(rollback_drain, dict)
+            and rollback_drain.get("containerId") == original_container
+            and rollback_drain.get("instanceId") == status["instanceId"]
+            and rollback_drain.get("generation") is None
+            and isinstance(rollback_drain.get("initialGeneration"), int)
+            and status["generation"] == rollback_drain["initialGeneration"] + 1
+        ):
+            known_generation = status["generation"]
+            rollback_drain["generation"] = known_generation
         if status["mode"] == "draining" and known_generation is None:
-            expected_generation = journal["navigator"]["initialGeneration"] + 1
+            drain_attempt = journal["navigator"].get("drainAttempt")
             if (
-                status["instanceId"] == journal["navigator"]["initialInstanceId"]
-                and status["generation"] == expected_generation
-                and journal["phase"].startswith(("NAVIGATOR_DRAIN", "ROLLBACK_"))
+                isinstance(drain_attempt, dict)
+                and drain_attempt.get("containerId") == original_container
+                and status["instanceId"] == journal["navigator"]["initialInstanceId"]
+                and status["generation"] == drain_attempt.get("generation")
             ):
-                known_generation = expected_generation
-                journal["navigator"]["drainGeneration"] = expected_generation
+                known_generation = status["generation"]
+                journal["navigator"]["drainGeneration"] = known_generation
+        rollback_drain = journal["navigator"].get("rollbackDrain")
+        if (
+            status["mode"] == "draining"
+            and known_generation is None
+            and isinstance(rollback_drain, dict)
+            and rollback_drain.get("containerId") == original_container
+            and rollback_drain.get("instanceId") == status["instanceId"]
+            and isinstance(rollback_drain.get("initialGeneration"), int)
+            and rollback_drain.get("generation") == status["generation"]
+        ):
+            known_generation = status["generation"]
         if (
             status["mode"] == "accepting"
             and known_generation is None
-            and status["generation"] == journal["navigator"]["initialGeneration"] + 1
-            and journal["phase"].startswith(("NAVIGATOR_DRAIN", "ROLLBACK_"))
+            and isinstance(journal["navigator"].get("drainAttempt"), dict)
+            and status["instanceId"] == journal["navigator"]["initialInstanceId"]
+            and status["generation"] == journal["navigator"]["drainAttempt"].get("generation")
         ):
             known_generation = status["generation"]
             journal["navigator"]["drainGeneration"] = known_generation
@@ -2747,6 +3104,20 @@ def _execute_update(
         _resume_edge(journal=journal, journal_path=journal_path, docker_prefix=docker_prefix)
         _set_phase(journal, journal_path, "UPDATE_COMPLETE", state="APPLIED")
         return _journal_summary(journal)
+    except RuntimeUpdateOutcomeUnknown as failure:
+        error_code = journal.get("lastErrorCode")
+        if not isinstance(error_code, str) or not error_code:
+            error_code = "docker_mutation_outcome_unknown"
+        _set_phase(
+            journal,
+            journal_path,
+            "RECOVERY_REQUIRED",
+            state="RECOVERY_REQUIRED",
+            error_code=error_code,
+        )
+        raise RuntimeUpdateError(
+            "Docker mutation outcome is unknown; no rollback or edge resume was attempted. Use status and reconcile the exact container state before manual recovery."
+        ) from failure
     except (RuntimeUpdateError, OSError, subprocess.SubprocessError) as failure:
         try:
             _rollback_operation(
@@ -2757,12 +3128,17 @@ def _execute_update(
                 docker_prefix=docker_prefix,
             )
         except (RuntimeUpdateError, OSError, subprocess.SubprocessError) as rollback_failure:
+            error_code = (
+                "docker_rollback_outcome_unknown"
+                if isinstance(rollback_failure, RuntimeUpdateOutcomeUnknown)
+                else "safe_rollback_not_verified"
+            )
             _set_phase(
                 journal,
                 journal_path,
                 "RECOVERY_REQUIRED",
                 state="RECOVERY_REQUIRED",
-                error_code="safe_rollback_not_verified",
+                error_code=error_code,
             )
             raise RuntimeUpdateError(
                 "update failed and automatic rollback could not be verified; edge delivery remains paused when its hold is known"
@@ -2780,12 +3156,13 @@ def apply_plan_file(
 ) -> dict[str, Any]:
     """Freshly verify and apply one owner-reviewed private plan exactly once."""
 
+    _require_update_operator()
     plan = _load_plan_file(plan_path, expected_digest)
     docker_prefix = plan["policy"]["dockerPrefix"]
     _validate_docker_prefix(docker_prefix)
     _ensure_journal_directory(journal_dir, create=True)
     journal_path = _journal_path(journal_dir, plan["operationId"])
-    with _operation_lock(journal_dir):
+    with _operation_lock(plan["project"]):
         if journal_path.exists() or journal_path.is_symlink():
             raise RuntimeUpdateError(
                 "this plan already has an operation journal; use resume or status"
@@ -2823,6 +3200,55 @@ def _plan_for_journal(journal: dict[str, Any], expected_digest: str) -> tuple[di
     return plan, plan_path
 
 
+def _has_unresolved_docker_mutation(journal: dict[str, Any]) -> bool:
+    """Detect durable pre-call intents whose Docker daemon outcome may be unknown."""
+
+    if isinstance(journal.get("unknownDockerMutation"), dict):
+        return True
+    if journal.get("phase") == "NAVIGATOR_ACTIVE_IMAGE_RESTART_REQUESTED":
+        intent = journal.get("navigator", {}).get("restartIntent")
+        if not (
+            isinstance(intent, dict)
+            and intent.get("kind") == "active-image-restart"
+            and intent.get("composeCommandExitCode") == 0
+            and isinstance(intent.get("composeCommandReturnedAtUtc"), str)
+        ):
+            return True
+    if journal.get("phase") in {
+        "NAVIGATOR_STOP_REQUESTED",
+        "REPLACING_EXCHANGE",
+        "REPLACING_NAVIGATOR",
+        "ROLLBACK_EXCHANGE_REQUESTED",
+        "ROLLBACK_NAVIGATOR_REQUESTED",
+    }:
+        stop_record = journal.get("navigator", {}).get("stop")
+        if journal.get("phase") != "NAVIGATOR_STOP_REQUESTED" or not (
+            isinstance(stop_record, dict)
+            and isinstance(stop_record.get("commandExitCode"), int)
+            and isinstance(stop_record.get("graceful"), bool)
+            and isinstance(stop_record.get("startedAt"), str)
+            and isinstance(stop_record.get("finishedAt"), str)
+        ):
+            return True
+    if isinstance(journal.get("navigator", {}).get("stop"), dict):
+        stop_record = journal["navigator"]["stop"]
+        if (
+            stop_record.get("commandExitCode") is None
+            or stop_record.get("exitCode") is None
+            or stop_record.get("finishedAt") is None
+            or stop_record.get("graceful") is None
+        ):
+            return True
+    for progress in journal.get("targetProgress", {}).values():
+        if isinstance(progress, dict) and progress.get("phase") in {
+            "REPLACE_REQUESTED",
+            "REPLACE_OUTCOME_UNKNOWN",
+            "ROLLBACK_REQUESTED",
+        }:
+            return True
+    return False
+
+
 def resume_operation(
     operation_id: str,
     *,
@@ -2831,22 +3257,70 @@ def resume_operation(
 ) -> dict[str, Any]:
     """Conservatively reconcile a nonterminal operation back to its prior locked images."""
 
+    _require_update_operator()
     _ensure_journal_directory(journal_dir, create=False)
     journal_path = _journal_path(journal_dir, operation_id)
-    with _operation_lock(journal_dir):
+    snapshot = _read_journal(journal_path)
+    if snapshot["state"] in {"APPLIED", "FAILED_ROLLED_BACK"}:
+        if expected_digest != snapshot["planSha256"]:
+            raise RuntimeUpdateError("operation confirmation digest does not match its journal")
+        return _journal_summary(snapshot)
+    snapshot_plan, _plan_path = _plan_for_journal(snapshot, expected_digest)
+    with _operation_lock(snapshot_plan["project"]):
         journal = _read_journal(journal_path)
-        if journal["state"] in {"APPLIED", "FAILED_ROLLED_BACK"}:
-            if expected_digest != journal["planSha256"]:
-                raise RuntimeUpdateError("operation confirmation digest does not match its journal")
-            return _journal_summary(journal)
         plan, _plan_path = _plan_for_journal(journal, expected_digest)
+        if plan["project"] != snapshot_plan["project"]:
+            raise RuntimeUpdateError("operation project changed while acquiring the update lock")
+        if journal["state"] in {"APPLIED", "FAILED_ROLLED_BACK"}:
+            return _journal_summary(journal)
         docker_prefix = plan["policy"]["dockerPrefix"]
         _validate_docker_prefix(docker_prefix)
+        unknown_error_codes = {
+            "compose_update_outcome_unknown",
+            "docker_rollback_outcome_unknown",
+            "navigator_stop_outcome_unknown",
+            "navigator_restart_outcome_unknown",
+        }
+        if journal.get("lastErrorCode") in unknown_error_codes or _has_unresolved_docker_mutation(
+            journal
+        ):
+            error_code = journal.get("lastErrorCode")
+            if error_code not in unknown_error_codes:
+                error_code = "docker_mutation_intent_unresolved"
+            try:
+                _recover_edge_pause(
+                    journal=journal,
+                    journal_path=journal_path,
+                    docker_prefix=docker_prefix,
+                    timeout_seconds=plan["policy"]["drainTimeoutSeconds"] + 15,
+                )
+            except (RuntimeUpdateError, OSError, subprocess.SubprocessError) as error:
+                _set_phase(
+                    journal,
+                    journal_path,
+                    "RECOVERY_REQUIRED",
+                    state="RECOVERY_REQUIRED",
+                    error_code=error_code,
+                )
+                raise RuntimeUpdateError(
+                    "Docker mutation outcome remains unknown and the edge hold could not be reconfirmed"
+                ) from error
+            _set_phase(
+                journal,
+                journal_path,
+                "RECOVERY_REQUIRED",
+                state="RECOVERY_REQUIRED",
+                error_code=error_code,
+            )
+            raise RuntimeUpdateError(
+                "Docker mutation outcome remains unknown; the edge hold is confirmed and no replacement was retried"
+            )
         context = _resolve_plan_inputs(
             plan,
             docker_prefix=docker_prefix,
             run_full_preflight=True,
             inspect_active=False,
+            recovery_only=True,
         )
         try:
             _rollback_operation(
@@ -2857,12 +3331,17 @@ def resume_operation(
                 docker_prefix=docker_prefix,
             )
         except (RuntimeUpdateError, OSError, subprocess.SubprocessError) as error:
+            error_code = (
+                "docker_rollback_outcome_unknown"
+                if isinstance(error, RuntimeUpdateOutcomeUnknown)
+                else "safe_rollback_not_verified"
+            )
             _set_phase(
                 journal,
                 journal_path,
                 "RECOVERY_REQUIRED",
                 state="RECOVERY_REQUIRED",
-                error_code="safe_rollback_not_verified",
+                error_code=error_code,
             )
             raise RuntimeUpdateError(
                 "operation remains in recovery-required state; no unverified container was stopped or replaced"
@@ -2961,6 +3440,7 @@ def create_plan(
 ) -> dict[str, Any]:
     """Build a read-only plan bound to exact active containers and candidate files."""
 
+    _require_update_operator()
     if (
         not targets
         or any(not isinstance(target, str) for target in targets)
@@ -3153,7 +3633,11 @@ def create_plan(
 
 
 def _run_command(
-    argv: list[str], *, input_data: str | None = None, timeout_seconds: float = 30.0
+    argv: list[str],
+    *,
+    input_data: str | None = None,
+    timeout_seconds: float = 30.0,
+    external_mutation: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run one argv-only Docker command while keeping raw output internal."""
 
@@ -3167,6 +3651,10 @@ def _run_command(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as error:
+        if external_mutation:
+            raise RuntimeUpdateOutcomeUnknown(
+                "Docker mutation timed out; the daemon outcome is unknown"
+            ) from error
         raise RuntimeUpdateError(f"Docker command timed out: {Path(argv[0]).name}") from error
     except OSError as error:
         raise RuntimeUpdateError(f"Docker command is unavailable: {Path(argv[0]).name}") from error
@@ -3201,7 +3689,11 @@ import json
 import sys
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+class RejectRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        return None
 
 token_path, url, method = sys.argv[1:4]
 request_timeout = float(sys.argv[4])
@@ -3218,7 +3710,9 @@ try:
         method=method,
     )
     try:
-        response = urlopen(request, timeout=request_timeout)
+        response = build_opener(RejectRedirectHandler()).open(
+            request, timeout=request_timeout
+        )
         status_code = response.status
         response_bytes = response.read(65537)
     except HTTPError as error:
