@@ -156,6 +156,11 @@ def test_cloud_management_tls_secret_overlay_allows_only_the_canonical_four_name
 
     active = {"secrets": {}}
     candidate = {"secrets": {name: {"file": f"/candidate/{name}"} for name in expected}}
+    candidate["services"] = {
+        "cloud-management-phase2": {
+            "secrets": [{"source": name, "target": name} for name in sorted(expected)]
+        }
+    }
     stage_transition._validate_active_candidate_secrets(active, candidate)
 
     candidate["secrets"]["cloud-management-unexpected-secret"] = {
@@ -163,6 +168,18 @@ def test_cloud_management_tls_secret_overlay_allows_only_the_canonical_four_name
     }
     with pytest.raises(
         stage_transition.StageTransitionError, match="outside the HF/cloud provider set"
+    ):
+        stage_transition._validate_active_candidate_secrets(active, candidate)
+
+    del candidate["secrets"]["cloud-management-unexpected-secret"]
+    candidate["services"]["exchange"] = {
+        "secrets": [
+            {"source": "cloud-management-server-key", "target": "cloud-management-server-key"}
+        ]
+    }
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="only to their canonical Cloud Management targets",
     ):
         stage_transition._validate_active_candidate_secrets(active, candidate)
 
@@ -178,8 +195,19 @@ def test_candidate_secrets_cannot_repoint_existing_host_secret_sources(tmp_path:
     candidate_source = candidate_dir / "exchange-tls-cert"
     active_source.write_text("active-placeholder")
     candidate_source.write_text("candidate-placeholder")
-    active = {"secrets": {"exchange-tls-cert": {"file": str(active_source)}}}
-    candidate = {"secrets": {"exchange-tls-cert": {"file": str(candidate_source)}}}
+    cloud_secret_sources = {}
+    cloud_mounts = []
+    for name in sorted(stage_transition.CLOUD_MANAGEMENT_TLS_SECRET_NAMES):
+        source = active_dir / name
+        source.write_text("active-placeholder")
+        cloud_secret_sources[name] = {"file": str(source)}
+        cloud_mounts.append({"source": name, "target": name})
+    active = {
+        "secrets": {"exchange-tls-cert": {"file": str(active_source)}, **cloud_secret_sources}
+    }
+    candidate = copy.deepcopy(active)
+    candidate["secrets"]["exchange-tls-cert"] = {"file": str(candidate_source)}
+    candidate["services"] = {"cloud-management-phase2": {"secrets": cloud_mounts}}
 
     with pytest.raises(
         stage_transition.StageTransitionError, match="changes unrelated secret source"
