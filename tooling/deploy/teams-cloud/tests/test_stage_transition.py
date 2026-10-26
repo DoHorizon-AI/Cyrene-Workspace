@@ -1069,6 +1069,17 @@ def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
     assert receipt["verifiedProviderIds"] == ["azure", "gcp", "huggingface"]
     assert receipt["bindingCount"] == 3
 
+    wrong_access_mode = copy.deepcopy(snapshot)
+    next(row for row in wrong_access_mode["connections"] if row["providerId"] == "huggingface")[
+        "accessMode"
+    ] = "actor_owned"
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="profile/connection access mode"
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=wrong_access_mode, compose=compose
+        )
+
     wrong_scope = copy.deepcopy(snapshot)
     next(row for row in wrong_scope["profiles"] if row["providerId"] == "azure")["targetScope"][
         "targets"

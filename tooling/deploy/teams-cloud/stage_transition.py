@@ -2962,12 +2962,13 @@ def _verify_exchange_readiness_snapshot(
             or connection["profileRef"] != binding["profileRef"]
             or profile["profileRef"] != binding["profileRef"]
             or connection["profileAlias"] != profile["profileAlias"]
+            or connection["accessMode"] != profile["accessMode"]
             or connection["readOnly"] is not True
             or not catalog_item["tools"]
             or any(tool.get("readOnly") is not True for tool in catalog_item["tools"])
         ):
             raise StageTransitionError(
-                f"live Exchange profile, binding, and read-only catalog do not join for {provider_id}"
+                f"live Exchange profile/connection access mode, binding, and read-only catalog do not join for {provider_id}"
             )
         live_profile_refs[provider_id] = profile["profileRef"]
 
