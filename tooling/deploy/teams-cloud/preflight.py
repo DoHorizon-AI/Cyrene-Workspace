@@ -2313,22 +2313,29 @@ def _connector_bootstrap_cloud_profiles(
 ) -> dict[str, dict[str, Any]]:
     """Join Exchange bootstrap selectors to the exact candidate Cloud Management profiles."""
 
-    if mode != "connector-auth-readonly":
+    if mode not in {"connector-auth-readonly", "stage2", "stage3", "cutover"}:
         return {}
     services = config.get("services", {})
     cloud_service = services.get("cloud-management-phase2") if isinstance(services, dict) else None
     exchange_service = services.get("exchange") if isinstance(services, dict) else None
-    if not isinstance(cloud_service, dict) or not isinstance(exchange_service, dict):
+    if mode == "connector-auth-readonly" and (
+        not isinstance(cloud_service, dict) or not isinstance(exchange_service, dict)
+    ):
         raise PreflightError(
             "connector bootstrap cloud profiles require Cloud Management and Exchange"
         )
+    if not isinstance(cloud_service, dict):
+        return {}
+    if not isinstance(exchange_service, dict):
+        raise PreflightError("Exchange cloud bootstrap configuration is unavailable")
     cloud_document = _json_environment_object(
         cloud_service, "CYRENE_CAPABILITY_CONFIGURATION_JSON", "Cloud Management"
     )
     cloud_rows = cloud_document.get("profiles")
     if not isinstance(cloud_rows, list):
         raise PreflightError("Cloud Management bootstrap profile list is invalid")
-    expected_providers = _expected_exchange_providers(config, "cutover") - (
+    provider_mode = "cutover" if mode == "connector-auth-readonly" else mode
+    expected_providers = _expected_exchange_providers(config, provider_mode) - (
         {"hf"} if _huggingface_enabled(config) else set()
     )
     rows_by_provider: dict[str, dict[str, Any]] = {}

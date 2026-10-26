@@ -3812,6 +3812,9 @@ def test_connector_bootstrap_cloud_selection_joins_candidate_profiles_and_target
     expected_cloud = preflight._connector_bootstrap_cloud_profiles(
         config, "connector-auth-readonly"
     )
+    assert preflight._connector_bootstrap_cloud_profiles(config, "stage2") == expected_cloud
+    cutover_cloud = preflight._connector_bootstrap_cloud_profiles(config, "cutover")
+    assert cutover_cloud == expected_cloud
     document = {
         "schemaVersion": 1,
         "actor": actor,
@@ -3837,6 +3840,12 @@ def test_connector_bootstrap_cloud_selection_joins_candidate_profiles_and_target
         huggingface_enabled=True,
         expected_actor=actor,
         expected_cloud_profiles=expected_cloud,
+    )
+    preflight._validate_connector_bootstrap_config(
+        path,
+        huggingface_enabled=True,
+        expected_actor=actor,
+        expected_cloud_profiles=cutover_cloud,
     )
 
     invalid_documents = []
