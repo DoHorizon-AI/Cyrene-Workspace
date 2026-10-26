@@ -138,6 +138,62 @@ def test_caddy_compare_rejects_any_other_front_change() -> None:
         )
 
 
+def test_existing_host_fronted_readiness_is_read_only_and_does_not_claim_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify active Caddy, backend TLS, and public TLS without old-file or ACP evidence."""
+
+    active_file = tmp_path / "active-Caddyfile"
+    active_file.write_text("existing host Caddy config", encoding="utf-8")
+    caddy_binary = tmp_path / "caddy"
+    caddy_binary.write_text("synthetic caddy executable", encoding="utf-8")
+    ca_file = tmp_path / "staging-root.crt"
+    ca_file.write_text("synthetic public certificate", encoding="utf-8")
+    adapted = _adapted(candidate=True, ca_path=str(ca_file))
+    handshake_labels: list[str] = []
+    monkeypatch.setattr(canary, "_verify_live_caddy_process", lambda **_kwargs: None)
+    monkeypatch.setattr(canary, "_adapt_caddyfile", lambda *_args: adapted)
+    monkeypatch.setattr(canary, "_read_live_caddy_config", lambda: adapted)
+    monkeypatch.setattr(canary, "_verify_public_ca_file", lambda *_args: None)
+    monkeypatch.setattr(
+        canary,
+        "_verify_tls_handshake",
+        lambda **kwargs: handshake_labels.append(kwargs["label"]),
+    )
+    monkeypatch.setattr(canary, "_verify_backend_unsigned_callback_http", lambda **_kwargs: 12)
+    monkeypatch.setattr(canary, "_verify_public_unsigned_callback_http", lambda **_kwargs: 18)
+
+    result = canary.run_existing_host_fronted_readiness(
+        expected_hostname=HOST,
+        ingress_image_id=IMAGE_ID,
+        caddy_binary=str(caddy_binary),
+        active_file=active_file,
+    )
+
+    assert result["status"] == "HOST_FRONTED_STAGING_READY"
+    assert result["ingressExposure"] == "host-fronted-staging"
+    assert result["ingressImageId"] == IMAGE_ID
+    assert result["backendTls"] == result["publicTls"] == "PASS"
+    assert result["backendUnsignedCallbackHttpStatus"] == 401
+    assert result["publicUnsignedCallbackHttpStatus"] == 401
+    assert result["accepted"] is False
+    assert result["deploymentReady"] is False
+    assert result["publicCallbackPostApply"] == "NOT_RUN"
+    assert result["fullTeamsAcceptance"] == "NOT_RUN"
+    assert set(handshake_labels) == {"host-fronted staging backend TLS", "host-fronted public TLS"}
+
+
+def test_existing_host_fronted_caddy_rejects_an_unowned_backend_route() -> None:
+    """Keep the current host Caddy route on the exact loopback ingress and TLS CA."""
+
+    adapted = _adapted(candidate=True)
+    _path, handler, _hosts = canary._find_callback_proxy(adapted, "test active Caddy")
+    handler["upstreams"][0]["dial"] = "0.0.0.0:18443"
+    with pytest.raises(canary.CanaryGateError, match="loopback 127.0.0.1:18443"):
+        canary._verify_existing_host_fronted_caddy(adapted=adapted, expected_hostname=HOST)
+
+
 @pytest.mark.parametrize(
     "headers",
     [

@@ -80,6 +80,24 @@ private client-CA bundle, and mTLS health checks. The public Caddyfile accepts
 only `POST /api/messages`, uses the ACME TLS-ALPN challenge, and leaves host port
 80 closed.
 
+For a VM whose existing host Caddy already fronts the loopback staging ingress,
+pass `--ingress-exposure host-fronted-staging` to the connector-auth stage plan.
+The default remains `public-cutover`. The explicit mode requires the existing
+Compose ingress to stay on `127.0.0.1:18443` with `Caddyfile.staging`, verifies
+the exact Docker owner, and rechecks the active host Caddy process/Admin API,
+callback route, backend CA/TLS, public TLS, and unsigned callback HTTP 401 during
+both plan and apply. This read-only readiness does not apply host Caddy, enable
+the public Compose ingress, or claim post-apply callback acceptance; the report
+keeps `accepted=false`, `deploymentReady=false`, and
+`publicCallbackPostApply=NOT_RUN` until the later live Teams acceptance.
+
+For connector-auth provider bootstrap and activation, the private Exchange
+bootstrap may include a `cloud` array only when those exact candidate Cloud
+Management profiles are present. Every entry is closed to `profileAlias`,
+`targetAlias`, and `expectedAccessMode="workspace_operator"`; the profile alias,
+identity, and target must join to the Exchange `authorizationCloud` map and the
+Cloud Management phase provider set. Stage 1 must keep `cloud` absent.
+
 When HF is enabled, it uses a fresh device-OAuth bootstrap selected by the HF
 Compose overlay. Its private JSON file stays outside the secret directory and
 is mounted read-only into Account Center only. Account Center persists profile
@@ -93,6 +111,10 @@ binding, or tool catalog.
 基础 Compose 文件只为回调入口发布 TCP 443。Exchange、Navigator、Directory Authority、Account Center 和所有 DirectPluginRuntime 均留在私有网络；Provider 使用各自服务证书、私有 client-CA bundle 和 mTLS 健康探针。公网 Caddyfile 只接受 `POST /api/messages`，使用 ACME TLS-ALPN challenge，并保持宿主机 80 端口关闭。
 
 启用 HF 时，使用 HF Compose overlay 选择新的 device-OAuth bootstrap。私有 JSON 文件保存在 secrets 目录之外，只读挂载到 Account Center。Account Center 会将 profile 凭据加密保存到持久数据库；在后续配置发布同时移除文件引用和挂载前，需将 bootstrap 文件保持 owner-only，以支持重启和重新授权。预检会校验封闭 DTO 与目标仓库范围，不会输出 token 内容。GitHub-only 模式不包含 OAuth secret 挂载、HF Provider 服务、Exchange HF profile、binding 或 tool catalog。
+
+如果 VM 已由现有宿主机 Caddy 前置到 loopback staging ingress，connector-auth 阶段 plan 必须显式传入 `--ingress-exposure host-fronted-staging`；默认仍为 `public-cutover`。该模式要求 Compose ingress 继续使用 `Caddyfile.staging` 和 `127.0.0.1:18443`，核验精确 Docker owner，并在 plan 与 apply 时重新只读检查宿主机 Caddy 进程/Admin API、回调路由、backend CA/TLS、公网 TLS 和未签名回调 HTTP 401。它不会应用宿主机 Caddy、启用 Compose 公网入口或声称回调已在更新后验收；后续实际 Teams 验收前，报告必须保留 `accepted=false`、`deploymentReady=false` 和 `publicCallbackPostApply=NOT_RUN`。
+
+connector-auth Provider bootstrap/activation 的私有 Exchange bootstrap 只有在候选 Cloud Management profile 确实存在时才可包含 `cloud` 数组。每项严格只有 `profileAlias`、`targetAlias`、`expectedAccessMode="workspace_operator"`；profile alias、identity 和 target 必须与 Exchange `authorizationCloud` 映射及 Cloud Management 阶段 Provider 集合对应。Stage 1 必须省略 `cloud`。
 
 ### Private provider credential setup / 私有 Provider 凭据配置
 

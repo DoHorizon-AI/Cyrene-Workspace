@@ -1600,6 +1600,78 @@ def test_owned_staging_ingress_rejects_multiple_docker_port_owners(
         )
 
 
+def test_connector_auth_host_fronted_port_requires_exact_live_docker_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind loopback 18443 to the exact locked Compose ingress and reject public listeners."""
+
+    config = {
+        "name": "cyrene-test",
+        "services": {
+            "teams-public-ingress": {
+                "image": "caddy:test",
+                "ports": [
+                    {
+                        "target": 443,
+                        "published": "18443",
+                        "host_ip": "127.0.0.1",
+                        "protocol": "tcp",
+                    }
+                ],
+            }
+        },
+    }
+    image_id = "sha256:" + "a" * 64
+    image_lock = {
+        "images": [],
+        "externalImages": {"caddy": {"localImage": "caddy:test", "imageId": image_id}},
+    }
+    container = {
+        "Config": {
+            "Image": "caddy:test",
+            "Labels": {
+                "com.docker.compose.project": "cyrene-test",
+                "com.docker.compose.service": "teams-public-ingress",
+            },
+        },
+        "Image": image_id,
+        "HostConfig": {"PortBindings": {"443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18443"}]}},
+        "State": {"Running": True},
+    }
+    listener_output = "LISTEN 0 4096 127.0.0.1:18443 0.0.0.0:*\n"
+
+    def run(argv: list[str], *, capture: bool = True) -> str:
+        if argv[1:3] == ["ps", "--filter"]:
+            return "0123456789ab\n"
+        if argv[1] == "inspect":
+            return json.dumps([container])
+        if argv[:2] == ["ss", "-H"]:
+            return listener_output
+        raise AssertionError("unexpected read-only command")
+
+    monkeypatch.setattr(preflight, "_run", run)
+    assert (
+        preflight._validate_host_ports(
+            config,
+            mode="connector-auth-readonly",
+            docker_prefix=["docker"],
+            image_lock=image_lock,
+            ingress_exposure="host-fronted-staging",
+        )
+        == image_id
+    )
+
+    listener_output = "LISTEN 0 4096 0.0.0.0:18443 0.0.0.0:*\n"
+    with pytest.raises(preflight.PreflightError, match="loopback-only 127.0.0.1:18443"):
+        preflight._validate_host_ports(
+            config,
+            mode="connector-auth-readonly",
+            docker_prefix=["docker"],
+            image_lock=image_lock,
+            ingress_exposure="host-fronted-staging",
+        )
+
+
 def test_default_host_port_guard_still_rejects_an_occupied_staging_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3460,6 +3532,27 @@ def test_public_caddyfile_is_callback_only_and_tls_alpn_only() -> None:
         preflight._validate_caddyfile(service, "cutover")
 
 
+def test_connector_auth_host_fronted_mode_keeps_the_existing_staging_caddyfile() -> None:
+    """Allow internal TLS only when the operator explicitly selects host-fronted staging."""
+
+    service = {
+        "volumes": [
+            {
+                "type": "bind",
+                "source": str((DEPLOYMENT_ROOT / "Caddyfile.staging").resolve()),
+                "target": "/etc/caddy/Caddyfile",
+            }
+        ]
+    }
+    preflight._validate_caddyfile(
+        service,
+        "connector-auth-readonly",
+        ingress_exposure="host-fronted-staging",
+    )
+    with pytest.raises(preflight.PreflightError, match="canonical Caddyfile"):
+        preflight._validate_caddyfile(service, "connector-auth-readonly")
+
+
 def test_teams_provider_uses_only_the_file_backed_bot_secret() -> None:
     """Pin the egress connector to the rotated secret file and approved Team scope."""
 
@@ -3668,6 +3761,146 @@ def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path
         )
 
 
+def test_connector_bootstrap_cloud_selection_joins_candidate_profiles_and_targets(
+    tmp_path: Path,
+) -> None:
+    """Accept only Exchange's three-field cloud selector for the exact phase profiles."""
+
+    actor = {
+        "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+        "subject": UUID,
+        "organizationId": "org-test",
+        "workspaceId": "workspace-test",
+    }
+    cloud_rows = [
+        {"provider": "azure", "profile_ref": "azure-primary", "identity_ref": "azure-mi"},
+        {"provider": "gcp", "profile_ref": "gcp-primary", "identity_ref": "gcp-wif"},
+    ]
+    exchange_profiles = {
+        "azure-primary": {
+            "provider": "azure",
+            "identityRef": "azure-mi",
+            "accessMode": "workspace_operator",
+            "targets": {
+                "azure-read": {"targetRef": "subscription-prod", "displayName": "Azure prod"}
+            },
+        },
+        "gcp-primary": {
+            "provider": "gcp",
+            "identityRef": "gcp-wif",
+            "accessMode": "workspace_operator",
+            "targets": {"gcp-read": {"targetRef": "project-prod", "displayName": "GCP prod"}},
+        },
+    }
+    config = {
+        "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "true"}},
+            "cloud-management-phase2": {
+                "environment": {
+                    "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps({"profiles": cloud_rows})
+                }
+            },
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                        {"authorizationCloud": {"profiles": exchange_profiles}}
+                    )
+                }
+            },
+        }
+    }
+    expected_cloud = preflight._connector_bootstrap_cloud_profiles(
+        config, "connector-auth-readonly"
+    )
+    assert preflight._connector_bootstrap_cloud_profiles(config, "stage2") == expected_cloud
+    cutover_cloud = preflight._connector_bootstrap_cloud_profiles(config, "cutover")
+    assert cutover_cloud == expected_cloud
+    document = {
+        "schemaVersion": 1,
+        "actor": actor,
+        "github": {"expectedAccessMode": "workspace_operator"},
+        "huggingface": {"expectedAccessMode": "workspace_operator"},
+        "cloud": [
+            {
+                "profileAlias": "azure-primary",
+                "targetAlias": "azure-read",
+                "expectedAccessMode": "workspace_operator",
+            },
+            {
+                "profileAlias": "gcp-primary",
+                "targetAlias": "gcp-read",
+                "expectedAccessMode": "workspace_operator",
+            },
+        ],
+    }
+    path = tmp_path / "connector-bootstrap.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    preflight._validate_connector_bootstrap_config(
+        path,
+        huggingface_enabled=True,
+        expected_actor=actor,
+        expected_cloud_profiles=expected_cloud,
+    )
+    preflight._validate_connector_bootstrap_config(
+        path,
+        huggingface_enabled=True,
+        expected_actor=actor,
+        expected_cloud_profiles=cutover_cloud,
+    )
+
+    invalid_documents = []
+    missing_provider = json.loads(json.dumps(document))
+    missing_provider["cloud"].pop()
+    invalid_documents.append(missing_provider)
+    extra_field = json.loads(json.dumps(document))
+    extra_field["cloud"][0]["provider"] = "azure"
+    invalid_documents.append(extra_field)
+    wrong_target = json.loads(json.dumps(document))
+    wrong_target["cloud"][0]["targetAlias"] = "unconfigured-target"
+    invalid_documents.append(wrong_target)
+    wrong_mode = json.loads(json.dumps(document))
+    wrong_mode["cloud"][1]["expectedAccessMode"] = "actor_owned"
+    invalid_documents.append(wrong_mode)
+    for invalid in invalid_documents:
+        path.write_text(json.dumps(invalid), encoding="utf-8")
+        with pytest.raises(preflight.PreflightError):
+            preflight._validate_connector_bootstrap_config(
+                path,
+                huggingface_enabled=True,
+                expected_actor=actor,
+                expected_cloud_profiles=expected_cloud,
+            )
+
+    stage1_document = json.loads(json.dumps(document))
+    path.write_text(json.dumps(stage1_document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="not allowed before the provider phase"):
+        preflight._validate_connector_bootstrap_config(
+            path,
+            huggingface_enabled=True,
+            expected_actor=actor,
+            expected_cloud_profiles={},
+        )
+
+    wrong_identity = json.loads(json.dumps(config))
+    wrong_identity["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(
+        {
+            "authorizationCloud": {
+                "profiles": {
+                    **exchange_profiles,
+                    "azure-primary": {
+                        **exchange_profiles["azure-primary"],
+                        "identityRef": "different-identity",
+                    },
+                }
+            }
+        }
+    )
+    with pytest.raises(preflight.PreflightError, match="provider identity and targets"):
+        preflight._connector_bootstrap_cloud_profiles(wrong_identity, "connector-auth-readonly")
+
+
 def test_huggingface_oauth_source_matches_closed_account_center_dto(tmp_path: Path) -> None:
     """Validate the private OAuth seed shape and target scope without exposing tokens."""
 
@@ -3784,6 +4017,61 @@ def test_stage3_cloud_provider_counts_toward_runtime_budget() -> None:
     }
     with pytest.raises(preflight.PreflightError, match="memory limits total"):
         preflight._validate_compose(config, "stage3", 1024, 1.8, {"test:local"})
+
+
+def test_connector_auth_host_fronted_compose_keeps_only_loopback_18443() -> None:
+    """Require the host-fronted profile to keep the pinned internal-Caddy ingress untouched."""
+
+    config = {
+        "services": {
+            "teams-public-ingress": {
+                "image": "caddy:test",
+                "mem_limit": "64m",
+                "cpus": "0.05",
+                "profiles": ["public-ingress"],
+                "ports": [
+                    {
+                        "target": 443,
+                        "published": "18443",
+                        "host_ip": "127.0.0.1",
+                        "protocol": "tcp",
+                    }
+                ],
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": str((DEPLOYMENT_ROOT / "Caddyfile.staging").resolve()),
+                        "target": "/etc/caddy/Caddyfile",
+                    }
+                ],
+            }
+        }
+    }
+    preflight._validate_compose(
+        config,
+        "connector-auth-readonly",
+        3584,
+        1.95,
+        {"caddy:test"},
+        ingress_exposure="host-fronted-staging",
+    )
+
+    for host_ip, published in (("0.0.0.0", "18443"), ("127.0.0.1", "443")):
+        changed = json.loads(json.dumps(config))
+        changed["services"]["teams-public-ingress"]["ports"][0]["host_ip"] = host_ip
+        changed["services"]["teams-public-ingress"]["ports"][0]["published"] = published
+        with pytest.raises(preflight.PreflightError, match="127.0.0.1:18443"):
+            preflight._validate_compose(
+                changed,
+                "connector-auth-readonly",
+                3584,
+                1.95,
+                {"caddy:test"},
+                ingress_exposure="host-fronted-staging",
+            )
+
+    with pytest.raises(preflight.PreflightError, match="canonical Caddyfile"):
+        preflight._validate_compose(config, "connector-auth-readonly", 3584, 1.95, {"caddy:test"})
 
 
 @pytest.mark.parametrize(

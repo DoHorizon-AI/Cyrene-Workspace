@@ -2308,8 +2308,126 @@ def _connector_bootstrap_actor(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _connector_bootstrap_cloud_profiles(
+    config: dict[str, Any], mode: str
+) -> dict[str, dict[str, Any]]:
+    """Join Exchange bootstrap selectors to the exact candidate Cloud Management profiles."""
+
+    if mode not in {"connector-auth-readonly", "stage2", "stage3", "cutover"}:
+        return {}
+    services = config.get("services", {})
+    cloud_service = services.get("cloud-management-phase2") if isinstance(services, dict) else None
+    exchange_service = services.get("exchange") if isinstance(services, dict) else None
+    if mode == "connector-auth-readonly" and (
+        not isinstance(cloud_service, dict) or not isinstance(exchange_service, dict)
+    ):
+        raise PreflightError(
+            "connector bootstrap cloud profiles require Cloud Management and Exchange"
+        )
+    if not isinstance(cloud_service, dict):
+        return {}
+    if not isinstance(exchange_service, dict):
+        raise PreflightError("Exchange cloud bootstrap configuration is unavailable")
+    cloud_document = _json_environment_object(
+        cloud_service, "CYRENE_CAPABILITY_CONFIGURATION_JSON", "Cloud Management"
+    )
+    cloud_rows = cloud_document.get("profiles")
+    if not isinstance(cloud_rows, list):
+        raise PreflightError("Cloud Management bootstrap profile list is invalid")
+    provider_mode = "cutover" if mode == "connector-auth-readonly" else mode
+    expected_providers = _expected_exchange_providers(config, provider_mode) - (
+        {"hf"} if _huggingface_enabled(config) else set()
+    )
+    rows_by_provider: dict[str, dict[str, Any]] = {}
+    for row in cloud_rows:
+        if not isinstance(row, dict):
+            raise PreflightError("Cloud Management bootstrap profile list is invalid")
+        provider = row.get("provider")
+        profile_ref = row.get("profile_ref")
+        identity_ref = row.get("identity_ref")
+        if (
+            not isinstance(provider, str)
+            or not isinstance(profile_ref, str)
+            or not profile_ref
+            or not isinstance(identity_ref, str)
+            or not identity_ref
+            or provider in rows_by_provider
+        ):
+            raise PreflightError("Cloud Management bootstrap profile identity is invalid")
+        rows_by_provider[provider] = row
+    if set(rows_by_provider) != expected_providers or expected_providers not in (
+        {"azure", "gcp"},
+        {"azure", "gcp", "runpod"},
+    ):
+        raise PreflightError("connector bootstrap cloud providers must match the candidate phase")
+
+    exchange_document = _json_environment_object(
+        exchange_service,
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON",
+        "Exchange",
+    )
+    authorization_cloud = exchange_document.get("authorizationCloud")
+    exchange_profiles = (
+        authorization_cloud.get("profiles") if isinstance(authorization_cloud, dict) else None
+    )
+    if not isinstance(exchange_profiles, dict):
+        raise PreflightError("Exchange bootstrap cloud profile map is unavailable")
+
+    result: dict[str, dict[str, Any]] = {}
+    for provider, cloud_row in rows_by_provider.items():
+        profile_ref = cloud_row["profile_ref"]
+        identity_ref = cloud_row["identity_ref"]
+        exchange_profile = exchange_profiles.get(profile_ref)
+        targets = exchange_profile.get("targets") if isinstance(exchange_profile, dict) else None
+        if (
+            not isinstance(exchange_profile, dict)
+            or exchange_profile.get("provider") != provider
+            or exchange_profile.get("identityRef") != identity_ref
+            or exchange_profile.get("accessMode") != "workspace_operator"
+            or not isinstance(targets, dict)
+            or not targets
+        ):
+            raise PreflightError(
+                "Exchange cloud bootstrap profile must join to the candidate provider identity and targets"
+            )
+        for target_alias, target in targets.items():
+            if (
+                not isinstance(target_alias, str)
+                or not target_alias
+                or not isinstance(target, dict)
+                or set(target) - {"targetRef", "displayName", "allowedContextRefs"}
+                or not {"targetRef", "displayName"} <= set(target)
+                or any(
+                    not isinstance(target.get(field), str) or not target[field]
+                    for field in ("targetRef", "displayName")
+                )
+                or (
+                    "allowedContextRefs" in target
+                    and (
+                        not isinstance(target["allowedContextRefs"], list)
+                        or any(
+                            not isinstance(value, str) or not value
+                            for value in target["allowedContextRefs"]
+                        )
+                        or len(target["allowedContextRefs"])
+                        != len(set(target["allowedContextRefs"]))
+                    )
+                )
+            ):
+                raise PreflightError("Exchange cloud bootstrap target configuration is invalid")
+        result[provider] = {
+            "profileAlias": profile_ref,
+            "targets": targets,
+        }
+    return result
+
+
 def _validate_connector_bootstrap_config(
-    path: Path, *, huggingface_enabled: bool, expected_actor: dict[str, Any]
+    path: Path,
+    *,
+    huggingface_enabled: bool,
+    expected_actor: dict[str, Any],
+    expected_cloud_profiles: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Require the private Exchange bootstrap input to match the selected provider set."""
 
@@ -2320,10 +2438,11 @@ def _validate_connector_bootstrap_config(
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise PreflightError("private connector bootstrap configuration is invalid JSON") from error
     required = {"schemaVersion", "actor", "github"}
+    expected_cloud_profiles = expected_cloud_profiles or {}
     if (
         not isinstance(document, dict)
         or not required <= set(document)
-        or set(document) - (required | {"huggingface"})
+        or set(document) - (required | {"huggingface", "cloud"})
         or document.get("schemaVersion") != 1
         or not isinstance(document.get("actor"), dict)
         or set(document["actor"]) != {"issuer", "subject", "organizationId", "workspaceId"}
@@ -2349,6 +2468,62 @@ def _validate_connector_bootstrap_config(
             raise PreflightError(
                 "Hugging Face connector bootstrap must require workspace_operator access"
             )
+    cloud_entries = document.get("cloud")
+    if expected_cloud_profiles:
+        if not isinstance(cloud_entries, list) or len(cloud_entries) != len(
+            expected_cloud_profiles
+        ):
+            raise PreflightError(
+                "private connector bootstrap cloud provider set must match the candidate phase"
+            )
+        seen_providers: set[str] = set()
+        for entry in cloud_entries:
+            if not isinstance(entry, dict) or set(entry) != {
+                "profileAlias",
+                "targetAlias",
+                "expectedAccessMode",
+            }:
+                raise PreflightError(
+                    "cloud bootstrap entries must match the Exchange v1 closed schema"
+                )
+            profile_alias = entry.get("profileAlias")
+            target_alias = entry.get("targetAlias")
+            if (
+                not isinstance(profile_alias, str)
+                or not isinstance(target_alias, str)
+                or not profile_alias
+                or not target_alias
+                or entry.get("expectedAccessMode") != "workspace_operator"
+            ):
+                raise PreflightError(
+                    "cloud bootstrap entries require profile/target aliases and workspace_operator access"
+                )
+            matching = [
+                provider
+                for provider, expected in expected_cloud_profiles.items()
+                if expected.get("profileAlias") == profile_alias
+            ]
+            if len(matching) != 1:
+                raise PreflightError(
+                    "cloud bootstrap profileAlias must select one candidate phase provider"
+                )
+            provider = matching[0]
+            targets = expected_cloud_profiles[provider].get("targets")
+            if (
+                provider in seen_providers
+                or not isinstance(targets, dict)
+                or target_alias not in targets
+            ):
+                raise PreflightError(
+                    "cloud bootstrap targetAlias must exist on its exact Exchange provider profile"
+                )
+            seen_providers.add(provider)
+        if seen_providers != set(expected_cloud_profiles):
+            raise PreflightError(
+                "private connector bootstrap cloud provider set must match the candidate phase"
+            )
+    elif "cloud" in document:
+        raise PreflightError("cloud bootstrap profiles are not allowed before the provider phase")
 
 
 def _validate_teams_connector_config(service: dict[str, Any], navigator: dict[str, Any]) -> None:
@@ -2858,7 +3033,9 @@ def _validate_teams_delivery_state_directory(state_dir: Path) -> None:
         )
 
 
-def _validate_caddyfile(service: dict[str, Any], mode: str) -> None:
+def _validate_caddyfile(
+    service: dict[str, Any], mode: str, *, ingress_exposure: str = "public-cutover"
+) -> None:
     """Require the exact callback-only Caddy route and stage-appropriate TLS file."""
 
     matches = [
@@ -2869,9 +3046,12 @@ def _validate_caddyfile(service: dict[str, Any], mode: str) -> None:
     if len(matches) != 1 or matches[0].get("type") != "bind":
         raise PreflightError("public ingress must bind exactly one repository Caddyfile")
     path = Path(matches[0].get("source", ""))
+    host_fronted_staging = (
+        mode == "connector-auth-readonly" and ingress_exposure == "host-fronted-staging"
+    )
     expected_name = (
         "Caddyfile.staging"
-        if mode in {"bootstrap", "staging", "stage1", "stage2", "stage3"}
+        if mode in {"bootstrap", "staging", "stage1", "stage2", "stage3"} or host_fronted_staging
         else "Caddyfile"
     )
     if path.name != expected_name or path.is_symlink() or not path.is_file():
@@ -2893,7 +3073,7 @@ def _validate_caddyfile(service: dict[str, Any], mode: str) -> None:
         or 'respond "not found" 404' not in lines
     ):
         raise PreflightError("Caddy callback must reject other methods and paths")
-    if mode in {"cutover", "connector-auth-readonly"}:
+    if mode in {"cutover", "connector-auth-readonly"} and not host_fronted_staging:
         if "tls internal" in contents or "disable_http_challenge" not in lines:
             raise PreflightError(
                 "public Caddyfile must use public ACME TLS-ALPN without internal certificates or HTTP-01"
@@ -2910,6 +3090,7 @@ def _validate_compose(
     max_memory_mib: int,
     max_cpus: float,
     locked_images: set[str],
+    ingress_exposure: str = "public-cutover",
 ) -> tuple[float, float]:
     """Enforce network exposure and aggregate cgroup limits from rendered Compose."""
 
@@ -2944,7 +3125,19 @@ def _validate_compose(
                 raise PreflightError(
                     "Teams ingress may publish only TCP 443; keep host port 80 closed"
                 )
-            _validate_caddyfile(service, mode)
+            _validate_caddyfile(service, mode, ingress_exposure=ingress_exposure)
+            if (
+                mode == "connector-auth-readonly"
+                and ingress_exposure == "host-fronted-staging"
+                and (
+                    len(ports) != 1
+                    or targets.get(443) != ("18443", "127.0.0.1")
+                    or ports[0].get("protocol", "tcp") != "tcp"
+                )
+            ):
+                raise PreflightError(
+                    "host-fronted staging ingress must publish only 127.0.0.1:18443/tcp"
+                )
             if mode in {"bootstrap", "staging", "stage1", "stage2", "stage3"}:
                 if any(host_ip not in {"127.0.0.1", "::1"} for _, host_ip in targets.values()):
                     raise PreflightError("staging ingress must bind loopback only")
@@ -2952,7 +3145,9 @@ def _validate_compose(
                     raise PreflightError(
                         "staging ingress must use a loopback high port rather than host 443"
                     )
-            if mode in {"cutover", "connector-auth-readonly"}:
+            if mode in {"cutover", "connector-auth-readonly"} and not (
+                mode == "connector-auth-readonly" and ingress_exposure == "host-fronted-staging"
+            ):
                 if {published for published, _ in targets.values()} != {"443"}:
                     raise PreflightError("cutover ingress must bind standard HTTPS port 443 only")
                 if any(host_ip in {"127.0.0.1", "::1"} for _, host_ip in targets.values()):
@@ -3261,6 +3456,7 @@ def _validate_secrets_and_configs(
                 path,
                 huggingface_enabled=huggingface_enabled,
                 expected_actor=_connector_bootstrap_actor(config),
+                expected_cloud_profiles=_connector_bootstrap_cloud_profiles(config, mode),
             )
         elif path.suffix == ".json":
             try:
@@ -4836,8 +5032,8 @@ def _validate_owned_staging_ingress(
 ) -> str:
     """Verify the one explicitly owned loopback ingress binding for a canary."""
 
-    if mode not in {"stage1", "staging"}:
-        raise PreflightError("owned staging ingress is available only during Stage 1 staging")
+    if mode not in {"stage1", "staging", "connector-auth-readonly"}:
+        raise PreflightError("owned loopback staging ingress is unavailable in this mode")
     project = config.get("name")
     service = config.get("services", {}).get("teams-public-ingress", {})
     ports = service.get("ports", []) if isinstance(service, dict) else []
@@ -4942,11 +5138,23 @@ def _validate_host_ports(
     docker_prefix: list[str] | None = None,
     image_lock: dict[str, Any] | None = None,
     allow_owned_staging_ingress: bool = False,
+    ingress_exposure: str = "public-cutover",
 ) -> str | None:
     """Refuse occupied ports unless the explicit Stage 1 owner check passes."""
 
     owned_staging_image_id = None
-    if allow_owned_staging_ingress:
+    host_fronted_staging = (
+        mode == "connector-auth-readonly" and ingress_exposure == "host-fronted-staging"
+    )
+    if host_fronted_staging:
+        if image_lock is None or docker_prefix is None:
+            raise PreflightError(
+                "host-fronted ingress requires its exact image lock and Docker readback"
+            )
+        owned_staging_image_id = _validate_owned_staging_ingress(
+            config, image_lock, docker_prefix, mode
+        )
+    elif allow_owned_staging_ingress:
         if mode not in {"stage1", "staging"} or image_lock is None or docker_prefix is None:
             raise PreflightError(
                 "owned staging ingress requires Stage 1 mode, the exact image lock, and Docker"
@@ -4960,9 +5168,19 @@ def _validate_host_ports(
     if not ports:
         return
     if mode == "connector-auth-readonly":
-        # The stage-transition planner verifies the exact active ingress owner and port before
-        # apply; the existing listener is expected to be occupied during a live cutover plan.
-        return
+        if host_fronted_staging:
+            listeners = _run(["ss", "-H", "-ltn"])
+            staging_listeners = [
+                host for host, port in _parse_listener_endpoints(listeners) if port == "18443"
+            ]
+            if staging_listeners != ["127.0.0.1"]:
+                raise PreflightError(
+                    "host-fronted ingress requires exactly one loopback-only 127.0.0.1:18443 listener"
+                )
+            return owned_staging_image_id
+        # The stage-transition planner verifies the exact active public ingress owner and port
+        # before apply; the existing listener is expected to be occupied during its read-only plan.
+        return None
     listeners = _run(["ss", "-H", "-ltn"])
     if allow_owned_staging_ingress:
         staging_listeners = [
@@ -5159,6 +5377,9 @@ def run_preflight(
     notification_anchor_file: Path | None = None,
     notification_provenance_file: Path | None = None,
     candidate_runpod_key_file: Path | None = None,
+    ingress_exposure: str = "public-cutover",
+    host_caddy_binary: str = "/usr/local/bin/caddy",
+    openssl_binary: str = "openssl",
 ) -> dict[str, Any]:
     """Perform all read-only gates before the operator starts or cuts over services."""
 
@@ -5174,6 +5395,10 @@ def run_preflight(
         raise PreflightError(
             "mode must be bootstrap, staging, cutover, stage1, stage2, stage3, or connector-auth-readonly"
         )
+    if ingress_exposure not in {"public-cutover", "host-fronted-staging"}:
+        raise PreflightError("ingress exposure must be public-cutover or host-fronted-staging")
+    if ingress_exposure == "host-fronted-staging" and mode != "connector-auth-readonly":
+        raise PreflightError("host-fronted staging exposure is limited to connector-auth-readonly")
     if mode == "connector-auth-readonly":
         if connector_auth_phase not in CONNECTOR_AUTH_READONLY_PHASES:
             raise PreflightError(
@@ -5241,6 +5466,7 @@ def run_preflight(
         max_memory_mib,
         max_cpus,
         locked_images,
+        ingress_exposure,
     )
     if recovery_only:
         memory = {
@@ -5330,7 +5556,32 @@ def run_preflight(
         docker_prefix=docker_prefix,
         image_lock=image_lock_data,
         allow_owned_staging_ingress=allow_owned_staging_ingress,
+        ingress_exposure=ingress_exposure,
     )
+    host_fronted_ingress_readiness: dict[str, Any] | None = None
+    if ingress_exposure == "host-fronted-staging":
+        ingress_service = config.get("services", {}).get("teams-public-ingress", {})
+        ingress_environment = (
+            ingress_service.get("environment", {}) if isinstance(ingress_service, dict) else {}
+        )
+        expected_hostname = (
+            ingress_environment.get("TEAMS_FQDN") if isinstance(ingress_environment, dict) else None
+        )
+        if not isinstance(expected_hostname, str) or not expected_hostname:
+            raise PreflightError("host-fronted staging requires the candidate Teams FQDN")
+        try:
+            import host_fronted_canary
+
+            host_fronted_ingress_readiness = (
+                host_fronted_canary.run_existing_host_fronted_readiness(
+                    expected_hostname=expected_hostname,
+                    ingress_image_id=owned_staging_image_id,
+                    caddy_binary=host_caddy_binary,
+                    openssl_binary=openssl_binary,
+                )
+            )
+        except (OSError, host_fronted_canary.CanaryGateError, subprocess.SubprocessError) as error:
+            raise PreflightError("existing host-fronted ingress readiness check failed") from error
     runtime_rss = _validate_cutover_runtime(config, docker_prefix, mode)
     if len(compose_files) == 0 or len(env_files) == 0:
         raise PreflightError("compose and environment files are required")
@@ -5373,6 +5624,8 @@ def run_preflight(
                 **notification_inputs,
             }
         )
+    if host_fronted_ingress_readiness is not None:
+        result["hostFrontedIngressReadiness"] = host_fronted_ingress_readiness
     if owned_staging_image_id is not None:
         result["ownedStagingIngressImageId"] = owned_staging_image_id
     return result
@@ -5412,6 +5665,13 @@ def main() -> int:
     parser.add_argument("--notification-anchor-file", type=Path)
     parser.add_argument("--notification-provenance-file", type=Path)
     parser.add_argument("--candidate-runpod-key-file", type=Path)
+    parser.add_argument(
+        "--ingress-exposure",
+        choices=("public-cutover", "host-fronted-staging"),
+        default="public-cutover",
+    )
+    parser.add_argument("--host-caddy-binary", default="/usr/local/bin/caddy")
+    parser.add_argument("--openssl-binary", default="openssl")
     parser.add_argument("--docker-prefix", nargs="+", default=["sudo", "-n", "docker"])
     parser.add_argument("--max-memory-mib", type=int, default=3584)
     parser.add_argument("--max-cpus", type=float, default=1.95)
@@ -5449,6 +5709,9 @@ def main() -> int:
             notification_anchor_file=arguments.notification_anchor_file,
             notification_provenance_file=arguments.notification_provenance_file,
             candidate_runpod_key_file=arguments.candidate_runpod_key_file,
+            ingress_exposure=arguments.ingress_exposure,
+            host_caddy_binary=arguments.host_caddy_binary,
+            openssl_binary=arguments.openssl_binary,
         )
     except (OSError, PreflightError, BuildError, subprocess.SubprocessError) as error:
         print(f"Cloud deployment preflight blocked: {error}", file=sys.stderr)
