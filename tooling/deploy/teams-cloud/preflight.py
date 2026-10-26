@@ -3806,6 +3806,37 @@ def _docker_memory_usage_mib(value: str) -> float:
     return float(match.group(1)) * _DOCKER_MEMORY_UNIT_BYTES[match.group(2)] / MIB
 
 
+def _expected_stage1_services(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Select Stage 1 runtime services from the exact rendered Compose profile set.
+
+    Runtime services without a profile are active; the Stage 1 `public-ingress`
+    profile is also required. One-shot jobs and every later-stage profile are excluded.
+    中文：保留基础服务及 Stage 1 公网入口，排除初始化任务和后续阶段 profile。
+    """
+
+    services = config.get("services")
+    if not isinstance(services, dict):
+        raise PreflightError("rendered Compose configuration has no valid services")
+    expected: dict[str, dict[str, Any]] = {}
+    for name, service in services.items():
+        if not isinstance(name, str) or not isinstance(service, dict):
+            raise PreflightError("rendered Compose service inventory is malformed")
+        if service.get("restart") == "no":
+            continue
+        profiles = service.get("profiles", [])
+        if not isinstance(profiles, list) or any(
+            not isinstance(profile, str) for profile in profiles
+        ):
+            raise PreflightError("rendered Compose service profiles are malformed")
+        if profiles and "public-ingress" not in profiles:
+            continue
+        expected[name] = service
+    required_ingress = {"teams-ingress", "teams-public-ingress"}
+    if not required_ingress <= set(expected):
+        raise PreflightError("Stage 1 Compose services must include both Teams ingress services")
+    return expected
+
+
 def _validate_cutover_runtime(
     config: dict[str, Any], docker_prefix: list[str], mode: str
 ) -> dict[str, float]:

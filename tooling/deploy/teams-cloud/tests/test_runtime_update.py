@@ -88,6 +88,118 @@ def _active_service(container_id: str, image_id: str, image_ref: str) -> dict[st
     }
 
 
+def _merge_compose_mapping(left: dict[str, Any], right: dict[str, Any]) -> None:
+    """Merge YAML mappings for a bounded `docker compose config` subprocess stub."""
+
+    for key, value in right.items():
+        current = left.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            _merge_compose_mapping(current, value)
+        elif isinstance(current, list) and isinstance(value, list):
+            current.extend(item for item in value if item not in current)
+        else:
+            left[key] = copy.deepcopy(value)
+
+
+def _render_actual_runtime_compose(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Render tracked Compose and ACP/computer/cloud overlays through a command stub."""
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    compose_files = [
+        deployment_root / "compose.yaml",
+        deployment_root / "compose.codebuddy-acp.yaml",
+        deployment_root / "compose.computer-runtime.yaml",
+        deployment_root / "compose.cloud-phase2.yaml",
+        deployment_root / "compose.runpod.yaml",
+    ]
+
+    def compose_config(argv: list[str], *, capture: bool = True) -> str:
+        assert capture is True
+        selected_files = [
+            Path(argv[index + 1])
+            for index, argument in enumerate(argv[:-1])
+            if argument == "--file"
+        ]
+        active_profiles = {
+            argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--profile"
+        }
+        assert selected_files == compose_files
+        assert active_profiles == {"public-ingress", "cloud-phase2", "runpod", "directory-operator"}
+        assert argv[-3:] == ["config", "--format", "json"]
+
+        rendered: dict[str, Any] = {}
+        for path in selected_files:
+            _merge_compose_mapping(rendered, yaml.safe_load(path.read_text(encoding="utf-8")))
+        services = rendered.get("services")
+        assert isinstance(services, dict)
+        rendered["services"] = {
+            name: service
+            for name, service in services.items()
+            if not service.get("profiles") or active_profiles.intersection(service["profiles"])
+        }
+        return json.dumps(rendered)
+
+    monkeypatch.setattr(runtime_update.preflight, "_run", compose_config)
+    return runtime_update.preflight._compose_config(["docker"], compose_files, [])
+
+
+def _locked_compose_service_rows(
+    compose: dict[str, Any], service_names: set[str]
+) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
+    """Build exact image-lock and Docker inspection data for selected Compose services."""
+
+    image_rows: list[dict[str, str]] = []
+    container_ids: list[str] = []
+    inspect_rows: list[dict[str, Any]] = []
+    services = compose["services"]
+    for index, service_name in enumerate(sorted(service_names), start=1):
+        service = services[service_name]
+        image_ref = f"example.test/{service_name}:runtime-update-test"
+        image_id = "sha256:" + f"{index:064x}"
+        container_id = f"{index:064x}"
+        service["image"] = image_ref
+        image_rows.append({"image": image_ref, "imageId": image_id})
+        container_ids.append(container_id)
+        inspect_rows.append(
+            {
+                "Id": container_id,
+                "Image": image_id,
+                "Config": {
+                    "Image": image_ref,
+                    "Labels": {
+                        "com.docker.compose.project": compose["name"],
+                        "com.docker.compose.service": service_name,
+                        **{key: str(value) for key, value in service.get("labels", {}).items()},
+                    },
+                },
+                "State": {
+                    "Running": True,
+                    **({"Health": {"Status": "healthy"}} if service.get("healthcheck") else {}),
+                },
+                "NetworkSettings": {"Networks": {"private": {"NetworkID": "network-id"}}},
+            }
+        )
+    return {"images": image_rows}, container_ids, inspect_rows
+
+
+def _stub_project_container_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    container_ids: list[str],
+    inspect_rows: list[dict[str, Any]],
+) -> None:
+    """Stub only the read-only Docker inventory commands used by the updater."""
+
+    def checked_stdout(argv: list[str], *, label: str, timeout_seconds: float = 30.0) -> str:
+        assert argv[0] == "docker"
+        if argv[1] == "ps":
+            assert label == "running project inventory"
+            return "\n".join(container_ids)
+        assert argv[1] == "inspect" and label == "service inspection"
+        return json.dumps(inspect_rows)
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked_stdout)
+
+
 def test_runtime_plan_maps_compose_navigator_to_the_canonical_dsh_lock_row() -> None:
     """Bind the Compose navigator service to the build system's DSH executor identity."""
 
@@ -350,6 +462,108 @@ def test_current_compose_has_the_exact_private_navigator_exchange_caller_set() -
     }
     with pytest.raises(runtime_update.RuntimeUpdateError, match="unsupported service consumer"):
         runtime_update._validate_standalone_callers(with_extra_caller)
+
+
+def test_runtime_inventory_uses_real_stage1_selector_for_codebuddy_computer_compose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Render tracked Compose overlays and require exactly the twelve Stage 1 services."""
+
+    compose = _render_actual_runtime_compose(monkeypatch)
+    expected = runtime_update.preflight._expected_stage1_services(compose)
+    expected_names = {
+        "postgres",
+        "workspace-authority",
+        "account-center",
+        "navigator-persistence",
+        "navigator",
+        "exchange",
+        "github-issues",
+        "teams-provider",
+        "teams-ingress",
+        "teams-public-ingress",
+        "computer-runtime",
+        "computer-runtime-proxy",
+    }
+    assert set(expected) == expected_names
+    assert compose["services"]["navigator"]["labels"]["com.cyrene.runtime.profile"] == (
+        "codebuddy-acp"
+    )
+    assert "cloud-management-phase2" in compose["services"]
+    assert "cloud-management-phase2" not in expected
+    assert "directory-operator" in compose["services"]
+    assert "directory-operator" not in expected
+    assert "directory-migrate" not in compose["services"]
+    assert "huggingface" not in compose["services"]
+
+    image_lock, container_ids, inspect_rows = _locked_compose_service_rows(compose, expected_names)
+    _stub_project_container_readback(monkeypatch, container_ids, inspect_rows)
+
+    actual = runtime_update._inspect_project_services(
+        compose=compose,
+        image_lock=image_lock,
+        docker_prefix=["docker"],
+    )
+
+    assert set(actual) == expected_names
+    assert {name for name in actual if name.startswith("computer-runtime")} == {
+        "computer-runtime",
+        "computer-runtime-proxy",
+    }
+
+    without_acp = copy.deepcopy(compose)
+    without_acp["services"]["navigator"]["labels"].pop("com.cyrene.runtime.profile")
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="requires the CodeBuddy ACP"):
+        runtime_update._inspect_project_services(
+            compose=without_acp,
+            image_lock=image_lock,
+            docker_prefix=["docker"],
+        )
+
+    navigator_row = next(
+        row
+        for row in inspect_rows
+        if row["Config"]["Labels"]["com.docker.compose.service"] == "navigator"
+    )
+    navigator_row["Config"]["Labels"]["com.cyrene.runtime.profile"] = "other-profile"
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="does not match the rendered"):
+        runtime_update._inspect_project_services(
+            compose=compose,
+            image_lock=image_lock,
+            docker_prefix=["docker"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "extra_services"),
+    [
+        ("inactive-later-stage-profile", {"cloud-management-phase2"}),
+        ("one-shot-operator", {"directory-operator"}),
+        ("inactive-computer-profile", {"computer-runtime", "computer-runtime-proxy"}),
+    ],
+)
+def test_runtime_inventory_rejects_running_services_outside_stage1_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    extra_services: set[str],
+) -> None:
+    """Fail closed for later profiles, one-shot jobs, and configured inactive overlays."""
+
+    compose = _render_actual_runtime_compose(monkeypatch)
+    if case == "inactive-computer-profile":
+        for service_name in extra_services:
+            compose["services"][service_name]["profiles"] = ["computer-runtime"]
+    expected = runtime_update.preflight._expected_stage1_services(compose)
+    inventory_names = set(expected) | extra_services
+    image_lock, container_ids, inspect_rows = _locked_compose_service_rows(compose, inventory_names)
+    _stub_project_container_readback(monkeypatch, container_ids, inspect_rows)
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="unexpected running worker"):
+        runtime_update._inspect_project_services(
+            compose=compose,
+            image_lock=image_lock,
+            docker_prefix=["docker"],
+        )
 
 
 def test_runtime_maintenance_static_markers_fail_closed() -> None:
