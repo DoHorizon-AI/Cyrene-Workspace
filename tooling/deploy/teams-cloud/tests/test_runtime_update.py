@@ -1589,6 +1589,204 @@ def test_lost_edge_resume_reply_reacquires_the_pause_with_a_fresh_cas_revision(
     assert journal["edge"]["pauseHistory"] == [1, 3]
 
 
+def test_pause_cas_dead_letter_increase_is_recorded_and_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A DLQ increment returned by the pause CAS cannot be reported as a successful pause."""
+
+    journal = {
+        "operationId": OPERATION_ID,
+        "edge": {
+            "containerId": OLD_CONTAINER_ID,
+            "initialRevision": 0,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "pauseHolder": OPERATION_ID,
+        },
+    }
+    pause_response = {
+        "_httpStatus": 200,
+        **_edge_status(paused=True, revision=1),
+        "dead_count": 1,
+    }
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_edge_status",
+        lambda *_args, **_kwargs: _edge_status(paused=False, revision=0),
+    )
+    monkeypatch.setattr(
+        runtime_update, "_call_internal_api", lambda *_args, **_kwargs: pause_response
+    )
+    monkeypatch.setattr(runtime_update, "_set_phase", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_atomic_journal_write", lambda *_args: None)
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="pause CAS"):
+        runtime_update._pause_edge(
+            plan={"policy": {"drainTimeoutSeconds": 60}},
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+        )
+    assert journal["edge"]["latestDeadCount"] == 1
+
+
+def test_pause_poll_dead_letter_increase_is_recorded_and_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A DLQ increment during active-delivery drain aborts before any target update."""
+
+    journal = {
+        "operationId": OPERATION_ID,
+        "edge": {
+            "containerId": OLD_CONTAINER_ID,
+            "initialRevision": 0,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "pauseHolder": OPERATION_ID,
+        },
+    }
+    statuses = [
+        _edge_status(paused=False, revision=0),
+        _edge_status(paused=True, revision=1, active=0) | {"dead_count": 1},
+    ]
+    pause_response = {
+        "_httpStatus": 200,
+        **_edge_status(paused=True, revision=1, active=1),
+    }
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_edge_status",
+        lambda *_args, **_kwargs: statuses.pop(0),
+    )
+    monkeypatch.setattr(
+        runtime_update, "_call_internal_api", lambda *_args, **_kwargs: pause_response
+    )
+    monkeypatch.setattr(runtime_update, "_set_phase", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_atomic_journal_write", lambda *_args: None)
+    monkeypatch.setattr(runtime_update.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(runtime_update.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="pause drain polling"):
+        runtime_update._pause_edge(
+            plan={"policy": {"drainTimeoutSeconds": 60}},
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+        )
+    assert journal["edge"]["latestDeadCount"] == 1
+
+
+def test_pause_recovery_cas_dead_letter_increase_is_recorded_and_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A recovery pause CAS with a new DLQ entry stays an explicit recovery failure."""
+
+    journal = {
+        "operationId": OPERATION_ID,
+        "edge": {
+            "containerId": OLD_CONTAINER_ID,
+            "initialRevision": 0,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "pauseHolder": OPERATION_ID,
+            "pauseIntent": True,
+            "pauseRevision": None,
+            "resumeRevision": None,
+        },
+    }
+    response = {
+        "_httpStatus": 200,
+        **_edge_status(paused=True, revision=1),
+        "dead_count": 1,
+    }
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_edge_status",
+        lambda *_args, **_kwargs: _edge_status(paused=False, revision=0),
+    )
+    monkeypatch.setattr(runtime_update, "_call_internal_api", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr(runtime_update, "_set_phase", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_atomic_journal_write", lambda *_args: None)
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="pause recovery CAS"):
+        runtime_update._recover_edge_pause(
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+        )
+    assert journal["edge"]["latestDeadCount"] == 1
+    assert journal["edge"]["resumeRevision"] is None
+
+
+def test_resume_cas_dead_letter_increase_is_recorded_and_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A DLQ increment in the resume CAS remains a recovery condition, not success."""
+
+    journal = {
+        "edge": {
+            "containerId": OLD_CONTAINER_ID,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "pauseRevision": 1,
+            "resumeRevision": None,
+            "pauseHolder": OPERATION_ID,
+        }
+    }
+    response = {
+        "_httpStatus": 200,
+        **_edge_status(paused=False, revision=2),
+        "dead_count": 1,
+    }
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_edge_status",
+        lambda *_args, **_kwargs: _edge_status(paused=True, revision=1),
+    )
+    monkeypatch.setattr(runtime_update, "_call_internal_api", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr(runtime_update, "_set_phase", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="resume CAS"):
+        runtime_update._resume_edge(
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+        )
+    assert journal["edge"]["latestDeadCount"] == 1
+
+
+def test_resume_preflight_dead_letter_increase_stops_before_resume_cas(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A DLQ increase observed before resume never triggers the resume mutation."""
+
+    journal = {
+        "edge": {
+            "containerId": OLD_CONTAINER_ID,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "pauseRevision": 1,
+            "resumeRevision": None,
+            "pauseHolder": OPERATION_ID,
+        }
+    }
+    status = _edge_status(paused=True, revision=1) | {"dead_count": 1}
+    monkeypatch.setattr(runtime_update, "_current_edge_status", lambda *_args, **_kwargs: status)
+    monkeypatch.setattr(
+        runtime_update,
+        "_call_internal_api",
+        lambda *_args, **_kwargs: pytest.fail("resume CAS must not run after a DLQ increase"),
+    )
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="resume preflight readback"):
+        runtime_update._resume_edge(
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+        )
+    assert journal["edge"]["latestDeadCount"] == 1
+
+
 def test_unobserved_initial_pause_is_replayed_instead_of_assumed_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

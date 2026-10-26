@@ -1417,6 +1417,16 @@ def _current_navigator_status(
     return response
 
 
+def _verify_edge_dead_count(edge: dict[str, Any], observed: int, phase: str) -> None:
+    """Fail closed if any pause/resume observation adds a dead-lettered delivery."""
+
+    edge["latestDeadCount"] = observed
+    if observed != edge["initialDeadCount"]:
+        raise RuntimeUpdateError(
+            f"Teams delivery dead-letter count changed during {phase}; preserve the recorded DLQ and require recovery"
+        )
+
+
 def _pause_edge(
     *,
     plan: dict[str, Any],
@@ -1442,8 +1452,7 @@ def _pause_edge(
             raise RuntimeUpdateError("Teams delivery is paused under an unknown revision")
     elif status["revision"] != initial_revision:
         raise RuntimeUpdateError("Teams delivery revision changed before this operation paused it")
-    if status["dead_count"] != edge["initialDeadCount"]:
-        raise RuntimeUpdateError("Teams delivery dead-letter count changed before pause")
+    _verify_edge_dead_count(edge, status["dead_count"], "pre-pause readback")
 
     # Replaying the same holder/revision is contractually idempotent if the first reply was lost.
     response = _call_internal_api(
@@ -1456,7 +1465,7 @@ def _pause_edge(
         timeout_seconds=plan["policy"]["drainTimeoutSeconds"] + 15,
     )
     _validate_edge_status(response)
-    edge["latestDeadCount"] = response["dead_count"]
+    _verify_edge_dead_count(edge, response["dead_count"], "pause CAS")
     _atomic_journal_write(journal_path, journal)
     if response["paused"] is not True or response["revision"] != expected_paused_revision:
         raise RuntimeUpdateError("Teams delivery did not enter this operation's paused revision")
@@ -1468,9 +1477,10 @@ def _pause_edge(
             )
         time.sleep(2)
         response = _current_edge_status(docker_prefix, edge["containerId"])
+        _verify_edge_dead_count(edge, response["dead_count"], "pause drain polling")
         if not response["paused"] or response["revision"] != expected_paused_revision:
             raise RuntimeUpdateError("Teams delivery pause holder/revision changed while draining")
-    edge["latestDeadCount"] = response["dead_count"]
+    _verify_edge_dead_count(edge, response["dead_count"], "pause drain completion")
     edge["pauseRevision"] = expected_paused_revision
     _set_phase(journal, journal_path, "EDGE_PAUSED")
 
@@ -1486,6 +1496,7 @@ def _recover_edge_pause(
 
     edge = journal["edge"]
     status = _current_edge_status(docker_prefix, edge["containerId"])
+    _verify_edge_dead_count(edge, status["dead_count"], "pause recovery readback")
     pause_revision = edge.get("pauseRevision")
     resume_revision = edge.get("resumeRevision")
     if (
@@ -1564,13 +1575,13 @@ def _recover_edge_pause(
         or response["active_delivery_count"] != 0
     ):
         raise RuntimeUpdateError("Teams delivery pause ownership could not be recovered")
+    _verify_edge_dead_count(edge, response["dead_count"], "pause recovery CAS")
     edge.setdefault("pauseHistory", []).append(response["revision"])
     edge["pauseRevision"] = response["revision"]
     edge["pauseHolder"] = holder
     edge["resumeRevision"] = None
     edge["repauseExpectedRevision"] = None
     edge["repauseHolder"] = None
-    edge["latestDeadCount"] = response["dead_count"]
     _atomic_journal_write(journal_path, journal)
 
 
@@ -1707,6 +1718,7 @@ def _resume_edge(
     if pause_revision is None:
         return
     status = _current_edge_status(docker_prefix, edge["containerId"])
+    _verify_edge_dead_count(edge, status["dead_count"], "resume preflight readback")
     if status["paused"] is False and status["revision"] == pause_revision + 1:
         edge["resumeRevision"] = status["revision"]
         edge["latestDeadCount"] = status["dead_count"]
@@ -1734,8 +1746,8 @@ def _resume_edge(
     _validate_edge_status(response)
     if response["paused"] is not False or response["revision"] != pause_revision + 1:
         raise RuntimeUpdateError("Teams delivery spool did not resume its exact paused revision")
+    _verify_edge_dead_count(edge, response["dead_count"], "resume CAS")
     edge["resumeRevision"] = response["revision"]
-    edge["latestDeadCount"] = response["dead_count"]
     _set_phase(journal, journal_path, "EDGE_RESUMED")
 
 

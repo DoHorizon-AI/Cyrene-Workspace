@@ -47,6 +47,262 @@ DATABASE_PATH = "/var/lib/cyrene-navigator/persistence.db"
 DATABASE_VOLUME_TARGET = "/var/lib/cyrene-navigator"
 CODEBUDDY_HOME_TARGET = "/home/navigator/.codebuddy"
 MEMORY_RESERVE_DEFAULT_MIB = 1024
+SQLITE_ADDITIVE_SCHEMA_OBJECTS = {"table:work_credential_authorization_health"}
+SQLITE_CREDENTIAL_HEALTH_TABLE_SQL = """CREATE TABLE work_credential_authorization_health (
+ organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL, connection_id TEXT NOT NULL,
+ provider TEXT NOT NULL, generation INTEGER NOT NULL, fingerprint TEXT NOT NULL,
+ decision TEXT NOT NULL, checked_at TEXT, expires_at TEXT, reason_code TEXT,
+ incident_id TEXT, incident_started_at INTEGER, last_notified_at INTEGER,
+ reminder_count INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+ PRIMARY KEY(organization_id,workspace_id,connection_id))"""
+EXCHANGE_READINESS_EXECUTABLE = (
+    "/app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-exchange"
+)
+EXCHANGE_SECRET_ENV_ENTRYPOINT = "/usr/local/bin/cyrene-secret-env-entrypoint"
+EXCHANGE_INTEGRATION_DATABASE = "/data/integrations.sqlite3"
+
+_SQLITE_REPORT_PYTHON = r"""
+import base64
+import hashlib
+import json
+import math
+import re
+import sqlite3
+import sys
+
+def quote_identifier(value):
+    return '"' + value.replace('"', '""') + '"'
+
+def normalize_value(value):
+    if isinstance(value, bytes):
+        return {"$bytesBase64": base64.b64encode(value).decode("ascii")}
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"$float": repr(value)}
+    return value
+
+def digest_rows(connection, table, columns, order_columns):
+    if not columns:
+        return 0, hashlib.sha256(b"").hexdigest()
+    selected = ",".join(quote_identifier(name) for name in columns)
+    ordered = list(dict.fromkeys(order_columns + columns))
+    order = ",".join(quote_identifier(name) for name in ordered)
+    query = "SELECT " + selected + " FROM " + quote_identifier(table) + " ORDER BY " + order
+    digest = hashlib.sha256()
+    count = 0
+    for row in connection.execute(query):
+        encoded = json.dumps(
+            [normalize_value(value) for value in row],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        count += 1
+    return count, digest.hexdigest()
+
+def check_constraints(sql):
+    if not isinstance(sql, str):
+        return []
+    result = []
+    offset = 0
+    pattern = re.compile(r"\bCHECK\s*\(", re.IGNORECASE)
+    while True:
+        match = pattern.search(sql, offset)
+        if match is None:
+            break
+        start = match.end()
+        depth = 1
+        quote = None
+        index = start
+        while index < len(sql) and depth:
+            char = sql[index]
+            if quote is not None:
+                if char == quote:
+                    if index + 1 < len(sql) and sql[index + 1] == quote:
+                        index += 1
+                    else:
+                        quote = None
+            elif char in "'\"`":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            index += 1
+        if depth:
+            raise ValueError("unbalanced CHECK expression")
+        result.append(" ".join(sql[start:index - 1].split()).lower())
+        offset = index
+    return sorted(result)
+
+def report_database(database_path, comparison_contract=None):
+    connection = sqlite3.connect("file:" + database_path + "?mode=ro", uri=True)
+    integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    schema_rows = connection.execute(
+        "SELECT type,name,sql FROM sqlite_master "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+    ).fetchall()
+    schema_objects = [
+        {"type": row[0], "name": row[1], "sql": row[2]} for row in schema_rows
+    ]
+    tables = {}
+    table_names = [
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        )
+    ]
+    for table in table_names:
+        table_info = connection.execute(
+            "PRAGMA table_xinfo(" + quote_identifier(table) + ")"
+        ).fetchall()
+        columns = [
+            {
+                "name": row[1],
+                "type": row[2] or "",
+                "notNull": bool(row[3]),
+                "default": row[4],
+                "primaryKeyOrdinal": int(row[5]),
+                "hidden": int(row[6]) if len(row) > 6 else 0,
+            }
+            for row in table_info
+        ]
+        data_columns = [row["name"] for row in columns if row["hidden"] != 1]
+        primary_key = [
+            row["name"]
+            for row in sorted(columns, key=lambda item: item["primaryKeyOrdinal"])
+            if row["primaryKeyOrdinal"] > 0
+        ]
+        foreign_keys = {}
+        for row in connection.execute(
+            "PRAGMA foreign_key_list(" + quote_identifier(table) + ")"
+        ).fetchall():
+            group = foreign_keys.setdefault(
+                int(row[0]),
+                {
+                    "table": row[2],
+                    "onUpdate": row[5],
+                    "onDelete": row[6],
+                    "match": row[7],
+                    "columns": [],
+                },
+            )
+            group["columns"].append(
+                {"sequence": int(row[1]), "from": row[3], "to": row[4]}
+            )
+        foreign_key_records = []
+        for group in foreign_keys.values():
+            group["columns"].sort(key=lambda item: item["sequence"])
+            for column in group["columns"]:
+                column.pop("sequence")
+            foreign_key_records.append(group)
+        foreign_key_records.sort(key=lambda item: json.dumps(item, sort_keys=True))
+        unique_indexes = []
+        for index_row in connection.execute(
+            "PRAGMA index_list(" + quote_identifier(table) + ")"
+        ).fetchall():
+            index_name = index_row[1]
+            origin = index_row[3] if len(index_row) > 3 else "c"
+            if origin == "pk":
+                continue
+            index_columns = [
+                {
+                    "name": row[2],
+                    "descending": bool(row[3]),
+                    "collation": row[4],
+                    "key": bool(row[5]),
+                }
+                for row in connection.execute(
+                    "PRAGMA index_xinfo(" + quote_identifier(index_name) + ")"
+                ).fetchall()
+                if bool(row[5])
+            ]
+            unique_indexes.append(
+                {
+                    "name": index_name,
+                    "unique": bool(index_row[2]),
+                    "origin": origin,
+                    "partial": bool(index_row[4]) if len(index_row) > 4 else False,
+                    "columns": index_columns,
+                }
+            )
+        unique_indexes.sort(key=lambda item: item["name"])
+        create_sql = next(
+            (row[2] for row in schema_rows if row[0] == "table" and row[1] == table),
+            None,
+        )
+        row_count, rows_digest = digest_rows(
+            connection, table, data_columns, primary_key or data_columns
+        )
+        record = {
+            "columns": columns,
+            "createSql": create_sql,
+            "primaryKeyColumns": primary_key,
+            "foreignKeys": foreign_key_records,
+            "checkConstraints": check_constraints(create_sql),
+            "uniqueIndexes": unique_indexes,
+            "rowCount": row_count,
+            "rowsDigest": rows_digest,
+        }
+        if any(column["name"] == "organization_id" for column in columns):
+            scope = connection.execute(
+                "SELECT COUNT(*) FROM " + quote_identifier(table) +
+                " WHERE organization_id = ''"
+            ).fetchone()[0]
+            record["emptyOrganizationIdRows"] = int(scope)
+        tables[table] = record
+
+    comparison_contract = comparison_contract or {}
+    for table, contract in comparison_contract.items():
+        if table not in tables:
+            raise ValueError("a previously present table disappeared")
+        current_columns = {column["name"] for column in tables[table]["columns"]}
+        columns = contract.get("columns")
+        order_columns = contract.get("primaryKeyColumns")
+        if (
+            not isinstance(columns, list)
+            or not isinstance(order_columns, list)
+            or not set(columns) <= current_columns
+            or not set(order_columns) <= current_columns
+        ):
+            raise ValueError("previous table columns are not available for reconciliation")
+        count, digest = digest_rows(connection, table, columns, order_columns or columns)
+        tables[table]["preservedRowsCount"] = count
+        tables[table]["preservedRowsDigest"] = digest
+
+    connection.close()
+    schema_digest = hashlib.sha256(
+        json.dumps(
+            schema_objects,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "integrity": integrity,
+        "userVersion": version,
+        "schemaSha256": schema_digest,
+        "objects": [row[0] + ":" + row[1] for row in schema_rows],
+        "schemaObjects": schema_objects,
+        "tables": tables,
+    }
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+"""
 
 
 class StageTransitionError(ValueError):
@@ -247,9 +503,11 @@ def _runtime_service_inventory(compose: dict[str, Any]) -> dict[str, dict[str, A
             raise StageTransitionError(f"Compose profiles are malformed for {name}")
         if profiles and not active_profiles.intersection(profiles):
             continue
-        if name == "cloud-management-phase2" and "runpod" not in profiles:
+        if name == "cloud-management-phase2" and not set(profiles).intersection(
+            {"cloud-phase2", "runpod"}
+        ):
             raise StageTransitionError(
-                "the staged Cloud Management service must use the RunPod profile"
+                "the staged Cloud Management service must use cloud-phase2 or its optional RunPod profile"
             )
         result[name] = service
     if "navigator" not in result or "navigator-persistence" not in result:
@@ -831,7 +1089,8 @@ def _selection_file_state(
             "active runtime selection image lock differs from explicit inputs"
         )
     _verify_record(document.get("huggingfaceSeed"), "active runtime selection HF seed")
-    _verify_record(document.get("runpodKey"), "active runtime selection RunPod key")
+    if document.get("runpodKey") is not None:
+        _verify_record(document["runpodKey"], "active runtime selection RunPod key")
     mount_identity = _validate_runtime_config_identity(
         document.get("runtimeConfigIdentity"),
         expected_services=active_service_names,
@@ -999,10 +1258,10 @@ def _validate_candidate_secret_paths(
     candidate: dict[str, Any],
     active_secrets_dir: Path,
     huggingface_seed_file: Path,
-    runpod_key_file: Path,
+    runpod_key_file: Path | None,
     phase: str,
 ) -> None:
-    """Bind Compose's two staged credential paths to the explicit immutable inputs."""
+    """Bind configured staged credential paths to exact immutable candidate inputs."""
 
     if phase not in PHASES:
         raise StageTransitionError("transition phase is invalid")
@@ -1012,11 +1271,30 @@ def _validate_candidate_secret_paths(
         raise StageTransitionError(
             "candidate Account Center OAuth mount differs from the explicit HF seed"
         )
-    if candidate.get("secrets", {}).get("runpod-api-key", {}).get("file") != str(
-        runpod_key_file.resolve(strict=True)
-    ):
-        raise StageTransitionError("candidate RunPod mount differs from the explicit API key file")
-    for name, path in (("HF seed", huggingface_seed_file), ("RunPod key", runpod_key_file)):
+    cloud = candidate.get("services", {}).get("cloud-management-phase2", {})
+    cloud_profiles = cloud.get("profiles", []) if isinstance(cloud, dict) else []
+    runpod_enabled = "runpod" in cloud_profiles
+    runpod_secret = candidate.get("secrets", {}).get("runpod-api-key")
+    runpod_environment = cloud.get("environment", {}) if isinstance(cloud, dict) else {}
+    if runpod_enabled:
+        if (
+            runpod_key_file is None
+            or not isinstance(runpod_secret, dict)
+            or runpod_secret.get("file") != str(runpod_key_file.resolve(strict=True))
+            or runpod_environment.get("CYRENE_CLOUD_MGMT_RUNPOD_API_KEY_FILE")
+            != "/run/secrets/runpod-api-key"
+        ):
+            raise StageTransitionError(
+                "candidate RunPod profile requires its explicit mounted API key file"
+            )
+    elif runpod_key_file is not None or runpod_secret is not None:
+        raise StageTransitionError("an unconfigured RunPod profile must not have a candidate key")
+    candidate_credentials = [("HF seed", huggingface_seed_file)]
+    if runpod_enabled:
+        candidate_credentials.append(("RunPod key", runpod_key_file))
+    for name, path in candidate_credentials:
+        if path is None:
+            raise StageTransitionError(f"candidate {name} path is unavailable")
         if path.is_symlink() or not path.is_file() or not preflight._private_artifact(path):
             raise StageTransitionError(f"candidate {name} must be a regular private artifact")
         metadata = path.stat()
@@ -1028,16 +1306,6 @@ def _validate_candidate_secret_paths(
             raise StageTransitionError(f"candidate {name} must be owned by UID 10001 and mode 0400")
     if not active_secrets_dir.is_dir() or active_secrets_dir.is_symlink():
         raise StageTransitionError("active shared secrets directory is unavailable")
-    if (
-        candidate.get("services", {})
-        .get("cloud-management-phase2", {})
-        .get("environment", {})
-        .get("CYRENE_CLOUD_MGMT_RUNPOD_API_KEY_FILE")
-        != "/run/secrets/runpod-api-key"
-    ):
-        raise StageTransitionError(
-            "RunPod provider must read its candidate key only through the secret mount"
-        )
 
 
 def _live_service_inventory(
@@ -1294,19 +1562,129 @@ def _wait_for_target_service(
         time.sleep(2)
 
 
-def _live_sqlite_report(
-    *, docker_prefix: list[str], container_id: str, database_path: str
-) -> dict[str, Any]:
-    """Read integrity, schema version, and schema-object identity from the live database."""
+def _validate_sqlite_report_shape(report: Any, label: str) -> dict[str, Any]:
+    """Validate the bounded SQLite schema/count/hash readback without exposing row values."""
 
+    if not isinstance(report, dict):
+        raise StageTransitionError(f"{label} is malformed")
+    if (
+        report.get("integrity") != "ok"
+        or isinstance(report.get("userVersion"), bool)
+        or not isinstance(report.get("userVersion"), int)
+        or report["userVersion"] < 0
+        or not isinstance(report.get("schemaSha256"), str)
+        or SHA256_RE.fullmatch(report["schemaSha256"]) is None
+        or not isinstance(report.get("objects"), list)
+        or any(not isinstance(name, str) for name in report["objects"])
+        or not isinstance(report.get("schemaObjects"), list)
+        or not isinstance(report.get("tables"), dict)
+    ):
+        raise StageTransitionError(f"{label} is malformed")
+    schema_objects = report["schemaObjects"]
+    if any(
+        not isinstance(row, dict)
+        or set(row) != {"type", "name", "sql"}
+        or row.get("type") not in {"table", "index", "view", "trigger"}
+        or not isinstance(row.get("name"), str)
+        or not row["name"]
+        or (row.get("sql") is not None and not isinstance(row.get("sql"), str))
+        for row in schema_objects
+    ):
+        raise StageTransitionError(f"{label} schema-object records are malformed")
+    expected_objects = sorted(f"{row['type']}:{row['name']}" for row in schema_objects)
+    if (
+        report["objects"] != expected_objects
+        or _sha256_bytes(_canonical_json(schema_objects)) != report["schemaSha256"]
+    ):
+        raise StageTransitionError(f"{label} schema digest does not match its object inventory")
+    table_names = {row["name"] for row in schema_objects if row["type"] == "table"}
+    tables = report["tables"]
+    if set(tables) != table_names:
+        raise StageTransitionError(f"{label} table inventory differs from sqlite_master")
+    for name, row in tables.items():
+        required = {
+            "columns",
+            "createSql",
+            "primaryKeyColumns",
+            "foreignKeys",
+            "checkConstraints",
+            "uniqueIndexes",
+            "rowCount",
+            "rowsDigest",
+        }
+        optional = {"emptyOrganizationIdRows", "preservedRowsCount", "preservedRowsDigest"}
+        if (
+            not isinstance(name, str)
+            or not isinstance(row, dict)
+            or set(row) - required - optional
+            or not required <= set(row)
+            or not isinstance(row["columns"], list)
+            or (row["createSql"] is not None and not isinstance(row["createSql"], str))
+            or not isinstance(row["primaryKeyColumns"], list)
+            or not isinstance(row["foreignKeys"], list)
+            or not isinstance(row["checkConstraints"], list)
+            or not isinstance(row["uniqueIndexes"], list)
+            or isinstance(row["rowCount"], bool)
+            or not isinstance(row["rowCount"], int)
+            or row["rowCount"] < 0
+            or not isinstance(row["rowsDigest"], str)
+            or SHA256_RE.fullmatch(row["rowsDigest"]) is None
+        ):
+            raise StageTransitionError(f"{label} table report is malformed")
+        if any(
+            not isinstance(column, dict)
+            or set(column) != {"name", "type", "notNull", "default", "primaryKeyOrdinal", "hidden"}
+            or not isinstance(column.get("name"), str)
+            or not isinstance(column.get("type"), str)
+            or not isinstance(column.get("notNull"), bool)
+            or isinstance(column.get("primaryKeyOrdinal"), bool)
+            or not isinstance(column.get("primaryKeyOrdinal"), int)
+            or isinstance(column.get("hidden"), bool)
+            or not isinstance(column.get("hidden"), int)
+            for column in row["columns"]
+        ):
+            raise StageTransitionError(f"{label} table column report is malformed")
+        schema_sql = next(
+            (
+                item["sql"]
+                for item in schema_objects
+                if item["type"] == "table" and item["name"] == name
+            ),
+            None,
+        )
+        if row["createSql"] != schema_sql:
+            raise StageTransitionError(f"{label} table DDL differs from sqlite_master")
+        for count_name in ("emptyOrganizationIdRows", "preservedRowsCount"):
+            if count_name in row and (
+                isinstance(row[count_name], bool)
+                or not isinstance(row[count_name], int)
+                or row[count_name] < 0
+            ):
+                raise StageTransitionError(f"{label} table reconciliation count is malformed")
+        if "preservedRowsDigest" in row and (
+            not isinstance(row["preservedRowsDigest"], str)
+            or SHA256_RE.fullmatch(row["preservedRowsDigest"]) is None
+        ):
+            raise StageTransitionError(f"{label} table reconciliation digest is malformed")
+    return report
+
+
+def _live_sqlite_report(
+    *,
+    docker_prefix: list[str],
+    container_id: str,
+    database_path: str,
+    comparison_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Stream live SQLite table hashes plus the snapshot column contract for comparison."""
+
+    comparison_json = json.dumps(
+        comparison_contract or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     script = (
-        "import hashlib,json,sqlite3,sys;"
-        "db=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True);"
-        "integrity=db.execute('PRAGMA integrity_check').fetchone()[0];"
-        "version=db.execute('PRAGMA user_version').fetchone()[0];"
-        "objects=db.execute(\"SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name\").fetchall();"
-        "schema=json.dumps(objects,sort_keys=True,separators=(',',':')).encode();"
-        "print(json.dumps({'integrity':integrity,'userVersion':version,'schemaSha256':hashlib.sha256(schema).hexdigest(),'objects':[r[0]+':'+r[1] for r in objects]},separators=(',',':')));db.close()"
+        _SQLITE_REPORT_PYTHON
+        + "\nreport=report_database(sys.argv[1],json.loads(sys.argv[2]))"
+        + "\nprint(json.dumps(report,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False))\n"
     )
     try:
         output = runtime_update._checked_stdout(
@@ -1318,6 +1696,7 @@ def _live_sqlite_report(
                 "-c",
                 script,
                 database_path,
+                comparison_json,
             ],
             label="Navigator Persistence live SQLite inspection",
             timeout_seconds=30,
@@ -1327,19 +1706,7 @@ def _live_sqlite_report(
         raise StageTransitionError(
             "live Navigator Persistence database could not be inspected"
         ) from error
-    if (
-        not isinstance(report, dict)
-        or report.get("integrity") != "ok"
-        or isinstance(report.get("userVersion"), bool)
-        or not isinstance(report.get("userVersion"), int)
-        or not isinstance(report.get("schemaSha256"), str)
-        or not SHA256_RE.fullmatch(report["schemaSha256"])
-        or not isinstance(report.get("objects"), list)
-        or any(not isinstance(name, str) for name in report["objects"])
-    ):
-        raise StageTransitionError(
-            "live Navigator Persistence database failed integrity/schema validation"
-        )
+    _validate_sqlite_report_shape(report, "live Navigator Persistence database report")
     report["objects"] = sorted(report["objects"])
     return report
 
@@ -1351,7 +1718,7 @@ def _validate_database_migration(
     journal_path: Path,
     docker_prefix: list[str],
 ) -> dict[str, Any]:
-    """Accept only an intact, non-regressing additive SQLite schema migration."""
+    """Verify additive schema changes and exact preservation of every pre-existing row."""
 
     persistence = journal.get("targetProgress", {}).get("navigator-persistence", {})
     container_id = (
@@ -1359,26 +1726,153 @@ def _validate_database_migration(
     )
     if not isinstance(container_id, str) or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
         raise StageTransitionError("candidate Persistence container identity is unavailable")
+    before = journal.get("database", {}).get("snapshot")
+    _validate_sqlite_report_shape(before, "pre-transition SQLite snapshot")
+    comparison_contract = {
+        table: {
+            "columns": [column["name"] for column in record["columns"]],
+            "primaryKeyColumns": record["primaryKeyColumns"],
+        }
+        for table, record in before["tables"].items()
+    }
     current = _live_sqlite_report(
         docker_prefix=docker_prefix,
         container_id=container_id,
         database_path=plan["database"]["containerPath"],
+        comparison_contract=comparison_contract,
     )
-    before = journal["database"].get("snapshot")
-    if not isinstance(before, dict):
-        raise StageTransitionError("SQLite pre-transition snapshot is unavailable")
-    before_objects = set(before.get("objects", []))
-    current_objects = set(current.get("objects", []))
-    if not before_objects <= current_objects or current["userVersion"] < before["userVersion"]:
-        raise StageTransitionError(
-            "candidate Persistence migration removed schema objects or regressed user_version"
-        )
-    current["addedObjects"] = sorted(current_objects - before_objects)
-    current["removedObjects"] = []
+    _validate_database_migration_reports(before, current)
     journal["database"]["postMigration"] = current
     journal["database"]["restorePerformed"] = False
     _write_journal(journal_path, journal, "DATABASE_MIGRATION_VERIFIED")
     return current
+
+
+def _validate_work_credential_health_table(record: dict[str, Any]) -> None:
+    """Pin the one additive Navigator 17700 credential-health table to its source schema."""
+
+    expected = [
+        ("organization_id", "TEXT", True, None, 1),
+        ("workspace_id", "TEXT", True, None, 2),
+        ("connection_id", "TEXT", True, None, 3),
+        ("provider", "TEXT", True, None, 0),
+        ("generation", "INTEGER", True, None, 0),
+        ("fingerprint", "TEXT", True, None, 0),
+        ("decision", "TEXT", True, None, 0),
+        ("checked_at", "TEXT", False, None, 0),
+        ("expires_at", "TEXT", False, None, 0),
+        ("reason_code", "TEXT", False, None, 0),
+        ("incident_id", "TEXT", False, None, 0),
+        ("incident_started_at", "INTEGER", False, None, 0),
+        ("last_notified_at", "INTEGER", False, None, 0),
+        ("reminder_count", "INTEGER", True, "0", 0),
+        ("updated_at", "INTEGER", True, None, 0),
+    ]
+    observed = [
+        (
+            row.get("name"),
+            row.get("type"),
+            row.get("notNull"),
+            row.get("default"),
+            row.get("primaryKeyOrdinal"),
+        )
+        for row in record.get("columns", [])
+    ]
+    if (
+        observed != expected
+        or _normalize_sqlite_ddl(record.get("createSql"))
+        != _normalize_sqlite_ddl(SQLITE_CREDENTIAL_HEALTH_TABLE_SQL)
+        or record.get("primaryKeyColumns") != ["organization_id", "workspace_id", "connection_id"]
+        or record.get("foreignKeys") != []
+        or record.get("checkConstraints") != []
+        or record.get("uniqueIndexes") != []
+        or record.get("rowCount") != 0
+        or record.get("emptyOrganizationIdRows") != 0
+    ):
+        raise StageTransitionError(
+            "additive credential-health table differs from the pinned Navigator 17700 schema"
+        )
+
+
+def _normalize_sqlite_ddl(value: Any) -> str:
+    """Normalize whitespace and SQLite's removed IF NOT EXISTS clause for pinned DDL."""
+
+    if not isinstance(value, str):
+        return ""
+    normalized = re.sub(r"\bIF\s+NOT\s+EXISTS\b", "", value, flags=re.IGNORECASE)
+    return " ".join(normalized.split()).strip().rstrip(";").lower()
+
+
+def _validate_database_migration_reports(before: dict[str, Any], current: dict[str, Any]) -> None:
+    """Permit one empty declared table while requiring unchanged old DDL and row streams."""
+
+    _validate_sqlite_report_shape(before, "pre-transition SQLite snapshot")
+    _validate_sqlite_report_shape(current, "post-transition SQLite report")
+    if current["userVersion"] != before["userVersion"]:
+        raise StageTransitionError(
+            "Persistence changed user_version outside the declared additive migration"
+        )
+
+    old_objects = {f"{row['type']}:{row['name']}": row for row in before["schemaObjects"]}
+    new_objects = {f"{row['type']}:{row['name']}": row for row in current["schemaObjects"]}
+    removed = set(old_objects) - set(new_objects)
+    added = set(new_objects) - set(old_objects)
+    if removed:
+        raise StageTransitionError("Persistence removed an existing SQLite schema object")
+    if added - SQLITE_ADDITIVE_SCHEMA_OBJECTS:
+        raise StageTransitionError("Persistence added an undeclared SQLite schema object")
+    for object_name in old_objects:
+        if old_objects[object_name]["sql"] != new_objects[object_name]["sql"]:
+            raise StageTransitionError(
+                f"Persistence changed the DDL for an existing SQLite object: {object_name}"
+            )
+
+    for table, old_record in before["tables"].items():
+        new_record = current["tables"].get(table)
+        if not isinstance(new_record, dict):
+            raise StageTransitionError(f"Persistence removed existing table {table}")
+        for field in (
+            "columns",
+            "primaryKeyColumns",
+            "foreignKeys",
+            "checkConstraints",
+            "uniqueIndexes",
+        ):
+            if new_record[field] != old_record[field]:
+                raise StageTransitionError(
+                    f"Persistence changed existing table {table} {field} metadata"
+                )
+        if (
+            new_record["rowCount"] != old_record["rowCount"]
+            or new_record.get("preservedRowsCount") != old_record["rowCount"]
+            or new_record.get("preservedRowsDigest") != old_record["rowsDigest"]
+            or new_record["rowsDigest"] != old_record["rowsDigest"]
+        ):
+            raise StageTransitionError(
+                f"Persistence changed or lost pre-existing rows in table {table}"
+            )
+
+    for object_name in added:
+        object_record = new_objects[object_name]
+        if object_name == "table:work_credential_authorization_health":
+            _validate_work_credential_health_table(
+                current["tables"]["work_credential_authorization_health"]
+            )
+        elif object_record["type"] == "index" and object_name in SQLITE_ADDITIVE_SCHEMA_OBJECTS:
+            if not isinstance(object_record["sql"], str) or not object_record[
+                "sql"
+            ].lstrip().lower().startswith("create index "):
+                raise StageTransitionError(
+                    "only declared non-unique additive indexes are supported"
+                )
+        else:
+            raise StageTransitionError("declared SQLite schema addition has an unsupported type")
+    current["migrationCompatibility"] = {
+        "class": "ADDITIVE_ONLY_EXISTING_SCHEMA_AND_ROWS_PRESERVED",
+        "userVersionUnchanged": True,
+        "preservedExistingTables": sorted(before["tables"]),
+        "addedSchemaObjects": sorted(added),
+    }
 
 
 def _validate_post_update_capacity(
@@ -1452,7 +1946,7 @@ def create_plan(
     active_config_dir: Path,
     candidate_config_dir: Path,
     candidate_huggingface_seed: Path,
-    candidate_runpod_key_file: Path,
+    candidate_runpod_key_file: Path | None,
     connector_auth_evidence: Path,
     connector_auth_task_id: str,
     notification_anchor_file: Path | None,
@@ -1529,7 +2023,11 @@ def create_plan(
         "imageLock": _file_record(candidate_image_lock, "candidate image lock"),
         "configDirectoryFiles": _directory_manifest(candidate_config_dir, "candidate config"),
         "huggingfaceSeed": _file_record(candidate_huggingface_seed, "candidate HF OAuth seed"),
-        "runpodKey": _file_record(candidate_runpod_key_file, "candidate RunPod key"),
+        "runpodKey": (
+            _file_record(candidate_runpod_key_file, "candidate RunPod key")
+            if candidate_runpod_key_file is not None
+            else None
+        ),
         "connectorAuthEvidence": _file_record(connector_auth_evidence, "connector auth evidence"),
         "notificationAnchor": (
             _file_record(notification_anchor_file, "notification source anchor")
@@ -1598,7 +2096,11 @@ def create_plan(
             connector_auth_evidence=connector_auth_evidence.resolve(strict=True),
             connector_auth_task_id=connector_auth_task_id,
             huggingface_seed_file=candidate_huggingface_seed.resolve(strict=True),
-            candidate_runpod_key_file=candidate_runpod_key_file.resolve(strict=True),
+            candidate_runpod_key_file=(
+                candidate_runpod_key_file.resolve(strict=True)
+                if candidate_runpod_key_file is not None
+                else None
+            ),
             notification_anchor_file=(
                 notification_anchor_file.resolve(strict=True)
                 if notification_anchor_file is not None
@@ -1767,6 +2269,14 @@ def create_plan(
             "requiredFreeGiB": required_free_gib,
             "minimumMemAvailableMiB": minimum_mem_available_mib,
         },
+        "exchangeReadiness": {
+            "required": phase == "issued-connector-activation",
+            "status": (
+                "PENDING_LIVE_READBACK"
+                if phase == "issued-connector-activation"
+                else "NOT_REQUIRED_PROVIDER_BOOTSTRAP"
+            ),
+        },
         "policy": {
             "dockerPrefix": docker_prefix,
             "updateOrder": targets,
@@ -1821,6 +2331,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         "navigatorDrain",
         "database",
         "candidatePreflight",
+        "exchangeReadiness",
         "policy",
         "planSha256",
     }
@@ -1877,6 +2388,20 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         or readiness.get("lifecycleAcceptance") != "NOT_RUN"
     ):
         raise StageTransitionError("stage transition candidate readiness record is malformed")
+    exchange_readiness = plan.get("exchangeReadiness")
+    if (
+        not isinstance(exchange_readiness, dict)
+        or set(exchange_readiness) != {"required", "status"}
+        or not isinstance(exchange_readiness.get("required"), bool)
+        or exchange_readiness["required"] != (plan["phase"] == "issued-connector-activation")
+        or exchange_readiness.get("status")
+        != (
+            "PENDING_LIVE_READBACK"
+            if plan["phase"] == "issued-connector-activation"
+            else "NOT_REQUIRED_PROVIDER_BOOTSTRAP"
+        )
+    ):
+        raise StageTransitionError("Exchange live readiness plan record is malformed")
 
 
 def _verify_record(record: Any, label: str) -> None:
@@ -1987,7 +2512,7 @@ def _candidate_preflight(plan: dict[str, Any]) -> dict[str, Any]:
     phase = plan["phase"]
     evidence = inputs["connectorAuthEvidence"]
     seed = inputs["huggingfaceSeed"]
-    key_file = inputs["runpodKey"]
+    key_file = inputs.get("runpodKey")
     try:
         result = preflight.run_preflight(
             mode="connector-auth-readonly",
@@ -2010,7 +2535,9 @@ def _candidate_preflight(plan: dict[str, Any]) -> dict[str, Any]:
             connector_auth_evidence=Path(evidence["path"]),
             connector_auth_task_id=paths["connectorAuthTaskId"],
             huggingface_seed_file=Path(seed["path"]),
-            candidate_runpod_key_file=Path(key_file["path"]),
+            candidate_runpod_key_file=(
+                Path(key_file["path"]) if isinstance(key_file, dict) else None
+            ),
             notification_anchor_file=(
                 Path(paths["notificationAnchorFile"])
                 if paths.get("notificationAnchorFile") is not None
@@ -2043,6 +2570,519 @@ def _candidate_preflight(plan: dict[str, Any]) -> dict[str, Any]:
     if observed_notification != expected_notification:
         raise StageTransitionError("notification anchor/profile changed after planning")
     return result
+
+
+def _candidate_config_json(compose: dict[str, Any], name: str) -> dict[str, Any]:
+    """Read one validated private Compose config by its rendered host source."""
+
+    row = compose.get("configs", {}).get(name)
+    path_text = row.get("file") if isinstance(row, dict) else None
+    if not isinstance(path_text, str):
+        raise StageTransitionError(f"candidate {name} config is unavailable")
+    try:
+        document = json.loads(
+            Path(path_text).read_text(encoding="utf-8"),
+            object_pairs_hook=preflight._unique_json_object,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError(f"candidate {name} config is invalid") from error
+    if not isinstance(document, dict):
+        raise StageTransitionError(f"candidate {name} config is malformed")
+    return document
+
+
+def _sorted_exchange_bindings(value: Any) -> list[dict[str, Any]]:
+    """Normalize only array ordering in the official Exchange binding projection."""
+
+    if not isinstance(value, list):
+        raise StageTransitionError("Exchange readiness bindings are malformed")
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"bindingId", "connectionRef", "providerId", "profileRef", "tools"}
+            or not isinstance(item.get("bindingId"), str)
+            or item["bindingId"] in seen
+            or not isinstance(item.get("tools"), list)
+        ):
+            raise StageTransitionError("Exchange readiness binding row is malformed")
+        seen.add(item["bindingId"])
+        tools = item["tools"]
+        if any(
+            not isinstance(tool, dict)
+            or set(tool) != {"toolId", "operationId", "resourceProjection", "mutating"}
+            for tool in tools
+        ):
+            raise StageTransitionError("Exchange readiness operation map is malformed")
+        rows.append({**item, "tools": sorted(tools, key=lambda row: row["toolId"])})
+    return sorted(rows, key=lambda row: row["bindingId"])
+
+
+def _sorted_exchange_catalog(value: Any) -> dict[str, Any]:
+    """Normalize tool catalog array ordering while retaining schemas byte-for-byte."""
+
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schemaVersion", "items"}
+        or value.get("schemaVersion") != 1
+        or isinstance(value.get("schemaVersion"), bool)
+        or not isinstance(value.get("items"), list)
+    ):
+        raise StageTransitionError("Exchange readiness tool catalog is malformed")
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in value["items"]:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {"bindingId", "capabilityId", "providerId", "connectionRef", "profileRef", "tools"}
+            or not isinstance(item.get("bindingId"), str)
+            or item["bindingId"] in seen
+            or not isinstance(item.get("tools"), list)
+        ):
+            raise StageTransitionError("Exchange readiness catalog row is malformed")
+        seen.add(item["bindingId"])
+        tools = item["tools"]
+        if any(
+            not isinstance(tool, dict)
+            or set(tool) != {"id", "name", "description", "readOnly", "inputSchema"}
+            for tool in tools
+        ):
+            raise StageTransitionError("Exchange readiness catalog tool is malformed")
+        rows.append({**item, "tools": sorted(tools, key=lambda row: row["id"])})
+    return {"schemaVersion": 1, "items": sorted(rows, key=lambda row: row["bindingId"])}
+
+
+def _assert_exchange_readiness_safe_shape(snapshot: dict[str, Any]) -> None:
+    """Enforce the frozen credential-free connector-readiness v1 projection."""
+
+    allowed_provider_ids = {"github", "huggingface", "azure", "gcp", "runpod", "computer"}
+    profiles = snapshot.get("profiles")
+    connections = snapshot.get("connections")
+    if not isinstance(profiles, list) or not isinstance(connections, list):
+        raise StageTransitionError("Exchange readiness profiles/connections are malformed")
+    profile_keys: set[tuple[str, str]] = set()
+    for row in profiles:
+        if not isinstance(row, dict):
+            raise StageTransitionError("Exchange readiness profile row is malformed")
+        provider = row.get("providerId")
+        profile_ref = row.get("profileRef")
+        if (
+            provider not in allowed_provider_ids
+            or not isinstance(profile_ref, str)
+            or not profile_ref
+        ):
+            raise StageTransitionError("Exchange readiness profile identity is malformed")
+        if provider in {"github", "huggingface"}:
+            required = {
+                "profileRef",
+                "profileAlias",
+                "providerId",
+                "authStatus",
+                "accessMode",
+                "targetScope",
+            }
+            optional = {"authMode", "credentialRevision"}
+        elif provider in {"azure", "gcp", "runpod"}:
+            required = {
+                "profileRef",
+                "profileAlias",
+                "providerId",
+                "accessMode",
+                "targetScope",
+                "readOnly",
+            }
+            optional = {"authMode"}
+        else:
+            required = {"profileRef", "profileAlias", "providerId", "accessMode", "targetScope"}
+            optional = set()
+        if set(row) - required - optional or not required <= set(row):
+            raise StageTransitionError("Exchange readiness profile contains unsupported fields")
+        if row.get("profileAlias") is not None and not isinstance(row["profileAlias"], str):
+            raise StageTransitionError("Exchange readiness profile alias is malformed")
+        if not isinstance(row.get("accessMode"), str) or not row["accessMode"]:
+            raise StageTransitionError("Exchange readiness profile access mode is malformed")
+        if not isinstance(row.get("targetScope"), dict):
+            raise StageTransitionError("Exchange readiness profile target scope is malformed")
+        if provider in {"github", "huggingface"} and (
+            not isinstance(row.get("authStatus"), str) or not row["authStatus"]
+        ):
+            raise StageTransitionError("Exchange readiness account profile status is malformed")
+        if "readOnly" in row and not isinstance(row["readOnly"], bool):
+            raise StageTransitionError("Exchange readiness profile read-only marker is malformed")
+        key = (provider, profile_ref)
+        if key in profile_keys:
+            raise StageTransitionError("Exchange readiness has duplicate provider profiles")
+        profile_keys.add(key)
+
+    for row in connections:
+        if not isinstance(row, dict):
+            raise StageTransitionError("Exchange readiness connection row is malformed")
+        provider = row.get("providerId")
+        required = {
+            "connectionRef",
+            "providerId",
+            "profileRef",
+            "profileAlias",
+            "targetAlias",
+            "accessMode",
+            "readOnly",
+        }
+        optional = {"targetScope"}
+        if (
+            provider not in allowed_provider_ids
+            or set(row) - required - optional
+            or not required <= set(row)
+            or not isinstance(row.get("connectionRef"), str)
+            or not isinstance(row.get("profileRef"), str)
+            or not isinstance(row.get("accessMode"), str)
+            or not isinstance(row.get("readOnly"), bool)
+            or not isinstance(row.get("profileAlias"), (str, type(None)))
+            or not isinstance(row.get("targetAlias"), (str, type(None)))
+            or ("targetScope" in row and not isinstance(row["targetScope"], dict))
+        ):
+            raise StageTransitionError("Exchange readiness connection contains unsupported fields")
+
+
+def _verify_exchange_readiness_snapshot(
+    *,
+    snapshot: Any,
+    compose: dict[str, Any],
+) -> dict[str, Any]:
+    """Compare the live Exchange issuer/catalog projection against exact candidate scope."""
+
+    if (
+        not isinstance(snapshot, dict)
+        or set(snapshot)
+        != {"schemaVersion", "actor", "profiles", "connections", "bindings", "catalog"}
+        or snapshot.get("schemaVersion") != 1
+        or isinstance(snapshot.get("schemaVersion"), bool)
+    ):
+        raise StageTransitionError("pinned Exchange returned an unsupported readiness schema")
+    actor = preflight._connector_bootstrap_actor(compose)
+    if (
+        not isinstance(snapshot.get("actor"), dict)
+        or set(snapshot["actor"]) != {"issuer", "subject", "organizationId", "workspaceId"}
+        or snapshot["actor"] != actor
+        or any(not isinstance(value, str) or not value for value in actor.values())
+    ):
+        raise StageTransitionError(
+            "pinned Exchange readiness actor differs from candidate owner scope"
+        )
+    _assert_exchange_readiness_safe_shape(snapshot)
+
+    bindings_document = _candidate_config_json(compose, "connector-bindings")
+    catalog_document = _candidate_config_json(compose, "connector-tool-catalog")
+    if (
+        set(bindings_document) != {"schemaVersion", "bindings"}
+        or bindings_document.get("schemaVersion") != 1
+        or isinstance(bindings_document.get("schemaVersion"), bool)
+    ):
+        raise StageTransitionError("candidate connector binding projection is malformed")
+    if _canonical_json(_sorted_exchange_bindings(snapshot.get("bindings"))) != _canonical_json(
+        _sorted_exchange_bindings(bindings_document.get("bindings"))
+    ):
+        raise StageTransitionError(
+            "live Exchange issued bindings differ from the frozen Navigator binding config"
+        )
+    live_catalog = _sorted_exchange_catalog(snapshot.get("catalog"))
+    candidate_catalog = _sorted_exchange_catalog(catalog_document)
+    if _canonical_json(live_catalog) != _canonical_json(candidate_catalog):
+        raise StageTransitionError(
+            "live provider tool catalog differs from the frozen Navigator catalog config"
+        )
+
+    cloud_service = compose.get("services", {}).get("cloud-management-phase2", {})
+    cloud_env = cloud_service.get("environment", {}) if isinstance(cloud_service, dict) else {}
+    try:
+        cloud_document = json.loads(
+            cloud_env.get("CYRENE_CAPABILITY_CONFIGURATION_JSON", ""),
+            object_pairs_hook=preflight._unique_json_object,
+        )
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError("candidate cloud provider scope is invalid") from error
+    cloud_profiles = cloud_document.get("profiles") if isinstance(cloud_document, dict) else None
+    if not isinstance(cloud_profiles, list):
+        raise StageTransitionError("candidate cloud provider scope is malformed")
+    cloud_profile_by_provider = {
+        row.get("provider"): row for row in cloud_profiles if isinstance(row, dict)
+    }
+    cloud_provider_ids = set(cloud_profile_by_provider)
+    if len(cloud_provider_ids) != len(cloud_profiles) or cloud_provider_ids not in (
+        {"azure", "gcp"},
+        {"azure", "gcp", "runpod"},
+    ):
+        raise StageTransitionError("candidate cloud provider set is unsupported")
+    if any(
+        profile.get("read_only") is not True
+        or not isinstance(profile.get("profile_ref"), str)
+        or not profile["profile_ref"]
+        or not isinstance(profile.get("identity_ref"), str)
+        or not profile["identity_ref"]
+        for profile in cloud_profile_by_provider.values()
+    ):
+        raise StageTransitionError(
+            "candidate cloud providers require exact profile/identity refs and server-enforced read_only"
+        )
+
+    expected_provider_ids = {"huggingface", *cloud_provider_ids}
+    bindings_by_provider: dict[str, dict[str, Any]] = {}
+    for row in bindings_document["bindings"]:
+        if isinstance(row, dict) and row.get("providerId") in expected_provider_ids:
+            provider_id = row["providerId"]
+            if provider_id in bindings_by_provider:
+                raise StageTransitionError(
+                    f"candidate has multiple Exchange bindings for {provider_id}"
+                )
+            bindings_by_provider[provider_id] = row
+    if set(bindings_by_provider) != expected_provider_ids:
+        raise StageTransitionError("candidate issued binding set differs from configured providers")
+
+    profiles_by_provider: dict[str, list[dict[str, Any]]] = {}
+    for row in snapshot["profiles"]:
+        if row.get("providerId") in expected_provider_ids:
+            profiles_by_provider.setdefault(row["providerId"], []).append(row)
+    connections_by_provider: dict[str, list[dict[str, Any]]] = {}
+    for row in snapshot["connections"]:
+        if row.get("providerId") in expected_provider_ids:
+            connections_by_provider.setdefault(row["providerId"], []).append(row)
+
+    catalog_by_binding = {row["bindingId"]: row for row in live_catalog["items"]}
+    exchange_service = compose.get("services", {}).get("exchange", {})
+    exchange_environment = (
+        exchange_service.get("environment", {}) if isinstance(exchange_service, dict) else {}
+    )
+    try:
+        exchange_config = json.loads(
+            exchange_environment.get("CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON", ""),
+            object_pairs_hook=preflight._unique_json_object,
+        )
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError(
+            "candidate Exchange provider profile config is invalid"
+        ) from error
+    if not isinstance(exchange_config, dict):
+        raise StageTransitionError("candidate Exchange provider profile config is malformed")
+    authorization_cloud = exchange_config.get("authorizationCloud")
+    configured_profiles = (
+        authorization_cloud.get("profiles") if isinstance(authorization_cloud, dict) else None
+    )
+    if not isinstance(configured_profiles, dict):
+        raise StageTransitionError("candidate Exchange provider profiles are unavailable")
+
+    bootstrap = _candidate_config_json(compose, "connector-bootstrap")
+    hf_bootstrap = bootstrap.get("huggingface")
+    hf_alias = hf_bootstrap.get("profileAlias") if isinstance(hf_bootstrap, dict) else None
+    if not isinstance(hf_alias, str) or not hf_alias:
+        raise StageTransitionError("candidate HF profile alias is unavailable")
+    hf_profile_config = configured_profiles.get(hf_alias)
+    if not isinstance(hf_profile_config, dict) or hf_profile_config.get("provider") != "hf":
+        raise StageTransitionError("candidate Exchange HF profile alias does not resolve to HF")
+    hf_account_scopes = hf_profile_config.get("accountScopes")
+    hf_repositories = preflight._normalize_exchange_huggingface_repository_scope(
+        hf_account_scopes.get("repositories") if isinstance(hf_account_scopes, dict) else None,
+        "candidate Exchange HF profile",
+    )
+    expected_account_scope = [
+        {
+            "repoType": row["repo_type"],
+            "repoId": row["repo_id"],
+            "permissions": row["permissions"],
+        }
+        for row in hf_repositories
+    ]
+    hf_seed_path = preflight._hf_seed_path(compose)
+    try:
+        hf_seed = json.loads(
+            hf_seed_path.read_text(encoding="utf-8"),
+            object_pairs_hook=preflight._unique_json_object,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError(
+            "candidate HF seed is unavailable for live scope comparison"
+        ) from error
+    if not isinstance(hf_seed, dict):
+        raise StageTransitionError("candidate HF seed scope is malformed")
+
+    live_profile_refs: dict[str, str] = {}
+    for provider_id in sorted(expected_provider_ids):
+        provider_profiles = profiles_by_provider.get(provider_id, [])
+        provider_connections = connections_by_provider.get(provider_id, [])
+        if len(provider_profiles) != 1 or len(provider_connections) != 1:
+            raise StageTransitionError(
+                f"live Exchange state must have exactly one profile and connection for {provider_id}"
+            )
+        profile = provider_profiles[0]
+        connection = provider_connections[0]
+        if (
+            not isinstance(connection.get("targetAlias"), str)
+            or not isinstance(connection.get("targetScope"), dict)
+            or not isinstance(profile.get("profileAlias"), str)
+        ):
+            raise StageTransitionError(
+                f"live Exchange target/profile metadata is incomplete for {provider_id}"
+            )
+        binding = bindings_by_provider[provider_id]
+        catalog_item = catalog_by_binding.get(binding["bindingId"])
+        if (
+            not isinstance(catalog_item, dict)
+            or connection["connectionRef"] != binding["connectionRef"]
+            or connection["profileRef"] != binding["profileRef"]
+            or profile["profileRef"] != binding["profileRef"]
+            or connection["profileAlias"] != profile["profileAlias"]
+            or connection["readOnly"] is not True
+            or not catalog_item["tools"]
+            or any(tool.get("readOnly") is not True for tool in catalog_item["tools"])
+        ):
+            raise StageTransitionError(
+                f"live Exchange profile, binding, and read-only catalog do not join for {provider_id}"
+            )
+        live_profile_refs[provider_id] = profile["profileRef"]
+
+        if provider_id == "huggingface":
+            if (
+                profile["profileAlias"] != hf_alias
+                or profile["targetScope"].get("repositories") != expected_account_scope
+                or profile.get("authMode")
+                != (hf_profile_config.get("authMode") or hf_seed.get("auth_mode"))
+                or profile["accessMode"] != hf_bootstrap.get("expectedAccessMode")
+            ):
+                raise StageTransitionError(
+                    "live Account Center HF profile scope/access mode differs from candidate config"
+                )
+            target_rows = hf_profile_config.get("targets")
+            target_alias = connection.get("targetAlias")
+            target = target_rows.get(target_alias) if isinstance(target_rows, dict) else None
+            if not isinstance(target, dict) or connection["targetScope"] != next(
+                (row for row in expected_account_scope if row["repoId"] == target.get("targetRef")),
+                None,
+            ):
+                raise StageTransitionError(
+                    "live HF connector target does not match the Account Center repository scope"
+                )
+        else:
+            candidate_profiles = [
+                (alias, row)
+                for alias, row in configured_profiles.items()
+                if isinstance(row, dict) and row.get("provider") == provider_id
+            ]
+            if len(candidate_profiles) != 1:
+                raise StageTransitionError(
+                    f"candidate Exchange must have exactly one host profile for {provider_id}"
+                )
+            alias, candidate_profile = candidate_profiles[0]
+            plugin_profile = cloud_profile_by_provider[provider_id]
+            if (
+                alias != plugin_profile["profile_ref"]
+                or candidate_profile.get("identityRef") != plugin_profile["identity_ref"]
+            ):
+                raise StageTransitionError(
+                    f"candidate Exchange profile identity does not join to Cloud Management for {provider_id}"
+                )
+            targets = candidate_profile.get("targets")
+            expected_targets = (
+                {
+                    target_alias: {"targetRef": target.get("targetRef")}
+                    for target_alias, target in targets.items()
+                    if isinstance(target, dict)
+                }
+                if isinstance(targets, dict)
+                else {}
+            )
+            expected_access = candidate_profile.get("accessMode", "actor_owned")
+            target_alias = connection.get("targetAlias")
+            candidate_target = targets.get(target_alias) if isinstance(targets, dict) else None
+            if (
+                profile["profileAlias"] != alias
+                or profile["accessMode"] != expected_access
+                or profile["targetScope"] != {"targets": expected_targets}
+                or profile.get("readOnly") is not True
+                or candidate_target is None
+                or connection.get("targetScope")
+                != {"targetAlias": target_alias, "targetRef": candidate_target.get("targetRef")}
+            ):
+                raise StageTransitionError(
+                    f"live Exchange cloud profile scope/read-only state differs for {provider_id}"
+                )
+
+    actor_digest = _sha256_bytes(_canonical_json(actor))
+    bindings_digest = _sha256_bytes(
+        _canonical_json(_sorted_exchange_bindings(snapshot["bindings"]))
+    )
+    catalog_digest = _sha256_bytes(_canonical_json(live_catalog))
+    return {
+        "schemaVersion": 1,
+        "status": "LIVE_VERIFIED",
+        "actorSha256": actor_digest,
+        "bindingsSha256": bindings_digest,
+        "catalogSha256": catalog_digest,
+        "profileCount": len(snapshot["profiles"]),
+        "connectionCount": len(snapshot["connections"]),
+        "bindingCount": len(snapshot["bindings"]),
+        "verifiedProviderIds": sorted(expected_provider_ids),
+        "profileRefByProvider": live_profile_refs,
+    }
+
+
+def _read_live_exchange_readiness(
+    *,
+    plan: dict[str, Any],
+    compose: dict[str, Any],
+    container_id: str,
+    image_id: str,
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Run the frozen read-only connector readiness CLI in the exact Exchange container."""
+
+    exchange_plan = plan["candidateServices"].get("exchange")
+    expected_image = (
+        exchange_plan.get("candidate", {}).get("imageId")
+        if isinstance(exchange_plan, dict)
+        else plan["activeServices"].get("exchange", {}).get("imageId")
+    )
+    if image_id != expected_image or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError(
+            "Exchange readiness target does not match its exact candidate image"
+        )
+    actor = preflight._connector_bootstrap_actor(compose)
+    if any(not isinstance(value, str) or not value for value in actor.values()):
+        raise StageTransitionError("candidate Exchange readiness actor is incomplete")
+    argv = [
+        *docker_prefix,
+        "exec",
+        container_id,
+        EXCHANGE_SECRET_ENV_ENTRYPOINT,
+        EXCHANGE_READINESS_EXECUTABLE,
+        "integrations",
+        "connector-readiness",
+        "--integration-database",
+        EXCHANGE_INTEGRATION_DATABASE,
+        "--issuer",
+        actor["issuer"],
+        "--subject",
+        actor["subject"],
+        "--organization-id",
+        actor["organizationId"],
+        "--workspace-id",
+        actor["workspaceId"],
+    ]
+    output = runtime_update._checked_stdout(
+        argv,
+        label="pinned Exchange connector readiness readback",
+        timeout_seconds=120,
+    )
+    if len(output.encode("utf-8")) > 16 * 1024 * 1024:
+        raise StageTransitionError("Exchange readiness output exceeds its bounded size")
+    try:
+        snapshot = json.loads(output, object_pairs_hook=preflight._unique_json_object)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError("pinned Exchange readiness output is invalid JSON") from error
+    receipt = _verify_exchange_readiness_snapshot(snapshot=snapshot, compose=compose)
+    receipt["exchangeContainerId"] = container_id
+    receipt["exchangeImageId"] = image_id
+    receipt["snapshotSha256"] = _sha256_bytes(output.encode("utf-8"))
+    return receipt
 
 
 def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
@@ -2087,6 +3127,11 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "snapshot": None,
             "postMigration": None,
             "restorePerformed": False,
+        },
+        "exchangeReadiness": {
+            "required": plan["exchangeReadiness"]["required"],
+            "verified": False,
+            "receipt": None,
         },
         "targetProgress": {
             service: {
@@ -2156,6 +3201,44 @@ def _atomic_write_record(path: Path, document: dict[str, Any]) -> None:
         ) from error
 
 
+def _create_initial_journal(path: Path, document: dict[str, Any]) -> None:
+    """Create one initial journal exclusively so a competing apply cannot replace it."""
+
+    parent = path.parent
+    if parent.is_symlink() or not parent.is_dir() or parent.resolve(strict=True) != parent:
+        raise StageTransitionError("transaction journal parent directory is unsafe")
+    parent_metadata = parent.stat()
+    if parent_metadata.st_uid != os.geteuid() or stat.S_IMODE(parent_metadata.st_mode) != 0o700:
+        raise StageTransitionError("transaction journal parent must be owner-only")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError as error:
+        raise StageTransitionError(
+            "operation journal already exists; apply is never replayed"
+        ) from error
+    except OSError as error:
+        raise StageTransitionError("initial transaction journal could not be created") from error
+    payload = _canonical_json(document) + b"\n"
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise StageTransitionError("initial transaction journal could not be persisted") from error
+
+
 def _write_journal(
     path: Path, journal: dict[str, Any], phase: str, *, state: str | None = None
 ) -> None:
@@ -2218,6 +3301,17 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
 
     db = journal.get("database", {})
     database_snapshot = db.get("snapshot") if isinstance(db, dict) else None
+    exchange_readiness = journal.get("exchangeReadiness", {})
+    exchange_readiness_required = (
+        exchange_readiness.get("required") is True
+        if isinstance(exchange_readiness, dict)
+        else False
+    )
+    exchange_readiness_verified = (
+        exchange_readiness.get("verified") is True
+        if isinstance(exchange_readiness, dict)
+        else False
+    )
     return {
         "schemaVersion": journal.get("schemaVersion"),
         "operationId": journal.get("operationId"),
@@ -2231,6 +3325,14 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         "databaseUserVersion": database_snapshot.get("userVersion")
         if isinstance(database_snapshot, dict)
         else None,
+        "exchangeReadinessRequired": exchange_readiness_required,
+        "exchangeReadinessStatus": (
+            "LIVE_VERIFIED"
+            if exchange_readiness_verified
+            else "PENDING"
+            if exchange_readiness_required
+            else "NOT_REQUIRED"
+        ),
         "selectionPromoted": journal.get("selection", {}).get("promoted"),
         "updatedAtUtc": journal.get("updatedAtUtc"),
         "lastErrorCode": journal.get("lastErrorCode"),
@@ -2271,17 +3373,17 @@ def _atomic_sqlite_snapshot(
     backup_temp = f"/tmp/cyrene-stage-transition-{plan['operationId']}.sqlite3"
     source_path = plan["database"]["containerPath"]
     script = (
-        "import hashlib,json,os,sqlite3,sys;"
-        "source_path,backup_path=sys.argv[1:3];"
-        "source=sqlite3.connect('file:'+source_path+'?mode=ro',uri=True);"
-        "target=sqlite3.connect(backup_path);"
-        "source.backup(target);"
-        "integrity=target.execute('PRAGMA integrity_check').fetchone()[0];"
-        "version=target.execute('PRAGMA user_version').fetchone()[0];"
-        "objects=target.execute(\"SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name\").fetchall();"
-        "schema=json.dumps(objects,sort_keys=True,separators=(',',':')).encode();"
-        "target.close();source.close();os.chmod(backup_path,0o600);"
-        "print(json.dumps({'integrity':integrity,'userVersion':version,'schemaSha256':hashlib.sha256(schema).hexdigest(),'objects':[r[0]+':'+r[1] for r in objects]},separators=(',',':')))"
+        _SQLITE_REPORT_PYTHON
+        + "\nimport os\n"
+        + "source_path,backup_path=sys.argv[1:3]\n"
+        + "source=sqlite3.connect('file:'+source_path+'?mode=ro',uri=True)\n"
+        + "target=sqlite3.connect(backup_path)\n"
+        + "source.backup(target)\n"
+        + "target.close();source.close();os.chmod(backup_path,0o600)\n"
+        + "report=report_database(backup_path)\n"
+        + "if report['integrity']!='ok': raise RuntimeError('SQLite backup integrity check failed')\n"
+        + "report['backupFileSha256']=file_sha256(backup_path)\n"
+        + "print(json.dumps(report,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False))\n"
     )
     service["backupIntent"] = True
     _write_journal(journal_path, journal, "DATABASE_BACKUP_REQUESTED")
@@ -2300,19 +3402,12 @@ def _atomic_sqlite_snapshot(
         timeout_seconds=120,
     )
     report = runtime_update._decode_json_output(report_text, "Navigator Persistence backup report")
+    _validate_sqlite_report_shape(report, "Persistence online backup report")
     if (
-        not isinstance(report, dict)
-        or report.get("integrity") != "ok"
-        or isinstance(report.get("userVersion"), bool)
-        or not isinstance(report.get("userVersion"), int)
-        or not isinstance(report.get("schemaSha256"), str)
-        or not SHA256_RE.fullmatch(report["schemaSha256"])
-        or not isinstance(report.get("objects"), list)
-        or any(not isinstance(name, str) for name in report["objects"])
+        not isinstance(report.get("backupFileSha256"), str)
+        or SHA256_RE.fullmatch(report["backupFileSha256"]) is None
     ):
-        raise StageTransitionError(
-            "Persistence online backup failed its integrity/schema read-back"
-        )
+        raise StageTransitionError("Persistence online backup file digest is malformed")
     copy_result = runtime_update._run_command(
         [*docker_prefix, "cp", f"{container_id}:{backup_temp}", str(backup_path)],
         timeout_seconds=120,
@@ -2330,7 +3425,7 @@ def _atomic_sqlite_snapshot(
         host_db = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)
         integrity = host_db.execute("PRAGMA integrity_check").fetchone()[0]
         user_version = host_db.execute("PRAGMA user_version").fetchone()[0]
-        objects = host_db.execute(
+        schema_rows = host_db.execute(
             "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
         ).fetchall()
         host_db.close()
@@ -2338,11 +3433,13 @@ def _atomic_sqlite_snapshot(
         raise StageTransitionError(
             "host SQLite online backup failed integrity verification"
         ) from error
-    host_schema_digest = _sha256_bytes(_canonical_json(objects))
+    host_schema_objects = [{"type": row[0], "name": row[1], "sql": row[2]} for row in schema_rows]
+    host_schema_digest = _sha256_bytes(_canonical_json(host_schema_objects))
     if (
         integrity != "ok"
         or user_version != report["userVersion"]
         or host_schema_digest != report["schemaSha256"]
+        or backup_sha256 != report["backupFileSha256"]
     ):
         raise StageTransitionError("host SQLite backup differs from the container online snapshot")
     report["objects"] = sorted(report["objects"])
@@ -2749,6 +3846,24 @@ def _resume_ingress_after_safe_state(
     )
 
 
+def _verify_final_delivery_readback(
+    *, journal: dict[str, Any], docker_prefix: list[str]
+) -> dict[str, Any]:
+    """Require the final resumed revision and unchanged DLQ count before APPLIED."""
+
+    edge = journal["edge"]
+    status = runtime_update._current_edge_status(docker_prefix, edge["containerId"])
+    runtime_update._validate_edge_status(status)
+    runtime_update._verify_edge_dead_count(edge, status["dead_count"], "final APPLIED readback")
+    if (
+        status["paused"] is not False
+        or status["revision"] != edge.get("resumeRevision")
+        or edge.get("resumeRevision") is None
+    ):
+        raise StageTransitionError("Teams ingress final resume revision changed before APPLIED")
+    return status
+
+
 def _rollback_known_mutations(
     *,
     plan: dict[str, Any],
@@ -2918,18 +4033,18 @@ def apply_plan_file(
     journal_dir = Path(plan["journalDir"])
     runtime_update._ensure_journal_directory(journal_dir, create=True)
     journal_path = _journal_path(journal_dir, plan["operationId"])
-    if journal_path.exists() or journal_path.is_symlink():
-        raise StageTransitionError("operation journal already exists; apply is never replayed")
     docker_prefix = plan["policy"]["dockerPrefix"]
     runtime_update._validate_docker_prefix(docker_prefix)
     with runtime_update._operation_lock(plan["project"]):
+        if journal_path.exists() or journal_path.is_symlink():
+            raise StageTransitionError("operation journal already exists; apply is never replayed")
         _verify_all_inputs(plan)
         _check_selection_unchanged(plan)
         _candidate_preflight(plan)
         active_compose, _active_lock = _verify_active_baseline(plan, docker_prefix)
         candidate_compose, _candidate_lock = _candidate_configs(plan, docker_prefix)
         journal = _make_journal(plan, plan_path)
-        _atomic_write_record(journal_path, journal)
+        _create_initial_journal(journal_path, journal)
         try:
             runtime_update._pause_edge(
                 plan=plan,
@@ -2950,6 +4065,40 @@ def apply_plan_file(
                 journal_path=journal_path,
             )
             for service_name in plan["targets"]:
+                if (
+                    service_name == "navigator"
+                    and journal["exchangeReadiness"]["required"]
+                    and journal["exchangeReadiness"]["verified"] is not True
+                ):
+                    exchange_progress = journal["targetProgress"].get("exchange")
+                    uses_candidate = (
+                        isinstance(exchange_progress, dict)
+                        and exchange_progress.get("candidateContainerId") is not None
+                    )
+                    exchange_container_id = (
+                        exchange_progress.get("candidateContainerId")
+                        if uses_candidate
+                        else plan["activeServices"].get("exchange", {}).get("containerId")
+                    )
+                    exchange_image_id = (
+                        exchange_progress.get("candidateImageId")
+                        if uses_candidate
+                        else plan["activeServices"].get("exchange", {}).get("imageId")
+                    )
+                    receipt = _read_live_exchange_readiness(
+                        plan=plan,
+                        compose=candidate_compose,
+                        container_id=exchange_container_id,
+                        image_id=exchange_image_id,
+                        docker_prefix=docker_prefix,
+                    )
+                    journal["exchangeReadiness"]["verified"] = True
+                    journal["exchangeReadiness"]["receipt"] = receipt
+                    _write_journal(
+                        journal_path,
+                        journal,
+                        "EXCHANGE_LIVE_READINESS_VERIFIED",
+                    )
                 _update_target(
                     plan=plan,
                     candidate_compose=candidate_compose,
@@ -2958,6 +4107,31 @@ def apply_plan_file(
                     docker_prefix=docker_prefix,
                     service_name=service_name,
                 )
+                if service_name == "navigator-persistence":
+                    try:
+                        _validate_database_migration(
+                            plan=plan,
+                            journal=journal,
+                            journal_path=journal_path,
+                            docker_prefix=docker_prefix,
+                        )
+                    except (
+                        OSError,
+                        StageTransitionError,
+                        runtime_update.RuntimeUpdateError,
+                        subprocess.SubprocessError,
+                    ) as error:
+                        journal["database"]["migrationGateFailed"] = True
+                        journal["lastErrorCode"] = "database_migration_contract_failed"
+                        _write_journal(
+                            journal_path,
+                            journal,
+                            "RECOVERY_REQUIRED",
+                            state="RECOVERY_REQUIRED",
+                        )
+                        raise StageTransitionError(
+                            "Persistence migration contract failed; keep ingress held and do not roll back the database image or restore snapshot bytes"
+                        ) from error
             candidate_lock = runtime_update._load_lock(
                 Path(plan["candidateInputs"]["imageLock"]["path"])
             )
@@ -2978,16 +4152,17 @@ def apply_plan_file(
             runtime_update._verify_live_network_membership(
                 candidate_compose, candidate_services, docker_prefix
             )
+            if (
+                journal["exchangeReadiness"]["required"]
+                and journal["exchangeReadiness"]["verified"] is not True
+            ):
+                raise StageTransitionError(
+                    "issued connector activation reached cutover without live Exchange readiness"
+                )
             _resume_live_navigator(
                 plan=plan,
                 journal=journal,
                 candidate_compose=candidate_compose,
-                docker_prefix=docker_prefix,
-            )
-            _validate_database_migration(
-                plan=plan,
-                journal=journal,
-                journal_path=journal_path,
                 docker_prefix=docker_prefix,
             )
             resource_readback = _validate_post_update_capacity(
@@ -3008,6 +4183,11 @@ def apply_plan_file(
                 journal_path=journal_path,
                 docker_prefix=docker_prefix,
             )
+            delivery_readback = _verify_final_delivery_readback(
+                journal=journal,
+                docker_prefix=docker_prefix,
+            )
+            journal["edge"]["latestDeadCount"] = delivery_readback["dead_count"]
             _write_journal(journal_path, journal, "APPLIED", state="APPLIED")
             return {
                 **_journal_summary(journal),
@@ -3026,6 +4206,17 @@ def apply_plan_file(
                 if isinstance(row, dict)
             ):
                 raise
+            if (
+                journal.get("selection", {}).get("promoted") is True
+                or journal.get("edge", {}).get("resumeRevision") is not None
+            ):
+                journal["lastErrorCode"] = "post_cutover_readback_failed"
+                _write_journal(
+                    journal_path, journal, "RECOVERY_REQUIRED", state="RECOVERY_REQUIRED"
+                )
+                raise StageTransitionError(
+                    "post-cutover ingress readback failed; keep the recorded delivery state for manual recovery"
+                ) from error
             if _selection_promotion_uncertain(journal):
                 journal["lastErrorCode"] = "runtime_selection_promotion_outcome_unknown"
                 _write_journal(
@@ -3069,6 +4260,17 @@ def apply_plan_file(
             if journal.get("state") == "RECOVERY_REQUIRED":
                 raise StageTransitionError(
                     "stage transition requires read-only recovery; no uncertain mutation was replayed"
+                ) from error
+            if (
+                journal.get("selection", {}).get("promoted") is True
+                or journal.get("edge", {}).get("resumeRevision") is not None
+            ):
+                journal["lastErrorCode"] = "post_cutover_readback_failed"
+                _write_journal(
+                    journal_path, journal, "RECOVERY_REQUIRED", state="RECOVERY_REQUIRED"
+                )
+                raise StageTransitionError(
+                    "post-cutover ingress readback failed; keep the recorded delivery state for manual recovery"
                 ) from error
             if _selection_promotion_uncertain(journal):
                 journal["lastErrorCode"] = "runtime_selection_promotion_outcome_unknown"
@@ -3203,7 +4405,7 @@ def _add_common_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--active-config-dir", type=Path, required=True)
     parser.add_argument("--candidate-config-dir", type=Path, required=True)
     parser.add_argument("--candidate-huggingface-seed", type=Path, required=True)
-    parser.add_argument("--candidate-runpod-key-file", type=Path, required=True)
+    parser.add_argument("--candidate-runpod-key-file", type=Path)
     parser.add_argument("--connector-auth-evidence", type=Path, required=True)
     parser.add_argument("--connector-auth-task-id", required=True)
     parser.add_argument("--notification-anchor-file", type=Path)
@@ -3271,7 +4473,11 @@ def main(argv: list[str] | None = None) -> int:
                 active_config_dir=arguments.active_config_dir.resolve(),
                 candidate_config_dir=arguments.candidate_config_dir.resolve(),
                 candidate_huggingface_seed=arguments.candidate_huggingface_seed.resolve(),
-                candidate_runpod_key_file=arguments.candidate_runpod_key_file.resolve(),
+                candidate_runpod_key_file=(
+                    arguments.candidate_runpod_key_file.resolve()
+                    if arguments.candidate_runpod_key_file is not None
+                    else None
+                ),
                 connector_auth_evidence=arguments.connector_auth_evidence.resolve(),
                 connector_auth_task_id=arguments.connector_auth_task_id,
                 notification_anchor_file=(

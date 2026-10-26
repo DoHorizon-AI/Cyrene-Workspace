@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib
 import json
 import stat
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -97,7 +99,7 @@ def _active_and_bootstrap() -> tuple[
     candidate_services["exchange"]["environment"]["PROVIDER_PHASE"] = "readonly"
     candidate_services["navigator"]["environment"]["CONNECTOR_PHASE"] = "provider-bootstrap"
     candidate_services["huggingface"] = _service("huggingface:v1")
-    candidate_services["cloud-management-phase2"] = _service("cloud:v1", profiles=["runpod"])
+    candidate_services["cloud-management-phase2"] = _service("cloud:v1", profiles=["cloud-phase2"])
     active = {
         "name": "cyrene-teams-cloud",
         "services": active_services,
@@ -166,6 +168,21 @@ def test_provider_bootstrap_uses_exact_service_delta_and_order() -> None:
         images["navigator-persistence"]["active"]["imageId"]
         != images["navigator-persistence"]["candidate"]["imageId"]
     )
+
+
+def test_provider_bootstrap_keeps_runpod_as_an_optional_cloud_profile() -> None:
+    """The phase-two cloud service remains active with Azure/GCP before RunPod is configured."""
+
+    active, candidate, active_lock, candidate_lock = _active_and_bootstrap()
+    candidate["services"]["cloud-management-phase2"]["profiles"] = ["cloud-phase2", "runpod"]
+    targets, _images = stage_transition._validate_phase_topology(
+        phase="provider-bootstrap",
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+    assert "cloud-management-phase2" in targets
 
 
 def test_provider_bootstrap_rejects_an_independent_executor() -> None:
@@ -447,47 +464,686 @@ def test_selection_promotion_unknown_state_is_never_replayed(tmp_path: Path) -> 
     assert stage_transition._selection_promotion_uncertain(journal) is True
 
 
-def test_sqlite_migration_rejects_removed_schema_and_never_restores_backup(
+def test_same_plan_apply_rechecks_journal_under_lock_and_never_overwrites_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Keep rollback image-only when candidate persistence removes an existing schema object."""
+    """A caller queued behind an ambiguous apply must observe, not replace, its journal."""
 
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir(mode=0o700)
+    selection_path = tmp_path / "active-runtime-selection.json"
+    plan = {
+        "schemaVersion": stage_transition.PLAN_SCHEMA,
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "phase": "provider-bootstrap",
+        "createdAtUtc": "2026-10-26T12:00:00+00:00",
+        "project": "cyrene-teams-cloud",
+        "activeInputs": {},
+        "candidateInputs": {},
+        "candidateInputPaths": {},
+        "activeConfigDir": str(tmp_path),
+        "candidateConfigDir": str(tmp_path),
+        "activeSecretsDir": str(tmp_path),
+        "journalDir": str(journal_dir),
+        "candidateSelectionFile": str(selection_path),
+        "selectionBackupPath": str(tmp_path / "previous.json"),
+        "activeSelection": {"path": str(selection_path), "sha256": None, "document": None},
+        "runtimeConfigIdentity": {
+            "active": {"navigator": []},
+            "candidate": {"navigator": []},
+        },
+        "candidateServices": {"navigator": {"added": False}},
+        "targets": ["navigator"],
+        "activeServices": {"navigator": {}},
+        "edgeDelivery": {},
+        "navigatorDrain": {},
+        "database": {},
+        "exchangeReadiness": {
+            "required": False,
+            "status": "NOT_REQUIRED_PROVIDER_BOOTSTRAP",
+        },
+        "candidatePreflight": {
+            "mode": "connector-auth-readonly",
+            "credentialReadOnlyRuntimeReady": True,
+            "fullCloudWriteDeploymentReady": False,
+            "lifecycleAcceptance": "NOT_RUN",
+        },
+        "policy": {"dockerPrefix": ["docker"]},
+    }
+    plan["planSha256"] = stage_transition._sha256_bytes(stage_transition._canonical_json(plan))
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_bytes(stage_transition._canonical_json(plan))
+    plan_path.chmod(0o600)
+    journal_path = stage_transition._journal_path(journal_dir, plan["operationId"])
+
+    @contextmanager
+    def competing_operation_lock(_project: str):
+        journal_path.write_text('{"state":"RECOVERY_REQUIRED"}', encoding="utf-8")
+        journal_path.chmod(0o600)
+        yield
+
+    monkeypatch.setattr(stage_transition.runtime_update, "_require_update_operator", lambda: None)
+    monkeypatch.setattr(stage_transition.preflight, "_private_artifact", lambda _path: True)
+    monkeypatch.setattr(
+        stage_transition.runtime_update, "_ensure_journal_directory", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(stage_transition.runtime_update, "_validate_docker_prefix", lambda _p: None)
+    monkeypatch.setattr(
+        stage_transition.runtime_update, "_operation_lock", competing_operation_lock
+    )
     monkeypatch.setattr(
         stage_transition,
-        "_live_sqlite_report",
-        lambda **_kwargs: {
-            "integrity": "ok",
-            "userVersion": 2,
-            "schemaSha256": "a" * 64,
-            "objects": ["table:new_table"],
-        },
+        "_verify_all_inputs",
+        lambda _plan: pytest.fail("a competing journal must stop before reconciliation"),
     )
-    plan = {
-        "operationId": "00000000-0000-4000-8000-000000000001",
-        "database": {"containerPath": "/var/lib/cyrene-navigator/persistence.db"},
-    }
-    journal = {
-        "database": {
-            "snapshot": {
-                "integrity": "ok",
-                "userVersion": 1,
-                "objects": ["table:work_items"],
-            },
-            "restorePerformed": False,
-        },
-        "targetProgress": {"navigator-persistence": {"candidateContainerId": "1" * 64}},
-        "history": [],
-    }
-    journal_path = tmp_path / "journal.json"
 
-    with pytest.raises(stage_transition.StageTransitionError, match="removed schema objects"):
-        stage_transition._validate_database_migration(
-            plan=plan,
-            journal=journal,
-            journal_path=journal_path,
-            docker_prefix=["docker"],
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="already exists; apply is never replayed"
+    ):
+        stage_transition.apply_plan_file(plan_path, expected_digest=plan["planSha256"])
+    assert journal_path.read_text(encoding="utf-8") == '{"state":"RECOVERY_REQUIRED"}'
+
+
+def test_initial_journal_creation_is_exclusive_and_does_not_replace_existing_bytes(
+    tmp_path: Path,
+) -> None:
+    """Use create-exclusive semantics for the first journal write."""
+
+    journal = tmp_path / "operation.json"
+    journal.write_text('{"state":"RECOVERY_REQUIRED"}', encoding="utf-8")
+    with pytest.raises(stage_transition.StageTransitionError, match="already exists"):
+        stage_transition._create_initial_journal(journal, {"state": "RUNNING"})
+    assert journal.read_text(encoding="utf-8") == '{"state":"RECOVERY_REQUIRED"}'
+
+
+def test_final_ingress_readback_rejects_a_new_dead_letter_before_applied(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not publish APPLIED when the resumed spool reports a new dead-letter event."""
+
+    journal = {
+        "edge": {
+            "containerId": "3" * 64,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "resumeRevision": 2,
+        }
+    }
+    status = {
+        "_httpStatus": 200,
+        "paused": False,
+        "revision": 2,
+        "active_delivery_count": 0,
+        "queued_count": 0,
+        "leased_count": 0,
+        "retry_wait_count": 0,
+        "delivered_count": 1,
+        "rejected_count": 0,
+        "dead_count": 1,
+        "pending_bytes": 0,
+        "retained_body_bytes": 0,
+        "oldest_pending_at": None,
+        "last_delivered_at": None,
+    }
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_current_edge_status",
+        lambda *_args, **_kwargs: status,
+    )
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="dead-letter count changed"):
+        stage_transition._verify_final_delivery_readback(journal=journal, docker_prefix=["docker"])
+    assert journal["edge"]["latestDeadCount"] == 1
+
+
+def _table_report(
+    *,
+    name: str,
+    row_count: int,
+    rows_digest: str,
+    preserved_count: int | None = None,
+    preserved_digest: str | None = None,
+) -> dict[str, Any]:
+    """Build one bounded schema/data report for the migration-gate fixtures."""
+
+    columns = [
+        {
+            "name": column,
+            "type": "TEXT",
+            "notNull": True,
+            "default": None,
+            "primaryKeyOrdinal": ordinal,
+            "hidden": 0,
+        }
+        for ordinal, column in enumerate(("organization_id", "workspace_id", "session_id"), 1)
+    ]
+    report: dict[str, Any] = {
+        "columns": columns,
+        "createSql": (
+            f"CREATE TABLE {name} (organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL, "
+            "session_id TEXT NOT NULL, PRIMARY KEY (organization_id, workspace_id, session_id))"
+        ),
+        "primaryKeyColumns": ["organization_id", "workspace_id", "session_id"],
+        "foreignKeys": [],
+        "checkConstraints": [],
+        "uniqueIndexes": [],
+        "rowCount": row_count,
+        "rowsDigest": rows_digest,
+        "emptyOrganizationIdRows": row_count,
+    }
+    if preserved_count is not None:
+        report["preservedRowsCount"] = preserved_count
+        report["preservedRowsDigest"] = preserved_digest
+    return report
+
+
+def _sqlite_report_fixture(
+    tables: dict[str, dict[str, Any]],
+    *,
+    session_sql: str = (
+        "CREATE TABLE sessions (organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL, "
+        "session_id TEXT NOT NULL, PRIMARY KEY (organization_id, workspace_id, session_id))"
+    ),
+    user_version: int = 0,
+) -> dict[str, Any]:
+    """Recompute exact schema digest metadata for a synthetic migration readback."""
+
+    for name, row in tables.items():
+        if name == "sessions":
+            row["createSql"] = session_sql
+        elif name == "work_credential_authorization_health":
+            row["createSql"] = stage_transition.SQLITE_CREDENTIAL_HEALTH_TABLE_SQL
+
+    schema_objects = [
+        {
+            "type": "table",
+            "name": name,
+            "sql": row["createSql"],
+        }
+        for name, row in sorted(tables.items())
+    ]
+    schema_digest = stage_transition._sha256_bytes(stage_transition._canonical_json(schema_objects))
+    report = {
+        "integrity": "ok",
+        "userVersion": user_version,
+        "schemaSha256": schema_digest,
+        "objects": sorted(f"table:{name}" for name in tables),
+        "schemaObjects": schema_objects,
+        "tables": tables,
+    }
+    stage_transition._validate_sqlite_report_shape(report, "fixture SQLite report")
+    return report
+
+
+def _work_credential_health_table_report() -> dict[str, Any]:
+    """Return the exact empty additive table contract exported by Navigator 17700."""
+
+    columns = [
+        ("organization_id", "TEXT", True, None, 1),
+        ("workspace_id", "TEXT", True, None, 2),
+        ("connection_id", "TEXT", True, None, 3),
+        ("provider", "TEXT", True, None, 0),
+        ("generation", "INTEGER", True, None, 0),
+        ("fingerprint", "TEXT", True, None, 0),
+        ("decision", "TEXT", True, None, 0),
+        ("checked_at", "TEXT", False, None, 0),
+        ("expires_at", "TEXT", False, None, 0),
+        ("reason_code", "TEXT", False, None, 0),
+        ("incident_id", "TEXT", False, None, 0),
+        ("incident_started_at", "INTEGER", False, None, 0),
+        ("last_notified_at", "INTEGER", False, None, 0),
+        ("reminder_count", "INTEGER", True, "0", 0),
+        ("updated_at", "INTEGER", True, None, 0),
+    ]
+    return {
+        "columns": [
+            {
+                "name": name,
+                "type": type_name,
+                "notNull": not_null,
+                "default": default,
+                "primaryKeyOrdinal": ordinal,
+                "hidden": 0,
+            }
+            for name, type_name, not_null, default, ordinal in columns
+        ],
+        "createSql": stage_transition.SQLITE_CREDENTIAL_HEALTH_TABLE_SQL,
+        "primaryKeyColumns": ["organization_id", "workspace_id", "connection_id"],
+        "foreignKeys": [],
+        "checkConstraints": [],
+        "uniqueIndexes": [],
+        "rowCount": 0,
+        "rowsDigest": hashlib.sha256(b"").hexdigest(),
+        "emptyOrganizationIdRows": 0,
+    }
+
+
+def test_sqlite_migration_preserves_old_ddl_and_rows_while_adding_only_health_table() -> None:
+    """The old image keeps its exact tables/data; only the pinned empty health table may appear."""
+
+    session_rows_digest = "a" * 64
+    before = _sqlite_report_fixture(
+        {"sessions": _table_report(name="sessions", row_count=2, rows_digest=session_rows_digest)}
+    )
+    current_sessions = _table_report(
+        name="sessions",
+        row_count=2,
+        rows_digest=session_rows_digest,
+        preserved_count=2,
+        preserved_digest=session_rows_digest,
+    )
+    current_health = _work_credential_health_table_report()
+    current = _sqlite_report_fixture(
+        {
+            "sessions": current_sessions,
+            "work_credential_authorization_health": current_health,
+        }
+    )
+
+    stage_transition._validate_database_migration_reports(before, current)
+    assert current["migrationCompatibility"]["class"] == (
+        "ADDITIVE_ONLY_EXISTING_SCHEMA_AND_ROWS_PRESERVED"
+    )
+    assert current["migrationCompatibility"]["preservedExistingTables"] == ["sessions"]
+
+
+def test_sqlite_migration_rejects_same_name_ddl_or_row_content_changes() -> None:
+    """Same object names cannot hide a table rewrite, lost rows, or changed old values."""
+
+    old_digest = "a" * 64
+    before = _sqlite_report_fixture(
+        {"sessions": _table_report(name="sessions", row_count=2, rows_digest=old_digest)}
+    )
+    changed_ddl = _sqlite_report_fixture(
+        {
+            "sessions": _table_report(
+                name="sessions",
+                row_count=2,
+                rows_digest=old_digest,
+                preserved_count=2,
+                preserved_digest=old_digest,
+            )
+        },
+        session_sql="CREATE TABLE sessions (session_id INTEGER PRIMARY KEY)",
+    )
+    with pytest.raises(stage_transition.StageTransitionError, match="changed the DDL"):
+        stage_transition._validate_database_migration_reports(before, changed_ddl)
+
+    lost_rows = _sqlite_report_fixture(
+        {
+            "sessions": _table_report(
+                name="sessions",
+                row_count=1,
+                rows_digest="b" * 64,
+                preserved_count=1,
+                preserved_digest="b" * 64,
+            )
+        }
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="changed or lost pre-existing rows"
+    ):
+        stage_transition._validate_database_migration_reports(before, lost_rows)
+
+
+def test_sqlite_migration_rejects_undeclared_new_tables_and_never_restores_backup() -> None:
+    """Unknown database additions fail closed and snapshot restoration remains forbidden."""
+
+    session_rows_digest = "a" * 64
+    before = _sqlite_report_fixture(
+        {"sessions": _table_report(name="sessions", row_count=1, rows_digest=session_rows_digest)}
+    )
+    current = _sqlite_report_fixture(
+        {
+            "sessions": _table_report(
+                name="sessions",
+                row_count=1,
+                rows_digest=session_rows_digest,
+                preserved_count=1,
+                preserved_digest=session_rows_digest,
+            ),
+            "unexpected": _table_report(name="unexpected", row_count=0, rows_digest="c" * 64),
+        }
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="undeclared SQLite schema object"
+    ):
+        stage_transition._validate_database_migration_reports(before, current)
+    assert before["integrity"] == "ok"
+
+
+def test_sqlite_migration_pins_exact_additive_health_table_ddl() -> None:
+    """A table with matching names/columns but changed additive DDL is rejected."""
+
+    before = _sqlite_report_fixture(
+        {"sessions": _table_report(name="sessions", row_count=0, rows_digest="a" * 64)}
+    )
+    current = _sqlite_report_fixture(
+        {
+            "sessions": _table_report(
+                name="sessions",
+                row_count=0,
+                rows_digest="a" * 64,
+                preserved_count=0,
+                preserved_digest="a" * 64,
+            ),
+            "work_credential_authorization_health": _work_credential_health_table_report(),
+        }
+    )
+    new_ddl = current["tables"]["work_credential_authorization_health"]["createSql"].replace(
+        "reminder_count INTEGER NOT NULL DEFAULT 0",
+        "reminder_count INTEGER NOT NULL DEFAULT 1",
+    )
+    current["tables"]["work_credential_authorization_health"]["createSql"] = new_ddl
+    schema_record = next(
+        row
+        for row in current["schemaObjects"]
+        if row["name"] == "work_credential_authorization_health"
+    )
+    schema_record["sql"] = new_ddl
+    current["schemaSha256"] = stage_transition._sha256_bytes(
+        stage_transition._canonical_json(current["schemaObjects"])
+    )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="pinned Navigator 17700 schema"
+    ):
+        stage_transition._validate_database_migration_reports(before, current)
+
+
+def _exchange_readiness_fixture(tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build one redacted Exchange e704358 readiness snapshot and matching candidate inputs."""
+
+    actor = {
+        "issuer": "https://login.microsoftonline.com/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/v2.0",
+        "subject": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "organizationId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "workspaceId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    }
+    hf_profile_ref = "11111111-1111-4111-8111-111111111111"
+    repositories = [
+        {"repoType": "model", "repoId": "Qwen/Qwen2.5-0.5B-Instruct", "permissions": ["read"]}
+    ]
+    cloud_profiles = {
+        "hf-primary": {
+            "provider": "hf",
+            "authMode": "device_oauth",
+            "accountScopes": {"repositories": repositories},
+            "targets": {"hf-model": {"targetRef": repositories[0]["repoId"]}},
+        },
+        "azure-primary": {
+            "provider": "azure",
+            "identityRef": "azure-identity",
+            "accessMode": "workspace_operator",
+            "targets": {"azure-read": {"targetRef": "azure-target-1"}},
+        },
+        "gcp-primary": {
+            "provider": "gcp",
+            "identityRef": "gcp-identity",
+            "accessMode": "workspace_operator",
+            "targets": {"gcp-read": {"targetRef": "gcp-target-1"}},
+        },
+    }
+    identifiers = {
+        "huggingface": ("22222222-2222-4222-8222-222222222222", hf_profile_ref),
+        "azure": ("33333333-3333-4333-8333-333333333333", "azure-primary"),
+        "gcp": ("44444444-4444-4444-8444-444444444444", "gcp-primary"),
+    }
+    bindings = []
+    catalog_items = []
+    profiles = []
+    connections = []
+    for provider_id, (connection_ref, profile_ref) in identifiers.items():
+        binding_id = f"exchange-{provider_id}-{connection_ref}"
+        tool_id = f"{provider_id}.readonly.v1"
+        bindings.append(
+            {
+                "bindingId": binding_id,
+                "connectionRef": connection_ref,
+                "providerId": provider_id,
+                "profileRef": profile_ref,
+                "tools": [
+                    {
+                        "toolId": tool_id,
+                        "operationId": f"{provider_id}.list",
+                        "resourceProjection": "safe_summary",
+                        "mutating": False,
+                    }
+                ],
+            }
         )
-    assert journal["database"]["restorePerformed"] is False
+        catalog_items.append(
+            {
+                "bindingId": binding_id,
+                "capabilityId": "tool.provider.v1",
+                "providerId": provider_id,
+                "connectionRef": connection_ref,
+                "profileRef": profile_ref,
+                "tools": [
+                    {
+                        "id": tool_id,
+                        "name": f"Read {provider_id}",
+                        "description": "Read one scoped safe summary.",
+                        "readOnly": True,
+                        "inputSchema": {"type": "object", "additionalProperties": False},
+                    }
+                ],
+            }
+        )
+        if provider_id == "huggingface":
+            profile_alias = "hf-primary"
+            profile = {
+                "profileRef": profile_ref,
+                "profileAlias": profile_alias,
+                "providerId": provider_id,
+                "authStatus": "connected",
+                "accessMode": "workspace_operator",
+                "authMode": "device_oauth",
+                "targetScope": {"repositories": repositories},
+            }
+            connection = {
+                "connectionRef": connection_ref,
+                "providerId": provider_id,
+                "profileRef": profile_ref,
+                "profileAlias": profile_alias,
+                "targetAlias": "hf-model",
+                "accessMode": "workspace_operator",
+                "readOnly": True,
+                "targetScope": repositories[0],
+            }
+        else:
+            profile_alias = f"{provider_id}-primary"
+            target_alias = f"{provider_id}-read"
+            target_ref = f"{provider_id}-target-1"
+            profile = {
+                "profileRef": profile_ref,
+                "profileAlias": profile_alias,
+                "providerId": provider_id,
+                "accessMode": "workspace_operator",
+                "targetScope": {"targets": {target_alias: {"targetRef": target_ref}}},
+                "readOnly": True,
+            }
+            connection = {
+                "connectionRef": connection_ref,
+                "providerId": provider_id,
+                "profileRef": profile_ref,
+                "profileAlias": profile_alias,
+                "targetAlias": target_alias,
+                "accessMode": "workspace_operator",
+                "readOnly": True,
+                "targetScope": {"targetAlias": target_alias, "targetRef": target_ref},
+            }
+        profiles.append(profile)
+        connections.append(connection)
+
+    bindings_file = tmp_path / "connector-bindings.json"
+    catalog_file = tmp_path / "connector-tool-catalog.json"
+    bootstrap_file = tmp_path / "connector-bootstrap.json"
+    seed_file = tmp_path / "huggingface-oauth.json"
+    bindings_file.write_text(json.dumps({"schemaVersion": 1, "bindings": bindings}))
+    catalog_file.write_text(json.dumps({"schemaVersion": 1, "items": catalog_items}))
+    bootstrap_file.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "huggingface": {
+                    "profileAlias": "hf-primary",
+                    "expectedAccessMode": "workspace_operator",
+                },
+            }
+        )
+    )
+    seed_file.write_text(json.dumps({"auth_mode": "device_oauth"}))
+    compose = {
+        "configs": {
+            "connector-bindings": {"file": str(bindings_file)},
+            "connector-tool-catalog": {"file": str(catalog_file)},
+            "connector-bootstrap": {"file": str(bootstrap_file)},
+        },
+        "secrets": {"account-center-huggingface-oauth-source": {"file": str(seed_file)}},
+        "services": {
+            "navigator": {
+                "environment": {"TEAMS_TENANT_ID": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}
+            },
+            "directory-operator": {
+                "environment": {"CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": actor["subject"]}
+            },
+            "workspace-authority": {
+                "environment": {
+                    "CYRENE_ORGANIZATION_ID": actor["organizationId"],
+                    "CYRENE_WORKSPACE_ID": actor["workspaceId"],
+                }
+            },
+            "cloud-management-phase2": {
+                "environment": {
+                    "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                        {
+                            "profiles": [
+                                {
+                                    "provider": "azure",
+                                    "profile_ref": "azure-primary",
+                                    "identity_ref": "azure-identity",
+                                    "read_only": True,
+                                },
+                                {
+                                    "provider": "gcp",
+                                    "profile_ref": "gcp-primary",
+                                    "identity_ref": "gcp-identity",
+                                    "read_only": True,
+                                },
+                            ]
+                        }
+                    )
+                }
+            },
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                        {"authorizationCloud": {"profiles": cloud_profiles}}
+                    )
+                }
+            },
+        },
+    }
+    snapshot = {
+        "schemaVersion": 1,
+        "actor": actor,
+        "profiles": profiles,
+        "connections": connections,
+        "bindings": bindings,
+        "catalog": {"schemaVersion": 1, "items": catalog_items},
+    }
+    return snapshot, compose
+
+
+def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
+    tmp_path: Path,
+) -> None:
+    """Bind candidate scope and Navigator tools to the exact live Exchange readback."""
+
+    snapshot, compose = _exchange_readiness_fixture(tmp_path)
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot, compose=compose
+    )
+    assert receipt["status"] == "LIVE_VERIFIED"
+    assert receipt["verifiedProviderIds"] == ["azure", "gcp", "huggingface"]
+    assert receipt["bindingCount"] == 3
+
+    wrong_scope = copy.deepcopy(snapshot)
+    next(row for row in wrong_scope["profiles"] if row["providerId"] == "azure")["targetScope"][
+        "targets"
+    ]["azure-read"]["targetRef"] = "other"
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="cloud profile scope/read-only"
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(snapshot=wrong_scope, compose=compose)
+
+    wrong_identity = copy.deepcopy(compose)
+    wrong_exchange = json.loads(
+        wrong_identity["services"]["exchange"]["environment"][
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+        ]
+    )
+    wrong_exchange["authorizationCloud"]["profiles"]["azure-primary"]["identityRef"] = (
+        "different-identity"
+    )
+    wrong_identity["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(wrong_exchange)
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="does not join to Cloud Management"
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot, compose=wrong_identity
+        )
+
+    wrong_catalog = copy.deepcopy(snapshot)
+    wrong_catalog["catalog"]["items"][0]["tools"][0]["readOnly"] = False
+    with pytest.raises(stage_transition.StageTransitionError, match="live provider tool catalog"):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=wrong_catalog, compose=compose
+        )
+
+
+def test_live_exchange_readiness_runs_in_exact_pinned_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use the official in-image command and secret-file entrypoint without shell interpolation."""
+
+    snapshot, compose = _exchange_readiness_fixture(tmp_path)
+    container_id = "a" * 64
+    image_id = _image_id(77)
+    captured: list[str] = []
+
+    def checked(argv: list[str], **_kwargs: Any) -> str:
+        captured.extend(argv)
+        return json.dumps(snapshot, separators=(",", ":"))
+
+    monkeypatch.setattr(stage_transition.runtime_update, "_checked_stdout", checked)
+    receipt = stage_transition._read_live_exchange_readiness(
+        plan={
+            "candidateServices": {"exchange": {"candidate": {"imageId": image_id}}},
+            "candidateConfigDir": str(tmp_path),
+            "policy": {"dockerPrefix": ["docker"]},
+        },
+        compose=compose,
+        container_id=container_id,
+        image_id=image_id,
+        docker_prefix=["docker"],
+    )
+
+    assert captured[:5] == [
+        "docker",
+        "exec",
+        container_id,
+        stage_transition.EXCHANGE_SECRET_ENV_ENTRYPOINT,
+        stage_transition.EXCHANGE_READINESS_EXECUTABLE,
+    ]
+    assert "connector-readiness" in captured
+    assert stage_transition.EXCHANGE_INTEGRATION_DATABASE in captured
+    assert receipt["exchangeContainerId"] == container_id
+    assert receipt["exchangeImageId"] == image_id
+    assert receipt["status"] == "LIVE_VERIFIED"
 
 
 def test_compose_stage_target_is_closed_and_never_pulls_or_builds(

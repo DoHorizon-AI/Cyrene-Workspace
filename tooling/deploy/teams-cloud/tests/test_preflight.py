@@ -3344,6 +3344,63 @@ def test_exchange_cloud_profiles_follow_compose_overlay_stage() -> None:
     preflight._validate_exchange_profile_stage(phase3, "stage3")
 
 
+def test_exchange_authorization_cloud_runner_requires_fixed_interval_and_bounded_shutdown() -> None:
+    """Enable the single cloud monitor only with its fixed cadence and Compose join window."""
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    overlay = yaml.safe_load((deployment_root / "compose.cloud-phase2.yaml").read_text())
+    exchange_overlay = overlay["services"]["exchange"]
+    assert (
+        exchange_overlay["environment"]["CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"]
+        == "${CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED:-false}"
+    )
+    assert exchange_overlay["stop_grace_period"] == "70s"
+    runtime_env_template = (deployment_root / "config/runtime.env.template").read_text()
+    assert "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED=false" in runtime_env_template
+
+    exchange_config = _exchange_configuration({"hf", "azure", "gcp"})
+    exchange_config["authorizationCloud"]["monitorIntervalSeconds"] = 900
+    config = {
+        "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "true"}},
+            "huggingface": {},
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED": "true",
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(exchange_config),
+                }
+            },
+            "cloud-management-phase2": {"profiles": ["cloud-phase2"]},
+        }
+    }
+    preflight._validate_exchange_profile_stage(config, "cutover")
+    exchange_config["authorizationCloud"]["monitorIntervalSeconds"] = 899
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(exchange_config)
+    with pytest.raises(preflight.PreflightError, match="900-second"):
+        preflight._validate_exchange_profile_stage(config, "cutover")
+
+
+def test_exchange_authorization_cloud_runner_is_off_then_on_at_issued_activation() -> None:
+    """The bootstrap phase cannot poll unissued profiles, while activation must start one runner."""
+
+    config = {"services": {"exchange": {"environment": {}}}}
+    preflight._validate_exchange_authorization_cloud_runner_phase(config, "provider-bootstrap")
+    with pytest.raises(preflight.PreflightError, match="must be true"):
+        preflight._validate_exchange_authorization_cloud_runner_phase(
+            config, "issued-connector-activation"
+        )
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
+    ] = "true"
+    preflight._validate_exchange_authorization_cloud_runner_phase(
+        config, "issued-connector-activation"
+    )
+    with pytest.raises(preflight.PreflightError, match="must be false"):
+        preflight._validate_exchange_authorization_cloud_runner_phase(config, "provider-bootstrap")
+
+
 def test_stage3_reuses_one_cloud_provider_state_owner() -> None:
     """Add RunPod to the phase-2 service instead of starting a second volume writer."""
 
@@ -3737,6 +3794,10 @@ def test_stage3_cloud_provider_counts_toward_runtime_budget() -> None:
             "issued-connector-activation",
             {"github", "huggingface", "azure", "gcp", "runpod", "computer"},
         ),
+        (
+            "issued-connector-activation",
+            {"github", "huggingface", "azure", "gcp", "computer"},
+        ),
     ],
 )
 def test_connector_auth_phases_keep_new_provider_bindings_closed_until_activation(
@@ -3744,11 +3805,20 @@ def test_connector_auth_phases_keep_new_provider_bindings_closed_until_activatio
 ) -> None:
     """Keep the first topology transaction model-visible only through existing providers."""
 
+    cloud_providers = ["azure", "gcp"] + (["runpod"] if "runpod" in expected else [])
+    cloud_profile = "runpod" if "runpod" in expected else "cloud-phase2"
     config = {
         "services": {
             "computer-runtime": {},
             "huggingface": {},
-            "cloud-management-phase2": {"profiles": ["runpod"]},
+            "cloud-management-phase2": {
+                "profiles": [cloud_profile],
+                "environment": {
+                    "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                        {"profiles": [{"provider": provider} for provider in cloud_providers]}
+                    )
+                },
+            },
         }
     }
     assert (
@@ -3816,17 +3886,47 @@ def test_new_provider_binding_gate_accepts_only_the_fixed_readonly_operation_set
             for operation in rows
         ],
     }
-    preflight._validate_new_provider_bindings_readonly(document)
+    expected = set(operations)
+    preflight._validate_new_provider_bindings_readonly(document, expected)
     document["bindings"][1]["tools"][0]["operationId"] = "cloud.resource.create"
     document["bindings"][1]["tools"][0]["mutating"] = False
     with pytest.raises(preflight.PreflightError, match="write, CLI"):
-        preflight._validate_new_provider_bindings_readonly(document)
+        preflight._validate_new_provider_bindings_readonly(document, expected)
 
 
-def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_new_provider_binding_gate_allows_three_configured_providers_but_rejects_duplicate_hf() -> (
+    None
+):
+    """Keep RunPod optional while preventing an extra HF scope from entering the catalog."""
+
+    operations = {
+        "huggingface": "huggingface.repo.get",
+        "azure": "cloud.resources.list",
+        "gcp": "cloud.resources.list",
+    }
+    bindings = [
+        {"providerId": provider, "tools": [{"operationId": operation, "mutating": False}]}
+        for provider, operation in operations.items()
+    ]
+    document = {"schemaVersion": 1, "bindings": bindings}
+    expected = set(operations)
+    preflight._validate_new_provider_bindings_readonly(document, expected)
+
+    document["bindings"].append(
+        {
+            "providerId": "huggingface",
+            "tools": [{"operationId": "huggingface.repo.get", "mutating": False}],
+        }
+    )
+    with pytest.raises(preflight.PreflightError, match="exactly one"):
+        preflight._validate_new_provider_bindings_readonly(document, expected)
+
+
+@pytest.mark.parametrize("runpod_enabled", [True, False])
+def test_connector_auth_scope_digest_binds_configured_hf_cloud_scopes_and_candidate_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runpod_enabled: bool
 ) -> None:
-    """Bind seed, Exchange accountScopes, HF provider repos, WIF, and the candidate RunPod key."""
+    """Bind seed/scopes and include RunPod only when its key-backed profile is configured."""
 
     repos = [{"repo_type": "model", "repo_id": "owner/private-model", "permissions": ["read"]}]
     seed = tmp_path / "huggingface-oauth.json"
@@ -3860,6 +3960,7 @@ def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
     runpod_key = tmp_path / "runpod-api-key"
     runpod_key.write_text("synthetic-runpod-api-key", encoding="utf-8")
 
+    cloud_providers = ("azure", "gcp", "runpod") if runpod_enabled else ("azure", "gcp")
     cloud_config = {
         "profiles": [
             {
@@ -3868,7 +3969,7 @@ def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
                 "auth": {"mode": "managed_identity"},
                 "scope": {},
             }
-            for provider in ("azure", "gcp", "runpod")
+            for provider in cloud_providers
         ]
     }
     hf_config = {"read_only": True, "repositories": repos}
@@ -3889,7 +3990,7 @@ def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
                 },
                 "azure-primary": {"provider": "azure"},
                 "gcp-primary": {"provider": "gcp"},
-                "runpod-primary": {"provider": "runpod"},
+                **({"runpod-primary": {"provider": "runpod"}} if runpod_enabled else {}),
             }
         }
     }
@@ -3919,7 +4020,7 @@ def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
         "secrets": {
             "account-center-huggingface-oauth-source": {"file": str(seed)},
             "gcp-wif-credential-config": {"file": str(wif)},
-            "runpod-api-key": {"file": str(runpod_key)},
+            **({"runpod-api-key": {"file": str(runpod_key)}} if runpod_enabled else {}),
         },
     }
     monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
@@ -3939,14 +4040,16 @@ def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
     result = preflight._connector_auth_scope_expectations(
         config,
         huggingface_seed_file=seed,
-        runpod_key_file=runpod_key,
+        runpod_key_file=runpod_key if runpod_enabled else None,
     )
-    assert set(result["expectedProviderScopeDigests"]) == {
+    expected_providers = {
         "huggingface",
         "azure",
         "gcp",
-        "runpod",
     }
+    if runpod_enabled:
+        expected_providers.add("runpod")
+    assert set(result["expectedProviderScopeDigests"]) == expected_providers
     assert result["huggingfaceRepositoryScopeDigestSha256"] == preflight._canonical_json_digest(
         repos
     )
@@ -3961,7 +4064,7 @@ def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
         preflight._connector_auth_scope_expectations(
             config,
             huggingface_seed_file=seed,
-            runpod_key_file=runpod_key,
+            runpod_key_file=runpod_key if runpod_enabled else None,
         )
 
 
@@ -3987,8 +4090,8 @@ def test_connector_auth_readonly_evidence_is_fresh_closed_and_operation_allowlis
     }
     document = {
         "schemaVersion": "cyrene-connector-auth-readonly-evidence-v1",
-        "status": "VERIFIED",
-        "evidenceClass": "REAL_PROVIDER_API_READ_ONLY",
+        "status": "OPERATOR_ATTESTED",
+        "evidenceClass": "OPERATOR_RECORDED_REAL_PROBE",
         "executionPath": "provider_identity_bootstrap_api",
         "taskId": "connector-probe-task-1",
         "owner": UUID,
@@ -3996,7 +4099,7 @@ def test_connector_auth_readonly_evidence_is_fresh_closed_and_operation_allowlis
         "providers": [
             {
                 "providerId": provider,
-                "identityStatus": "VERIFIED",
+                "identityStatus": "OPERATOR_RECORDED",
                 "authMode": auth_modes[provider],
                 "profileScopeDigestSha256": digests[provider],
                 "readOperations": [
@@ -4064,7 +4167,7 @@ def test_credential_notification_activation_binds_anchor_provenance_and_exchange
         },
         "connections": [
             {"connectionId": f"00000000-0000-4000-8000-00000000000{index}", "provider": provider}
-            for index, provider in enumerate(("hf", "azure", "gcp", "runpod"), start=1)
+            for index, provider in enumerate(("hf", "azure", "gcp"), start=1)
         ],
         "destination": {
             "tenantId": UUID_2,
@@ -4087,7 +4190,7 @@ def test_credential_notification_activation_binds_anchor_provenance_and_exchange
                 "providerId": provider,
                 "connectionRef": f"00000000-0000-4000-8000-00000000000{index}",
             }
-            for index, provider in enumerate(("huggingface", "azure", "gcp", "runpod"), start=1)
+            for index, provider in enumerate(("huggingface", "azure", "gcp"), start=1)
         ],
     }
     (config_dir / "connector-bindings.json").write_text(json.dumps(bindings), encoding="utf-8")
@@ -4206,6 +4309,7 @@ def test_credential_notification_activation_binds_anchor_provenance_and_exchange
         config_dir=config_dir,
         anchor_file=anchor_path,
         provenance_file=provenance_path,
+        expected_provider_ids={"huggingface", "azure", "gcp"},
     )
     assert (
         result["credentialNotificationConfigSha256"]
@@ -4229,4 +4333,5 @@ def test_credential_notification_activation_binds_anchor_provenance_and_exchange
             config_dir=config_dir,
             anchor_file=anchor_path,
             provenance_file=provenance_path,
+            expected_provider_ids={"huggingface", "azure", "gcp"},
         )
