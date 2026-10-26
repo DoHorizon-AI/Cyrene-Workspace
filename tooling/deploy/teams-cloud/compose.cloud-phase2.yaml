@@ -1,7 +1,9 @@
 services:
   exchange:
+    stop_grace_period: 70s
     environment:
       CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON: ${CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_PHASE2_JSON:?phase 2 Exchange config must add Azure and GCP profiles}
+      CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED: ${CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED:-false}
       CYRENE_SECRET_FILE_MAP: EXCHANGE_ACCOUNT_CONTEXT_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key,EXCHANGE_CLOUD_AUTH_CONTEXT_HMAC_KEY=/run/secrets/cloud-management-exchange-hmac-key
     secrets:
       - source: cloud-management-exchange-hmac-key

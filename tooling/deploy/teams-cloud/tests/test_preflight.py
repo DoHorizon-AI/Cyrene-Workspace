@@ -3344,6 +3344,63 @@ def test_exchange_cloud_profiles_follow_compose_overlay_stage() -> None:
     preflight._validate_exchange_profile_stage(phase3, "stage3")
 
 
+def test_exchange_authorization_cloud_runner_requires_fixed_interval_and_bounded_shutdown() -> None:
+    """Enable the single cloud monitor only with its fixed cadence and Compose join window."""
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    overlay = yaml.safe_load((deployment_root / "compose.cloud-phase2.yaml").read_text())
+    exchange_overlay = overlay["services"]["exchange"]
+    assert (
+        exchange_overlay["environment"]["CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"]
+        == "${CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED:-false}"
+    )
+    assert exchange_overlay["stop_grace_period"] == "70s"
+    runtime_env_template = (deployment_root / "config/runtime.env.template").read_text()
+    assert "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED=false" in runtime_env_template
+
+    exchange_config = _exchange_configuration({"hf", "azure", "gcp"})
+    exchange_config["authorizationCloud"]["monitorIntervalSeconds"] = 900
+    config = {
+        "services": {
+            "account-center": {"labels": {"com.cyrene.huggingface-enabled": "true"}},
+            "huggingface": {},
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED": "true",
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(exchange_config),
+                }
+            },
+            "cloud-management-phase2": {"profiles": ["cloud-phase2"]},
+        }
+    }
+    preflight._validate_exchange_profile_stage(config, "cutover")
+    exchange_config["authorizationCloud"]["monitorIntervalSeconds"] = 899
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(exchange_config)
+    with pytest.raises(preflight.PreflightError, match="900-second"):
+        preflight._validate_exchange_profile_stage(config, "cutover")
+
+
+def test_exchange_authorization_cloud_runner_is_off_then_on_at_issued_activation() -> None:
+    """The bootstrap phase cannot poll unissued profiles, while activation must start one runner."""
+
+    config = {"services": {"exchange": {"environment": {}}}}
+    preflight._validate_exchange_authorization_cloud_runner_phase(config, "provider-bootstrap")
+    with pytest.raises(preflight.PreflightError, match="must be true"):
+        preflight._validate_exchange_authorization_cloud_runner_phase(
+            config, "issued-connector-activation"
+        )
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
+    ] = "true"
+    preflight._validate_exchange_authorization_cloud_runner_phase(
+        config, "issued-connector-activation"
+    )
+    with pytest.raises(preflight.PreflightError, match="must be false"):
+        preflight._validate_exchange_authorization_cloud_runner_phase(config, "provider-bootstrap")
+
+
 def test_stage3_reuses_one_cloud_provider_state_owner() -> None:
     """Add RunPod to the phase-2 service instead of starting a second volume writer."""
 
@@ -3565,6 +3622,14 @@ def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path
     preflight._validate_connector_bootstrap_config(
         path, huggingface_enabled=False, expected_actor=expected_actor
     )
+    document["github"]["expectedAccessMode"] = "read_only"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="workspace_operator"):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=False, expected_actor=expected_actor
+        )
+    document["github"]["expectedAccessMode"] = "workspace_operator"
+    path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(
         preflight.PreflightError, match="approved Directory owner and CYRENE_HF_ENABLED"
     ):
@@ -3595,6 +3660,12 @@ def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path
     preflight._validate_connector_bootstrap_config(
         path, huggingface_enabled=True, expected_actor=expected_actor
     )
+    document["huggingface"]["expectedAccessMode"] = "user"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="workspace_operator"):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=True, expected_actor=expected_actor
+        )
 
 
 def test_huggingface_oauth_source_matches_closed_account_center_dto(tmp_path: Path) -> None:
@@ -3713,3 +3784,554 @@ def test_stage3_cloud_provider_counts_toward_runtime_budget() -> None:
     }
     with pytest.raises(preflight.PreflightError, match="memory limits total"):
         preflight._validate_compose(config, "stage3", 1024, 1.8, {"test:local"})
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected"),
+    [
+        ("provider-bootstrap", {"github", "computer"}),
+        (
+            "issued-connector-activation",
+            {"github", "huggingface", "azure", "gcp", "runpod", "computer"},
+        ),
+        (
+            "issued-connector-activation",
+            {"github", "huggingface", "azure", "gcp", "computer"},
+        ),
+    ],
+)
+def test_connector_auth_phases_keep_new_provider_bindings_closed_until_activation(
+    phase: str, expected: set[str]
+) -> None:
+    """Keep the first topology transaction model-visible only through existing providers."""
+
+    cloud_providers = ["azure", "gcp"] + (["runpod"] if "runpod" in expected else [])
+    cloud_profile = "runpod" if "runpod" in expected else "cloud-phase2"
+    config = {
+        "services": {
+            "computer-runtime": {},
+            "huggingface": {},
+            "cloud-management-phase2": {
+                "profiles": [cloud_profile],
+                "environment": {
+                    "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                        {"profiles": [{"provider": provider} for provider in cloud_providers]}
+                    )
+                },
+            },
+        }
+    }
+    assert (
+        preflight._expected_connector_providers(config, "connector-auth-readonly", phase)
+        == expected
+    )
+
+
+def test_connector_auth_capacity_gates_added_caps_without_changing_host_reserve() -> None:
+    """Require the 1 GiB host reserve plus only the new provider cap during bootstrap."""
+
+    config = {
+        "services": {
+            "huggingface": {"mem_limit": "192m"},
+            "cloud-management-phase2": {"mem_limit": "384m"},
+        }
+    }
+    result = preflight._memory_headroom(
+        mode="connector-auth-readonly",
+        connector_auth_phase="provider-bootstrap",
+        config=config,
+        available_mib=1600,
+        cgroup_budget_mib=3392,
+        minimum_available_mib=1024,
+    )
+    assert result["additionalPhaseMemoryMiB"] == 576
+    assert result["runtimeRssMeasurementRequired"] is True
+    with pytest.raises(preflight.PreflightError, match="requires 1600 MiB"):
+        preflight._memory_headroom(
+            mode="connector-auth-readonly",
+            connector_auth_phase="provider-bootstrap",
+            config=config,
+            available_mib=1599,
+            cgroup_budget_mib=3392,
+            minimum_available_mib=1024,
+        )
+    activation = preflight._memory_headroom(
+        mode="connector-auth-readonly",
+        connector_auth_phase="issued-connector-activation",
+        config=config,
+        available_mib=1024,
+        cgroup_budget_mib=3392,
+        minimum_available_mib=1024,
+    )
+    assert activation["additionalPhaseMemoryMiB"] == 0
+
+
+def test_new_provider_binding_gate_accepts_only_the_fixed_readonly_operation_set() -> None:
+    """Reject provider writes, cancellation, and CLI tools even if a host says readOnly."""
+
+    operations = {
+        "huggingface": ["huggingface.repo.get"],
+        "azure": ["cloud.resources.list"],
+        "gcp": ["cloud.resources.list"],
+        "runpod": ["cloud.resources.list"],
+    }
+    document = {
+        "schemaVersion": 1,
+        "bindings": [
+            {
+                "providerId": provider,
+                "tools": [{"operationId": operation, "mutating": False}],
+            }
+            for provider, rows in operations.items()
+            for operation in rows
+        ],
+    }
+    expected = set(operations)
+    preflight._validate_new_provider_bindings_readonly(document, expected)
+    document["bindings"][1]["tools"][0]["operationId"] = "cloud.resource.create"
+    document["bindings"][1]["tools"][0]["mutating"] = False
+    with pytest.raises(preflight.PreflightError, match="write, CLI"):
+        preflight._validate_new_provider_bindings_readonly(document, expected)
+
+
+def test_new_provider_binding_gate_allows_three_configured_providers_but_rejects_duplicate_hf() -> (
+    None
+):
+    """Keep RunPod optional while preventing an extra HF scope from entering the catalog."""
+
+    operations = {
+        "huggingface": "huggingface.repo.get",
+        "azure": "cloud.resources.list",
+        "gcp": "cloud.resources.list",
+    }
+    bindings = [
+        {"providerId": provider, "tools": [{"operationId": operation, "mutating": False}]}
+        for provider, operation in operations.items()
+    ]
+    document = {"schemaVersion": 1, "bindings": bindings}
+    expected = set(operations)
+    preflight._validate_new_provider_bindings_readonly(document, expected)
+
+    document["bindings"].append(
+        {
+            "providerId": "huggingface",
+            "tools": [{"operationId": "huggingface.repo.get", "mutating": False}],
+        }
+    )
+    with pytest.raises(preflight.PreflightError, match="exactly one"):
+        preflight._validate_new_provider_bindings_readonly(document, expected)
+
+
+@pytest.mark.parametrize("runpod_enabled", [True, False])
+def test_connector_auth_scope_digest_binds_configured_hf_cloud_scopes_and_candidate_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runpod_enabled: bool
+) -> None:
+    """Bind seed/scopes and include RunPod only when its key-backed profile is configured."""
+
+    repos = [{"repo_type": "model", "repo_id": "owner/private-model", "permissions": ["read"]}]
+    seed = tmp_path / "huggingface-oauth.json"
+    seed.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider": "huggingface",
+                "auth_mode": "device_oauth",
+                "client_id": "public-client",
+                "oauth_scopes": ["profile", "read-repos"],
+                "access_token": "synthetic-access-token",
+                "refresh_token": "synthetic-refresh-token",
+                "access_token_expires_at": 2_000_000_000,
+                "refresh_token_expires_at": None,
+                "target_scope": {"repositories": repos},
+                "credential_secret_ref": "huggingface/connector-token",
+            }
+        ),
+        encoding="utf-8",
+    )
+    bootstrap = tmp_path / "connector-bootstrap.json"
+    bootstrap.write_text(
+        json.dumps({"huggingface": {"profileAlias": "hf-primary"}}), encoding="utf-8"
+    )
+    wif = tmp_path / "gcp-wif.json"
+    wif.write_text(
+        json.dumps({"type": "external_account", "audience": "//iam.googleapis.com/pool"}),
+        encoding="utf-8",
+    )
+    runpod_key = tmp_path / "runpod-api-key"
+    runpod_key.write_text("synthetic-runpod-api-key", encoding="utf-8")
+
+    cloud_providers = ("azure", "gcp", "runpod") if runpod_enabled else ("azure", "gcp")
+    cloud_config = {
+        "profiles": [
+            {
+                "provider": provider,
+                "read_only": True,
+                "auth": {"mode": "managed_identity"},
+                "scope": {},
+            }
+            for provider in cloud_providers
+        ]
+    }
+    hf_config = {"read_only": True, "repositories": repos}
+    exchange_repositories = [
+        {
+            "repoType": row["repo_type"],
+            "repoId": row["repo_id"],
+            "permissions": row["permissions"],
+        }
+        for row in repos
+    ]
+    exchange_config = {
+        "authorizationCloud": {
+            "profiles": {
+                "hf-primary": {
+                    "provider": "hf",
+                    "accountScopes": {"repositories": exchange_repositories},
+                },
+                "azure-primary": {"provider": "azure"},
+                "gcp-primary": {"provider": "gcp"},
+                **({"runpod-primary": {"provider": "runpod"}} if runpod_enabled else {}),
+            }
+        }
+    }
+    config = {
+        "services": {
+            "huggingface": {
+                "environment": {
+                    "CYRENE_CAPABILITY_BINDING_ID": "hf-binding",
+                    "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(hf_config),
+                }
+            },
+            "cloud-management-phase2": {
+                "environment": {
+                    "CYRENE_CAPABILITY_BINDING_ID": "cloud-binding",
+                    "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(cloud_config),
+                    "AZURE_CLIENT_ID": UUID,
+                    "CYRENE_CLOUD_MGMT_AZURE_SUBSCRIPTION_ID": UUID_2,
+                }
+            },
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(exchange_config)
+                }
+            },
+        },
+        "configs": {"connector-bootstrap": {"file": str(bootstrap)}},
+        "secrets": {
+            "account-center-huggingface-oauth-source": {"file": str(seed)},
+            "gcp-wif-credential-config": {"file": str(wif)},
+            **({"runpod-api-key": {"file": str(runpod_key)}} if runpod_enabled else {}),
+        },
+    }
+    monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
+    regular_owner_file = stat.S_IFREG | 0o400
+    real_lstat = Path.lstat
+
+    def fake_lstat(path: Path) -> Any:
+        if path in {seed, wif, runpod_key}:
+            return SimpleNamespace(
+                st_mode=regular_owner_file,
+                st_uid=10001,
+                st_size=path.stat().st_size,
+            )
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", fake_lstat)
+    result = preflight._connector_auth_scope_expectations(
+        config,
+        huggingface_seed_file=seed,
+        runpod_key_file=runpod_key if runpod_enabled else None,
+    )
+    expected_providers = {
+        "huggingface",
+        "azure",
+        "gcp",
+    }
+    if runpod_enabled:
+        expected_providers.add("runpod")
+    assert set(result["expectedProviderScopeDigests"]) == expected_providers
+    assert result["huggingfaceRepositoryScopeDigestSha256"] == preflight._canonical_json_digest(
+        repos
+    )
+
+    exchange_config["authorizationCloud"]["profiles"]["hf-primary"]["accountScopes"][
+        "repositories"
+    ][0]["repoId"] = "owner/other-model"
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(exchange_config)
+    with pytest.raises(preflight.PreflightError, match="differ"):
+        preflight._connector_auth_scope_expectations(
+            config,
+            huggingface_seed_file=seed,
+            runpod_key_file=runpod_key if runpod_enabled else None,
+        )
+
+
+def test_connector_auth_readonly_evidence_is_fresh_closed_and_operation_allowlisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accept only fresh provider identity evidence for the fixed read-only operation set."""
+
+    now = datetime.now(UTC).isoformat()
+    providers = ("huggingface", "azure", "gcp", "runpod")
+    digests = {provider: f"{index:064x}" for index, provider in enumerate(providers, start=1)}
+    operation_ids = {
+        "huggingface": ["huggingface.whoami", "huggingface.repo.get"],
+        "azure": ["azure.resources.list"],
+        "gcp": ["gcp.compute.instances.list"],
+        "runpod": ["runpod.pods.list"],
+    }
+    auth_modes = {
+        "huggingface": "device_oauth",
+        "azure": "managed_identity",
+        "gcp": "workload_identity_federation",
+        "runpod": "api_key",
+    }
+    document = {
+        "schemaVersion": "cyrene-connector-auth-readonly-evidence-v1",
+        "status": "OPERATOR_ATTESTED",
+        "evidenceClass": "OPERATOR_RECORDED_REAL_PROBE",
+        "executionPath": "provider_identity_bootstrap_api",
+        "taskId": "connector-probe-task-1",
+        "owner": UUID,
+        "verifiedAt": now,
+        "providers": [
+            {
+                "providerId": provider,
+                "identityStatus": "OPERATOR_RECORDED",
+                "authMode": auth_modes[provider],
+                "profileScopeDigestSha256": digests[provider],
+                "readOperations": [
+                    {
+                        "operationId": operation_id,
+                        "outcome": "SUCCEEDED",
+                        "observedAt": now,
+                        "resultDigestSha256": "a" * 64,
+                    }
+                    for operation_id in operation_ids[provider]
+                ],
+            }
+            for provider in providers
+        ],
+    }
+    path = tmp_path / "connector-auth-evidence.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    path.chmod(0o600)
+    monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
+    real_stat = Path.stat
+
+    def fake_stat(candidate: Path, *, follow_symlinks: bool = True) -> Any:
+        if candidate == path:
+            return SimpleNamespace(
+                st_uid=10001, st_mode=stat.S_IFREG | 0o600, st_size=path.read_bytes().__len__()
+            )
+        return real_stat(candidate, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    digest = preflight._validate_connector_auth_readonly_evidence(
+        path,
+        expected_task_id="connector-probe-task-1",
+        expected_owner=UUID,
+        expected_scope_digests=digests,
+    )
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    document["providers"][1]["readOperations"][0]["operationId"] = "cloud.resource.create"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="fixed successful read"):
+        preflight._validate_connector_auth_readonly_evidence(
+            path,
+            expected_task_id="connector-probe-task-1",
+            expected_owner=UUID,
+            expected_scope_digests=digests,
+        )
+
+
+def test_credential_notification_activation_binds_anchor_provenance_and_exchange_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Require exact issued connection IDs and matching owner/route on the Exchange profile."""
+
+    config_dir = tmp_path / "runtime-config"
+    config_dir.mkdir(mode=0o700)
+    notification = {
+        "schemaVersion": 1,
+        "organizationId": UUID,
+        "workspaceId": UUID_2,
+        "owner": {
+            "actorAadObjectId": UUID,
+            "issuer": f"https://login.microsoftonline.com/{UUID_2}/v2.0",
+            "subject": UUID,
+            "tenantId": UUID_2,
+        },
+        "connections": [
+            {"connectionId": f"00000000-0000-4000-8000-00000000000{index}", "provider": provider}
+            for index, provider in enumerate(("hf", "azure", "gcp"), start=1)
+        ],
+        "destination": {
+            "tenantId": UUID_2,
+            "teamId": UUID,
+            "channelId": "19:channel-anchor",
+            "conversationId": "19:conversation-anchor",
+            "rootThreadId": "1712345678901",
+            "serviceUrl": "https://smba.trafficmanager.net/amer/",
+        },
+        "exchange": {"profileRef": "teams-credential-notifications-20261026"},
+        "pollIntervalMs": 900000,
+    }
+    notification_path = config_dir / "teams-credential-notifications.json"
+    notification_path.write_text(json.dumps(notification), encoding="utf-8")
+    notification_path.chmod(0o600)
+    bindings = {
+        "schemaVersion": 1,
+        "bindings": [
+            {
+                "providerId": provider,
+                "connectionRef": f"00000000-0000-4000-8000-00000000000{index}",
+            }
+            for index, provider in enumerate(("huggingface", "azure", "gcp"), start=1)
+        ],
+    }
+    (config_dir / "connector-bindings.json").write_text(json.dumps(bindings), encoding="utf-8")
+    anchor_path = tmp_path / "actual-teams-anchor.json"
+    anchor_path.write_text(json.dumps({"taskId": "real-work-anchor-task"}), encoding="utf-8")
+    anchor_path.chmod(0o600)
+
+    exchange_config = {
+        "connectorHost": {
+            "teamsMessages": {
+                "connectionRef": "exchange-physical-connection",
+                "systemNotification": {
+                    "profileRef": notification["exchange"]["profileRef"],
+                    "ownerSubject": UUID,
+                    "fixedRoute": notification["destination"],
+                },
+            }
+        }
+    }
+    services = {
+        "navigator": {
+            "environment": {
+                "TEAMS_CREDENTIAL_NOTIFICATIONS_CONFIG_FILE": "/run/secrets/teams-credential-notifications.json",
+                "TEAMS_TENANT_ID": UUID_2,
+                "TEAMS_ALLOWED_TEAM_IDS": UUID,
+                "TEAMS_EXCHANGE_CONNECTION_REF": "exchange-physical-connection",
+            },
+            "configs": [
+                {
+                    "source": "teams-credential-notifications",
+                    "target": "/run/secrets/teams-credential-notifications.json",
+                }
+            ],
+        },
+        "directory-operator": {"environment": {"CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": UUID}},
+        "workspace-authority": {
+            "environment": {
+                "CYRENE_ORGANIZATION_ID": UUID,
+                "CYRENE_WORKSPACE_ID": UUID_2,
+            }
+        },
+        "exchange": {
+            "environment": {
+                "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(exchange_config)
+            }
+        },
+    }
+    config = {
+        "services": services,
+        "configs": {"teams-credential-notifications": {"file": str(notification_path)}},
+    }
+
+    deployment_root = tmp_path / "deployment"
+    deployment_root.mkdir()
+    deployment_config = deployment_root / "config"
+    deployment_config.mkdir()
+    schema_paths = {
+        "teams-credential-notifications.schema.json": deployment_config
+        / "teams-credential-notifications.schema.json",
+        "teams-credential-notifications-exchange-profile.schema.json": deployment_config
+        / "teams-credential-notifications-exchange-profile.schema.json",
+        "teams-credential-notifications.template.json": deployment_config
+        / "teams-credential-notifications.template.json",
+        "teams-credential-notifications-exchange-profile.template.json": deployment_config
+        / "teams-credential-notifications-exchange-profile.template.json",
+    }
+    for path in schema_paths.values():
+        path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(preflight, "__file__", str(deployment_root / "preflight.py"))
+    monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
+    real_stat = Path.stat
+    provenance_path = tmp_path / "notification-provenance.json"
+    notification_bytes = notification_path.read_bytes()
+    anchor_bytes = anchor_path.read_bytes()
+    schema_digest = hashlib.sha256(
+        schema_paths["teams-credential-notifications.schema.json"].read_bytes()
+    ).hexdigest()
+    owner_digest = preflight._canonical_json_digest(
+        {
+            "organizationId": notification["organizationId"],
+            "workspaceId": notification["workspaceId"],
+            "owner": notification["owner"],
+        }
+    )
+    destination_digest = preflight._canonical_json_digest(notification["destination"])
+    provenance = {
+        "schemaVersion": "cyrene-teams-credential-notifications-provenance-v1",
+        "sourceAnchorSha256": hashlib.sha256(anchor_bytes).hexdigest(),
+        "sourceTaskId": "real-work-anchor-task",
+        "candidateConfigSha256": hashlib.sha256(notification_bytes).hexdigest(),
+        "candidateExchangeHostConfigSha256": preflight._canonical_json_digest(exchange_config),
+        "schemaSha256": schema_digest,
+        "ownerScopeSha256": owner_digest,
+        "destinationSha256": destination_digest,
+        "exchangeConnectionRef": "exchange-physical-connection",
+        "exchangeProfileRef": notification["exchange"]["profileRef"],
+        "sourceWorkspaceCommit": "a" * 40,
+        "generatedAt": datetime.now(UTC).isoformat(),
+    }
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+    provenance_path.chmod(0o600)
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *, follow_symlinks=True: (
+            SimpleNamespace(
+                st_uid=10001, st_mode=stat.S_IFREG | 0o600, st_size=path.read_bytes().__len__()
+            )
+            if path in {notification_path, anchor_path, provenance_path}
+            else real_stat(path, follow_symlinks=follow_symlinks)
+        ),
+    )
+
+    result = preflight._validate_credential_notification_activation(
+        config,
+        config_dir=config_dir,
+        anchor_file=anchor_path,
+        provenance_file=provenance_path,
+        expected_provider_ids={"huggingface", "azure", "gcp"},
+    )
+    assert (
+        result["credentialNotificationConfigSha256"]
+        == hashlib.sha256(notification_bytes).hexdigest()
+    )
+    assert result["credentialNotificationExchangeConfigSha256"] == preflight._canonical_json_digest(
+        exchange_config
+    )
+
+    exchange_config["connectorHost"]["teamsMessages"]["systemNotification"]["ownerSubject"] = UUID_2
+    services["exchange"]["environment"]["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"] = (
+        json.dumps(exchange_config)
+    )
+    provenance["candidateExchangeHostConfigSha256"] = preflight._canonical_json_digest(
+        exchange_config
+    )
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="systemNotification profile"):
+        preflight._validate_credential_notification_activation(
+            config,
+            config_dir=config_dir,
+            anchor_file=anchor_path,
+            provenance_file=provenance_path,
+            expected_provider_ids={"huggingface", "azure", "gcp"},
+        )

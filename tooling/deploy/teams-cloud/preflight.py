@@ -23,7 +23,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -66,6 +66,50 @@ HUGGINGFACE_OPTIONAL_SECRET_NAMES = {
     "huggingface-health-client-key",
     "huggingface-account-center-client-cert",
     "huggingface-account-center-client-key",
+}
+CONNECTOR_AUTH_READONLY_PHASES = {"provider-bootstrap", "issued-connector-activation"}
+CONNECTOR_AUTH_READONLY_PROVIDERS = {"huggingface", "azure", "gcp", "runpod"}
+CONNECTOR_AUTH_READONLY_OPERATIONS = {
+    "huggingface": {"huggingface.whoami", "huggingface.repo.get"},
+    "azure": {"azure.resources.list"},
+    "gcp": {"gcp.compute.instances.list"},
+    "runpod": {"runpod.pods.list"},
+}
+CONNECTOR_AUTH_READONLY_AUTH_MODES = {
+    "huggingface": {"device_oauth"},
+    "azure": {"managed_identity"},
+    "gcp": {"workload_identity_federation"},
+    "runpod": {"api_key"},
+}
+CONNECTOR_MODEL_READONLY_OPERATIONS = {
+    "huggingface": {
+        "huggingface.models.list",
+        "huggingface.datasets.list",
+        "huggingface.spaces.list",
+        "huggingface.repo.get",
+        "huggingface.file.download",
+    },
+    "azure": {
+        "cloud.provider.health.read",
+        "cloud.resources.list",
+        "cloud.resource.get",
+        "cloud.operation.status.read",
+        "cloud.operation.logs.read",
+    },
+    "gcp": {
+        "cloud.provider.health.read",
+        "cloud.resources.list",
+        "cloud.resource.get",
+        "cloud.operation.status.read",
+        "cloud.operation.logs.read",
+    },
+    "runpod": {
+        "cloud.provider.health.read",
+        "cloud.resources.list",
+        "cloud.resource.get",
+        "cloud.operation.status.read",
+        "cloud.operation.logs.read",
+    },
 }
 PEM_PRIVATE_KEY_NAMES = {
     "authority-tls-key",
@@ -443,7 +487,12 @@ def _validate_keyring(path: Path, expected_key_id: str | None = None) -> None:
             raise PreflightError("Authority public keyring keys must be raw Ed25519 public keys")
 
 
-def _validate_principal_configuration(path: Path, services: dict[str, Any]) -> None:
+def _validate_principal_configuration(
+    path: Path,
+    services: dict[str, Any],
+    *,
+    connector_auth_phase: str | None = None,
+) -> None:
     """Bind the Navigator session principal to the approved Directory scope."""
 
     try:
@@ -477,6 +526,18 @@ def _validate_principal_configuration(path: Path, services: dict[str, Any]) -> N
         )
     if document.get("product_directory") != [] or document.get("product_service_credentials") != []:
         raise PreflightError("unconfigured Product proxy credentials must remain absent")
+    if connector_auth_phase == "provider-bootstrap":
+        if principal.get("can_publish_credential_health") not in {None, False}:
+            raise PreflightError(
+                "credential notification publishing must remain disabled during provider bootstrap"
+            )
+    elif (
+        connector_auth_phase == "issued-connector-activation"
+        and principal.get("can_publish_credential_health") is not True
+    ):
+        raise PreflightError(
+            "credential notification activation requires the owner publishing role"
+        )
 
 
 def _validate_actor_projection(path: Path, services: dict[str, Any]) -> None:
@@ -956,11 +1017,44 @@ def _huggingface_enabled(config: dict[str, Any]) -> bool:
     return enabled == "true"
 
 
-def _expected_connector_providers(config: dict[str, Any], mode: str) -> set[str]:
+def _expected_connector_providers(
+    config: dict[str, Any], mode: str, connector_auth_phase: str | None = None
+) -> set[str]:
     """Derive the only provider bindings that may be mounted for a deployment stage."""
 
     has_computer_runner = "computer-runtime" in config.get("services", {})
     providers = {"github"} | ({"huggingface"} if _huggingface_enabled(config) else set())
+    if mode == "connector-auth-readonly":
+        if connector_auth_phase == "provider-bootstrap":
+            return {"github"} | ({"computer"} if has_computer_runner else set())
+        if connector_auth_phase == "issued-connector-activation":
+            services = config.get("services", {})
+            cloud_service = (
+                services.get("cloud-management-phase2") if isinstance(services, dict) else None
+            )
+            cloud_document = _json_environment_object(
+                cloud_service if isinstance(cloud_service, dict) else {},
+                "CYRENE_CAPABILITY_CONFIGURATION_JSON",
+                "Cloud Management",
+            )
+            cloud_profiles = cloud_document.get("profiles")
+            cloud_provider_ids = (
+                {
+                    row.get("provider")
+                    for row in cloud_profiles
+                    if isinstance(row, dict) and isinstance(row.get("provider"), str)
+                }
+                if isinstance(cloud_profiles, list)
+                else set()
+            )
+            if cloud_provider_ids not in ({"azure", "gcp"}, {"azure", "gcp", "runpod"}) or len(
+                cloud_provider_ids
+            ) != len(cloud_profiles):
+                raise PreflightError(
+                    "activation provider set must include Azure/GCP and optional configured RunPod"
+                )
+            return providers | cloud_provider_ids | ({"computer"} if has_computer_runner else set())
+        raise PreflightError("connector auth phase is required for connector-auth-readonly mode")
     if mode in {"stage1", "staging"}:
         return providers | ({"computer"} if has_computer_runner else set())
     if mode == "stage2":
@@ -979,6 +1073,511 @@ def _expected_connector_providers(config: dict[str, Any], mode: str) -> set[str]
     if isinstance(cloud_service, dict) and "runpod" in cloud_service.get("profiles", []):
         providers.add("runpod")
     return providers
+
+
+def _canonical_json_digest(value: Any) -> str:
+    """Hash one canonical UTF-8 JSON value without exposing its contents."""
+
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _normalize_huggingface_repository_scope(value: Any, label: str) -> list[dict[str, Any]]:
+    """Validate and canonically order one closed Hugging Face repository scope."""
+
+    if not _valid_huggingface_repository_scope(value):
+        raise PreflightError(f"{label} repository scope is invalid")
+    return sorted(
+        [
+            {
+                "repo_type": row["repo_type"],
+                "repo_id": row["repo_id"],
+                "permissions": sorted(row["permissions"]),
+            }
+            for row in value
+        ],
+        key=lambda row: (row["repo_type"], row["repo_id"]),
+    )
+
+
+def _normalize_exchange_huggingface_repository_scope(
+    value: Any, label: str
+) -> list[dict[str, Any]]:
+    """Translate Exchange's canonical camelCase account-scope DTO to the shared scope shape."""
+
+    if not isinstance(value, list):
+        raise PreflightError(f"{label} repository scope is invalid")
+    normalized: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict) or set(row) != {"repoType", "repoId", "permissions"}:
+            raise PreflightError(f"{label} repository scope is invalid")
+        normalized.append(
+            {
+                "repo_type": row["repoType"],
+                "repo_id": row["repoId"],
+                "permissions": row["permissions"],
+            }
+        )
+    return _normalize_huggingface_repository_scope(normalized, label)
+
+
+def _json_environment_object(service: dict[str, Any], variable: str, label: str) -> dict[str, Any]:
+    """Decode one Compose JSON setting while rejecting ambiguous keys and values."""
+
+    environment = service.get("environment", {})
+    encoded = environment.get(variable) if isinstance(environment, dict) else None
+    if not isinstance(encoded, str):
+        raise PreflightError(f"{label} configuration is missing")
+    try:
+        value = json.loads(
+            encoded,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
+        )
+    except (json.JSONDecodeError, ValueError) as error:
+        raise PreflightError(f"{label} configuration is invalid JSON") from error
+    if not isinstance(value, dict) or PLACEHOLDER_RE.search(json.dumps(value, sort_keys=True)):
+        raise PreflightError(f"{label} configuration is incomplete or contains a placeholder")
+    return value
+
+
+def _hf_seed_path(config: dict[str, Any]) -> Path:
+    """Resolve the OAuth seed from the exact Account Center Compose secret mount."""
+
+    source = config.get("secrets", {}).get("account-center-huggingface-oauth-source", {})
+    path_text = source.get("file") if isinstance(source, dict) else None
+    if not isinstance(path_text, str) or not path_text:
+        raise PreflightError("HF OAuth seed is not mounted by Account Center")
+    return Path(path_text)
+
+
+def _connector_auth_scope_expectations(
+    config: dict[str, Any],
+    *,
+    huggingface_seed_file: Path | None,
+    runpod_key_file: Path | None,
+) -> dict[str, Any]:
+    """Build exact non-secret profile scope digests for read-only identity evidence."""
+
+    services = config.get("services", {})
+    cloud = services.get("cloud-management-phase2")
+    huggingface = services.get("huggingface")
+    exchange = services.get("exchange")
+    if not all(isinstance(item, dict) for item in (cloud, huggingface, exchange)):
+        raise PreflightError(
+            "read-only provider bootstrap requires HF, cloud, and Exchange services"
+        )
+    cloud_environment = cloud.get("environment", {})
+    cloud_document = _json_environment_object(
+        cloud, "CYRENE_CAPABILITY_CONFIGURATION_JSON", "Cloud Management"
+    )
+    cloud_profiles = cloud_document.get("profiles")
+    if not isinstance(cloud_profiles, list):
+        raise PreflightError("Cloud Management must declare a closed provider profile list")
+    cloud_by_provider = {
+        row.get("provider"): row
+        for row in cloud_profiles
+        if isinstance(row, dict) and isinstance(row.get("provider"), str)
+    }
+    cloud_provider_ids = set(cloud_by_provider)
+    if cloud_provider_ids not in ({"azure", "gcp"}, {"azure", "gcp", "runpod"}) or len(
+        cloud_by_provider
+    ) != len(cloud_profiles):
+        raise PreflightError(
+            "Cloud Management must contain Azure/GCP and only the explicitly configured optional RunPod profile"
+        )
+    if any(profile.get("read_only") is not True for profile in cloud_by_provider.values()):
+        raise PreflightError("Azure, GCP, and RunPod profiles must enforce read_only=true")
+
+    huggingface_document = _json_environment_object(
+        huggingface, "CYRENE_CAPABILITY_CONFIGURATION_JSON", "Hugging Face"
+    )
+    if huggingface_document.get("read_only") is not True:
+        raise PreflightError("Hugging Face provider must enforce read_only=true")
+    expected_seed_path = _hf_seed_path(config)
+    if huggingface_seed_file is None:
+        raise PreflightError("the exact candidate HF OAuth seed path is required")
+    try:
+        supplied_seed_path = huggingface_seed_file.resolve(strict=True)
+        expected_seed_path = expected_seed_path.resolve(strict=True)
+        metadata = supplied_seed_path.lstat()
+    except OSError as error:
+        raise PreflightError("candidate HF OAuth seed is unavailable") from error
+    if (
+        supplied_seed_path != expected_seed_path
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or not _private_artifact(supplied_seed_path)
+        or metadata.st_uid != 10001
+        or metadata.st_mode & 0o077
+    ):
+        raise PreflightError("candidate HF seed must match the owner-only mounted OAuth file")
+    _validate_huggingface_oauth_source(supplied_seed_path)
+    hf_seed_sha256 = hashlib.sha256(supplied_seed_path.read_bytes()).hexdigest()
+    try:
+        seed_document = json.loads(
+            supplied_seed_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError("candidate HF OAuth seed is invalid JSON") from error
+
+    hf_repositories = _normalize_huggingface_repository_scope(
+        seed_document.get("target_scope", {}).get("repositories"), "HF OAuth seed"
+    )
+    if any(row["permissions"] != ["read"] for row in hf_repositories):
+        raise PreflightError("read-only HF OAuth seed may grant only read repository permissions")
+    provider_repositories = _normalize_huggingface_repository_scope(
+        huggingface_document.get("repositories"), "Hugging Face provider"
+    )
+    if provider_repositories != hf_repositories:
+        raise PreflightError("HF OAuth seed and provider repositories scopes differ")
+
+    exchange_document = _json_environment_object(
+        exchange,
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON",
+        "Exchange integration",
+    )
+    bootstrap_config = config.get("configs", {}).get("connector-bootstrap", {})
+    bootstrap_path_text = (
+        bootstrap_config.get("file") if isinstance(bootstrap_config, dict) else None
+    )
+    if not isinstance(bootstrap_path_text, str):
+        raise PreflightError("private connector bootstrap config is missing")
+    try:
+        bootstrap_path = Path(bootstrap_path_text)
+        bootstrap = json.loads(
+            bootstrap_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError("private connector bootstrap config is invalid") from error
+    hf_bootstrap = bootstrap.get("huggingface") if isinstance(bootstrap, dict) else None
+    alias = hf_bootstrap.get("profileAlias") if isinstance(hf_bootstrap, dict) else None
+    authorization_cloud = exchange_document.get("authorizationCloud")
+    exchange_profiles = (
+        authorization_cloud.get("profiles") if isinstance(authorization_cloud, dict) else None
+    )
+    exchange_hf_profile = (
+        exchange_profiles.get(alias) if isinstance(exchange_profiles, dict) else None
+    )
+    account_scopes = (
+        exchange_hf_profile.get("accountScopes") if isinstance(exchange_hf_profile, dict) else None
+    )
+    exchange_repositories = _normalize_exchange_huggingface_repository_scope(
+        account_scopes.get("repositories") if isinstance(account_scopes, dict) else None,
+        "Exchange HF profile",
+    )
+    if exchange_repositories != hf_repositories:
+        raise PreflightError("HF OAuth, Exchange accountScopes, and provider repositories differ")
+    repository_scope_digest = _canonical_json_digest(hf_repositories)
+
+    huggingface_environment_binding = huggingface.get("environment", {}).get(
+        "CYRENE_CAPABILITY_BINDING_ID"
+    )
+    if not isinstance(huggingface_environment_binding, str) or not huggingface_environment_binding:
+        raise PreflightError("Hugging Face provider binding ID is missing")
+    scope_inputs: dict[str, dict[str, Any]] = {
+        "huggingface": {
+            "bindingId": huggingface_environment_binding,
+            "profileAlias": alias,
+            "profile": exchange_hf_profile,
+            "providerConfiguration": {
+                key: value for key, value in huggingface_document.items() if key != "repositories"
+            },
+            "identitySelectors": {
+                "authMode": seed_document.get("auth_mode"),
+                "clientId": seed_document.get("client_id"),
+                "repositoryScopeDigestSha256": repository_scope_digest,
+                "credentialFileSha256": hf_seed_sha256,
+            },
+        }
+    }
+    secrets = config.get("secrets", {})
+    secret_path_by_name = {
+        name: Path(row["file"])
+        for name, row in secrets.items()
+        if isinstance(name, str) and isinstance(row, dict) and isinstance(row.get("file"), str)
+    }
+    cloud_binding_id = cloud_environment.get("CYRENE_CAPABILITY_BINDING_ID")
+    if not isinstance(cloud_binding_id, str) or not cloud_binding_id:
+        raise PreflightError("Cloud Management provider binding ID is missing")
+    gcp_wif_file = secret_path_by_name.get("gcp-wif-credential-config")
+    rendered_runpod_key_file = secret_path_by_name.get("runpod-api-key")
+    runpod_enabled = "runpod" in cloud_provider_ids
+    if gcp_wif_file is None:
+        raise PreflightError("GCP WIF config must be mounted from its host file")
+    if runpod_enabled and (rendered_runpod_key_file is None or runpod_key_file is None):
+        raise PreflightError(
+            "RunPod profile and explicit candidate key mount must be enabled together"
+        )
+    if not runpod_enabled and (rendered_runpod_key_file is not None or runpod_key_file is not None):
+        raise PreflightError("an unconfigured RunPod profile must not accept a candidate key")
+    try:
+        gcp_wif_metadata = gcp_wif_file.lstat()
+        gcp_wif_bytes = gcp_wif_file.read_bytes()
+        gcp_wif_document = json.loads(gcp_wif_bytes, object_pairs_hook=_unique_json_object)
+        if runpod_enabled:
+            supplied_runpod_key_path = runpod_key_file.resolve(strict=True)
+            rendered_runpod_key_path = rendered_runpod_key_file.resolve(strict=True)
+            runpod_key_metadata = supplied_runpod_key_path.lstat()
+            runpod_key_sha256 = hashlib.sha256(supplied_runpod_key_path.read_bytes()).hexdigest()
+        else:
+            supplied_runpod_key_path = None
+            rendered_runpod_key_path = None
+            runpod_key_metadata = None
+            runpod_key_sha256 = None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError(
+            "GCP WIF or configured RunPod credential metadata is invalid"
+        ) from error
+    if (
+        (
+            runpod_enabled
+            and (
+                supplied_runpod_key_path != rendered_runpod_key_path
+                or not _private_artifact(supplied_runpod_key_path)
+                or runpod_key_metadata.st_uid != 10001
+                or stat.S_ISLNK(runpod_key_metadata.st_mode)
+                or not stat.S_ISREG(runpod_key_metadata.st_mode)
+                or runpod_key_metadata.st_mode & 0o077
+                or runpod_key_metadata.st_size < 16
+            )
+        )
+        or stat.S_ISLNK(gcp_wif_metadata.st_mode)
+        or not stat.S_ISREG(gcp_wif_metadata.st_mode)
+        or not isinstance(gcp_wif_document, dict)
+        or gcp_wif_document.get("type") != "external_account"
+    ):
+        raise PreflightError(
+            "GCP WIF or RunPod credential file does not match the private host contract"
+        )
+    exchange_profiles_by_provider: dict[str, dict[str, Any]] = {}
+    if isinstance(exchange_profiles, dict):
+        for profile in exchange_profiles.values():
+            if isinstance(profile, dict) and profile.get("provider") in cloud_provider_ids:
+                provider = profile["provider"]
+                if provider in exchange_profiles_by_provider:
+                    raise PreflightError(f"Exchange has multiple {provider} authorization profiles")
+                exchange_profiles_by_provider[provider] = profile
+    if set(exchange_profiles_by_provider) != cloud_provider_ids:
+        raise PreflightError("Exchange cloud profiles differ from the configured provider set")
+    for provider in sorted(cloud_provider_ids):
+        profile = cloud_by_provider[provider]
+        exchange_profile = exchange_profiles_by_provider.get(provider)
+        if not isinstance(exchange_profile, dict):
+            raise PreflightError(f"Exchange lacks the {provider} authorization profile")
+        selectors: dict[str, Any] = {}
+        if provider == "azure":
+            selectors = {
+                "clientId": cloud_environment.get("AZURE_CLIENT_ID"),
+                "subscriptionId": cloud_environment.get("CYRENE_CLOUD_MGMT_AZURE_SUBSCRIPTION_ID"),
+            }
+        elif provider == "gcp":
+            selectors = {
+                "wifConfigPath": str(gcp_wif_file.resolve(strict=True)),
+                "wifConfigSha256": hashlib.sha256(gcp_wif_bytes).hexdigest(),
+                "wifAudience": gcp_wif_document.get("audience"),
+                "workloadIdentityProvider": gcp_wif_document.get("audience"),
+            }
+        elif provider == "runpod":
+            selectors = {
+                "keyFilePath": str(supplied_runpod_key_path),
+                "keyFileSizeBytes": runpod_key_metadata.st_size,
+                "keyFileMode": stat.S_IMODE(runpod_key_metadata.st_mode),
+                "keyFileSha256": runpod_key_sha256,
+            }
+        scope_inputs[provider] = {
+            "bindingId": cloud_binding_id,
+            "profile": profile,
+            "exchangeProfile": exchange_profile,
+            "identitySelectors": selectors,
+        }
+    digests = {provider: _canonical_json_digest(value) for provider, value in scope_inputs.items()}
+    return {
+        "expectedProviderScopeDigests": digests,
+        "huggingfaceRepositoryScopeDigestSha256": repository_scope_digest,
+    }
+
+
+def _read_timestamp(value: Any, label: str) -> datetime:
+    """Parse one UTC RFC 3339 timestamp without accepting naive or future values."""
+
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise PreflightError(f"{label} timestamp is malformed")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as error:
+        raise PreflightError(f"{label} timestamp is malformed") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise PreflightError(f"{label} timestamp must use UTC")
+    now = datetime.now(UTC)
+    if parsed > now or now - parsed > timedelta(minutes=15):
+        raise PreflightError(f"{label} evidence is outside the 15-minute freshness window")
+    return parsed
+
+
+def _validate_connector_auth_readonly_evidence(
+    path: Path | None,
+    *,
+    expected_task_id: str | None,
+    expected_owner: str,
+    expected_scope_digests: dict[str, str],
+) -> str:
+    """Accept a fresh operator-recorded provider probe receipt without treating it as proof."""
+
+    if path is None:
+        raise PreflightError("fresh connector auth read-only evidence is required")
+    if path.is_symlink() or not path.is_file() or not _private_artifact(path):
+        raise PreflightError("connector auth evidence must be a regular private .artifacts file")
+    metadata = path.stat()
+    if metadata.st_uid != 10001 or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise PreflightError("connector auth evidence must be UID 10001 mode 0600")
+    try:
+        raw = path.read_bytes()
+        evidence = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError("connector auth evidence is invalid JSON") from error
+    fields = {
+        "schemaVersion",
+        "status",
+        "evidenceClass",
+        "executionPath",
+        "taskId",
+        "owner",
+        "verifiedAt",
+        "providers",
+    }
+    if (
+        not isinstance(evidence, dict)
+        or set(evidence) != fields
+        or evidence.get("schemaVersion") != "cyrene-connector-auth-readonly-evidence-v1"
+        or evidence.get("status") != "OPERATOR_ATTESTED"
+        or evidence.get("evidenceClass") != "OPERATOR_RECORDED_REAL_PROBE"
+        or evidence.get("executionPath") != "provider_identity_bootstrap_api"
+        or not isinstance(evidence.get("taskId"), str)
+        or not evidence["taskId"]
+        or (expected_task_id is not None and evidence["taskId"] != expected_task_id)
+        or evidence.get("owner") != expected_owner
+        or not isinstance(evidence.get("providers"), list)
+    ):
+        raise PreflightError(
+            "connector auth evidence does not match the closed operator-recorded schema"
+        )
+    _read_timestamp(evidence.get("verifiedAt"), "connector auth verifiedAt")
+    expected_providers = set(expected_scope_digests)
+    providers: dict[str, dict[str, Any]] = {}
+    for row in evidence["providers"]:
+        if not isinstance(row, dict) or set(row) != {
+            "providerId",
+            "identityStatus",
+            "authMode",
+            "profileScopeDigestSha256",
+            "readOperations",
+        }:
+            raise PreflightError("connector auth provider evidence has an unsupported schema")
+        provider = row.get("providerId")
+        if not isinstance(provider, str) or provider in providers:
+            raise PreflightError("connector auth evidence has duplicate provider rows")
+        providers[provider] = row
+    if set(providers) != expected_providers:
+        raise PreflightError(
+            "connector auth evidence must include exactly the enabled provider profiles"
+        )
+    for provider, row in providers.items():
+        if (
+            row.get("identityStatus") != "OPERATOR_RECORDED"
+            or row.get("authMode") not in CONNECTOR_AUTH_READONLY_AUTH_MODES[provider]
+            or row.get("profileScopeDigestSha256") != expected_scope_digests[provider]
+        ):
+            raise PreflightError(
+                f"{provider} operator-recorded identity receipt does not match its profile scope"
+            )
+        operations = row.get("readOperations")
+        expected_operations = CONNECTOR_AUTH_READONLY_OPERATIONS[provider]
+        if not isinstance(operations, list) or len(operations) != len(expected_operations):
+            raise PreflightError(f"{provider} evidence must contain its fixed read-only operations")
+        observed_operations: set[str] = set()
+        for operation in operations:
+            if not isinstance(operation, dict) or set(operation) != {
+                "operationId",
+                "outcome",
+                "observedAt",
+                "resultDigestSha256",
+            }:
+                raise PreflightError(
+                    f"{provider} read operation evidence has an unsupported schema"
+                )
+            operation_id = operation.get("operationId")
+            digest = operation.get("resultDigestSha256")
+            if (
+                not isinstance(operation_id, str)
+                or operation_id in observed_operations
+                or operation_id not in expected_operations
+                or operation.get("outcome") != "SUCCEEDED"
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            ):
+                raise PreflightError(
+                    f"{provider} operation evidence is not a fixed successful read"
+                )
+            observed_operations.add(operation_id)
+            observed_at = _read_timestamp(operation.get("observedAt"), f"{provider} {operation_id}")
+            verified_at = datetime.fromisoformat(
+                evidence["verifiedAt"][:-1] + "+00:00"
+                if evidence["verifiedAt"].endswith("Z")
+                else evidence["verifiedAt"]
+            )
+            if observed_at > verified_at:
+                raise PreflightError(
+                    f"{provider} read operation occurred after evidence verification"
+                )
+        if observed_operations != expected_operations:
+            raise PreflightError(f"{provider} evidence is missing a required read operation")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _validate_new_provider_bindings_readonly(
+    document: dict[str, Any], expected_provider_ids: set[str]
+) -> None:
+    """Require exact issued HF/cloud bindings with a read-only Exchange operation set."""
+
+    bindings = document.get("bindings") if isinstance(document, dict) else None
+    if not isinstance(bindings, list):
+        raise PreflightError("connector binding document is malformed")
+    if not expected_provider_ids <= {"huggingface", "azure", "gcp", "runpod"}:
+        raise PreflightError("activation provider set contains an unsupported connector")
+    selected = [
+        row
+        for row in bindings
+        if isinstance(row, dict) and row.get("providerId") in expected_provider_ids
+    ]
+    by_provider = {row["providerId"]: row for row in selected}
+    if len(selected) != len(expected_provider_ids) or set(by_provider) != expected_provider_ids:
+        raise PreflightError(
+            "activation must use exactly one Exchange-issued binding for every configured provider"
+        )
+    for provider in expected_provider_ids:
+        binding = by_provider[provider]
+        tools = binding.get("tools")
+        allowed_operations = CONNECTOR_MODEL_READONLY_OPERATIONS[provider]
+        if not isinstance(tools, list) or not tools:
+            raise PreflightError(f"{provider} read-only binding must expose at least one safe read")
+        operations: set[str] = set()
+        for tool in tools:
+            operation = tool.get("operationId") if isinstance(tool, dict) else None
+            if (
+                not isinstance(operation, str)
+                or operation not in allowed_operations
+                or tool.get("mutating") is not False
+                or operation in operations
+            ):
+                raise PreflightError(
+                    f"{provider} binding contains a write, CLI, duplicate, or non-allowlisted operation"
+                )
+            operations.add(operation)
 
 
 def _validate_huggingface_profile_selection(compose: dict[str, Any], mode: str) -> bool:
@@ -1053,6 +1652,28 @@ def _validate_profile_stage(compose: dict[str, Any], mode: str) -> None:
             raise PreflightError(
                 "RunPod CLI must read its key from the stage-3 mounted secret file"
             )
+    if mode == "connector-auth-readonly":
+        row = services.get("cloud-management-phase2")
+        if not isinstance(row, dict) or "cloud-phase2" not in row.get("profiles", []):
+            raise PreflightError("credential read-only activation must use cloud-phase2 profile")
+        runpod_enabled = "runpod" in row.get("profiles", [])
+        expected_cloud = {"azure", "gcp"} | ({"runpod"} if runpod_enabled else set())
+        _verify_provider_profiles(
+            row.get("environment", {}).get("CYRENE_CAPABILITY_CONFIGURATION_JSON", ""),
+            expected_cloud,
+        )
+        _verify_uami(row.get("environment", {}).get("AZURE_CLIENT_ID"))
+        _verify_azure_cli_scope(row)
+        if runpod_enabled:
+            if (
+                row.get("environment", {}).get("CYRENE_CLOUD_MGMT_RUNPOD_API_KEY_FILE")
+                != "/run/secrets/runpod-api-key"
+            ):
+                raise PreflightError(
+                    "configured RunPod CLI must read its key from the candidate secret mount"
+                )
+        elif row.get("environment", {}).get("CYRENE_CLOUD_MGMT_RUNPOD_API_KEY_FILE"):
+            raise PreflightError("unconfigured RunPod must not enter the Cloud Management profile")
     if mode == "cutover":
         cloud_service = services.get("cloud-management-phase2")
         if cloud_service:
@@ -1079,6 +1700,21 @@ def _validate_profile_stage(compose: dict[str, Any], mode: str) -> None:
                 raise PreflightError(
                     "RunPod CLI must read its key from the stage-3 mounted secret file"
                 )
+
+
+def _validate_exchange_authorization_cloud_runner_phase(
+    config: dict[str, Any], connector_auth_phase: str
+) -> None:
+    """Keep the single cloud monitor off during bootstrap and on after issuance."""
+
+    exchange = config.get("services", {}).get("exchange", {})
+    environment = exchange.get("environment", {}) if isinstance(exchange, dict) else {}
+    observed = environment.get("CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED", "false")
+    expected = "false" if connector_auth_phase == "provider-bootstrap" else "true"
+    if connector_auth_phase not in CONNECTOR_AUTH_READONLY_PHASES or observed != expected:
+        raise PreflightError(
+            f"Exchange AuthorizationCloudRunner must be {expected} during {connector_auth_phase}"
+        )
 
 
 def _validate_computer_runtime_boundary(compose: dict[str, Any]) -> None:
@@ -1391,6 +2027,11 @@ def _validate_exchange_profile_stage(compose: dict[str, Any], mode: str) -> None
     services = compose.get("services", {})
     service = services.get("exchange", {})
     environment = service.get("environment", {})
+    runner_enabled = environment.get("CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED", "false")
+    if runner_enabled not in {"true", "false"}:
+        raise PreflightError(
+            "Exchange AuthorizationCloudRunner must use exact lowercase true/false"
+        )
     encoded = environment.get("CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON", "")
     try:
         document = json.loads(encoded, object_pairs_hook=_unique_json_object)
@@ -1447,12 +2088,16 @@ def _validate_exchange_profile_stage(compose: dict[str, Any], mode: str) -> None
             raise PreflightError(
                 "Exchange authorizationCloud must be omitted when no cloud provider profiles are expected"
             )
+        if runner_enabled == "true":
+            raise PreflightError("AuthorizationCloudRunner cannot run without cloud profiles")
         return
 
     cloud = document.get("authorizationCloud")
     profiles = cloud.get("profiles") if isinstance(cloud, dict) else None
     if not isinstance(profiles, dict):
         raise PreflightError("Exchange requires the phase-scoped cloud provider profile map")
+    if runner_enabled == "true" and cloud.get("monitorIntervalSeconds") != 900:
+        raise PreflightError("AuthorizationCloudRunner must poll at the fixed 900-second interval")
     actual_providers = {
         profile.get("provider") for profile in profiles.values() if isinstance(profile, dict)
     }
@@ -1689,6 +2334,21 @@ def _validate_connector_bootstrap_config(
         raise PreflightError(
             "private connector bootstrap actor and provider set must match the approved Directory owner and CYRENE_HF_ENABLED"
         )
+    github_bootstrap = document.get("github")
+    if (
+        not isinstance(github_bootstrap, dict)
+        or github_bootstrap.get("expectedAccessMode") != "workspace_operator"
+    ):
+        raise PreflightError("GitHub connector bootstrap must require workspace_operator access")
+    if huggingface_enabled:
+        huggingface_bootstrap = document.get("huggingface")
+        if (
+            not isinstance(huggingface_bootstrap, dict)
+            or huggingface_bootstrap.get("expectedAccessMode") != "workspace_operator"
+        ):
+            raise PreflightError(
+                "Hugging Face connector bootstrap must require workspace_operator access"
+            )
 
 
 def _validate_teams_connector_config(service: dict[str, Any], navigator: dict[str, Any]) -> None:
@@ -1797,6 +2457,386 @@ def _validate_teams_delivery_spool(config: dict[str, Any]) -> None:
     _validate_teams_delivery_state_directory(Path(source))
 
 
+def _validate_credential_notification_activation(
+    config: dict[str, Any],
+    *,
+    config_dir: Path,
+    anchor_file: Path | None,
+    provenance_file: Path | None,
+    expected_provider_ids: set[str],
+) -> dict[str, str]:
+    """Bind the owner-only notification DTO to the real anchor and Exchange system profile."""
+
+    services = config.get("services", {})
+    navigator = services.get("navigator", {})
+    environment = navigator.get("environment", {}) if isinstance(navigator, dict) else {}
+    if environment.get("TEAMS_CREDENTIAL_NOTIFICATIONS_CONFIG_FILE") != (
+        "/run/secrets/teams-credential-notifications.json"
+    ):
+        raise PreflightError("Navigator credential notification config path is not fixed")
+    mounts = [
+        row
+        for row in navigator.get("configs", [])
+        if isinstance(row, dict)
+        and row.get("source") == "teams-credential-notifications"
+        and row.get("target") == "/run/secrets/teams-credential-notifications.json"
+    ]
+    resolved = config.get("configs", {}).get("teams-credential-notifications", {})
+    source_text = resolved.get("file") if isinstance(resolved, dict) else None
+    if len(mounts) != 1 or not isinstance(source_text, str):
+        raise PreflightError("credential notification config must use its one fixed Compose mount")
+    config_path = Path(source_text)
+    if config_path.resolve(strict=True) != (
+        config_dir / "teams-credential-notifications.json"
+    ).resolve(strict=True):
+        raise PreflightError(
+            "credential notification config must stay in the private config directory"
+        )
+    if anchor_file is None or anchor_file.is_symlink() or not anchor_file.is_file():
+        raise PreflightError("a separate private owner/destination notification anchor is required")
+    if provenance_file is None or provenance_file.is_symlink() or not provenance_file.is_file():
+        raise PreflightError("a private credential notification provenance receipt is required")
+    if not _private_artifact(anchor_file) or not _private_artifact(provenance_file):
+        raise PreflightError(
+            "credential notification anchor and provenance must stay under private umbrella artifacts"
+        )
+    for path, label in (
+        (config_path, "config"),
+        (anchor_file, "anchor"),
+        (provenance_file, "provenance"),
+    ):
+        metadata = path.stat()
+        if (
+            metadata.st_uid != 10001
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or path.is_symlink()
+            or not path.is_file()
+        ):
+            raise PreflightError(
+                f"credential notification {label} must be owner-only UID 10001 mode 0600"
+            )
+    try:
+        document = json.loads(
+            config_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
+        )
+        provenance = json.loads(
+            provenance_file.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError(
+            "credential notification config or provenance is invalid JSON"
+        ) from error
+    expected_fields = {
+        "schemaVersion",
+        "organizationId",
+        "workspaceId",
+        "owner",
+        "connections",
+        "destination",
+        "exchange",
+    }
+    optional_fields = {"pollIntervalMs"}
+    if (
+        not isinstance(document, dict)
+        or set(document) - expected_fields - optional_fields
+        or not expected_fields <= set(document)
+        or document.get("schemaVersion") != 1
+        or isinstance(document.get("schemaVersion"), bool)
+        or (
+            "pollIntervalMs" in document
+            and (
+                isinstance(document["pollIntervalMs"], bool)
+                or not isinstance(document["pollIntervalMs"], int)
+                or not 60_000 <= document["pollIntervalMs"] <= 900_000
+            )
+        )
+    ):
+        raise PreflightError("credential notification document has an unsupported closed schema")
+    operator = services.get("directory-operator", {}).get("environment", {})
+    authority = services.get("workspace-authority", {}).get("environment", {})
+    tenant = services.get("navigator", {}).get("environment", {}).get("TEAMS_TENANT_ID")
+    team_ids = (
+        services.get("navigator", {})
+        .get("environment", {})
+        .get("TEAMS_ALLOWED_TEAM_IDS", "")
+        .split(",")
+    )
+    expected_owner = {
+        "actorAadObjectId": operator.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID"),
+        "issuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
+        "subject": operator.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID"),
+        "tenantId": tenant,
+    }
+    if (
+        document.get("organizationId") != authority.get("CYRENE_ORGANIZATION_ID")
+        or document.get("workspaceId") != authority.get("CYRENE_WORKSPACE_ID")
+        or document.get("owner") != expected_owner
+    ):
+        raise PreflightError(
+            "credential notification owner scope differs from Directory/Teams identity"
+        )
+    connections = document.get("connections")
+    if not isinstance(connections, list) or len(connections) != len(expected_provider_ids):
+        raise PreflightError(
+            "credential notification config must pin exactly the configured issued provider connections"
+        )
+    short_names = {"huggingface": "hf", "azure": "azure", "gcp": "gcp", "runpod": "runpod"}
+    if not expected_provider_ids <= set(short_names):
+        raise PreflightError("credential notification provider set is unsupported")
+    provider_map = {short_names[provider]: provider for provider in sorted(expected_provider_ids)}
+    expected_binding_ids: dict[str, str] = {}
+    try:
+        binding_document = json.loads(
+            (config_dir / "connector-bindings.json").read_text(encoding="utf-8"),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError(
+            "issued connector bindings are unavailable for notification validation"
+        ) from error
+    for binding in (
+        binding_document.get("bindings", []) if isinstance(binding_document, dict) else []
+    ):
+        if isinstance(binding, dict) and binding.get("providerId") in expected_provider_ids:
+            provider_id = str(binding["providerId"])
+            if provider_id in expected_binding_ids:
+                raise PreflightError(
+                    f"credential notification binding set contains multiple {provider_id} connections"
+                )
+            expected_binding_ids[provider_id] = str(binding.get("connectionRef", ""))
+    if set(expected_binding_ids) != expected_provider_ids:
+        raise PreflightError(
+            "credential notification binding set differs from configured providers"
+        )
+    observed_connections: dict[str, str] = {}
+    uuid_pattern = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    for row in connections:
+        if not isinstance(row, dict) or set(row) != {"connectionId", "provider"}:
+            raise PreflightError("credential notification connection has an unsupported shape")
+        provider = row.get("provider")
+        connection_id = row.get("connectionId")
+        if (
+            provider not in provider_map
+            or provider in observed_connections
+            or not isinstance(connection_id, str)
+            or re.fullmatch(uuid_pattern, connection_id) is None
+        ):
+            raise PreflightError(
+                "credential notification connection is not an issued provider UUID"
+            )
+        observed_connections[provider] = connection_id
+    expected_connection_ids = {
+        short_name: expected_binding_ids.get(provider_id)
+        for short_name, provider_id in provider_map.items()
+    }
+    if observed_connections != expected_connection_ids:
+        raise PreflightError(
+            "credential notification IDs differ from the issued connector bindings"
+        )
+    destination = document.get("destination")
+    if not isinstance(destination, dict) or set(destination) != {
+        "tenantId",
+        "teamId",
+        "channelId",
+        "conversationId",
+        "rootThreadId",
+        "serviceUrl",
+    }:
+        raise PreflightError("credential notification destination has an unsupported shape")
+    if (
+        destination.get("tenantId") != tenant
+        or destination.get("teamId") not in team_ids
+        or not all(
+            isinstance(destination.get(name), str)
+            and 1 <= len(destination[name]) <= maximum
+            and destination[name].isprintable()
+            for name, maximum in (
+                ("teamId", 256),
+                ("channelId", 256),
+                ("conversationId", 512),
+                ("rootThreadId", 512),
+            )
+        )
+        or not destination["rootThreadId"].isascii()
+        or not destination["rootThreadId"].isdecimal()
+        or int(destination["rootThreadId"]) == 0
+    ):
+        raise PreflightError(
+            "credential notification destination differs from the admitted Teams scope"
+        )
+    service_url = destination.get("serviceUrl")
+    try:
+        parsed_service_url = urlsplit(service_url)
+        parsed_port = parsed_service_url.port
+    except (TypeError, ValueError) as error:
+        raise PreflightError("credential notification service URL is malformed") from error
+    if (
+        parsed_service_url.scheme != "https"
+        or parsed_service_url.username is not None
+        or parsed_service_url.password is not None
+        or parsed_port not in {None, 443}
+        or parsed_service_url.query
+        or parsed_service_url.fragment
+        or parsed_service_url.hostname
+        not in {"smba.trafficmanager.net", "smba.infra.teams.microsoft.com"}
+        or not parsed_service_url.path.startswith("/")
+        or not parsed_service_url.path
+        or len(service_url) > 512
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in service_url)
+        or "?" in service_url
+        or "#" in service_url
+        or "%" in service_url
+        or "\\" in service_url
+        or "//" in parsed_service_url.path
+    ):
+        raise PreflightError(
+            "credential notification service URL is outside the official Teams endpoint"
+        )
+    service_path_parts = [part for part in parsed_service_url.path.split("/") if part]
+    regional_path = (
+        len(service_path_parts) == 1 and service_path_parts[0] in {"amer", "in", "emea", "apac"}
+    ) or (
+        len(service_path_parts) == 2
+        and service_path_parts[0] in {"amer", "in", "emea", "apac"}
+        and service_path_parts[1].lower() == tenant.lower()
+        and re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            service_path_parts[1],
+        )
+        is not None
+    )
+    if (
+        parsed_service_url.hostname == "smba.infra.teams.microsoft.com"
+        and service_path_parts != ["teams"]
+    ) or (
+        parsed_service_url.hostname == "smba.trafficmanager.net"
+        and service_path_parts != ["teams"]
+        and not regional_path
+    ):
+        raise PreflightError("credential notification Teams route is outside its tenant region")
+    exchange = document.get("exchange")
+    if (
+        not isinstance(exchange, dict)
+        or set(exchange) != {"profileRef"}
+        or not isinstance(exchange.get("profileRef"), str)
+        or not exchange["profileRef"]
+        or len(exchange["profileRef"]) > 128
+        or not exchange["profileRef"].isprintable()
+        or PLACEHOLDER_RE.search(exchange["profileRef"])
+    ):
+        raise PreflightError("notification Exchange profile must come from its frozen provenance")
+
+    exchange_service = services.get("exchange", {})
+    exchange_document = _json_environment_object(
+        exchange_service,
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON",
+        "Exchange integration",
+    )
+    connector_host = exchange_document.get("connectorHost")
+    teams_profile = (
+        connector_host.get("teamsMessages") if isinstance(connector_host, dict) else None
+    )
+    system_notification = (
+        teams_profile.get("systemNotification") if isinstance(teams_profile, dict) else None
+    )
+    if (
+        not isinstance(teams_profile, dict)
+        or teams_profile.get("connectionRef")
+        != services.get("navigator", {}).get("environment", {}).get("TEAMS_EXCHANGE_CONNECTION_REF")
+        or not isinstance(system_notification, dict)
+        or set(system_notification) != {"profileRef", "ownerSubject", "fixedRoute"}
+        or system_notification.get("profileRef") != exchange["profileRef"]
+        or system_notification.get("ownerSubject") != expected_owner["subject"]
+        or system_notification.get("fixedRoute") != destination
+    ):
+        raise PreflightError(
+            "Exchange systemNotification profile must bind the exact owner and fixed Teams destination"
+        )
+
+    deployment_config = Path(__file__).resolve().parent / "config"
+    notification_schema = deployment_config / "teams-credential-notifications.schema.json"
+    exchange_profile_schema = (
+        deployment_config / "teams-credential-notifications-exchange-profile.schema.json"
+    )
+    notification_template = deployment_config / "teams-credential-notifications.template.json"
+    exchange_profile_template = (
+        deployment_config / "teams-credential-notifications-exchange-profile.template.json"
+    )
+    source_files = (
+        notification_schema,
+        exchange_profile_schema,
+        notification_template,
+        exchange_profile_template,
+    )
+    if any(path.is_symlink() or not path.is_file() for path in source_files):
+        raise PreflightError("credential notification schemas and templates are unavailable")
+
+    candidate_config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    exchange_config_sha256 = _canonical_json_digest(exchange_document)
+    anchor_sha256 = hashlib.sha256(anchor_file.read_bytes()).hexdigest()
+    owner_scope_sha256 = _canonical_json_digest(
+        {
+            "organizationId": document["organizationId"],
+            "workspaceId": document["workspaceId"],
+            "owner": document["owner"],
+        }
+    )
+    destination_sha256 = _canonical_json_digest(destination)
+    schema_sha256 = hashlib.sha256(notification_schema.read_bytes()).hexdigest()
+    receipt_fields = {
+        "schemaVersion",
+        "sourceAnchorSha256",
+        "sourceTaskId",
+        "candidateConfigSha256",
+        "candidateExchangeHostConfigSha256",
+        "schemaSha256",
+        "ownerScopeSha256",
+        "destinationSha256",
+        "exchangeConnectionRef",
+        "exchangeProfileRef",
+        "sourceWorkspaceCommit",
+        "generatedAt",
+    }
+    if (
+        not isinstance(provenance, dict)
+        or set(provenance) != receipt_fields
+        or provenance.get("schemaVersion") != "cyrene-teams-credential-notifications-provenance-v1"
+        or provenance.get("sourceAnchorSha256") != anchor_sha256
+        or provenance.get("candidateConfigSha256") != candidate_config_sha256
+        or provenance.get("candidateExchangeHostConfigSha256") != exchange_config_sha256
+        or provenance.get("schemaSha256") != schema_sha256
+        or provenance.get("ownerScopeSha256") != owner_scope_sha256
+        or provenance.get("destinationSha256") != destination_sha256
+        or provenance.get("exchangeConnectionRef") != teams_profile.get("connectionRef")
+        or provenance.get("exchangeProfileRef") != exchange["profileRef"]
+        or not isinstance(provenance.get("sourceTaskId"), str)
+        or not provenance["sourceTaskId"]
+        or re.fullmatch(r"[0-9a-f]{40,64}", provenance.get("sourceWorkspaceCommit", "")) is None
+    ):
+        raise PreflightError(
+            "credential notification provenance is stale or differs from frozen host anchors"
+        )
+    _read_timestamp(provenance.get("generatedAt"), "credential notification provenance")
+    return {
+        "credentialNotificationConfigSha256": candidate_config_sha256,
+        "credentialNotificationAnchorSha256": anchor_sha256,
+        "credentialNotificationProvenanceSha256": hashlib.sha256(
+            provenance_file.read_bytes()
+        ).hexdigest(),
+        "credentialNotificationExchangeConfigSha256": exchange_config_sha256,
+        "credentialNotificationSchemaSha256": schema_sha256,
+        "credentialNotificationExchangeProfileSchemaSha256": hashlib.sha256(
+            exchange_profile_schema.read_bytes()
+        ).hexdigest(),
+        "credentialNotificationTemplateSha256": hashlib.sha256(
+            notification_template.read_bytes()
+        ).hexdigest(),
+        "credentialNotificationExchangeProfileTemplateSha256": hashlib.sha256(
+            exchange_profile_template.read_bytes()
+        ).hexdigest(),
+    }
+
+
 def _validate_teams_delivery_state_directory(state_dir: Path) -> None:
     """Require the spool bind source to be private, persistent, and owned by ingress."""
 
@@ -1853,7 +2893,7 @@ def _validate_caddyfile(service: dict[str, Any], mode: str) -> None:
         or 'respond "not found" 404' not in lines
     ):
         raise PreflightError("Caddy callback must reject other methods and paths")
-    if mode == "cutover":
+    if mode in {"cutover", "connector-auth-readonly"}:
         if "tls internal" in contents or "disable_http_challenge" not in lines:
             raise PreflightError(
                 "public Caddyfile must use public ACME TLS-ALPN without internal certificates or HTTP-01"
@@ -1912,7 +2952,7 @@ def _validate_compose(
                     raise PreflightError(
                         "staging ingress must use a loopback high port rather than host 443"
                     )
-            if mode == "cutover":
+            if mode in {"cutover", "connector-auth-readonly"}:
                 if {published for published, _ in targets.values()} != {"443"}:
                     raise PreflightError("cutover ingress must bind standard HTTPS port 443 only")
                 if any(host_ip in {"127.0.0.1", "::1"} for _, host_ip in targets.values()):
@@ -1921,8 +2961,15 @@ def _validate_compose(
         if profiles & {"directory-bootstrap", "directory-operator"}:
             continue
         if name == "cloud-management-phase2":
-            active_phase = "runpod" if mode == "stage3" else "cloud-phase2"
-            if mode not in {"stage2", "stage3", "cutover"} or active_phase not in profiles:
+            active_phase = (
+                "runpod"
+                if mode == "stage3" or (mode == "connector-auth-readonly" and "runpod" in profiles)
+                else "cloud-phase2"
+            )
+            if (
+                mode not in {"stage2", "stage3", "cutover", "connector-auth-readonly"}
+                or active_phase not in profiles
+            ):
                 continue
         memory_value = service.get("mem_limit")
         memory_bytes = _memory_limit_bytes(memory_value)
@@ -1950,6 +2997,7 @@ def _memory_headroom(
     available_mib: int,
     cgroup_budget_mib: float,
     minimum_available_mib: int,
+    connector_auth_phase: str | None = None,
 ) -> dict[str, Any]:
     """Gate new phase memory against real MemAvailable and retain a staging-only state."""
 
@@ -1962,6 +3010,20 @@ def _memory_headroom(
         if not isinstance(limit, int) or limit <= 0:
             raise PreflightError("stage 2 Cloud Management memory limit is unavailable")
         additional_mib = math.ceil(limit / MIB)
+    elif mode == "connector-auth-readonly":
+        if connector_auth_phase == "provider-bootstrap":
+            for service_name in ("huggingface", "cloud-management-phase2"):
+                service = config.get("services", {}).get(service_name)
+                limit = (
+                    _memory_limit_bytes(service.get("mem_limit"))
+                    if isinstance(service, dict)
+                    else None
+                )
+                if limit is None:
+                    raise PreflightError(f"{service_name} memory increment is unavailable")
+                additional_mib += math.ceil(limit / MIB)
+        elif connector_auth_phase != "issued-connector-activation":
+            raise PreflightError("connector auth phase is required for read-only capacity planning")
     required_mib = minimum_available_mib + additional_mib
     if available_mib < required_mib:
         raise PreflightError(
@@ -2005,10 +3067,19 @@ def _compose_config(
 
 
 def _validate_secrets_and_configs(
-    config: dict[str, Any], secrets_dir: Path, config_dir: Path, mode: str
-) -> None:
+    config: dict[str, Any],
+    secrets_dir: Path,
+    config_dir: Path,
+    mode: str,
+    *,
+    connector_auth_phase: str | None = None,
+    notification_anchor_file: Path | None = None,
+    notification_provenance_file: Path | None = None,
+    candidate_runpod_key_file: Path | None = None,
+) -> dict[str, str]:
     """Check every file-backed secret/config path while keeping its contents private."""
 
+    notification_inputs: dict[str, str] = {}
     for directory, name in ((secrets_dir, "secret"), (config_dir, "configuration")):
         if not _private_artifact(directory) or directory.is_symlink() or not directory.is_dir():
             raise PreflightError(f"private {name} directory must remain under umbrella .artifacts")
@@ -2027,9 +3098,19 @@ def _validate_secrets_and_configs(
     if not huggingface_enabled and present_huggingface_secrets:
         raise PreflightError("GitHub-only Compose must not define Hugging Face secrets")
     phase_secrets = {
-        "cloud-management-exchange-hmac-key": {"stage2", "stage3", "cutover"},
-        "gcp-wif-credential-config": {"stage2", "stage3", "cutover"},
-        "runpod-api-key": {"stage3", "cutover"},
+        "cloud-management-exchange-hmac-key": {
+            "stage2",
+            "stage3",
+            "cutover",
+            "connector-auth-readonly",
+        },
+        "gcp-wif-credential-config": {
+            "stage2",
+            "stage3",
+            "cutover",
+            "connector-auth-readonly",
+        },
+        "runpod-api-key": {"stage3", "cutover", "connector-auth-readonly"},
     }
     for secret_name, secret in resolved_secrets.items():
         if secret_name in phase_secrets and mode not in phase_secrets[secret_name]:
@@ -2039,27 +3120,91 @@ def _validate_secrets_and_configs(
             raise PreflightError(f"secret {secret_name} must resolve to one host file")
         path = Path(source)
         if secret_name == "account-center-huggingface-oauth-source":
-            onboarding_directory = path.parent.parent
-            if (
-                path.name != "huggingface-oauth.json"
-                or path.parent.name != "private"
-                or onboarding_directory.name != "onboarding"
-                or not _private_artifact(onboarding_directory)
-                or onboarding_directory.is_symlink()
-                or not onboarding_directory.is_dir()
-                or onboarding_directory.stat().st_uid != 10001
-                or onboarding_directory.stat().st_mode & 0o077
-                or not _private_artifact(path.parent)
-                or path.parent.is_symlink()
-                or not path.parent.is_dir()
-                or path.parent.stat().st_uid != 10001
-                or path.parent.stat().st_mode & 0o077
-            ):
-                raise PreflightError(
-                    "Hugging Face OAuth bootstrap must stay in its owner-only private onboarding directory"
-                )
+            if mode == "connector-auth-readonly":
+                candidate_directory = path.parent
+                candidates_directory = candidate_directory.parent
+                private_directory = candidates_directory.parent
+                onboarding_directory = private_directory.parent
+                if (
+                    path.name != "huggingface-oauth.json"
+                    or not re.fullmatch(r"[0-9a-f]{32}", candidate_directory.name)
+                    or candidates_directory.name != "provider-candidates"
+                    or private_directory.name != "private"
+                    or onboarding_directory.name != "onboarding"
+                    or not _private_artifact(onboarding_directory)
+                    or onboarding_directory.is_symlink()
+                    or not onboarding_directory.is_dir()
+                    or onboarding_directory.stat().st_uid != 10001
+                    or onboarding_directory.stat().st_mode & 0o077
+                    or not _private_artifact(private_directory)
+                    or private_directory.is_symlink()
+                    or not private_directory.is_dir()
+                    or private_directory.stat().st_uid != 10001
+                    or stat.S_IMODE(private_directory.stat().st_mode) != 0o700
+                    or not _private_artifact(candidates_directory)
+                    or candidates_directory.is_symlink()
+                    or not candidates_directory.is_dir()
+                    or candidates_directory.stat().st_uid != 10001
+                    or stat.S_IMODE(candidates_directory.stat().st_mode) != 0o700
+                    or not _private_artifact(candidate_directory)
+                    or candidate_directory.is_symlink()
+                    or not candidate_directory.is_dir()
+                    or candidate_directory.stat().st_uid != 10001
+                    or stat.S_IMODE(candidate_directory.stat().st_mode) != 0o700
+                ):
+                    raise PreflightError(
+                        "candidate HF OAuth seed must stay in its versioned owner-only onboarding bundle"
+                    )
+                if stat.S_IMODE(path.stat().st_mode) != 0o400:
+                    raise PreflightError(
+                        "candidate HF OAuth seed must use owner-read-only mode 0400"
+                    )
+            else:
+                onboarding_directory = path.parent.parent
+                if (
+                    path.name != "huggingface-oauth.json"
+                    or path.parent.name != "private"
+                    or onboarding_directory.name != "onboarding"
+                    or not _private_artifact(onboarding_directory)
+                    or onboarding_directory.is_symlink()
+                    or not onboarding_directory.is_dir()
+                    or onboarding_directory.stat().st_uid != 10001
+                    or onboarding_directory.stat().st_mode & 0o077
+                    or not _private_artifact(path.parent)
+                    or path.parent.is_symlink()
+                    or not path.parent.is_dir()
+                    or path.parent.stat().st_uid != 10001
+                    or path.parent.stat().st_mode & 0o077
+                ):
+                    raise PreflightError(
+                        "Hugging Face OAuth bootstrap must stay in its owner-only private onboarding directory"
+                    )
             _secret_file(path, secret_name)
             _validate_huggingface_oauth_source(path)
+            continue
+        if secret_name == "runpod-api-key" and mode == "connector-auth-readonly":
+            if candidate_runpod_key_file is None:
+                raise PreflightError("an explicit candidate RunPod key file is required")
+            try:
+                expected_key_path = candidate_runpod_key_file.resolve(strict=True)
+                rendered_key_path = path.resolve(strict=True)
+                metadata = expected_key_path.lstat()
+            except OSError as error:
+                raise PreflightError("candidate RunPod key file is unavailable") from error
+            if (
+                expected_key_path != rendered_key_path
+                or not _private_artifact(expected_key_path)
+                or expected_key_path.is_symlink()
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != 10001
+                or metadata.st_mode & 0o077
+                or stat.S_IMODE(metadata.st_mode) != 0o400
+                or metadata.st_size < 16
+            ):
+                raise PreflightError(
+                    "RunPod Compose secret must be the exact owner-only candidate API key file"
+                )
+            _secret_file(expected_key_path, secret_name)
             continue
         if path.parent.resolve() != secrets_dir.resolve():
             raise PreflightError(
@@ -2089,18 +3234,22 @@ def _validate_secrets_and_configs(
         elif path.name == "connector-bindings.json":
             _validate_connector_bindings(
                 path,
-                _expected_connector_providers(config, mode),
+                _expected_connector_providers(config, mode, connector_auth_phase),
                 allow_empty=mode == "bootstrap",
             )
         elif path.name == "connector-tool-catalog.json":
             _validate_connector_tool_catalog(
                 path,
                 config_dir / "connector-bindings.json",
-                _expected_connector_providers(config, mode),
+                _expected_connector_providers(config, mode, connector_auth_phase),
                 allow_empty=mode == "bootstrap",
             )
         elif path.name == "navigator-principal-config.json":
-            _validate_principal_configuration(path, config.get("services", {}))
+            _validate_principal_configuration(
+                path,
+                config.get("services", {}),
+                connector_auth_phase=connector_auth_phase,
+            )
         elif path.name == "responsibility-targets.v1.json":
             _validate_responsibility_targets(
                 path,
@@ -2128,7 +3277,12 @@ def _validate_secrets_and_configs(
             huggingface_enabled=huggingface_enabled,
         )
     cloud_service = config.get("services", {}).get("cloud-management-phase2")
-    if isinstance(cloud_service, dict) and mode in {"stage2", "stage3", "cutover"}:
+    if isinstance(cloud_service, dict) and mode in {
+        "stage2",
+        "stage3",
+        "cutover",
+        "connector-auth-readonly",
+    }:
         _validate_cloud_acceptance_mount(cloud_service)
     oauth_mounts = [
         service_name
@@ -2145,6 +3299,47 @@ def _validate_secrets_and_configs(
     navigator = config.get("services", {}).get("navigator")
     if isinstance(teams_provider, dict) and isinstance(navigator, dict):
         _validate_teams_connector_config(teams_provider, navigator)
+    if mode == "connector-auth-readonly":
+        bindings_path = config_dir / "connector-bindings.json"
+        try:
+            bindings_document = json.loads(
+                bindings_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise PreflightError("connector read-only binding file is unavailable") from error
+        if connector_auth_phase == "provider-bootstrap":
+            _validate_exchange_authorization_cloud_runner_phase(config, connector_auth_phase)
+            if "teams-credential-notifications" in resolved_configs or any(
+                row.get("source") == "teams-credential-notifications"
+                for row in config.get("services", {}).get("navigator", {}).get("configs", [])
+                if isinstance(row, dict)
+            ):
+                raise PreflightError(
+                    "notification config must remain disabled during provider bootstrap"
+                )
+            notification_environment = (
+                config.get("services", {}).get("navigator", {}).get("environment", {})
+            )
+            if "TEAMS_CREDENTIAL_NOTIFICATIONS_CONFIG_FILE" in notification_environment:
+                raise PreflightError(
+                    "notification config path must remain absent during provider bootstrap"
+                )
+        elif connector_auth_phase == "issued-connector-activation":
+            _validate_exchange_authorization_cloud_runner_phase(config, connector_auth_phase)
+            expected_provider_ids = _expected_connector_providers(
+                config, mode, connector_auth_phase
+            ) - {"github", "computer"}
+            _validate_new_provider_bindings_readonly(bindings_document, expected_provider_ids)
+            notification_inputs = _validate_credential_notification_activation(
+                config,
+                config_dir=config_dir,
+                anchor_file=notification_anchor_file,
+                provenance_file=notification_provenance_file,
+                expected_provider_ids=expected_provider_ids,
+            )
+        else:
+            raise PreflightError("connector auth phase is required for read-only configuration")
+    return notification_inputs
 
 
 def _validate_runtime_config_file(path: Path, name: str) -> None:
@@ -3535,6 +4730,9 @@ def _validate_stage_acceptance_receipts(
 ) -> None:
     """Gate optional cloud profiles on verified prior-stage evidence and cleanup."""
 
+    if mode == "connector-auth-readonly":
+        # Direct identity probes are checked separately; this mode never claims lifecycle writes.
+        return
     services = config.get("services", {})
     operator = services.get("directory-operator", {}).get("environment", {})
     expected_owner = operator.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID")
@@ -3761,6 +4959,10 @@ def _validate_host_ports(
     ports = service.get("ports", [])
     if not ports:
         return
+    if mode == "connector-auth-readonly":
+        # The stage-transition planner verifies the exact active ingress owner and port before
+        # apply; the existing listener is expected to be occupied during a live cutover plan.
+        return
     listeners = _run(["ss", "-H", "-ltn"])
     if allow_owned_staging_ingress:
         staging_listeners = [
@@ -3950,11 +5152,62 @@ def run_preflight(
     minimum_mem_available_mib: int,
     allow_owned_staging_ingress: bool = False,
     recovery_only: bool = False,
+    connector_auth_phase: str | None = None,
+    connector_auth_evidence: Path | None = None,
+    connector_auth_task_id: str | None = None,
+    huggingface_seed_file: Path | None = None,
+    notification_anchor_file: Path | None = None,
+    notification_provenance_file: Path | None = None,
+    candidate_runpod_key_file: Path | None = None,
 ) -> dict[str, Any]:
     """Perform all read-only gates before the operator starts or cuts over services."""
 
-    if mode not in {"bootstrap", "staging", "cutover", "stage1", "stage2", "stage3"}:
-        raise PreflightError("mode must be bootstrap, staging, cutover, stage1, stage2, or stage3")
+    if mode not in {
+        "bootstrap",
+        "staging",
+        "cutover",
+        "stage1",
+        "stage2",
+        "stage3",
+        "connector-auth-readonly",
+    }:
+        raise PreflightError(
+            "mode must be bootstrap, staging, cutover, stage1, stage2, stage3, or connector-auth-readonly"
+        )
+    if mode == "connector-auth-readonly":
+        if connector_auth_phase not in CONNECTOR_AUTH_READONLY_PHASES:
+            raise PreflightError(
+                "connector auth phase must be provider-bootstrap or issued-connector-activation"
+            )
+        if connector_auth_evidence is None or not connector_auth_task_id:
+            raise PreflightError("connector auth evidence and its exact task ID are required")
+        if huggingface_seed_file is None:
+            raise PreflightError("the exact candidate HF seed path is required")
+        if connector_auth_phase == "provider-bootstrap" and (
+            notification_anchor_file is not None or notification_provenance_file is not None
+        ):
+            raise PreflightError("provider bootstrap must not include notification anchor inputs")
+        if connector_auth_phase == "issued-connector-activation" and (
+            notification_anchor_file is None or notification_provenance_file is None
+        ):
+            raise PreflightError(
+                "issued connector activation requires notification anchor/provenance"
+            )
+    elif any(
+        value is not None
+        for value in (
+            connector_auth_phase,
+            connector_auth_evidence,
+            connector_auth_task_id,
+            huggingface_seed_file,
+            notification_anchor_file,
+            notification_provenance_file,
+            candidate_runpod_key_file,
+        )
+    ):
+        raise PreflightError(
+            "connector auth inputs are accepted only in connector-auth-readonly mode"
+        )
     if allow_owned_staging_ingress and mode not in {"stage1", "staging"}:
         raise PreflightError("owned staging ingress cannot be used for bootstrap or cutover")
     if recovery_only and mode != "stage1":
@@ -4004,12 +5257,23 @@ def run_preflight(
             available_mib=_parse_memavailable(),
             cgroup_budget_mib=cgroup_budget_mib,
             minimum_available_mib=minimum_mem_available_mib,
+            connector_auth_phase=connector_auth_phase,
         )
     _validate_internal_https_topology(config)
-    _validate_profile_stage(config, mode)
+    profile_mode = "cutover" if mode == "connector-auth-readonly" else mode
+    _validate_profile_stage(config, profile_mode)
     _validate_provider_listener_addresses(config)
     _validate_teams_delivery_spool(config)
-    _validate_secrets_and_configs(config, secrets_dir.resolve(), config_dir.resolve(), mode)
+    notification_inputs = _validate_secrets_and_configs(
+        config,
+        secrets_dir.resolve(),
+        config_dir.resolve(),
+        mode,
+        connector_auth_phase=connector_auth_phase,
+        notification_anchor_file=notification_anchor_file,
+        notification_provenance_file=notification_provenance_file,
+        candidate_runpod_key_file=candidate_runpod_key_file,
+    )
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
     execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
     if execution_backend == "codebuddy-acp":
@@ -4040,6 +5304,24 @@ def run_preflight(
         azure_gcp_api_evidence=azure_gcp_api_evidence,
         runpod_api_evidence=runpod_api_evidence,
     )
+    connector_auth_evidence_sha256: str | None = None
+    connector_auth_expectations: dict[str, Any] | None = None
+    if mode == "connector-auth-readonly":
+        connector_auth_expectations = _connector_auth_scope_expectations(
+            config,
+            huggingface_seed_file=huggingface_seed_file,
+            runpod_key_file=candidate_runpod_key_file,
+        )
+        operator = config.get("services", {}).get("directory-operator", {}).get("environment", {})
+        expected_owner = operator.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID")
+        if not isinstance(expected_owner, str):
+            raise PreflightError("Directory operator subject is unavailable for connector evidence")
+        connector_auth_evidence_sha256 = _validate_connector_auth_readonly_evidence(
+            connector_auth_evidence,
+            expected_task_id=connector_auth_task_id,
+            expected_owner=expected_owner,
+            expected_scope_digests=connector_auth_expectations["expectedProviderScopeDigests"],
+        )
     if mode != "bootstrap":
         _validate_codebuddy_mount(config, secrets_dir.resolve())
     owned_staging_image_id = _validate_host_ports(
@@ -4055,12 +5337,15 @@ def run_preflight(
     result = {
         **memory,
         "mode": mode,
-        "deploymentReady": mode != "bootstrap" and not recovery_only,
+        "deploymentReady": mode not in {"bootstrap", "connector-auth-readonly"}
+        and not recovery_only,
         "status": (
             "RECOVERY_CONFIGURATION_ONLY"
             if recovery_only
             else "BOOTSTRAP_ONLY_NOT_FULL_READY"
             if mode == "bootstrap"
+            else "CREDENTIAL_READ_ONLY_RUNTIME_READY"
+            if mode == "connector-auth-readonly"
             else memory["status"]
         ),
         "hostArchitecture": platform.machine().lower(),
@@ -4073,6 +5358,21 @@ def run_preflight(
         "serviceCount": len(config["services"]),
         "imageLock": str(image_lock.resolve()),
     }
+    if mode == "connector-auth-readonly":
+        result.update(
+            {
+                "connectorAuthPhase": connector_auth_phase,
+                "credentialReadOnlyRuntimeReady": True,
+                "fullCloudWriteDeploymentReady": False,
+                "lifecycleAcceptance": "NOT_RUN",
+                "connectorAuthEvidenceSha256": connector_auth_evidence_sha256,
+                "providerIdentityEvidenceStatus": "OPERATOR_ATTESTED",
+                "providerIdentityEvidenceClass": "OPERATOR_RECORDED_REAL_PROBE",
+                "providerIdentityEvidenceCryptographicallyVerified": False,
+                **(connector_auth_expectations or {}),
+                **notification_inputs,
+            }
+        )
     if owned_staging_image_id is not None:
         result["ownedStagingIngressImageId"] = owned_staging_image_id
     return result
@@ -4084,7 +5384,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("bootstrap", "staging", "cutover", "stage1", "stage2", "stage3"),
+        choices=(
+            "bootstrap",
+            "staging",
+            "cutover",
+            "stage1",
+            "stage2",
+            "stage3",
+            "connector-auth-readonly",
+        ),
         required=True,
     )
     parser.add_argument("--compose-file", type=Path, action="append", required=True)
@@ -4097,6 +5405,13 @@ def main() -> int:
     parser.add_argument("--azure-gcp-api-evidence", type=Path)
     parser.add_argument("--runpod-ledger", type=Path)
     parser.add_argument("--runpod-api-evidence", type=Path)
+    parser.add_argument("--connector-auth-phase", choices=sorted(CONNECTOR_AUTH_READONLY_PHASES))
+    parser.add_argument("--connector-auth-evidence", type=Path)
+    parser.add_argument("--connector-auth-task-id")
+    parser.add_argument("--huggingface-seed-file", type=Path)
+    parser.add_argument("--notification-anchor-file", type=Path)
+    parser.add_argument("--notification-provenance-file", type=Path)
+    parser.add_argument("--candidate-runpod-key-file", type=Path)
     parser.add_argument("--docker-prefix", nargs="+", default=["sudo", "-n", "docker"])
     parser.add_argument("--max-memory-mib", type=int, default=3584)
     parser.add_argument("--max-cpus", type=float, default=1.95)
@@ -4127,6 +5442,13 @@ def main() -> int:
             required_free_gib=arguments.required_free_gib,
             minimum_mem_available_mib=arguments.minimum_mem_available_mib,
             allow_owned_staging_ingress=arguments.allow_owned_staging_ingress,
+            connector_auth_phase=arguments.connector_auth_phase,
+            connector_auth_evidence=arguments.connector_auth_evidence,
+            connector_auth_task_id=arguments.connector_auth_task_id,
+            huggingface_seed_file=arguments.huggingface_seed_file,
+            notification_anchor_file=arguments.notification_anchor_file,
+            notification_provenance_file=arguments.notification_provenance_file,
+            candidate_runpod_key_file=arguments.candidate_runpod_key_file,
         )
     except (OSError, PreflightError, BuildError, subprocess.SubprocessError) as error:
         print(f"Cloud deployment preflight blocked: {error}", file=sys.stderr)
