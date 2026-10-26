@@ -2952,6 +2952,16 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
     assert rendered["services"]["teams-provider"]["healthcheck"]["timeout"] == "20s"
     assert rendered["services"]["account-center"]["healthcheck"]["timeout"] == "5s"
     assert rendered["services"]["github-issues"]["healthcheck"]["timeout"] == "5s"
+    teams_ingress = rendered["services"]["teams-ingress"]
+    assert preflight._cpu_limit_decimal(teams_ingress["cpus"]) == preflight.Decimal("0.05")
+    ingress_healthcheck = teams_ingress["healthcheck"]
+    assert ingress_healthcheck["interval"] == "10s"
+    assert ingress_healthcheck["timeout"] == "20s"
+    assert ingress_healthcheck["retries"] == 8
+    assert ingress_healthcheck["start_period"] == "30s"
+    assert ingress_healthcheck["test"][:3] == ["CMD", "python", "-c"]
+    assert "/health/ready" in ingress_healthcheck["test"][3]
+    assert "timeout=3" in ingress_healthcheck["test"][3]
     provider_networks = {
         "account-center": {
             "account-private",

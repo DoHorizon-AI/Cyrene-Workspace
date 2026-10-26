@@ -667,7 +667,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3978/health/ready', timeout=3)"]
       interval: 10s
-      timeout: 4s
+      timeout: 20s
       retries: 8
       start_period: 30s
 
