@@ -112,6 +112,15 @@ def _install_internal_status_transport(
             stdout=json.dumps({"httpStatus": 200, "document": document}),
         )
 
+    monkeypatch.setattr(
+        runtime_update,
+        "_internal_control_probe_target",
+        lambda _prefix, container_id, **_kwargs: (
+            container_id,
+            "sha256:" + "a" * 64,
+            "/private/test-only-token",
+        ),
+    )
     monkeypatch.setattr(runtime_update, "_run_command", run_command)
     return requested_urls
 
