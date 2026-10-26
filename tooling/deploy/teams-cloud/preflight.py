@@ -3537,20 +3537,159 @@ def _validate_host(required_free_gib: float) -> tuple[int, float]:
     return memory_mib, free_gib
 
 
-def _validate_host_ports(config: dict[str, Any]) -> None:
-    """Refuse an ingress binding that already has a listener on this VM."""
+def _validate_owned_staging_ingress(
+    config: dict[str, Any],
+    image_lock: dict[str, Any],
+    docker_prefix: list[str],
+    mode: str,
+) -> str:
+    """Verify the one explicitly owned loopback ingress binding for a canary."""
+
+    if mode not in {"stage1", "staging"}:
+        raise PreflightError("owned staging ingress is available only during Stage 1 staging")
+    project = config.get("name")
+    service = config.get("services", {}).get("teams-public-ingress", {})
+    ports = service.get("ports", []) if isinstance(service, dict) else []
+    if (
+        not isinstance(project, str)
+        or not project
+        or not isinstance(ports, list)
+        or len(ports) != 1
+        or not isinstance(ports[0], dict)
+        or ports[0].get("target") != 443
+        or str(ports[0].get("published")) != "18443"
+        or ports[0].get("host_ip") != "127.0.0.1"
+        or ports[0].get("protocol", "tcp") != "tcp"
+    ):
+        raise PreflightError("owned staging ingress must publish only 127.0.0.1:18443/tcp")
+
+    image_ref = service.get("image")
+    image_rows = [
+        row
+        for row in image_lock.get("images", [])
+        if isinstance(row, dict) and row.get("image") == image_ref
+    ]
+    image_rows.extend(
+        row
+        for row in image_lock.get("externalImages", {}).values()
+        if isinstance(row, dict) and row.get("localImage") == image_ref
+    )
+    if len(image_rows) != 1 or not isinstance(image_rows[0].get("imageId"), str):
+        raise PreflightError("owned staging ingress image is absent from the exact image lock")
+
+    container_ids = _run(
+        [
+            *docker_prefix,
+            "ps",
+            "--filter",
+            "publish=18443",
+            "--format",
+            "{{.ID}}",
+        ]
+    ).splitlines()
+    container_ids = [value.strip() for value in container_ids if value.strip()]
+    if len(container_ids) != 1 or re.fullmatch(r"[0-9a-f]{12,64}", container_ids[0]) is None:
+        raise PreflightError("loopback port 18443 must have exactly one running Docker owner")
+    try:
+        inspected = json.loads(
+            _run([*docker_prefix, "inspect", container_ids[0]], capture=True),
+            object_pairs_hook=_unique_json_object,
+        )
+    except (json.JSONDecodeError, ValueError) as error:
+        raise PreflightError("Docker returned invalid staging ingress inspection data") from error
+    if not isinstance(inspected, list) or len(inspected) != 1 or not isinstance(inspected[0], dict):
+        raise PreflightError("Docker staging ingress ownership readback is ambiguous")
+    container = inspected[0]
+    container_config = container.get("Config")
+    host_config = container.get("HostConfig")
+    labels = container_config.get("Labels") if isinstance(container_config, dict) else None
+    bindings = host_config.get("PortBindings") if isinstance(host_config, dict) else None
+    entries = bindings.get("443/tcp") if isinstance(bindings, dict) else None
+    state = container.get("State")
+    if (
+        not isinstance(labels, dict)
+        or labels.get("com.docker.compose.project") != project
+        or labels.get("com.docker.compose.service") != "teams-public-ingress"
+        or not isinstance(container_config, dict)
+        or container_config.get("Image") != image_ref
+        or container.get("Image") != image_rows[0].get("imageId")
+        or not isinstance(state, dict)
+        or state.get("Running") is not True
+        or not isinstance(entries, list)
+        or entries != [{"HostIp": "127.0.0.1", "HostPort": "18443"}]
+        or set(bindings) != {"443/tcp"}
+    ):
+        raise PreflightError(
+            "loopback port 18443 is not uniquely owned by the locked Compose ingress service"
+        )
+    return image_rows[0]["imageId"]
+
+
+def _parse_listener_endpoints(listeners: str) -> list[tuple[str, str]]:
+    """Parse every numeric TCP-listener local endpoint from ``ss -H -ltn``."""
+
+    endpoints: list[tuple[str, str]] = []
+    for line in listeners.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[0] != "LISTEN":
+            raise PreflightError("host listener inventory contains an unknown row")
+        host, separator, port = fields[3].rpartition(":")
+        if not separator or not port.isdigit():
+            raise PreflightError("host listener inventory contains an unknown local endpoint")
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        if not host:
+            raise PreflightError("host listener inventory contains an empty local address")
+        endpoints.append((host, port))
+    return endpoints
+
+
+def _validate_host_ports(
+    config: dict[str, Any],
+    *,
+    mode: str | None = None,
+    docker_prefix: list[str] | None = None,
+    image_lock: dict[str, Any] | None = None,
+    allow_owned_staging_ingress: bool = False,
+) -> str | None:
+    """Refuse occupied ports unless the explicit Stage 1 owner check passes."""
+
+    owned_staging_image_id = None
+    if allow_owned_staging_ingress:
+        if mode not in {"stage1", "staging"} or image_lock is None or docker_prefix is None:
+            raise PreflightError(
+                "owned staging ingress requires Stage 1 mode, the exact image lock, and Docker"
+            )
+        owned_staging_image_id = _validate_owned_staging_ingress(
+            config, image_lock, docker_prefix, mode
+        )
 
     service = config["services"].get("teams-public-ingress", {})
     ports = service.get("ports", [])
     if not ports:
         return
     listeners = _run(["ss", "-H", "-ltn"])
+    if allow_owned_staging_ingress:
+        staging_listeners = [
+            host for host, port in _parse_listener_endpoints(listeners) if port == "18443"
+        ]
+        if any(host != "127.0.0.1" for host in staging_listeners) or len(staging_listeners) > 1:
+            raise PreflightError(
+                "loopback port 18443 has a wildcard, non-loopback, or ambiguous host listener"
+            )
     for row in ports:
         published = str(row.get("published", ""))
         if published and re.search(rf":{re.escape(published)}(?:\s|$)", listeners):
+            if (
+                allow_owned_staging_ingress
+                and published == "18443"
+                and row.get("host_ip") == "127.0.0.1"
+            ):
+                continue
             raise PreflightError(
                 f"host port {published} is already occupied; preserve the current ingress and plan a cutover"
             )
+    return owned_staging_image_id
 
 
 _DOCKER_MEMORY_UNIT_BYTES = {
@@ -3659,11 +3798,14 @@ def run_preflight(
     max_cpus: float,
     required_free_gib: float,
     minimum_mem_available_mib: int,
+    allow_owned_staging_ingress: bool = False,
 ) -> dict[str, Any]:
     """Perform all read-only gates before the operator starts or cuts over services."""
 
     if mode not in {"bootstrap", "staging", "cutover", "stage1", "stage2", "stage3"}:
         raise PreflightError("mode must be bootstrap, staging, cutover, stage1, stage2, or stage3")
+    if allow_owned_staging_ingress and mode not in {"stage1", "staging"}:
+        raise PreflightError("owned staging ingress cannot be used for bootstrap or cutover")
     if not _private_artifact(image_lock) or any(not _private_artifact(path) for path in env_files):
         raise PreflightError(
             "image locks and environment files must be stored under umbrella .artifacts"
@@ -3731,11 +3873,17 @@ def run_preflight(
     )
     if mode != "bootstrap":
         _validate_codebuddy_mount(config, secrets_dir.resolve())
-    _validate_host_ports(config)
+    owned_staging_image_id = _validate_host_ports(
+        config,
+        mode=mode,
+        docker_prefix=docker_prefix,
+        image_lock=image_lock_data,
+        allow_owned_staging_ingress=allow_owned_staging_ingress,
+    )
     runtime_rss = _validate_cutover_runtime(config, docker_prefix, mode)
     if len(compose_files) == 0 or len(env_files) == 0:
         raise PreflightError("compose and environment files are required")
-    return {
+    result = {
         **memory,
         "mode": mode,
         "deploymentReady": mode != "bootstrap",
@@ -3750,6 +3898,9 @@ def run_preflight(
         "serviceCount": len(config["services"]),
         "imageLock": str(image_lock.resolve()),
     }
+    if owned_staging_image_id is not None:
+        result["ownedStagingIngressImageId"] = owned_staging_image_id
+    return result
 
 
 def main() -> int:
@@ -3776,6 +3927,11 @@ def main() -> int:
     parser.add_argument("--max-cpus", type=float, default=1.95)
     parser.add_argument("--required-free-gib", type=float, default=2.0)
     parser.add_argument("--minimum-mem-available-mib", type=int, default=1024)
+    parser.add_argument(
+        "--allow-owned-staging-ingress",
+        action="store_true",
+        help="allow only a verified project-owned 127.0.0.1:18443 listener in stage1/staging mode",
+    )
     arguments = parser.parse_args()
     try:
         result = run_preflight(
@@ -3795,6 +3951,7 @@ def main() -> int:
             max_cpus=arguments.max_cpus,
             required_free_gib=arguments.required_free_gib,
             minimum_mem_available_mib=arguments.minimum_mem_available_mib,
+            allow_owned_staging_ingress=arguments.allow_owned_staging_ingress,
         )
     except (OSError, PreflightError, BuildError, subprocess.SubprocessError) as error:
         print(f"Cloud deployment preflight blocked: {error}", file=sys.stderr)

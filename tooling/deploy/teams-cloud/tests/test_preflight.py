@@ -1222,6 +1222,267 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
         }
 
 
+@pytest.mark.parametrize(
+    ("listener_output", "message"),
+    [
+        ("", None),
+        ("LISTEN 0 4096 127.0.0.1:18443 0.0.0.0:*\n", None),
+        ("LISTEN 0 4096 127.0.0.1:18444 0.0.0.0:*\n", None),
+        (
+            "LISTEN 0 4096 0.0.0.0:18443 0.0.0.0:*\n",
+            "wildcard, non-loopback, or ambiguous",
+        ),
+        ("LISTEN 0 4096 [::]:18443 [::]:*\n", "wildcard, non-loopback, or ambiguous"),
+        ("LISTEN 0 4096 [::1]:18443 [::]:*\n", "wildcard, non-loopback, or ambiguous"),
+        ("LISTEN 0 4096 *:18443 *:*\n", "wildcard, non-loopback, or ambiguous"),
+        (
+            ("LISTEN 0 4096 127.0.0.1:18443 0.0.0.0:*\nLISTEN 0 4096 0.0.0.0:18443 0.0.0.0:*\n"),
+            "wildcard, non-loopback, or ambiguous",
+        ),
+        (
+            ("LISTEN 0 4096 127.0.0.1:18443 0.0.0.0:*\nLISTEN 0 4096 127.0.0.1:18443 0.0.0.0:*\n"),
+            "wildcard, non-loopback, or ambiguous",
+        ),
+        ("unexpected ss row\n", "listener inventory"),
+    ],
+)
+def test_owned_staging_ingress_accepts_only_locked_loopback_compose_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    listener_output: str,
+    message: str | None,
+) -> None:
+    """Allow only one locked Docker owner and a strictly loopback TCP listener."""
+
+    project = "cyrene-test"
+    image = "caddy:test"
+    image_id = "sha256:" + "a" * 64
+    container_id = "0123456789ab"
+    config = {
+        "name": project,
+        "services": {
+            "teams-public-ingress": {
+                "image": image,
+                "ports": [
+                    {
+                        "target": 443,
+                        "published": "18443",
+                        "host_ip": "127.0.0.1",
+                        "protocol": "tcp",
+                    }
+                ],
+            }
+        },
+    }
+    image_lock = {
+        "images": [],
+        "externalImages": {"caddy": {"localImage": image, "imageId": image_id}},
+    }
+    container = {
+        "Config": {
+            "Image": image,
+            "Labels": {
+                "com.docker.compose.project": project,
+                "com.docker.compose.service": "teams-public-ingress",
+            },
+        },
+        "Image": image_id,
+        "HostConfig": {"PortBindings": {"443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18443"}]}},
+        "State": {"Running": True},
+    }
+
+    def run(argv: list[str], *, capture: bool = True) -> str:
+        if argv[1:3] == ["ps", "--filter"]:
+            return container_id + "\n"
+        if argv[1] == "inspect":
+            return json.dumps([container])
+        if argv[:2] == ["ss", "-H"]:
+            return listener_output
+        raise AssertionError("unexpected read-only command")
+
+    monkeypatch.setattr(preflight, "_run", run)
+    if message:
+        with pytest.raises(preflight.PreflightError, match=message):
+            preflight._validate_host_ports(
+                config,
+                mode="stage1",
+                docker_prefix=["docker"],
+                image_lock=image_lock,
+                allow_owned_staging_ingress=True,
+            )
+    else:
+        assert (
+            preflight._validate_host_ports(
+                config,
+                mode="stage1",
+                docker_prefix=["docker"],
+                image_lock=image_lock,
+                allow_owned_staging_ingress=True,
+            )
+            == image_id
+        )
+
+
+def test_owned_staging_ingress_rejects_multiple_docker_port_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require the fixed published port to resolve to one Docker container ID."""
+
+    config = {
+        "name": "cyrene-test",
+        "services": {
+            "teams-public-ingress": {
+                "image": "caddy:test",
+                "ports": [
+                    {
+                        "target": 443,
+                        "published": "18443",
+                        "host_ip": "127.0.0.1",
+                        "protocol": "tcp",
+                    }
+                ],
+            }
+        },
+    }
+    image_lock = {
+        "images": [],
+        "externalImages": {"caddy": {"localImage": "caddy:test", "imageId": "sha256:" + "a" * 64}},
+    }
+    monkeypatch.setattr(preflight, "_run", lambda *_args, **_kwargs: "a" * 12 + "\nb" * 12)
+    with pytest.raises(preflight.PreflightError, match="exactly one running Docker owner"):
+        preflight._validate_owned_staging_ingress(
+            config,
+            image_lock,
+            ["docker"],
+            "stage1",
+        )
+
+
+def test_default_host_port_guard_still_rejects_an_occupied_staging_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep ordinary preflight fail-closed when the owner exception is not selected."""
+
+    monkeypatch.setattr(
+        preflight,
+        "_run",
+        lambda _argv, **_kwargs: "LISTEN 0 4096 127.0.0.1:18443 0.0.0.0:*\n",
+    )
+    with pytest.raises(preflight.PreflightError, match="port 18443 is already occupied"):
+        preflight._validate_host_ports(
+            {
+                "services": {
+                    "teams-public-ingress": {
+                        "ports": [
+                            {
+                                "target": 443,
+                                "published": "18443",
+                                "host_ip": "127.0.0.1",
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("project", "uniquely owned"),
+        ("service", "uniquely owned"),
+        ("image_id", "uniquely owned"),
+        ("host_ip", "uniquely owned"),
+        ("extra_port", "only 127.0.0.1:18443/tcp"),
+    ],
+)
+def test_owned_staging_ingress_rejects_unknown_owner_or_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+    message: str,
+) -> None:
+    """Reject another project, image, host, or port before allowing occupied-port reuse."""
+
+    image_id = "sha256:" + "b" * 64
+    port = {
+        "target": 443,
+        "published": "18443",
+        "host_ip": "127.0.0.1",
+        "protocol": "tcp",
+    }
+    config = {
+        "name": "cyrene-test",
+        "services": {"teams-public-ingress": {"image": "caddy:test", "ports": [port]}},
+    }
+    container = {
+        "Config": {
+            "Image": "caddy:test",
+            "Labels": {
+                "com.docker.compose.project": "cyrene-test",
+                "com.docker.compose.service": "teams-public-ingress",
+            },
+        },
+        "Image": image_id,
+        "HostConfig": {"PortBindings": {"443/tcp": [{"HostIp": "127.0.0.1", "HostPort": "18443"}]}},
+        "State": {"Running": True},
+    }
+    if change == "project":
+        container["Config"]["Labels"]["com.docker.compose.project"] = "other-project"
+    elif change == "service":
+        container["Config"]["Labels"]["com.docker.compose.service"] = "other-service"
+    elif change == "image_id":
+        container["Image"] = "sha256:" + "c" * 64
+    elif change == "host_ip":
+        container["HostConfig"]["PortBindings"]["443/tcp"][0]["HostIp"] = "0.0.0.0"
+    elif change == "extra_port":
+        config["services"]["teams-public-ingress"]["ports"].append(
+            {"target": 80, "published": "18444", "host_ip": "127.0.0.1"}
+        )
+
+    def run(argv: list[str], *, capture: bool = True) -> str:
+        if argv[1:3] == ["ps", "--filter"]:
+            return "0123456789ab\n"
+        if argv[1] == "inspect":
+            return json.dumps([container])
+        raise AssertionError("unexpected read-only command")
+
+    monkeypatch.setattr(preflight, "_run", run)
+    with pytest.raises(preflight.PreflightError, match=message):
+        preflight._validate_owned_staging_ingress(
+            config,
+            {
+                "images": [],
+                "externalImages": {"caddy": {"localImage": "caddy:test", "imageId": image_id}},
+            },
+            ["docker"],
+            "stage1",
+        )
+
+
+def test_owned_staging_ingress_flag_cannot_be_used_for_cutover() -> None:
+    """Keep the production cutover port guard outside the staging exception."""
+
+    with pytest.raises(preflight.PreflightError, match="cannot be used for bootstrap or cutover"):
+        preflight.run_preflight(
+            mode="cutover",
+            compose_files=[],
+            env_files=[],
+            image_lock=Path("unused"),
+            secrets_dir=Path("unused"),
+            config_dir=Path("unused"),
+            github_hf_evidence=None,
+            azure_gcp_ledger=None,
+            runpod_ledger=None,
+            azure_gcp_api_evidence=None,
+            runpod_api_evidence=None,
+            docker_prefix=["docker"],
+            max_memory_mib=1,
+            max_cpus=1.0,
+            required_free_gib=1.0,
+            minimum_mem_available_mib=1024,
+            allow_owned_staging_ingress=True,
+        )
+
+
 def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
     tmp_path: Path,
 ) -> None:
