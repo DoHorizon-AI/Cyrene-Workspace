@@ -204,9 +204,12 @@ def test_runtime_update_requires_the_fixed_root_operator(
     with pytest.raises(runtime_update.RuntimeUpdateError, match="must run as root"):
         runtime_update._require_update_operator()
 
-    assert runtime_update.main(
-        ["apply", "--plan", "/missing/plan.json", "--confirm-plan-sha256", "d" * 64]
-    ) == 3
+    assert (
+        runtime_update.main(
+            ["apply", "--plan", "/missing/plan.json", "--confirm-plan-sha256", "d" * 64]
+        )
+        == 3
+    )
     assert "must run as root" in capsys.readouterr().err
 
 
@@ -224,8 +227,9 @@ def test_project_lock_rejects_symlink_and_hard_link_replacements(
     target.write_text("", encoding="ascii")
     target.chmod(0o600)
     lock_path.symlink_to(target)
-    with pytest.raises(runtime_update.RuntimeUpdateError), runtime_update._operation_lock(
-        "unsafe-lock-test"
+    with (
+        pytest.raises(runtime_update.RuntimeUpdateError),
+        runtime_update._operation_lock("unsafe-lock-test"),
     ):
         pytest.fail("symlinked lock was accepted")
 
@@ -234,8 +238,9 @@ def test_project_lock_rejects_symlink_and_hard_link_replacements(
     lock_path.chmod(0o600)
     second_link = tmp_path / "second-link"
     second_link.hardlink_to(lock_path)
-    with pytest.raises(runtime_update.RuntimeUpdateError, match="mode 0600"), runtime_update._operation_lock(
-        "unsafe-lock-test"
+    with (
+        pytest.raises(runtime_update.RuntimeUpdateError, match="mode 0600"),
+        runtime_update._operation_lock("unsafe-lock-test"),
     ):
         pytest.fail("multiply linked lock was accepted")
 
@@ -351,7 +356,8 @@ def test_runtime_maintenance_probe_reports_presence_without_paths_or_token_value
         key: value
         for key, value in os.environ.items()
         if key not in runtime_update.RUNTIME_ACTIVITY_MARKERS
-        and key not in {
+        and key
+        not in {
             "CYRENE_RUNTIME_MAINTENANCE_SOCKET",
             "CYRENE_RUNTIME_ACTIVITY_SOURCE_TOKEN_FILE",
         }
@@ -460,8 +466,12 @@ def test_recorded_navigator_stop_is_read_back_before_replacement(
     monkeypatch.setattr(runtime_update, "_inspect_container_state", lambda *_args: stopped)
 
     runtime_update._stop_drained_navigator(
-        plan={}, context={}, journal=journal, journal_path=Path("unused"),
-        docker_prefix=["docker"], container_id=OLD_CONTAINER_ID
+        plan={},
+        context={},
+        journal=journal,
+        journal_path=Path("unused"),
+        docker_prefix=["docker"],
+        container_id=OLD_CONTAINER_ID,
     )
 
     monkeypatch.setattr(
@@ -471,8 +481,12 @@ def test_recorded_navigator_stop_is_read_back_before_replacement(
     )
     with pytest.raises(runtime_update.RuntimeUpdateError, match="read-back changed"):
         runtime_update._stop_drained_navigator(
-            plan={}, context={}, journal=journal, journal_path=Path("unused"),
-            docker_prefix=["docker"], container_id=OLD_CONTAINER_ID
+            plan={},
+            context={},
+            journal=journal,
+            journal_path=Path("unused"),
+            docker_prefix=["docker"],
+            container_id=OLD_CONTAINER_ID,
         )
 
 
@@ -516,7 +530,9 @@ def test_compose_timeout_is_classified_as_an_unknown_daemon_outcome(
         ),
     )
 
-    with pytest.raises(runtime_update.RuntimeUpdateOutcomeUnknown, match="daemon outcome is unknown"):
+    with pytest.raises(
+        runtime_update.RuntimeUpdateOutcomeUnknown, match="daemon outcome is unknown"
+    ):
         runtime_update._compose_up(
             docker_prefix=["docker"],
             project="test-project",
@@ -557,9 +573,7 @@ def test_internal_admin_http_bridge_rejects_redirects_without_forwarding_bearer(
 
     class RedirectHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
-            self.server.visited.append(
-                (self.path, self.command, self.headers.get("Authorization"))
-            )
+            self.server.visited.append((self.path, self.command, self.headers.get("Authorization")))
             if self.path == "/internal/v1/executor/drain":
                 self.send_response(302)
                 self.send_header(
@@ -571,9 +585,7 @@ def test_internal_admin_http_bridge_rejects_redirects_without_forwarding_bearer(
             self.end_headers()
 
         def do_GET(self) -> None:
-            self.server.visited.append(
-                (self.path, self.command, self.headers.get("Authorization"))
-            )
+            self.server.visited.append((self.path, self.command, self.headers.get("Authorization")))
             self.send_response(200)
             self.end_headers()
 
@@ -611,9 +623,7 @@ def test_internal_admin_http_bridge_rejects_redirects_without_forwarding_bearer(
 
     assert response.returncode == 0
     assert json.loads(response.stdout)["httpStatus"] == 302
-    assert server.visited == [
-        ("/internal/v1/executor/drain", "POST", "Bearer test-only-bearer")
-    ]
+    assert server.visited == [("/internal/v1/executor/drain", "POST", "Bearer test-only-bearer")]
     assert "test-only-bearer" not in response.stdout
 
 
@@ -820,7 +830,9 @@ def test_candidate_drain_commit_is_recognized_after_recovery_phase_changes(
     monkeypatch.setattr(
         runtime_update,
         "_call_internal_api",
-        lambda *_args, **_kwargs: pytest.fail("recovery must not repeat the committed drain request"),
+        lambda *_args, **_kwargs: pytest.fail(
+            "recovery must not repeat the committed drain request"
+        ),
     )
 
     runtime_update._drain_current_navigator_for_rollback(
@@ -882,7 +894,9 @@ def test_candidate_compose_timeout_is_journaled_and_resume_never_retries_it(
     monkeypatch.setattr(
         runtime_update,
         "_compose_up",
-        lambda **_kwargs: (_ for _ in ()).throw(runtime_update.RuntimeUpdateOutcomeUnknown("timeout")),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            runtime_update.RuntimeUpdateOutcomeUnknown("timeout")
+        ),
     )
     monkeypatch.setattr(runtime_update, "_atomic_journal_write", lambda *_args: None)
 
@@ -1008,9 +1022,7 @@ def test_rollback_compose_timeout_is_not_retried_by_resume(
         "_ensure_navigator_resumed",
         lambda **_kwargs: (_ for _ in ()).throw(runtime_update.RuntimeUpdateError("late failure")),
     )
-    monkeypatch.setattr(
-        runtime_update, "_recover_edge_pause", lambda **_kwargs: None
-    )
+    monkeypatch.setattr(runtime_update, "_recover_edge_pause", lambda **_kwargs: None)
     monkeypatch.setattr(
         runtime_update, "_recover_old_navigator_before_candidate_start", lambda **_kwargs: False
     )
@@ -1027,11 +1039,15 @@ def test_rollback_compose_timeout_is_not_retried_by_resume(
     monkeypatch.setattr(
         runtime_update,
         "_compose_up",
-        lambda **_kwargs: (_ for _ in ()).throw(runtime_update.RuntimeUpdateOutcomeUnknown("timeout")),
+        lambda **_kwargs: (_ for _ in ()).throw(
+            runtime_update.RuntimeUpdateOutcomeUnknown("timeout")
+        ),
     )
     monkeypatch.setattr(runtime_update, "_atomic_journal_write", lambda *_args: None)
 
-    with pytest.raises(runtime_update.RuntimeUpdateError, match="automatic rollback could not be verified"):
+    with pytest.raises(
+        runtime_update.RuntimeUpdateError, match="automatic rollback could not be verified"
+    ):
         runtime_update._execute_update(
             plan={**plan, "policy": {**plan["policy"], "updateOrder": ["exchange"]}},
             context={},
@@ -1318,9 +1334,7 @@ def test_resume_restores_the_drained_old_image_before_candidate_compose_started(
     assert recovered is True
     assert journal["targetProgress"]["navigator"]["phase"] == "RECOVERY_OLD_IMAGE_RESTARTED"
     assert journal["navigator"]["processRestart"]["activeImageVerified"] is True
-    assert isinstance(
-        journal["navigator"]["restartIntent"]["composeCommandReturnedAtUtc"], str
-    )
+    assert isinstance(journal["navigator"]["restartIntent"]["composeCommandReturnedAtUtc"], str)
     assert not runtime_update._has_unresolved_docker_mutation(journal)
 
 

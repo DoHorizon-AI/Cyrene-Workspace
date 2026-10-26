@@ -1017,7 +1017,9 @@ def _ensure_global_lock_directory() -> None:
         or stat.S_IMODE(metadata.st_mode) != 0o700
         or GLOBAL_LOCK_DIRECTORY.resolve(strict=True) != GLOBAL_LOCK_DIRECTORY
     ):
-        raise RuntimeUpdateError("global runtime update lock directory must be root-owned mode 0700")
+        raise RuntimeUpdateError(
+            "global runtime update lock directory must be root-owned mode 0700"
+        )
 
 
 @contextmanager
@@ -1044,7 +1046,10 @@ def _operation_lock(project: str) -> Iterator[None]:
         except FileExistsError:
             descriptor = os.open(lock_path, flags)
         metadata = os.fstat(descriptor)
-        if before is not None and (before.st_dev, before.st_ino) != (metadata.st_dev, metadata.st_ino):
+        if before is not None and (before.st_dev, before.st_ino) != (
+            metadata.st_dev,
+            metadata.st_ino,
+        ):
             raise RuntimeUpdateError("runtime update lock changed inode while opening")
         after = lock_path.lstat()
         if (after.st_dev, after.st_ino) != (metadata.st_dev, metadata.st_ino):
@@ -1073,7 +1078,9 @@ def _operation_lock(project: str) -> Iterator[None]:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise RuntimeUpdateError("another runtime update operation is active for this project") from error
+            raise RuntimeUpdateError(
+                "another runtime update operation is active for this project"
+            ) from error
         yield
     finally:
         try:
@@ -1375,7 +1382,9 @@ def _pause_edge(
     expected_paused_revision = initial_revision + 1
     holder = edge.get("pauseHolder")
     if not isinstance(holder, str) or not holder:
-        raise RuntimeUpdateError("Teams delivery pause holder is missing from the operation journal")
+        raise RuntimeUpdateError(
+            "Teams delivery pause holder is missing from the operation journal"
+        )
     edge["pauseIntent"] = True
     _set_phase(journal, journal_path, "EDGE_PAUSE_REQUESTED")
     status = _current_edge_status(docker_prefix, edge["containerId"])
@@ -1449,10 +1458,7 @@ def _recover_edge_pause(
         elif isinstance(pause_revision, int) and status["revision"] == pause_revision:
             expected_revision = pause_revision - 1
             holder = edge.get("pauseHolder")
-        elif (
-            pause_revision is None
-            and status["revision"] == edge["initialRevision"] + 1
-        ):
+        elif pause_revision is None and status["revision"] == edge["initialRevision"] + 1:
             expected_revision = edge["initialRevision"]
             holder = journal["operationId"]
         else:
@@ -1661,7 +1667,9 @@ def _resume_edge(
     _set_phase(journal, journal_path, "EDGE_RESUME_REQUESTED")
     holder = edge.get("pauseHolder")
     if not isinstance(holder, str) or not holder:
-        raise RuntimeUpdateError("Teams delivery resume holder is missing from the operation journal")
+        raise RuntimeUpdateError(
+            "Teams delivery resume holder is missing from the operation journal"
+        )
     response = _call_internal_api(
         docker_prefix,
         edge["containerId"],
@@ -2170,8 +2178,8 @@ def _recover_old_navigator_before_candidate_start(
             if progress_phase != "ACTIVE_IMAGE_RESTART_REQUESTED":
                 return False
             stopped_container_id = stop_record["containerId"]
-            command_exit_code = journal["navigator"].get("restartIntent", {}).get(
-                "composeCommandExitCode"
+            command_exit_code = (
+                journal["navigator"].get("restartIntent", {}).get("composeCommandExitCode")
             )
         elif progress_phase != "PREPARED":
             raise RuntimeUpdateError(

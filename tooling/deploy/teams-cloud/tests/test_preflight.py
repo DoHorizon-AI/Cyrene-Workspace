@@ -1439,7 +1439,9 @@ def test_stage1_recovery_preflight_skips_capacity_gates_but_keeps_configuration_
     monkeypatch.setattr(
         preflight,
         "_validate_internal_https_topology",
-        lambda *_args: (_ for _ in ()).throw(preflight.PreflightError("static configuration failed")),
+        lambda *_args: (_ for _ in ()).throw(
+            preflight.PreflightError("static configuration failed")
+        ),
     )
     with pytest.raises(preflight.PreflightError, match="static configuration failed"):
         preflight.run_preflight(
