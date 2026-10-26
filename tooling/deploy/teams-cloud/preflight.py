@@ -3806,6 +3806,27 @@ def _docker_memory_usage_mib(value: str) -> float:
     return float(match.group(1)) * _DOCKER_MEMORY_UNIT_BYTES[match.group(2)] / MIB
 
 
+_STAGE1_REQUIRED_SERVICE_NAMES = frozenset(
+    {
+        "postgres",
+        "workspace-authority",
+        "account-center",
+        "navigator-persistence",
+        "navigator",
+        "exchange",
+        "github-issues",
+        "teams-provider",
+        "teams-ingress",
+        "teams-public-ingress",
+    }
+)
+_STAGE1_OPTIONAL_SERVICE_NAMES = frozenset(
+    {"huggingface", "computer-runtime", "computer-runtime-proxy"}
+)
+_STAGE1_ALLOWED_SERVICE_NAMES = _STAGE1_REQUIRED_SERVICE_NAMES | _STAGE1_OPTIONAL_SERVICE_NAMES
+_COMPUTER_RUNTIME_SERVICE_NAMES = frozenset({"computer-runtime", "computer-runtime-proxy"})
+
+
 def _expected_stage1_services(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Select Stage 1 runtime services from the exact rendered Compose profile set.
 
@@ -3830,10 +3851,15 @@ def _expected_stage1_services(config: dict[str, Any]) -> dict[str, dict[str, Any
             raise PreflightError("rendered Compose service profiles are malformed")
         if profiles and "public-ingress" not in profiles:
             continue
+        if name not in _STAGE1_ALLOWED_SERVICE_NAMES:
+            raise PreflightError(f"unsupported active Stage 1 Compose service: {name}")
         expected[name] = service
-    required_ingress = {"teams-ingress", "teams-public-ingress"}
-    if not required_ingress <= set(expected):
-        raise PreflightError("Stage 1 Compose services must include both Teams ingress services")
+    missing = sorted(_STAGE1_REQUIRED_SERVICE_NAMES - set(expected))
+    if missing:
+        raise PreflightError("Stage 1 Compose services are missing: " + ", ".join(missing))
+    computer_services = set(expected) & _COMPUTER_RUNTIME_SERVICE_NAMES
+    if computer_services and computer_services != _COMPUTER_RUNTIME_SERVICE_NAMES:
+        raise PreflightError("Stage 1 computer runtime and proxy must be configured together")
     return expected
 
 

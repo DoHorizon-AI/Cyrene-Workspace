@@ -611,45 +611,56 @@ def test_backend_ca_must_be_parseable_public_certificate_only(
 def test_stage1_service_health_requires_every_expected_locked_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Require healthy running base services and exclude disabled provider profiles."""
+    """Require the complete Stage 1 runtime topology and exclude inactive/one-shot services."""
 
-    compose = {
-        "name": "cyrene-test",
-        "services": {
-            "navigator": {
-                "image": "navigator:test",
-                "restart": "unless-stopped",
-                "healthcheck": {"test": ["CMD", "true"]},
-            },
-            "teams-ingress": {
-                "image": "teams:test",
-                "restart": "unless-stopped",
-                "healthcheck": {"test": ["CMD", "true"]},
-            },
-            "teams-public-ingress": {
-                "image": "caddy:test",
-                "restart": "unless-stopped",
-                "profiles": ["public-ingress"],
-            },
+    service_names = [
+        "postgres",
+        "workspace-authority",
+        "account-center",
+        "navigator-persistence",
+        "navigator",
+        "exchange",
+        "github-issues",
+        "teams-provider",
+        "teams-ingress",
+        "teams-public-ingress",
+        "computer-runtime",
+        "computer-runtime-proxy",
+    ]
+    services = {
+        name: {
+            "image": f"{name}:test",
+            "restart": "unless-stopped",
+            **(
+                {"healthcheck": {"test": ["CMD", "true"]}}
+                if name != "teams-public-ingress"
+                else {"profiles": ["public-ingress"]}
+            ),
+        }
+        for name in service_names
+    }
+    services.update(
+        {
             "cloud-management-phase2": {
                 "image": "cloud:test",
                 "restart": "unless-stopped",
                 "profiles": ["cloud-phase2"],
             },
             "directory-migrate": {"image": "directory:test", "restart": "no"},
-        },
-    }
-    ids = ["a" * 12, "b" * 12, "c" * 12]
+        }
+    )
+    compose = {"name": "cyrene-test", "services": services}
+    ids = [f"{index:012x}" for index, _name in enumerate(service_names, start=1)]
+    service_by_id = dict(zip(ids, service_names, strict=True))
     image_lock = {
         "images": [
-            {"image": "navigator:test", "imageId": "sha256:" + "1" * 64},
-            {"image": "teams:test", "imageId": "sha256:" + "2" * 64},
-        ],
-        "externalImages": {"caddy": {"localImage": "caddy:test", "imageId": "sha256:" + "3" * 64}},
+            {
+                "image": compose["services"][name]["image"],
+                "imageId": "sha256:" + f"{index:064x}",
+            }
+            for index, name in enumerate(service_names, start=1)
+        ]
     }
-    service_by_id = dict(
-        zip(ids, ["navigator", "teams-ingress", "teams-public-ingress"], strict=True)
-    )
 
     def run(argv: list[str], label: str, *, timeout: float = 20.0) -> str:
         assert label
@@ -660,9 +671,7 @@ def test_stage1_service_health_requires_every_expected_locked_container(
         for container_id in ids:
             service_name = service_by_id[container_id]
             image = compose["services"][service_name]["image"]
-            suffix = {"navigator": "1", "teams-ingress": "2", "teams-public-ingress": "3"}[
-                service_name
-            ]
+            index = service_names.index(service_name) + 1
             rows.append(
                 {
                     "Config": {
@@ -672,7 +681,7 @@ def test_stage1_service_health_requires_every_expected_locked_container(
                             "com.docker.compose.service": service_name,
                         },
                     },
-                    "Image": "sha256:" + suffix * 64,
+                    "Image": "sha256:" + f"{index:064x}",
                     "State": {
                         "Running": True,
                         **(
@@ -692,9 +701,7 @@ def test_stage1_service_health_requires_every_expected_locked_container(
         docker_prefix=["docker"],
     )
     assert states == {
-        "navigator": "healthy",
-        "teams-ingress": "healthy",
-        "teams-public-ingress": "running",
+        name: "running" if name == "teams-public-ingress" else "healthy" for name in service_names
     }
 
 
