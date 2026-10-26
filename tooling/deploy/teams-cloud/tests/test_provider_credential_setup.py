@@ -113,6 +113,7 @@ def _write_active_runtime_env(artifacts: Path) -> Path:
     active_env = artifacts / "runtime.env"
     active_env.write_text(
         "# preserve this comment\n"
+        "CYRENE_CONFIG_DIR=/old/private/config\n"
         "CYRENE_HF_OAUTH_BOOTSTRAP_FILE=/old/private/hf-seed.json\n"
         f"CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON={json.dumps(integration, separators=(',', ':'))}\n"
         f"CYRENE_HUGGINGFACE_CONFIGURATION_JSON={json.dumps(provider, separators=(',', ':'))}\n"
@@ -282,11 +283,16 @@ def test_hf_device_flow_search_and_selection_persists_only_a_scoped_seed(
             "permissions": ["read"],
         }
     ]
-    assert saved["state"] == "SAVED_CANDIDATE_PROFILE_LINK_OR_ROTATION_REQUIRED"
+    assert saved["state"] == "SAVED_CANDIDATE_REQUIRES_PREPARATION"
     assert saved["activation"] == "FORMAL_STAGE_TRANSITION_REQUIRED"
+    candidate_config_dir = Path(saved["candidateConfigDir"])
     assert candidate_env.parent == output.parent
     assert candidate_env.parent.stat().st_uid == setup.OWNER_UID
     assert stat.S_IMODE(candidate_env.parent.stat().st_mode) == 0o700
+    assert candidate_config_dir == candidate_env.parent / "config"
+    assert candidate_config_dir.is_dir() and not list(candidate_config_dir.iterdir())
+    assert candidate_config_dir.stat().st_uid == setup.OWNER_UID
+    assert stat.S_IMODE(candidate_config_dir.stat().st_mode) == 0o700
     assert candidate_env.stat().st_uid == setup.OWNER_UID
     assert stat.S_IMODE(candidate_env.stat().st_mode) == 0o600
     assert output.stat().st_uid == setup.OWNER_UID
@@ -307,6 +313,7 @@ def test_hf_device_flow_search_and_selection_persists_only_a_scoped_seed(
     assert provider_candidate["repositories"] == expected_scope
     assert provider_candidate["read_only"] is True
     assert provider_candidate["existingProviderSetting"] == "retained"
+    assert candidate_values["CYRENE_CONFIG_DIR"] == str(candidate_config_dir)
     assert candidate_values["CYRENE_HF_OAUTH_BOOTSTRAP_FILE"] == str(output)
     assert active_env.read_bytes() == original_active_env
     assert FAKE_ACCESS not in candidate_text
@@ -406,6 +413,53 @@ def test_hf_candidate_rejects_unregistered_or_ambiguous_source_without_publishin
             ],
         )
 
+    candidates = artifacts / "onboarding" / "private" / "provider-candidates"
+    assert not candidates.exists() or not list(candidates.iterdir())
+
+
+def test_hf_candidate_rejects_explicit_null_exchange_account_scopes(
+    private_dirs: tuple[Path, Path],
+) -> None:
+    """An explicit null scope is invalid and is not silently normalized as missing."""
+
+    artifacts, secrets = private_dirs
+    active_env = _write_active_runtime_env(artifacts)
+    content = active_env.read_text(encoding="utf-8")
+    lines = content.splitlines()
+    exchange_line = next(
+        line for line in lines if line.startswith("CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON=")
+    )
+    name, encoded = exchange_line.split("=", 1)
+    exchange = json.loads(encoded)
+    exchange["authorizationCloud"]["profiles"]["hf-primary"]["accountScopes"] = None
+    lines[lines.index(exchange_line)] = f"{name}={json.dumps(exchange, separators=(',', ':'))}"
+    active_env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    active_env.chmod(0o600)
+    hub = FakeHub()
+    service = setup.CredentialSetupService(
+        artifacts,
+        secrets,
+        hub_client=hub,
+        active_env_file=active_env,
+    )
+    session = service.create_session()[1]
+    session.seed = _seed_document()
+    session.identity = hub.whoami(FAKE_ACCESS)
+    service.list_hf_repositories(
+        session, repo_type="model", owner="*", search="Qwen2.5-0.5B-Instruct"
+    )
+
+    with pytest.raises(setup.SetupError, match="huggingface_exchange_profile_invalid"):
+        service.save_hf_selection(
+            session,
+            [
+                {
+                    "repoType": "model",
+                    "repoId": "Qwen/Qwen2.5-0.5B-Instruct",
+                    "permissions": ["read"],
+                }
+            ],
+        )
     candidates = artifacts / "onboarding" / "private" / "provider-candidates"
     assert not candidates.exists() or not list(candidates.iterdir())
 
@@ -660,7 +714,7 @@ def test_runpod_probe_saves_only_after_success_and_never_returns_key(
     env_path = Path(result["candidateEnvFile"])
 
     assert probes == [FAKE_RUNPOD_KEY]
-    assert result["state"] == "SAVED_CANDIDATE_RELOAD_REQUIRED_READ_VALIDATED"
+    assert result["state"] == "SAVED_CANDIDATE_REQUIRES_PREPARATION"
     assert result["activation"] == "FORMAL_STAGE_TRANSITION_REQUIRED"
     assert path.read_text(encoding="ascii") == FAKE_RUNPOD_KEY
     assert path.stat().st_uid == setup.OWNER_UID
@@ -668,12 +722,16 @@ def test_runpod_probe_saves_only_after_success_and_never_returns_key(
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
     assert env_path.parent.stat().st_uid == setup.OWNER_UID
     assert stat.S_IMODE(env_path.parent.stat().st_mode) == 0o700
+    candidate_config_dir = Path(result["candidateConfigDir"])
+    assert candidate_config_dir == env_path.parent / "config"
+    assert candidate_config_dir.is_dir() and not list(candidate_config_dir.iterdir())
     env_values = {
         line.split("=", 1)[0]: line.split("=", 1)[1]
         for line in env_path.read_text(encoding="utf-8").splitlines()
         if "=" in line
     }
     assert env_values["CYRENE_RUNPOD_API_KEY_FILE"] == str(path)
+    assert env_values["CYRENE_CONFIG_DIR"] == str(candidate_config_dir)
     assert active_key.read_text(encoding="ascii") == "existing-active-key"
     assert FAKE_RUNPOD_KEY not in json.dumps(result)
     assert service.status(session)["runpod"]["candidateRunpodKeyFile"] == str(path)
@@ -850,7 +908,7 @@ def test_local_page_enforces_exact_host_origin_csrf_and_redacts_api_key(
         accepted = valid.getresponse()
         result = accepted.read().decode("utf-8")
         assert accepted.status == 200
-        assert "SAVED_CANDIDATE_RELOAD_REQUIRED_READ_VALIDATED" in result
+        assert "SAVED_CANDIDATE_REQUIRES_PREPARATION" in result
         assert str(secrets / "runpod-api-key") not in result
         assert FAKE_RUNPOD_KEY not in result
         assert calls == [FAKE_RUNPOD_KEY]

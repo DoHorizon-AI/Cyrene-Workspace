@@ -114,9 +114,11 @@ sudo -u '#10001' -- python3 /absolute/path/to/Cyrene-Workspace/tooling/deploy/te
 `--secrets-dir` is validated read-only and is never modified by the page. Both
 HF and Runpod writes go to new versioned directories beneath
 `onboarding/private/provider-candidates/`; each save returns the exact
-candidate `runtime.env` and provider file paths. Do not copy a candidate over
-the active env or active secrets. Use those returned paths in the reviewed
-stage-transition plan.
+candidate `runtime.env`, empty `config/` directory, and provider file paths.
+The private operator preparation must populate that candidate config directory
+before a plan can pass preflight. Do not copy a candidate over the active env
+or active secrets. Use those returned paths in the reviewed stage-transition
+plan.
 
 If the helper runs on a remote VM, create a tunnel from the operator computer:
 
@@ -151,14 +153,16 @@ AuthorizationCloudRunner, which remains the only health poller.
 For Runpod, create a Restricted API key and enable only the Pod operations
 approved for the profile. The helper sends that candidate only to Runpod's
 read-only `GET /v2/pods?limit=1` endpoint, then atomically publishes a
-versioned private bundle containing `runtime.env` and `runpod-api-key` (UID
-10001, mode `0400`) after HTTP 200. The candidate env overrides only
+versioned private bundle containing `runtime.env`, an empty `config/` target,
+and `runpod-api-key` (UID 10001, mode `0400`) after HTTP 200. The candidate env
+sets `CYRENE_CONFIG_DIR` to the returned config target and overrides only
 `CYRENE_RUNPOD_API_KEY_FILE`; the active secrets directory and active key stay
 unchanged. A 401, 403, rate limit, malformed response, or network failure
 publishes nothing. This probe confirms Pod-list access only; it does not prove
-write authorization. Pass the returned candidate env path and key path to the
-formal stage-transition plan. Cloud Management changes only after that reviewed
-apply recreates the locked service and reads back health.
+write authorization. Root-private configuration preparation must populate the
+candidate config directory before the formal plan. Cloud Management changes
+only after that reviewed apply recreates the locked service and reads back
+health.
 
 The credential notice overlay is optional and must remain absent until the
 Directory owner, Teams tenant/team/channel/thread/service URL, Exchange

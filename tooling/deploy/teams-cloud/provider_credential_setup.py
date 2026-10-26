@@ -366,11 +366,13 @@ def _read_private_runtime_env(path: Path) -> tuple[list[str], dict[str, str]]:
     values: dict[str, str] = {}
     lines = content.splitlines(keepends=True)
     required = {
+        "CYRENE_CONFIG_DIR",
         "CYRENE_HF_OAUTH_BOOTSTRAP_FILE",
         "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON",
         "CYRENE_HUGGINGFACE_CONFIGURATION_JSON",
     }
     for name in (
+        "CYRENE_CONFIG_DIR",
         "CYRENE_HF_OAUTH_BOOTSTRAP_FILE",
         "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON",
         "CYRENE_HUGGINGFACE_CONFIGURATION_JSON",
@@ -422,6 +424,7 @@ def _hf_candidate_env(
     lines: list[str],
     values: Mapping[str, str],
     repositories: list[dict[str, Any]],
+    config_dir: Path,
     seed_path: Path,
 ) -> str:
     """Render only the HF seed path and its two matching repository scopes."""
@@ -455,10 +458,11 @@ def _hf_candidate_env(
         or direct_plugin.get("transport") != "mtls"
     ):
         raise SetupError("huggingface_exchange_profile_invalid")
-    account_scopes = profile.get("accountScopes")
-    if account_scopes is None:
+    if "accountScopes" not in profile:
         account_scopes = {}
         profile["accountScopes"] = account_scopes
+    else:
+        account_scopes = profile["accountScopes"]
     if not isinstance(account_scopes, dict) or set(account_scopes) - {"repositories"}:
         raise SetupError("huggingface_exchange_profile_invalid")
     account_scopes["repositories"] = [
@@ -477,6 +481,7 @@ def _hf_candidate_env(
     provider["repositories"] = repositories
     provider["read_only"] = not any("write" in row["permissions"] for row in repositories)
     replacements = {
+        "CYRENE_CONFIG_DIR": str(config_dir),
         "CYRENE_HF_OAUTH_BOOTSTRAP_FILE": str(seed_path),
         "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
             exchange, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -491,7 +496,11 @@ def _hf_candidate_env(
         for name in replacements
     ):
         raise SetupError("runtime_env_value_invalid")
-    if any(character in str(seed_path) for character in " \t\r\n\x00$#'\"\\"):
+    if any(
+        character in str(candidate_path)
+        for candidate_path in (config_dir, seed_path)
+        for character in " \t\r\n\x00$#'\"\\"
+    ):
         raise SetupError("runtime_env_path_unsupported")
     output: list[str] = []
     replaced: set[str] = set()
@@ -510,26 +519,35 @@ def _hf_candidate_env(
     return "".join(output)
 
 
-def _runpod_candidate_env(lines: list[str], key_path: Path) -> str:
+def _runpod_candidate_env(lines: list[str], config_dir: Path, key_path: Path) -> str:
     """Render the isolated Runpod key path without changing other secret sources."""
 
-    replacement = str(key_path)
-    if any(character in replacement for character in " \t\r\n\x00$#'\"\\"):
+    replacements = {
+        "CYRENE_CONFIG_DIR": str(config_dir),
+        "CYRENE_RUNPOD_API_KEY_FILE": str(key_path),
+    }
+    if any(
+        character in value for value in replacements.values() for character in " \t\r\n\x00$#'\"\\"
+    ):
         raise SetupError("runtime_env_path_unsupported")
     output: list[str] = []
-    replaced = False
+    replaced: set[str] = set()
     for line in lines:
         ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
         body = line[: -len(ending)] if ending else line
-        if body.startswith("CYRENE_RUNPOD_API_KEY_FILE="):
-            output.append(f"CYRENE_RUNPOD_API_KEY_FILE={replacement}{ending}")
-            replaced = True
+        match = re.match(r"^(CYRENE_[A-Z0-9_]+)=(.*)$", body)
+        if match and match.group(1) in replacements:
+            name = match.group(1)
+            output.append(f"{name}={replacements[name]}{ending}")
+            replaced.add(name)
         else:
             output.append(line)
-    if not replaced:
+    if "CYRENE_CONFIG_DIR" not in replaced:
+        raise SetupError("runtime_env_assignment_invalid")
+    if "CYRENE_RUNPOD_API_KEY_FILE" not in replaced:
         if output and not output[-1].endswith(("\n", "\r")):
             output.append("\n")
-        output.append(f"CYRENE_RUNPOD_API_KEY_FILE={replacement}\n")
+        output.append(f"CYRENE_RUNPOD_API_KEY_FILE={replacements['CYRENE_RUNPOD_API_KEY_FILE']}\n")
     return "".join(output)
 
 
@@ -537,8 +555,8 @@ def _write_hf_candidate_bundle(
     artifacts_dir: Path,
     active_env_file: Path,
     seed: Mapping[str, Any],
-) -> tuple[str, Path, Path, str]:
-    """Atomically publish an immutable owner-only env/seed candidate directory."""
+) -> tuple[str, Path, Path, Path, str]:
+    """Atomically publish an owner-only env/seed bundle with an empty config target."""
 
     lines, values = _read_private_runtime_env(active_env_file)
     repositories = _canonical_hf_repositories(seed["target_scope"]["repositories"])
@@ -555,9 +573,19 @@ def _write_hf_candidate_bundle(
     final_directory = parent / candidate_id
     candidate_seed = staging / "huggingface-oauth.json"
     candidate_env = staging / "runtime.env"
+    candidate_config_dir = staging / "config"
+    try:
+        candidate_config_dir.mkdir(mode=0o700)
+    except OSError:
+        staging.rmdir()
+        raise SetupError("candidate_bundle_write_failed") from None
     try:
         rendered_env = _hf_candidate_env(
-            lines, values, repositories, final_directory / candidate_seed.name
+            lines,
+            values,
+            repositories,
+            final_directory / "config",
+            final_directory / candidate_seed.name,
         )
         output_seed = dict(seed)
         output_seed["target_scope"] = {"repositories": repositories}
@@ -589,11 +617,18 @@ def _write_hf_candidate_bundle(
         if staging.exists():
             for child in (candidate_env, candidate_seed):
                 child.unlink(missing_ok=True)
+            candidate_config_dir.rmdir()
             staging.rmdir()
 
     candidate_env = final_directory / "runtime.env"
     candidate_seed = final_directory / "huggingface-oauth.json"
-    if not candidate_env.is_file() or not candidate_seed.is_file():
+    candidate_config_dir = final_directory / "config"
+    if (
+        not candidate_env.is_file()
+        or not candidate_seed.is_file()
+        or not candidate_config_dir.is_dir()
+        or any(candidate_config_dir.iterdir())
+    ):
         raise SetupError("candidate_bundle_publish_failed")
     for path, mode in ((candidate_env, 0o600), (candidate_seed, 0o400)):
         metadata = path.lstat()
@@ -604,15 +639,22 @@ def _write_hf_candidate_bundle(
             or stat.S_IMODE(metadata.st_mode) != mode
         ):
             raise SetupError("candidate_bundle_permissions_invalid")
+    config_metadata = candidate_config_dir.lstat()
+    if (
+        not stat.S_ISDIR(config_metadata.st_mode)
+        or config_metadata.st_uid != OWNER_UID
+        or stat.S_IMODE(config_metadata.st_mode) != 0o700
+    ):
+        raise SetupError("candidate_bundle_permissions_invalid")
     env_hash = hashlib.sha256(candidate_env.read_bytes()).hexdigest()
-    return candidate_id, candidate_env, candidate_seed, env_hash
+    return candidate_id, candidate_env, candidate_seed, candidate_config_dir, env_hash
 
 
 def _write_runpod_candidate_bundle(
     artifacts_dir: Path,
     active_env_file: Path,
     api_key: str,
-) -> tuple[str, Path, Path, str, str]:
+) -> tuple[str, Path, Path, Path, str, str]:
     """Publish a validated Runpod key and matching env without touching active secrets."""
 
     lines, _values = _read_private_runtime_env(active_env_file)
@@ -629,9 +671,13 @@ def _write_runpod_candidate_bundle(
     final_directory = parent / candidate_id
     candidate_env = staging / "runtime.env"
     candidate_key = staging / "runpod-api-key"
+    candidate_config_dir = staging / "config"
     published = False
     try:
-        rendered_env = _runpod_candidate_env(lines, final_directory / candidate_key.name)
+        candidate_config_dir.mkdir(mode=0o700)
+        rendered_env = _runpod_candidate_env(
+            lines, final_directory / "config", final_directory / candidate_key.name
+        )
         _atomic_private_write(candidate_env, rendered_env.encode("utf-8"), mode=0o600)
         _atomic_private_write(candidate_key, api_key.encode("ascii"), mode=0o400)
         try:
@@ -657,10 +703,13 @@ def _write_runpod_candidate_bundle(
         if staging.exists():
             candidate_env.unlink(missing_ok=True)
             candidate_key.unlink(missing_ok=True)
+            if candidate_config_dir.exists():
+                candidate_config_dir.rmdir()
             staging.rmdir()
 
     candidate_env = final_directory / "runtime.env"
     candidate_key = final_directory / "runpod-api-key"
+    candidate_config_dir = final_directory / "config"
     for path, mode in ((candidate_env, 0o600), (candidate_key, 0o400)):
         metadata = path.lstat()
         if (
@@ -670,10 +719,18 @@ def _write_runpod_candidate_bundle(
             or stat.S_IMODE(metadata.st_mode) != mode
         ):
             raise SetupError("candidate_bundle_permissions_invalid")
+    config_metadata = candidate_config_dir.lstat()
+    if (
+        not stat.S_ISDIR(config_metadata.st_mode)
+        or config_metadata.st_uid != OWNER_UID
+        or stat.S_IMODE(config_metadata.st_mode) != 0o700
+    ):
+        raise SetupError("candidate_bundle_permissions_invalid")
     return (
         candidate_id,
         candidate_env,
         candidate_key,
+        candidate_config_dir,
         hashlib.sha256(candidate_env.read_bytes()).hexdigest(),
         hashlib.sha256(candidate_key.read_bytes()).hexdigest(),
     )
@@ -1253,13 +1310,17 @@ class CredentialSetupService:
         if self.active_env_file is None:
             raise SetupError("runtime_env_required_for_huggingface_candidate")
         with self._exclusive_write_lock():
-            candidate_id, candidate_env, candidate_seed, env_hash = _write_hf_candidate_bundle(
-                self.artifacts_dir, self.active_env_file, output
-            )
+            (
+                candidate_id,
+                candidate_env,
+                candidate_seed,
+                candidate_config_dir,
+                env_hash,
+            ) = _write_hf_candidate_bundle(self.artifacts_dir, self.active_env_file, output)
         session.seed = output
         session.repositories.clear()
         return {
-            "state": "SAVED_CANDIDATE_PROFILE_LINK_OR_ROTATION_REQUIRED",
+            "state": "SAVED_CANDIDATE_REQUIRES_PREPARATION",
             "username": identity["username"],
             "repositoryCount": len(selected),
             "accessMode": "read_write"
@@ -1269,8 +1330,11 @@ class CredentialSetupService:
             "candidateId": candidate_id,
             "candidateEnvFile": str(candidate_env),
             "candidateHuggingFaceSeed": str(candidate_seed),
+            "candidateConfigDir": str(candidate_config_dir),
             "candidateEnvSha256": env_hash,
             "exchangeProfileAlias": HF_PROFILE_ALIAS,
+            "configurationPreparation": "REQUIRED_BEFORE_FORMAL_PLAN",
+            "profileAction": "FORMAL_EXCHANGE_LINK_OR_ROTATION_REQUIRED",
             "activation": "FORMAL_STAGE_TRANSITION_REQUIRED",
         }
 
@@ -1302,22 +1366,27 @@ class CredentialSetupService:
                 candidate_id,
                 candidate_env,
                 candidate_key,
+                candidate_config_dir,
                 env_hash,
                 key_hash,
             ) = _write_runpod_candidate_bundle(self.artifacts_dir, self.active_env_file, api_key)
         result = {
-            "state": "SAVED_CANDIDATE_RELOAD_REQUIRED_READ_VALIDATED",
+            "state": "SAVED_CANDIDATE_REQUIRES_PREPARATION",
             "candidateId": candidate_id,
             "candidateEnvFile": str(candidate_env),
             "candidateRunpodKeyFile": str(candidate_key),
+            "candidateConfigDir": str(candidate_config_dir),
             "candidateEnvSha256": env_hash,
             "candidateRunpodKeySha256": key_hash,
+            "providerProbe": "PODS_READ_VALIDATED",
+            "configurationPreparation": "REQUIRED_BEFORE_FORMAL_PLAN",
             "activation": "FORMAL_STAGE_TRANSITION_REQUIRED",
         }
         session.runpod_candidate = {
             "state": result["state"],
             "candidateEnvFile": result["candidateEnvFile"],
             "candidateRunpodKeyFile": result["candidateRunpodKeyFile"],
+            "candidateConfigDir": result["candidateConfigDir"],
             "activation": result["activation"],
         }
         return result
@@ -1333,7 +1402,7 @@ def _private_page() -> str:
 </head><body>
 <h1>Cyrene provider authorization</h1>
 <p>This page listens only on 127.0.0.1. Credentials are sent from this browser to the local helper and are never echoed or logged.</p>
-<section><h2>Hugging Face</h2><p>Use the existing authorized device-OAuth seed when available. Choose only repositories you want Cyrene to access. Saving creates a private candidate runtime.env and OAuth seed together; it does not change the active deployment.</p>
+<section><h2>Hugging Face</h2><p>Use the existing authorized device-OAuth seed when available. Choose only repositories you want Cyrene to access. Saving creates a private candidate runtime.env, OAuth seed, and empty config directory; private config preparation and the formal stage transition are still required.</p>
 <div id="hf-state" class="status">Loading authorization state…</div>
 <button id="hf-load-owner" type="button">Load account and organization namespaces</button>
 <div class="row"><label>Namespace<select id="hf-owner"><option value="*">Public Hub search</option></select></label><label>Repository type<select id="hf-type"><option value="model">Models</option><option value="dataset">Datasets</option><option value="space">Spaces</option></select></label></div>
@@ -1345,7 +1414,7 @@ def _private_page() -> str:
 <label><input id="hf-gated" type="checkbox"> Request access to gated public repositories.</label>
 <button id="hf-start" type="button">Start Hugging Face login</button>
 <div id="hf-device" class="status"></div></details></section>
-<section><h2>Runpod</h2><p>Validation calls only <code>GET https://api.runpod.io/v2/pods?limit=1</code>. It proves Pod-list access, not write permissions. A successful key is saved in a versioned private candidate bundle; the active key is not changed.</p>
+<section><h2>Runpod</h2><p>Validation calls only <code>GET https://api.runpod.io/v2/pods?limit=1</code>. It proves Pod-list access, not write permissions. A successful key is saved in a versioned private candidate bundle with an empty config directory; private config preparation and the formal stage transition are still required. The active key is not changed.</p>
 <form method="post" action="/runpod" autocomplete="off"><input type="hidden" name="csrf" value="{csrf}">
 <label>Runpod API key <input type="password" name="api_key" required maxlength="16384" autocomplete="new-password"></label>
 <button type="submit">Validate and save</button></form><div id="runpod-state" class="status">No validation run.</div>
