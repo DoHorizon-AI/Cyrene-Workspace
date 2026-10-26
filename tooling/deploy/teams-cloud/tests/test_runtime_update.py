@@ -2529,7 +2529,12 @@ def test_successful_update_holds_edge_around_provider_only_or_combined_targets(
         "createdAtUtc": "2026-10-25T18:00:00+00:00",
         "updatedAtUtc": "2026-10-25T18:00:00+00:00",
         "lastErrorCode": None,
-        "edge": {"latestDeadCount": 0},
+        "edge": {
+            "containerId": OLD_CONTAINER_ID,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "resumeRevision": None,
+        },
         "navigator": {"stop": None},
     }
     events: list[str] = []
@@ -2556,10 +2561,19 @@ def test_successful_update_holds_edge_around_provider_only_or_combined_targets(
         "_ensure_navigator_resumed",
         lambda **_kwargs: events.append("nav-ready"),
     )
+
+    def resume_edge(**_kwargs: Any) -> None:
+        journal["edge"]["resumeRevision"] = 2
+        events.append("edge-resume")
+
+    monkeypatch.setattr(runtime_update, "_resume_edge", resume_edge)
     monkeypatch.setattr(
         runtime_update,
-        "_resume_edge",
-        lambda **_kwargs: events.append("edge-resume"),
+        "_current_edge_status",
+        lambda *_args, **_kwargs: (
+            events.append("edge-final-readback")
+            or {"_httpStatus": 200, **_edge_status(paused=False, revision=2)}
+        ),
     )
     monkeypatch.setattr(
         runtime_update,
@@ -2584,7 +2598,83 @@ def test_successful_update_holds_edge_around_provider_only_or_combined_targets(
 
     assert events == ["edge-pause", "nav-drain"] + [
         f"update-{target}" for target in expected_target_updates
-    ] + ["nav-ready", "edge-resume"]
+    ] + ["nav-ready", "edge-resume", "edge-final-readback"]
     assert result["state"] == "APPLIED"
     assert result["phase"] == "UPDATE_COMPLETE"
     assert result["updatedTargets"] == update_order
+
+
+def test_final_dead_letter_increment_after_resume_prevents_applied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A post-CAS DLQ increase is caught by final readback before APPLIED."""
+
+    journal = {
+        "schemaVersion": runtime_update.JOURNAL_SCHEMA,
+        "operationId": OPERATION_ID,
+        "planSha256": "c" * 64,
+        "state": "RUNNING",
+        "phase": "PRECHECKED",
+        "targets": ["exchange"],
+        "updatedTargets": [],
+        "edge": {
+            "containerId": OLD_CONTAINER_ID,
+            "initialDeadCount": 0,
+            "latestDeadCount": 0,
+            "resumeRevision": None,
+        },
+        "navigator": {},
+        "history": [],
+    }
+
+    monkeypatch.setattr(runtime_update, "_pause_edge", lambda **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_drain_navigator", lambda **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_update_target", lambda **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_ensure_navigator_resumed", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        runtime_update,
+        "_resume_edge",
+        lambda **_kwargs: journal["edge"].update(resumeRevision=2),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_edge_status",
+        lambda *_args, **_kwargs: {
+            "_httpStatus": 200,
+            **_edge_status(paused=False, revision=2),
+            "dead_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_set_phase",
+        lambda target_journal, _path, phase, *, state=None, error_code=None: target_journal.update(
+            {
+                "phase": phase,
+                "state": state or target_journal["state"],
+                "lastErrorCode": error_code,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_rollback_operation",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            runtime_update.RuntimeUpdateError("DLQ count changed; preserve delivery state")
+        ),
+    )
+
+    with pytest.raises(
+        runtime_update.RuntimeUpdateError, match="automatic rollback could not be verified"
+    ):
+        runtime_update._execute_update(
+            plan={"policy": {"updateOrder": ["exchange"]}},
+            context={},
+            journal=journal,
+            journal_path=tmp_path / "operation.json",
+            docker_prefix=["docker"],
+        )
+
+    assert journal["edge"]["latestDeadCount"] == 1
+    assert journal["state"] == "RECOVERY_REQUIRED"
+    assert journal["phase"] == "RECOVERY_REQUIRED"

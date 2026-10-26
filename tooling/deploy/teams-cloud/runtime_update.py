@@ -1751,6 +1751,27 @@ def _resume_edge(
     _set_phase(journal, journal_path, "EDGE_RESUMED")
 
 
+def _verify_final_edge_delivery_readback(
+    *, journal: dict[str, Any], docker_prefix: list[str]
+) -> dict[str, Any]:
+    """Require the resumed spool revision and unchanged DLQ count before APPLIED."""
+
+    edge = journal["edge"]
+    status = _current_edge_status(docker_prefix, edge["containerId"])
+    _validate_edge_status(status)
+    _verify_edge_dead_count(edge, status["dead_count"], "final APPLIED readback")
+    resume_revision = edge.get("resumeRevision")
+    if (
+        status["paused"] is not False
+        or resume_revision is None
+        or status["revision"] != resume_revision
+    ):
+        raise RuntimeUpdateError(
+            "Teams delivery final readback differs from the operation's resumed revision"
+        )
+    return status
+
+
 def _active_image_option(plan: dict[str, Any], target: str) -> dict[str, str]:
     """Return one reviewed active image reference/ID pair for a target."""
 
@@ -3181,6 +3202,7 @@ def _execute_update(
             docker_prefix=docker_prefix,
         )
         _resume_edge(journal=journal, journal_path=journal_path, docker_prefix=docker_prefix)
+        _verify_final_edge_delivery_readback(journal=journal, docker_prefix=docker_prefix)
         _set_phase(journal, journal_path, "UPDATE_COMPLETE", state="APPLIED")
         return _journal_summary(journal)
     except RuntimeUpdateOutcomeUnknown as failure:
