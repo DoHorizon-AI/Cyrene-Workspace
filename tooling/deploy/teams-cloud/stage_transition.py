@@ -48,6 +48,7 @@ DATABASE_VOLUME_TARGET = "/var/lib/cyrene-navigator"
 CODEBUDDY_HOME_TARGET = "/home/navigator/.codebuddy"
 MEMORY_RESERVE_DEFAULT_MIB = 1024
 SQLITE_ADDITIVE_SCHEMA_OBJECTS = {"table:work_credential_authorization_health"}
+ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR = "account_center_schema_downgrade_unsupported"
 CLOUD_MANAGEMENT_TLS_SECRET_NAMES = frozenset(
     {
         "cloud-management-server-cert",
@@ -725,9 +726,9 @@ def _validate_phase_topology(
             raise StageTransitionError(f"candidate changes non-target runtime service {name}")
     if phase == "provider-bootstrap":
         persistence = target_images.get("navigator-persistence")
-        if not isinstance(persistence, dict) or persistence["active"] == persistence["candidate"]:
+        if not isinstance(persistence, dict) or persistence["active"] is None:
             raise StageTransitionError(
-                "provider bootstrap must include the locked Persistence image update"
+                "provider bootstrap requires the existing locked Persistence service"
             )
     ordered_targets = [name for name in SERVICE_ORDER if name in changed]
     if not ordered_targets or "navigator" not in ordered_targets:
@@ -1828,7 +1829,9 @@ def _validate_database_migration(
     return current
 
 
-def _validate_work_credential_health_table(record: dict[str, Any]) -> None:
+def _validate_work_credential_health_table(
+    record: dict[str, Any], *, require_empty: bool = True
+) -> None:
     """Pin the one additive Navigator 17700 credential-health table to its source schema."""
 
     expected = [
@@ -1866,12 +1869,38 @@ def _validate_work_credential_health_table(record: dict[str, Any]) -> None:
         or record.get("foreignKeys") != []
         or record.get("checkConstraints") != []
         or record.get("uniqueIndexes") != []
-        or record.get("rowCount") != 0
+        or (require_empty and record.get("rowCount") != 0)
         or record.get("emptyOrganizationIdRows") != 0
     ):
         raise StageTransitionError(
             "additive credential-health table differs from the pinned Navigator 17700 schema"
         )
+
+
+def _validate_preexisting_credential_health_schema(report: Any) -> dict[str, Any]:
+    """Require the exact previously migrated health table before continuing provider bootstrap."""
+
+    snapshot = _validate_sqlite_report_shape(
+        report, "pre-existing Persistence candidate schema readback"
+    )
+    table = snapshot["tables"].get("work_credential_authorization_health")
+    if not isinstance(table, dict):
+        raise StageTransitionError(
+            "Persistence already uses the candidate image but lacks its credential-health table"
+        )
+    _validate_work_credential_health_table(table, require_empty=False)
+    return snapshot
+
+
+def _validate_bootstrap_persistence_baseline(
+    plan: dict[str, Any], report: Any
+) -> dict[str, Any] | None:
+    """Require the credential-health schema when bootstrap reuses the candidate Persistence image."""
+
+    persistence = plan["candidateServices"]["navigator-persistence"]
+    if plan["phase"] == "provider-bootstrap" and persistence["active"] == persistence["candidate"]:
+        return _validate_preexisting_credential_health_schema(report)
+    return None
 
 
 def _normalize_sqlite_ddl(value: Any) -> str:
@@ -4041,6 +4070,33 @@ def _verify_final_delivery_readback(
     return status
 
 
+def _account_center_image_downgrade_may_be_unsafe(
+    plan: dict[str, Any], progress: dict[str, Any]
+) -> bool:
+    """Detect a started Account Center candidate whose old image cannot read migrated state."""
+
+    migration_may_have_started = (
+        progress.get("applyIntent") is True
+        or progress.get("rollbackIntent") is True
+        or isinstance(progress.get("candidateContainerId"), str)
+    )
+    if not migration_may_have_started:
+        return False
+    target = plan.get("candidateServices", {}).get("account-center", {})
+    active_image = target.get("active") if isinstance(target, dict) else None
+    candidate_image = target.get("candidate") if isinstance(target, dict) else None
+    if active_image is None:
+        return True
+    if (
+        not isinstance(active_image, dict)
+        or not isinstance(candidate_image, dict)
+        or not isinstance(active_image.get("imageId"), str)
+        or not isinstance(candidate_image.get("imageId"), str)
+    ):
+        return True
+    return active_image["imageId"] != candidate_image["imageId"]
+
+
 def _rollback_known_mutations(
     *,
     plan: dict[str, Any],
@@ -4055,6 +4111,19 @@ def _rollback_known_mutations(
     active_images = _lock_image_ids(active_lock)
     for service_name in reversed(plan["targets"]):
         progress = journal["targetProgress"][service_name]
+        if service_name == "account-center" and _account_center_image_downgrade_may_be_unsafe(
+            plan, progress
+        ):
+            journal["lastErrorCode"] = ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR
+            _write_journal(
+                journal_path,
+                journal,
+                "ACCOUNT_CENTER_SCHEMA_DOWNGRADE_BLOCKED",
+                state="RECOVERY_REQUIRED",
+            )
+            raise StageTransitionError(
+                "Account Center may have migrated durable SQLite; preserve its candidate image and require roll-forward recovery"
+            )
         candidate_id = progress.get("candidateContainerId")
         if not isinstance(candidate_id, str):
             if progress.get("applyIntent") is True:
@@ -4241,6 +4310,15 @@ def apply_plan_file(
                 journal=journal,
                 journal_path=journal_path,
             )
+            preexisting_schema = _validate_bootstrap_persistence_baseline(
+                plan, journal["database"]["snapshot"]
+            )
+            if preexisting_schema is not None:
+                _write_journal(
+                    journal_path,
+                    journal,
+                    "PERSISTENCE_CANDIDATE_SCHEMA_VERIFIED",
+                )
             for service_name in plan["targets"]:
                 if (
                     service_name == "navigator"
@@ -4416,7 +4494,8 @@ def apply_plan_file(
                 runtime_update.RuntimeUpdateError,
                 subprocess.SubprocessError,
             ) as rollback_error:
-                journal["lastErrorCode"] = "safe_rollback_not_verified"
+                if journal.get("lastErrorCode") != ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR:
+                    journal["lastErrorCode"] = "safe_rollback_not_verified"
                 _write_journal(
                     journal_path, journal, "RECOVERY_REQUIRED", state="RECOVERY_REQUIRED"
                 )
@@ -4471,7 +4550,8 @@ def apply_plan_file(
                 runtime_update.RuntimeUpdateError,
                 subprocess.SubprocessError,
             ) as rollback_error:
-                journal["lastErrorCode"] = "safe_rollback_not_verified"
+                if journal.get("lastErrorCode") != ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR:
+                    journal["lastErrorCode"] = "safe_rollback_not_verified"
                 _write_journal(
                     journal_path, journal, "RECOVERY_REQUIRED", state="RECOVERY_REQUIRED"
                 )
