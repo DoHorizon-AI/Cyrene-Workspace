@@ -5,7 +5,8 @@
       "actor_id": "REPLACE_WITH_VERIFIED_OWNER_SUBJECT",
       "workspace_ids": ["REPLACE_WITH_AUTHORIZED_WORKSPACE_ID"],
       "organization_id": "REPLACE_WITH_AUTHORIZED_ORGANIZATION_ID",
-      "can_takeover": true
+      "can_takeover": true,
+      "can_publish_credential_health": false
     }
   ],
   "product_directory": [],
