@@ -267,7 +267,13 @@ def _render_actual_runtime_compose(monkeypatch: pytest.MonkeyPatch) -> dict[str,
             argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--profile"
         }
         assert selected_files == compose_files
-        assert active_profiles == {"public-ingress", "cloud-phase2", "runpod", "directory-operator"}
+        assert runtime_update.preflight.ACTIVE_COMPOSE_PROFILES == (
+            "public-ingress",
+            "cloud-phase2",
+            "runpod",
+            "directory-operator",
+        )
+        assert active_profiles == set(runtime_update.preflight.ACTIVE_COMPOSE_PROFILES)
         assert argv[-3:] == ["config", "--format", "json"]
 
         rendered: dict[str, Any] = {}
@@ -1064,6 +1070,19 @@ def test_github_provider_compose_update_is_no_deps_and_targets_only_provider(
     assert "--no-build" in argv
     assert "account-center" not in argv
     assert "exchange" not in argv
+    profiles = [
+        argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--profile"
+    ]
+    assert profiles == list(runtime_update.preflight.ACTIVE_COMPOSE_PROFILES)
+    assert "directory-bootstrap" not in profiles
+    assert argv[argv.index("up") + 1 :] == [
+        "--detach",
+        "--no-deps",
+        "--pull",
+        "never",
+        "--no-build",
+        "github-issues",
+    ]
 
 
 def test_github_provider_target_uses_locked_image_health_readback_without_nav_stop(

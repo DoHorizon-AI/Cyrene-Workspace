@@ -1709,6 +1709,22 @@ def test_compose_stage_target_is_closed_and_never_pulls_or_builds(
         "--force-recreate",
         "navigator-persistence",
     ]
+    profiles = [
+        captured[index + 1]
+        for index, argument in enumerate(captured[:-1])
+        if argument == "--profile"
+    ]
+    assert profiles == list(runtime_update.preflight.ACTIVE_COMPOSE_PROFILES)
+    assert "directory-bootstrap" not in profiles
+    assert captured[captured.index("up") + 1 :] == [
+        "--detach",
+        "--no-deps",
+        "--pull",
+        "never",
+        "--no-build",
+        "--force-recreate",
+        "navigator-persistence",
+    ]
     with pytest.raises(runtime_update.RuntimeUpdateError, match="outside the formal"):
         runtime_update._compose_up_stage_transition(
             docker_prefix=["docker"],

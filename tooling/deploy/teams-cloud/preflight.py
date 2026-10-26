@@ -33,6 +33,9 @@ from build_arm64 import BuildError, check_local_lock
 
 GIB = 1024**3
 MIB = 1024**2
+# Keep preflight and targeted `up` on the same dependency graph; `--no-deps` starts only its target.
+# 中文：预检与定向更新使用同一依赖图；`--no-deps` 仍只启动指定目标。
+ACTIVE_COMPOSE_PROFILES = ("public-ingress", "cloud-phase2", "runpod", "directory-operator")
 # A nominal 4 GiB VM reports less MemTotal after firmware/kernel reservations.
 # 中文：4 GiB 规格按 guest 可见下限识别；实际可用内存仍由独立余量检查决定。
 MIN_GUEST_MEMORY_MIB = 3584
@@ -3248,7 +3251,7 @@ def _compose_config(
     for compose_file in compose_files:
         argv.extend(["--file", str(compose_file.resolve())])
     # Resolve the stable owner ID for actor validation without launching the operator service.
-    for profile in ("public-ingress", "cloud-phase2", "runpod", "directory-operator"):
+    for profile in ACTIVE_COMPOSE_PROFILES:
         argv.extend(["--profile", profile])
     argv.extend(["config", "--format", "json"])
     output = _run(argv)
