@@ -1758,7 +1758,6 @@ def _verify_final_edge_delivery_readback(
 
     edge = journal["edge"]
     status = _current_edge_status(docker_prefix, edge["containerId"])
-    _validate_edge_status(status)
     _verify_edge_dead_count(edge, status["dead_count"], "final APPLIED readback")
     resume_revision = edge.get("resumeRevision")
     if (

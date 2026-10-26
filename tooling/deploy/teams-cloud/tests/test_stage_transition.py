@@ -62,6 +62,274 @@ def _mount_service(image: str, *, executor: bool = False) -> dict[str, Any]:
     return row
 
 
+def _install_internal_status_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    edge_status: dict[str, Any] | None = None,
+    navigator_status: dict[str, Any] | None = None,
+) -> list[str]:
+    """Return genuine HTTP 200 envelopes through the internal status transport layer."""
+
+    edge_document = edge_status or {
+        "paused": False,
+        "revision": 7,
+        "active_delivery_count": 0,
+        "queued_count": 0,
+        "leased_count": 0,
+        "retry_wait_count": 0,
+        "delivered_count": 1,
+        "rejected_count": 0,
+        "dead_count": 0,
+        "pending_bytes": 0,
+        "retained_body_bytes": 0,
+        "oldest_pending_at": None,
+        "last_delivered_at": None,
+    }
+    if navigator_status is None:
+        fixture_path = (
+            Path(__file__).resolve().parent / "fixtures/navigator-drain-status-18baefba.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        navigator_status = fixture["statuses"]["accepting"]
+    requested_urls: list[str] = []
+
+    def run_command(argv: list[str], **_kwargs: Any) -> SimpleNamespace:
+        url = next(
+            (value for value in argv if isinstance(value, str) and value.startswith("http://")),
+            None,
+        )
+        if not isinstance(url, str):
+            raise TypeError("internal status request omitted its URL")
+        requested_urls.append(url)
+        if url.endswith("/_internal/teams/delivery/status"):
+            document = edge_document
+        elif url.endswith("/internal/v1/executor/drain"):
+            document = navigator_status
+        else:
+            raise AssertionError(f"unexpected internal status endpoint: {url}")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"httpStatus": 200, "document": document}),
+        )
+
+    monkeypatch.setattr(runtime_update, "_run_command", run_command)
+    return requested_urls
+
+
+def test_create_plan_consumes_statuses_after_transport_and_single_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the planner through raw HTTP 200 envelopes, not mocked status helpers."""
+
+    edge_container_id = "1" * 64
+    navigator_container_id = "2" * 64
+    requested_urls = _install_internal_status_transport(monkeypatch)
+    active_services = {
+        "teams-ingress": {
+            "containerId": edge_container_id,
+            "imageRef": "teams-ingress:test",
+            "imageId": _image_id(1),
+        },
+        "navigator": {
+            "containerId": navigator_container_id,
+            "imageRef": "navigator:test",
+            "imageId": _image_id(2),
+        },
+    }
+    compose = {
+        "name": "cyrene-teams-cloud",
+        "services": {"teams-ingress": {}, "navigator": {}},
+        "secrets": {},
+        "configs": {},
+        "volumes": {},
+    }
+    runtime_services = {"teams-ingress": {}, "navigator": {}}
+    mount_identity = {"teams-ingress": [], "navigator": []}
+    candidate_preflight = {
+        "mode": "connector-auth-readonly",
+        "connectorAuthPhase": "provider-bootstrap",
+        "credentialReadOnlyRuntimeReady": True,
+        "fullCloudWriteDeploymentReady": False,
+        "lifecycleAcceptance": "NOT_RUN",
+        "expectedProviderScopeDigests": {},
+        "huggingfaceRepositoryScopeDigestSha256": "a" * 64,
+    }
+    seed_file = tmp_path / "huggingface-oauth.json"
+    evidence_file = tmp_path / "connector-auth-evidence.json"
+    seed_file.write_text("{}", encoding="utf-8")
+    evidence_file.write_text("{}", encoding="utf-8")
+    persisted_plan: dict[str, Any] = {}
+
+    monkeypatch.setattr(runtime_update, "_require_update_operator", lambda: None)
+    monkeypatch.setattr(runtime_update, "_validate_docker_prefix", lambda _prefix: None)
+    monkeypatch.setattr(runtime_update, "_load_lock", lambda _path: {})
+
+    def capture_plan(_path: Path, document: dict[str, Any], **_kwargs: Any) -> None:
+        persisted_plan.update(document)
+
+    monkeypatch.setattr(runtime_update, "_write_private_json", capture_plan)
+    monkeypatch.setattr(stage_transition, "_validate_output_directory", lambda _path: None)
+    monkeypatch.setattr(
+        stage_transition,
+        "_validate_private_directory",
+        lambda path, *_args, **_kwargs: Path(path),
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_file_records",
+        lambda paths, _label: [
+            {"path": str(Path(path).resolve()), "sha256": "b" * 64} for path in paths
+        ],
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_file_record",
+        lambda path, _label: {"path": str(Path(path).resolve()), "sha256": "c" * 64},
+    )
+    monkeypatch.setattr(stage_transition, "_directory_manifest", lambda *_args: [])
+    monkeypatch.setattr(stage_transition.preflight, "_compose_config", lambda *_args: compose)
+    monkeypatch.setattr(stage_transition, "_secret_manifest", lambda *_args: [])
+    monkeypatch.setattr(stage_transition, "_validate_active_candidate_configs", lambda *_args: None)
+    monkeypatch.setattr(stage_transition, "_validate_active_candidate_secrets", lambda *_args: None)
+    monkeypatch.setattr(
+        stage_transition, "_validate_candidate_secret_paths", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_validate_phase_topology",
+        lambda **_kwargs: (["navigator"], {"navigator": {"added": False}}),
+    )
+    monkeypatch.setattr(
+        stage_transition.preflight, "run_preflight", lambda **_kwargs: candidate_preflight
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_selection_file_state",
+        lambda path, *_args, **_kwargs: {
+            "path": str(Path(path).resolve()),
+            "sha256": None,
+            "document": None,
+        },
+    )
+    monkeypatch.setattr(
+        stage_transition, "_runtime_service_inventory", lambda _compose: runtime_services
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_runtime_config_identity_for_compose",
+        lambda _compose: mount_identity,
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_runtime_config_identity",
+        lambda **_kwargs: mount_identity,
+    )
+    monkeypatch.setattr(
+        stage_transition, "_verify_runtime_config_identity_sources", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        stage_transition, "_live_service_inventory", lambda **_kwargs: active_services
+    )
+    monkeypatch.setattr(stage_transition, "_validate_plan", lambda _plan: None)
+
+    compose_file = tmp_path / "compose.yaml"
+    env_file = tmp_path / "runtime.env"
+    lock_file = tmp_path / "image-lock.json"
+    result = stage_transition.create_plan(
+        phase="provider-bootstrap",
+        active_compose_files=[compose_file],
+        active_env_files=[env_file],
+        active_image_lock=lock_file,
+        candidate_compose_files=[compose_file],
+        candidate_env_files=[env_file],
+        candidate_image_lock=lock_file,
+        secrets_dir=tmp_path / "secrets",
+        active_config_dir=tmp_path / "active-config",
+        candidate_config_dir=tmp_path / "candidate-config",
+        candidate_huggingface_seed=seed_file,
+        candidate_runpod_key_file=None,
+        connector_auth_evidence=evidence_file,
+        connector_auth_task_id="teams-status-test",
+        notification_anchor_file=None,
+        notification_provenance_file=None,
+        active_selection_file=None,
+        promote_selection_file=tmp_path / "runtime-selection.json",
+        backup_dir=tmp_path,
+        journal_dir=tmp_path,
+        plan_path=tmp_path / "plan.json",
+        docker_prefix=["docker"],
+        drain_timeout_seconds=300,
+        health_timeout_seconds=300,
+        max_memory_mib=3584,
+        max_cpus=1.95,
+        required_free_gib=2.0,
+        minimum_mem_available_mib=1024,
+    )
+
+    assert len(result["planSha256"]) == 64
+    assert persisted_plan["edgeDelivery"]["revision"] == 7
+    assert persisted_plan["navigatorDrain"]["instanceId"] == "11111111-1111-4111-8111-111111111111"
+    assert len(requested_urls) == 2
+    assert any("/_internal/teams/delivery/status" in url for url in requested_urls)
+    assert any("/internal/v1/executor/drain" in url for url in requested_urls)
+
+
+def test_apply_baseline_consumes_statuses_after_transport_and_single_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise apply's active baseline through the raw 200 status envelopes."""
+
+    edge_container_id = "3" * 64
+    navigator_container_id = "4" * 64
+    requested_urls = _install_internal_status_transport(monkeypatch)
+    active_services = {
+        "teams-ingress": {
+            "containerId": edge_container_id,
+            "imageRef": "teams-ingress:test",
+            "imageId": _image_id(3),
+        },
+        "navigator": {
+            "containerId": navigator_container_id,
+            "imageRef": "navigator:test",
+            "imageId": _image_id(4),
+        },
+    }
+    compose = {"name": "cyrene-teams-cloud", "services": {}}
+    monkeypatch.setattr(runtime_update, "_load_lock", lambda _path: {})
+    monkeypatch.setattr(stage_transition.preflight, "_compose_config", lambda *_args: compose)
+    monkeypatch.setattr(
+        stage_transition,
+        "_live_service_inventory",
+        lambda **_kwargs: active_services,
+    )
+    plan = {
+        "activeInputs": {
+            "composeFiles": [{"path": "/private/active-compose.yaml"}],
+            "envFiles": [{"path": "/private/active.env"}],
+            "imageLock": {"path": "/private/active-image-lock.json"},
+        },
+        "project": "cyrene-teams-cloud",
+        "runtimeConfigIdentity": {"active": {"teams-ingress": [], "navigator": []}},
+        "activeServices": active_services,
+        "edgeDelivery": {
+            "containerId": edge_container_id,
+            "revision": 7,
+            "deadCount": 0,
+        },
+        "navigatorDrain": {
+            "containerId": navigator_container_id,
+            "instanceId": "11111111-1111-4111-8111-111111111111",
+            "generation": 0,
+        },
+    }
+
+    active_compose, _lock_data = stage_transition._verify_active_baseline(plan, ["docker"])
+
+    assert active_compose == compose
+    assert len(requested_urls) == 2
+
+
 def test_apply_preflight_rechecks_frozen_host_fronted_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -820,7 +1088,6 @@ def test_final_ingress_readback_rejects_a_new_dead_letter_before_applied(
         }
     }
     status = {
-        "_httpStatus": 200,
         "paused": False,
         "revision": 2,
         "active_delivery_count": 0,
@@ -835,15 +1102,12 @@ def test_final_ingress_readback_rejects_a_new_dead_letter_before_applied(
         "oldest_pending_at": None,
         "last_delivered_at": None,
     }
-    monkeypatch.setattr(
-        stage_transition.runtime_update,
-        "_current_edge_status",
-        lambda *_args, **_kwargs: status,
-    )
+    requested_urls = _install_internal_status_transport(monkeypatch, edge_status=status)
 
     with pytest.raises(runtime_update.RuntimeUpdateError, match="dead-letter count changed"):
         stage_transition._verify_final_delivery_readback(journal=journal, docker_prefix=["docker"])
     assert journal["edge"]["latestDeadCount"] == 1
+    assert len(requested_urls) == 1
 
 
 def _table_report(
