@@ -141,6 +141,52 @@ def _active_and_bootstrap() -> tuple[
     return active, candidate, active_lock, candidate_lock
 
 
+def test_cloud_management_tls_secret_overlay_allows_only_the_canonical_four_names() -> None:
+    """Permit the four phase-two mTLS files while rejecting any other new secret."""
+
+    expected = frozenset(
+        {
+            "cloud-management-server-cert",
+            "cloud-management-server-key",
+            "cloud-management-health-client-cert",
+            "cloud-management-health-client-key",
+        }
+    )
+    assert stage_transition.CLOUD_MANAGEMENT_TLS_SECRET_NAMES == expected
+
+    active = {"secrets": {}}
+    candidate = {"secrets": {name: {"file": f"/candidate/{name}"} for name in expected}}
+    stage_transition._validate_active_candidate_secrets(active, candidate)
+
+    candidate["secrets"]["cloud-management-unexpected-secret"] = {
+        "file": "/candidate/cloud-management-unexpected-secret"
+    }
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="outside the HF/cloud provider set"
+    ):
+        stage_transition._validate_active_candidate_secrets(active, candidate)
+
+
+def test_candidate_secrets_cannot_repoint_existing_host_secret_sources(tmp_path: Path) -> None:
+    """Keep existing secret names pinned to their original host files."""
+
+    active_dir = tmp_path / "active"
+    candidate_dir = tmp_path / "candidate"
+    active_dir.mkdir()
+    candidate_dir.mkdir()
+    active_source = active_dir / "exchange-tls-cert"
+    candidate_source = candidate_dir / "exchange-tls-cert"
+    active_source.write_text("active-placeholder")
+    candidate_source.write_text("candidate-placeholder")
+    active = {"secrets": {"exchange-tls-cert": {"file": str(active_source)}}}
+    candidate = {"secrets": {"exchange-tls-cert": {"file": str(candidate_source)}}}
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="changes unrelated secret source"
+    ):
+        stage_transition._validate_active_candidate_secrets(active, candidate)
+
+
 def test_provider_bootstrap_uses_exact_service_delta_and_order() -> None:
     """Add only HF and cloud service while upgrading persistence and the single Navigator."""
 

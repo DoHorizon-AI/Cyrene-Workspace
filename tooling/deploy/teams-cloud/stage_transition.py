@@ -48,6 +48,14 @@ DATABASE_VOLUME_TARGET = "/var/lib/cyrene-navigator"
 CODEBUDDY_HOME_TARGET = "/home/navigator/.codebuddy"
 MEMORY_RESERVE_DEFAULT_MIB = 1024
 SQLITE_ADDITIVE_SCHEMA_OBJECTS = {"table:work_credential_authorization_health"}
+CLOUD_MANAGEMENT_TLS_SECRET_NAMES = frozenset(
+    {
+        "cloud-management-server-cert",
+        "cloud-management-server-key",
+        "cloud-management-health-client-cert",
+        "cloud-management-health-client-key",
+    }
+)
 SQLITE_CREDENTIAL_HEALTH_TABLE_SQL = """CREATE TABLE work_credential_authorization_health (
  organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL, connection_id TEXT NOT NULL,
  provider TEXT NOT NULL, generation INTEGER NOT NULL, fingerprint TEXT NOT NULL,
@@ -1196,11 +1204,15 @@ def _validate_active_candidate_secrets(active: dict[str, Any], candidate: dict[s
         raise StageTransitionError("Compose secret inventory is malformed")
     if not set(active_secrets) <= set(candidate_secrets):
         raise StageTransitionError("candidate removes an existing Compose secret")
-    allowed_additions = preflight.HUGGINGFACE_OPTIONAL_SECRET_NAMES | {
-        "cloud-management-exchange-hmac-key",
-        "gcp-wif-credential-config",
-        "runpod-api-key",
-    }
+    allowed_additions = (
+        preflight.HUGGINGFACE_OPTIONAL_SECRET_NAMES
+        | {
+            "cloud-management-exchange-hmac-key",
+            "gcp-wif-credential-config",
+            "runpod-api-key",
+        }
+        | CLOUD_MANAGEMENT_TLS_SECRET_NAMES
+    )
     added = set(candidate_secrets) - set(active_secrets)
     if not added <= allowed_additions:
         raise StageTransitionError("candidate adds a secret outside the HF/cloud provider set")
