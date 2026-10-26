@@ -88,6 +88,95 @@ def _active_service(container_id: str, image_id: str, image_ref: str) -> dict[st
     }
 
 
+def _reviewed_plan(
+    targets: list[str], *, targets_only: list[str], update_order: list[str]
+) -> dict[str, Any]:
+    """Build a digest-valid sanitized plan for target-policy compatibility checks."""
+
+    navigator = _active_service(OLD_CONTAINER_ID, OLD_IMAGE_ID, "navigator:active")
+    ingress = _active_service(NEW_CONTAINER_ID, NEW_IMAGE_ID, "teams-ingress:active")
+    lock_services = {
+        "github-issues": "github-issues-provider",
+        "exchange": "exchange",
+        "navigator": "dsh-executor",
+    }
+    active_services = {"navigator": navigator, "teams-ingress": ingress}
+    for index, target in enumerate(targets, start=3):
+        if target not in active_services:
+            active_services[target] = _active_service(
+                f"{index:064x}", "sha256:" + f"{index + 10:064x}", f"{target}:active"
+            )
+    plan: dict[str, Any] = {
+        "schemaVersion": runtime_update.PLAN_SCHEMA,
+        "operationId": OPERATION_ID,
+        "createdAtUtc": "2026-10-26T00:00:00+00:00",
+        "project": "test-project",
+        "targets": sorted(targets),
+        "activeInputs": {
+            "composeFiles": [{"path": "/private/active-compose.yaml", "sha256": "a" * 64}],
+            "envFiles": [{"path": "/private/active.env", "sha256": "b" * 64}],
+            "imageLock": {"path": "/private/active-lock.json", "sha256": "c" * 64},
+        },
+        "candidateInputs": {
+            "composeFiles": [{"path": "/private/candidate-compose.yaml", "sha256": "d" * 64}],
+            "envFiles": [{"path": "/private/candidate.env", "sha256": "e" * 64}],
+            "imageLock": {"path": "/private/candidate-lock.json", "sha256": "f" * 64},
+        },
+        "activeSourceIdentitySha256": "1" * 64,
+        "candidateSourceIdentitySha256": "2" * 64,
+        "candidateImages": {
+            target: {
+                "lockService": lock_services[target],
+                "image": f"{target}:candidate",
+                "imageId": NEW_IMAGE_ID,
+                "sourceCommits": {},
+            }
+            for target in targets
+        },
+        "activeServices": active_services,
+        "edgeDelivery": {
+            "service": "teams-ingress",
+            "containerId": ingress["containerId"],
+            "imageRef": ingress["imageRef"],
+            "imageId": ingress["imageId"],
+            "revision": 0,
+            "deadCount": 0,
+        },
+        "navigatorDrain": {
+            "containerId": navigator["containerId"],
+            "imageRef": navigator["imageRef"],
+            "imageId": navigator["imageId"],
+            "instanceId": "navigator-instance",
+            "generation": 0,
+        },
+        "policy": {
+            "scope": "standalone-teams",
+            "managedRuntimeMaintenance": "UNMANAGED_REQUIRED",
+            "targetsOnly": targets_only,
+            "updateOrder": update_order,
+            "edgeImageReplacement": False,
+            "composeNoDeps": True,
+            "dockerPrefix": ["docker"],
+            "drainTimeoutSeconds": 300,
+            "healthTimeoutSeconds": 180,
+        },
+        "preflight": {
+            "mode": "stage1",
+            "activeDeploymentReady": True,
+            "candidateDeploymentReady": True,
+            "secretsDir": "/private/secrets",
+            "configDir": "/private/config",
+            "maxMemoryMiB": 3584,
+            "maxCpus": 1.95,
+            "requiredFreeGiB": 2.0,
+            "minimumMemAvailableMiB": 1024,
+        },
+        "planSha256": "0" * 64,
+    }
+    plan["planSha256"] = runtime_update._plan_digest(plan)
+    return plan
+
+
 def _merge_compose_mapping(left: dict[str, Any], right: dict[str, Any]) -> None:
     """Merge YAML mappings for a bounded `docker compose config` subprocess stub."""
 
@@ -231,6 +320,64 @@ def test_runtime_plan_maps_compose_navigator_to_the_canonical_dsh_lock_row() -> 
         )
 
 
+def test_runtime_plan_maps_github_compose_service_to_canonical_provider_lock_row() -> None:
+    """Map `github-issues` Compose to the image-lock `github-issues-provider` identity."""
+
+    compose = {"services": {"github-issues": {"image": "github-issues:candidate"}}}
+    lock = {
+        "images": [
+            {
+                "service": "github-issues-provider",
+                "image": "github-issues:candidate",
+                "imageId": NEW_IMAGE_ID,
+                "sourceCommits": {"plugins": "b" * 40},
+            }
+        ]
+    }
+
+    assert runtime_update._target_images(compose, lock, ["github-issues"]) == {
+        "github-issues": {
+            "lockService": "github-issues-provider",
+            "image": "github-issues:candidate",
+            "imageId": NEW_IMAGE_ID,
+            "sourceCommits": {"plugins": "b" * 40},
+        }
+    }
+
+
+def test_runtime_plan_validation_preserves_legacy_nav_exchange_v1_policy() -> None:
+    """Accept old target policies while validating the new GitHub provider contract."""
+
+    legacy_plan = _reviewed_plan(
+        ["exchange", "navigator"],
+        targets_only=runtime_update.LEGACY_TARGETS_ONLY,
+        update_order=["exchange", "navigator"],
+    )
+    runtime_update._validate_plan(legacy_plan)
+
+    provider_plan = _reviewed_plan(
+        ["github-issues"],
+        targets_only=list(runtime_update.TARGET_ORDER),
+        update_order=["github-issues"],
+    )
+    runtime_update._validate_plan(provider_plan)
+
+    combined_plan = _reviewed_plan(
+        ["github-issues", "navigator"],
+        targets_only=list(runtime_update.TARGET_ORDER),
+        update_order=["github-issues", "navigator"],
+    )
+    runtime_update._validate_plan(combined_plan)
+
+    provider_claim_using_legacy_policy = _reviewed_plan(
+        ["github-issues"],
+        targets_only=runtime_update.LEGACY_TARGETS_ONLY,
+        update_order=["github-issues"],
+    )
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="outside the supported contract"):
+        runtime_update._validate_plan(provider_claim_using_legacy_policy)
+
+
 def test_edge_status_accepts_plugins_nonempty_queue_and_epoch_times() -> None:
     """Validate the float timestamps emitted by the pinned Teams DeliveryStatus producer."""
 
@@ -292,13 +439,15 @@ def test_plan_cli_parses_the_noninteractive_docker_prefix_as_one_closed_choice()
             "sudo-n-docker",
             "--target",
             "navigator",
+            "--target",
+            "github-issues",
             "--output",
             "/private/.artifacts/plan.json",
         ]
     )
 
     assert arguments.docker_prefix == "sudo-n-docker"
-    assert arguments.target == ["navigator"]
+    assert arguments.target == ["navigator", "github-issues"]
 
 
 def test_apply_global_project_lock_cannot_be_bypassed_with_another_journal_directory(
@@ -831,6 +980,191 @@ def test_compose_timeout_is_classified_as_an_unknown_daemon_outcome(
             service="exchange",
             timeout_seconds=1,
         )
+
+
+def test_github_provider_compose_update_is_no_deps_and_targets_only_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Update only the provider, preserving Account Center and Exchange containers."""
+
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(runtime_update, "_run_command", run)
+    runtime_update._compose_up(
+        docker_prefix=["docker"],
+        project="cyrene-teams-cloud",
+        compose_files=[Path("compose.yaml"), Path("compose.codebuddy-acp.yaml")],
+        env_files=[Path("runtime.env"), Path("images.env")],
+        service="github-issues",
+        timeout_seconds=90,
+    )
+
+    argv = calls[0]
+    assert argv[-1] == "github-issues"
+    assert "--no-deps" in argv
+    assert "--pull" in argv and argv[argv.index("--pull") + 1] == "never"
+    assert "--no-build" in argv
+    assert "account-center" not in argv
+    assert "exchange" not in argv
+
+
+def test_github_provider_target_uses_locked_image_health_readback_without_nav_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Replace and verify only GitHub provider while the shared transaction keeps Nav drained."""
+
+    old_provider = _active_service(OLD_CONTAINER_ID, OLD_IMAGE_ID, "github-issues:active")
+    new_provider = _active_service(NEW_CONTAINER_ID, NEW_IMAGE_ID, "github-issues:candidate")
+    plan = {
+        "project": "cyrene-teams-cloud",
+        "targets": ["github-issues"],
+        "activeServices": {"github-issues": old_provider},
+        "candidateImages": {
+            "github-issues": {
+                "lockService": "github-issues-provider",
+                "image": new_provider["imageRef"],
+                "imageId": new_provider["imageId"],
+                "sourceCommits": {"plugins": "b" * 40},
+            }
+        },
+        "candidateInputs": {"composeFiles": [], "envFiles": []},
+        "policy": {"healthTimeoutSeconds": 30},
+    }
+    journal = {
+        "updatedTargets": [],
+        "targetProgress": {},
+        "phase": "NAVIGATOR_DRAINED",
+        "updatedAtUtc": "2026-10-26T00:00:00+00:00",
+    }
+    service_states = iter([{"github-issues": old_provider}, {"github-issues": new_provider}])
+    compose_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        runtime_update, "_operation_service_state", lambda **_kwargs: next(service_states)
+    )
+    monkeypatch.setattr(runtime_update, "_verify_runtime_unmanaged", lambda *_args: None)
+    monkeypatch.setattr(runtime_update, "_input_paths", lambda *_args: [Path("candidate.yaml")])
+    monkeypatch.setattr(runtime_update, "_atomic_journal_write", lambda *_args: None)
+    monkeypatch.setattr(
+        runtime_update,
+        "_set_phase",
+        lambda target_journal, _path, phase, **_kwargs: target_journal.update({"phase": phase}),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_compose_up",
+        lambda **kwargs: compose_calls.append(kwargs) or subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_stop_drained_navigator",
+        lambda **_kwargs: pytest.fail("provider target must not stop Navigator"),
+    )
+
+    runtime_update._update_target(
+        plan=plan,
+        context={},
+        journal=journal,
+        journal_path=tmp_path / "provider-update.json",
+        docker_prefix=["docker"],
+        target="github-issues",
+    )
+
+    assert len(compose_calls) == 1
+    assert compose_calls[0]["service"] == "github-issues"
+    assert journal["updatedTargets"] == ["github-issues"]
+    assert journal["targetProgress"]["github-issues"]["phase"] == "UPDATED_HEALTHY"
+    assert journal["targetProgress"]["github-issues"]["newContainerId"] == NEW_CONTAINER_ID
+
+
+def test_github_provider_rollback_restores_only_its_locked_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Rollback a provider candidate under the same Nav drain and ingress pause."""
+
+    old_provider = _active_service(OLD_CONTAINER_ID, OLD_IMAGE_ID, "github-issues:active")
+    candidate_provider = _active_service(NEW_CONTAINER_ID, NEW_IMAGE_ID, "github-issues:candidate")
+    navigator = _active_service("3" * 64, "sha256:" + "c" * 64, "navigator:active")
+    plan = {
+        "project": "cyrene-teams-cloud",
+        "targets": ["github-issues"],
+        "activeServices": {"github-issues": old_provider, "navigator": navigator},
+        "candidateImages": {
+            "github-issues": {
+                "lockService": "github-issues-provider",
+                "image": candidate_provider["imageRef"],
+                "imageId": candidate_provider["imageId"],
+                "sourceCommits": {"plugins": "b" * 40},
+            }
+        },
+        "activeInputs": {"composeFiles": [], "envFiles": []},
+        "policy": {"drainTimeoutSeconds": 60, "healthTimeoutSeconds": 30},
+    }
+    journal = {
+        "targets": ["github-issues"],
+        "updatedTargets": ["github-issues"],
+        "targetProgress": {
+            "github-issues": {
+                "phase": "UPDATED_HEALTHY",
+                "oldContainerId": OLD_CONTAINER_ID,
+                "oldImageId": OLD_IMAGE_ID,
+                "candidateImageId": NEW_IMAGE_ID,
+                "newContainerId": NEW_CONTAINER_ID,
+            }
+        },
+        "edge": {"latestDeadCount": 0},
+        "navigator": {"stop": None},
+    }
+    states = iter(
+        [
+            {"github-issues": candidate_provider, "navigator": navigator},
+            {"github-issues": candidate_provider, "navigator": navigator},
+            {"github-issues": old_provider, "navigator": navigator},
+            {"github-issues": old_provider, "navigator": navigator},
+        ]
+    )
+    compose_calls: list[dict[str, Any]] = []
+    navigator_drains: list[str] = []
+    monkeypatch.setattr(runtime_update, "_set_phase", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_recover_edge_pause", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        runtime_update, "_recover_old_navigator_before_candidate_start", lambda **_kwargs: False
+    )
+    monkeypatch.setattr(runtime_update, "_read_transition_state", lambda **_kwargs: next(states))
+    monkeypatch.setattr(
+        runtime_update,
+        "_drain_current_navigator_for_rollback",
+        lambda **_kwargs: navigator_drains.append("drained"),
+    )
+    monkeypatch.setattr(runtime_update, "_verify_runtime_unmanaged", lambda *_args: None)
+    monkeypatch.setattr(runtime_update, "_input_paths", lambda *_args: [Path("active.yaml")])
+    monkeypatch.setattr(
+        runtime_update,
+        "_compose_up",
+        lambda **kwargs: compose_calls.append(kwargs) or subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setattr(runtime_update, "_verify_live_network_membership", lambda *_args: None)
+    monkeypatch.setattr(runtime_update, "_resume_navigator_after_rollback", lambda **_kwargs: None)
+    monkeypatch.setattr(runtime_update, "_resume_edge", lambda **_kwargs: None)
+
+    runtime_update._rollback_operation(
+        plan=plan,
+        context={"activeCompose": {}, "activeLock": {}},
+        journal=journal,
+        journal_path=tmp_path / "provider-rollback.json",
+        docker_prefix=["docker"],
+    )
+
+    assert navigator_drains == ["drained"]
+    assert len(compose_calls) == 1
+    assert compose_calls[0]["service"] == "github-issues"
+    assert journal["updatedTargets"] == []
+    assert journal["targetProgress"]["github-issues"]["phase"] == "ROLLED_BACK"
 
 
 def test_internal_status_validation_preserves_the_json_document() -> None:
@@ -1964,19 +2298,35 @@ def test_resume_completes_a_returned_old_image_restart_without_reissuing_compose
     assert journal["navigator"]["processRestart"]["composeCommandExitCode"] == 0
 
 
-def test_successful_update_releases_edge_only_after_new_navigator_is_ready(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    ("update_order", "targets", "expected_target_updates"),
+    [
+        (["exchange", "navigator"], ["exchange", "navigator"], ["exchange", "navigator"]),
+        (["github-issues"], ["github-issues"], ["github-issues"]),
+        (
+            ["github-issues", "navigator"],
+            ["github-issues", "navigator"],
+            ["github-issues", "navigator"],
+        ),
+    ],
+)
+def test_successful_update_holds_edge_around_provider_only_or_combined_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    update_order: list[str],
+    targets: list[str],
+    expected_target_updates: list[str],
 ) -> None:
-    """Preserve the sequence: durable edge hold, Navigator drain, updates, Nav ready, release."""
+    """Pause ingress and drain Nav once around provider-only or combined updates."""
 
-    plan = {"policy": {"updateOrder": ["exchange", "navigator"]}}
+    plan = {"policy": {"updateOrder": update_order}}
     journal = {
         "schemaVersion": runtime_update.JOURNAL_SCHEMA,
         "operationId": OPERATION_ID,
         "planSha256": "c" * 64,
         "state": "RUNNING",
         "phase": "PRECHECKED",
-        "targets": ["exchange", "navigator"],
+        "targets": targets,
         "updatedTargets": [],
         "createdAtUtc": "2026-10-25T18:00:00+00:00",
         "updatedAtUtc": "2026-10-25T18:00:00+00:00",
@@ -1985,6 +2335,13 @@ def test_successful_update_releases_edge_only_after_new_navigator_is_ready(
         "navigator": {"stop": None},
     }
     events: list[str] = []
+
+    def record_target_update(**kwargs: Any) -> None:
+        target = kwargs["target"]
+        events.append(f"update-{target}")
+        journal["updatedTargets"].append(target)
+        journal["updatedTargets"].sort(key=runtime_update.TARGET_ORDER.index)
+
     monkeypatch.setattr(
         runtime_update, "_pause_edge", lambda **_kwargs: events.append("edge-pause")
     )
@@ -1994,7 +2351,7 @@ def test_successful_update_releases_edge_only_after_new_navigator_is_ready(
     monkeypatch.setattr(
         runtime_update,
         "_update_target",
-        lambda **kwargs: events.append(f"update-{kwargs['target']}"),
+        record_target_update,
     )
     monkeypatch.setattr(
         runtime_update,
@@ -2027,13 +2384,9 @@ def test_successful_update_releases_edge_only_after_new_navigator_is_ready(
         docker_prefix=["docker"],
     )
 
-    assert events == [
-        "edge-pause",
-        "nav-drain",
-        "update-exchange",
-        "update-navigator",
-        "nav-ready",
-        "edge-resume",
-    ]
+    assert events == ["edge-pause", "nav-drain"] + [
+        f"update-{target}" for target in expected_target_updates
+    ] + ["nav-ready", "edge-resume"]
     assert result["state"] == "APPLIED"
     assert result["phase"] == "UPDATE_COMPLETE"
+    assert result["updatedTargets"] == update_order
