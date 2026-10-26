@@ -693,6 +693,22 @@ The staged Caddy file uses an internal certificate and a high loopback-only HTTP
 
 Staging Caddy 使用内部证书和仅监听 loopback 的高位 HTTPS 端口。只有 `teams-public-ingress` 可以映射宿主机端口；公网路由只接受 `POST /api/messages`，其他路径或方法均拒绝。Navigator、Directory Authority、Exchange、Account Center 和 Provider 仅在私有 Compose 网络中运行。生产只映射 TCP 443，使用 ACME TLS-ALPN，禁用 HTTP-01 challenge，并保持宿主机 80 端口不变且关闭。生产预检会拒绝 `Caddyfile.staging` 和 `tls internal`。只有 DNS、Bot 回调 URL 和宿主机端口检查就绪后，才绑定公网 NIC 地址。Staging 期间保留旧 Docker 栈；回滚时只停止新 ingress，再恢复旧监听。
 
+### Host-Caddy-fronted canary
+
+When an existing host Caddy already owns public TCP 443, keep its live configuration in place while preparing a bot-only candidate that forwards the existing `POST /api/messages` route to `https://127.0.0.1:18443`. Run `host_fronted_canary.py` only after the private Stage 1 stack is running. It reruns the canonical Stage 1 preflight, accepts an occupied port only after Docker read-back proves the unique loopback binding belongs to the same Compose project, `teams-public-ingress`, and its locked image, and requires all Stage 1 runtime services to be running and healthy.
+
+The canary gate adapts both the baseline and candidate with the installed Caddy binary, compares the full adapted configuration, and permits changes only to the callback proxy's upstream and TLS transport. It verifies the backend certificate against the selected public CA with the callback hostname as SNI, checks the current public certificate, and requires a fresh successful native CodeBuddy ACP model probe. It performs no writes, reloads, port changes, callback changes, or Teams messages. Its only success state is `CANARY_READY_NOT_ACCEPTED` with `deploymentReady:false`; it does not accept Teams conversations, connector business queries, cloud-provider operations, cutover, or the 24-hour observation. A blocked ACP login remains a hard canary blocker.
+
+If `preflight.py` is invoked separately while the Stage 1 ingress is running, leave `--allow-owned-staging-ingress` unset by default. That explicit option is limited to `stage1`/`staging` and the locked Compose-owned `127.0.0.1:18443` binding. It does not apply to `cutover`, public port 443, another host port, or an unknown container owner.
+
+### 宿主机 Caddy 前置 canary
+
+若现有宿主机 Caddy 已占用公网 TCP 443，准备 bot-only 候选配置时应保留当前生效配置，并只将既有 `POST /api/messages` 路由转发到 `https://127.0.0.1:18443`。私有 Stage 1 服务运行后再执行 `host_fronted_canary.py`。该门禁会重新运行规范 Stage 1 预检；只有 Docker 回读确认 loopback 端口由同一 Compose project 中的 `teams-public-ingress` 和锁定镜像唯一占用，且所有 Stage 1 运行服务均已启动并健康，才接受端口被占用。
+
+门禁使用当前安装的 Caddy 分别适配基线和候选配置，比较完整适配结果，只允许回调代理 upstream 与 TLS transport 发生变化。随后使用指定公有 CA、回调域名 SNI 验证后台证书，验证当前公网证书，并要求近期原生 CodeBuddy ACP 模型探测成功。门禁不写配置、不 reload、不改端口或回调地址，也不发送 Teams 消息。唯一成功状态为 `CANARY_READY_NOT_ACCEPTED` 且 `deploymentReady:false`；这不代表 Teams 对话、连接器业务查询、云 Provider 操作、生产切换或 24 小时观察已验收。ACP 登录被拒绝时，canary 必须保持阻断。
+
+如果 Stage 1 ingress 正在运行时单独调用 `preflight.py`，默认不要设置 `--allow-owned-staging-ingress`。该显式选项仅适用于 `stage1`/`staging`，而且仅接受由锁定 Compose ingress 唯一占用的 `127.0.0.1:18443`。它不适用于 `cutover`、公网 443、其他宿主端口或未知容器所有者。
+
 ## Connector stages and budget / 连接器阶段与预算
 
 1. **Teams, GitHub, and optional Hugging Face.** GitHub-only Stage 1 needs only the service-owned GitHub App key through Account Center. When HF authorization is approved, use a newly authorized device-OAuth bootstrap file; never copy the old personal OAuth token file. Keep the bootstrap under private onboarding storage and mount it read-only into Account Center only. Account Center persists profile credentials encrypted in its durable database; keep the source owner-only for restarts and reauthentication until a later config rollout removes its file reference and mount. Generate the Exchange connector map and live provider tool catalog from the verified owner/workspace. Verify private reads, a bounded API write, read-back, and deletion before enabling cloud-provider profiles.
