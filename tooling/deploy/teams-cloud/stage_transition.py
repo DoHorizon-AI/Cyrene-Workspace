@@ -4315,13 +4315,44 @@ def _resume_live_navigator(
 
 
 def _resume_old_executor_if_needed(
-    *, plan: dict[str, Any], journal: dict[str, Any], docker_prefix: list[str]
+    *,
+    plan: dict[str, Any],
+    journal: dict[str, Any],
+    docker_prefix: list[str],
+    require_original_instance: bool = False,
 ) -> None:
     """Resume only the exact old drained process when no Navigator container was replaced."""
 
+    navigator = journal.get("navigator")
+    if not isinstance(navigator, dict):
+        raise StageTransitionError("Navigator recovery identity is malformed")
     progress = journal.get("targetProgress", {}).get("navigator", {})
     if isinstance(progress, dict) and progress.get("phase") == "APPLIED":
         return
+    initial_container_id = navigator.get("initialContainerId")
+    initial_instance_id = navigator.get("initialInstanceId")
+    initial_generation = navigator.get("initialGeneration")
+    if (
+        not isinstance(initial_container_id, str)
+        or not isinstance(initial_instance_id, str)
+        or isinstance(initial_generation, bool)
+        or not isinstance(initial_generation, int)
+        or initial_generation < 0
+    ):
+        raise StageTransitionError("Navigator recovery identity is malformed")
+    drain_generation = initial_generation + 1
+    expected_drain_attempt = {
+        "containerId": initial_container_id,
+        "instanceId": initial_instance_id,
+        "initialGeneration": initial_generation,
+        "generation": drain_generation,
+    }
+    drain_attempt = navigator.get("drainAttempt")
+    journaled_drain_generation = navigator.get("drainGeneration")
+    if drain_attempt is not None and drain_attempt != expected_drain_attempt:
+        raise StageTransitionError("Navigator drain intent does not match the reviewed plan")
+    if journaled_drain_generation not in (None, drain_generation):
+        raise StageTransitionError("Navigator drain generation does not match the reviewed plan")
     containers = runtime_update._list_project_navigator_containers(
         project=plan["project"], docker_prefix=docker_prefix
     )
@@ -4334,21 +4365,65 @@ def _resume_old_executor_if_needed(
         current_id,
         timeout_seconds=15,
     )
-    if (
-        current_id == journal["navigator"]["initialContainerId"]
-        and status.get("mode") == "draining"
+    if require_original_instance:
+        if current_id != initial_container_id:
+            raise StageTransitionError(
+                "Navigator recovery container differs from the original instance"
+            )
+        if status.get("instanceId") != initial_instance_id:
+            raise StageTransitionError(
+                "Navigator recovery process differs from the original instance"
+            )
+        if status.get("mode") == "draining":
+            if (
+                status.get("generation") != drain_generation
+                or drain_attempt != expected_drain_attempt
+            ):
+                raise StageTransitionError(
+                    "old Navigator drain generation cannot be safely resumed"
+                )
+            runtime_update._resume_navigator_instance(
+                docker_prefix=docker_prefix,
+                container_id=current_id,
+                instance_id=initial_instance_id,
+                generation=drain_generation,
+                timeout_seconds=30,
+            )
+        elif status.get("mode") == "accepting":
+            if (
+                status.get("generation") == initial_generation
+                and journaled_drain_generation is None
+            ):
+                return
+            if (
+                status.get("generation") == drain_generation
+                and drain_attempt == expected_drain_attempt
+            ):
+                return
+            raise StageTransitionError(
+                "accepting Navigator is outside the known original generation"
+            )
+        else:
+            raise StageTransitionError("Navigator did not return to an accepting generation")
+        return
+
+    if current_id != initial_container_id and not (
+        isinstance(progress, dict)
+        and progress.get("phase") == "ROLLED_BACK"
+        and progress.get("rollbackContainerId") == current_id
     ):
-        expected_generation = journal["navigator"]["initialGeneration"] + 1
+        raise StageTransitionError("Navigator recovery container is not recorded by this operation")
+    if current_id == initial_container_id and status.get("mode") == "draining":
         if (
-            status.get("generation") != expected_generation
-            or status.get("instanceId") != journal["navigator"]["initialInstanceId"]
+            status.get("generation") != drain_generation
+            or status.get("instanceId") != initial_instance_id
         ):
             raise StageTransitionError("old Navigator drain generation cannot be safely resumed")
         runtime_update._resume_navigator_instance(
             docker_prefix=docker_prefix,
             container_id=current_id,
-            instance_id=journal["navigator"]["initialInstanceId"],
-            generation=expected_generation,
+            instance_id=initial_instance_id,
+            generation=drain_generation,
             timeout_seconds=30,
         )
     elif status.get("mode") != "accepting":
@@ -4369,6 +4444,7 @@ def _resume_executor_after_transition(
             plan=plan,
             journal=journal,
             docker_prefix=docker_prefix,
+            require_original_instance=True,
         )
         return
     _resume_live_navigator(
@@ -4594,7 +4670,12 @@ def _rollback_known_mutations(
         mount_identity_by_service=plan["runtimeConfigIdentity"]["active"],
     )
     runtime_update._verify_live_network_membership(active_compose, active_services, docker_prefix)
-    _resume_old_executor_if_needed(plan=plan, journal=journal, docker_prefix=docker_prefix)
+    _resume_old_executor_if_needed(
+        plan=plan,
+        journal=journal,
+        docker_prefix=docker_prefix,
+        require_original_instance=plan.get("imageUpdateTarget") == "exchange",
+    )
     _resume_ingress_after_safe_state(
         journal=journal,
         journal_path=journal_path,

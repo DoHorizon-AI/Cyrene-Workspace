@@ -1037,6 +1037,255 @@ def test_image_update_resumes_the_existing_executor_only_for_exchange(
     assert observed == [expected]
 
 
+def test_resume_old_executor_accepts_only_the_planned_navigator_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An already accepting old process must retain its exact container and generation."""
+
+    container_id = "a" * 64
+    instance_id = "11111111-1111-4111-8111-111111111111"
+    initial_generation = 4
+    drain_generation = initial_generation + 1
+    expected_attempt = {
+        "containerId": container_id,
+        "instanceId": instance_id,
+        "initialGeneration": initial_generation,
+        "generation": drain_generation,
+    }
+    observed_resume_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_list_project_navigator_containers",
+        lambda **_kwargs: [{"containerId": container_id, "running": True}],
+    )
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_current_navigator_status",
+        lambda *_args, **_kwargs: {
+            "mode": "accepting",
+            "instanceId": instance_id,
+            "generation": initial_generation,
+        },
+    )
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_resume_navigator_instance",
+        lambda **kwargs: observed_resume_calls.append(kwargs),
+    )
+
+    journal = {
+        "navigator": {
+            "initialContainerId": container_id,
+            "initialInstanceId": instance_id,
+            "initialGeneration": initial_generation,
+            "drainAttempt": None,
+            "drainGeneration": None,
+        },
+        "targetProgress": {},
+    }
+    stage_transition._resume_old_executor_if_needed(
+        plan={"project": "cyrene-teams-cloud"},
+        journal=journal,
+        docker_prefix=["docker"],
+        require_original_instance=True,
+    )
+    assert observed_resume_calls == []
+
+    journal["navigator"]["drainAttempt"] = expected_attempt
+    journal["navigator"]["drainGeneration"] = drain_generation
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_current_navigator_status",
+        lambda *_args, **_kwargs: {
+            "mode": "accepting",
+            "instanceId": instance_id,
+            "generation": drain_generation,
+        },
+    )
+    stage_transition._resume_old_executor_if_needed(
+        plan={"project": "cyrene-teams-cloud"},
+        journal=journal,
+        docker_prefix=["docker"],
+        require_original_instance=True,
+    )
+    assert observed_resume_calls == []
+
+
+@pytest.mark.parametrize(
+    ("running_container_id", "instance_id", "generation", "drain_attempt", "drain_generation"),
+    [
+        ("b" * 64, "11111111-1111-4111-8111-111111111111", 4, None, None),
+        ("a" * 64, "22222222-2222-4222-8222-222222222222", 4, None, None),
+        ("a" * 64, "11111111-1111-4111-8111-111111111111", 99, None, None),
+        ("a" * 64, "11111111-1111-4111-8111-111111111111", 5, None, None),
+        (
+            "a" * 64,
+            "11111111-1111-4111-8111-111111111111",
+            4,
+            {
+                "containerId": "a" * 64,
+                "instanceId": "11111111-1111-4111-8111-111111111111",
+                "initialGeneration": 4,
+                "generation": 5,
+            },
+            5,
+        ),
+    ],
+)
+def test_resume_old_executor_rejects_unknown_accepting_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    running_container_id: str,
+    instance_id: str,
+    generation: int,
+    drain_attempt: dict[str, object] | None,
+    drain_generation: int | None,
+) -> None:
+    """An unrelated accepting container, process, or generation cannot pass recovery."""
+
+    container_id = "a" * 64
+    initial_instance_id = "11111111-1111-4111-8111-111111111111"
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_list_project_navigator_containers",
+        lambda **_kwargs: [{"containerId": running_container_id, "running": True}],
+    )
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_current_navigator_status",
+        lambda *_args, **_kwargs: {
+            "mode": "accepting",
+            "instanceId": instance_id,
+            "generation": generation,
+        },
+    )
+    journal = {
+        "navigator": {
+            "initialContainerId": container_id,
+            "initialInstanceId": initial_instance_id,
+            "initialGeneration": 4,
+            "drainAttempt": drain_attempt,
+            "drainGeneration": drain_generation,
+        },
+        "targetProgress": {},
+    }
+
+    with pytest.raises(stage_transition.StageTransitionError):
+        stage_transition._resume_old_executor_if_needed(
+            plan={"project": "cyrene-teams-cloud"},
+            journal=journal,
+            docker_prefix=["docker"],
+            require_original_instance=True,
+        )
+
+
+def test_resume_old_executor_keeps_recorded_two_phase_rollback_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal two-phase rollback may use its explicitly recorded old-image container."""
+
+    initial_container_id = "a" * 64
+    rollback_container_id = "b" * 64
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_list_project_navigator_containers",
+        lambda **_kwargs: [{"containerId": rollback_container_id, "running": True}],
+    )
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_current_navigator_status",
+        lambda *_args, **_kwargs: {
+            "mode": "accepting",
+            "instanceId": "22222222-2222-4222-8222-222222222222",
+            "generation": 0,
+        },
+    )
+    journal = {
+        "navigator": {
+            "initialContainerId": initial_container_id,
+            "initialInstanceId": "11111111-1111-4111-8111-111111111111",
+            "initialGeneration": 0,
+            "drainAttempt": None,
+            "drainGeneration": None,
+        },
+        "targetProgress": {
+            "navigator": {
+                "phase": "ROLLED_BACK",
+                "rollbackContainerId": rollback_container_id,
+            }
+        },
+    }
+
+    stage_transition._resume_old_executor_if_needed(
+        plan={"project": "cyrene-teams-cloud"},
+        journal=journal,
+        docker_prefix=["docker"],
+    )
+
+
+def test_resume_old_executor_resumes_only_the_journaled_drain_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A draining process resumes only when its container, instance, and attempt match."""
+
+    container_id = "a" * 64
+    instance_id = "11111111-1111-4111-8111-111111111111"
+    initial_generation = 4
+    drain_generation = initial_generation + 1
+    expected_attempt = {
+        "containerId": container_id,
+        "instanceId": instance_id,
+        "initialGeneration": initial_generation,
+        "generation": drain_generation,
+    }
+    observed: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_list_project_navigator_containers",
+        lambda **_kwargs: [{"containerId": container_id, "running": True}],
+    )
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_current_navigator_status",
+        lambda *_args, **_kwargs: {
+            "mode": "draining",
+            "instanceId": instance_id,
+            "generation": drain_generation,
+        },
+    )
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_resume_navigator_instance",
+        lambda **kwargs: observed.append(kwargs),
+    )
+    journal = {
+        "navigator": {
+            "initialContainerId": container_id,
+            "initialInstanceId": instance_id,
+            "initialGeneration": initial_generation,
+            "drainAttempt": expected_attempt,
+            "drainGeneration": drain_generation,
+        },
+        "targetProgress": {},
+    }
+
+    stage_transition._resume_old_executor_if_needed(
+        plan={"project": "cyrene-teams-cloud"},
+        journal=journal,
+        docker_prefix=["docker"],
+        require_original_instance=True,
+    )
+
+    assert observed == [
+        {
+            "docker_prefix": ["docker"],
+            "container_id": container_id,
+            "instance_id": instance_id,
+            "generation": drain_generation,
+            "timeout_seconds": 30,
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("phase", "target", "required"),
     [
