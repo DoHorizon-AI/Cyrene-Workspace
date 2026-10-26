@@ -1228,6 +1228,37 @@ def _validate_active_candidate_secrets(active: dict[str, Any], candidate: dict[s
             Path(old_file).resolve(strict=True)
         ) != str(Path(new_file).resolve(strict=True)):
             raise StageTransitionError(f"candidate changes unrelated secret source {name}")
+    _validate_cloud_management_tls_secret_consumers(candidate)
+
+
+def _validate_cloud_management_tls_secret_consumers(candidate: dict[str, Any]) -> None:
+    """Keep the four new mTLS secret sources exclusive to Cloud Management."""
+
+    services = candidate.get("services")
+    if not isinstance(services, dict):
+        raise StageTransitionError(
+            "candidate service inventory is malformed for Cloud Management TLS"
+        )
+    uses: dict[str, list[tuple[str, Any]]] = {
+        name: [] for name in CLOUD_MANAGEMENT_TLS_SECRET_NAMES
+    }
+    for service_name, service in services.items():
+        if not isinstance(service_name, str) or not isinstance(service, dict):
+            raise StageTransitionError(
+                "candidate service entry is malformed for Cloud Management TLS"
+            )
+        for row in _mount_rows(service, "secrets"):
+            source_name = row.get("source")
+            if isinstance(source_name, str) and source_name in CLOUD_MANAGEMENT_TLS_SECRET_NAMES:
+                uses[source_name].append((service_name, row.get("target")))
+
+    if any(
+        uses[name] != [("cloud-management-phase2", name)]
+        for name in CLOUD_MANAGEMENT_TLS_SECRET_NAMES
+    ):
+        raise StageTransitionError(
+            "Cloud Management mTLS secrets must be mounted once each, only to their canonical Cloud Management targets"
+        )
 
 
 def _validate_compose_definition_deltas(active: dict[str, Any], candidate: dict[str, Any]) -> None:
