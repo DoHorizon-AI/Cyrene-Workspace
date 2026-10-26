@@ -808,10 +808,25 @@ The updater rejects RuntimeMaintenance/Broker markers, unknown running workers o
 
 `runtime.env` must point `CYRENE_TEAMS_DELIVERY_STATE_DIR` at an already provisioned persistent host directory owned by UID `10001` with mode `0700`. Compose mounts it at `/var/lib/cyrene/teams-delivery`; the independent `teams-delivery-admin-token` file is a read-only secret mount into `teams-ingress` only and is checked by metadata without printing or loading its value into the host process. Preflight rejects a missing, symlinked, broadly accessible, or incorrectly owned spool directory.
 
-The plan/apply split is intentional. Open a root shell on the VM before creating the private output directory. Plan, apply, status, and resume must all run as root; the root-private project lock is stored at `/run/cyrene-runtime-update/<project-hash>.lock` with mode `0600`. Review the plan digest before separately invoking apply:
+The plan/apply split is intentional. Open a root shell on the VM (`sudo -i`) before creating the private output directory. This VM example uses `/home/DH/cyrene` as the Workspace checkout; change that one path if the checkout is elsewhere. The active and candidate input snapshots must already be staged at the private paths shown below. These variables contain paths only: do not source either runtime environment file. Plan, apply, status, and resume must all run as root; the root-private project lock is stored at `/run/cyrene-runtime-update/<project-hash>.lock` with mode `0600`. Review the plan digest before separately invoking apply:
 
 ```sh
+WORKSPACE=/home/DH/cyrene
+cd "$WORKSPACE"
 DEPLOYMENT=tooling/deploy/teams-cloud
+ARTIFACTS="$WORKSPACE/.artifacts/teams-cloud-runtime-update"
+ACTIVE_DIR="$ARTIFACTS/active"
+CANDIDATE_DIR="$ARTIFACTS/candidate"
+ACTIVE_COMPOSE="$ACTIVE_DIR/compose.yaml"
+ACTIVE_RUNTIME_ENV="$ACTIVE_DIR/runtime.env"
+ACTIVE_IMAGE_ENV="$ACTIVE_DIR/images.env"
+ACTIVE_IMAGE_LOCK="$ACTIVE_DIR/image-lock.json"
+CANDIDATE_COMPOSE="$CANDIDATE_DIR/compose.yaml"
+CANDIDATE_RUNTIME_ENV="$CANDIDATE_DIR/runtime.env"
+CANDIDATE_IMAGE_ENV="$CANDIDATE_DIR/images.env"
+CANDIDATE_IMAGE_LOCK="$CANDIDATE_DIR/image-lock.json"
+SECRETS_DIR="$ARTIFACTS/secrets"
+CONFIG_DIR="$ARTIFACTS/config"
 UPDATE_DIR="$ARTIFACTS/runtime-update"
 install -d -o root -g root -m 0700 "$UPDATE_DIR"
 umask 077
@@ -825,8 +840,8 @@ python3 "$DEPLOYMENT/runtime_update.py" plan \
   --candidate-env-file "$CANDIDATE_RUNTIME_ENV" \
   --candidate-env-file "$CANDIDATE_IMAGE_ENV" \
   --candidate-image-lock "$CANDIDATE_IMAGE_LOCK" \
-  --secrets-dir "$ARTIFACTS/secrets" \
-  --config-dir "$ARTIFACTS/config" \
+  --secrets-dir "$SECRETS_DIR" \
+  --config-dir "$CONFIG_DIR" \
   --docker-prefix docker \
   --target exchange --target navigator \
   --output "$UPDATE_DIR/plan.json"
@@ -858,10 +873,25 @@ For a `RECOVERY_REQUIRED` operation, use its exact operation ID and reviewed pla
 
 `runtime.env` 中的 `CYRENE_TEAMS_DELIVERY_STATE_DIR` 必须指向已预先创建、UID `10001` 所有且权限为 `0700` 的持久宿主机目录。Compose 将其挂载到 `/var/lib/cyrene/teams-delivery`；独立的 `teams-delivery-admin-token` 只读挂载到 `teams-ingress`，预检只核对元数据，不会向宿主进程读取或打印 token 内容。spool 目录缺失、为符号链接、权限过宽或 owner 不正确时预检会拒绝。
 
-计划和应用分开执行。先在 VM 上打开 root shell，再创建私有输出目录。plan、apply、status、resume 都必须以 root 运行；root 私有项目锁位于 `/run/cyrene-runtime-update/<project-hash>.lock`，权限为 `0600`。审核计划摘要后再单独执行 apply：
+计划和应用分开执行。先在 VM 上打开 root shell（`sudo -i`），再创建私有输出目录。当前 VM 示例的 Workspace 路径为 `/home/DH/cyrene`；若 checkout 在其他位置，只改此路径。下方展示的 active/candidate 输入快照必须提前放到这些私有路径。变量只保存路径，不要 `source` runtime environment 文件。plan、apply、status、resume 都必须以 root 运行；root 私有项目锁位于 `/run/cyrene-runtime-update/<project-hash>.lock`，权限为 `0600`。审核计划摘要后再单独执行 apply：
 
 ```sh
+WORKSPACE=/home/DH/cyrene
+cd "$WORKSPACE"
 DEPLOYMENT=tooling/deploy/teams-cloud
+ARTIFACTS="$WORKSPACE/.artifacts/teams-cloud-runtime-update"
+ACTIVE_DIR="$ARTIFACTS/active"
+CANDIDATE_DIR="$ARTIFACTS/candidate"
+ACTIVE_COMPOSE="$ACTIVE_DIR/compose.yaml"
+ACTIVE_RUNTIME_ENV="$ACTIVE_DIR/runtime.env"
+ACTIVE_IMAGE_ENV="$ACTIVE_DIR/images.env"
+ACTIVE_IMAGE_LOCK="$ACTIVE_DIR/image-lock.json"
+CANDIDATE_COMPOSE="$CANDIDATE_DIR/compose.yaml"
+CANDIDATE_RUNTIME_ENV="$CANDIDATE_DIR/runtime.env"
+CANDIDATE_IMAGE_ENV="$CANDIDATE_DIR/images.env"
+CANDIDATE_IMAGE_LOCK="$CANDIDATE_DIR/image-lock.json"
+SECRETS_DIR="$ARTIFACTS/secrets"
+CONFIG_DIR="$ARTIFACTS/config"
 UPDATE_DIR="$ARTIFACTS/runtime-update"
 install -d -o root -g root -m 0700 "$UPDATE_DIR"
 umask 077
@@ -875,8 +905,8 @@ python3 "$DEPLOYMENT/runtime_update.py" plan \
   --candidate-env-file "$CANDIDATE_RUNTIME_ENV" \
   --candidate-env-file "$CANDIDATE_IMAGE_ENV" \
   --candidate-image-lock "$CANDIDATE_IMAGE_LOCK" \
-  --secrets-dir "$ARTIFACTS/secrets" \
-  --config-dir "$ARTIFACTS/config" \
+  --secrets-dir "$SECRETS_DIR" \
+  --config-dir "$CONFIG_DIR" \
   --docker-prefix docker \
   --target exchange --target navigator \
   --output "$UPDATE_DIR/plan.json"
