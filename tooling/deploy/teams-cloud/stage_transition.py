@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -35,6 +36,7 @@ JOURNAL_SCHEMA = "cyrene-teams-stage-transition-journal-v1"
 SELECTION_SCHEMA = "cyrene-teams-runtime-selection-v2"
 DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/stage-transition")
 PHASES = {"provider-bootstrap", "issued-connector-activation"}
+IMAGE_UPDATE_TARGETS = frozenset({"exchange", "navigator"})
 NEW_SERVICES = {"huggingface", "cloud-management-phase2"}
 SERVICE_ORDER = runtime_update.STAGE_TRANSITION_TARGET_ORDER
 SERVICE_SET = set(SERVICE_ORDER)
@@ -49,6 +51,14 @@ CODEBUDDY_HOME_TARGET = "/home/navigator/.codebuddy"
 MEMORY_RESERVE_DEFAULT_MIB = 1024
 SQLITE_ADDITIVE_SCHEMA_OBJECTS = {"table:work_credential_authorization_health"}
 ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR = "account_center_schema_downgrade_unsupported"
+
+
+def _exchange_readiness_required(phase: str, image_update_target: str | None) -> bool:
+    """Require live Exchange verification for activation or an Exchange image update."""
+
+    return phase == "issued-connector-activation" or image_update_target == "exchange"
+
+
 CLOUD_MANAGEMENT_TLS_SECRET_NAMES = frozenset(
     {
         "cloud-management-server-cert",
@@ -629,6 +639,7 @@ def _mounted_file_digests(compose: dict[str, Any], service_name: str) -> dict[st
 def _validate_phase_topology(
     *,
     phase: str,
+    image_update_target: str | None = None,
     active: dict[str, Any],
     candidate: dict[str, Any],
     active_lock: dict[str, Any],
@@ -649,6 +660,16 @@ def _validate_phase_topology(
     _validate_compose_definition_deltas(active, candidate)
     old_services = _runtime_service_inventory(active)
     new_services = _runtime_service_inventory(candidate)
+    if image_update_target is not None:
+        return _validate_image_update_topology(
+            target=image_update_target,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+            old_services=old_services,
+            new_services=new_services,
+        )
     if phase == "provider-bootstrap":
         added = set(new_services) - set(old_services)
         removed = set(old_services) - set(new_services)
@@ -740,6 +761,79 @@ def _validate_phase_topology(
             "provider bootstrap must include both newly locked provider services"
         )
     return ordered_targets, target_images
+
+
+def _validate_image_update_topology(
+    *,
+    target: str,
+    active: dict[str, Any],
+    candidate: dict[str, Any],
+    active_lock: dict[str, Any],
+    candidate_lock: dict[str, Any],
+    old_services: dict[str, dict[str, Any]],
+    new_services: dict[str, dict[str, Any]],
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """Allow one immutable Exchange or Navigator image change on an existing topology."""
+
+    if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
+        raise StageTransitionError("image update target must be Exchange or Navigator")
+    if set(old_services) != set(new_services):
+        raise StageTransitionError("image update must keep the exact active service inventory")
+    if sum(name == "navigator" for name in new_services) != 1:
+        raise StageTransitionError("image update must retain exactly one Navigator executor")
+
+    active_definition = copy.deepcopy(active)
+    candidate_definition = copy.deepcopy(candidate)
+    for compose in (active_definition, candidate_definition):
+        service = compose.get("services", {}).get(target)
+        if not isinstance(service, dict) or not isinstance(service.get("image"), str):
+            raise StageTransitionError(f"image update target {target} has no image reference")
+        service.pop("image")
+    if active_definition != candidate_definition:
+        raise StageTransitionError("image update may change only its selected service image")
+
+    try:
+        runtime_update._validate_lock_pair(active_lock, candidate_lock, [target])
+        active_target = runtime_update._target_images(active, active_lock, [target])[target]
+        candidate_target = runtime_update._target_images(candidate, candidate_lock, [target])[
+            target
+        ]
+        active_ids = _lock_image_ids(active_lock)
+        candidate_ids = _lock_image_ids(candidate_lock)
+    except runtime_update.RuntimeUpdateError as error:
+        raise StageTransitionError(
+            "image update lock may change only the selected built service"
+        ) from error
+    if (
+        active_target["image"] == candidate_target["image"]
+        or active_target["imageId"] == candidate_target["imageId"]
+    ):
+        raise StageTransitionError("image update must use a distinct target reference and image ID")
+
+    target_images: dict[str, dict[str, Any]] = {}
+    for service_name in new_services:
+        active_image = _service_image(active, active_ids, service_name)
+        candidate_image = _service_image(candidate, candidate_ids, service_name)
+        if service_name == target:
+            if active_image == candidate_image:
+                raise StageTransitionError("selected image update target did not change")
+        elif active_image != candidate_image:
+            raise StageTransitionError(
+                f"image update changes non-target service image {service_name}"
+            )
+        if _mounted_file_digests(active, service_name) != _mounted_file_digests(
+            candidate, service_name
+        ):
+            raise StageTransitionError(
+                f"image update changes mounted configuration for {service_name}"
+            )
+        target_images[service_name] = {
+            "active": active_image,
+            "candidate": candidate_image,
+            "added": False,
+            "configChanged": False,
+        }
+    return [target], target_images
 
 
 def _expected_mount_identity(compose: dict[str, Any], service_name: str) -> list[dict[str, Any]]:
@@ -890,6 +984,95 @@ def _candidate_runtime_config_identity(
         expected_services=candidate_services,
         label="candidate runtime configuration identity",
     )
+
+
+def _validate_image_update_selection_contract(
+    *,
+    target: str | None,
+    phase: str,
+    project: str,
+    selection_record: Any,
+    selection_path: str,
+    active_config_dir: str,
+    candidate_config_dir: str,
+    active_secrets_dir: str,
+    active_inputs: dict[str, Any],
+    candidate_inputs: dict[str, Any],
+    runtime_config_identity: Any,
+) -> None:
+    """Bind an image-only update to the existing selector and unchanged runtime inputs."""
+
+    if target is None:
+        return
+    if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
+        raise StageTransitionError("image update target must be Exchange or Navigator")
+    if (
+        not isinstance(selection_record, dict)
+        or set(selection_record) != {"path", "sha256", "document"}
+        or selection_record.get("path") != selection_path
+        or not isinstance(selection_record.get("sha256"), str)
+        or SHA256_RE.fullmatch(selection_record["sha256"]) is None
+    ):
+        raise StageTransitionError("image update requires an existing runtime selector v2")
+    selection = selection_record.get("document")
+    expected_selection_fields = {
+        "schemaVersion",
+        "project",
+        "operationId",
+        "planSha256",
+        "phase",
+        "composeFiles",
+        "envFiles",
+        "imageLock",
+        "secretsDir",
+        "configDir",
+        "huggingfaceSeed",
+        "runpodKey",
+        "runtimeConfigIdentity",
+        "updatedAtUtc",
+    }
+    if (
+        not isinstance(selection, dict)
+        or set(selection) != expected_selection_fields
+        or selection.get("schemaVersion") != SELECTION_SCHEMA
+        or selection.get("project") != project
+        or selection.get("phase") != phase
+        or not isinstance(selection.get("operationId"), str)
+        or not selection["operationId"]
+        or not isinstance(selection.get("updatedAtUtc"), str)
+        or not isinstance(selection.get("planSha256"), str)
+        or SHA256_RE.fullmatch(selection["planSha256"]) is None
+    ):
+        raise StageTransitionError("image update phase must match an existing runtime selector v2")
+    if (
+        active_config_dir != candidate_config_dir
+        or selection.get("configDir") != active_config_dir
+        or selection.get("secretsDir") != active_secrets_dir
+    ):
+        raise StageTransitionError(
+            "image update must preserve selected config and secret directories"
+        )
+    if (
+        selection.get("composeFiles") != active_inputs.get("composeFiles")
+        or selection.get("envFiles") != active_inputs.get("envFiles")
+        or selection.get("imageLock") != active_inputs.get("imageLock")
+    ):
+        raise StageTransitionError("active image update inputs differ from the runtime selector")
+    if candidate_inputs.get("huggingfaceSeed") != selection.get(
+        "huggingfaceSeed"
+    ) or candidate_inputs.get("runpodKey") != selection.get("runpodKey"):
+        raise StageTransitionError("image update must preserve the selected provider seed and key")
+    if active_inputs.get("configDirectoryFiles") != candidate_inputs.get(
+        "configDirectoryFiles"
+    ) or active_inputs.get("secretFiles") != candidate_inputs.get("secretFiles"):
+        raise StageTransitionError("image update must preserve config and secret file manifests")
+    if (
+        not isinstance(runtime_config_identity, dict)
+        or set(runtime_config_identity) != {"active", "candidate"}
+        or runtime_config_identity.get("active") != runtime_config_identity.get("candidate")
+        or selection.get("runtimeConfigIdentity") != runtime_config_identity.get("active")
+    ):
+        raise StageTransitionError("image update must preserve every service mount identity")
 
 
 def _validate_runtime_config_identity(
@@ -2072,6 +2255,7 @@ def _selection_summary(document: dict[str, Any]) -> dict[str, Any]:
 def create_plan(
     *,
     phase: str,
+    image_update_target: str | None = None,
     active_compose_files: list[Path],
     active_env_files: list[Path],
     active_image_lock: Path,
@@ -2110,6 +2294,10 @@ def create_plan(
         raise StageTransitionError(
             "phase must be provider-bootstrap or issued-connector-activation"
         )
+    if image_update_target is not None and (
+        not isinstance(image_update_target, str) or image_update_target not in IMAGE_UPDATE_TARGETS
+    ):
+        raise StageTransitionError("image update target must be Exchange or Navigator")
     if ingress_exposure not in {"public-cutover", "host-fronted-staging"}:
         raise StageTransitionError(
             "ingress exposure must be public-cutover or host-fronted-staging"
@@ -2145,8 +2333,10 @@ def create_plan(
     )
     secrets_dir = _validate_private_directory(secrets_dir, "active secrets", expected_uid=10001)
     backup_dir = _validate_private_directory(backup_dir, "SQLite backup", require_artifact=True)
-    if active_config_dir == candidate_config_dir:
+    if image_update_target is None and active_config_dir == candidate_config_dir:
         raise StageTransitionError("candidate config directory must be separate from active config")
+    if image_update_target is not None and active_config_dir != candidate_config_dir:
+        raise StageTransitionError("image update must keep the active config directory")
     if not connector_auth_task_id or len(connector_auth_task_id) > 128:
         raise StageTransitionError("connector auth task ID is malformed")
     if phase == "issued-connector-activation" and (
@@ -2200,9 +2390,10 @@ def create_plan(
         raise StageTransitionError("active or candidate Compose could not be rendered") from error
     active_inputs["secretFiles"] = _secret_manifest(active_compose, "active")
     candidate_inputs["secretFiles"] = _secret_manifest(candidate_compose, "candidate")
-    _validate_active_candidate_configs(
-        active_config_dir, candidate_config_dir, active_compose, candidate_compose
-    )
+    if image_update_target is None:
+        _validate_active_candidate_configs(
+            active_config_dir, candidate_config_dir, active_compose, candidate_compose
+        )
     _validate_active_candidate_secrets(active_compose, candidate_compose)
     _validate_candidate_secret_paths(
         candidate=candidate_compose,
@@ -2213,6 +2404,7 @@ def create_plan(
     )
     targets, target_images = _validate_phase_topology(
         phase=phase,
+        image_update_target=image_update_target,
         active=active_compose,
         candidate=candidate_compose,
         active_lock=active_lock,
@@ -2275,6 +2467,8 @@ def create_plan(
         raise StageTransitionError(
             "candidate preflight did not return the scoped read-only readiness contract"
         )
+    if image_update_target is not None and active_selection_file is None:
+        raise StageTransitionError("image update requires the existing runtime selector v2")
     if (
         active_selection_file is not None
         and active_selection_file.resolve() != promote_selection_file.resolve()
@@ -2308,6 +2502,22 @@ def create_plan(
     _verify_runtime_config_identity_sources(active_mount_identity, "active runtime configuration")
     _verify_runtime_config_identity_sources(
         candidate_mount_identity, "candidate runtime configuration"
+    )
+    _validate_image_update_selection_contract(
+        target=image_update_target,
+        phase=phase,
+        project=project,
+        selection_record=selection_state,
+        selection_path=str(promote_selection_file.resolve()),
+        active_config_dir=str(active_config_dir),
+        candidate_config_dir=str(candidate_config_dir),
+        active_secrets_dir=str(secrets_dir),
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity={
+            "active": active_mount_identity,
+            "candidate": candidate_mount_identity,
+        },
     )
     edge_service = _runtime_service_inventory(active_compose).get("teams-ingress")
     if not isinstance(edge_service, dict):
@@ -2346,6 +2556,7 @@ def create_plan(
         "schemaVersion": PLAN_SCHEMA,
         "operationId": operation_id,
         "phase": phase,
+        **({"imageUpdateTarget": image_update_target} if image_update_target is not None else {}),
         "createdAtUtc": _utc_now(),
         "project": project,
         "activeInputs": active_inputs,
@@ -2422,10 +2633,10 @@ def create_plan(
             "minimumMemAvailableMiB": minimum_mem_available_mib,
         },
         "exchangeReadiness": {
-            "required": phase == "issued-connector-activation",
+            "required": _exchange_readiness_required(phase, image_update_target),
             "status": (
                 "PENDING_LIVE_READBACK"
-                if phase == "issued-connector-activation"
+                if _exchange_readiness_required(phase, image_update_target)
                 else "NOT_REQUIRED_PROVIDER_BOOTSTRAP"
             ),
         },
@@ -2487,7 +2698,17 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         "policy",
         "planSha256",
     }
-    if set(plan) != required or plan.get("schemaVersion") != PLAN_SCHEMA:
+    if set(plan) == required:
+        image_update_target = None
+    elif (
+        set(plan) == required | {"imageUpdateTarget"}
+        and isinstance(plan.get("imageUpdateTarget"), str)
+        and plan["imageUpdateTarget"] in IMAGE_UPDATE_TARGETS
+    ):
+        image_update_target = plan["imageUpdateTarget"]
+    else:
+        image_update_target = "__invalid__"
+    if image_update_target == "__invalid__" or plan.get("schemaVersion") != PLAN_SCHEMA:
         raise StageTransitionError("stage transition plan has an unsupported closed schema")
     for field in ("activeServices", "candidateServices"):
         if not isinstance(plan.get(field), dict):
@@ -2503,6 +2724,8 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError("stage transition plan lacks its ordered service targets")
     if plan["targets"] != [name for name in SERVICE_ORDER if name in set(plan["targets"])]:
         raise StageTransitionError("stage transition targets are not in canonical dependency order")
+    if image_update_target is not None and plan["targets"] != [image_update_target]:
+        raise StageTransitionError("image update plan must contain exactly its selected target")
     active_runtime_services = set(plan.get("activeServices", {}))
     added_services = {
         name
@@ -2531,6 +2754,19 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     for field in ("activeInputs", "candidateInputs"):
         if not isinstance(plan.get(field), dict):
             raise StageTransitionError(f"stage transition {field} record is malformed")
+    _validate_image_update_selection_contract(
+        target=image_update_target,
+        phase=plan["phase"],
+        project=plan["project"],
+        selection_record=plan["activeSelection"],
+        selection_path=plan["candidateSelectionFile"],
+        active_config_dir=plan["activeConfigDir"],
+        candidate_config_dir=plan["candidateConfigDir"],
+        active_secrets_dir=plan["activeSecretsDir"],
+        active_inputs=plan["activeInputs"],
+        candidate_inputs=plan["candidateInputs"],
+        runtime_config_identity=runtime_identity,
+    )
     readiness = plan.get("candidatePreflight")
     if (
         not isinstance(readiness, dict)
@@ -2576,15 +2812,16 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     elif host_fronted_readiness is not None:
         raise StageTransitionError("public-cutover plan must not contain host-fronted readiness")
     exchange_readiness = plan.get("exchangeReadiness")
+    exchange_readiness_required = _exchange_readiness_required(plan["phase"], image_update_target)
     if (
         not isinstance(exchange_readiness, dict)
         or set(exchange_readiness) != {"required", "status"}
         or not isinstance(exchange_readiness.get("required"), bool)
-        or exchange_readiness["required"] != (plan["phase"] == "issued-connector-activation")
+        or exchange_readiness["required"] != exchange_readiness_required
         or exchange_readiness.get("status")
         != (
             "PENDING_LIVE_READBACK"
-            if plan["phase"] == "issued-connector-activation"
+            if exchange_readiness_required
             else "NOT_REQUIRED_PROVIDER_BOOTSTRAP"
         )
     ):
@@ -2976,9 +3213,13 @@ def _verify_exchange_readiness_snapshot(
     *,
     snapshot: Any,
     compose: dict[str, Any],
+    phase: str = "issued-connector-activation",
+    image_update_target: str | None = None,
 ) -> dict[str, Any]:
-    """Compare the live Exchange issuer/catalog projection against exact candidate scope."""
+    """Verify the frozen catalog, then join issuer scopes only during activation."""
 
+    if phase not in PHASES:
+        raise StageTransitionError("Exchange readiness phase is unsupported")
     if (
         not isinstance(snapshot, dict)
         or set(snapshot)
@@ -3007,9 +3248,9 @@ def _verify_exchange_readiness_snapshot(
         or isinstance(bindings_document.get("schemaVersion"), bool)
     ):
         raise StageTransitionError("candidate connector binding projection is malformed")
-    if _canonical_json(_sorted_exchange_bindings(snapshot.get("bindings"))) != _canonical_json(
-        _sorted_exchange_bindings(bindings_document.get("bindings"))
-    ):
+    live_bindings = _sorted_exchange_bindings(snapshot.get("bindings"))
+    candidate_bindings = _sorted_exchange_bindings(bindings_document.get("bindings"))
+    if _canonical_json(live_bindings) != _canonical_json(candidate_bindings):
         raise StageTransitionError(
             "live Exchange issued bindings differ from the frozen Navigator binding config"
         )
@@ -3019,6 +3260,23 @@ def _verify_exchange_readiness_snapshot(
         raise StageTransitionError(
             "live provider tool catalog differs from the frozen Navigator catalog config"
         )
+
+    if phase == "provider-bootstrap" and image_update_target == "exchange":
+        provider_ids = sorted({row["providerId"] for row in live_bindings})
+        if not provider_ids:
+            raise StageTransitionError("provider-bootstrap Exchange binding inventory is empty")
+        return {
+            "schemaVersion": 1,
+            "status": "LIVE_VERIFIED",
+            "actorSha256": _sha256_bytes(_canonical_json(actor)),
+            "bindingsSha256": _sha256_bytes(_canonical_json(live_bindings)),
+            "catalogSha256": _sha256_bytes(_canonical_json(live_catalog)),
+            "profileCount": len(snapshot["profiles"]),
+            "connectionCount": len(snapshot["connections"]),
+            "bindingCount": len(live_bindings),
+            "verifiedProviderIds": provider_ids,
+            "profileRefByProvider": {},
+        }
 
     cloud_service = compose.get("services", {}).get("cloud-management-phase2", {})
     cloud_env = cloud_service.get("environment", {}) if isinstance(cloud_service, dict) else {}
@@ -3310,7 +3568,12 @@ def _read_live_exchange_readiness(
     except (json.JSONDecodeError, ValueError) as error:
         raise StageTransitionError("pinned Exchange readiness output is invalid JSON") from error
     try:
-        receipt = _verify_exchange_readiness_snapshot(snapshot=snapshot, compose=compose)
+        receipt = _verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase=plan.get("phase", "issued-connector-activation"),
+            image_update_target=plan.get("imageUpdateTarget"),
+        )
     except StageTransitionError:
         raise
     except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -3321,6 +3584,40 @@ def _read_live_exchange_readiness(
     receipt["exchangeImageId"] = image_id
     receipt["snapshotSha256"] = _sha256_bytes(output.encode("utf-8"))
     return receipt
+
+
+def _record_exchange_readiness(
+    *,
+    plan: dict[str, Any],
+    compose: dict[str, Any],
+    journal: dict[str, Any],
+    journal_path: Path,
+    docker_prefix: list[str],
+) -> None:
+    """Read readiness from the exact active or candidate Exchange selected by progress."""
+
+    progress = journal["targetProgress"].get("exchange")
+    uses_candidate = isinstance(progress, dict) and progress.get("candidateContainerId") is not None
+    container_id = (
+        progress.get("candidateContainerId")
+        if uses_candidate
+        else plan["activeServices"].get("exchange", {}).get("containerId")
+    )
+    image_id = (
+        progress.get("candidateImageId")
+        if uses_candidate
+        else plan["activeServices"].get("exchange", {}).get("imageId")
+    )
+    receipt = _read_live_exchange_readiness(
+        plan=plan,
+        compose=compose,
+        container_id=container_id,
+        image_id=image_id,
+        docker_prefix=docker_prefix,
+    )
+    journal["exchangeReadiness"]["verified"] = True
+    journal["exchangeReadiness"]["receipt"] = receipt
+    _write_journal(journal_path, journal, "EXCHANGE_LIVE_READINESS_VERIFIED")
 
 
 def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
@@ -4018,13 +4315,44 @@ def _resume_live_navigator(
 
 
 def _resume_old_executor_if_needed(
-    *, plan: dict[str, Any], journal: dict[str, Any], docker_prefix: list[str]
+    *,
+    plan: dict[str, Any],
+    journal: dict[str, Any],
+    docker_prefix: list[str],
+    require_original_instance: bool = False,
 ) -> None:
     """Resume only the exact old drained process when no Navigator container was replaced."""
 
+    navigator = journal.get("navigator")
+    if not isinstance(navigator, dict):
+        raise StageTransitionError("Navigator recovery identity is malformed")
     progress = journal.get("targetProgress", {}).get("navigator", {})
     if isinstance(progress, dict) and progress.get("phase") == "APPLIED":
         return
+    initial_container_id = navigator.get("initialContainerId")
+    initial_instance_id = navigator.get("initialInstanceId")
+    initial_generation = navigator.get("initialGeneration")
+    if (
+        not isinstance(initial_container_id, str)
+        or not isinstance(initial_instance_id, str)
+        or isinstance(initial_generation, bool)
+        or not isinstance(initial_generation, int)
+        or initial_generation < 0
+    ):
+        raise StageTransitionError("Navigator recovery identity is malformed")
+    drain_generation = initial_generation + 1
+    expected_drain_attempt = {
+        "containerId": initial_container_id,
+        "instanceId": initial_instance_id,
+        "initialGeneration": initial_generation,
+        "generation": drain_generation,
+    }
+    drain_attempt = navigator.get("drainAttempt")
+    journaled_drain_generation = navigator.get("drainGeneration")
+    if drain_attempt is not None and drain_attempt != expected_drain_attempt:
+        raise StageTransitionError("Navigator drain intent does not match the reviewed plan")
+    if journaled_drain_generation not in (None, drain_generation):
+        raise StageTransitionError("Navigator drain generation does not match the reviewed plan")
     containers = runtime_update._list_project_navigator_containers(
         project=plan["project"], docker_prefix=docker_prefix
     )
@@ -4037,25 +4365,94 @@ def _resume_old_executor_if_needed(
         current_id,
         timeout_seconds=15,
     )
-    if (
-        current_id == journal["navigator"]["initialContainerId"]
-        and status.get("mode") == "draining"
+    if require_original_instance:
+        if current_id != initial_container_id:
+            raise StageTransitionError(
+                "Navigator recovery container differs from the original instance"
+            )
+        if status.get("instanceId") != initial_instance_id:
+            raise StageTransitionError(
+                "Navigator recovery process differs from the original instance"
+            )
+        if status.get("mode") == "draining":
+            if (
+                status.get("generation") != drain_generation
+                or drain_attempt != expected_drain_attempt
+            ):
+                raise StageTransitionError(
+                    "old Navigator drain generation cannot be safely resumed"
+                )
+            runtime_update._resume_navigator_instance(
+                docker_prefix=docker_prefix,
+                container_id=current_id,
+                instance_id=initial_instance_id,
+                generation=drain_generation,
+                timeout_seconds=30,
+            )
+        elif status.get("mode") == "accepting":
+            if (
+                status.get("generation") == initial_generation
+                and journaled_drain_generation is None
+            ):
+                return
+            if (
+                status.get("generation") == drain_generation
+                and drain_attempt == expected_drain_attempt
+            ):
+                return
+            raise StageTransitionError(
+                "accepting Navigator is outside the known original generation"
+            )
+        else:
+            raise StageTransitionError("Navigator did not return to an accepting generation")
+        return
+
+    if current_id != initial_container_id and not (
+        isinstance(progress, dict)
+        and progress.get("phase") == "ROLLED_BACK"
+        and progress.get("rollbackContainerId") == current_id
     ):
-        expected_generation = journal["navigator"]["initialGeneration"] + 1
+        raise StageTransitionError("Navigator recovery container is not recorded by this operation")
+    if current_id == initial_container_id and status.get("mode") == "draining":
         if (
-            status.get("generation") != expected_generation
-            or status.get("instanceId") != journal["navigator"]["initialInstanceId"]
+            status.get("generation") != drain_generation
+            or status.get("instanceId") != initial_instance_id
         ):
             raise StageTransitionError("old Navigator drain generation cannot be safely resumed")
         runtime_update._resume_navigator_instance(
             docker_prefix=docker_prefix,
             container_id=current_id,
-            instance_id=journal["navigator"]["initialInstanceId"],
-            generation=expected_generation,
+            instance_id=initial_instance_id,
+            generation=drain_generation,
             timeout_seconds=30,
         )
     elif status.get("mode") != "accepting":
         raise StageTransitionError("Navigator did not return to an accepting generation")
+
+
+def _resume_executor_after_transition(
+    *,
+    plan: dict[str, Any],
+    journal: dict[str, Any],
+    candidate_compose: dict[str, Any],
+    docker_prefix: list[str],
+) -> None:
+    """Keep the same Navigator generation for Exchange-only image updates."""
+
+    if plan.get("imageUpdateTarget") == "exchange":
+        _resume_old_executor_if_needed(
+            plan=plan,
+            journal=journal,
+            docker_prefix=docker_prefix,
+            require_original_instance=True,
+        )
+        return
+    _resume_live_navigator(
+        plan=plan,
+        journal=journal,
+        candidate_compose=candidate_compose,
+        docker_prefix=docker_prefix,
+    )
 
 
 def _resume_ingress_after_safe_state(
@@ -4273,7 +4670,12 @@ def _rollback_known_mutations(
         mount_identity_by_service=plan["runtimeConfigIdentity"]["active"],
     )
     runtime_update._verify_live_network_membership(active_compose, active_services, docker_prefix)
-    _resume_old_executor_if_needed(plan=plan, journal=journal, docker_prefix=docker_prefix)
+    _resume_old_executor_if_needed(
+        plan=plan,
+        journal=journal,
+        docker_prefix=docker_prefix,
+        require_original_instance=plan.get("imageUpdateTarget") == "exchange",
+    )
     _resume_ingress_after_safe_state(
         journal=journal,
         journal_path=journal_path,
@@ -4352,34 +4754,12 @@ def apply_plan_file(
                     and journal["exchangeReadiness"]["required"]
                     and journal["exchangeReadiness"]["verified"] is not True
                 ):
-                    exchange_progress = journal["targetProgress"].get("exchange")
-                    uses_candidate = (
-                        isinstance(exchange_progress, dict)
-                        and exchange_progress.get("candidateContainerId") is not None
-                    )
-                    exchange_container_id = (
-                        exchange_progress.get("candidateContainerId")
-                        if uses_candidate
-                        else plan["activeServices"].get("exchange", {}).get("containerId")
-                    )
-                    exchange_image_id = (
-                        exchange_progress.get("candidateImageId")
-                        if uses_candidate
-                        else plan["activeServices"].get("exchange", {}).get("imageId")
-                    )
-                    receipt = _read_live_exchange_readiness(
+                    _record_exchange_readiness(
                         plan=plan,
                         compose=candidate_compose,
-                        container_id=exchange_container_id,
-                        image_id=exchange_image_id,
+                        journal=journal,
+                        journal_path=journal_path,
                         docker_prefix=docker_prefix,
-                    )
-                    journal["exchangeReadiness"]["verified"] = True
-                    journal["exchangeReadiness"]["receipt"] = receipt
-                    _write_journal(
-                        journal_path,
-                        journal,
-                        "EXCHANGE_LIVE_READINESS_VERIFIED",
                     )
                 _update_target(
                     plan=plan,
@@ -4389,6 +4769,19 @@ def apply_plan_file(
                     docker_prefix=docker_prefix,
                     service_name=service_name,
                 )
+                if (
+                    plan.get("imageUpdateTarget") == "exchange"
+                    and service_name == "exchange"
+                    and journal["exchangeReadiness"]["required"]
+                    and journal["exchangeReadiness"]["verified"] is not True
+                ):
+                    _record_exchange_readiness(
+                        plan=plan,
+                        compose=candidate_compose,
+                        journal=journal,
+                        journal_path=journal_path,
+                        docker_prefix=docker_prefix,
+                    )
                 if service_name == "navigator-persistence":
                     try:
                         _validate_database_migration(
@@ -4439,9 +4832,9 @@ def apply_plan_file(
                 and journal["exchangeReadiness"]["verified"] is not True
             ):
                 raise StageTransitionError(
-                    "issued connector activation reached cutover without live Exchange readiness"
+                    "transition reached cutover without required live Exchange readiness"
                 )
-            _resume_live_navigator(
+            _resume_executor_after_transition(
                 plan=plan,
                 journal=journal,
                 candidate_compose=candidate_compose,
@@ -4679,6 +5072,7 @@ def _add_common_plan_arguments(parser: argparse.ArgumentParser) -> None:
     """Add the immutable active/candidate inputs and bounded policy settings."""
 
     parser.add_argument("--phase", choices=sorted(PHASES), required=True)
+    parser.add_argument("--image-update-target", choices=sorted(IMAGE_UPDATE_TARGETS))
     parser.add_argument("--active-compose-file", type=Path, action="append", required=True)
     parser.add_argument("--active-env-file", type=Path, action="append", required=True)
     parser.add_argument("--active-image-lock", type=Path, required=True)
@@ -4752,6 +5146,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime_update._validate_docker_prefix(docker_prefix)
             result = create_plan(
                 phase=arguments.phase,
+                image_update_target=arguments.image_update_target,
                 active_compose_files=[path.resolve() for path in arguments.active_compose_file],
                 active_env_files=[path.resolve() for path in arguments.active_env_file],
                 active_image_lock=arguments.active_image_lock.resolve(),
