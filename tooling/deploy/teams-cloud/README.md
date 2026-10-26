@@ -34,6 +34,7 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `build_arm64.py` | Fetch exact remote commits, build ARM64 images, and record image IDs and materialized disk footprints / 获取精确远端提交、构建 ARM64 镜像并记录镜像 ID 与落盘占用 |
 | `transfer_arm64.py` | Enforce strict SSH/capacity gates and stream locked images directly into Docker / 严格核验 SSH 和容量门槛，并将锁定镜像直接流式导入 Docker |
 | `preflight.py` | Read-only host, image, config, secret, stage-evidence, tool-catalog, and ingress checks / 只读核验主机、镜像、配置、密钥、阶段回执、工具目录和入口 |
+| `runtime_update.py` | Owner-confirmed, drain-aware Navigator/Exchange update plan, apply, rollback recovery, and status / 需 owner 明确应用的 Navigator/Exchange 排空热更新计划、回滚恢复与状态查询 |
 | `host_fronted_canary.py` | Read-only readiness gate for an existing host Caddy front and the private locked ingress / 现有宿主机 Caddy 与锁定私有 ingress 的只读就绪门禁 |
 | `plugin_grpc_health_probe.py` | Verify private DirectPluginRuntime mTLS health and plugin identity / 通过内网 mTLS 核验 DirectPluginRuntime 健康状态与插件身份 |
 | `acceptance_budget.py` | Legacy CLI resource lifecycle runner for unrelated task IDs; rejects CLI mutation plans for this task / 供其他 task ID 使用的旧版 CLI 生命周期 runner；本任务会拒绝 CLI 资源变更计划 |

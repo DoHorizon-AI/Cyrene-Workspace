@@ -20,6 +20,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from datetime import datetime
@@ -41,6 +42,7 @@ SECRET_SIZE_MINIMUMS = {
     "exchange-authority-client-key": 1,
     "navigator-exchange-hmac-key": 32,
     "teams-navigator-hmac-key": 32,
+    "teams-delivery-admin-token": 32,
     "account-center-encryption-key": 32,
     "account-center-exchange-hmac-key": 32,
     "cloud-management-exchange-hmac-key": 32,
@@ -115,6 +117,13 @@ PEM_CERTIFICATE_NAMES = {
     "cloud-management-health-client-cert",
     "computer-runtime-proxy-server-cert",
 }
+SECRET_CONTENT_VALIDATED_NAMES = (
+    RAW32_SECRET_NAMES
+    | HEX32_SECRET_NAMES
+    | PEM_PRIVATE_KEY_NAMES
+    | PEM_CERTIFICATE_NAMES
+    | {"teams-navigator-hmac-key", "account-center-encryption-key"}
+)
 PLACEHOLDER_RE = re.compile(
     r"(replace[_ -]?with|example\.invalid|changeme|placeholder|<[^>]+>)", re.IGNORECASE
 )
@@ -194,6 +203,8 @@ def _secret_file(path: Path, expected_name: str) -> None:
         raise PreflightError("Authority signing seed must contain exactly 32 raw bytes")
     if metadata.st_size < minimum:
         raise PreflightError(f"secret file is too short: {expected_name}")
+    if expected_name not in SECRET_CONTENT_VALIDATED_NAMES:
+        return
     value = path.read_bytes()
     if expected_name in RAW32_SECRET_NAMES and len(value) != 32:
         raise PreflightError(f"raw HMAC/signing key must contain exactly 32 bytes: {expected_name}")
@@ -1722,6 +1733,86 @@ def _validate_teams_connector_config(service: dict[str, Any], navigator: dict[st
     ):
         raise PreflightError(
             "Teams provider bot client secret must be mounted only through its host file reference"
+        )
+
+
+def _validate_teams_delivery_spool(config: dict[str, Any]) -> None:
+    """Require durable ingress storage and a separate read-only admin secret.
+
+    The host bind must already be provisioned for UID 10001. The token itself is
+    checked by metadata only here; runtime admin requests read it inside ingress.
+    中文：spool 使用 UID 10001 的持久宿主机目录；预检不读取管理 token 内容。
+    """
+
+    services = config.get("services", {})
+    service = services.get("teams-ingress") if isinstance(services, dict) else None
+    if service is None:
+        return
+    if not isinstance(service, dict):
+        raise PreflightError("Teams ingress delivery configuration is malformed")
+    environment = service.get("environment", {})
+    volumes = service.get("volumes", [])
+    secrets = service.get("secrets", [])
+    state_mounts = [
+        row
+        for row in volumes
+        if isinstance(row, dict) and row.get("target") == "/var/lib/cyrene/teams-delivery"
+    ]
+    admin_secret_mounts = [
+        row
+        for row in secrets
+        if isinstance(row, dict) and row.get("source") == "teams-delivery-admin-token"
+    ]
+    if (
+        environment.get("TEAMS_NAVIGATOR_DELIVERY_STATE_DIR") != "/var/lib/cyrene/teams-delivery"
+        or environment.get("TEAMS_DELIVERY_ADMIN_TOKEN_FILE")
+        != "/run/secrets/teams-delivery-admin-token"
+        or "TEAMS_DELIVERY_ADMIN_TOKEN" in environment
+        or len(state_mounts) != 1
+        or state_mounts[0].get("type") != "bind"
+        or state_mounts[0].get("read_only", False) is not False
+        or len(admin_secret_mounts) != 1
+        or admin_secret_mounts[0].get("target") != "teams-delivery-admin-token"
+        or service.get("ports")
+    ):
+        raise PreflightError(
+            "Teams delivery spool must use its fixed persistent path and private admin-secret mount"
+        )
+    for name, candidate in services.items():
+        if name == "teams-ingress" or not isinstance(candidate, dict):
+            continue
+        if any(
+            isinstance(row, dict) and row.get("source") == "teams-delivery-admin-token"
+            for row in candidate.get("secrets", [])
+        ):
+            raise PreflightError(
+                "Teams delivery admin token may be mounted only into Teams ingress"
+            )
+
+    source = state_mounts[0].get("source")
+    if not isinstance(source, str) or not source:
+        raise PreflightError("Teams delivery state bind source is missing")
+    _validate_teams_delivery_state_directory(Path(source))
+
+
+def _validate_teams_delivery_state_directory(state_dir: Path) -> None:
+    """Require the spool bind source to be private, persistent, and owned by ingress."""
+
+    if not state_dir.is_absolute() or state_dir.is_symlink():
+        raise PreflightError("Teams delivery state path must be an absolute non-symlink directory")
+    try:
+        resolved = state_dir.resolve(strict=True)
+        metadata = state_dir.lstat()
+    except OSError as error:
+        raise PreflightError("Teams delivery state directory is unavailable") from error
+    if (
+        resolved != state_dir
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 10001
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise PreflightError(
+            "Teams delivery state directory must be a real UID 10001 directory with mode 0700"
         )
 
 
@@ -3840,6 +3931,7 @@ def run_preflight(
     _validate_internal_https_topology(config)
     _validate_profile_stage(config, mode)
     _validate_provider_listener_addresses(config)
+    _validate_teams_delivery_spool(config)
     _validate_secrets_and_configs(config, secrets_dir.resolve(), config_dir.resolve(), mode)
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
     execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")

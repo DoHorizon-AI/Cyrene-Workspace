@@ -323,6 +323,8 @@ services:
       CYRENE_WORKSPACE_ID: ${CYRENE_WORKSPACE_ID:?workspace ID is required}
       CYRENE_PERSISTENCE_URL: https://navigator-persistence:8080
       CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS: "1"
+      CYRENE_EXECUTOR_DRAIN_TIMEOUT_MS: "30000"
+      CYRENE_EXECUTOR_ABORT_CLEANUP_TIMEOUT_MS: "5000"
       NAVIGATOR_DATABASE_PATH: /var/lib/cyrene-navigator/persistence.db
       CYRENE_CONNECTOR_BINDINGS_FILE: /run/config/connector-bindings.json
       CYRENE_CONNECTOR_TOOL_CATALOG_FILE: /run/config/connector-tool-catalog.json
@@ -382,6 +384,7 @@ services:
     memswap_limit: 768m
     cpus: "0.65"
     pids_limit: 192
+    stop_grace_period: 40s
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
@@ -646,11 +649,19 @@ services:
       NAVIGATOR_INTERNAL_BASE_URL: http://navigator:8080
       TEAMS_NAVIGATOR_HMAC_KEY_FILE: /run/secrets/teams-navigator-hmac-key
       TEAMS_NAVIGATOR_KEY_ID: ${CYRENE_TEAMS_NAVIGATOR_HMAC_KEY_ID:?Teams-to-Navigator key ID is required}
+      TEAMS_NAVIGATOR_DELIVERY_STATE_DIR: /var/lib/cyrene/teams-delivery
+      TEAMS_DELIVERY_ADMIN_TOKEN_FILE: /run/secrets/teams-delivery-admin-token
       HOST: 0.0.0.0
       PORT: "3978"
     secrets:
       - source: teams-navigator-hmac-key
         target: teams-navigator-hmac-key
+      - source: teams-delivery-admin-token
+        target: teams-delivery-admin-token
+    volumes:
+      - type: bind
+        source: ${CYRENE_TEAMS_DELIVERY_STATE_DIR:?provision the UID 10001 private Teams delivery state directory}
+        target: /var/lib/cyrene/teams-delivery
     expose:
       - "3978"
     networks:
@@ -836,6 +847,8 @@ secrets:
     file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-bot-client-secret
   teams-navigator-hmac-key:
     file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-navigator-hmac-key
+  teams-delivery-admin-token:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-delivery-admin-token
   exchange-tls-cert:
     file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/exchange-tls-cert
   exchange-tls-key:

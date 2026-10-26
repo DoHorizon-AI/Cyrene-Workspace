@@ -795,3 +795,105 @@ sudo -n docker compose --env-file "$ARTIFACTS/runtime.env" --env-file "$ARTIFACT
 Use `revoke` for removal. A successful CLI call updates the private subject projection atomically; Navigator reads the replacement from its read-only directory mount on the next request without a rebuild or restart. Do not hand-edit the projection to grant access, and do not report the change as complete if the wrapper reports a projection-write failure.
 
 撤销成员时将 `add` 改为 `revoke`。CLI 成功后包装器会原子更新私有身份投影；Navigator 下次请求即可从只读目录挂载读取新文件，无需重建或重启。不要手工编辑投影以授予权限；若包装器报告投影写入失败，不得宣称变更完成。
+
+## Drain-aware Navigator and Exchange image updates / Navigator 与 Exchange 排空热更新
+
+`runtime_update.py` supports only the standalone Teams deployment with a durable ingress spool. Its read-only `plan` command binds the active and candidate Compose/env/image-lock file hashes, exact running container IDs and immutable image IDs, source identity digests, Teams spool revision and dead-letter count, and the Navigator process generation. The plan is written under the private Workspace `.artifacts/` tree with mode `0600`; the operation journal is persistent, owner-only, and contains phase/status metadata but no bearer or drain tokens.
+
+During `apply`, the Teams ingress keeps authenticating, durably storing, and acknowledging incoming activities while its delivery worker is paused. The updater waits for existing forwards to settle, drains Navigator, and replaces only the selected `exchange` and/or `navigator` service with `compose up --no-deps --pull never --no-build`. Exchange is updated before Navigator. Navigator's Compose stop grace is 40 seconds, covering the known 30-second executor-drain and 5-second context-cleanup defaults; the updater records Docker's actual old-container exit code and does not treat `137` as graceful. It verifies immutable image IDs and health, verifies that the old or new Navigator is accepting work, and only then resumes ingress delivery. This is a bounded maintenance window, not a zero-downtime promise.
+
+If a candidate fails, rollback first establishes the operation's own ingress pause. If a candidate Navigator may have started, it must answer the drain API and prove `activeWorkDrained=true`, `activeTasks=0`, notification polling paused, and no notification drain in flight before Compose may replace it. When the API is unreachable or the state is unknown, the updater leaves the edge paused and records `RECOVERY_REQUIRED`; `resume` repeats only safe reconciliation to the prior locked images and never retries an uncertain replacement blindly. Check `status` and inspect the service before taking a separate recovery action. Dead letters are never retried automatically; a non-zero `deliveryDeadCount` remains visible in the journal and requires the independent owner procedure.
+
+The updater rejects RuntimeMaintenance/Broker markers, unknown running workers or service-network peers, additional Navigator/Exchange consumers, changed non-target images, and replacement of the Teams ingress. It does not update host Caddy, public ports, the ACP login, connector bindings, or provider profiles. It requires fresh successful Stage 1 preflight and read-back for each apply/recovery attempt.
+
+`runtime.env` must point `CYRENE_TEAMS_DELIVERY_STATE_DIR` at an already provisioned persistent host directory owned by UID `10001` with mode `0700`. Compose mounts it at `/var/lib/cyrene/teams-delivery`; the independent `teams-delivery-admin-token` file is a read-only secret mount into `teams-ingress` only and is checked by metadata without printing or loading its value into the host process. Preflight rejects a missing, symlinked, broadly accessible, or incorrectly owned spool directory.
+
+The plan/apply split is intentional. Run the plan as the private artifact owner (the Docker prefix may use non-interactive `sudo`) and review its digest before the separately invoked apply:
+
+```sh
+DEPLOYMENT=tooling/deploy/teams-cloud
+UPDATE_DIR="$ARTIFACTS/runtime-update"
+install -d -m 0700 "$UPDATE_DIR"
+umask 077
+
+python3 "$DEPLOYMENT/runtime_update.py" plan \
+  --active-compose-file "$ACTIVE_COMPOSE" \
+  --active-env-file "$ACTIVE_RUNTIME_ENV" \
+  --active-env-file "$ACTIVE_IMAGE_ENV" \
+  --active-image-lock "$ACTIVE_IMAGE_LOCK" \
+  --candidate-compose-file "$CANDIDATE_COMPOSE" \
+  --candidate-env-file "$CANDIDATE_RUNTIME_ENV" \
+  --candidate-env-file "$CANDIDATE_IMAGE_ENV" \
+  --candidate-image-lock "$CANDIDATE_IMAGE_LOCK" \
+  --secrets-dir "$ARTIFACTS/secrets" \
+  --config-dir "$ARTIFACTS/config" \
+  --docker-prefix sudo-n-docker \
+  --target exchange --target navigator \
+  --output "$UPDATE_DIR/plan.json"
+
+python3 "$DEPLOYMENT/runtime_update.py" apply \
+  --plan "$UPDATE_DIR/plan.json" \
+  --confirm-plan-sha256 "$REVIEWED_PLAN_SHA256" \
+  --journal-dir "$UPDATE_DIR/journal"
+
+python3 "$DEPLOYMENT/runtime_update.py" status \
+  --operation-id "$OPERATION_ID" \
+  --journal-dir "$UPDATE_DIR/journal"
+
+python3 "$DEPLOYMENT/runtime_update.py" resume \
+  --operation-id "$OPERATION_ID" \
+  --confirm-plan-sha256 "$REVIEWED_PLAN_SHA256" \
+  --journal-dir "$UPDATE_DIR/journal"
+```
+
+For a `RECOVERY_REQUIRED` operation, use its exact operation ID and reviewed plan digest with `resume`. It will refuse recovery if the source files changed, the process/image identity is unknown, the edge hold cannot be proven, or the candidate Navigator cannot be drained. Keep the journal and spool intact until the state is reconciled.
+
+`runtime_update.py` 仅支持带持久 ingress spool 的 standalone Teams 部署。只读 `plan` 会绑定 active/candidate Compose、env、image-lock 文件摘要，精确的运行容器 ID 和不可变镜像 ID，源码身份摘要，Teams spool revision/dead-letter 数量，以及 Navigator 进程 generation。计划写入 Workspace 私有 `.artifacts/` 目录，文件权限为 `0600`；持久 journal 仅包含阶段和状态元数据，不包含 bearer 或 drain token。
+
+执行 `apply` 时，Teams ingress 仍会验证身份、持久保存并确认新活动，只暂停后台投递 worker。更新器等待已开始的转发完成，再排空 Navigator，随后只用 `compose up --no-deps --pull never --no-build` 替换选中的 `exchange` 和/或 `navigator` 服务。Exchange 先于 Navigator 更新。Navigator Compose stop grace 为 40 秒，覆盖已知 30 秒 executor drain 与 5 秒 context 清理预算；更新器记录旧容器真实 Docker exit code，不会将 `137` 视作正常退出。更新器回读不可变镜像 ID 和健康状态，确认旧/新 Navigator 已接受工作后才恢复 ingress 投递。这是有边界的维护窗口，不承诺零停机。
+
+候选失败时，回滚先确认 ingress 处于本操作持有的暂停状态。如果候选 Navigator 可能已启动，必须通过 drain API 证明 `activeWorkDrained=true`、`activeTasks=0`、通知轮询已暂停且没有通知 drain 在途，Compose 才能替换它。如果 API 不可达或状态未知，更新器保持 edge 暂停并记录 `RECOVERY_REQUIRED`；`resume` 只尝试安全地恢复到之前锁定的镜像，不会盲目重试结果未知的替换。此时先查询 `status` 并检查服务状态，再决定独立恢复动作。dead-letter 不会自动重试；journal 中会保留非零 `deliveryDeadCount`，需要 owner 通过单独流程处理。
+
+更新器拒绝 RuntimeMaintenance/Broker 标记、未知运行 worker 或网络 peer、额外 Navigator/Exchange consumer、非目标镜像变化以及 Teams ingress 替换。它不更新宿主机 Caddy、公网端口、ACP 登录、connector binding 或 Provider profile。每次 apply/recovery 都重新运行 Stage 1 预检并做实时回读。
+
+`runtime.env` 中的 `CYRENE_TEAMS_DELIVERY_STATE_DIR` 必须指向已预先创建、UID `10001` 所有且权限为 `0700` 的持久宿主机目录。Compose 将其挂载到 `/var/lib/cyrene/teams-delivery`；独立的 `teams-delivery-admin-token` 只读挂载到 `teams-ingress`，预检只核对元数据，不会向宿主进程读取或打印 token 内容。spool 目录缺失、为符号链接、权限过宽或 owner 不正确时预检会拒绝。
+
+plan/apply 分离为两个显式步骤。以私有 artifacts owner 运行 plan（Docker 命令可通过非交互 `sudo`），审核其摘要后再单独执行 apply：
+
+```sh
+DEPLOYMENT=tooling/deploy/teams-cloud
+UPDATE_DIR="$ARTIFACTS/runtime-update"
+install -d -m 0700 "$UPDATE_DIR"
+umask 077
+
+python3 "$DEPLOYMENT/runtime_update.py" plan \
+  --active-compose-file "$ACTIVE_COMPOSE" \
+  --active-env-file "$ACTIVE_RUNTIME_ENV" \
+  --active-env-file "$ACTIVE_IMAGE_ENV" \
+  --active-image-lock "$ACTIVE_IMAGE_LOCK" \
+  --candidate-compose-file "$CANDIDATE_COMPOSE" \
+  --candidate-env-file "$CANDIDATE_RUNTIME_ENV" \
+  --candidate-env-file "$CANDIDATE_IMAGE_ENV" \
+  --candidate-image-lock "$CANDIDATE_IMAGE_LOCK" \
+  --secrets-dir "$ARTIFACTS/secrets" \
+  --config-dir "$ARTIFACTS/config" \
+  --docker-prefix sudo-n-docker \
+  --target exchange --target navigator \
+  --output "$UPDATE_DIR/plan.json"
+
+python3 "$DEPLOYMENT/runtime_update.py" apply \
+  --plan "$UPDATE_DIR/plan.json" \
+  --confirm-plan-sha256 "$REVIEWED_PLAN_SHA256" \
+  --journal-dir "$UPDATE_DIR/journal"
+
+python3 "$DEPLOYMENT/runtime_update.py" status \
+  --operation-id "$OPERATION_ID" \
+  --journal-dir "$UPDATE_DIR/journal"
+
+python3 "$DEPLOYMENT/runtime_update.py" resume \
+  --operation-id "$OPERATION_ID" \
+  --confirm-plan-sha256 "$REVIEWED_PLAN_SHA256" \
+  --journal-dir "$UPDATE_DIR/journal"
+```
+
+若操作处于 `RECOVERY_REQUIRED`，使用其精确 operation ID 和审核过的 plan 摘要执行 `resume`。如果源码文件已变化、进程/镜像身份未知、edge pause 无法确认，或候选 Navigator 无法排空，resume 会拒绝继续。状态核实前保留 journal 和 spool。
