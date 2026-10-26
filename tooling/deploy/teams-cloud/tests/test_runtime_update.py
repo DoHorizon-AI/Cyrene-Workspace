@@ -35,6 +35,9 @@ OPERATION_ID = "00000000-0000-4000-8000-000000000001"
 NAVIGATOR_DRAIN_FIXTURE_PATH = (
     Path(__file__).resolve().parent / "fixtures/navigator-drain-status-18baefba.json"
 )
+PLUGINS_DELIVERY_FIXTURE_PATH = (
+    Path(__file__).resolve().parent / "fixtures/plugins-delivery-status-cffd6786.json"
+)
 
 
 def _native_navigator_status(name: str) -> dict[str, Any]:
@@ -43,6 +46,14 @@ def _native_navigator_status(name: str) -> dict[str, Any]:
     fixture = json.loads(NAVIGATOR_DRAIN_FIXTURE_PATH.read_text(encoding="utf-8"))
     assert fixture["producerCommit"] == "18baefba4f8e0c89b2ba335ea6f7d41251f1a85d"
     return copy.deepcopy(fixture["statuses"][name])
+
+
+def _plugins_delivery_status() -> dict[str, Any]:
+    """Load the non-empty queue/timestamp shape returned by the pinned Plugins producer."""
+
+    fixture = json.loads(PLUGINS_DELIVERY_FIXTURE_PATH.read_text(encoding="utf-8"))
+    assert fixture["producerCommit"] == "cffd6786fbbef74dcc0797fe33e760dbda5250a8"
+    return copy.deepcopy(fixture["status"])
 
 
 def _edge_status(*, paused: bool, revision: int, active: int = 0) -> dict[str, Any]:
@@ -106,6 +117,41 @@ def test_runtime_plan_maps_compose_navigator_to_the_canonical_dsh_lock_row() -> 
             {"images": [{**lock["images"][0], "service": "navigator"}]},
             ["navigator"],
         )
+
+
+def test_edge_status_accepts_plugins_nonempty_queue_and_epoch_times() -> None:
+    """Validate the float timestamps emitted by the pinned Teams DeliveryStatus producer."""
+
+    response = {"_httpStatus": 200, **_plugins_delivery_status()}
+
+    runtime_update._validate_edge_status(response)
+
+    assert response["queued_count"] == 1
+    assert response["delivered_count"] == 1
+    assert response["oldest_pending_at"] == 1792991936.462
+    assert response["last_delivered_at"] == 1792991801.25
+    assert isinstance(response["oldest_pending_at"], float)
+    assert isinstance(response["last_delivered_at"], float)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("oldest_pending_at", True),
+        ("last_delivered_at", "1792991801.25"),
+        ("oldest_pending_at", -0.25),
+        ("last_delivered_at", float("inf")),
+        ("oldest_pending_at", float("nan")),
+    ],
+)
+def test_edge_status_rejects_invalid_plugins_timestamp_values(field: str, value: Any) -> None:
+    """Reject nonnumeric, boolean, negative, or non-finite timestamp values."""
+
+    response = {"_httpStatus": 200, **_plugins_delivery_status()}
+    response[field] = value
+
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="timestamps are malformed"):
+        runtime_update._validate_edge_status(response)
 
 
 def test_plan_cli_parses_the_noninteractive_docker_prefix_as_one_closed_choice() -> None:
@@ -818,6 +864,64 @@ def test_internal_http_bridge_preserves_native_navigator_drain_fences(
     assert bridge["httpStatus"] == 200
     assert bridge["document"] == fixture
     assert server.visited == [("/internal/v1/executor/drain", "Bearer test-only-bearer")]
+    assert "test-only-bearer" not in response.stdout
+
+
+def test_internal_http_bridge_preserves_nonempty_plugins_spool_timestamps(
+    tmp_path: Path,
+) -> None:
+    """Keep producer epoch-second numbers intact through the container-local admin bridge."""
+
+    fixture = _plugins_delivery_status()
+
+    class DeliveryStatusHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.server.visited.append((self.path, self.headers.get("Authorization")))
+            body = json.dumps(fixture, separators=(",", ":")).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DeliveryStatusHandler)
+    server.visited = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    token_file = tmp_path / "admin-token"
+    token_file.write_text("test-only-bearer", encoding="ascii")
+    token_file.chmod(0o600)
+    try:
+        response = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                runtime_update._INTERNAL_HTTP_SCRIPT,
+                str(token_file),
+                f"http://127.0.0.1:{server.server_port}/_internal/teams/delivery/status",
+                "GET",
+                "2",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert response.returncode == 0
+    bridge = json.loads(response.stdout)
+    assert bridge["httpStatus"] == 200
+    assert bridge["document"] == fixture
+    assert isinstance(bridge["document"]["oldest_pending_at"], float)
+    assert isinstance(bridge["document"]["last_delivered_at"], float)
+    assert server.visited == [("/_internal/teams/delivery/status", "Bearer test-only-bearer")]
     assert "test-only-bearer" not in response.stdout
 
 

@@ -3870,7 +3870,13 @@ def _validate_edge_status(response: dict[str, Any]) -> None:
     ):
         raise RuntimeUpdateError("Teams delivery counters or revision are malformed")
     if any(
-        document.get(name) is not None and not isinstance(document.get(name), str)
+        (value := document.get(name)) is not None
+        and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value < 0
+            or (isinstance(value, float) and not math.isfinite(value))
+        )
         for name in ("oldest_pending_at", "last_delivered_at")
     ):
         raise RuntimeUpdateError("Teams delivery timestamps are malformed")
