@@ -1,0 +1,88 @@
+{
+  "producer": "DoHorizon-AI/Cyrene-Navigator",
+  "producerCommit": "18baefba4f8e0c89b2ba335ea6f7d41251f1a85d",
+  "endpoint": "GET /internal/v1/executor/drain",
+  "note": "Field names and JSON types match ExecutorDrainStatus and a sanitized GET/drain/resume wire capture. IDs and token are deterministic placeholders; this fixture is not a deployment receipt.",
+  "statuses": {
+    "accepting": {
+      "mode": "accepting",
+      "instanceId": "11111111-1111-4111-8111-111111111111",
+      "generation": 0,
+      "token": null,
+      "startedAt": null,
+      "countsComplete": true,
+      "activeTasks": 0,
+      "queuedTasks": 0,
+      "dispatches": {
+        "active": 0,
+        "waiting": 0
+      },
+      "notifications": {
+        "configured": true,
+        "pollingPaused": false,
+        "inFlight": false
+      },
+      "activeWorkDrained": true
+    },
+    "drainingActive": {
+      "mode": "draining",
+      "instanceId": "11111111-1111-4111-8111-111111111111",
+      "generation": 1,
+      "token": "00000000-0000-4000-8000-000000000001",
+      "startedAt": 1792991936450,
+      "countsComplete": true,
+      "activeTasks": 1,
+      "queuedTasks": 2,
+      "dispatches": {
+        "active": 1,
+        "waiting": 0
+      },
+      "notifications": {
+        "configured": true,
+        "pollingPaused": true,
+        "inFlight": false
+      },
+      "activeWorkDrained": false
+    },
+    "drained": {
+      "mode": "draining",
+      "instanceId": "11111111-1111-4111-8111-111111111111",
+      "generation": 1,
+      "token": "00000000-0000-4000-8000-000000000001",
+      "startedAt": 1792991936450,
+      "countsComplete": true,
+      "activeTasks": 0,
+      "queuedTasks": 2,
+      "dispatches": {
+        "active": 0,
+        "waiting": 0
+      },
+      "notifications": {
+        "configured": true,
+        "pollingPaused": true,
+        "inFlight": false
+      },
+      "activeWorkDrained": true
+    },
+    "resumedPolling": {
+      "mode": "accepting",
+      "instanceId": "11111111-1111-4111-8111-111111111111",
+      "generation": 1,
+      "token": null,
+      "startedAt": null,
+      "countsComplete": true,
+      "activeTasks": 0,
+      "queuedTasks": 0,
+      "dispatches": {
+        "active": 0,
+        "waiting": 0
+      },
+      "notifications": {
+        "configured": true,
+        "pollingPaused": false,
+        "inFlight": true
+      },
+      "activeWorkDrained": false
+    }
+  }
+}

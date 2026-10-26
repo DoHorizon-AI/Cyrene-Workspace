@@ -60,8 +60,10 @@ NAVIGATOR_DRAIN_FIELDS = {
     "token",
     "startedAt",
     "instanceId",
+    "countsComplete",
     "activeTasks",
     "queuedTasks",
+    "dispatches",
     "notifications",
     "activeWorkDrained",
 }
@@ -1580,7 +1582,10 @@ def _drain_navigator(
     while True:
         if (
             status["activeWorkDrained"]
+            and status["countsComplete"] is True
             and status["activeTasks"] == 0
+            and status["dispatches"]["active"] == 0
+            and status["dispatches"]["waiting"] == 0
             and status["notifications"]["pollingPaused"]
             and status["notifications"]["inFlight"] is False
         ):
@@ -2410,7 +2415,10 @@ def _stop_drained_navigator(
         and before["instanceId"] == journal["navigator"]["initialInstanceId"]
         and before["generation"] == journal["navigator"].get("drainGeneration")
         and before["activeWorkDrained"]
+        and before["countsComplete"] is True
         and before["activeTasks"] == 0
+        and before["dispatches"]["active"] == 0
+        and before["dispatches"]["waiting"] == 0
         and before["notifications"]["pollingPaused"]
         and before["notifications"]["inFlight"] is False
     ):
@@ -2724,7 +2732,10 @@ def _drain_current_navigator_for_rollback(
     deadline = time.monotonic() + timeout_seconds
     while not (
         status["activeWorkDrained"]
+        and status["countsComplete"] is True
         and status["activeTasks"] == 0
+        and status["dispatches"]["active"] == 0
+        and status["dispatches"]["waiting"] == 0
         and status["notifications"]["pollingPaused"]
         and status["notifications"]["inFlight"] is False
     ):
@@ -3737,8 +3748,8 @@ try:
         response_document = {}
     if "/internal/v1/executor/drain" in url:
         fields = {
-            "mode", "generation", "token", "startedAt", "instanceId", "activeTasks",
-            "queuedTasks", "notifications", "activeWorkDrained",
+            "mode", "generation", "token", "startedAt", "instanceId", "countsComplete",
+            "activeTasks", "queuedTasks", "dispatches", "notifications", "activeWorkDrained",
         }
     else:
         fields = {
@@ -3893,16 +3904,33 @@ def _validate_navigator_status(response: dict[str, Any]) -> None:
     if token is not None and (not isinstance(token, str) or not token or len(token) > 4096):
         raise RuntimeUpdateError("Navigator drain operation token is malformed")
     started_at = document.get("startedAt")
-    if started_at is not None and not isinstance(started_at, str):
+    if started_at is not None and (
+        isinstance(started_at, bool) or not isinstance(started_at, int) or started_at < 0
+    ):
         raise RuntimeUpdateError("Navigator drain start timestamp is malformed")
+    dispatches = document.get("dispatches")
+    if (
+        not isinstance(dispatches, dict)
+        or set(dispatches) != {"active", "waiting"}
+        or any(
+            isinstance(dispatches.get(field), bool)
+            or not isinstance(dispatches.get(field), int)
+            or dispatches[field] < 0
+            for field in ("active", "waiting")
+        )
+    ):
+        raise RuntimeUpdateError("Navigator dispatch drain status is malformed")
     notifications = document.get("notifications")
     if (
         not isinstance(notifications, dict)
-        or set(notifications) != {"pollingPaused", "inFlight"}
+        or set(notifications) != {"configured", "pollingPaused", "inFlight"}
+        or not isinstance(notifications.get("configured"), bool)
         or not isinstance(notifications.get("pollingPaused"), bool)
         or not isinstance(notifications.get("inFlight"), bool)
     ):
         raise RuntimeUpdateError("Navigator notification drain status is malformed")
+    if document.get("countsComplete") is not True:
+        raise RuntimeUpdateError("Navigator durable task counts are incomplete")
     if (
         document["mode"] == "accepting"
         and (token is not None or started_at is not None or notifications["pollingPaused"])
@@ -3912,7 +3940,10 @@ def _validate_navigator_status(response: dict[str, Any]) -> None:
     ):
         raise RuntimeUpdateError("Navigator drain mode does not match its fencing metadata")
     if document["activeWorkDrained"] and (
-        document["activeTasks"] != 0 or notifications["inFlight"]
+        document["activeTasks"] != 0
+        or dispatches["active"] != 0
+        or dispatches["waiting"] != 0
+        or notifications["inFlight"]
     ):
         raise RuntimeUpdateError("Navigator reported drained while active work remains")
     response.clear()
