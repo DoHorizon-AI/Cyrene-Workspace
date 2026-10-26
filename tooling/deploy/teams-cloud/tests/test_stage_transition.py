@@ -415,6 +415,126 @@ def test_apply_preflight_rechecks_frozen_host_fronted_readiness(
         stage_transition._candidate_preflight(plan)
 
 
+def test_post_update_capacity_maps_overlapping_service_names_by_container_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use exact IDs when service names overlap, regardless of Docker output order."""
+
+    container_ids = {
+        "navigator": "1" * 64,
+        "navigator-persistence": "2" * 64,
+        "computer-runtime": "3" * 64,
+        "computer-runtime-proxy": "4" * 64,
+    }
+    services = {name: {"containerId": container_id} for name, container_id in container_ids.items()}
+    stats_rows = [
+        (container_ids["computer-runtime-proxy"], "400MiB / 512MiB"),
+        (container_ids["navigator-persistence"], "200MiB / 512MiB"),
+        (container_ids["computer-runtime"], "300MiB / 512MiB"),
+        (container_ids["navigator"], "100MiB / 512MiB"),
+    ]
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(stage_transition.preflight, "_parse_memavailable", lambda: 2048)
+    monkeypatch.setattr(stage_transition.preflight, "_parse_meminfo", lambda: 8192)
+
+    def checked_stdout(argv: list[str], **kwargs: Any) -> str:
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return "\n".join(f"{container_id}|{usage}" for container_id, usage in stats_rows)
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked_stdout)
+    result = stage_transition._validate_post_update_capacity(
+        compose={"name": "cyrene"},
+        services=services,
+        docker_prefix=["docker"],
+        minimum_available_mib=1024,
+    )
+
+    assert result["rssByServiceMiB"] == {
+        "computer-runtime": 300.0,
+        "computer-runtime-proxy": 400.0,
+        "navigator": 100.0,
+        "navigator-persistence": 200.0,
+    }
+    assert result["totalRssMiB"] == 1000.0
+    assert captured["argv"] == [
+        "docker",
+        "stats",
+        "--no-stream",
+        "--no-trunc",
+        "--format",
+        "{{.ID}}|{{.MemUsage}}",
+        *sorted(container_ids.values()),
+    ]
+    assert captured["timeout_seconds"] == 30
+
+
+@pytest.mark.parametrize(
+    ("stats_rows", "message"),
+    [
+        (
+            [("1" * 64, "100MiB / 512MiB"), ("1" * 64, "100MiB / 512MiB")],
+            "duplicate RSS container ID",
+        ),
+        ([("9" * 64, "100MiB / 512MiB")], "unknown service container"),
+        ([("1" * 63, "100MiB / 512MiB")], "malformed RSS container ID"),
+        ([("1" * 64, "100MiB / 512MiB")], "complete per-service RSS"),
+    ],
+)
+def test_post_update_capacity_rejects_invalid_rss_container_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    stats_rows: list[tuple[str, str]],
+    message: str,
+) -> None:
+    """Reject malformed, duplicate, unknown, or missing per-container RSS rows."""
+
+    services = {
+        "navigator": {"containerId": "1" * 64},
+        "navigator-persistence": {"containerId": "2" * 64},
+    }
+    monkeypatch.setattr(stage_transition.preflight, "_parse_memavailable", lambda: 2048)
+    monkeypatch.setattr(stage_transition.preflight, "_parse_meminfo", lambda: 8192)
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: "\n".join(
+            f"{container_id}|{usage}" for container_id, usage in stats_rows
+        ),
+    )
+
+    with pytest.raises(stage_transition.StageTransitionError, match=message):
+        stage_transition._validate_post_update_capacity(
+            compose={"name": "cyrene"},
+            services=services,
+            docker_prefix=["docker"],
+            minimum_available_mib=1024,
+        )
+
+
+def test_post_update_capacity_rejects_duplicate_expected_container_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require the sealed runtime inventory to map one ID to one service."""
+
+    monkeypatch.setattr(stage_transition.preflight, "_parse_memavailable", lambda: 2048)
+    monkeypatch.setattr(stage_transition.preflight, "_parse_meminfo", lambda: 8192)
+    monkeypatch.setattr(runtime_update, "_checked_stdout", lambda *_args, **_kwargs: "")
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="services share a container ID"
+    ):
+        stage_transition._validate_post_update_capacity(
+            compose={"name": "cyrene"},
+            services={
+                "navigator": {"containerId": "1" * 64},
+                "navigator-persistence": {"containerId": "1" * 64},
+            },
+            docker_prefix=["docker"],
+            minimum_available_mib=1024,
+        )
+
+
 def _lock(rows: list[tuple[str, str, int]]) -> dict[str, Any]:
     """Build one synthetic image lock with immutable service IDs."""
 

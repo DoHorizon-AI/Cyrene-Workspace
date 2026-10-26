@@ -1991,7 +1991,7 @@ def _validate_post_update_capacity(
     docker_prefix: list[str],
     minimum_available_mib: int,
 ) -> dict[str, Any]:
-    """Require current RSS plus the fixed host reserve to fit before releasing ingress."""
+    """Match RSS by sealed container ID and enforce the fixed host reserve before release."""
 
     available_mib = preflight._parse_memavailable()
     total_memory_mib = preflight._parse_meminfo()
@@ -1999,21 +1999,48 @@ def _validate_post_update_capacity(
         raise StageTransitionError(
             "post-transition MemAvailable fell below the configured host reserve"
         )
+    service_by_container_id: dict[str, str] = {}
+    for service_name, service in services.items():
+        container_id = service.get("containerId") if isinstance(service, dict) else None
+        if (
+            not isinstance(container_id, str)
+            or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None
+        ):
+            raise StageTransitionError("post-transition service container ID is malformed")
+        if container_id in service_by_container_id:
+            raise StageTransitionError("post-transition services share a container ID")
+        service_by_container_id[container_id] = service_name
+    if not service_by_container_id:
+        raise StageTransitionError("post-transition RSS inventory has no services")
+
+    # Match stats to the sealed inventory by exact ID; service-name prefixes overlap.
+    # 精确容器 ID 可避免 navigator 与 navigator-persistence 等名称前缀重叠。
     stats = runtime_update._checked_stdout(
-        [*docker_prefix, "stats", "--no-stream", "--format", "{{.Name}}|{{.MemUsage}}"],
+        [
+            *docker_prefix,
+            "stats",
+            "--no-stream",
+            "--no-trunc",
+            "--format",
+            "{{.ID}}|{{.MemUsage}}",
+            *sorted(service_by_container_id),
+        ],
         label="post-transition RSS inventory",
         timeout_seconds=30,
     )
-    project_prefix = f"{compose.get('name')}-"
     observed: dict[str, float] = {}
+    seen_container_ids: set[str] = set()
     for line in stats.splitlines():
-        name, separator, usage = line.partition("|")
-        if not separator or not name.startswith(project_prefix):
-            continue
-        for service_name in services:
-            if name.startswith(f"{project_prefix}{service_name}-"):
-                observed[service_name] = preflight._docker_memory_usage_mib(usage)
-                break
+        container_id, separator, usage = line.partition("|")
+        if not separator or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+            raise StageTransitionError("Docker returned a malformed RSS container ID")
+        if container_id in seen_container_ids:
+            raise StageTransitionError("Docker returned a duplicate RSS container ID")
+        seen_container_ids.add(container_id)
+        service_name = service_by_container_id.get(container_id)
+        if service_name is None:
+            raise StageTransitionError("Docker returned RSS for an unknown service container")
+        observed[service_name] = preflight._docker_memory_usage_mib(usage)
     if set(observed) != set(services):
         raise StageTransitionError(
             "Docker did not return complete per-service RSS after transition"
