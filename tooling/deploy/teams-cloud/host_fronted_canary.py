@@ -676,26 +676,12 @@ def _locked_navigator_image_id(image_lock: dict[str, Any], *, navigator_image: s
 
 
 def _expected_stage1_services(compose: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Select long-running base services plus the public callback profile for Stage 1."""
+    """Use the shared Stage 1 service selector without duplicating profile rules."""
 
-    services = compose.get("services")
-    if not isinstance(services, dict):
-        raise CanaryGateError("rendered Compose configuration has no services")
-    expected: dict[str, dict[str, Any]] = {}
-    for name, service in services.items():
-        if not isinstance(name, str) or not isinstance(service, dict):
-            raise CanaryGateError("rendered Compose service is malformed")
-        if service.get("restart") == "no":
-            continue
-        profiles = service.get("profiles", [])
-        if not isinstance(profiles, list) or any(not isinstance(item, str) for item in profiles):
-            raise CanaryGateError("rendered Compose service profiles are malformed")
-        if profiles and "public-ingress" not in profiles:
-            continue
-        expected[name] = service
-    if "teams-ingress" not in expected or "teams-public-ingress" not in expected:
-        raise CanaryGateError("Stage 1 Compose services must include both Teams ingress services")
-    return expected
+    try:
+        return preflight._expected_stage1_services(compose)
+    except preflight.PreflightError as error:
+        raise CanaryGateError(str(error)) from error
 
 
 def _container_labels(container: dict[str, Any]) -> dict[str, str]:

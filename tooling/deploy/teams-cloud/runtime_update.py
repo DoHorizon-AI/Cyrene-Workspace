@@ -4030,7 +4030,18 @@ def _inspect_project_services(
         raise RuntimeUpdateError("rendered Compose project name is missing")
     expected = preflight._expected_stage1_services(compose)
     required_stage1_services = set(expected)
-    configured_services = compose.get("services", {})
+    navigator = expected.get("navigator")
+    navigator_labels = navigator.get("labels") if isinstance(navigator, dict) else None
+    navigator_environment = navigator.get("environment") if isinstance(navigator, dict) else None
+    if (
+        not isinstance(navigator_labels, dict)
+        or navigator_labels.get("com.cyrene.runtime.profile") != "codebuddy-acp"
+        or not isinstance(navigator_environment, dict)
+        or navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND") != "codebuddy-acp"
+    ):
+        raise RuntimeUpdateError(
+            "Stage 1 runtime update requires the CodeBuddy ACP Navigator profile"
+        )
     lock_ids = _locked_image_ids(image_lock)
     image_overrides = image_overrides or {}
     health_exceptions = health_exceptions or set()
@@ -4074,15 +4085,16 @@ def _inspect_project_services(
                 "running container is not owned by the selected Compose project"
             )
         if service_name not in expected:
-            if (
-                service_name not in {"computer-runtime", "computer-runtime-proxy"}
-                or not isinstance(configured_services, dict)
-                or not isinstance(configured_services.get(service_name), dict)
-            ):
-                raise RuntimeUpdateError(
-                    "unexpected running worker exists in the selected Compose project"
-                )
-            expected[service_name] = configured_services[service_name]
+            raise RuntimeUpdateError(
+                "unexpected running worker exists in the selected Compose project"
+            )
+        if (
+            service_name == "navigator"
+            and labels.get("com.cyrene.runtime.profile") != "codebuddy-acp"
+        ):
+            raise RuntimeUpdateError(
+                "running Navigator does not match the rendered CodeBuddy ACP profile"
+            )
         if service_name in by_service:
             raise RuntimeUpdateError(
                 f"Compose service {service_name} has multiple running containers"
@@ -4138,10 +4150,17 @@ def _inspect_project_services(
             "health": health if health is not None else "running",
             "networkNames": network_names,
         }
-    if not required_stage1_services <= set(by_service):
+    if set(by_service) != required_stage1_services:
         missing = sorted(required_stage1_services - set(by_service))
-        raise RuntimeUpdateError(f"Stage 1 Compose services are missing: {','.join(missing)}")
-    computer_services = set(by_service) & {"computer-runtime", "computer-runtime-proxy"}
+        unexpected = sorted(set(by_service) - required_stage1_services)
+        raise RuntimeUpdateError(
+            "Stage 1 Compose service inventory differs from the rendered topology; "
+            f"missing={','.join(missing)} unexpected={','.join(unexpected)}"
+        )
+    computer_services = required_stage1_services & {
+        "computer-runtime",
+        "computer-runtime-proxy",
+    }
     if computer_services and computer_services != {"computer-runtime", "computer-runtime-proxy"}:
         raise RuntimeUpdateError("the known computer runtime and proxy must be running together")
     return by_service
