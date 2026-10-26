@@ -1081,6 +1081,27 @@ def _normalize_huggingface_repository_scope(value: Any, label: str) -> list[dict
     )
 
 
+def _normalize_exchange_huggingface_repository_scope(
+    value: Any, label: str
+) -> list[dict[str, Any]]:
+    """Translate Exchange's canonical camelCase account-scope DTO to the shared scope shape."""
+
+    if not isinstance(value, list):
+        raise PreflightError(f"{label} repository scope is invalid")
+    normalized: list[dict[str, Any]] = []
+    for row in value:
+        if not isinstance(row, dict) or set(row) != {"repoType", "repoId", "permissions"}:
+            raise PreflightError(f"{label} repository scope is invalid")
+        normalized.append(
+            {
+                "repo_type": row["repoType"],
+                "repo_id": row["repoId"],
+                "permissions": row["permissions"],
+            }
+        )
+    return _normalize_huggingface_repository_scope(normalized, label)
+
+
 def _json_environment_object(service: dict[str, Any], variable: str, label: str) -> dict[str, Any]:
     """Decode one Compose JSON setting while rejecting ambiguous keys and values."""
 
@@ -1223,7 +1244,7 @@ def _connector_auth_scope_expectations(
     account_scopes = (
         exchange_hf_profile.get("accountScopes") if isinstance(exchange_hf_profile, dict) else None
     )
-    exchange_repositories = _normalize_huggingface_repository_scope(
+    exchange_repositories = _normalize_exchange_huggingface_repository_scope(
         account_scopes.get("repositories") if isinstance(account_scopes, dict) else None,
         "Exchange HF profile",
     )
@@ -2216,6 +2237,21 @@ def _validate_connector_bootstrap_config(
         raise PreflightError(
             "private connector bootstrap actor and provider set must match the approved Directory owner and CYRENE_HF_ENABLED"
         )
+    github_bootstrap = document.get("github")
+    if (
+        not isinstance(github_bootstrap, dict)
+        or github_bootstrap.get("expectedAccessMode") != "workspace_operator"
+    ):
+        raise PreflightError("GitHub connector bootstrap must require workspace_operator access")
+    if huggingface_enabled:
+        huggingface_bootstrap = document.get("huggingface")
+        if (
+            not isinstance(huggingface_bootstrap, dict)
+            or huggingface_bootstrap.get("expectedAccessMode") != "workspace_operator"
+        ):
+            raise PreflightError(
+                "Hugging Face connector bootstrap must require workspace_operator access"
+            )
 
 
 def _validate_teams_connector_config(service: dict[str, Any], navigator: dict[str, Any]) -> None:

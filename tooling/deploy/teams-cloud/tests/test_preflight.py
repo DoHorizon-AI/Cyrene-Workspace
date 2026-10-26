@@ -3565,6 +3565,14 @@ def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path
     preflight._validate_connector_bootstrap_config(
         path, huggingface_enabled=False, expected_actor=expected_actor
     )
+    document["github"]["expectedAccessMode"] = "read_only"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="workspace_operator"):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=False, expected_actor=expected_actor
+        )
+    document["github"]["expectedAccessMode"] = "workspace_operator"
+    path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(
         preflight.PreflightError, match="approved Directory owner and CYRENE_HF_ENABLED"
     ):
@@ -3595,6 +3603,12 @@ def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path
     preflight._validate_connector_bootstrap_config(
         path, huggingface_enabled=True, expected_actor=expected_actor
     )
+    document["huggingface"]["expectedAccessMode"] = "user"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="workspace_operator"):
+        preflight._validate_connector_bootstrap_config(
+            path, huggingface_enabled=True, expected_actor=expected_actor
+        )
 
 
 def test_huggingface_oauth_source_matches_closed_account_center_dto(tmp_path: Path) -> None:
@@ -3858,12 +3872,20 @@ def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
         ]
     }
     hf_config = {"read_only": True, "repositories": repos}
+    exchange_repositories = [
+        {
+            "repoType": row["repo_type"],
+            "repoId": row["repo_id"],
+            "permissions": row["permissions"],
+        }
+        for row in repos
+    ]
     exchange_config = {
         "authorizationCloud": {
             "profiles": {
                 "hf-primary": {
                     "provider": "hf",
-                    "accountScopes": {"repositories": repos},
+                    "accountScopes": {"repositories": exchange_repositories},
                 },
                 "azure-primary": {"provider": "azure"},
                 "gcp-primary": {"provider": "gcp"},
@@ -3931,7 +3953,7 @@ def test_connector_auth_scope_digest_binds_all_hf_scopes_and_candidate_keys(
 
     exchange_config["authorizationCloud"]["profiles"]["hf-primary"]["accountScopes"][
         "repositories"
-    ][0]["repo_id"] = "owner/other-model"
+    ][0]["repoId"] = "owner/other-model"
     config["services"]["exchange"]["environment"][
         "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
     ] = json.dumps(exchange_config)
