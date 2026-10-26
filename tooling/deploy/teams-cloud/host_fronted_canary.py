@@ -329,7 +329,7 @@ def _at_path(document: Any, path: tuple[str | int, ...]) -> Any:
 
 
 def _normalized_caddy(adapted: dict[str, Any], path: tuple[str | int, ...]) -> dict[str, Any]:
-    """Replace only callback upstream and transport values before full-tree comparison."""
+    """Replace verified callback values before the full-tree comparison."""
 
     normalized = copy.deepcopy(adapted)
     handler = _at_path(normalized, path)
@@ -340,6 +340,44 @@ def _normalized_caddy(adapted: dict[str, Any], path: tuple[str | int, ...]) -> d
     return normalized
 
 
+def _contains_host_header_key(value: Any) -> bool:
+    """Detect Host operations anywhere in one adapted header configuration."""
+
+    if isinstance(value, dict):
+        return any(
+            isinstance(key, str) and key.lower() == "host" or _contains_host_header_key(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_host_header_key(child) for child in value)
+    return False
+
+
+def _verify_candidate_host_header(
+    source_handler: dict[str, Any],
+    candidate_handler: dict[str, Any],
+    hostname: str,
+) -> dict[str, Any]:
+    """Require the sole candidate header delta to set Host to the literal public name."""
+
+    source_headers = source_handler.get("headers", {})
+    if not isinstance(source_headers, dict) or _contains_host_header_key(source_headers):
+        raise CanaryGateError("current callback headers contain an unsupported Host operation")
+    expected_headers = copy.deepcopy(source_headers)
+    request_headers = expected_headers.setdefault("request", {})
+    if not isinstance(request_headers, dict):
+        raise CanaryGateError("current callback request headers are malformed")
+    set_headers = request_headers.setdefault("set", {})
+    if not isinstance(set_headers, dict):
+        raise CanaryGateError("current callback request set headers are malformed")
+    set_headers["Host"] = [hostname]
+    if candidate_handler.get("headers") != expected_headers:
+        raise CanaryGateError(
+            "candidate callback headers must add only request.set.Host with the public hostname"
+        )
+    return source_headers
+
+
 def _verify_candidate_caddy(
     *,
     source: dict[str, Any],
@@ -348,7 +386,7 @@ def _verify_candidate_caddy(
 ) -> tuple[str, tuple[str, ...]]:
     """Require a single callback backend/TLS change and no other adapted Caddy change."""
 
-    source_path, _source_handler, source_hosts = _find_callback_proxy(source, "current host Caddy")
+    source_path, source_handler, source_hosts = _find_callback_proxy(source, "current host Caddy")
     candidate_path, candidate_handler, candidate_hosts = _find_callback_proxy(
         candidate, "candidate host Caddy"
     )
@@ -392,8 +430,18 @@ def _verify_candidate_caddy(
     ):
         raise CanaryGateError("candidate backend TLS must trust only the selected public CA file")
 
-    if _normalized_caddy(source, source_path) != _normalized_caddy(candidate, candidate_path):
-        raise CanaryGateError("candidate Caddy changes routes outside the callback upstream/TLS")
+    source_headers = _verify_candidate_host_header(source_handler, candidate_handler, hostname)
+    normalized_source = _normalized_caddy(source, source_path)
+    normalized_candidate = _normalized_caddy(candidate, candidate_path)
+    normalized_candidate_handler = _at_path(normalized_candidate, candidate_path)
+    if source_headers:
+        normalized_candidate_handler["headers"] = source_headers
+    else:
+        normalized_candidate_handler.pop("headers", None)
+    if normalized_source != normalized_candidate:
+        raise CanaryGateError(
+            "candidate Caddy changes routes outside the callback upstream/TLS/Host header"
+        )
     return hostname, source_hosts
 
 
@@ -473,6 +521,64 @@ def _verify_tls_handshake(
     output = _checked_command(argv, label, timeout=15.0, include_stderr=True)
     if "Verification: OK" not in output and "Verify return code: 0 (ok)" not in output:
         raise CanaryGateError(f"{label} did not report a verified certificate chain")
+
+
+def _verify_backend_unsigned_callback_http(
+    *,
+    openssl_binary: str,
+    hostname: str,
+    ca_file: Path,
+) -> int:
+    """POST an unsigned empty callback to the loopback backend and require its SDK 401."""
+
+    request = (
+        f"POST /api/messages HTTP/1.1\r\n"
+        f"Host: {hostname}\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 2\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "{}"
+    ).encode("ascii")
+    argv = [
+        openssl_binary,
+        "s_client",
+        "-quiet",
+        "-connect",
+        "127.0.0.1:18443",
+        "-servername",
+        hostname,
+        "-verify_hostname",
+        hostname,
+        "-verify",
+        "5",
+        "-verify_return_error",
+        "-CAfile",
+        str(ca_file),
+    ]
+    try:
+        result = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            input=request,
+            timeout=15.0,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CanaryGateError(
+            "unsigned backend callback HTTP probe could not be completed"
+        ) from error
+    if result.returncode != 0:
+        raise CanaryGateError("unsigned backend callback HTTP probe failed TLS verification")
+    response = result.stdout
+    try:
+        header_block, body = response.split(b"\r\n\r\n", 1)
+        status_line = header_block.split(b"\r\n", 1)[0].decode("ascii")
+    except (ValueError, UnicodeDecodeError) as error:
+        raise CanaryGateError("backend callback did not return a valid HTTP response") from error
+    if re.fullmatch(r"HTTP/1\.[01] 401(?:[ \t].*)?", status_line) is None:
+        raise CanaryGateError("unsigned backend callback must return HTTP 401 from the Teams SDK")
+    return len(body)
 
 
 def _verify_public_ca_file(ca_file: Path, openssl_binary: str) -> None:
@@ -900,14 +1006,19 @@ def run_canary_gate(
     )
     _verify_public_ca_file(backend_ca_file, openssl_binary)
 
-    # ── Phase 3: Verify both TLS paths and the real model probe ─────────
-    # 第三阶段：验证两段 TLS 和真实模型探测。
+    # ── Phase 3: Verify backend HTTP routing, both TLS paths, and model ──
+    # 第三阶段：验证后端 HTTP 路由、两段 TLS 和真实模型探测。
     _verify_tls_handshake(
         openssl_binary=openssl_binary,
         connect="127.0.0.1:18443",
         hostname=hostname,
         ca_file=backend_ca_file,
         label="staging backend TLS",
+    )
+    backend_response_body_bytes = _verify_backend_unsigned_callback_http(
+        openssl_binary=openssl_binary,
+        hostname=hostname,
+        ca_file=backend_ca_file,
     )
     _verify_tls_handshake(
         openssl_binary=openssl_binary,
@@ -945,7 +1056,11 @@ def run_canary_gate(
         "hostCaddySourceSha256": source_digest,
         "hostCaddyCandidateSha256": candidate_digest,
         "backendTls": "PASS",
+        "backendUnsignedCallbackHttp": "PASS",
+        "backendUnsignedCallbackHttpStatus": 401,
+        "backendUnsignedCallbackResponseBodyBytes": backend_response_body_bytes,
         "publicTls": "PASS",
+        "publicCallbackPostApply": "NOT_RUN",
         "codeBuddyAcpProbe": "PASS",
         "fullTeamsAcceptance": "NOT_RUN",
         "cloudProviderAcceptance": "NOT_RUN",
@@ -1024,6 +1139,7 @@ def main() -> int:
             "accepted": False,
             "blockedReason": str(error),
             "fullTeamsAcceptance": "NOT_RUN",
+            "publicCallbackPostApply": "NOT_RUN",
             "cloudProviderAcceptance": "NOT_RUN",
             "twentyFourHourObservation": "NOT_RUN",
             "huggingFace": "DISABLED",

@@ -74,6 +74,8 @@ def _adapted(
             else None
         ),
     )
+    if candidate:
+        callback["headers"] = {"request": {"set": {"Host": [HOST]}}}
     return {
         "apps": {
             "http": {
@@ -112,8 +114,8 @@ def _adapted(
     }
 
 
-def test_caddy_compare_allows_only_callback_upstream_and_transport() -> None:
-    """Accept the intended callback TLS route while preserving every other route."""
+def test_caddy_compare_allows_only_callback_upstream_tls_and_public_host() -> None:
+    """Accept the fixed TLS route and Host override while preserving every other route."""
 
     hostname, hosts = canary._verify_candidate_caddy(
         source=_adapted(candidate=False),
@@ -132,6 +134,34 @@ def test_caddy_compare_rejects_any_other_front_change() -> None:
         canary._verify_candidate_caddy(
             source=_adapted(candidate=False),
             candidate=_adapted(candidate=True, unrelated_dial="changed.example.test:8080"),
+            backend_ca_file=Path(CA_PATH),
+        )
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"request": {"set": {"Host": ["wrong.example.test"]}}},
+        {"request": {"set": {"Host": ["{http.request.host}"]}}},
+        {"request": {"set": {"Host": [HOST], "Authorization": ["Bearer placeholder"]}}},
+        {"request": {"set": {"Host": [HOST]}, "add": {"X-Forwarded-Host": [HOST]}}},
+        {"request": {"set": {"host": [HOST]}}},
+    ],
+    ids=["wrong-host", "placeholder", "extra-auth", "extra-header-operation", "wrong-case"],
+)
+def test_caddy_compare_requires_exact_literal_host_header(headers: dict[str, Any]) -> None:
+    """Reject host placeholders and any additional or differently named header operation."""
+
+    source = _adapted(candidate=False)
+    candidate = _adapted(candidate=True)
+    callback = candidate["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][0]["routes"][0][
+        "handle"
+    ][0]
+    callback["headers"] = headers
+    with pytest.raises(canary.CanaryGateError, match="headers must add only request.set.Host"):
+        canary._verify_candidate_caddy(
+            source=source,
+            candidate=candidate,
             backend_ca_file=Path(CA_PATH),
         )
 
@@ -480,6 +510,70 @@ def test_tls_probe_requires_verified_output_even_when_openssl_exits_zero(
             hostname=HOST,
             ca_file=None,
             label="test handshake",
+        )
+
+
+def test_unsigned_backend_probe_pins_sni_host_and_requires_sdk_401(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Send an unsigned POST to loopback with the public Host and verified backend TLS."""
+
+    calls: list[tuple[list[str], bytes]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append((argv, kwargs["input"]))
+        assert kwargs["capture_output"] is True
+        assert kwargs["timeout"] == 15.0
+        assert "Authorization:" not in kwargs["input"].decode("ascii")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 6\r\n\r\nDenied",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(canary.subprocess, "run", run)
+    body_bytes = canary._verify_backend_unsigned_callback_http(
+        openssl_binary="openssl",
+        hostname=HOST,
+        ca_file=Path(CA_PATH),
+    )
+    argv, request = calls[0]
+    assert body_bytes == len(b"Denied")
+    assert argv[:3] == ["openssl", "s_client", "-quiet"]
+    assert argv[argv.index("-connect") + 1] == "127.0.0.1:18443"
+    assert argv[argv.index("-servername") + 1] == HOST
+    assert argv[argv.index("-verify_hostname") + 1] == HOST
+    assert argv[argv.index("-CAfile") + 1] == str(Path(CA_PATH))
+    assert "-verify_return_error" in argv
+    assert "-insecure" not in argv
+    assert request == (
+        f"POST /api/messages HTTP/1.1\r\nHost: {HOST}\r\n"
+        "Content-Type: application/json\r\nContent-Length: 2\r\n"
+        "Connection: close\r\n\r\n{}"
+    ).encode("ascii")
+
+
+def test_unsigned_backend_probe_rejects_empty_public_like_200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful empty HTTP 200 cannot stand in for the backend SDK's unsigned 401."""
+
+    monkeypatch.setattr(
+        canary.subprocess,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            stderr=b"",
+        ),
+    )
+    with pytest.raises(canary.CanaryGateError, match="must return HTTP 401"):
+        canary._verify_backend_unsigned_callback_http(
+            openssl_binary="openssl",
+            hostname=HOST,
+            ca_file=Path(CA_PATH),
         )
 
 
@@ -906,6 +1000,7 @@ def test_readiness_result_never_means_deployment_acceptance(
     )
     monkeypatch.setattr(canary, "_verify_public_ca_file", lambda *_args: None)
     monkeypatch.setattr(canary, "_verify_tls_handshake", lambda **_kwargs: None)
+    monkeypatch.setattr(canary, "_verify_backend_unsigned_callback_http", lambda **_kwargs: 24)
     monkeypatch.setattr(canary, "_verify_acp_probe", lambda **_kwargs: None)
 
     result = canary.run_canary_gate(
@@ -935,6 +1030,10 @@ def test_readiness_result_never_means_deployment_acceptance(
     assert result["deploymentReady"] is False
     assert result["accepted"] is False
     assert result["fullTeamsAcceptance"] == "NOT_RUN"
+    assert result["backendUnsignedCallbackHttp"] == "PASS"
+    assert result["backendUnsignedCallbackHttpStatus"] == 401
+    assert result["backendUnsignedCallbackResponseBodyBytes"] == 24
+    assert result["publicCallbackPostApply"] == "NOT_RUN"
     assert result["cloudProviderAcceptance"] == "NOT_RUN"
     assert result["twentyFourHourObservation"] == "NOT_RUN"
     assert preflight_calls[0]["mode"] == "stage1"
