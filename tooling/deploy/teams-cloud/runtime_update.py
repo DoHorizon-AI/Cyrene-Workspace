@@ -1323,6 +1323,8 @@ def _compose_base_argv(
         argv.extend(["--file", str(path)])
     for path in env_files:
         argv.extend(["--env-file", str(path)])
+    for profile in preflight.ACTIVE_COMPOSE_PROFILES:
+        argv.extend(["--profile", profile])
     return argv
 
 
