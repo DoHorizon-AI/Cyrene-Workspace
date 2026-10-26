@@ -2602,9 +2602,13 @@ def _sorted_exchange_bindings(value: Any) -> list[dict[str, Any]]:
         if (
             not isinstance(item, dict)
             or set(item) != {"bindingId", "connectionRef", "providerId", "profileRef", "tools"}
-            or not isinstance(item.get("bindingId"), str)
+            or any(
+                not isinstance(item.get(field), str) or not item[field]
+                for field in ("bindingId", "connectionRef", "providerId", "profileRef")
+            )
             or item["bindingId"] in seen
             or not isinstance(item.get("tools"), list)
+            or not item["tools"]
         ):
             raise StageTransitionError("Exchange readiness binding row is malformed")
         seen.add(item["bindingId"])
@@ -2612,6 +2616,11 @@ def _sorted_exchange_bindings(value: Any) -> list[dict[str, Any]]:
         if any(
             not isinstance(tool, dict)
             or set(tool) != {"toolId", "operationId", "resourceProjection", "mutating"}
+            or any(
+                not isinstance(tool.get(field), str) or not tool[field]
+                for field in ("toolId", "operationId", "resourceProjection")
+            )
+            or not isinstance(tool.get("mutating"), bool)
             for tool in tools
         ):
             raise StageTransitionError("Exchange readiness operation map is malformed")
@@ -2637,9 +2646,20 @@ def _sorted_exchange_catalog(value: Any) -> dict[str, Any]:
             not isinstance(item, dict)
             or set(item)
             != {"bindingId", "capabilityId", "providerId", "connectionRef", "profileRef", "tools"}
-            or not isinstance(item.get("bindingId"), str)
+            or any(
+                not isinstance(item.get(field), str) or not item[field]
+                for field in (
+                    "bindingId",
+                    "capabilityId",
+                    "providerId",
+                    "connectionRef",
+                    "profileRef",
+                )
+            )
+            or item.get("capabilityId") != "tool.provider.v1"
             or item["bindingId"] in seen
             or not isinstance(item.get("tools"), list)
+            or not item["tools"]
         ):
             raise StageTransitionError("Exchange readiness catalog row is malformed")
         seen.add(item["bindingId"])
@@ -2647,6 +2667,12 @@ def _sorted_exchange_catalog(value: Any) -> dict[str, Any]:
         if any(
             not isinstance(tool, dict)
             or set(tool) != {"id", "name", "description", "readOnly", "inputSchema"}
+            or any(
+                not isinstance(tool.get(field), str) or not tool[field]
+                for field in ("id", "name", "description")
+            )
+            or not isinstance(tool.get("readOnly"), bool)
+            or not isinstance(tool.get("inputSchema"), dict)
             for tool in tools
         ):
             raise StageTransitionError("Exchange readiness catalog tool is malformed")
@@ -2669,7 +2695,8 @@ def _assert_exchange_readiness_safe_shape(snapshot: dict[str, Any]) -> None:
         provider = row.get("providerId")
         profile_ref = row.get("profileRef")
         if (
-            provider not in allowed_provider_ids
+            not isinstance(provider, str)
+            or provider not in allowed_provider_ids
             or not isinstance(profile_ref, str)
             or not profile_ref
         ):
@@ -2731,7 +2758,8 @@ def _assert_exchange_readiness_safe_shape(snapshot: dict[str, Any]) -> None:
         }
         optional = {"targetScope"}
         if (
-            provider not in allowed_provider_ids
+            not isinstance(provider, str)
+            or provider not in allowed_provider_ids
             or set(row) - required - optional
             or not required <= set(row)
             or not isinstance(row.get("connectionRef"), str)
@@ -2805,9 +2833,12 @@ def _verify_exchange_readiness_snapshot(
     cloud_profiles = cloud_document.get("profiles") if isinstance(cloud_document, dict) else None
     if not isinstance(cloud_profiles, list):
         raise StageTransitionError("candidate cloud provider scope is malformed")
-    cloud_profile_by_provider = {
-        row.get("provider"): row for row in cloud_profiles if isinstance(row, dict)
-    }
+    if any(
+        not isinstance(row, dict) or not isinstance(row.get("provider"), str)
+        for row in cloud_profiles
+    ):
+        raise StageTransitionError("candidate cloud provider rows are malformed")
+    cloud_profile_by_provider = {row["provider"]: row for row in cloud_profiles}
     cloud_provider_ids = set(cloud_profile_by_provider)
     if len(cloud_provider_ids) != len(cloud_profiles) or cloud_provider_ids not in (
         {"azure", "gcp"},
@@ -3078,7 +3109,14 @@ def _read_live_exchange_readiness(
         snapshot = json.loads(output, object_pairs_hook=preflight._unique_json_object)
     except (json.JSONDecodeError, ValueError) as error:
         raise StageTransitionError("pinned Exchange readiness output is invalid JSON") from error
-    receipt = _verify_exchange_readiness_snapshot(snapshot=snapshot, compose=compose)
+    try:
+        receipt = _verify_exchange_readiness_snapshot(snapshot=snapshot, compose=compose)
+    except StageTransitionError:
+        raise
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise StageTransitionError(
+            "pinned Exchange readiness projection is malformed or internally inconsistent"
+        ) from error
     receipt["exchangeContainerId"] = container_id
     receipt["exchangeImageId"] = image_id
     receipt["snapshotSha256"] = _sha256_bytes(output.encode("utf-8"))
