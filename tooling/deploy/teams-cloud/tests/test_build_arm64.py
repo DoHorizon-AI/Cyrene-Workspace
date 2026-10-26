@@ -102,6 +102,57 @@ def test_computer_runtime_build_plan_copies_the_plugin_proto_tree() -> None:
     assert "COPY Cyrene-Plugins-Official/contracts/proto ./contracts/proto" in dockerfile
 
 
+def test_dsh_upstream_build_cache_isolated_from_navigator_app_sources() -> None:
+    """Keep the pinned DSH SDK build cache independent from Navigator application changes.
+
+    确保 Navigator 应用源码变化不会重新触发固定 DSH SDK 的耗时构建。
+    """
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    dockerfile = (deployment_root / "Dockerfile.dsh-executor").read_text(encoding="utf-8")
+    plan = json.loads(
+        (deployment_root / "config" / "build-plan.template.json").read_text(encoding="utf-8")
+    )
+    dsh_image = next(row for row in plan["images"] if row["service"] == "dsh-executor")
+    dsh_commit = next(
+        line.partition("=")[2]
+        for line in dockerfile.splitlines()
+        if line.startswith("ARG DSH_COMMIT=")
+    )
+
+    upstream_stage = dockerfile.index("FROM ${NODE_BASE_IMAGE} AS dsh-upstream")
+    app_stage = dockerfile.index("FROM dsh-upstream AS build")
+    upstream_lock_copy = dockerfile.index(
+        "COPY Cyrene-Services/Cyrene-Navigator/harness/upstream.lock.json"
+    )
+    prepare_script_copy = dockerfile.index(
+        "COPY Cyrene-Services/Cyrene-Navigator/scripts/prepare-harness.mjs"
+    )
+    upstream_build = dockerfile.index(
+        "node /app/scripts/prepare-harness.mjs --root=/opt/dsh --install --build --link"
+    )
+    app_copies = [
+        dockerfile.index("COPY Cyrene-Services/Cyrene-Navigator/harness/ ./harness/"),
+        dockerfile.index("COPY Cyrene-Services/Cyrene-Navigator/scripts/ ./scripts/"),
+        dockerfile.index("COPY Cyrene-Services/Cyrene-Navigator/src/ ./src/"),
+    ]
+    dependency_link_copy = dockerfile.index(
+        "COPY --from=dsh-upstream /app/harness/node_modules/ ./harness/node_modules/"
+    )
+    harness_compile = dockerfile.index(
+        "node /opt/dsh/node_modules/typescript/bin/tsc -p /app/harness/tsconfig.json --pretty false"
+    )
+
+    assert upstream_stage < upstream_lock_copy < upstream_build
+    assert upstream_stage < prepare_script_copy < upstream_build
+    assert upstream_build < app_stage < min(app_copies)
+    assert max(app_copies) < dependency_link_copy < harness_compile
+    assert dsh_image["buildArgs"]["DSH_COMMIT"] == dsh_commit
+    assert dsh_image["sourceLabelRepo"] == "navigator"
+    assert set(dsh_image["sourceRepos"]) == {"workspace", "navigator", "dsh"}
+    assert plan["sources"]["dsh"]["commit"] == dsh_commit
+
+
 def test_build_plan_requires_digest_pinned_base_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
