@@ -1318,6 +1318,10 @@ def test_resume_restores_the_drained_old_image_before_candidate_compose_started(
     assert recovered is True
     assert journal["targetProgress"]["navigator"]["phase"] == "RECOVERY_OLD_IMAGE_RESTARTED"
     assert journal["navigator"]["processRestart"]["activeImageVerified"] is True
+    assert isinstance(
+        journal["navigator"]["restartIntent"]["composeCommandReturnedAtUtc"], str
+    )
+    assert not runtime_update._has_unresolved_docker_mutation(journal)
 
 
 def test_resume_completes_a_returned_old_image_restart_without_reissuing_compose(

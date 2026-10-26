@@ -2220,6 +2220,7 @@ def _recover_old_navigator_before_candidate_start(
             raise
         command_exit_code = command.returncode
         journal["navigator"]["restartIntent"]["composeCommandExitCode"] = command_exit_code
+        journal["navigator"]["restartIntent"]["composeCommandReturnedAtUtc"] = _utc_now()
         _atomic_journal_write(journal_path, journal)
     image_overrides = {
         target: (
