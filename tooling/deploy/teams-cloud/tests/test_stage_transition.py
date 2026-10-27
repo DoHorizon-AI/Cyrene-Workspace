@@ -2469,6 +2469,127 @@ def test_candidate_secrets_cannot_repoint_existing_host_secret_sources(tmp_path:
         stage_transition._validate_active_candidate_secrets(active, candidate)
 
 
+def _recovered_principal_config_pair(
+    tmp_path: Path,
+    *,
+    alias: str = stage_transition.RECOVERED_PERSISTENCE_PRINCIPAL_CONFIG,
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
+    """Build the active/candidate config alias used for Persistence's principal file."""
+
+    active_dir = tmp_path / "active-config"
+    candidate_dir = tmp_path / "candidate-config"
+    active_dir.mkdir()
+    candidate_dir.mkdir()
+    active_file = active_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+    candidate_file = candidate_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+    active_file.write_text('{"principals":[]}', encoding="utf-8")
+    candidate_file.write_text(
+        '{"principals":[{"can_publish_credential_health":true}]}', encoding="utf-8"
+    )
+    active_configs = {
+        "navigator-principal": {"file": str(active_file)},
+        alias: {"file": str(active_file)},
+    }
+    candidate_configs = {
+        "navigator-principal": {"file": str(candidate_file)},
+        alias: {"file": str(candidate_file)},
+    }
+    active = {
+        "configs": active_configs,
+        "services": {
+            "navigator-persistence": {
+                "configs": [
+                    {
+                        "source": alias,
+                        "target": stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_TARGET,
+                    }
+                ]
+            }
+        },
+    }
+    candidate = copy.deepcopy(active)
+    candidate["configs"] = candidate_configs
+    return active_dir, candidate_dir, active, candidate
+
+
+def test_recovered_persistence_principal_alias_allows_only_its_scoped_content_update(
+    tmp_path: Path,
+) -> None:
+    """Allow the existing owner-principal alias only at its unique Persistence target."""
+
+    active_dir, candidate_dir, active, candidate = _recovered_principal_config_pair(tmp_path)
+
+    stage_transition._validate_active_candidate_configs(
+        active_dir,
+        candidate_dir,
+        active,
+        candidate,
+    )
+
+
+@pytest.mark.parametrize(
+    "scope_change",
+    ["service", "target", "duplicate", "basename", "active_directory", "directory", "alias"],
+)
+def test_recovered_persistence_principal_alias_rejects_wrong_consumer_or_source(
+    tmp_path: Path,
+    scope_change: str,
+) -> None:
+    """Reject principal alias changes outside the exact candidate config path and mount."""
+
+    alias = (
+        "recovered-other-principal"
+        if scope_change == "alias"
+        else stage_transition.RECOVERED_PERSISTENCE_PRINCIPAL_CONFIG
+    )
+    active_dir, candidate_dir, active, candidate = _recovered_principal_config_pair(
+        tmp_path,
+        alias=alias,
+    )
+    if scope_change == "service":
+        candidate["services"]["navigator"] = copy.deepcopy(
+            candidate["services"].pop("navigator-persistence")
+        )
+    elif scope_change == "target":
+        candidate["services"]["navigator-persistence"]["configs"][0]["target"] = (
+            "/run/secrets/other-principal.json"
+        )
+    elif scope_change == "duplicate":
+        candidate["services"]["navigator"] = {}
+        candidate["services"]["navigator"]["configs"] = [
+            {
+                "source": alias,
+                "target": stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_TARGET,
+            }
+        ]
+    elif scope_change == "basename":
+        wrong_file = candidate_dir / "different-principal.json"
+        wrong_file.write_text("candidate principal", encoding="utf-8")
+        candidate["configs"][alias]["file"] = str(wrong_file)
+    elif scope_change == "active_directory":
+        outside_dir = tmp_path / "outside-active-config"
+        outside_dir.mkdir()
+        outside_file = outside_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+        outside_file.write_text('{"principals":[{"unexpected":true}]}', encoding="utf-8")
+        active["configs"][alias]["file"] = str(outside_file)
+    elif scope_change == "directory":
+        outside_dir = tmp_path / "outside-config"
+        outside_dir.mkdir()
+        outside_file = outside_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+        outside_file.write_text(
+            '{"principals":[{"can_publish_credential_health":true}]}', encoding="utf-8"
+        )
+        candidate["configs"][alias]["file"] = str(outside_file)
+
+    with pytest.raises(stage_transition.StageTransitionError):
+        stage_transition._validate_active_candidate_configs(
+            active_dir,
+            candidate_dir,
+            active,
+            candidate,
+        )
+
+
 def test_provider_bootstrap_uses_exact_service_delta_and_order() -> None:
     """Add only HF and cloud service while upgrading persistence and the single Navigator."""
 

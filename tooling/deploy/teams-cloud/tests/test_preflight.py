@@ -1352,6 +1352,216 @@ def test_bootstrap_preflight_is_explicitly_not_full_ready(
         }
 
 
+def test_issued_candidate_preflight_validates_principal_through_recovered_config_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Run the candidate preflight with both principal config keys in the full Compose map."""
+
+    artifact_root = tmp_path / ".artifacts" / "activation-principal-alias"
+    artifact_root.mkdir(parents=True)
+    config_dir = artifact_root / "candidate-config"
+    secrets_dir = artifact_root / "candidate-secrets"
+    config_dir.mkdir()
+    secrets_dir.mkdir()
+    environment_file = artifact_root / "runtime.env"
+    environment_file.write_text("TEST=1\n", encoding="utf-8")
+    environment_file.chmod(0o600)
+    image_lock = artifact_root / "image-lock.json"
+    image_lock.write_text(json.dumps({"images": [], "externalImages": {}}), encoding="utf-8")
+    image_lock.chmod(0o600)
+    connector_evidence = artifact_root / "connector-auth-evidence.json"
+    connector_evidence.write_text("{}", encoding="utf-8")
+    hf_seed = artifact_root / "huggingface-oauth.json"
+    hf_seed.write_text("{}", encoding="utf-8")
+    owner = "11111111-1111-4111-8111-111111111111"
+    organization = "22222222-2222-4222-8222-222222222222"
+    workspace = "33333333-3333-4333-8333-333333333333"
+    principal_file = config_dir / "navigator-principal-config.json"
+    principal_file.write_text(
+        json.dumps(
+            {
+                "principals": [
+                    {
+                        "actor_id": owner,
+                        "workspace_ids": [workspace],
+                        "organization_id": organization,
+                        "token_env": "NAVIGATOR_SESSION_TOKEN",
+                        "can_takeover": True,
+                        "can_publish_credential_health": True,
+                    }
+                ],
+                "product_directory": [],
+                "product_service_credentials": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    principal_file.chmod(0o400)
+    bindings_file = config_dir / "connector-bindings.json"
+    bindings_file.write_text('{"schemaVersion":1,"bindings":[]}', encoding="utf-8")
+    catalog_file = config_dir / "connector-tool-catalog.json"
+    catalog_file.write_text('{"schemaVersion":1,"items":[]}', encoding="utf-8")
+    notification_file = config_dir / "teams-credential-notifications.json"
+    notification_file.write_text('{"schemaVersion":1}', encoding="utf-8")
+    alias = "recovered-navigator-persistence-navigator-principal"
+    config = {
+        "configs": {
+            "navigator-principal": {"file": str(principal_file)},
+            alias: {"file": str(principal_file)},
+            "connector-bindings": {"file": str(bindings_file)},
+            "connector-tool-catalog": {"file": str(catalog_file)},
+            "teams-credential-notifications": {"file": str(notification_file)},
+        },
+        "secrets": {},
+        "services": {
+            "navigator": {
+                "environment": {
+                    "CYRENE_WORKSPACE_ID": workspace,
+                    "TEAMS_CREDENTIAL_NOTIFICATIONS_CONFIG_FILE": "/run/secrets/teams-credential-notifications.json",
+                },
+                "configs": [
+                    {
+                        "source": "teams-credential-notifications",
+                        "target": "/run/secrets/teams-credential-notifications.json",
+                    }
+                ],
+            },
+            "directory-operator": {
+                "environment": {
+                    "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": owner,
+                    "CYRENE_ORGANIZATION_ID": organization,
+                }
+            },
+            "navigator-persistence": {
+                "configs": [{"source": alias, "target": "/run/secrets/principal-config.json"}]
+            },
+        },
+    }
+
+    real_stat = Path.stat
+
+    def owner_only_directory_stat(path: Path, *, follow_symlinks: bool = True) -> Any:
+        if path in {config_dir, secrets_dir}:
+            return SimpleNamespace(st_uid=10001, st_mode=stat.S_IFDIR | 0o700)
+        return real_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", owner_only_directory_stat)
+    monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
+    monkeypatch.setattr(preflight, "_validate_runtime_config_metadata", lambda *_args: None)
+    principal_validation_paths: list[Path] = []
+    validate_principal = preflight._validate_principal_configuration
+
+    def record_principal_validation(
+        path: Path,
+        services: dict[str, Any],
+        *,
+        connector_auth_phase: str | None = None,
+    ) -> None:
+        principal_validation_paths.append(path)
+        validate_principal(
+            path,
+            services,
+            connector_auth_phase=connector_auth_phase,
+        )
+
+    monkeypatch.setattr(preflight, "_validate_principal_configuration", record_principal_validation)
+    monkeypatch.setattr(preflight, "_huggingface_enabled", lambda _config: False)
+    monkeypatch.setattr(preflight, "check_local_lock", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_validate_host", lambda _required: (4096, 8.0))
+    monkeypatch.setattr(preflight, "_compose_config", lambda *_args: config)
+    monkeypatch.setattr(preflight, "_validate_compose", lambda *_args: (100.0, 0.5))
+    monkeypatch.setattr(preflight, "_parse_memavailable", lambda: 4096)
+    monkeypatch.setattr(
+        preflight,
+        "_memory_headroom",
+        lambda **_kwargs: {
+            "status": "READY",
+            "memAvailableMiB": 4096,
+            "minimumMemAvailableMiB": 1024,
+            "additionalPhaseMemoryMiB": 0,
+            "runtimeRssMeasurementRequired": False,
+        },
+    )
+    for helper in (
+        "_validate_directory_database_urls",
+        "_validate_internal_service_certificates",
+        "_validate_computer_proxy_certificate",
+        "_validate_exchange_authority_identity",
+        "_validate_actor_projection",
+        "_validate_exchange_authorization_cloud_runner_phase",
+        "_validate_new_provider_bindings_readonly",
+        "_validate_connector_bindings",
+        "_validate_connector_tool_catalog",
+        "_validate_internal_https_topology",
+        "_validate_profile_stage",
+        "_validate_provider_listener_addresses",
+        "_validate_teams_delivery_spool",
+        "_validate_stage_acceptance_receipts",
+        "_validate_identity_scope",
+        "_validate_codebuddy_mount",
+        "_validate_host_ports",
+    ):
+        monkeypatch.setattr(preflight, helper, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(preflight, "_expected_connector_providers", lambda *_args: set())
+    monkeypatch.setattr(
+        preflight,
+        "_validate_credential_notification_activation",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(preflight, "_validate_cutover_runtime", lambda *_args: {})
+    monkeypatch.setattr(
+        preflight,
+        "_connector_auth_scope_expectations",
+        lambda *_args, **_kwargs: {"expectedProviderScopeDigests": {}},
+    )
+    monkeypatch.setattr(
+        preflight,
+        "_validate_connector_auth_readonly_evidence",
+        lambda *_args, **_kwargs: "a" * 64,
+    )
+
+    arguments = {
+        "mode": "connector-auth-readonly",
+        "compose_files": [artifact_root / "compose.yaml"],
+        "env_files": [environment_file],
+        "image_lock": image_lock,
+        "secrets_dir": secrets_dir,
+        "config_dir": config_dir,
+        "github_hf_evidence": None,
+        "azure_gcp_ledger": None,
+        "runpod_ledger": None,
+        "azure_gcp_api_evidence": None,
+        "runpod_api_evidence": None,
+        "docker_prefix": ["docker"],
+        "max_memory_mib": 3584,
+        "max_cpus": 1.95,
+        "required_free_gib": 2.0,
+        "minimum_mem_available_mib": 1024,
+        "connector_auth_phase": "issued-connector-activation",
+        "connector_auth_evidence": connector_evidence,
+        "connector_auth_task_id": "activation-config-alias-test",
+        "huggingface_seed_file": hf_seed,
+        "notification_anchor_file": artifact_root / "anchor.json",
+        "notification_provenance_file": artifact_root / "provenance.json",
+    }
+    report = preflight.run_preflight(**arguments)
+    assert report["credentialReadOnlyRuntimeReady"] is True
+    assert report["lifecycleAcceptance"] == "NOT_RUN"
+    assert principal_validation_paths == [principal_file, principal_file]
+
+    invalid_principal = json.loads(principal_file.read_text(encoding="utf-8"))
+    invalid_principal["principals"][0]["can_publish_credential_health"] = False
+    principal_file.chmod(0o600)
+    principal_file.write_text(json.dumps(invalid_principal), encoding="utf-8")
+    principal_file.chmod(0o400)
+    with pytest.raises(
+        preflight.PreflightError,
+        match="activation requires the owner publishing role",
+    ):
+        preflight.run_preflight(**arguments)
+
+
 def test_stage1_recovery_preflight_skips_capacity_gates_but_keeps_configuration_checks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
