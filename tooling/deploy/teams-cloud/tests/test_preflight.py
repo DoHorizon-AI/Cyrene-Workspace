@@ -5348,6 +5348,50 @@ def test_connector_auth_readonly_evidence_is_fresh_closed_and_operation_allowlis
     )
     assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
 
+    exchange_document = copy.deepcopy(document)
+    exchange_document["executionPath"] = "exchange_connector_api"
+    exchange_operations = {
+        "huggingface": ["huggingface.repo.get"],
+        "azure": ["cloud.resources.list", "cloud.provider.health.read"],
+        "gcp": ["cloud.resources.list", "cloud.provider.health.read"],
+    }
+    exchange_document["providers"] = [
+        {
+            **row,
+            "readOperations": [
+                {
+                    "operationId": operation_id,
+                    "outcome": "SUCCEEDED",
+                    "observedAt": now,
+                    "resultDigestSha256": "b" * 64,
+                }
+                for operation_id in exchange_operations[row["providerId"]]
+            ],
+        }
+        for row in document["providers"]
+        if row["providerId"] in exchange_operations
+    ]
+    path.write_text(json.dumps(exchange_document), encoding="utf-8")
+    exchange_scope_digests = {provider: digests[provider] for provider in exchange_operations}
+    exchange_digest = preflight._validate_connector_auth_readonly_evidence(
+        path,
+        expected_task_id="connector-probe-task-1",
+        expected_owner=UUID,
+        expected_scope_digests=exchange_scope_digests,
+    )
+    assert exchange_digest == hashlib.sha256(path.read_bytes()).hexdigest()
+
+    exchange_document["providers"][0]["readOperations"][0]["operationId"] = "huggingface.whoami"
+    path.write_text(json.dumps(exchange_document), encoding="utf-8")
+    with pytest.raises(preflight.PreflightError, match="fixed successful read"):
+        preflight._validate_connector_auth_readonly_evidence(
+            path,
+            expected_task_id="connector-probe-task-1",
+            expected_owner=UUID,
+            expected_scope_digests=exchange_scope_digests,
+        )
+
+    path.write_text(json.dumps(document), encoding="utf-8")
     document["providers"][1]["readOperations"][0]["operationId"] = "cloud.resource.create"
     path.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(preflight.PreflightError, match="fixed successful read"):

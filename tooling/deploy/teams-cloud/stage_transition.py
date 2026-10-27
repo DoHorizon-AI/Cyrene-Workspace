@@ -36,11 +36,17 @@ JOURNAL_SCHEMA = "cyrene-teams-stage-transition-journal-v1"
 SELECTION_SCHEMA = "cyrene-teams-runtime-selection-v2"
 DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/stage-transition")
 PHASES = {"provider-bootstrap", "issued-connector-activation"}
-IMAGE_UPDATE_TARGETS = frozenset({"cloud-management-phase2", "exchange", "navigator"})
+IMAGE_UPDATE_TARGETS = frozenset(
+    {"cloud-management-phase2", "exchange", "navigator", "navigator-persistence"}
+)
 CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
+PERSISTENCE_IMAGE_UPDATE_TARGET = "navigator-persistence"
 PROVIDER_LISTENER_REPAIR_TARGETS = ("huggingface", "cloud-management-phase2")
 EXCHANGE_CLOUD_RUNNER_ENV = "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
 EXCHANGE_READINESS_IMAGE_TARGETS = frozenset({"cloud-management-phase2", "exchange"})
+PRESERVE_NAVIGATOR_IMAGE_TARGETS = EXCHANGE_READINESS_IMAGE_TARGETS | frozenset(
+    {PERSISTENCE_IMAGE_UPDATE_TARGET}
+)
 NEW_SERVICES = {"huggingface", "cloud-management-phase2"}
 SERVICE_ORDER = runtime_update.STAGE_TRANSITION_TARGET_ORDER
 SERVICE_SET = set(SERVICE_ORDER)
@@ -1624,11 +1630,15 @@ def _validate_image_update_topology(
 
     if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
         raise StageTransitionError(
-            "image update target must be Cloud Management, Exchange, or Navigator"
+            "image update target must be Cloud Management, Exchange, Navigator, or Persistence"
         )
     if target == CLOUD_IMAGE_UPDATE_TARGET and phase != "provider-bootstrap":
         raise StageTransitionError(
             "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+        )
+    if target == PERSISTENCE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+        raise StageTransitionError(
+            "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
     if set(old_services) != set(new_services):
         raise StageTransitionError("image update must keep the exact active service inventory")
@@ -1933,7 +1943,11 @@ def _validate_image_update_selection_contract(
         return
     if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
         raise StageTransitionError(
-            "image update target must be Cloud Management, Exchange, or Navigator"
+            "image update target must be Cloud Management, Exchange, Navigator, or Persistence"
+        )
+    if target == PERSISTENCE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+        raise StageTransitionError(
+            "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
     if (
         not isinstance(selection_record, dict)
@@ -3061,6 +3075,158 @@ def _live_sqlite_report(
     return report
 
 
+def _sqlite_comparison_contract(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Build a closed old-column reconciliation contract from one validated report."""
+
+    _validate_sqlite_report_shape(snapshot, "pre-update Persistence snapshot")
+    return {
+        table: {
+            "columns": [column["name"] for column in record["columns"]],
+            "primaryKeyColumns": record["primaryKeyColumns"],
+        }
+        for table, record in snapshot["tables"].items()
+    }
+
+
+def _active_persistence_writer_lease_count(
+    *, docker_prefix: list[str], container_id: str, database_path: str
+) -> int:
+    """Count unexpired Persistence write leases without reading their identifiers."""
+
+    if FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError("active Persistence container identity is malformed")
+    script = (
+        "import json,sqlite3,sys,time\n"
+        "path=sys.argv[1]\n"
+        "db=sqlite3.connect('file:'+path+'?mode=ro',uri=True)\n"
+        "columns={row[1] for row in db.execute('PRAGMA table_info(sessions)')}\n"
+        "required={'writer_token_hash','lease_expires_at'}\n"
+        "if not required <= columns: raise RuntimeError('writer lease columns unavailable')\n"
+        "now=int(time.time()*1000)\n"
+        "count=db.execute('SELECT COUNT(*) FROM sessions WHERE writer_token_hash IS NOT NULL AND lease_expires_at>?',(now,)).fetchone()[0]\n"
+        "db.close()\n"
+        "print(json.dumps({'activeWriterLeaseCount':int(count)},separators=(',',':')))\n"
+    )
+    try:
+        output = runtime_update._checked_stdout(
+            [
+                *docker_prefix,
+                "exec",
+                container_id,
+                "/opt/venv/bin/python",
+                "-c",
+                script,
+                database_path,
+            ],
+            label="Navigator Persistence active writer lease readback",
+            timeout_seconds=15,
+        )
+        report = runtime_update._decode_json_output(output, "active Persistence writer leases")
+    except (runtime_update.RuntimeUpdateError, subprocess.SubprocessError) as error:
+        raise StageTransitionError(
+            "active Persistence writer leases could not be verified"
+        ) from error
+    count = report.get("activeWriterLeaseCount") if isinstance(report, dict) else None
+    if (
+        not isinstance(report, dict)
+        or set(report) != {"activeWriterLeaseCount"}
+        or isinstance(count, bool)
+        or not isinstance(count, int)
+        or count < 0
+    ):
+        raise StageTransitionError("active Persistence writer lease report is malformed")
+    return count
+
+
+def _verify_persistence_update_quiescence(
+    *,
+    plan: dict[str, Any],
+    journal: dict[str, Any],
+    journal_path: Path,
+    docker_prefix: list[str],
+) -> None:
+    """Prove the drained database is unchanged and has no live writer before replacement."""
+
+    baseline = _validate_sqlite_report_shape(
+        journal.get("database", {}).get("snapshot"),
+        "pre-update Persistence snapshot",
+    )
+    persistence = plan.get("activeServices", {}).get(PERSISTENCE_IMAGE_UPDATE_TARGET)
+    if not isinstance(persistence, dict):
+        raise StageTransitionError("active Persistence service identity is unavailable")
+    current = _live_sqlite_report(
+        docker_prefix=docker_prefix,
+        container_id=persistence["containerId"],
+        database_path=plan["database"]["containerPath"],
+        comparison_contract=_sqlite_comparison_contract(baseline),
+    )
+    _validate_persistence_same_schema_reports(baseline, current)
+    active_writer_leases = _active_persistence_writer_lease_count(
+        docker_prefix=docker_prefix,
+        container_id=persistence["containerId"],
+        database_path=plan["database"]["containerPath"],
+    )
+    if active_writer_leases != 0:
+        raise StageTransitionError(
+            "Persistence image update requires zero unexpired Session writer leases"
+        )
+    journal["database"]["preUpdateQuiescence"] = {
+        "verified": True,
+        "activeWriterLeaseCount": active_writer_leases,
+        "schemaSha256": baseline["schemaSha256"],
+        "tableCount": len(baseline["tables"]),
+        "rowsDigestSha256": _sha256_bytes(
+            _canonical_json(
+                {
+                    table: {
+                        "rowCount": record["rowCount"],
+                        "rowsDigest": record["rowsDigest"],
+                    }
+                    for table, record in sorted(baseline["tables"].items())
+                }
+            )
+        ),
+        "checkedAtUtc": _utc_now(),
+    }
+    _write_journal(
+        journal_path,
+        journal,
+        "PERSISTENCE_SAME_SCHEMA_QUIESCENCE_VERIFIED",
+    )
+
+
+def _validate_persistence_same_schema_update(
+    *,
+    plan: dict[str, Any],
+    journal: dict[str, Any],
+    journal_path: Path,
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Verify that a replaced Persistence image preserved every schema object and row."""
+
+    persistence = journal.get("targetProgress", {}).get(PERSISTENCE_IMAGE_UPDATE_TARGET, {})
+    container_id = (
+        persistence.get("candidateContainerId") if isinstance(persistence, dict) else None
+    )
+    if not isinstance(container_id, str) or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError("candidate Persistence container identity is unavailable")
+    before = _validate_sqlite_report_shape(
+        journal.get("database", {}).get("snapshot"),
+        "pre-update Persistence snapshot",
+    )
+    current = _live_sqlite_report(
+        docker_prefix=docker_prefix,
+        container_id=container_id,
+        database_path=plan["database"]["containerPath"],
+        comparison_contract=_sqlite_comparison_contract(before),
+    )
+    _validate_persistence_same_schema_reports(before, current)
+    journal["database"]["postMigration"] = current
+    journal["database"]["restorePerformed"] = False
+    _write_journal(journal_path, journal, "PERSISTENCE_SAME_SCHEMA_READBACK_VERIFIED")
+    return current
+
+
 def _validate_database_migration(
     *,
     plan: dict[str, Any],
@@ -3253,6 +3419,47 @@ def _validate_database_migration_reports(before: dict[str, Any], current: dict[s
     }
 
 
+def _validate_persistence_same_schema_reports(
+    before: dict[str, Any], current: dict[str, Any]
+) -> None:
+    """Require byte-stable schema metadata and exact logical rows for image-only updates.
+
+    中文：Persistence 镜像更新只允许同一 schema 和全部逻辑行保持一致。
+    """
+
+    _validate_sqlite_report_shape(before, "pre-update Persistence snapshot")
+    _validate_sqlite_report_shape(current, "post-update Persistence report")
+    for field in ("userVersion", "objects", "schemaObjects", "schemaSha256"):
+        if current[field] != before[field]:
+            raise StageTransitionError(f"Persistence same-schema update changed SQLite {field}")
+    if set(current["tables"]) != set(before["tables"]):
+        raise StageTransitionError("Persistence same-schema update changed the table inventory")
+
+    exact_table_fields = (
+        "columns",
+        "createSql",
+        "primaryKeyColumns",
+        "foreignKeys",
+        "checkConstraints",
+        "uniqueIndexes",
+        "rowCount",
+        "rowsDigest",
+        "emptyOrganizationIdRows",
+    )
+    for table, old_record in before["tables"].items():
+        new_record = current["tables"][table]
+        for field in exact_table_fields:
+            if old_record.get(field) != new_record.get(field):
+                raise StageTransitionError(
+                    f"Persistence same-schema update changed {table} {field}"
+                )
+    current["migrationCompatibility"] = {
+        "class": "SAME_SCHEMA_AND_ALL_ROWS_PRESERVED",
+        "schemaSha256": before["schemaSha256"],
+        "preservedTables": sorted(before["tables"]),
+    }
+
+
 def _validate_post_update_capacity(
     *,
     compose: dict[str, Any],
@@ -3385,11 +3592,18 @@ def create_plan(
         not isinstance(image_update_target, str) or image_update_target not in IMAGE_UPDATE_TARGETS
     ):
         raise StageTransitionError(
-            "image update target must be Cloud Management, Exchange, or Navigator"
+            "image update target must be Cloud Management, Exchange, Navigator, or Persistence"
         )
     if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and phase != "provider-bootstrap":
         raise StageTransitionError(
             "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+        )
+    if (
+        image_update_target == PERSISTENCE_IMAGE_UPDATE_TARGET
+        and phase != "issued-connector-activation"
+    ):
+        raise StageTransitionError(
+            "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
     if listener_repair and (phase != "provider-bootstrap" or image_update_target is not None):
         raise StageTransitionError(
@@ -3899,6 +4113,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     ):
         raise StageTransitionError(
             "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+        )
+    if (
+        image_update_target == PERSISTENCE_IMAGE_UPDATE_TARGET
+        and plan.get("phase") != "issued-connector-activation"
+    ):
+        raise StageTransitionError(
+            "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
     if listener_repair and plan.get("phase") != "provider-bootstrap":
         raise StageTransitionError("provider listener repair is limited to provider-bootstrap")
@@ -5150,6 +5371,7 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "backupPath": plan["database"]["backupPath"],
             "backupSha256": None,
             "snapshot": None,
+            "preUpdateQuiescence": None,
             "postMigration": None,
             "restorePerformed": False,
         },
@@ -5351,6 +5573,14 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(exchange_readiness, dict)
         else False
     )
+    persistence_update_required = PERSISTENCE_IMAGE_UPDATE_TARGET in journal.get("targets", [])
+    persistence_quiescence = db.get("preUpdateQuiescence") if isinstance(db, dict) else None
+    persistence_post_update = db.get("postMigration") if isinstance(db, dict) else None
+    persistence_compatibility = (
+        persistence_post_update.get("migrationCompatibility")
+        if isinstance(persistence_post_update, dict)
+        else None
+    )
     cloud_idle = journal.get("cloudRunnerIdle", {})
     cloud_idle_required = (
         cloud_idle.get("required") is True if isinstance(cloud_idle, dict) else False
@@ -5393,6 +5623,23 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         "databaseUserVersion": database_snapshot.get("userVersion")
         if isinstance(database_snapshot, dict)
         else None,
+        "persistenceQuiescenceStatus": (
+            "NOT_REQUIRED"
+            if not persistence_update_required
+            else "VERIFIED"
+            if isinstance(persistence_quiescence, dict)
+            and persistence_quiescence.get("verified") is True
+            and persistence_quiescence.get("activeWriterLeaseCount") == 0
+            else "PENDING"
+        ),
+        "persistenceSameSchemaStatus": (
+            "NOT_REQUIRED"
+            if not persistence_update_required
+            else "VERIFIED"
+            if isinstance(persistence_compatibility, dict)
+            and persistence_compatibility.get("class") == "SAME_SCHEMA_AND_ALL_ROWS_PRESERVED"
+            else "PENDING"
+        ),
         "exchangeReadinessRequired": exchange_readiness_required,
         "exchangeReadinessStatus": (
             "LIVE_VERIFIED"
@@ -6021,7 +6268,7 @@ def _resume_executor_after_transition(
     中文：Exchange、Cloud 或 listener repair 后恢复原 Navigator 容器与 generation。
     """
 
-    if plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS or (
+    if plan.get("imageUpdateTarget") in PRESERVE_NAVIGATOR_IMAGE_TARGETS or (
         "listenerRepairState" in plan
     ):
         _resume_old_executor_if_needed(
@@ -6105,6 +6352,21 @@ def _account_center_image_downgrade_may_be_unsafe(
     return active_image["imageId"] != candidate_image["imageId"]
 
 
+def _persistence_image_update_may_have_started(
+    plan: dict[str, Any], journal: dict[str, Any]
+) -> bool:
+    """Detect any Persistence replacement intent that must never be auto-rolled back."""
+
+    if plan.get("imageUpdateTarget") != PERSISTENCE_IMAGE_UPDATE_TARGET:
+        return False
+    progress = journal.get("targetProgress", {}).get(PERSISTENCE_IMAGE_UPDATE_TARGET, {})
+    return isinstance(progress, dict) and (
+        progress.get("applyIntent") is True
+        or isinstance(progress.get("candidateContainerId"), str)
+        or progress.get("phase") == "APPLIED"
+    )
+
+
 def _rollback_known_mutations(
     *,
     plan: dict[str, Any],
@@ -6114,6 +6376,18 @@ def _rollback_known_mutations(
     docker_prefix: list[str],
 ) -> None:
     """Rollback only exact, recorded candidate containers; never restore SQLite bytes."""
+
+    if _persistence_image_update_may_have_started(plan, journal):
+        journal["lastErrorCode"] = "persistence_update_requires_manual_reconciliation"
+        _write_journal(
+            journal_path,
+            journal,
+            "RECOVERY_REQUIRED",
+            state="RECOVERY_REQUIRED",
+        )
+        raise StageTransitionError(
+            "Persistence image replacement may have started; preserve the current database and require read-only reconciliation"
+        )
 
     active_lock = runtime_update._load_lock(Path(plan["activeInputs"]["imageLock"]["path"]))
     active_images = _lock_image_ids(active_lock)
@@ -6290,7 +6564,7 @@ def _rollback_known_mutations(
         plan=plan,
         journal=journal,
         docker_prefix=docker_prefix,
-        require_original_instance=plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS
+        require_original_instance=plan.get("imageUpdateTarget") in PRESERVE_NAVIGATOR_IMAGE_TARGETS
         or "listenerRepairState" in plan,
     )
     _resume_ingress_after_safe_state(
@@ -6403,6 +6677,27 @@ def apply_plan_file(
                 )
             for service_name in plan["targets"]:
                 if (
+                    plan.get("imageUpdateTarget") == PERSISTENCE_IMAGE_UPDATE_TARGET
+                    and service_name == PERSISTENCE_IMAGE_UPDATE_TARGET
+                ):
+                    if (
+                        journal["exchangeReadiness"]["required"]
+                        and journal["exchangeReadiness"]["verified"] is not True
+                    ):
+                        _record_exchange_readiness(
+                            plan=plan,
+                            compose=candidate_compose,
+                            journal=journal,
+                            journal_path=journal_path,
+                            docker_prefix=docker_prefix,
+                        )
+                    _verify_persistence_update_quiescence(
+                        plan=plan,
+                        journal=journal,
+                        journal_path=journal_path,
+                        docker_prefix=docker_prefix,
+                    )
+                if (
                     service_name == "navigator"
                     and journal["exchangeReadiness"]["required"]
                     and journal["exchangeReadiness"]["verified"] is not True
@@ -6466,12 +6761,20 @@ def apply_plan_file(
                     )
                 if service_name == "navigator-persistence":
                     try:
-                        _validate_database_migration(
-                            plan=plan,
-                            journal=journal,
-                            journal_path=journal_path,
-                            docker_prefix=docker_prefix,
-                        )
+                        if plan.get("imageUpdateTarget") == PERSISTENCE_IMAGE_UPDATE_TARGET:
+                            _validate_persistence_same_schema_update(
+                                plan=plan,
+                                journal=journal,
+                                journal_path=journal_path,
+                                docker_prefix=docker_prefix,
+                            )
+                        else:
+                            _validate_database_migration(
+                                plan=plan,
+                                journal=journal,
+                                journal_path=journal_path,
+                                docker_prefix=docker_prefix,
+                            )
                     except (
                         OSError,
                         StageTransitionError,
@@ -6601,6 +6904,17 @@ def apply_plan_file(
                 raise StageTransitionError(
                     "runtime selector promotion may have committed; ingress remains held for read-only recovery"
                 ) from error
+            if _persistence_image_update_may_have_started(plan, journal):
+                journal["lastErrorCode"] = "persistence_update_requires_manual_reconciliation"
+                _write_journal(
+                    journal_path,
+                    journal,
+                    "RECOVERY_REQUIRED",
+                    state="RECOVERY_REQUIRED",
+                )
+                raise StageTransitionError(
+                    "Persistence image replacement may have started; no automatic image rollback was attempted"
+                ) from error
             try:
                 _rollback_known_mutations(
                     plan=plan,
@@ -6656,6 +6970,17 @@ def apply_plan_file(
                 )
                 raise StageTransitionError(
                     "runtime selector promotion may have committed; ingress remains held for read-only recovery"
+                ) from error
+            if _persistence_image_update_may_have_started(plan, journal):
+                journal["lastErrorCode"] = "persistence_update_requires_manual_reconciliation"
+                _write_journal(
+                    journal_path,
+                    journal,
+                    "RECOVERY_REQUIRED",
+                    state="RECOVERY_REQUIRED",
+                )
+                raise StageTransitionError(
+                    "Persistence image replacement may have started; no automatic image rollback was attempted"
                 ) from error
             try:
                 _rollback_known_mutations(

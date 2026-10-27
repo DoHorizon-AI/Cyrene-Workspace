@@ -749,6 +749,7 @@ def _listener_repair_pair(
     [
         ("exchange", "issued-connector-activation"),
         ("navigator", "issued-connector-activation"),
+        ("navigator-persistence", "issued-connector-activation"),
         ("cloud-management-phase2", "provider-bootstrap"),
     ],
 )
@@ -1653,7 +1654,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
     active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="must be Cloud Management, Exchange, or Navigator",
+        match="must be Cloud Management, Exchange, Navigator, or Persistence",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -1678,11 +1679,25 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
             candidate_lock=candidate_lock,
         )
 
+    active, candidate, active_lock, candidate_lock = _active_image_update("navigator-persistence")
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Persistence image updates require issued-connector-activation",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="provider-bootstrap",
+            image_update_target="navigator-persistence",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
 
 def test_stage_transition_cli_closes_image_update_target_choices() -> None:
-    """Expose the three services with explicit V2 image-update gates.
+    """Expose only the four services with explicit V2 image-update gates.
 
-    中文：CLI 只开放具备独立严格门禁的 Exchange、Navigator 与 Cloud 目标。
+    中文：CLI 只开放具备独立严格门禁的 Exchange、Navigator、Persistence 与 Cloud 目标。
     """
 
     parser = stage_transition._build_parser()
@@ -1698,6 +1713,7 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
         "cloud-management-phase2",
         "exchange",
         "navigator",
+        "navigator-persistence",
     ]
     listener_action = next(
         action for action in plan_parser._actions if "--listener-repair" in action.option_strings
@@ -1844,6 +1860,19 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
     active_inputs, candidate_inputs, selection, identity = _image_update_selection_inputs()
     stage_transition._validate_image_update_selection_contract(
         target="exchange",
+        phase="issued-connector-activation",
+        project="cyrene-teams-cloud",
+        selection_record=selection,
+        selection_path="/private/runtime-selection.json",
+        active_config_dir="/private/config",
+        candidate_config_dir="/private/config",
+        active_secrets_dir="/private/secrets",
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity=identity,
+    )
+    stage_transition._validate_image_update_selection_contract(
+        target="navigator-persistence",
         phase="issued-connector-activation",
         project="cyrene-teams-cloud",
         selection_record=selection,
@@ -2043,6 +2072,7 @@ def test_listener_repair_requires_the_current_bootstrap_selector_and_unchanged_i
     [
         ("exchange", "old", True),
         ("cloud-management-phase2", "old", True),
+        ("navigator-persistence", "old", True),
         ("navigator", "fresh", False),
         (None, "fresh", False),
     ],
@@ -2055,7 +2085,7 @@ def test_image_update_resumes_old_executor_or_fresh_navigator_by_target(
 ) -> None:
     """Non-Navigator image updates fence the old generation; Navigator uses the fresh gate.
 
-    中文：只更新 Exchange 或 Cloud 时沿用原执行器实例，更新 Navigator 则走新实例门。
+    中文：更新 Exchange、Cloud 或 Persistence 时沿用原实例；Navigator 镜像更新走新实例门。
     """
 
     observed: list[tuple[str, bool]] = []
@@ -3449,6 +3479,212 @@ def test_sqlite_migration_accepts_recreated_persistence_with_existing_schema_unc
         "sessions",
         "work_credential_authorization_health",
     ]
+
+
+def test_persistence_image_update_requires_identical_schema_and_all_rows() -> None:
+    """Image-only Persistence accepts exact state and rejects additive schema or row drift."""
+
+    before = _sqlite_report_fixture(
+        {"sessions": _table_report(name="sessions", row_count=1, rows_digest="a" * 64)}
+    )
+    unchanged = copy.deepcopy(before)
+    stage_transition._validate_persistence_same_schema_reports(before, unchanged)
+    assert unchanged["migrationCompatibility"]["class"] == ("SAME_SCHEMA_AND_ALL_ROWS_PRESERVED")
+
+    changed_rows = copy.deepcopy(before)
+    changed_rows["tables"]["sessions"]["rowsDigest"] = "b" * 64
+    with pytest.raises(stage_transition.StageTransitionError, match="rowsDigest"):
+        stage_transition._validate_persistence_same_schema_reports(before, changed_rows)
+
+    changed_schema = _sqlite_report_fixture(
+        {
+            "sessions": _table_report(name="sessions", row_count=1, rows_digest="a" * 64),
+            "unexpected": _table_report(name="unexpected", row_count=0, rows_digest="c" * 64),
+        }
+    )
+    with pytest.raises(stage_transition.StageTransitionError, match="objects"):
+        stage_transition._validate_persistence_same_schema_reports(before, changed_schema)
+
+
+def test_persistence_active_writer_lease_readback_is_count_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read only the active writer count and reject malformed database reports."""
+
+    observed: list[list[str]] = []
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_checked_stdout",
+        lambda argv, **kwargs: observed.append(argv) or '{"activeWriterLeaseCount":0}',
+    )
+    assert (
+        stage_transition._active_persistence_writer_lease_count(
+            docker_prefix=["docker"],
+            container_id="a" * 64,
+            database_path="/var/lib/cyrene-navigator/persistence.db",
+        )
+        == 0
+    )
+    assert observed[0][:4] == ["docker", "exec", "a" * 64, "/opt/venv/bin/python"]
+    assert "SELECT COUNT(*) FROM sessions" in observed[0][5]
+
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: '{"activeWriterLeaseCount":1}',
+    )
+    assert (
+        stage_transition._active_persistence_writer_lease_count(
+            docker_prefix=["docker"],
+            container_id="a" * 64,
+            database_path="/var/lib/cyrene-navigator/persistence.db",
+        )
+        == 1
+    )
+
+
+def test_persistence_quiescence_gate_requires_stable_database_and_no_writer_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persist the gate only after a fresh exact-data read and zero active writer count."""
+
+    baseline = _sqlite_report_fixture(
+        {"sessions": _table_report(name="sessions", row_count=1, rows_digest="a" * 64)}
+    )
+    plan = {
+        "activeServices": {"navigator-persistence": {"containerId": "a" * 64}},
+        "database": {"containerPath": "/var/lib/cyrene-navigator/persistence.db"},
+    }
+    phases: list[str] = []
+
+    monkeypatch.setattr(
+        stage_transition,
+        "_live_sqlite_report",
+        lambda **_kwargs: copy.deepcopy(baseline),
+    )
+    monkeypatch.setattr(stage_transition, "_active_persistence_writer_lease_count", lambda **_: 0)
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, phase: phases.append(phase),
+    )
+    journal = {"database": {"snapshot": copy.deepcopy(baseline)}}
+    stage_transition._verify_persistence_update_quiescence(
+        plan=plan,
+        journal=journal,
+        journal_path=tmp_path / "journal.json",
+        docker_prefix=["docker"],
+    )
+    assert phases == ["PERSISTENCE_SAME_SCHEMA_QUIESCENCE_VERIFIED"]
+    assert journal["database"]["preUpdateQuiescence"]["activeWriterLeaseCount"] == 0
+
+    phases.clear()
+    monkeypatch.setattr(stage_transition, "_active_persistence_writer_lease_count", lambda **_: 1)
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="zero unexpired Session writer"
+    ):
+        stage_transition._verify_persistence_update_quiescence(
+            plan=plan,
+            journal={"database": {"snapshot": copy.deepcopy(baseline)}},
+            journal_path=tmp_path / "journal.json",
+            docker_prefix=["docker"],
+        )
+    assert phases == []
+
+
+def test_persistence_image_update_mutation_blocks_automatic_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once replacement intent is journaled, recovery never restores an older image."""
+
+    journal = {
+        "state": "RUNNING",
+        "lastErrorCode": None,
+        "targetProgress": {
+            "navigator-persistence": {
+                "phase": "APPLIED",
+                "applyIntent": False,
+                "candidateContainerId": "b" * 64,
+            }
+        },
+    }
+    assert not stage_transition._persistence_image_update_may_have_started(
+        {"imageUpdateTarget": "navigator-persistence"},
+        {
+            "targetProgress": {
+                "navigator-persistence": {
+                    "phase": "PREPARED",
+                    "applyIntent": False,
+                    "candidateContainerId": None,
+                }
+            }
+        },
+    )
+
+    def record(
+        _path: Path, document: dict[str, Any], _phase: str, *, state: str | None = None
+    ) -> None:
+        if state is not None:
+            document["state"] = state
+
+    monkeypatch.setattr(stage_transition, "_write_journal", record)
+    monkeypatch.setattr(
+        stage_transition.runtime_update,
+        "_load_lock",
+        lambda *_args, **_kwargs: pytest.fail("Persistence rollback must not load the old lock"),
+    )
+    with pytest.raises(stage_transition.StageTransitionError, match="may have started"):
+        stage_transition._rollback_known_mutations(
+            plan={
+                "imageUpdateTarget": "navigator-persistence",
+                "activeInputs": {"imageLock": {"path": "/private/active-lock.json"}},
+            },
+            active_compose={"services": {}},
+            journal=journal,
+            journal_path=tmp_path / "journal.json",
+            docker_prefix=["docker"],
+        )
+    assert journal["state"] == "RECOVERY_REQUIRED"
+    assert journal["lastErrorCode"] == "persistence_update_requires_manual_reconciliation"
+
+
+def test_stage_transition_summary_reports_persistence_gate_evidence() -> None:
+    """Expose quiescence and exact-row proof through the normal apply/status result."""
+
+    summary = stage_transition._journal_summary(
+        {
+            "schemaVersion": stage_transition.JOURNAL_SCHEMA,
+            "operationId": "00000000-0000-4000-8000-000000000001",
+            "planSha256": "a" * 64,
+            "project": "cyrene-teams-cloud",
+            "state": "APPLIED",
+            "phase": "APPLIED",
+            "targets": ["navigator-persistence"],
+            "completedTargets": ["navigator-persistence"],
+            "updatedAtUtc": "2026-10-27T00:00:00+00:00",
+            "database": {
+                "backupSha256": "b" * 64,
+                "snapshot": {"userVersion": 0},
+                "preUpdateQuiescence": {
+                    "verified": True,
+                    "activeWriterLeaseCount": 0,
+                },
+                "postMigration": {
+                    "migrationCompatibility": {"class": "SAME_SCHEMA_AND_ALL_ROWS_PRESERVED"}
+                },
+            },
+            "exchangeReadiness": {"required": True, "verified": True},
+            "cloudRunnerIdle": {"required": False},
+            "listenerRepair": {"required": False},
+            "selection": {"promoted": True},
+            "lastErrorCode": None,
+        }
+    )
+
+    assert summary["persistenceQuiescenceStatus"] == "VERIFIED"
+    assert summary["persistenceSameSchemaStatus"] == "VERIFIED"
 
 
 def test_preexisting_persistence_candidate_requires_exact_health_schema_but_allows_rows() -> None:

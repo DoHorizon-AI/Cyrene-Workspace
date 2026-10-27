@@ -434,6 +434,32 @@ def test_runtime_plan_maps_cloud_management_phase_two_to_canonical_lock_row() ->
     assert "cloud-management-phase2" not in runtime_update.ALLOWED_TARGETS
 
 
+def test_stage_transition_maps_persistence_to_its_canonical_lock_row() -> None:
+    """Map the Persistence service to its same-named immutable build-lock row."""
+
+    compose = {"services": {"navigator-persistence": {"image": "persistence:v2"}}}
+    lock = {
+        "images": [
+            {
+                "service": "navigator-persistence",
+                "image": "persistence:v2",
+                "imageId": NEW_IMAGE_ID,
+                "sourceCommits": {"navigator": "d" * 40},
+            }
+        ]
+    }
+
+    assert runtime_update._target_images(compose, lock, ["navigator-persistence"]) == {
+        "navigator-persistence": {
+            "lockService": "navigator-persistence",
+            "image": "persistence:v2",
+            "imageId": NEW_IMAGE_ID,
+            "sourceCommits": {"navigator": "d" * 40},
+        }
+    }
+    assert "navigator-persistence" not in runtime_update.ALLOWED_TARGETS
+
+
 def test_runtime_plan_validation_preserves_legacy_nav_exchange_v1_policy() -> None:
     """Accept old target policies while validating the new GitHub provider contract."""
 

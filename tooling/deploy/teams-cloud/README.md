@@ -118,11 +118,12 @@ connector-auth Provider bootstrap/activation 的私有 Exchange bootstrap 只有
 
 ### Phase-preserving image updates / 保留阶段状态的镜像更新
 
-An existing selector-v2 can receive a single Exchange or Navigator image update
+An existing selector-v2 can receive a single Exchange, Navigator, or Persistence image update
 without changing its `provider-bootstrap` or `issued-connector-activation`
 configuration phase. Use `runtime_update.py stage-transition plan` with the current
-`--phase` and exactly one `--image-update-target exchange` or
-`--image-update-target navigator`. The selector must already exist and name the
+`--phase` and exactly one `--image-update-target exchange`,
+`--image-update-target navigator`, or `--image-update-target navigator-persistence`.
+Persistence is limited to `issued-connector-activation`. The selector must already exist and name the
 same phase. The plan keeps the service inventory, config and secret directories,
 config/secret manifests, HF seed, RunPod key, roles, and every service mount
 identity unchanged; only the selected image reference/ID and its build-lock row
@@ -136,7 +137,14 @@ generation. During provider bootstrap, readiness compares the full live binding
 and tool-catalog projections to the frozen current config, without requiring
 future HF/cloud profiles to be issued. During issued-connector activation, it
 also verifies each configured provider's live profile/connection scope. A
-Navigator image update still requires a healthy fresh process instance. The V1
+Persistence image update verifies Exchange readiness before replacement, then
+requires zero unexpired Session writer leases and an exact schema/row-digest
+match against a fresh post-drain read immediately before Compose runs. Its
+post-start gate requires the same schema and every table row digest to remain
+unchanged; only then may the original Navigator process and ingress resume.
+Any possible Persistence replacement makes later failure `RECOVERY_REQUIRED`;
+the updater never restores the old Persistence image or SQLite snapshot bytes.
+A Navigator image update still requires a healthy fresh process instance. The V1
 `runtime_update.py plan --target exchange` command is for the Stage 1 inventory
 and does not update selector-v2; do not use it for an active 14-service
 selector-v2 deployment.
@@ -158,10 +166,11 @@ catalog evidence. Do not use this repair during issued activation or with an
 image/configuration update.
 
 现有 selector-v2 可在保留 `provider-bootstrap` 或
-`issued-connector-activation` 配置阶段的同时，只更新一个 Exchange 或
-Navigator 镜像。使用 `runtime_update.py stage-transition plan`，传入 selector
-当前的 `--phase`，并且只指定一个 `--image-update-target exchange` 或
-`--image-update-target navigator`。必须已有 selector-v2 且其 phase 与参数一致。
+`issued-connector-activation` 配置阶段的同时，只更新一个 Exchange、Navigator
+或 Persistence 镜像。使用 `runtime_update.py stage-transition plan`，传入 selector
+当前的 `--phase`，并且只指定一个 `--image-update-target exchange`、
+`--image-update-target navigator` 或 `--image-update-target navigator-persistence`。
+Persistence 只允许用于 `issued-connector-activation`。必须已有 selector-v2 且其 phase 与参数一致。
 计划固定服务集合、配置和 secrets 目录、配置/secret 清单、HF seed、RunPod key、
 角色以及每个服务的 mount identity；只允许目标镜像引用/ID 及对应 build lock 行
 变化。外部镜像锁和所有非目标 build 行必须保持完全一致。
@@ -171,8 +180,12 @@ Apply 复用 V2 ingress pause、Navigator drain、在线 Work SQLite snapshot、
 会在候选 Exchange 健康后做 live readiness 检查，再恢复同一 Navigator process
 generation。Provider bootstrap 阶段将当前完整 live binding 和 tool catalog 与冻结
 配置逐项比较，不要求尚未签发的 HF/cloud profile；issued-connector-activation
-阶段还会核对各已配置 Provider 的 live profile/connection scope。Navigator 镜像更新
-仍要求健康的新 process instance。V1 `runtime_update.py plan --target exchange` 面向
+阶段还会核对各已配置 Provider 的 live profile/connection scope。Persistence 镜像更新
+会先核验 Exchange readiness，然后要求所有 Session writer lease 均已过期，并在紧贴
+Compose 更新前读取一次数据库，确认 schema 和全部行摘要与 drain 后快照完全一致。
+更新后还会再次确认 schema 与所有行摘要不变，之后才恢复原 Navigator process 和 ingress。
+Persistence 替换可能开始后若再失败，状态进入 `RECOVERY_REQUIRED`；更新器不会自动回滚
+旧 Persistence 镜像，也不会用 SQLite 快照字节覆盖数据库。Navigator 镜像更新仍要求健康的新 process instance。V1 `runtime_update.py plan --target exchange` 面向
 Stage 1 inventory，且不会推进 selector-v2；已有 14-service selector-v2 部署不可用该 V1 命令。
 
 对于已部署的 14-service `provider-bootstrap` selector，如果多网卡 Hugging Face

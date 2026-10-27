@@ -78,6 +78,14 @@ CONNECTOR_AUTH_READONLY_OPERATIONS = {
     "gcp": {"gcp.compute.instances.list"},
     "runpod": {"runpod.pods.list"},
 }
+CONNECTOR_AUTH_READONLY_OPERATIONS_BY_PATH = {
+    "provider_identity_bootstrap_api": CONNECTOR_AUTH_READONLY_OPERATIONS,
+    "exchange_connector_api": {
+        "huggingface": {"huggingface.repo.get"},
+        "azure": {"cloud.resources.list", "cloud.provider.health.read"},
+        "gcp": {"cloud.resources.list", "cloud.provider.health.read"},
+    },
+}
 CONNECTOR_AUTH_READONLY_AUTH_MODES = {
     "huggingface": {"device_oauth"},
     "azure": {"managed_identity"},
@@ -1481,13 +1489,19 @@ def _validate_connector_auth_readonly_evidence(
         "verifiedAt",
         "providers",
     }
+    execution_path = evidence.get("executionPath") if isinstance(evidence, dict) else None
+    expected_operations_by_provider = (
+        CONNECTOR_AUTH_READONLY_OPERATIONS_BY_PATH.get(execution_path)
+        if isinstance(execution_path, str)
+        else None
+    )
     if (
         not isinstance(evidence, dict)
         or set(evidence) != fields
         or evidence.get("schemaVersion") != "cyrene-connector-auth-readonly-evidence-v1"
         or evidence.get("status") != "OPERATOR_ATTESTED"
         or evidence.get("evidenceClass") != "OPERATOR_RECORDED_REAL_PROBE"
-        or evidence.get("executionPath") != "provider_identity_bootstrap_api"
+        or expected_operations_by_provider is None
         or not isinstance(evidence.get("taskId"), str)
         or not evidence["taskId"]
         or (expected_task_id is not None and evidence["taskId"] != expected_task_id)
@@ -1527,7 +1541,11 @@ def _validate_connector_auth_readonly_evidence(
                 f"{provider} operator-recorded identity receipt does not match its profile scope"
             )
         operations = row.get("readOperations")
-        expected_operations = CONNECTOR_AUTH_READONLY_OPERATIONS[provider]
+        expected_operations = expected_operations_by_provider.get(provider)
+        if expected_operations is None:
+            raise PreflightError(
+                f"{provider} evidence is unsupported for execution path {execution_path}"
+            )
         if not isinstance(operations, list) or len(operations) != len(expected_operations):
             raise PreflightError(f"{provider} evidence must contain its fixed read-only operations")
         observed_operations: set[str] = set()
