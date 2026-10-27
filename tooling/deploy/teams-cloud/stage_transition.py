@@ -48,6 +48,7 @@ IMAGE_UPDATE_TARGETS = frozenset(
 CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
 HUGGINGFACE_IMAGE_UPDATE_TARGET = "huggingface"
 PERSISTENCE_IMAGE_UPDATE_TARGET = "navigator-persistence"
+CLOUD_MONITOR_PROVIDER_IDS = frozenset({"azure", "gcp", "runpod"})
 PROVIDER_LISTENER_REPAIR_TARGETS = ("huggingface", "cloud-management-phase2")
 EXCHANGE_CLOUD_RUNNER_ENV = "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
 EXCHANGE_READINESS_IMAGE_TARGETS = frozenset({"cloud-management-phase2", "exchange"})
@@ -864,7 +865,7 @@ def _exchange_cloud_runner_idle_counts(
     return report
 
 
-def _verify_huggingface_monitor_quiescence(
+def _verify_provider_monitor_quiescence(
     *,
     plan: dict[str, Any],
     candidate_compose: dict[str, Any],
@@ -872,45 +873,73 @@ def _verify_huggingface_monitor_quiescence(
     journal_path: Path,
     docker_prefix: list[str],
 ) -> dict[str, Any]:
-    """Require the selected HF monitor and connector calls to stay clear through startup.
+    """Require the selected connector monitors and calls to stay clear through startup.
 
-    The connection reference comes from the just-verified live Exchange binding and is
-    cross-checked against the frozen candidate binding before it is used in read-only SQL.
-    中文：只读检查实际签发的 HF 连接，确保 monitor 和调用不会碰到 Provider 重启窗口。
+    References come from the just-verified native Exchange snapshot and must join the frozen
+    binding set before they are used in read-only SQL. Cloud Management also requires its
+    durable refresh outbox to be empty. 中文：按实际签发连接只读检查监视器与调用窗口。
     """
 
-    if plan.get("imageUpdateTarget") != HUGGINGFACE_IMAGE_UPDATE_TARGET:
-        raise StageTransitionError("Hugging Face monitor gate is restricted to its image update")
+    target = plan.get("imageUpdateTarget")
+    if target == HUGGINGFACE_IMAGE_UPDATE_TARGET:
+        target_journal_key = "huggingfaceImageUpdate"
+        required_providers = [HUGGINGFACE_IMAGE_UPDATE_TARGET]
+        include_cloud_refresh = False
+    elif target == CLOUD_IMAGE_UPDATE_TARGET and plan.get("phase") == "issued-connector-activation":
+        target_journal_key = "cloudImageUpdate"
+        expected_scope_digests = plan.get("candidatePreflight", {}).get(
+            "expectedProviderScopeDigests"
+        )
+        if not isinstance(expected_scope_digests, dict):
+            raise StageTransitionError("candidate Cloud monitor provider scope is malformed")
+        required_providers = sorted(set(expected_scope_digests) & CLOUD_MONITOR_PROVIDER_IDS)
+        if not {"azure", "gcp"} <= set(required_providers):
+            raise StageTransitionError(
+                "Cloud image update requires its issued Azure and GCP bindings"
+            )
+        include_cloud_refresh = True
+    else:
+        raise StageTransitionError(
+            "connector monitor gate is restricted to issued HF/Cloud image updates"
+        )
+
     readiness = journal.get("exchangeReadiness")
     receipt = readiness.get("receipt") if isinstance(readiness, dict) else None
-    connection_ref = receipt.get("huggingfaceConnectionRef") if isinstance(receipt, dict) else None
-    try:
-        canonical_connection_ref = str(uuid.UUID(connection_ref))
-    except (ValueError, TypeError, AttributeError) as error:
+    if target == HUGGINGFACE_IMAGE_UPDATE_TARGET:
+        connection_refs = (
+            {HUGGINGFACE_IMAGE_UPDATE_TARGET: receipt.get("huggingfaceConnectionRef")}
+            if isinstance(receipt, dict)
+            else {}
+        )
+    else:
+        refs = receipt.get("connectionRefByProvider") if isinstance(receipt, dict) else None
+        connection_refs = refs if isinstance(refs, dict) else {}
+    if set(connection_refs) != set(required_providers):
         raise StageTransitionError(
-            "live Exchange readiness did not provide a canonical HF connection reference"
-        ) from error
-    if canonical_connection_ref != connection_ref:
-        raise StageTransitionError("live HF connection reference is not canonical")
+            "live Exchange readiness did not provide exactly the configured monitor connections"
+        )
+    canonical_refs: dict[str, str] = {}
+    for provider, connection_ref in connection_refs.items():
+        try:
+            canonical = str(uuid.UUID(connection_ref))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise StageTransitionError(
+                f"live Exchange readiness did not provide a canonical {provider} connection reference"
+            ) from error
+        if canonical != connection_ref:
+            raise StageTransitionError(f"live {provider} connection reference is not canonical")
+        canonical_refs[provider] = canonical
 
     bindings = _candidate_config_json(candidate_compose, "connector-bindings").get("bindings")
-    selected = (
-        [
-            row
-            for row in bindings
-            if isinstance(row, dict) and row.get("providerId") == HUGGINGFACE_IMAGE_UPDATE_TARGET
+    rows = bindings if isinstance(bindings, list) else []
+    for provider, connection_ref in canonical_refs.items():
+        selected = [
+            row for row in rows if isinstance(row, dict) and row.get("providerId") == provider
         ]
-        if isinstance(bindings, list)
-        else []
-    )
-    if (
-        len(selected) != 1
-        or selected[0].get("connectionRef") != canonical_connection_ref
-        or selected[0].get("providerId") != HUGGINGFACE_IMAGE_UPDATE_TARGET
-    ):
-        raise StageTransitionError(
-            "live HF connection does not match the single frozen candidate binding"
-        )
+        if len(selected) != 1 or selected[0].get("connectionRef") != connection_ref:
+            raise StageTransitionError(
+                f"live {provider} connection does not match its single frozen candidate binding"
+            )
 
     exchange = plan.get("activeServices", {}).get("exchange")
     if not isinstance(exchange, dict):
@@ -920,21 +949,30 @@ def _verify_huggingface_monitor_quiescence(
         raise StageTransitionError("active Exchange container identity is malformed")
     actor = preflight._connector_bootstrap_actor(candidate_compose)
     if any(not isinstance(value, str) or not value for value in actor.values()):
-        raise StageTransitionError("candidate Exchange actor is incomplete for the HF monitor gate")
+        raise StageTransitionError("candidate Exchange actor is incomplete for the monitor gate")
     timeout_seconds = plan.get("policy", {}).get("healthTimeoutSeconds")
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, int)
         or not 30 <= timeout_seconds <= 600
     ):
-        raise StageTransitionError("Hugging Face image update health timeout is malformed")
+        raise StageTransitionError("connector image update health timeout is malformed")
     required_window_seconds = timeout_seconds + 60
     python = str(Path(EXCHANGE_READINESS_EXECUTABLE).with_name("python"))
+    selected_connections = [
+        {"providerId": provider, "connectionRef": canonical_refs[provider]}
+        for provider in required_providers
+    ]
+    selected_connections_json = json.dumps(
+        selected_connections, sort_keys=True, separators=(",", ":")
+    )
     script = (
         "import json,sqlite3,sys\n"
         "from datetime import datetime,timedelta,timezone\n"
-        "database_path,connection_ref,issuer,subject,organization_id,workspace_id,window_text=sys.argv[1:8]\n"
+        "database_path,selected_text,issuer,subject,organization_id,workspace_id,window_text,cloud_text=sys.argv[1:9]\n"
+        "selected=json.loads(selected_text)\n"
         "window=int(window_text)\n"
+        "cloud_refresh_required=cloud_text=='true'\n"
         "now=datetime.now(timezone.utc)\n"
         "def utc(value,label):\n"
         " if not isinstance(value,str) or not value: raise RuntimeError(label+' is missing')\n"
@@ -945,24 +983,38 @@ def _verify_huggingface_monitor_quiescence(
         "try:\n"
         " db.execute('PRAGMA query_only=ON')\n"
         " db.execute('BEGIN')\n"
-        " connection_rows=db.execute('SELECT document FROM integration_connections WHERE id=? AND organization_id=? AND workspace_id=? AND actor_issuer=? AND actor_subject=? AND enabled=1',(connection_ref,organization_id,workspace_id,issuer,subject)).fetchall()\n"
-        " if len(connection_rows)!=1: raise RuntimeError('selected HF connection is missing or ambiguous')\n"
-        " connection=json.loads(str(connection_rows[0][0]))\n"
-        " if not isinstance(connection,dict) or connection.get('id')!=connection_ref or connection.get('provider')!='hf' or connection.get('enabled') is not True or connection.get('organizationId')!=organization_id or connection.get('workspaceId')!=workspace_id or connection.get('actorIssuer')!=issuer or connection.get('actorSubject')!=subject: raise RuntimeError('selected connection is not the exact HF actor scope')\n"
-        " monitor_rows=db.execute('SELECT next_check_at,claim_owner,lease_expires_at FROM authorization_monitor_state WHERE connection_id=?',(connection_ref,)).fetchall()\n"
-        " if len(monitor_rows)!=1: raise RuntimeError('selected HF authorization monitor state is missing or ambiguous')\n"
-        " next_check_at=utc(monitor_rows[0][0],'HF next_check_at')\n"
-        " claim_owner=monitor_rows[0][1]\n"
-        " lease_text=monitor_rows[0][2]\n"
-        " if claim_owner is not None and (not isinstance(claim_owner,str) or not claim_owner): raise RuntimeError('HF monitor claim owner is malformed')\n"
-        " if (claim_owner is None)!=(lease_text is None): raise RuntimeError('HF monitor lease fields are inconsistent')\n"
-        " active_lease=0\n"
-        " if lease_text is not None:\n"
-        "  lease_expiry=utc(lease_text,'HF monitor lease expiry')\n"
-        "  active_lease=int(lease_expiry>now)\n"
-        " inflight=db.execute(\"SELECT COUNT(*) FROM connector_invocations WHERE organization_id=? AND workspace_id=? AND actor_issuer=? AND actor_subject=? AND connection_ref=? AND provider_id='huggingface' AND state NOT IN ('SUCCEEDED','FAILED','REJECTED','RATE_LIMITED')\",(organization_id,workspace_id,issuer,subject,connection_ref)).fetchone()[0]\n"
-        " seconds_remaining=int((next_check_at-now).total_seconds())\n"
-        " report={'monitorStateCount':1,'activeMonitorLeaseCount':active_lease,'inFlightConnectorCallCount':int(inflight),'nextCheckSecondsRemaining':seconds_remaining,'requiredWindowSeconds':window,'nextCheckWindowSatisfied':next_check_at>now+timedelta(seconds=window)}\n"
+        " if not isinstance(selected,list) or not selected: raise RuntimeError('selected monitor connections are malformed')\n"
+        " stored_provider={'huggingface':'hf','azure':'azure','gcp':'gcp','runpod':'runpod'}\n"
+        " active_leases=0\n"
+        " inflight_calls=0\n"
+        " next_check_remaining=[]\n"
+        " monitor_count=0\n"
+        " for item in selected:\n"
+        "  if not isinstance(item,dict) or set(item)!={'providerId','connectionRef'}: raise RuntimeError('selected monitor connection row is malformed')\n"
+        "  provider=item['providerId']\n"
+        "  connection_ref=item['connectionRef']\n"
+        "  if provider not in stored_provider or not isinstance(connection_ref,str) or not connection_ref: raise RuntimeError('selected monitor provider is unsupported')\n"
+        "  connection_rows=db.execute('SELECT document FROM integration_connections WHERE id=? AND organization_id=? AND workspace_id=? AND actor_issuer=? AND actor_subject=? AND enabled=1',(connection_ref,organization_id,workspace_id,issuer,subject)).fetchall()\n"
+        "  if len(connection_rows)!=1: raise RuntimeError('selected connector connection is missing or ambiguous')\n"
+        "  connection=json.loads(str(connection_rows[0][0]))\n"
+        "  if not isinstance(connection,dict) or connection.get('id')!=connection_ref or connection.get('provider')!=stored_provider[provider] or connection.get('enabled') is not True or connection.get('organizationId')!=organization_id or connection.get('workspaceId')!=workspace_id or connection.get('actorIssuer')!=issuer or connection.get('actorSubject')!=subject: raise RuntimeError('selected connection is outside its exact provider actor scope')\n"
+        "  monitor_rows=db.execute('SELECT next_check_at,claim_owner,lease_expires_at FROM authorization_monitor_state WHERE connection_id=?',(connection_ref,)).fetchall()\n"
+        "  if len(monitor_rows)!=1: raise RuntimeError('selected authorization monitor state is missing or ambiguous')\n"
+        "  monitor_count+=1\n"
+        "  next_check_at=utc(monitor_rows[0][0],provider+' next_check_at')\n"
+        "  claim_owner=monitor_rows[0][1]\n"
+        "  lease_text=monitor_rows[0][2]\n"
+        "  if claim_owner is not None and (not isinstance(claim_owner,str) or not claim_owner): raise RuntimeError(provider+' monitor claim owner is malformed')\n"
+        "  if (claim_owner is None)!=(lease_text is None): raise RuntimeError(provider+' monitor lease fields are inconsistent')\n"
+        "  if lease_text is not None:\n"
+        "   lease_expiry=utc(lease_text,provider+' monitor lease expiry')\n"
+        "   active_leases+=int(lease_expiry>now)\n"
+        "  inflight_calls+=int(db.execute(\"SELECT COUNT(*) FROM connector_invocations WHERE organization_id=? AND workspace_id=? AND actor_issuer=? AND actor_subject=? AND connection_ref=? AND provider_id=? AND state NOT IN ('SUCCEEDED','FAILED','REJECTED','RATE_LIMITED')\",(organization_id,workspace_id,issuer,subject,connection_ref,provider)).fetchone()[0])\n"
+        "  next_check_remaining.append(int((next_check_at-now).total_seconds()))\n"
+        " cloud_refresh=0\n"
+        " if cloud_refresh_required:\n"
+        "  cloud_refresh=int(db.execute(\"SELECT COUNT(*) FROM cloud_refresh_outbox WHERE state IN ('QUEUED','RUNNING')\").fetchone()[0])\n"
+        " report={'selectedProviderCount':len(selected),'monitorStateCount':monitor_count,'activeMonitorLeaseCount':active_leases,'inFlightConnectorCallCount':inflight_calls,'nextCheckSecondsRemaining':min(next_check_remaining),'requiredWindowSeconds':window,'nextCheckWindowSatisfied':all(value>window for value in next_check_remaining),'cloudRefreshNonterminalCount':cloud_refresh}\n"
         " print(json.dumps(report,sort_keys=True,separators=(',',':')))\n"
         "finally:\n"
         " db.close()\n"
@@ -979,31 +1031,34 @@ def _verify_huggingface_monitor_quiescence(
                 "-c",
                 script,
                 EXCHANGE_INTEGRATION_DATABASE,
-                canonical_connection_ref,
+                selected_connections_json,
                 actor["issuer"],
                 actor["subject"],
                 actor["organizationId"],
                 actor["workspaceId"],
                 str(required_window_seconds),
+                "true" if include_cloud_refresh else "false",
             ],
-            label="Hugging Face authorization monitor quiescence readback",
+            label="Connector authorization monitor quiescence readback",
             timeout_seconds=15,
         )
         report = runtime_update._decode_json_output(
-            output, "Hugging Face authorization monitor quiescence report"
+            output, "connector authorization monitor quiescence report"
         )
     except (OSError, runtime_update.RuntimeUpdateError, subprocess.SubprocessError) as error:
         raise StageTransitionError(
-            "Hugging Face authorization monitor quiescence could not be verified read-only"
+            "connector authorization monitor quiescence could not be verified read-only"
         ) from error
 
     fields = {
+        "selectedProviderCount",
         "monitorStateCount",
         "activeMonitorLeaseCount",
         "inFlightConnectorCallCount",
         "nextCheckSecondsRemaining",
         "requiredWindowSeconds",
         "nextCheckWindowSatisfied",
+        "cloudRefreshNonterminalCount",
     }
     if (
         not isinstance(report, dict)
@@ -1011,54 +1066,67 @@ def _verify_huggingface_monitor_quiescence(
         or any(
             isinstance(report.get(field), bool) or not isinstance(report.get(field), int)
             for field in (
+                "selectedProviderCount",
                 "monitorStateCount",
                 "activeMonitorLeaseCount",
                 "inFlightConnectorCallCount",
                 "nextCheckSecondsRemaining",
                 "requiredWindowSeconds",
+                "cloudRefreshNonterminalCount",
             )
         )
-        or report.get("monitorStateCount") != 1
+        or report.get("selectedProviderCount") != len(required_providers)
+        or report.get("monitorStateCount") != len(required_providers)
         or report.get("activeMonitorLeaseCount", -1) < 0
         or report.get("inFlightConnectorCallCount", -1) < 0
         or report.get("requiredWindowSeconds") != required_window_seconds
+        or report.get("cloudRefreshNonterminalCount", -1) < 0
         or not isinstance(report.get("nextCheckWindowSatisfied"), bool)
     ):
-        raise StageTransitionError("Hugging Face authorization monitor report is malformed")
+        raise StageTransitionError("connector authorization monitor report is malformed")
 
     verified = (
         report["activeMonitorLeaseCount"] == 0
         and report["inFlightConnectorCallCount"] == 0
         and report["nextCheckWindowSatisfied"] is True
+        and report["cloudRefreshNonterminalCount"] == 0
     )
     evidence = {
         "verified": verified,
-        "connectionRefSha256": _sha256_bytes(canonical_connection_ref.encode("utf-8")),
+        "connectionRefsSha256": _sha256_bytes(
+            _canonical_json(
+                {
+                    provider: _sha256_bytes(connection_ref.encode("utf-8"))
+                    for provider, connection_ref in sorted(canonical_refs.items())
+                }
+            )
+        ),
         "activeMonitorLeaseCount": report["activeMonitorLeaseCount"],
         "inFlightConnectorCallCount": report["inFlightConnectorCallCount"],
         "nextCheckSecondsRemaining": report["nextCheckSecondsRemaining"],
         "requiredWindowSeconds": required_window_seconds,
+        "cloudRefreshNonterminalCount": report["cloudRefreshNonterminalCount"],
         "checkedAtUtc": _utc_now(),
     }
-    update_state = journal.get("huggingfaceImageUpdate")
+    update_state = journal.get(target_journal_key)
     if not isinstance(update_state, dict) or update_state.get("required") is not True:
-        raise StageTransitionError("Hugging Face image update journal state is malformed")
+        raise StageTransitionError("connector image update journal state is malformed")
     update_state["monitorQuiescence"] = evidence
     _write_journal(
         journal_path,
         journal,
-        "HUGGINGFACE_MONITOR_QUIESCENCE_VERIFIED"
-        if verified
-        else "HUGGINGFACE_MONITOR_NOT_QUIESCENT",
+        "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED" if verified else "CONNECTOR_MONITOR_NOT_QUIESCENT",
     )
     if not verified:
         if report["activeMonitorLeaseCount"]:
-            reason = "a live authorization monitor lease exists"
+            reason = "a live provider authorization monitor lease exists"
         elif report["inFlightConnectorCallCount"]:
-            reason = "a nonterminal HF connector invocation exists"
+            reason = "a nonterminal provider connector invocation exists"
+        elif report["cloudRefreshNonterminalCount"]:
+            reason = "the Exchange cloud refresh outbox is not empty"
         else:
-            reason = "the next authorization check is inside the image health window"
-        raise StageTransitionError(f"Hugging Face image update is blocked because {reason}")
+            reason = "a provider authorization check is inside the image health window"
+        raise StageTransitionError(f"connector image update is blocked because {reason}")
     return evidence
 
 
@@ -1844,9 +1912,17 @@ def _validate_image_update_topology(
         raise StageTransitionError(
             "Hugging Face image updates require issued-connector-activation and the existing connector runtime"
         )
-    if target == CLOUD_IMAGE_UPDATE_TARGET and phase != "provider-bootstrap":
+    if target == CLOUD_IMAGE_UPDATE_TARGET and phase not in PHASES:
         raise StageTransitionError(
-            "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+            "Cloud Management image updates require provider-bootstrap or issued-connector-activation"
+        )
+    if (
+        target == CLOUD_IMAGE_UPDATE_TARGET
+        and phase == "issued-connector-activation"
+        and (set(old_services) != RUNTIME_SERVICE_SET or set(new_services) != RUNTIME_SERVICE_SET)
+    ):
+        raise StageTransitionError(
+            "issued Cloud Management image updates require the exact 14-service runtime topology"
         )
     if target == PERSISTENCE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
         raise StageTransitionError(
@@ -2160,6 +2236,10 @@ def _validate_image_update_selection_contract(
     if target == HUGGINGFACE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
         raise StageTransitionError(
             "Hugging Face image updates require issued-connector-activation and the existing connector runtime"
+        )
+    if target == CLOUD_IMAGE_UPDATE_TARGET and phase not in PHASES:
+        raise StageTransitionError(
+            "Cloud Management image updates require provider-bootstrap or issued-connector-activation"
         )
     if target == PERSISTENCE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
         raise StageTransitionError(
@@ -3817,9 +3897,9 @@ def create_plan(
         raise StageTransitionError(
             "Hugging Face image updates require issued-connector-activation and the existing connector runtime"
         )
-    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and phase != "provider-bootstrap":
+    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and phase not in PHASES:
         raise StageTransitionError(
-            "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+            "Cloud Management image updates require provider-bootstrap or issued-connector-activation"
         )
     if (
         image_update_target == PERSISTENCE_IMAGE_UPDATE_TARGET
@@ -4098,12 +4178,13 @@ def create_plan(
         exchange_service = active_services.get("exchange")
         if not isinstance(exchange_service, dict):
             raise StageTransitionError("active Exchange service is missing for provider transition")
-        cloud_runner_state = _cloud_runner_state_record(
-            active_compose=active_compose,
-            candidate_compose=candidate_compose,
-            exchange_service=exchange_service,
-            docker_prefix=docker_prefix,
-        )
+        if phase == "provider-bootstrap" or listener_repair:
+            cloud_runner_state = _cloud_runner_state_record(
+                active_compose=active_compose,
+                candidate_compose=candidate_compose,
+                exchange_service=exchange_service,
+                docker_prefix=docker_prefix,
+            )
     if listener_repair:
         listener_repair_state = _listener_repair_state_record(
             active_compose=active_compose,
@@ -4311,12 +4392,18 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         if (
             not isinstance(image_update_target, str)
             or image_update_target not in IMAGE_UPDATE_TARGETS
-            or image_update_target == CLOUD_IMAGE_UPDATE_TARGET
+            or (
+                image_update_target == CLOUD_IMAGE_UPDATE_TARGET
+                and plan.get("phase") != "issued-connector-activation"
+            )
         ):
             image_update_target = "__invalid__"
     elif set(plan) == required | {"imageUpdateTarget", "cloudRunnerState"}:
         image_update_target = plan.get("imageUpdateTarget")
-        if image_update_target != CLOUD_IMAGE_UPDATE_TARGET:
+        if (
+            image_update_target != CLOUD_IMAGE_UPDATE_TARGET
+            or plan.get("phase") != "provider-bootstrap"
+        ):
             image_update_target = "__invalid__"
     elif set(plan) == required | {"listenerRepairState", "cloudRunnerState"}:
         image_update_target = None
@@ -4330,12 +4417,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             raise StageTransitionError(f"stage transition {field} record is malformed")
     if plan.get("phase") not in PHASES or not isinstance(plan.get("project"), str):
         raise StageTransitionError("stage transition plan identity is malformed")
-    if (
-        image_update_target == CLOUD_IMAGE_UPDATE_TARGET
-        and plan.get("phase") != "provider-bootstrap"
+    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and (
+        plan.get("phase") not in {"provider-bootstrap", "issued-connector-activation"}
+        or (plan.get("phase") == "provider-bootstrap" and "cloudRunnerState" not in plan)
+        or (plan.get("phase") == "issued-connector-activation" and "cloudRunnerState" in plan)
     ):
         raise StageTransitionError(
-            "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+            "Cloud image update plan must use its exact bootstrap or issued connector gate"
         )
     if (
         image_update_target == HUGGINGFACE_IMAGE_UPDATE_TARGET
@@ -4385,7 +4473,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
                 raise StageTransitionError(
                     f"listener repair plan changes the immutable image for {service_name}"
                 )
-    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET or listener_repair:
+    if "cloudRunnerState" in plan or listener_repair:
         _validate_cloud_runner_state_record(plan.get("cloudRunnerState"), plan["activeServices"])
     if listener_repair:
         _validate_listener_repair_state_record(
@@ -5443,6 +5531,17 @@ def _verify_exchange_readiness_snapshot(
             else {}
         ),
         **(
+            {
+                "connectionRefByProvider": {
+                    provider: live_connection_refs[provider]
+                    for provider in sorted(expected_provider_ids & CLOUD_MONITOR_PROVIDER_IDS)
+                }
+            }
+            if image_update_target == CLOUD_IMAGE_UPDATE_TARGET
+            and phase == "issued-connector-activation"
+            else {}
+        ),
+        **(
             {"issuedStateSha256": _exchange_issued_metadata_sha256(snapshot)}
             if listener_repair
             else {}
@@ -5568,24 +5667,55 @@ def _record_exchange_readiness(
     _write_journal(journal_path, journal, "EXCHANGE_LIVE_READINESS_VERIFIED")
 
 
-def _huggingface_exchange_readiness_checkpoint(
+def _image_update_exchange_readiness_checkpoint(
     plan: dict[str, Any], journal: dict[str, Any]
 ) -> dict[str, Any]:
-    """Require the exact live 14-binding Exchange snapshot around an HF replacement."""
+    """Require the exact live 14-binding Exchange snapshot for HF/Cloud image updates."""
 
+    target = plan.get("imageUpdateTarget")
     exchange = plan.get("activeServices", {}).get("exchange")
     receipt = journal.get("exchangeReadiness", {}).get("receipt")
     expected_scope_digests = plan.get("candidatePreflight", {}).get("expectedProviderScopeDigests")
-    connection_ref = receipt.get("huggingfaceConnectionRef") if isinstance(receipt, dict) else None
-    try:
-        canonical_connection_ref = str(uuid.UUID(connection_ref))
-    except (ValueError, TypeError, AttributeError) as error:
+    if not isinstance(expected_scope_digests, dict):
+        raise StageTransitionError("candidate provider scope digests are malformed")
+    if target == HUGGINGFACE_IMAGE_UPDATE_TARGET:
+        connection_ref = (
+            receipt.get("huggingfaceConnectionRef") if isinstance(receipt, dict) else None
+        )
+        connection_refs = {HUGGINGFACE_IMAGE_UPDATE_TARGET: connection_ref}
+        expected_monitor_providers = [HUGGINGFACE_IMAGE_UPDATE_TARGET]
+    elif target == CLOUD_IMAGE_UPDATE_TARGET and plan.get("phase") == "issued-connector-activation":
+        expected_monitor_providers = sorted(
+            set(expected_scope_digests) & CLOUD_MONITOR_PROVIDER_IDS
+        )
+        if not {"azure", "gcp"} <= set(expected_monitor_providers):
+            raise StageTransitionError(
+                "Cloud image update readiness lacks Azure/GCP provider scopes"
+            )
+        refs = receipt.get("connectionRefByProvider") if isinstance(receipt, dict) else None
+        connection_refs = refs if isinstance(refs, dict) else {}
+    else:
         raise StageTransitionError(
-            "live Exchange readiness lacks the exact selected HF connection"
-        ) from error
+            "Exchange readiness checkpoint is outside the HF/Cloud image route"
+        )
+
+    if set(connection_refs) != set(expected_monitor_providers):
+        raise StageTransitionError(
+            "Exchange readiness lacks the exact selected provider connections"
+        )
+    canonical_refs: dict[str, str] = {}
+    for provider, connection_ref in connection_refs.items():
+        try:
+            canonical_connection_ref = str(uuid.UUID(connection_ref))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise StageTransitionError(
+                f"live Exchange readiness lacks the exact selected {provider} connection"
+            ) from error
+        if canonical_connection_ref != connection_ref:
+            raise StageTransitionError(f"live {provider} connection reference is not canonical")
+        canonical_refs[provider] = canonical_connection_ref
     if (
         not isinstance(exchange, dict)
-        or not isinstance(expected_scope_digests, dict)
         or not isinstance(receipt, dict)
         or receipt.get("status") != "LIVE_VERIFIED"
         or receipt.get("catalogStatus") != "LIVE_VERIFIED"
@@ -5596,10 +5726,9 @@ def _huggingface_exchange_readiness_checkpoint(
         or receipt.get("verifiedProviderIds") != sorted(expected_scope_digests)
         or receipt.get("snapshotSha256") is None
         or SHA256_RE.fullmatch(str(receipt.get("snapshotSha256"))) is None
-        or canonical_connection_ref != connection_ref
     ):
         raise StageTransitionError(
-            "Hugging Face image update requires live readiness for the exact 14 Exchange bindings"
+            "connector image update requires live readiness for the exact 14 Exchange bindings"
         )
     return {
         "verified": True,
@@ -5608,7 +5737,14 @@ def _huggingface_exchange_readiness_checkpoint(
         "connectionCount": receipt["connectionCount"],
         "exchangeContainerId": receipt["exchangeContainerId"],
         "exchangeImageId": receipt["exchangeImageId"],
-        "huggingfaceConnectionRefSha256": _sha256_bytes(canonical_connection_ref.encode("utf-8")),
+        "connectionRefsSha256": _sha256_bytes(
+            _canonical_json(
+                {
+                    provider: _sha256_bytes(connection_ref.encode("utf-8"))
+                    for provider, connection_ref in sorted(canonical_refs.items())
+                }
+            )
+        ),
     }
 
 
@@ -5667,9 +5803,15 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "monitorQuiescence": None,
             "afterReadiness": None,
         },
-        "cloudRunnerIdle": {
+        "cloudImageUpdate": {
             "required": plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET
-            or "listenerRepairState" in plan,
+            and plan.get("phase") == "issued-connector-activation",
+            "beforeReadiness": None,
+            "monitorQuiescence": None,
+            "afterReadiness": None,
+        },
+        "cloudRunnerIdle": {
+            "required": "cloudRunnerState" in plan or "listenerRepairState" in plan,
             "planState": plan.get("cloudRunnerState"),
             "beforeTarget": None,
             "afterTarget": None,
@@ -5907,6 +6049,37 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if huggingface_monitor_status == "BLOCKED"
         else "PENDING"
     )
+    cloud_update = journal.get("cloudImageUpdate", {})
+    cloud_update_required = (
+        cloud_update.get("required") is True if isinstance(cloud_update, dict) else False
+    )
+    cloud_before = cloud_update.get("beforeReadiness") if isinstance(cloud_update, dict) else None
+    cloud_monitor = (
+        cloud_update.get("monitorQuiescence") if isinstance(cloud_update, dict) else None
+    )
+    cloud_after = cloud_update.get("afterReadiness") if isinstance(cloud_update, dict) else None
+    cloud_monitor_status = (
+        "NOT_REQUIRED"
+        if not cloud_update_required
+        else "VERIFIED"
+        if isinstance(cloud_monitor, dict) and cloud_monitor.get("verified") is True
+        else "BLOCKED"
+        if isinstance(cloud_monitor, dict) and cloud_monitor.get("verified") is False
+        else "PENDING"
+    )
+    cloud_image_update_status = (
+        "NOT_REQUIRED"
+        if not cloud_update_required
+        else "VERIFIED"
+        if isinstance(cloud_before, dict)
+        and cloud_before.get("verified") is True
+        and cloud_monitor_status == "VERIFIED"
+        and isinstance(cloud_after, dict)
+        and cloud_after.get("verified") is True
+        else "BLOCKED"
+        if cloud_monitor_status == "BLOCKED"
+        else "PENDING"
+    )
     cloud_idle = journal.get("cloudRunnerIdle", {})
     cloud_idle_required = (
         cloud_idle.get("required") is True if isinstance(cloud_idle, dict) else False
@@ -5981,6 +6154,23 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
             if not huggingface_update_required
             else "LIVE_VERIFIED"
             if isinstance(huggingface_after, dict) and huggingface_after.get("verified") is True
+            else "PENDING"
+        ),
+        "cloudImageUpdateRequired": cloud_update_required,
+        "cloudImageUpdateStatus": cloud_image_update_status,
+        "cloudMonitorQuiescenceStatus": cloud_monitor_status,
+        "cloudBeforeReadinessStatus": (
+            "NOT_REQUIRED"
+            if not cloud_update_required
+            else "LIVE_VERIFIED"
+            if isinstance(cloud_before, dict) and cloud_before.get("verified") is True
+            else "PENDING"
+        ),
+        "cloudAfterReadinessStatus": (
+            "NOT_REQUIRED"
+            if not cloud_update_required
+            else "LIVE_VERIFIED"
+            if isinstance(cloud_after, dict) and cloud_after.get("verified") is True
             else "PENDING"
         ),
         "exchangeReadinessRequired": exchange_readiness_required,
@@ -6162,7 +6352,7 @@ def _verify_active_baseline(
         raise StageTransitionError(
             "active service IDs/images/network inventory changed after planning"
         )
-    if plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET:
+    if "cloudRunnerState" in plan:
         state = _validate_cloud_runner_state_record(
             plan.get("cloudRunnerState"), plan["activeServices"]
         )
@@ -6224,7 +6414,7 @@ def _candidate_configs(
         raise StageTransitionError("candidate Compose could not be re-rendered") from error
     if compose.get("name") != plan["project"]:
         raise StageTransitionError("candidate Compose project changed after planning")
-    if plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET:
+    if "cloudRunnerState" in plan:
         state = _validate_cloud_runner_state_record(
             plan.get("cloudRunnerState"), plan["activeServices"]
         )
@@ -7020,12 +7210,14 @@ def apply_plan_file(
                 )
             for service_name in plan["targets"]:
                 if (
-                    plan.get("imageUpdateTarget") == HUGGINGFACE_IMAGE_UPDATE_TARGET
-                    and service_name == HUGGINGFACE_IMAGE_UPDATE_TARGET
+                    plan.get("imageUpdateTarget")
+                    in {HUGGINGFACE_IMAGE_UPDATE_TARGET, CLOUD_IMAGE_UPDATE_TARGET}
+                    and plan.get("phase") == "issued-connector-activation"
+                    and service_name == plan.get("imageUpdateTarget")
                 ):
                     if journal["exchangeReadiness"]["required"] is not True:
                         raise StageTransitionError(
-                            "Hugging Face image update requires Exchange live readiness"
+                            "issued provider image update requires Exchange live readiness"
                         )
                     _record_exchange_readiness(
                         plan=plan,
@@ -7034,16 +7226,21 @@ def apply_plan_file(
                         journal_path=journal_path,
                         docker_prefix=docker_prefix,
                     )
-                    hf_update = journal["huggingfaceImageUpdate"]
-                    hf_update["beforeReadiness"] = _huggingface_exchange_readiness_checkpoint(
+                    update_key = (
+                        "huggingfaceImageUpdate"
+                        if plan.get("imageUpdateTarget") == HUGGINGFACE_IMAGE_UPDATE_TARGET
+                        else "cloudImageUpdate"
+                    )
+                    update_state = journal[update_key]
+                    update_state["beforeReadiness"] = _image_update_exchange_readiness_checkpoint(
                         plan, journal
                     )
                     _write_journal(
                         journal_path,
                         journal,
-                        "HUGGINGFACE_EXCHANGE_READINESS_BEFORE_UPDATE_VERIFIED",
+                        "PROVIDER_EXCHANGE_READINESS_BEFORE_UPDATE_VERIFIED",
                     )
-                    _verify_huggingface_monitor_quiescence(
+                    _verify_provider_monitor_quiescence(
                         plan=plan,
                         candidate_compose=candidate_compose,
                         journal=journal,
@@ -7092,8 +7289,10 @@ def apply_plan_file(
                     service_name=service_name,
                 )
                 if (
-                    plan.get("imageUpdateTarget") == HUGGINGFACE_IMAGE_UPDATE_TARGET
-                    and service_name == HUGGINGFACE_IMAGE_UPDATE_TARGET
+                    plan.get("imageUpdateTarget")
+                    in {HUGGINGFACE_IMAGE_UPDATE_TARGET, CLOUD_IMAGE_UPDATE_TARGET}
+                    and plan.get("phase") == "issued-connector-activation"
+                    and service_name == plan.get("imageUpdateTarget")
                 ):
                     _record_exchange_readiness(
                         plan=plan,
@@ -7102,13 +7301,18 @@ def apply_plan_file(
                         journal_path=journal_path,
                         docker_prefix=docker_prefix,
                     )
-                    journal["huggingfaceImageUpdate"]["afterReadiness"] = (
-                        _huggingface_exchange_readiness_checkpoint(plan, journal)
+                    update_key = (
+                        "huggingfaceImageUpdate"
+                        if plan.get("imageUpdateTarget") == HUGGINGFACE_IMAGE_UPDATE_TARGET
+                        else "cloudImageUpdate"
+                    )
+                    journal[update_key]["afterReadiness"] = (
+                        _image_update_exchange_readiness_checkpoint(plan, journal)
                     )
                     _write_journal(
                         journal_path,
                         journal,
-                        "HUGGINGFACE_EXCHANGE_READINESS_AFTER_UPDATE_VERIFIED",
+                        "PROVIDER_EXCHANGE_READINESS_AFTER_UPDATE_VERIFIED",
                     )
                 if (
                     plan.get("imageUpdateTarget") in IMAGE_UPDATE_READINESS_TARGETS
@@ -7124,8 +7328,7 @@ def apply_plan_file(
                         docker_prefix=docker_prefix,
                     )
                 if (
-                    plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET
-                    or journal["listenerRepair"]["required"]
+                    journal["cloudRunnerIdle"]["required"] or journal["listenerRepair"]["required"]
                 ) and service_name == CLOUD_IMAGE_UPDATE_TARGET:
                     try:
                         after_target = _verify_cloud_runner_idle(
