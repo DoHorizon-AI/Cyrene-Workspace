@@ -14,6 +14,7 @@ import importlib.util
 import json
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -665,8 +666,9 @@ def test_extracted_deb_requires_exact_five_product_unit_names(
         admin_initialize._resolve_extracted_systemd_units(extract_root)
 
 
+@pytest.mark.parametrize("yield_first", [False, True])
 def test_activity_source_filename_must_match_signed_source_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, yield_first: bool
 ) -> None:
     """The exact five filenames cannot be rebound to another Product source ID.
 
@@ -691,6 +693,16 @@ def test_activity_source_filename_must_match_signed_source_id(
             payload = payload.replace("cyrene-yield.token", "cyrene-navigator.token")
         (extracted / unit).write_text(payload, encoding="utf-8")
         (installed / unit).write_text(payload, encoding="utf-8")
+    original_glob = Path.glob
+    units = sorted(extracted.glob("cyrene-*.service"))
+    units.sort(key=lambda item: (item.name != "cyrene-yield.service") == yield_first)
+
+    def unit_order(path: Path, pattern: str) -> Iterator[Path]:
+        # Both filesystem orders must reject the same signed identity mismatch.
+        # 文件遍历次序只能改变先触发的校验，不能改变拒绝结果。
+        return iter(units) if path == extracted else original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", unit_order)
     monkeypatch.setattr(
         admin_initialize.pwd,
         "getpwnam",
@@ -703,7 +715,8 @@ def test_activity_source_filename_must_match_signed_source_id(
     )
 
     with pytest.raises(
-        admin_initialize.AdminInitializationError, match="source IDs are incomplete"
+        admin_initialize.AdminInitializationError,
+        match="source IDs are incomplete|unit name does not match its source ID",
     ):
         admin_initialize._activity_source_arguments(extracted, installed)
 
