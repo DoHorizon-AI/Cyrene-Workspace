@@ -3183,27 +3183,34 @@ def _assert_exchange_readiness_safe_shape(snapshot: dict[str, Any]) -> None:
         if not isinstance(row, dict):
             raise StageTransitionError("Exchange readiness connection row is malformed")
         provider = row.get("providerId")
+        if not isinstance(provider, str) or provider not in allowed_provider_ids:
+            raise StageTransitionError("Exchange readiness connection contains unsupported fields")
         required = {
             "connectionRef",
             "providerId",
             "profileRef",
             "profileAlias",
-            "targetAlias",
             "accessMode",
             "readOnly",
         }
-        optional = {"targetScope"}
+        if provider == "computer":
+            # The official Exchange readiness DTO has neither targetAlias nor targetScope for
+            # its fixed computer profile. Keep this provider's smaller shape closed.
+            optional: set[str] = set()
+        else:
+            required.update({"targetAlias", "targetScope"})
+            optional = set()
         if (
-            not isinstance(provider, str)
-            or provider not in allowed_provider_ids
-            or set(row) - required - optional
+            set(row) - required - optional
             or not required <= set(row)
             or not isinstance(row.get("connectionRef"), str)
             or not isinstance(row.get("profileRef"), str)
             or not isinstance(row.get("accessMode"), str)
             or not isinstance(row.get("readOnly"), bool)
             or not isinstance(row.get("profileAlias"), (str, type(None)))
-            or not isinstance(row.get("targetAlias"), (str, type(None)))
+            or (
+                provider != "computer" and not isinstance(row.get("targetAlias"), (str, type(None)))
+            )
             or ("targetScope" in row and not isinstance(row["targetScope"], dict))
         ):
             raise StageTransitionError("Exchange readiness connection contains unsupported fields")
@@ -3430,9 +3437,18 @@ def _verify_exchange_readiness_snapshot(
         live_profile_refs[provider_id] = profile["profileRef"]
 
         if provider_id == "huggingface":
+            try:
+                live_hf_repositories = preflight._normalize_exchange_huggingface_repository_scope(
+                    profile["targetScope"].get("repositories"),
+                    "live Account Center HF profile",
+                )
+            except preflight.PreflightError as error:
+                raise StageTransitionError(
+                    "live Account Center HF profile repository scope is invalid"
+                ) from error
             if (
                 profile["profileAlias"] != hf_alias
-                or profile["targetScope"].get("repositories") != expected_account_scope
+                or live_hf_repositories != hf_repositories
                 or profile.get("authMode")
                 != (hf_profile_config.get("authMode") or hf_seed.get("auth_mode"))
                 or profile["accessMode"] != hf_bootstrap.get("expectedAccessMode")
