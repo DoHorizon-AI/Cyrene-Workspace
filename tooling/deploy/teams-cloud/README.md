@@ -159,6 +159,33 @@ A Navigator image update still requires a healthy fresh process instance. The V1
 and does not update selector-v2; do not use it for an active 14-service
 selector-v2 deployment.
 
+### In-place memory increases / 原位增加内存上限
+
+For an existing issued-activation selector, `stage_transition.py plan
+--memory-update-target <service>` plans one strict memory increase on an
+already-running service. Active and candidate Compose definitions must be
+identical except for that service's `mem_limit`, `memswap_limit`, and a matching
+`deploy.resources.limits.memory` when present. Images, locks, environment and
+secret files, mounts, CPU, PIDs, ports, security settings, and the exact
+14-service inventory remain fixed. Both memory limits must be finite and equal,
+preserving the no-swap policy. The plan checks actual Docker memory and CPU
+limits for all 14 pinned containers, a total memory cap of 3584 MiB, a CPU cap
+of 1.95, at least 1 GiB `MemAvailable`, and at least 2 GiB free disk.
+
+Apply records intent, reads live Exchange readiness, and calls Docker's
+single-container `update --memory N --memory-swap N <container-id>` API. It
+never runs Compose `up`, recreates or pauses the target, pauses Teams ingress,
+drains Navigator, or snapshots/restores SQLite. It verifies the same container
+ID and image, target health, every other HostConfig field, all 14 actual
+resource caps, live Exchange readiness, and unchanged ingress/Navigator state
+before promoting the existing selector. Docker's immutable
+`com.docker.compose.config-hash` label remains at its prior hash after an
+in-place update; the plan records active, candidate, and live hashes. A later
+plan accepts that stale label only when the existing selector-linked journal
+chain proves the same container received the preceding memory update. An
+uncertain or partial update becomes `RECOVERY_REQUIRED`; the tool never lowers
+the limit automatically.
+
 For a deployed 14-service `provider-bootstrap` selector whose multi-network
 Hugging Face or Cloud Management listener is bound to one Docker address,
 `stage-transition plan --listener-repair` provides a closed command-only repair.
@@ -217,6 +244,26 @@ Work SQLite。Apply 以 no-deps 更新 HF 与 Cloud，核验两个目标容器�
 binding 和原生 tool catalog，之后才提升 selector 并恢复 ingress。修复前的 metadata-only
 检查不会调用 Provider `ListTools`，不能视为 live catalog 证据。issued activation 阶段
 或任何镜像/配置更新不得使用此修复。
+
+### 原位增加内存上限
+
+对于已有的 issued-connector-activation selector，可用
+`stage_transition.py plan --memory-update-target <service>` 为一个正在运行的服务
+规划严格的内存上限增加。Active 与 candidate Compose 除目标服务的
+`mem_limit`、`memswap_limit` 和（若存在）匹配的
+`deploy.resources.limits.memory` 外必须完全一致。镜像、锁、环境与 secret 文件、挂载、
+CPU、PID、端口、安全设置及精确 14 服务 inventory 均保持不变。两个内存值必须有限且相等，
+以保留无 swap 策略。计划检查 14 个固定容器的实际 Docker 内存与 CPU 限制、总内存不超过
+3584 MiB、CPU 不超过 1.95、`MemAvailable` 至少 1 GiB，以及至少 2 GiB 可用磁盘。
+
+Apply 会先记录更新意图并读取实时 Exchange readiness，然后仅对固定容器 ID 调用 Docker
+单容器 `update --memory N --memory-swap N` API。不会运行 Compose `up`，不会重建或暂停目标，
+不会暂停 Teams ingress、drain Navigator，也不会快照或恢复 SQLite。随后核验同一容器 ID 和镜像、
+目标健康状态、其余所有 HostConfig 字段、14 个容器的实际资源上限、实时 Exchange readiness，
+以及 ingress 和 Navigator 状态未变化，再提升现有 selector。Docker 不可变的
+`com.docker.compose.config-hash` 标签在原位更新后仍保留旧 hash；计划会记录 active、candidate
+和 live hash。后续计划只在现有 selector 关联的 journal 链证明同一容器已执行前一次内存更新时，
+才接受该旧标签。不确定或部分更新会进入 `RECOVERY_REQUIRED`；工具不会自动降低内存上限。
 
 ### Private provider credential setup / 私有 Provider 凭据配置
 
