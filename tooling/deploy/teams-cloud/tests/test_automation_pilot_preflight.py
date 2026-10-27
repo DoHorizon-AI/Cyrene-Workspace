@@ -387,7 +387,23 @@ def test_private_pilot_preflight_rejects_partial_actor_token_map(
         )
 
 
-def test_private_pilot_preflight_rejects_actor_outside_current_directory_projection(
+def test_revoked_member_does_not_block_remaining_pilot_preflight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A stale private token slot never grants access or makes revocation an outage."""
+
+    config, config_dir, secrets_dir, documents = _fixtures(tmp_path)
+    documents["teams-actor-subjects.json"]["subjects"] = ACTORS[:-1]
+    _patch_private_document_loader(monkeypatch, documents)
+    _patch_health_directory_stat(
+        monkeypatch, Path(config["services"]["navigator"]["volumes"][0]["source"])
+    )
+    assert preflight._validate_automation_workflow_configuration(
+        config, config_dir=config_dir, secrets_dir=secrets_dir
+    )
+
+
+def test_private_pilot_preflight_rejects_unconfigured_directory_actor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config, config_dir, secrets_dir, documents = _fixtures(tmp_path)

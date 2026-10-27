@@ -2,6 +2,10 @@
 
 This guide prepares the private configuration boundary for the read-only automation pilot. It does not activate a workflow, install a personal Bot, add a member, start a new provider process, change the current VM, or claim cloud acceptance. The default state is `CYRENE_WORKFLOWS_ENABLED=false`, `CYRENE_TEAMS_PERSONAL_CHAT_ENABLED=false`, and `personal_chat_enabled=false` with an empty personal-chat actor allowlist.
 
+The initial bundle reserves five separate actor credential slots. The current Directory projection may contain fewer actors after a member is revoked; that stale credential slot does not grant access and does not block the other members from restarting. The owner remains required by this owner-managed deployment profile. Live requests and notification sends must recheck Directory membership.
+
+初始配置为五人分别预留凭据。成员撤权后，当前 Directory 投影可以少于五人；保留的旧凭据槽位不授予访问权，也不会阻止其他成员重启服务。本部署配置仍要求保留 owner。实际请求及通知发送必须重新校验 Directory 成员资格。
+
 本指南准备只读自动化试点的私有配置边界，不会启用 workflow、安装个人 Bot、添加成员、启动新的 Provider 进程、修改当前 VM 或声称云端验收通过。默认状态为 `CYRENE_WORKFLOWS_ENABLED=false`、`CYRENE_TEAMS_PERSONAL_CHAT_ENABLED=false`，并将 `personal_chat_enabled=false`、个人聊天 actor allowlist 留空。
 
 The repository provides the opt-in `compose.automation-workflows.yaml` overlay, schemas for the two host-private reference maps, and a placeholder-only Work-principal merge fragment. The root-owned `compose.automation-providers.yaml` overlay is separate and adds the Microsoft Graph and Azure DevOps provider processes. Keep both overlays out of the active selection until the private profiles, current ACL checks, package/image locks, and a passing capacity gate are present. Workspace preflight validates the optional actor/bridge secret boundary and fixed provider topology. This is configuration validation; it does not establish OAuth, source access, live delivery or capacity admission.

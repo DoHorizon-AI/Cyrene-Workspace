@@ -1172,13 +1172,16 @@ def _validate_automation_workflow_configuration(
     )
     if (
         not isinstance(projection_subjects, list)
-        or len(projection_subjects) != 5
-        or set(projection_subjects) != set(actor_by_token.values())
+        or not 1 <= len(projection_subjects) <= 5
+        or any(not _uuid(subject) for subject in projection_subjects)
+        or len(set(projection_subjects)) != len(projection_subjects)
+        or owner_id not in projection_subjects
+        or not set(projection_subjects).issubset(actor_by_token.values())
         or actor_projection.get("workspaceId") != workspace_id
         or actor_projection.get("issuer") != f"https://login.microsoftonline.com/{tenant_id}/v2.0"
     ):
         raise PreflightError(
-            "automation actors must match the current five-person Directory projection"
+            "the current Directory projection must remain within configured pilot actors"
         )
 
     principal_document = _private_runtime_json(
