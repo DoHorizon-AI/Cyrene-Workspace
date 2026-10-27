@@ -155,7 +155,12 @@ def test_runtime_observation_module_is_in_the_release_tools_closure() -> None:
         "config/" + path.name for path in (source_root / "config").iterdir() if path.is_file()
     }
     required_config_files = {
-        path for path in release_bundle.REQUIRED_DEPLOYMENT_TOOL_FILES if path.startswith("config/")
+        path
+        for path in (
+            release_bundle.REQUIRED_DEPLOYMENT_TOOL_FILES
+            | release_bundle.AUTOMATION_DEPLOYMENT_TOOL_FILES
+        )
+        if path.startswith("config/")
     }
     assert config_files <= required_config_files
 

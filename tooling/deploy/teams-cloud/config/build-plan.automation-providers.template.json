@@ -1,0 +1,45 @@
+{
+  "schemaVersion": "cyrene-teams-cloud-build-v1",
+  "taskId": "automation-pilot-providers",
+  "targetPlatform": "linux/arm64",
+  "sources": {
+    "workspace": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Workspace.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Workspace"
+    },
+    "plugins": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Plugins-Official"
+    }
+  },
+  "images": [
+    {
+      "service": "microsoft-graph",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.microsoft-graph",
+      "context": ".",
+      "sourceRepos": [
+        "workspace",
+        "plugins"
+      ],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    },
+    {
+      "service": "azure-devops-observation",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.azure-devops-observation",
+      "context": ".",
+      "sourceRepos": [
+        "workspace",
+        "plugins"
+      ],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    }
+  ]
+}

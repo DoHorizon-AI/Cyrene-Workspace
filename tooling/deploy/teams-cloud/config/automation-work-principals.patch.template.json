@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "privateWriterPrincipals": [
+    {
+      "token_env": "CYRENE_WORK_ACTOR_TOKEN_01",
+      "actor_id": "REPLACE_WITH_OWNER_AAD_OBJECT_ID",
+      "workspace_ids": ["REPLACE_WITH_AUTHORIZED_WORKSPACE_ID"],
+      "organization_id": "REPLACE_WITH_AUTHORIZED_ORGANIZATION_ID",
+      "can_takeover": true,
+      "actor_private_scope": true,
+      "can_write_harness": true,
+      "can_publish_credential_health": false,
+      "can_bind_teams_private_conversations": false
+    },
+    {
+      "token_env": "CYRENE_WORK_ACTOR_TOKEN_02",
+      "actor_id": "REPLACE_WITH_APPROVED_PILOT_ACTOR_01_AAD_OBJECT_ID",
+      "workspace_ids": ["REPLACE_WITH_AUTHORIZED_WORKSPACE_ID"],
+      "organization_id": "REPLACE_WITH_AUTHORIZED_ORGANIZATION_ID",
+      "can_takeover": true,
+      "actor_private_scope": true,
+      "can_write_harness": true,
+      "can_publish_credential_health": false,
+      "can_bind_teams_private_conversations": false
+    },
+    {
+      "token_env": "CYRENE_WORK_ACTOR_TOKEN_03",
+      "actor_id": "REPLACE_WITH_APPROVED_PILOT_ACTOR_02_AAD_OBJECT_ID",
+      "workspace_ids": ["REPLACE_WITH_AUTHORIZED_WORKSPACE_ID"],
+      "organization_id": "REPLACE_WITH_AUTHORIZED_ORGANIZATION_ID",
+      "can_takeover": true,
+      "actor_private_scope": true,
+      "can_write_harness": true,
+      "can_publish_credential_health": false,
+      "can_bind_teams_private_conversations": false
+    },
+    {
+      "token_env": "CYRENE_WORK_ACTOR_TOKEN_04",
+      "actor_id": "REPLACE_WITH_APPROVED_PILOT_ACTOR_03_AAD_OBJECT_ID",
+      "workspace_ids": ["REPLACE_WITH_AUTHORIZED_WORKSPACE_ID"],
+      "organization_id": "REPLACE_WITH_AUTHORIZED_ORGANIZATION_ID",
+      "can_takeover": true,
+      "actor_private_scope": true,
+      "can_write_harness": true,
+      "can_publish_credential_health": false,
+      "can_bind_teams_private_conversations": false
+    },
+    {
+      "token_env": "CYRENE_WORK_ACTOR_TOKEN_05",
+      "actor_id": "REPLACE_WITH_APPROVED_PILOT_ACTOR_04_AAD_OBJECT_ID",
+      "workspace_ids": ["REPLACE_WITH_AUTHORIZED_WORKSPACE_ID"],
+      "organization_id": "REPLACE_WITH_AUTHORIZED_ORGANIZATION_ID",
+      "can_takeover": true,
+      "actor_private_scope": true,
+      "can_write_harness": true,
+      "can_publish_credential_health": false,
+      "can_bind_teams_private_conversations": false
+    }
+  ],
+  "privateTeamsBridgePrincipal": {
+    "token_env": "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
+    "actor_id": "teams-private-bridge",
+    "workspace_ids": ["REPLACE_WITH_AUTHORIZED_WORKSPACE_ID"],
+    "organization_id": "REPLACE_WITH_AUTHORIZED_ORGANIZATION_ID",
+    "can_takeover": false,
+    "actor_private_scope": false,
+    "can_write_harness": false,
+    "can_publish_credential_health": false,
+    "can_bind_teams_private_conversations": true
+  }
+}

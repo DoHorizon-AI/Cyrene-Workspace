@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-work-actor-token-map-v1.schema.json",
+  "title": "Private actor-scoped Work credential references",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "workspaceId", "actors"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "workspaceId": {"type": "string", "format": "uuid"},
+    "actors": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actorAadObjectId", "tokenEnv"],
+        "properties": {
+          "actorAadObjectId": {"type": "string", "format": "uuid"},
+          "tokenEnv": {
+            "enum": [
+              "CYRENE_WORK_ACTOR_TOKEN_01",
+              "CYRENE_WORK_ACTOR_TOKEN_02",
+              "CYRENE_WORK_ACTOR_TOKEN_03",
+              "CYRENE_WORK_ACTOR_TOKEN_04",
+              "CYRENE_WORK_ACTOR_TOKEN_05"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

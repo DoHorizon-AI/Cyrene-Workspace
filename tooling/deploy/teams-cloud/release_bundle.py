@@ -140,6 +140,24 @@ REQUIRED_DEPLOYMENT_TOOL_FILES = frozenset(
         "config/teams-credential-notifications.template.json",
     }
 )
+# Optional feature closure keeps already-published rollback bundles verifiable.
+# 中文：可选功能按整组校验，保留已发布旧版本的回退验证能力。
+AUTOMATION_DEPLOYMENT_TOOL_FILES = frozenset(
+    {
+        "compose.automation-workflows.yaml",
+        "compose.automation-providers.yaml",
+        "Dockerfile.microsoft-graph",
+        "Dockerfile.azure-devops-observation",
+        "pilot_subjects.py",
+        "maintainer_subjects.py",
+        "export_automation_observations.py",
+        "config/automation-source-bindings.schema.json",
+        "config/automation-work-principals.patch.schema.json",
+        "config/automation-work-principals.patch.template.json",
+        "config/build-plan.automation-providers.template.json",
+        "config/work-actor-token-map.schema.json",
+    }
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 RELEASE_ID_RE = re.compile(r"^teams-arm64-[0-9a-f]{12}-[0-9a-f]{12}$")
@@ -1705,6 +1723,15 @@ def verify_release_bundle(bundle_root: Path) -> dict[str, Any]:
     required_tool_members = {
         f"{tools_prefix}/{relative_path}" for relative_path in REQUIRED_DEPLOYMENT_TOOL_FILES
     }
+    automation_markers = {
+        f"{tools_prefix}/{name}"
+        for name in AUTOMATION_DEPLOYMENT_TOOL_FILES
+        if name != "maintainer_subjects.py"
+    }
+    if tools_members & automation_markers:
+        required_tool_members.update(
+            f"{tools_prefix}/{name}" for name in AUTOMATION_DEPLOYMENT_TOOL_FILES
+        )
     missing_tool_members = required_tool_members - tools_members
     if missing_tool_members:
         raise ReleaseBundleError(

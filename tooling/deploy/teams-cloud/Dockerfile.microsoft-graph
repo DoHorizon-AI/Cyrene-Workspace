@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+
+ARG PYTHON_BASE_IMAGE
+FROM ${PYTHON_BASE_IMAGE} AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/src:/app/Cyrene-Plugins-Official/sdk/python/cyrene_account_center_contracts/src:/app/Cyrene-Plugins-Official/plugins/providers/microsoft-graph/src
+RUN groupadd --system --gid 10001 graphprovider \
+    && useradd --system --uid 10001 --gid graphprovider --no-create-home --shell /usr/sbin/nologin graphprovider \
+    && install -d --owner=10001 --group=10001 --mode=0750 /app
+
+WORKDIR /app/Cyrene-Plugins-Official
+COPY Cyrene-Plugins-Official/plugins/providers/microsoft-graph/docker-requirements.lock /tmp/provider-requirements.lock
+RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/provider-requirements.lock
+COPY Cyrene-Plugins-Official/sdk/python/cyrene_plugin_runtime/src ./sdk/python/cyrene_plugin_runtime/src
+COPY Cyrene-Plugins-Official/sdk/python/cyrene_account_center_contracts/src ./sdk/python/cyrene_account_center_contracts/src
+COPY Cyrene-Plugins-Official/plugins/providers/microsoft-graph/src ./plugins/providers/microsoft-graph/src
+COPY Cyrene-Plugins-Official/plugins/providers/microsoft-graph/plugin.manifest.json \
+     Cyrene-Plugins-Official/plugins/providers/microsoft-graph/configuration.schema.json \
+     ./plugins/providers/microsoft-graph/
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/plugin_grpc_health_probe.py /usr/local/bin/cyrene-plugin-grpc-health
+RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint /usr/local/bin/cyrene-plugin-grpc-health
+
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.source=https://github.com/DoHorizon-AI/Cyrene-Plugins-Official \
+      org.opencontainers.image.revision=${SOURCE_REVISION}
+USER 10001:10001
+EXPOSE 7443
+ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "python", "-m", "cyrene_plugin_runtime.server"]
+CMD ["--entrypoint", "microsoft_graph_provider.plugin:MicrosoftGraphProvider", "--capability", "tool.provider.v1", "--interface-version", "1", "--listen", "0.0.0.0:7443", "--tls-cert-file", "/run/secrets/microsoft-graph-server-cert", "--tls-key-file", "/run/secrets/microsoft-graph-server-key", "--tls-client-ca-file", "/run/secrets/microsoft-graph-client-ca"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
+    CMD python /usr/local/bin/cyrene-plugin-grpc-health --target microsoft-graph:7443 \
+      --plugin-id cyrene.providers.microsoft-graph \
+      --server-ca /run/secrets/exchange-plugin-root-ca \
+      --client-cert /run/secrets/microsoft-graph-health-client-cert \
+      --client-key /run/secrets/microsoft-graph-health-client-key

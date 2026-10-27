@@ -17,7 +17,7 @@
         "properties": {
           "bindingId": {"type": "string", "minLength": 1},
           "capabilityId": {"const": "tool.provider.v1"},
-          "providerId": {"enum": ["github", "huggingface", "azure", "gcp", "runpod", "computer"]},
+          "providerId": {"enum": ["github", "huggingface", "azure", "gcp", "runpod", "computer", "microsoft_graph", "azure_devops"]},
           "connectionRef": {"type": "string", "format": "uuid"},
           "profileRef": {"type": "string", "minLength": 1},
           "tools": {
