@@ -427,3 +427,13 @@ def test_install_reconciler_cli_dispatches_and_writes_private_receipt(
     assert calls == [(policy, release_id, digest)]
     assert json.loads(receipt.read_text(encoding="utf-8"))["state"] == "INSTALLED"
     assert json.loads(capsys.readouterr().out)["state"] == "INSTALLED"
+
+
+def test_default_probe_policy_path_satisfies_the_canonical_private_artifact_gate() -> None:
+    """The shipped deployment template must be consumable by the real probe loader."""
+
+    import preflight
+
+    base = Path(__file__).resolve().parents[1]
+    policy = json.loads((base / "config/deployment-policy.template.json").read_text())
+    assert preflight._private_artifact(Path(policy["probePolicyPath"]))

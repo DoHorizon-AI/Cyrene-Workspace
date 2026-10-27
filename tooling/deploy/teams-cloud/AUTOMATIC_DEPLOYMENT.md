@@ -46,7 +46,9 @@ publication receives a new publication identity; an immutable tag is never rewri
 
 1. Provision the host's private `deployment-policy.template.json` and
    `deployment-probe.template.json` at `/etc/cyrene/teams-cloud-deployment.json`
-   and `/etc/cyrene/teams-cloud-probe.json`. Both are root-owned mode 0600. Derive
+   and `/var/lib/cyrene-connectors-runtime/.artifacts/deployment-policies/teams-cloud-probe.json`.
+   Both are root-owned mode 0600; the probe policy directory is root-owned mode 0700,
+   and remains inside the private artifact tree required by the canonical loader. Derive
    the owner and read targets from the accepted Directory/Exchange configuration;
    never put provider credentials in the publication. Pin the probe policy SHA.
 2. Provision the approved, same-generation four-file observation profile in a
