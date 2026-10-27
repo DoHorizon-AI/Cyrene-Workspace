@@ -2054,6 +2054,9 @@ def _memory_update_container_snapshot(
     )
     memory_bytes = host_config.get("Memory") if isinstance(host_config, dict) else None
     memory_swap_bytes = host_config.get("MemorySwap") if isinstance(host_config, dict) else None
+    process_id = state.get("Pid") if isinstance(state, dict) else None
+    process_started_at = state.get("StartedAt") if isinstance(state, dict) else None
+    restart_count = row.get("RestartCount")
     if (
         not isinstance(config, dict)
         or not isinstance(labels, dict)
@@ -2073,6 +2076,14 @@ def _memory_update_container_snapshot(
         or not isinstance(state, dict)
         or state.get("Running") is not True
         or state.get("Paused") is True
+        or isinstance(process_id, bool)
+        or not isinstance(process_id, int)
+        or process_id <= 0
+        or not isinstance(process_started_at, str)
+        or not process_started_at.strip()
+        or isinstance(restart_count, bool)
+        or not isinstance(restart_count, int)
+        or restart_count < 0
         or not isinstance(state.get("Health"), dict)
         or state["Health"].get("Status") != "healthy"
     ):
@@ -2100,6 +2111,9 @@ def _memory_update_container_snapshot(
         "imageId": image_id,
         "memoryBytes": memory_bytes,
         "memorySwapBytes": memory_swap_bytes,
+        "processId": process_id,
+        "processStartedAt": process_started_at,
+        "restartCount": restart_count,
         "health": state["Health"]["Status"],
         "composeConfigHash": compose_config_hash,
         "containerConfigSha256": _sha256_bytes(_canonical_json(config)),
@@ -2202,6 +2216,8 @@ def _prior_memory_update_hash_proof(
         ):
             return {"operationId": plan["operationId"], "planSha256": plan["planSha256"]}
 
+        # A prior completed update proves selector/hash lineage only; the current plan pins
+        # the current process independently, so a restart between completed updates is valid.
         previous = plan.get("activeSelection")
         previous_document = previous.get("document") if isinstance(previous, dict) else None
         previous_digest = previous.get("sha256") if isinstance(previous, dict) else None
@@ -2430,6 +2446,9 @@ def _memory_update_plan_state(
         "configHashProofPlanSha256": (hash_proof["planSha256"] if hash_proof is not None else None),
         "containerConfigSha256": snapshot["containerConfigSha256"],
         "hostConfigSha256WithoutMemory": snapshot["hostConfigSha256WithoutMemory"],
+        "processId": snapshot["processId"],
+        "processStartedAt": snapshot["processStartedAt"],
+        "restartCount": snapshot["restartCount"],
         "activeRuntimeMemoryBytes": actual_capacity["totalMemoryBytes"],
         "activeRuntimeNanoCpus": actual_capacity["totalNanoCpus"],
     }
@@ -2455,6 +2474,9 @@ def _verify_memory_update_snapshot(
         snapshot.get("containerId") != active_service.get("containerId")
         or snapshot.get("imageRef") != active_service.get("imageRef")
         or snapshot.get("imageId") != active_service.get("imageId")
+        or snapshot.get("processId") != memory_update.get("processId")
+        or snapshot.get("processStartedAt") != memory_update.get("processStartedAt")
+        or snapshot.get("restartCount") != memory_update.get("restartCount")
         or snapshot.get("memoryBytes") != expected_memory_bytes
         or snapshot.get("memorySwapBytes") != expected_memory_bytes
         or snapshot.get("health") != "healthy"
@@ -5180,6 +5202,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             "configHashProofPlanSha256",
             "containerConfigSha256",
             "hostConfigSha256WithoutMemory",
+            "processId",
+            "processStartedAt",
+            "restartCount",
             "activeRuntimeMemoryBytes",
             "activeRuntimeNanoCpus",
         }
@@ -5195,11 +5220,17 @@ def _validate_plan(plan: dict[str, Any]) -> None:
                 for field in (
                     "activeMemoryBytes",
                     "candidateMemoryBytes",
+                    "processId",
                     "activeRuntimeMemoryBytes",
                     "activeRuntimeNanoCpus",
                 )
             )
             or memory_state["candidateMemoryBytes"] <= memory_state["activeMemoryBytes"]
+            or isinstance(memory_state.get("restartCount"), bool)
+            or not isinstance(memory_state.get("restartCount"), int)
+            or memory_state["restartCount"] < 0
+            or not isinstance(memory_state.get("processStartedAt"), str)
+            or not memory_state["processStartedAt"].strip()
             or not isinstance(active_target.get("containerId"), str)
             or FULL_CONTAINER_ID_RE.fullmatch(active_target["containerId"]) is None
             or not isinstance(active_target.get("imageId"), str)

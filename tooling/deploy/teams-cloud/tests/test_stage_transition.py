@@ -1044,6 +1044,60 @@ def test_memory_update_actual_capacity_checks_all_fourteen_live_containers(
         )
 
 
+def test_memory_update_process_identity_is_pinned_before_and_after() -> None:
+    """Require the same healthy process, start time, and restart count around update."""
+
+    active_service = {
+        "containerId": "a" * 64,
+        "imageRef": "example.invalid/teams-ingress:fixed",
+        "imageId": _image_id(7),
+    }
+    planned_state = {
+        "containerComposeConfigHash": "b" * 64,
+        "containerConfigSha256": "c" * 64,
+        "hostConfigSha256WithoutMemory": "d" * 64,
+        "processId": 1879250,
+        "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+        "restartCount": 4,
+    }
+    readback = {
+        "containerId": active_service["containerId"],
+        "imageRef": active_service["imageRef"],
+        "imageId": active_service["imageId"],
+        "composeConfigHash": planned_state["containerComposeConfigHash"],
+        "containerConfigSha256": planned_state["containerConfigSha256"],
+        "hostConfigSha256WithoutMemory": planned_state["hostConfigSha256WithoutMemory"],
+        "processId": planned_state["processId"],
+        "processStartedAt": planned_state["processStartedAt"],
+        "restartCount": planned_state["restartCount"],
+        "memoryBytes": 128 * preflight.MIB,
+        "memorySwapBytes": 128 * preflight.MIB,
+        "health": "healthy",
+    }
+
+    stage_transition._verify_memory_update_snapshot(
+        readback,
+        planned_state,
+        active_service,
+        expected_memory_bytes=128 * preflight.MIB,
+    )
+
+    for field, changed in (
+        ("processId", planned_state["processId"] + 1),
+        ("processStartedAt", "2026-10-27T18:00:01.000000000Z"),
+        ("restartCount", planned_state["restartCount"] + 1),
+    ):
+        mutated_readback = dict(readback)
+        mutated_readback[field] = changed
+        with pytest.raises(stage_transition.StageTransitionError, match="read-back differs"):
+            stage_transition._verify_memory_update_snapshot(
+                mutated_readback,
+                planned_state,
+                active_service,
+                expected_memory_bytes=128 * preflight.MIB,
+            )
+
+
 def _install_memory_update_apply_mocks(
     monkeypatch: pytest.MonkeyPatch, *, after_memory_bytes: int
 ) -> tuple[dict[str, Any], dict[str, Any], list[list[str]]]:
@@ -1067,6 +1121,9 @@ def _install_memory_update_apply_mocks(
         "configHashProofPlanSha256": None,
         "containerConfigSha256": config_hash,
         "hostConfigSha256WithoutMemory": host_hash,
+        "processId": 1879250,
+        "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+        "restartCount": 4,
     }
     active_service = {
         "containerId": container_id,
@@ -1126,6 +1183,9 @@ def _install_memory_update_apply_mocks(
             "imageId": image_id,
             "memoryBytes": 128 * preflight.MIB,
             "memorySwapBytes": 128 * preflight.MIB,
+            "processId": 1879250,
+            "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+            "restartCount": 4,
             "health": "healthy",
             "composeConfigHash": actual_hash,
             "containerConfigSha256": config_hash,
@@ -1137,6 +1197,9 @@ def _install_memory_update_apply_mocks(
             "imageId": image_id,
             "memoryBytes": after_memory_bytes,
             "memorySwapBytes": after_memory_bytes,
+            "processId": 1879250,
+            "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+            "restartCount": 4,
             "health": "healthy",
             "composeConfigHash": actual_hash,
             "containerConfigSha256": config_hash,
