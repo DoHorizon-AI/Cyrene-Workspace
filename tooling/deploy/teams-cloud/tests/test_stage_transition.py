@@ -3839,6 +3839,35 @@ def test_listener_repair_precheck_requires_complete_cloud_issued_operation_map(
         )
 
 
+def test_listener_repair_issued_digest_survives_expected_live_catalog_projection(
+    tmp_path: Path,
+) -> None:
+    """Normalize only catalog-derived fields while retaining issued profile and scope identity."""
+
+    before_path = tmp_path / "before"
+    after_path = tmp_path / "after"
+    before_path.mkdir()
+    after_path.mkdir()
+    before, _before_compose = _listener_repair_readiness_fixture(
+        before_path, include_live_catalog=False
+    )
+    after, _after_compose = _listener_repair_readiness_fixture(
+        after_path, include_live_catalog=True
+    )
+
+    assert stage_transition._exchange_issued_metadata_sha256(
+        before
+    ) == stage_transition._exchange_issued_metadata_sha256(after)
+
+    changed_scope = copy.deepcopy(after)
+    next(row for row in changed_scope["connections"] if row["providerId"] == "azure")[
+        "targetScope"
+    ]["targetRef"] = "different-issued-target"
+    assert stage_transition._exchange_issued_metadata_sha256(
+        before
+    ) != stage_transition._exchange_issued_metadata_sha256(changed_scope)
+
+
 def test_listener_repair_postcheck_requires_full_live_catalog_for_all_14_rows(
     tmp_path: Path,
 ) -> None:
