@@ -72,6 +72,19 @@ def _principals() -> list[dict[str, Any]]:
     return rows
 
 
+def test_empty_optional_source_registry_does_not_grant_any_target() -> None:
+    """Pilot identity preparation can leave Office and training explicitly disabled."""
+
+    assert preflight._validate_automation_source_bindings(
+        {"schemaVersion": 1, "targets": []},
+        actor_ids=set(ACTORS),
+        connector_bindings={"schemaVersion": 1, "bindings": []},
+        organization_id=ORGANIZATION,
+        workspace_id=WORKSPACE,
+        tenant_id=TENANT,
+    ) == []
+
+
 def _fixtures(tmp_path: Path) -> tuple[dict[str, Any], Path, Path, dict[str, Any]]:
     config_dir = tmp_path / "private-config"
     secrets_dir = tmp_path / "private-secrets"

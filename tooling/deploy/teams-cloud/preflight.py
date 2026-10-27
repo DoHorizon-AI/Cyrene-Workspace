@@ -830,7 +830,7 @@ def _validate_automation_source_bindings(
         or set(document) != {"schemaVersion", "targets"}
         or document.get("schemaVersion") != 1
         or not isinstance(document.get("targets"), list)
-        or not 1 <= len(document["targets"]) <= 100
+        or len(document["targets"]) > 100
     ):
         raise PreflightError("automation source bindings have an unsupported schema")
     seen_bindings: set[str] = set()
