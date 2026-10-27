@@ -41,18 +41,22 @@ IMAGE_UPDATE_TARGETS = frozenset(
     {
         "cloud-management-phase2",
         "exchange",
+        "github-issues",
         "huggingface",
         "navigator",
         "navigator-persistence",
     }
 )
 CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
+GITHUB_ISSUES_IMAGE_UPDATE_TARGET = "github-issues"
 HUGGINGFACE_IMAGE_UPDATE_TARGET = "huggingface"
 PERSISTENCE_IMAGE_UPDATE_TARGET = "navigator-persistence"
 CLOUD_MONITOR_PROVIDER_IDS = frozenset({"azure", "gcp", "runpod"})
 PROVIDER_LISTENER_REPAIR_TARGETS = ("huggingface", "cloud-management-phase2")
 EXCHANGE_CLOUD_RUNNER_ENV = "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
-EXCHANGE_READINESS_IMAGE_TARGETS = frozenset({"cloud-management-phase2", "exchange"})
+EXCHANGE_READINESS_IMAGE_TARGETS = frozenset(
+    {"cloud-management-phase2", "exchange", GITHUB_ISSUES_IMAGE_UPDATE_TARGET}
+)
 IMAGE_UPDATE_READINESS_TARGETS = EXCHANGE_READINESS_IMAGE_TARGETS | frozenset(
     {HUGGINGFACE_IMAGE_UPDATE_TARGET}
 )
@@ -890,6 +894,13 @@ def _verify_provider_monitor_quiescence(
         target_journal_key = "huggingfaceImageUpdate"
         required_providers = [HUGGINGFACE_IMAGE_UPDATE_TARGET]
         include_cloud_refresh = False
+    elif (
+        target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        and plan.get("phase") == "issued-connector-activation"
+    ):
+        target_journal_key = "githubIssuesImageUpdate"
+        required_providers = ["github"]
+        include_cloud_refresh = False
     elif target == CLOUD_IMAGE_UPDATE_TARGET and plan.get("phase") == "issued-connector-activation":
         target_journal_key = "cloudImageUpdate"
         expected_scope_digests = plan.get("candidatePreflight", {}).get(
@@ -905,7 +916,7 @@ def _verify_provider_monitor_quiescence(
         include_cloud_refresh = True
     else:
         raise StageTransitionError(
-            "connector monitor gate is restricted to issued HF/Cloud image updates"
+            "connector monitor gate is restricted to issued GitHub/HF/Cloud image updates"
         )
 
     readiness = journal.get("exchangeReadiness")
@@ -916,6 +927,9 @@ def _verify_provider_monitor_quiescence(
             if isinstance(receipt, dict)
             else {}
         )
+    elif target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        github_refs = receipt.get("githubConnectionRefs") if isinstance(receipt, dict) else None
+        connection_refs = {"github": github_refs}
     else:
         refs = receipt.get("connectionRefByProvider") if isinstance(receipt, dict) else None
         connection_refs = refs if isinstance(refs, dict) else {}
@@ -923,27 +937,53 @@ def _verify_provider_monitor_quiescence(
         raise StageTransitionError(
             "live Exchange readiness did not provide exactly the configured monitor connections"
         )
-    canonical_refs: dict[str, str] = {}
-    for provider, connection_ref in connection_refs.items():
-        try:
-            canonical = str(uuid.UUID(connection_ref))
-        except (ValueError, TypeError, AttributeError) as error:
+    canonical_refs: dict[str, list[str]] = {}
+    for provider, provider_refs in connection_refs.items():
+        refs = provider_refs if isinstance(provider_refs, list) else [provider_refs]
+        if (
+            not refs
+            or (provider == "github" and len(refs) != 10)
+            or any(not isinstance(connection_ref, str) for connection_ref in refs)
+            or len(set(refs)) != len(refs)
+        ):
             raise StageTransitionError(
-                f"live Exchange readiness did not provide a canonical {provider} connection reference"
-            ) from error
-        if canonical != connection_ref:
-            raise StageTransitionError(f"live {provider} connection reference is not canonical")
-        canonical_refs[provider] = canonical
+                f"live Exchange readiness did not provide the exact {provider} connection refs"
+            )
+        canonical_provider_refs: list[str] = []
+        for connection_ref in refs:
+            try:
+                canonical = str(uuid.UUID(connection_ref))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise StageTransitionError(
+                    f"live Exchange readiness did not provide a canonical {provider} connection reference"
+                ) from error
+            if canonical != connection_ref:
+                raise StageTransitionError(f"live {provider} connection reference is not canonical")
+            canonical_provider_refs.append(canonical)
+        canonical_refs[provider] = sorted(canonical_provider_refs)
 
     bindings = _candidate_config_json(candidate_compose, "connector-bindings").get("bindings")
     rows = bindings if isinstance(bindings, list) else []
-    for provider, connection_ref in canonical_refs.items():
+    for provider, provider_refs in canonical_refs.items():
         selected = [
             row for row in rows if isinstance(row, dict) and row.get("providerId") == provider
         ]
-        if len(selected) != 1 or selected[0].get("connectionRef") != connection_ref:
+        selected_refs = [
+            row.get("connectionRef")
+            for row in selected
+            if isinstance(row.get("connectionRef"), str)
+        ]
+        if (
+            len(selected) != len(provider_refs)
+            or len(selected_refs) != len(selected)
+            or set(selected_refs) != set(provider_refs)
+        ):
+            if len(provider_refs) == 1:
+                raise StageTransitionError(
+                    f"live {provider} connection does not match its single frozen candidate binding"
+                )
             raise StageTransitionError(
-                f"live {provider} connection does not match its single frozen candidate binding"
+                f"live {provider} connection refs do not match the frozen candidate bindings"
             )
 
     exchange = plan.get("activeServices", {}).get("exchange")
@@ -965,9 +1005,11 @@ def _verify_provider_monitor_quiescence(
     required_window_seconds = timeout_seconds + 60
     python = str(Path(EXCHANGE_READINESS_EXECUTABLE).with_name("python"))
     selected_connections = [
-        {"providerId": provider, "connectionRef": canonical_refs[provider]}
+        {"providerId": provider, "connectionRef": connection_ref}
         for provider in required_providers
+        for connection_ref in canonical_refs[provider]
     ]
+    expected_monitor_count = sum(len(canonical_refs[provider]) for provider in required_providers)
     selected_connections_json = json.dumps(
         selected_connections, sort_keys=True, separators=(",", ":")
     )
@@ -989,7 +1031,7 @@ def _verify_provider_monitor_quiescence(
         " db.execute('PRAGMA query_only=ON')\n"
         " db.execute('BEGIN')\n"
         " if not isinstance(selected,list) or not selected: raise RuntimeError('selected monitor connections are malformed')\n"
-        " stored_provider={'huggingface':'hf','azure':'azure','gcp':'gcp','runpod':'runpod'}\n"
+        " stored_provider={'github':'github','huggingface':'hf','azure':'azure','gcp':'gcp','runpod':'runpod'}\n"
         " active_leases=0\n"
         " inflight_calls=0\n"
         " next_check_remaining=[]\n"
@@ -1019,7 +1061,7 @@ def _verify_provider_monitor_quiescence(
         " cloud_refresh=0\n"
         " if cloud_refresh_required:\n"
         "  cloud_refresh=int(db.execute(\"SELECT COUNT(*) FROM cloud_refresh_outbox WHERE state IN ('QUEUED','RUNNING')\").fetchone()[0])\n"
-        " report={'selectedProviderCount':len(selected),'monitorStateCount':monitor_count,'activeMonitorLeaseCount':active_leases,'inFlightConnectorCallCount':inflight_calls,'nextCheckSecondsRemaining':min(next_check_remaining),'requiredWindowSeconds':window,'nextCheckWindowSatisfied':all(value>window for value in next_check_remaining),'cloudRefreshNonterminalCount':cloud_refresh}\n"
+        " report={'selectedProviderCount':len({item['providerId'] for item in selected}),'monitorStateCount':monitor_count,'activeMonitorLeaseCount':active_leases,'inFlightConnectorCallCount':inflight_calls,'nextCheckSecondsRemaining':min(next_check_remaining),'requiredWindowSeconds':window,'nextCheckWindowSatisfied':all(value>window for value in next_check_remaining),'cloudRefreshNonterminalCount':cloud_refresh}\n"
         " print(json.dumps(report,sort_keys=True,separators=(',',':')))\n"
         "finally:\n"
         " db.close()\n"
@@ -1081,7 +1123,7 @@ def _verify_provider_monitor_quiescence(
             )
         )
         or report.get("selectedProviderCount") != len(required_providers)
-        or report.get("monitorStateCount") != len(required_providers)
+        or report.get("monitorStateCount") != expected_monitor_count
         or report.get("activeMonitorLeaseCount", -1) < 0
         or report.get("inFlightConnectorCallCount", -1) < 0
         or report.get("requiredWindowSeconds") != required_window_seconds
@@ -1096,16 +1138,15 @@ def _verify_provider_monitor_quiescence(
         and report["nextCheckWindowSatisfied"] is True
         and report["cloudRefreshNonterminalCount"] == 0
     )
+    reference_hashes = {
+        provider: [_sha256_bytes(connection_ref.encode("utf-8")) for connection_ref in refs]
+        if len(refs) > 1
+        else _sha256_bytes(refs[0].encode("utf-8"))
+        for provider, refs in sorted(canonical_refs.items())
+    }
     evidence = {
         "verified": verified,
-        "connectionRefsSha256": _sha256_bytes(
-            _canonical_json(
-                {
-                    provider: _sha256_bytes(connection_ref.encode("utf-8"))
-                    for provider, connection_ref in sorted(canonical_refs.items())
-                }
-            )
-        ),
+        "connectionRefsSha256": _sha256_bytes(_canonical_json(reference_hashes)),
         "activeMonitorLeaseCount": report["activeMonitorLeaseCount"],
         "inFlightConnectorCallCount": report["inFlightConnectorCallCount"],
         "nextCheckSecondsRemaining": report["nextCheckSecondsRemaining"],
@@ -2504,7 +2545,11 @@ def _validate_image_update_topology(
 
     if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
         raise StageTransitionError(
-            "image update target must be Cloud Management, Exchange, Hugging Face, Navigator, or Persistence"
+            "image update target must be Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
+        )
+    if target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+        raise StageTransitionError(
+            "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
         )
     if target == HUGGINGFACE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
         raise StageTransitionError(
@@ -2515,12 +2560,15 @@ def _validate_image_update_topology(
             "Cloud Management image updates require provider-bootstrap or issued-connector-activation"
         )
     if (
-        target == CLOUD_IMAGE_UPDATE_TARGET
+        target in {CLOUD_IMAGE_UPDATE_TARGET, GITHUB_ISSUES_IMAGE_UPDATE_TARGET}
         and phase == "issued-connector-activation"
         and (set(old_services) != RUNTIME_SERVICE_SET or set(new_services) != RUNTIME_SERVICE_SET)
     ):
+        label = (
+            "GitHub Issues" if target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET else "Cloud Management"
+        )
         raise StageTransitionError(
-            "issued Cloud Management image updates require the exact 14-service runtime topology"
+            f"issued {label} image updates require the exact 14-service runtime topology"
         )
     if target == PERSISTENCE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
         raise StageTransitionError(
@@ -2838,6 +2886,14 @@ def _validate_image_update_selection_contract(
         )
     if is_memory_update and phase != "issued-connector-activation":
         raise StageTransitionError("memory updates require issued-connector-activation")
+    if (
+        not is_memory_update
+        and target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        and phase != "issued-connector-activation"
+    ):
+        raise StageTransitionError(
+            "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
+        )
     if (
         not is_memory_update
         and target == HUGGINGFACE_IMAGE_UPDATE_TARGET
@@ -4507,7 +4563,7 @@ def create_plan(
         not isinstance(image_update_target, str) or image_update_target not in IMAGE_UPDATE_TARGETS
     ):
         raise StageTransitionError(
-            "image update target must be Cloud Management, Exchange, Hugging Face, Navigator, or Persistence"
+            "image update target must be Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
         )
     if image_update_target is not None and memory_update_target is not None:
         raise StageTransitionError("image and memory update modes are mutually exclusive")
@@ -4524,6 +4580,13 @@ def create_plan(
     ):
         raise StageTransitionError(
             "Hugging Face image updates require issued-connector-activation and the existing connector runtime"
+        )
+    if (
+        image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        and phase != "issued-connector-activation"
+    ):
+        raise StageTransitionError(
+            "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
         )
     if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and phase not in PHASES:
         raise StageTransitionError(
@@ -5124,6 +5187,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     ):
         raise StageTransitionError(
             "Hugging Face image updates require issued-connector-activation and the existing connector runtime"
+        )
+    if (
+        image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        and plan.get("phase") != "issued-connector-activation"
+    ):
+        raise StageTransitionError(
+            "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
         )
     if (
         image_update_target == PERSISTENCE_IMAGE_UPDATE_TARGET
@@ -6011,6 +6081,158 @@ def _verify_listener_repair_connector_projection(
         )
 
 
+def _github_image_update_connection_refs(
+    *,
+    snapshot: dict[str, Any],
+    compose: dict[str, Any],
+    frozen_bindings: list[dict[str, Any]],
+) -> list[str]:
+    """Join all ten live GitHub connections to the frozen issued binding and repository scope."""
+
+    bootstrap = _candidate_config_json(compose, "connector-bootstrap")
+    github_bootstrap = bootstrap.get("github")
+    expected_repositories = (
+        github_bootstrap.get("repositories") if isinstance(github_bootstrap, dict) else None
+    )
+    if (
+        not isinstance(github_bootstrap, dict)
+        or github_bootstrap.get("expectedAccessMode") != "workspace_operator"
+        or not isinstance(expected_repositories, list)
+        or len(expected_repositories) != 10
+    ):
+        raise StageTransitionError(
+            "GitHub image update requires the exact ten-repository workspace_operator bootstrap scope"
+        )
+
+    expected_by_id: dict[str, tuple[str, str]] = {}
+    for row in expected_repositories:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"repositoryId", "owner", "name"}
+            or any(not isinstance(row.get(field), str) or not row[field] for field in row)
+        ):
+            raise StageTransitionError("GitHub bootstrap repository scope is malformed")
+        repository_id = row["repositoryId"]
+        if repository_id in expected_by_id:
+            raise StageTransitionError("GitHub bootstrap repository scope has duplicate IDs")
+        expected_by_id[repository_id] = (row["owner"], row["name"])
+
+    profiles = [
+        row
+        for row in snapshot.get("profiles", [])
+        if isinstance(row, dict) and row.get("providerId") == "github"
+    ]
+    connections = [
+        row
+        for row in snapshot.get("connections", [])
+        if isinstance(row, dict) and row.get("providerId") == "github"
+    ]
+    bindings = [
+        row
+        for row in frozen_bindings
+        if isinstance(row, dict) and row.get("providerId") == "github"
+    ]
+    if len(profiles) != 1 or len(connections) != 10 or len(bindings) != 10:
+        raise StageTransitionError(
+            "GitHub image update requires one live profile and exactly ten issued connections/bindings"
+        )
+    profile = profiles[0]
+    profile_ref = profile.get("profileRef")
+    profile_scope = profile.get("targetScope")
+    live_repositories = (
+        profile_scope.get("repositories") if isinstance(profile_scope, dict) else None
+    )
+    if (
+        not isinstance(profile_ref, str)
+        or not profile_ref
+        or profile.get("accessMode") != github_bootstrap["expectedAccessMode"]
+        or not isinstance(live_repositories, list)
+        or len(live_repositories) != 10
+    ):
+        raise StageTransitionError("live GitHub profile scope/access mode is malformed")
+
+    live_by_id: dict[str, tuple[str, str]] = {}
+    for row in live_repositories:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"repositoryId", "owner", "name"}
+            or any(not isinstance(row.get(field), str) or not row[field] for field in row)
+        ):
+            raise StageTransitionError("live GitHub profile repository scope is malformed")
+        repository_id = row["repositoryId"]
+        if repository_id in live_by_id:
+            raise StageTransitionError("live GitHub profile repository scope has duplicate IDs")
+        live_by_id[repository_id] = (row["owner"], row["name"])
+    if live_by_id != expected_by_id:
+        raise StageTransitionError(
+            "live GitHub profile repository scope differs from the frozen bootstrap config"
+        )
+
+    binding_refs: list[str] = []
+    for row in bindings:
+        connection_ref = row.get("connectionRef")
+        try:
+            canonical_ref = str(uuid.UUID(connection_ref))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise StageTransitionError(
+                "frozen GitHub binding has a non-canonical connection reference"
+            ) from error
+        if (
+            canonical_ref != connection_ref
+            or row.get("profileRef") != profile_ref
+            or canonical_ref in binding_refs
+        ):
+            raise StageTransitionError(
+                "frozen GitHub binding refs/profile do not match the live issued profile"
+            )
+        binding_refs.append(canonical_ref)
+
+    connection_refs: list[str] = []
+    scoped_repository_ids: list[str] = []
+    for row in connections:
+        connection_ref = row.get("connectionRef")
+        target_scope = row.get("targetScope")
+        try:
+            canonical_ref = str(uuid.UUID(connection_ref))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise StageTransitionError(
+                "live GitHub connection has a non-canonical connection reference"
+            ) from error
+        if (
+            canonical_ref != connection_ref
+            or canonical_ref in connection_refs
+            or row.get("profileRef") != profile_ref
+            or row.get("accessMode") != github_bootstrap["expectedAccessMode"]
+            or not isinstance(target_scope, dict)
+            or set(target_scope) != {"repositoryId", "repository"}
+        ):
+            raise StageTransitionError(
+                "live GitHub connection identity/access mode is malformed or duplicated"
+            )
+        repository_id = target_scope.get("repositoryId")
+        repository = target_scope.get("repository")
+        expected_repository = expected_by_id.get(repository_id)
+        if (
+            not isinstance(repository_id, str)
+            or expected_repository is None
+            or repository != f"{expected_repository[0]}/{expected_repository[1]}"
+            or repository_id in scoped_repository_ids
+        ):
+            raise StageTransitionError(
+                "live GitHub connection target differs from the frozen repository scope"
+            )
+        connection_refs.append(canonical_ref)
+        scoped_repository_ids.append(repository_id)
+
+    if set(connection_refs) != set(binding_refs) or set(scoped_repository_ids) != set(
+        expected_by_id
+    ):
+        raise StageTransitionError(
+            "live GitHub connection refs/scopes do not match the ten frozen issued bindings"
+        )
+    return sorted(connection_refs)
+
+
 def _verify_exchange_readiness_snapshot(
     *,
     snapshot: Any,
@@ -6360,6 +6582,16 @@ def _verify_exchange_readiness_snapshot(
                     f"live Exchange cloud profile scope/read-only state differs for {provider_id}"
                 )
 
+    github_connection_refs = (
+        _github_image_update_connection_refs(
+            snapshot=snapshot,
+            compose=compose,
+            frozen_bindings=candidate_bindings,
+        )
+        if image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        and phase == "issued-connector-activation"
+        else None
+    )
     actor_digest = _sha256_bytes(_canonical_json(actor))
     bindings_digest = _sha256_bytes(
         _canonical_json(_sorted_exchange_bindings(snapshot["bindings"]))
@@ -6395,6 +6627,11 @@ def _verify_exchange_readiness_snapshot(
             }
             if image_update_target == CLOUD_IMAGE_UPDATE_TARGET
             and phase == "issued-connector-activation"
+            else {}
+        ),
+        **(
+            {"githubConnectionRefs": github_connection_refs}
+            if github_connection_refs is not None
             else {}
         ),
         **(
@@ -6540,6 +6777,13 @@ def _image_update_exchange_readiness_checkpoint(
         )
         connection_refs = {HUGGINGFACE_IMAGE_UPDATE_TARGET: connection_ref}
         expected_monitor_providers = [HUGGINGFACE_IMAGE_UPDATE_TARGET]
+    elif (
+        target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        and plan.get("phase") == "issued-connector-activation"
+    ):
+        refs = receipt.get("githubConnectionRefs") if isinstance(receipt, dict) else None
+        connection_refs = {"github": refs}
+        expected_monitor_providers = ["github"]
     elif target == CLOUD_IMAGE_UPDATE_TARGET and plan.get("phase") == "issued-connector-activation":
         expected_monitor_providers = sorted(
             set(expected_scope_digests) & CLOUD_MONITOR_PROVIDER_IDS
@@ -6559,17 +6803,30 @@ def _image_update_exchange_readiness_checkpoint(
         raise StageTransitionError(
             "Exchange readiness lacks the exact selected provider connections"
         )
-    canonical_refs: dict[str, str] = {}
-    for provider, connection_ref in connection_refs.items():
-        try:
-            canonical_connection_ref = str(uuid.UUID(connection_ref))
-        except (ValueError, TypeError, AttributeError) as error:
+    canonical_refs: dict[str, list[str]] = {}
+    for provider, provider_refs in connection_refs.items():
+        refs = provider_refs if isinstance(provider_refs, list) else [provider_refs]
+        if (
+            not refs
+            or (provider == "github" and len(refs) != 10)
+            or any(not isinstance(connection_ref, str) for connection_ref in refs)
+            or len(set(refs)) != len(refs)
+        ):
             raise StageTransitionError(
-                f"live Exchange readiness lacks the exact selected {provider} connection"
-            ) from error
-        if canonical_connection_ref != connection_ref:
-            raise StageTransitionError(f"live {provider} connection reference is not canonical")
-        canonical_refs[provider] = canonical_connection_ref
+                f"live Exchange readiness lacks the exact selected {provider} connection refs"
+            )
+        canonical_provider_refs: list[str] = []
+        for connection_ref in refs:
+            try:
+                canonical_connection_ref = str(uuid.UUID(connection_ref))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise StageTransitionError(
+                    f"live Exchange readiness lacks the exact selected {provider} connection"
+                ) from error
+            if canonical_connection_ref != connection_ref:
+                raise StageTransitionError(f"live {provider} connection reference is not canonical")
+            canonical_provider_refs.append(canonical_connection_ref)
+        canonical_refs[provider] = sorted(canonical_provider_refs)
     if (
         not isinstance(exchange, dict)
         or not isinstance(receipt, dict)
@@ -6586,6 +6843,12 @@ def _image_update_exchange_readiness_checkpoint(
         raise StageTransitionError(
             "connector image update requires live readiness for the exact 14 Exchange bindings"
         )
+    connection_ref_hashes = {
+        provider: [_sha256_bytes(connection_ref.encode("utf-8")) for connection_ref in refs]
+        if len(refs) > 1
+        else _sha256_bytes(refs[0].encode("utf-8"))
+        for provider, refs in sorted(canonical_refs.items())
+    }
     return {
         "verified": True,
         "snapshotSha256": receipt["snapshotSha256"],
@@ -6593,14 +6856,7 @@ def _image_update_exchange_readiness_checkpoint(
         "connectionCount": receipt["connectionCount"],
         "exchangeContainerId": receipt["exchangeContainerId"],
         "exchangeImageId": receipt["exchangeImageId"],
-        "connectionRefsSha256": _sha256_bytes(
-            _canonical_json(
-                {
-                    provider: _sha256_bytes(connection_ref.encode("utf-8"))
-                    for provider, connection_ref in sorted(canonical_refs.items())
-                }
-            )
-        ),
+        "connectionRefsSha256": _sha256_bytes(_canonical_json(connection_ref_hashes)),
     }
 
 
@@ -6677,6 +6933,13 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         },
         "cloudImageUpdate": {
             "required": plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET
+            and plan.get("phase") == "issued-connector-activation",
+            "beforeReadiness": None,
+            "monitorQuiescence": None,
+            "afterReadiness": None,
+        },
+        "githubIssuesImageUpdate": {
+            "required": plan.get("imageUpdateTarget") == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
             and plan.get("phase") == "issued-connector-activation",
             "beforeReadiness": None,
             "monitorQuiescence": None,
@@ -6952,6 +7215,50 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if cloud_monitor_status == "BLOCKED"
         else "PENDING"
     )
+    github_issues_update = journal.get("githubIssuesImageUpdate", {})
+    github_issues_update_required = (
+        github_issues_update.get("required") is True
+        if isinstance(github_issues_update, dict)
+        else False
+    )
+    github_issues_before = (
+        github_issues_update.get("beforeReadiness")
+        if isinstance(github_issues_update, dict)
+        else None
+    )
+    github_issues_monitor = (
+        github_issues_update.get("monitorQuiescence")
+        if isinstance(github_issues_update, dict)
+        else None
+    )
+    github_issues_after = (
+        github_issues_update.get("afterReadiness")
+        if isinstance(github_issues_update, dict)
+        else None
+    )
+    github_issues_monitor_status = (
+        "NOT_REQUIRED"
+        if not github_issues_update_required
+        else "VERIFIED"
+        if isinstance(github_issues_monitor, dict) and github_issues_monitor.get("verified") is True
+        else "BLOCKED"
+        if isinstance(github_issues_monitor, dict)
+        and github_issues_monitor.get("verified") is False
+        else "PENDING"
+    )
+    github_issues_update_status = (
+        "NOT_REQUIRED"
+        if not github_issues_update_required
+        else "VERIFIED"
+        if isinstance(github_issues_before, dict)
+        and github_issues_before.get("verified") is True
+        and github_issues_monitor_status == "VERIFIED"
+        and isinstance(github_issues_after, dict)
+        and github_issues_after.get("verified") is True
+        else "BLOCKED"
+        if github_issues_monitor_status == "BLOCKED"
+        else "PENDING"
+    )
     cloud_idle = journal.get("cloudRunnerIdle", {})
     cloud_idle_required = (
         cloud_idle.get("required") is True if isinstance(cloud_idle, dict) else False
@@ -7067,6 +7374,24 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
             if not cloud_update_required
             else "LIVE_VERIFIED"
             if isinstance(cloud_after, dict) and cloud_after.get("verified") is True
+            else "PENDING"
+        ),
+        "githubIssuesImageUpdateRequired": github_issues_update_required,
+        "githubIssuesImageUpdateStatus": github_issues_update_status,
+        "githubIssuesMonitorQuiescenceStatus": github_issues_monitor_status,
+        "githubIssuesBeforeReadinessStatus": (
+            "NOT_REQUIRED"
+            if not github_issues_update_required
+            else "LIVE_VERIFIED"
+            if isinstance(github_issues_before, dict)
+            and github_issues_before.get("verified") is True
+            else "PENDING"
+        ),
+        "githubIssuesAfterReadinessStatus": (
+            "NOT_REQUIRED"
+            if not github_issues_update_required
+            else "LIVE_VERIFIED"
+            if isinstance(github_issues_after, dict) and github_issues_after.get("verified") is True
             else "PENDING"
         ),
         "exchangeReadinessRequired": exchange_readiness_required,
@@ -7364,6 +7689,16 @@ def _compose_target_update(
     inputs = plan["candidateInputs"] if use_candidate else plan["activeInputs"]
     files = [Path(row["path"]) for row in inputs["composeFiles"]]
     env_files = [Path(row["path"]) for row in inputs["envFiles"]]
+    if service == GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        # The V2 journal owns all gates; reuse the existing allowlisted GitHub Compose primitive.
+        return runtime_update._compose_up(
+            docker_prefix=docker_prefix,
+            project=plan["project"],
+            compose_files=files,
+            env_files=env_files,
+            service=service,
+            timeout_seconds=plan["policy"]["healthTimeoutSeconds"],
+        )
     return runtime_update._compose_up_stage_transition(
         docker_prefix=docker_prefix,
         project=plan["project"],
@@ -8499,7 +8834,11 @@ def apply_plan_file(
             for service_name in plan["targets"]:
                 if (
                     plan.get("imageUpdateTarget")
-                    in {HUGGINGFACE_IMAGE_UPDATE_TARGET, CLOUD_IMAGE_UPDATE_TARGET}
+                    in {
+                        HUGGINGFACE_IMAGE_UPDATE_TARGET,
+                        CLOUD_IMAGE_UPDATE_TARGET,
+                        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+                    }
                     and plan.get("phase") == "issued-connector-activation"
                     and service_name == plan.get("imageUpdateTarget")
                 ):
@@ -8514,11 +8853,11 @@ def apply_plan_file(
                         journal_path=journal_path,
                         docker_prefix=docker_prefix,
                     )
-                    update_key = (
-                        "huggingfaceImageUpdate"
-                        if plan.get("imageUpdateTarget") == HUGGINGFACE_IMAGE_UPDATE_TARGET
-                        else "cloudImageUpdate"
-                    )
+                    update_key = {
+                        HUGGINGFACE_IMAGE_UPDATE_TARGET: "huggingfaceImageUpdate",
+                        CLOUD_IMAGE_UPDATE_TARGET: "cloudImageUpdate",
+                        GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "githubIssuesImageUpdate",
+                    }[plan["imageUpdateTarget"]]
                     update_state = journal[update_key]
                     update_state["beforeReadiness"] = _image_update_exchange_readiness_checkpoint(
                         plan, journal
@@ -8578,7 +8917,11 @@ def apply_plan_file(
                 )
                 if (
                     plan.get("imageUpdateTarget")
-                    in {HUGGINGFACE_IMAGE_UPDATE_TARGET, CLOUD_IMAGE_UPDATE_TARGET}
+                    in {
+                        HUGGINGFACE_IMAGE_UPDATE_TARGET,
+                        CLOUD_IMAGE_UPDATE_TARGET,
+                        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+                    }
                     and plan.get("phase") == "issued-connector-activation"
                     and service_name == plan.get("imageUpdateTarget")
                 ):
@@ -8589,11 +8932,11 @@ def apply_plan_file(
                         journal_path=journal_path,
                         docker_prefix=docker_prefix,
                     )
-                    update_key = (
-                        "huggingfaceImageUpdate"
-                        if plan.get("imageUpdateTarget") == HUGGINGFACE_IMAGE_UPDATE_TARGET
-                        else "cloudImageUpdate"
-                    )
+                    update_key = {
+                        HUGGINGFACE_IMAGE_UPDATE_TARGET: "huggingfaceImageUpdate",
+                        CLOUD_IMAGE_UPDATE_TARGET: "cloudImageUpdate",
+                        GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "githubIssuesImageUpdate",
+                    }[plan["imageUpdateTarget"]]
                     journal[update_key]["afterReadiness"] = (
                         _image_update_exchange_readiness_checkpoint(plan, journal)
                     )

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "cyrene-teams-release-deployment-policy-v1",
+  "selectionPath": "/var/lib/cyrene-connectors-runtime/.artifacts/selection/current-runtime-selection.json",
+  "journalDirectory": "/var/lib/cyrene-connectors-runtime/.artifacts/journals",
+  "releaseDirectory": "/var/lib/cyrene-connectors-runtime/.artifacts/releases",
+  "probePolicyPath": "/etc/cyrene/teams-cloud-probe.json",
+  "probePolicySha256": "REPLACE_WITH_PROVISIONED_PROBE_POLICY_SHA256",
+  "managedTargets": [
+    "navigator-persistence",
+    "github-issues",
+    "huggingface",
+    "cloud-management-phase2",
+    "exchange",
+    "navigator"
+  ],
+  "limits": {
+    "maxMemoryMiB": 3584,
+    "maxCpus": 1.95,
+    "requiredFreeGiB": 2,
+    "minimumMemAvailableMiB": 1024
+  },
+  "drainTimeoutSeconds": 600,
+  "healthTimeoutSeconds": 120,
+  "windowWaitSeconds": 900,
+  "ingressExposure": "host-fronted-staging"
+}

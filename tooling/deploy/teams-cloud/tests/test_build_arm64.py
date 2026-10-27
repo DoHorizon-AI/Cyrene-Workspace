@@ -153,6 +153,25 @@ def test_dsh_upstream_build_cache_isolated_from_navigator_app_sources() -> None:
     assert plan["sources"]["dsh"]["commit"] == dsh_commit
 
 
+def test_codebuddy_release_dockerfile_needs_no_private_antigravity_binary() -> None:
+    """Keep the automatic DSH release build on the pinned CodeBuddy ACP path only."""
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    dockerfile = (deployment_root / "Dockerfile.dsh-executor-codebuddy").read_text(encoding="utf-8")
+    plan = json.loads(
+        (deployment_root / "config" / "build-plan.template.json").read_text(encoding="utf-8")
+    )
+    dsh_image = next(row for row in plan["images"] if row["service"] == "dsh-executor")
+
+    assert "@tencent-ai/codebuddy-code@2.163.0" in dockerfile
+    assert 'CYRENE_HARNESS_MODEL_SOURCE=""' in dockerfile
+    assert "CYRENE_HARNESS_MODEL=glm-5.3-flash" in dockerfile
+    assert "antigravity" not in dockerfile.lower()
+    assert "ASSET_ANTIGRAVITY_CLI_SHA256" not in dockerfile
+    assert "runtime-artifacts/" not in dockerfile
+    assert dsh_image["buildArgs"]["CODEBUDDY_PACKAGE"] == "@tencent-ai/codebuddy-code@2.163.0"
+
+
 def test_build_plan_requires_digest_pinned_base_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
