@@ -701,6 +701,17 @@ def _validate_connector_bindings(
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PreflightError("Navigator connector bindings are invalid JSON") from error
+    _validate_connector_bindings_document(document, expected_providers, allow_empty=allow_empty)
+
+
+def _validate_connector_bindings_document(
+    document: Any, expected_providers: set[str], *, allow_empty: bool = False
+) -> None:
+    """Validate an already-read binding projection with the canonical operation map.
+
+    中文：供文件预检和实时 Exchange 导出共用同一份绑定与只读操作校验。
+    """
+
     if (
         not isinstance(document, dict)
         or set(document) != {"schemaVersion", "bindings"}
@@ -820,6 +831,23 @@ def _validate_connector_tool_catalog(
         raise PreflightError(
             "Exchange connector tool catalog or binding map is invalid JSON"
         ) from error
+    _validate_connector_tool_catalog_documents(
+        catalog, bindings, expected_providers, allow_empty=allow_empty
+    )
+
+
+def _validate_connector_tool_catalog_documents(
+    catalog: Any,
+    bindings: Any,
+    expected_providers: set[str],
+    *,
+    allow_empty: bool = False,
+) -> None:
+    """Validate native tool schemas against canonical binding operation maps.
+
+    中文：供候选文件和运行中 Exchange 的真实目录快照复用同一校验。
+    """
+
     if (
         not isinstance(catalog, dict)
         or set(catalog) != {"schemaVersion", "items"}
@@ -1602,11 +1630,20 @@ def _validate_huggingface_profile_selection(compose: dict[str, Any], mode: str) 
 
 
 def _validate_provider_listener_addresses(compose: dict[str, Any]) -> None:
-    """Require multi-network DirectPlugin providers to bind all container interfaces."""
+    """Require multi-network DirectPlugin providers to bind all container interfaces.
+
+    中文：HF 与 Cloud Management 位于多网卡容器，监听地址必须覆盖全部接口。
+    """
 
     services = compose.get("services", {})
-    for service_name in ("account-center", "github-issues", "teams-provider"):
+    required_services = {"account-center", "github-issues", "teams-provider"}
+    provider_services = {"huggingface", "cloud-management-phase2"}
+    for service_name in sorted(required_services | provider_services):
         service = services.get(service_name)
+        if service is None and service_name in provider_services:
+            continue
+        if service is None:
+            raise PreflightError(f"{service_name} must declare its fixed provider command")
         command = service.get("command") if isinstance(service, dict) else None
         if not isinstance(command, list) or any(not isinstance(part, str) for part in command):
             raise PreflightError(f"{service_name} must declare its fixed provider command")
