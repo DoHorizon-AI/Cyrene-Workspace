@@ -747,6 +747,30 @@ def _listener_repair_pair(
     return active, candidate, lock, copy.deepcopy(lock)
 
 
+def _full_cloud_image_update(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build a Cloud image pair over the canonical 14-service Compose inventory."""
+
+    active, _listener_candidate, active_lock, _candidate_lock = _listener_repair_pair(tmp_path)
+    target = "cloud-management-phase2"
+    target_lock_service = runtime_update.LOCK_SERVICE_FOR_TARGET[target]
+    active_lock = copy.deepcopy(active_lock)
+    target_row = next(row for row in active_lock["images"] if row["service"] == target)
+    target_row["service"] = target_lock_service
+
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    candidate_ref = "example.invalid/cloud-management-phase2:issued-update"
+    candidate["services"][target]["image"] = candidate_ref
+    candidate_row = next(
+        row for row in candidate_lock["images"] if row["service"] == target_lock_service
+    )
+    candidate_row["image"] = candidate_ref
+    candidate_row["imageId"] = _image_id(100)
+    return active, candidate, active_lock, candidate_lock
+
+
 @pytest.mark.parametrize(
     ("target", "phase"),
     [
@@ -779,7 +803,43 @@ def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
 
     assert targets == [target]
     assert images[target]["active"]["imageId"] != images[target]["candidate"]["imageId"]
+    assert set(images) == set(stage_transition._runtime_service_inventory(active))
     assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
+
+
+def test_issued_cloud_image_update_preserves_the_exact_fourteen_service_inventory(
+    tmp_path: Path,
+) -> None:
+    """Allow the issued Cloud route only when its one-image change keeps all 14 services."""
+
+    active, candidate, active_lock, candidate_lock = _full_cloud_image_update(tmp_path)
+    targets, images = stage_transition._validate_phase_topology(
+        phase="issued-connector-activation",
+        image_update_target="cloud-management-phase2",
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+    assert targets == ["cloud-management-phase2"]
+    assert set(images) == stage_transition.RUNTIME_SERVICE_SET
+    assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
+
+    active, candidate, active_lock, candidate_lock = _full_cloud_image_update(tmp_path)
+    del active["services"]["computer-runtime"]
+    del candidate["services"]["computer-runtime"]
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="issued Cloud Management image updates require the exact 14-service runtime topology",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target="cloud-management-phase2",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
 
 
 def test_listener_repair_changes_only_the_two_wildcard_command_arrays(
@@ -1672,10 +1732,10 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
     active, candidate, active_lock, candidate_lock = _active_image_update("cloud-management-phase2")
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="Cloud Management image updates require provider-bootstrap",
+        match="phase must be provider-bootstrap or issued-connector-activation",
     ):
         stage_transition._validate_phase_topology(
-            phase="issued-connector-activation",
+            phase="unsupported-phase",
             image_update_target="cloud-management-phase2",
             active=active,
             candidate=candidate,
@@ -4850,6 +4910,11 @@ def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
     )
     assert cloud_image_receipt["status"] == "LIVE_VERIFIED"
     assert cloud_image_receipt["verifiedProviderIds"] == ["azure", "gcp", "huggingface"]
+    assert cloud_image_receipt["connectionRefByProvider"] == {
+        row["providerId"]: row["connectionRef"]
+        for row in snapshot["connections"]
+        if row["providerId"] in {"azure", "gcp"}
+    }
 
     hf_connection_ref = next(
         row["connectionRef"]
@@ -4942,19 +5007,150 @@ def test_huggingface_readiness_checkpoint_uses_live_connection_reference() -> No
         }
     }
 
-    receipt = stage_transition._huggingface_exchange_readiness_checkpoint(plan, journal)
+    plan["phase"] = "issued-connector-activation"
+    receipt = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
     assert receipt["verified"] is True
     assert receipt["bindingCount"] == 14
     assert (
-        receipt["huggingfaceConnectionRefSha256"]
-        == hashlib.sha256(connection_ref.encode("utf-8")).hexdigest()
+        receipt["connectionRefsSha256"]
+        == hashlib.sha256(
+            json.dumps(
+                {"huggingface": hashlib.sha256(connection_ref.encode("utf-8")).hexdigest()},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
     )
 
     journal["exchangeReadiness"]["receipt"]["huggingfaceConnectionRef"] = "not-a-uuid"
     with pytest.raises(
-        stage_transition.StageTransitionError, match="lacks the exact selected HF connection"
+        stage_transition.StageTransitionError,
+        match="lacks the exact selected huggingface connection",
     ):
-        stage_transition._huggingface_exchange_readiness_checkpoint(plan, journal)
+        stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+
+
+def test_cloud_readiness_checkpoint_uses_exact_issued_provider_connections() -> None:
+    """Bind Cloud restart checks to the live Azure, GCP, and configured RunPod refs."""
+
+    provider_refs = {
+        "azure": "e5e1464b-00ec-4c85-9e71-1d52eab44a38",
+        "gcp": "8c473baa-3d22-4ab4-9d0e-f1086b54a400",
+        "runpod": "d0b0b832-a81c-4c39-94c9-d92405f2e6c2",
+    }
+    plan = {
+        "imageUpdateTarget": "cloud-management-phase2",
+        "phase": "issued-connector-activation",
+        "activeServices": {"exchange": {"containerId": "a" * 64, "imageId": _image_id(44)}},
+        "candidatePreflight": {
+            "expectedProviderScopeDigests": {
+                "azure": "b" * 64,
+                "gcp": "c" * 64,
+                "runpod": "d" * 64,
+                "huggingface": "e" * 64,
+            }
+        },
+    }
+    journal = {
+        "exchangeReadiness": {
+            "receipt": {
+                "status": "LIVE_VERIFIED",
+                "catalogStatus": "LIVE_VERIFIED",
+                "exchangeContainerId": "a" * 64,
+                "exchangeImageId": _image_id(44),
+                "bindingCount": 14,
+                "connectionCount": 14,
+                "verifiedProviderIds": ["azure", "gcp", "huggingface", "runpod"],
+                "snapshotSha256": "1" * 64,
+                "connectionRefByProvider": provider_refs,
+            }
+        }
+    }
+
+    receipt = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            {
+                provider: hashlib.sha256(connection_ref.encode("utf-8")).hexdigest()
+                for provider, connection_ref in sorted(provider_refs.items())
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert receipt["verified"] is True
+    assert receipt["connectionRefsSha256"] == expected_digest
+
+    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"].pop("runpod")
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="exact selected provider connections"
+    ):
+        stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+
+    del plan["candidatePreflight"]["expectedProviderScopeDigests"]["runpod"]
+    plan["candidatePreflight"]["expectedProviderScopeDigests"]["huggingface"] = "e" * 64
+    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"] = {
+        "azure": provider_refs["azure"],
+        "gcp": provider_refs["gcp"],
+    }
+    journal["exchangeReadiness"]["receipt"]["verifiedProviderIds"] = [
+        "azure",
+        "gcp",
+        "huggingface",
+    ]
+    receipt = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+    assert receipt["verified"] is True
+
+
+def test_cloud_image_update_journal_keeps_bootstrap_and_issued_gates_separate(
+    tmp_path: Path,
+) -> None:
+    """Keep the legacy runner-off gate while selecting monitor quiescence for issued updates."""
+
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("{}", encoding="utf-8")
+    target = "cloud-management-phase2"
+    plan: dict[str, Any] = {
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "a" * 64,
+        "project": "cyrene-teams-cloud",
+        "targets": [target],
+        "activeServices": {target: {"containerId": "b" * 64}},
+        "candidateServices": {
+            target: {
+                "active": {"imageId": _image_id(10)},
+                "candidate": {"imageId": _image_id(11)},
+                "added": False,
+            }
+        },
+        "edgeDelivery": {"containerId": "c" * 64, "revision": 0, "deadCount": 0},
+        "navigatorDrain": {
+            "containerId": "d" * 64,
+            "instanceId": "11111111-1111-4111-8111-111111111111",
+            "generation": 0,
+        },
+        "database": {"backupPath": "/private/database.snapshot"},
+        "exchangeReadiness": {"required": True},
+        "candidateSelectionFile": "/private/runtime-selection.json",
+        "selectionBackupPath": "/private/previous-selection.json",
+        "activeSelection": {"sha256": None},
+    }
+
+    issued_plan = {**plan, "phase": "issued-connector-activation", "imageUpdateTarget": target}
+    issued_journal = stage_transition._make_journal(issued_plan, plan_path)
+    assert issued_journal["cloudImageUpdate"]["required"] is True
+    assert issued_journal["cloudRunnerIdle"]["required"] is False
+
+    bootstrap_plan = {
+        **plan,
+        "phase": "provider-bootstrap",
+        "imageUpdateTarget": target,
+        "cloudRunnerState": {"liveContainerValue": "false"},
+    }
+    bootstrap_journal = stage_transition._make_journal(bootstrap_plan, plan_path)
+    assert bootstrap_journal["cloudImageUpdate"]["required"] is False
+    assert bootstrap_journal["cloudRunnerIdle"]["required"] is True
+    assert bootstrap_journal["cloudRunnerIdle"]["planState"] == bootstrap_plan["cloudRunnerState"]
 
 
 def _create_huggingface_monitor_database(
@@ -5111,7 +5307,9 @@ def test_huggingface_monitor_guard_requires_idle_exact_connection_and_restart_wi
         script_index = argv.index("-c")
         script = argv[script_index + 1]
         arguments = list(argv[script_index + 2 :])
-        assert arguments[1] == connection_ref
+        assert json.loads(arguments[1]) == [
+            {"providerId": "huggingface", "connectionRef": connection_ref}
+        ]
         arguments[0] = str(database_path)
         result = subprocess.run(
             [sys.executable, "-c", script, *arguments],
@@ -5140,7 +5338,7 @@ def test_huggingface_monitor_guard_requires_idle_exact_connection_and_restart_wi
     }
 
     if verified:
-        result = stage_transition._verify_huggingface_monitor_quiescence(
+        result = stage_transition._verify_provider_monitor_quiescence(
             plan=plan,
             candidate_compose=compose,
             journal=journal,
@@ -5150,10 +5348,10 @@ def test_huggingface_monitor_guard_requires_idle_exact_connection_and_restart_wi
         assert result["verified"] is True
         assert result["requiredWindowSeconds"] == 360
         assert journal["huggingfaceImageUpdate"]["monitorQuiescence"] == result
-        assert phases == ["HUGGINGFACE_MONITOR_QUIESCENCE_VERIFIED"]
+        assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
     else:
         with pytest.raises(stage_transition.StageTransitionError, match="blocked because"):
-            stage_transition._verify_huggingface_monitor_quiescence(
+            stage_transition._verify_provider_monitor_quiescence(
                 plan=plan,
                 candidate_compose=compose,
                 journal=journal,
@@ -5161,7 +5359,7 @@ def test_huggingface_monitor_guard_requires_idle_exact_connection_and_restart_wi
                 docker_prefix=["docker"],
             )
         assert journal["huggingfaceImageUpdate"]["monitorQuiescence"]["verified"] is False
-        assert phases == ["HUGGINGFACE_MONITOR_NOT_QUIESCENT"]
+        assert phases == ["CONNECTOR_MONITOR_NOT_QUIESCENT"]
 
 
 def test_huggingface_monitor_guard_never_guesses_a_connection_reference(
@@ -5192,9 +5390,10 @@ def test_huggingface_monitor_guard_never_guesses_a_connection_reference(
     )
 
     with pytest.raises(
-        stage_transition.StageTransitionError, match="does not match the single frozen"
+        stage_transition.StageTransitionError,
+        match="does not match its single frozen candidate binding",
     ):
-        stage_transition._verify_huggingface_monitor_quiescence(
+        stage_transition._verify_provider_monitor_quiescence(
             plan={
                 "imageUpdateTarget": "huggingface",
                 "activeServices": {"exchange": {"containerId": "a" * 64}},
@@ -5208,6 +5407,310 @@ def test_huggingface_monitor_guard_never_guesses_a_connection_reference(
             journal_path=Path("/private/journal.json"),
             docker_prefix=["docker"],
         )
+
+
+def _create_cloud_monitor_database(
+    path: Path,
+    *,
+    connection_refs: dict[str, str],
+    actor: dict[str, str],
+    next_check_seconds: dict[str, int],
+    active_monitor_leases: set[str],
+    in_flight_calls: dict[str, int],
+    cloud_refresh_states: list[str],
+) -> None:
+    """Build the exact Exchange rows used by the read-only Cloud restart-window probe."""
+
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE integration_connections (
+            id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+            actor_issuer TEXT NOT NULL, actor_subject TEXT NOT NULL, enabled INTEGER NOT NULL,
+            document TEXT NOT NULL
+        );
+        CREATE TABLE authorization_monitor_state (
+            connection_id TEXT PRIMARY KEY, next_check_at TEXT NOT NULL, last_checked_at TEXT,
+            claim_owner TEXT, claim_fence INTEGER NOT NULL DEFAULT 0, lease_expires_at TEXT
+        );
+        CREATE TABLE connector_invocations (
+            organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL, actor_issuer TEXT NOT NULL,
+            actor_subject TEXT NOT NULL, request_id TEXT NOT NULL, connection_ref TEXT NOT NULL,
+            provider_id TEXT NOT NULL, profile_ref TEXT NOT NULL, operation_id TEXT NOT NULL,
+            resource_ref TEXT NOT NULL, arguments_sha256 TEXT NOT NULL,
+            envelope_sha256 TEXT NOT NULL, state TEXT NOT NULL, operation_ref TEXT,
+            grant_ref TEXT NOT NULL DEFAULT '', is_mutating INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, response_json TEXT,
+            response_status INTEGER NOT NULL DEFAULT 200
+        );
+        CREATE TABLE cloud_refresh_outbox (state TEXT NOT NULL);
+        """
+    )
+    now = datetime.now(UTC)
+    for provider, connection_ref in sorted(connection_refs.items()):
+        connection_document = {
+            "id": connection_ref,
+            "organizationId": actor["organizationId"],
+            "workspaceId": actor["workspaceId"],
+            "actorIssuer": actor["issuer"],
+            "actorSubject": actor["subject"],
+            "provider": provider,
+            "enabled": True,
+        }
+        connection.execute(
+            "INSERT INTO integration_connections VALUES(?,?,?,?,?,?,?)",
+            (
+                connection_ref,
+                actor["organizationId"],
+                actor["workspaceId"],
+                actor["issuer"],
+                actor["subject"],
+                1,
+                json.dumps(connection_document),
+            ),
+        )
+        next_check_at = (now + timedelta(seconds=next_check_seconds[provider])).isoformat()
+        has_lease = provider in active_monitor_leases
+        claim_owner = f"{provider}-authorization-monitor" if has_lease else None
+        lease_expires_at = (now + timedelta(seconds=30)).isoformat() if has_lease else None
+        connection.execute(
+            "INSERT INTO authorization_monitor_state VALUES(?,?,?,?,?,?)",
+            (
+                connection_ref,
+                next_check_at,
+                None,
+                claim_owner,
+                1 if has_lease else 0,
+                lease_expires_at,
+            ),
+        )
+        for index in range(in_flight_calls.get(provider, 0)):
+            connection.execute(
+                "INSERT INTO connector_invocations "
+                "(organization_id,workspace_id,actor_issuer,actor_subject,request_id,connection_ref,"
+                "provider_id,profile_ref,operation_id,resource_ref,arguments_sha256,envelope_sha256,"
+                "state,grant_ref,is_mutating,created_at,expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    actor["organizationId"],
+                    actor["workspaceId"],
+                    actor["issuer"],
+                    actor["subject"],
+                    f"{provider}-call-{index}",
+                    connection_ref,
+                    provider,
+                    f"{provider}-primary",
+                    "cloud.resources.list",
+                    "configured-resource-scope",
+                    "a" * 64,
+                    "b" * 64,
+                    "IN_PROGRESS",
+                    "sha256:" + "c" * 64,
+                    0,
+                    int(now.timestamp()),
+                    0,
+                ),
+            )
+    connection.executemany(
+        "INSERT INTO cloud_refresh_outbox(state) VALUES(?)",
+        [(state,) for state in cloud_refresh_states],
+    )
+    connection.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("blocker", "include_runpod", "verified"),
+    [
+        (None, False, True),
+        (None, True, True),
+        ("monitor-lease", False, False),
+        ("in-flight-call", False, False),
+        ("short-window", False, False),
+        ("cloud-refresh", False, False),
+    ],
+)
+def test_cloud_issued_monitor_guard_checks_only_configured_bindings_and_restart_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocker: str | None,
+    include_runpod: bool,
+    verified: bool,
+) -> None:
+    """Run the Cloud idle SQL against Exchange and include RunPod only when configured."""
+
+    all_refs = {
+        "azure": "e5e1464b-00ec-4c85-9e71-1d52eab44a38",
+        "gcp": "8c473baa-3d22-4ab4-9d0e-f1086b54a400",
+        "runpod": "d0b0b832-a81c-4c39-94c9-d92405f2e6c2",
+    }
+    providers = ["azure", "gcp", *(["runpod"] if include_runpod else [])]
+    connection_refs = {provider: all_refs[provider] for provider in providers}
+    next_check_seconds = {provider: 900 for provider in providers}
+    active_monitor_leases: set[str] = set()
+    in_flight_calls: dict[str, int] = {}
+    cloud_refresh_states: list[str] = []
+    if blocker == "monitor-lease":
+        active_monitor_leases.add("azure")
+    elif blocker == "in-flight-call":
+        in_flight_calls["gcp"] = 1
+    elif blocker == "short-window":
+        next_check_seconds["gcp"] = 300
+    elif blocker == "cloud-refresh":
+        cloud_refresh_states.append("QUEUED")
+
+    actor = {
+        "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+        "subject": "actor-subject",
+        "organizationId": "organization-id",
+        "workspaceId": "workspace-id",
+    }
+    database_path = tmp_path / "integrations.sqlite3"
+    _create_cloud_monitor_database(
+        database_path,
+        connection_refs=connection_refs,
+        actor=actor,
+        next_check_seconds=next_check_seconds,
+        active_monitor_leases=active_monitor_leases,
+        in_flight_calls=in_flight_calls,
+        cloud_refresh_states=cloud_refresh_states,
+    )
+    bindings = [
+        {"providerId": provider, "connectionRef": connection_refs[provider]}
+        for provider in providers
+    ]
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_config_json",
+        lambda _compose, _name: {"bindings": bindings},
+    )
+    monkeypatch.setattr(
+        stage_transition.preflight, "_connector_bootstrap_actor", lambda _compose: actor
+    )
+    phases: list[str] = []
+
+    def run_readonly_exchange_script(argv: list[str], **_kwargs: Any) -> str:
+        script_index = argv.index("-c")
+        script = argv[script_index + 1]
+        arguments = list(argv[script_index + 2 :])
+        assert json.loads(arguments[1]) == [
+            {"providerId": provider, "connectionRef": connection_refs[provider]}
+            for provider in providers
+        ]
+        assert arguments[-1] == "true"
+        arguments[0] = str(database_path)
+        result = subprocess.run(
+            [sys.executable, "-c", script, *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise runtime_update.RuntimeUpdateError("read-only Exchange Cloud probe failed")
+        return result.stdout
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", run_readonly_exchange_script)
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, phase: phases.append(phase),
+    )
+    plan = {
+        "phase": "issued-connector-activation",
+        "imageUpdateTarget": "cloud-management-phase2",
+        "candidatePreflight": {
+            "expectedProviderScopeDigests": {
+                **{provider: f"{index:x}" * 64 for index, provider in enumerate(providers, 1)},
+                "huggingface": "f" * 64,
+            }
+        },
+        "activeServices": {"exchange": {"containerId": "a" * 64}},
+        "policy": {"healthTimeoutSeconds": 300},
+    }
+    journal = {
+        "exchangeReadiness": {"receipt": {"connectionRefByProvider": connection_refs}},
+        "cloudImageUpdate": {"required": True},
+    }
+
+    if verified:
+        result = stage_transition._verify_provider_monitor_quiescence(
+            plan=plan,
+            candidate_compose={"services": {}},
+            journal=journal,
+            journal_path=tmp_path / "journal.json",
+            docker_prefix=["docker"],
+        )
+        assert result["verified"] is True
+        assert result["requiredWindowSeconds"] == 360
+        assert result["cloudRefreshNonterminalCount"] == 0
+        assert journal["cloudImageUpdate"]["monitorQuiescence"] == result
+        assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
+    else:
+        with pytest.raises(stage_transition.StageTransitionError, match="blocked because"):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose={"services": {}},
+                journal=journal,
+                journal_path=tmp_path / "journal.json",
+                docker_prefix=["docker"],
+            )
+        assert journal["cloudImageUpdate"]["monitorQuiescence"]["verified"] is False
+        assert phases == ["CONNECTOR_MONITOR_NOT_QUIESCENT"]
+
+
+def test_cloud_issued_monitor_guard_rejects_connection_binding_drift_before_read_or_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live Azure/GCP reference must join one frozen binding before any target mutation."""
+
+    live_refs = {
+        "azure": "e5e1464b-00ec-4c85-9e71-1d52eab44a38",
+        "gcp": "8c473baa-3d22-4ab4-9d0e-f1086b54a400",
+    }
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_config_json",
+        lambda _compose, _name: {
+            "bindings": [
+                {"providerId": "azure", "connectionRef": "d0b0b832-a81c-4c39-94c9-d92405f2e6c2"},
+                {"providerId": "gcp", "connectionRef": live_refs["gcp"]},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: attempted.append("read") or "{}",
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_compose_target_update",
+        lambda **_kwargs: attempted.append("mutate"),
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="does not match its single frozen candidate binding",
+    ):
+        stage_transition._verify_provider_monitor_quiescence(
+            plan={
+                "phase": "issued-connector-activation",
+                "imageUpdateTarget": "cloud-management-phase2",
+                "candidatePreflight": {
+                    "expectedProviderScopeDigests": {"azure": "a" * 64, "gcp": "b" * 64}
+                },
+                "activeServices": {"exchange": {"containerId": "a" * 64}},
+                "policy": {"healthTimeoutSeconds": 300},
+            },
+            candidate_compose={"services": {}},
+            journal={
+                "exchangeReadiness": {"receipt": {"connectionRefByProvider": live_refs}},
+                "cloudImageUpdate": {"required": True},
+            },
+            journal_path=Path("/private/journal.json"),
+            docker_prefix=["docker"],
+        )
+    assert attempted == []
 
 
 def test_exchange_readiness_hf_profile_scope_is_order_insensitive_but_exact(
