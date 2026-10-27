@@ -98,7 +98,7 @@ LABEL org.opencontainers.image.source=https://github.com/DoHorizon-AI/Cyrene-Plu
 USER 10001:10001
 EXPOSE 7443
 ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "python", "-m", "cyrene_plugin_runtime.server"]
-CMD ["--entrypoint", "cloud_management_provider.plugin:CloudManagementProvider", "--capability", "tool.provider.v1", "--interface-version", "1", "--listen", "cloud-management:7443", "--tls-cert-file", "/run/secrets/cloud-management-server-cert", "--tls-key-file", "/run/secrets/cloud-management-server-key", "--tls-client-ca-file", "/run/secrets/cloud-management-client-ca"]
+CMD ["--entrypoint", "cloud_management_provider.plugin:CloudManagementProvider", "--capability", "tool.provider.v1", "--interface-version", "1", "--listen", "0.0.0.0:7443", "--tls-cert-file", "/run/secrets/cloud-management-server-cert", "--tls-key-file", "/run/secrets/cloud-management-server-key", "--tls-client-ca-file", "/run/secrets/cloud-management-client-ca"]
 HEALTHCHECK --interval=15s --timeout=5s --start-period=45s --retries=5 \
     CMD python /usr/local/bin/cyrene-plugin-grpc-health --target cloud-management:7443 \
       --plugin-id cyrene.providers.cloud-management \

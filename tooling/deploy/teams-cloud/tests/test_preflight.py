@@ -1803,7 +1803,7 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
 ) -> None:
     """Require live provider schemas to match the pinned connection and operation map."""
 
-    binding = _binding("github", "github.repository.list", "empty", False)
+    binding = _binding("github", "github.repository.list", "profile", False)
     bindings_file = tmp_path / "connector-bindings.json"
     bindings_file.write_text(json.dumps({"schemaVersion": 1, "bindings": [binding]}))
     catalog = {
@@ -1836,6 +1836,14 @@ def test_exchange_tool_catalog_must_match_exact_binding_and_hide_credentials(
     catalog_file.write_text(json.dumps(catalog))
     preflight._validate_connector_tool_catalog(
         catalog_file, bindings_file, {"github", "huggingface"}
+    )
+    preflight._validate_connector_bindings_document(
+        {"schemaVersion": 1, "bindings": [binding]}, {"github"}
+    )
+    preflight._validate_connector_tool_catalog_documents(
+        catalog,
+        {"schemaVersion": 1, "bindings": [binding]},
+        {"github", "huggingface"},
     )
 
     for schema_path, placeholder_value in (
@@ -3290,12 +3298,18 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
         },
         "teams-provider": {"teams-provider-private", "teams-provider-egress"},
     }
-    if huggingface_enabled:
-        provider_networks["account-center"].add("huggingface-account-center-private")
     dockerfiles = {
         "account-center": "Dockerfile.account-center",
         "github-issues": "Dockerfile.github-issues",
     }
+    if huggingface_enabled:
+        provider_networks["account-center"].add("huggingface-account-center-private")
+        provider_networks["huggingface"] = {
+            "huggingface-exchange-private",
+            "huggingface-account-center-private",
+            "huggingface-egress",
+        }
+        dockerfiles["huggingface"] = "Dockerfile.huggingface"
     for service_name, expected_networks in provider_networks.items():
         assert service_name in rendered["services"]
         service = rendered["services"][service_name]
@@ -3323,6 +3337,46 @@ def test_real_compose_render_passes_codebuddy_computer_profile_preflight(
         command[command.index("--listen") + 1] = f"{service_name}:7443"
         with pytest.raises(preflight.PreflightError, match="must listen on 0.0.0.0:7443"):
             preflight._validate_provider_listener_addresses(invalid_listener)
+
+
+def test_cloud_provider_compose_command_matches_wildcard_dockerfile_default() -> None:
+    """Keep the Cloud overlay command and image default on every container interface.
+
+    中文：Cloud provider 多网卡监听由显式 Compose 命令和镜像默认值共同保证。
+    """
+
+    deployment_root = DEPLOYMENT_ROOT
+    compose = yaml.safe_load(
+        (deployment_root / "compose.cloud-phase2.yaml").read_text(encoding="utf-8")
+    )
+    command = compose["services"]["cloud-management-phase2"]["command"]
+    dockerfile_lines = (
+        (deployment_root / "Dockerfile.cloud-management").read_text(encoding="utf-8").splitlines()
+    )
+    dockerfile_command = next(line for line in dockerfile_lines if line.startswith("CMD ["))
+    assert command == json.loads(dockerfile_command.removeprefix("CMD "))
+    assert command[command.index("--listen") + 1] == "0.0.0.0:7443"
+
+    rendered = {
+        "services": {
+            "account-center": {"command": ["--listen", "0.0.0.0:7443"]},
+            "github-issues": {"command": ["--listen", "0.0.0.0:7443"]},
+            "teams-provider": {"command": ["--listen", "0.0.0.0:7443"]},
+            "cloud-management-phase2": {"command": command},
+        }
+    }
+    preflight._validate_provider_listener_addresses(rendered)
+
+    rendered["services"]["cloud-management-phase2"]["command"] = [
+        *command[: command.index("--listen") + 1],
+        "cloud-management:7443",
+        *command[command.index("--listen") + 2 :],
+    ]
+    with pytest.raises(
+        preflight.PreflightError,
+        match="cloud-management-phase2 must listen on 0.0.0.0:7443",
+    ):
+        preflight._validate_provider_listener_addresses(rendered)
 
 
 def test_account_center_encryption_key_matches_locked_runtime_encodings() -> None:

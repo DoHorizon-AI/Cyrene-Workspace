@@ -16,6 +16,21 @@ services:
     image: ${CYRENE_IMAGE_CLOUD_MANAGEMENT:?build and lock the cloud provider image first}
     pull_policy: never
     restart: unless-stopped
+    command:
+      - --entrypoint
+      - cloud_management_provider.plugin:CloudManagementProvider
+      - --capability
+      - tool.provider.v1
+      - --interface-version
+      - "1"
+      - --listen
+      - 0.0.0.0:7443
+      - --tls-cert-file
+      - /run/secrets/cloud-management-server-cert
+      - --tls-key-file
+      - /run/secrets/cloud-management-server-key
+      - --tls-client-ca-file
+      - /run/secrets/cloud-management-client-ca
     logging:
       driver: json-file
       options:

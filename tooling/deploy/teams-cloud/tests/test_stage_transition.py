@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 stage_transition = importlib.import_module("stage_transition")
 runtime_update = importlib.import_module("runtime_update")
+preflight = importlib.import_module("preflight")
 
 
 def _image_id(number: int) -> str:
@@ -634,6 +635,57 @@ def _active_image_update(
     return active, candidate, active_lock, candidate_lock
 
 
+def _listener_repair_pair() -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]
+]:
+    """Build the exact 14-service topology with only HF/Cloud command changes."""
+
+    services: dict[str, dict[str, Any]] = {}
+    lock_rows: list[tuple[str, str, int]] = []
+    for index, service_name in enumerate(stage_transition.SERVICE_ORDER, start=1):
+        image = f"{service_name}:fixed"
+        if service_name == "navigator-persistence":
+            service = _mount_service(image)
+        elif service_name == "navigator":
+            service = _mount_service(image, executor=True)
+        else:
+            profiles = (
+                ["cloud-phase2"]
+                if service_name == "cloud-management-phase2"
+                else ["public-ingress"]
+                if service_name == "teams-public-ingress"
+                else None
+            )
+            service = _service(image, profiles=profiles)
+        services[service_name] = service
+        lock_rows.append((service_name, image, index))
+    services["exchange"]["environment"][stage_transition.EXCHANGE_CLOUD_RUNNER_ENV] = "false"
+    active_services = copy.deepcopy(services)
+    candidate_services = copy.deepcopy(services)
+    for service_name in stage_transition.PROVIDER_LISTENER_REPAIR_TARGETS:
+        candidate_services[service_name]["command"] = list(
+            stage_transition.PROVIDER_WILDCARD_COMMANDS[service_name]
+        )
+    active = {
+        "name": "cyrene-teams-cloud",
+        "services": active_services,
+        "networks": {},
+        "volumes": {},
+        "configs": {},
+        "secrets": {},
+    }
+    candidate = {
+        "name": "cyrene-teams-cloud",
+        "services": candidate_services,
+        "networks": {},
+        "volumes": {},
+        "configs": {},
+        "secrets": {},
+    }
+    lock = _lock(lock_rows)
+    return active, candidate, lock, copy.deepcopy(lock)
+
+
 @pytest.mark.parametrize(
     ("target", "phase"),
     [
@@ -665,6 +717,296 @@ def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
     assert targets == [target]
     assert images[target]["active"]["imageId"] != images[target]["candidate"]["imageId"]
     assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
+
+
+def test_listener_repair_changes_only_the_two_wildcard_command_arrays() -> None:
+    """Keep all 14 service images fixed while replacing only the two listener arguments.
+
+    中文：目标只能是 HF 与 Cloud，且两组 argv 除 listen 地址外必须逐项一致。
+    """
+
+    active, candidate, active_lock, candidate_lock = _listener_repair_pair()
+    targets, service_images = stage_transition._validate_phase_topology(
+        phase="provider-bootstrap",
+        listener_repair=True,
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+
+    assert targets == ["huggingface", "cloud-management-phase2"]
+    assert set(service_images) == stage_transition.SERVICE_SET
+    assert all(row["active"] == row["candidate"] for row in service_images.values())
+    assert all(
+        row["added"] is False and row["configChanged"] is False for row in service_images.values()
+    )
+    for service_name in stage_transition.PROVIDER_LISTENER_REPAIR_TARGETS:
+        old_command = list(stage_transition.PROVIDER_DEFAULT_COMMANDS[service_name])
+        new_command = list(stage_transition.PROVIDER_WILDCARD_COMMANDS[service_name])
+        listen_index = old_command.index("--listen")
+        old_command[listen_index + 1] = "0.0.0.0:7443"
+        assert new_command == old_command
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("hostname", "candidate huggingface command must change only its listener"),
+        ("extra_arg", "candidate cloud-management-phase2 command must change only its listener"),
+        ("environment", "may change only the HF and Cloud listener commands"),
+        ("image_lock", "preserve the exact image lock"),
+        ("missing_service", "exact 14-service topology"),
+    ],
+)
+def test_listener_repair_rejects_anything_beyond_the_two_listener_commands(
+    mutation: str, message: str
+) -> None:
+    """Reject other argv, config, image-lock, or topology changes in repair mode."""
+
+    active, candidate, active_lock, candidate_lock = _listener_repair_pair()
+    if mutation == "hostname":
+        candidate["services"]["huggingface"]["command"][
+            candidate["services"]["huggingface"]["command"].index("--listen") + 1
+        ] = "huggingface:7443"
+    elif mutation == "extra_arg":
+        candidate["services"]["cloud-management-phase2"]["command"].append("--debug")
+    elif mutation == "environment":
+        candidate["services"]["huggingface"]["environment"]["UNEXPECTED"] = "true"
+    elif mutation == "image_lock":
+        candidate_lock["images"][0]["imageId"] = _image_id(90)
+    elif mutation == "missing_service":
+        del candidate["services"]["account-center"]
+
+    with pytest.raises(stage_transition.StageTransitionError, match=message):
+        stage_transition._validate_phase_topology(
+            phase="provider-bootstrap",
+            listener_repair=True,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def test_listener_repair_is_not_available_during_issued_activation() -> None:
+    """Keep this listener repair closed to the bootstrap runner-off phase."""
+
+    active, candidate, active_lock, candidate_lock = _listener_repair_pair()
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="limited to provider-bootstrap",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            listener_repair=True,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def _listener_repair_state(active_services: dict[str, Any]) -> dict[str, Any]:
+    """Build one sealed command and pre-repair issued-state record for local tests."""
+
+    return {
+        "services": {
+            service_name: {
+                "containerId": active_services[service_name]["containerId"],
+                "imageId": active_services[service_name]["imageId"],
+                "activeCommand": list(stage_transition.PROVIDER_DEFAULT_COMMANDS[service_name]),
+                "candidateCommand": list(stage_transition.PROVIDER_WILDCARD_COMMANDS[service_name]),
+                "environmentSha256": stage_transition._docker_environment_sha256(
+                    ["PATH=/usr/bin", f"PROVIDER_ENV={service_name}"]
+                ),
+            }
+            for service_name in stage_transition.PROVIDER_LISTENER_REPAIR_TARGETS
+        },
+        "issuedState": {
+            "exchangeContainerId": active_services["exchange"]["containerId"],
+            "exchangeImageId": active_services["exchange"]["imageId"],
+            "issuedStateSha256": "a" * 64,
+            "catalogStatus": "NOT_LIVE_CATALOG",
+            "profileCount": 5,
+            "connectionCount": 14,
+            "bindingCount": 14,
+            "verifiedProviderIds": [
+                "azure",
+                "computer",
+                "gcp",
+                "github",
+                "huggingface",
+            ],
+        },
+    }
+
+
+def test_listener_repair_environment_fingerprint_is_order_independent_and_closed() -> None:
+    """Hash Docker Config.Env without accepting ambiguous names or retaining values."""
+
+    environment = ["API_MODE=read-only", "PATH=/usr/bin"]
+    fingerprint = stage_transition._docker_environment_sha256(environment)
+    assert fingerprint == stage_transition._docker_environment_sha256(list(reversed(environment)))
+    assert len(fingerprint) == 64
+    for malformed in (["MISSING_SEPARATOR"], ["TOKEN=one", "TOKEN=two"]):
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="environment readback is (malformed|ambiguous)",
+        ):
+            stage_transition._docker_environment_sha256(malformed)
+
+
+def test_listener_repair_state_reads_exact_active_commands_and_validates_target_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bind both old and new command arrays to their exact service container IDs."""
+
+    active, candidate, _active_lock, _candidate_lock = _listener_repair_pair()
+    active_services = {
+        service_name: {"containerId": f"{index:064x}", "imageId": _image_id(index)}
+        for index, service_name in enumerate(
+            stage_transition.PROVIDER_LISTENER_REPAIR_TARGETS, start=30
+        )
+    }
+    active_services["exchange"] = {"containerId": "e" * 64, "imageId": _image_id(40)}
+
+    def checked(argv: list[str], **_kwargs: Any) -> str:
+        container_id = argv[-1]
+        service_name = next(
+            name for name, row in active_services.items() if row.get("containerId") == container_id
+        )
+        if "{{json .Config.Cmd}}" in argv:
+            return json.dumps(list(stage_transition.PROVIDER_DEFAULT_COMMANDS[service_name]))
+        return json.dumps(["PATH=/usr/bin", f"PROVIDER_ENV={service_name}"])
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked)
+    state = stage_transition._listener_repair_state_record(
+        active_compose=active,
+        candidate_compose=candidate,
+        active_services=active_services,
+        docker_prefix=["docker"],
+    )
+    state["issuedState"] = _listener_repair_state(active_services)["issuedState"]
+    assert stage_transition._validate_listener_repair_state_record(state, active_services) == state
+
+    bad = copy.deepcopy(state)
+    bad["services"]["huggingface"]["candidateCommand"].append("--debug")
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="command identity is malformed"
+    ):
+        stage_transition._validate_listener_repair_state_record(bad, active_services)
+
+    active_command_by_id = {
+        row["containerId"]: list(stage_transition.PROVIDER_DEFAULT_COMMANDS[name])
+        for name, row in state["services"].items()
+    }
+    monkeypatch.setattr(
+        stage_transition,
+        "_service_command_readback",
+        lambda **kwargs: active_command_by_id[kwargs["container_id"]],
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_read_live_exchange_issued_state",
+        lambda **_kwargs: {
+            "exchangeContainerId": "e" * 64,
+            "exchangeImageId": _image_id(40),
+            "issuedStateSha256": "a" * 64,
+            "catalogStatus": "NOT_LIVE_CATALOG",
+            "profileCount": 5,
+            "connectionCount": 14,
+            "bindingCount": 14,
+            "verifiedProviderIds": ["azure", "computer", "gcp", "github", "huggingface"],
+        },
+    )
+    environment_sha_by_id = {
+        row["containerId"]: row["environmentSha256"] for row in state["services"].values()
+    }
+    monkeypatch.setattr(
+        stage_transition,
+        "_service_environment_sha256",
+        lambda **kwargs: environment_sha_by_id[kwargs["container_id"]],
+    )
+    plan = {"listenerRepairState": state, "activeServices": active_services}
+    stage_transition._verify_listener_repair_active_state(
+        plan=plan,
+        active_compose=active,
+        docker_prefix=["docker"],
+    )
+    active_command_by_id[active_services["huggingface"]["containerId"]] = ["wrong"]
+    with pytest.raises(stage_transition.StageTransitionError, match="changed after planning"):
+        stage_transition._verify_listener_repair_active_state(
+            plan=plan,
+            active_compose=active,
+            docker_prefix=["docker"],
+        )
+    active_command_by_id[active_services["huggingface"]["containerId"]] = list(
+        stage_transition.PROVIDER_DEFAULT_COMMANDS["huggingface"]
+    )
+    environment_sha_by_id[active_services["huggingface"]["containerId"]] = "b" * 64
+    with pytest.raises(stage_transition.StageTransitionError, match="environment changed"):
+        stage_transition._verify_listener_repair_active_state(
+            plan=plan,
+            active_compose=active,
+            docker_prefix=["docker"],
+        )
+    environment_sha_by_id[active_services["huggingface"]["containerId"]] = state["services"][
+        "huggingface"
+    ]["environmentSha256"]
+
+    journal = {
+        "targetProgress": {
+            service_name: {"candidateContainerId": f"{index:064x}"}
+            for index, service_name in enumerate(
+                stage_transition.PROVIDER_LISTENER_REPAIR_TARGETS, start=50
+            )
+        }
+    }
+    command_by_id = {
+        row["candidateContainerId"]: list(stage_transition.PROVIDER_WILDCARD_COMMANDS[name])
+        for name, row in journal["targetProgress"].items()
+    }
+    environment_sha_by_id.update(
+        {
+            row["candidateContainerId"]: state["services"][name]["environmentSha256"]
+            for name, row in journal["targetProgress"].items()
+        }
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_service_command_readback",
+        lambda **kwargs: command_by_id[kwargs["container_id"]],
+    )
+    stage_transition._verify_listener_repair_target_commands(
+        plan=plan,
+        journal=journal,
+        docker_prefix=["docker"],
+    )
+    active_command_by_id[active_services["huggingface"]["containerId"]] = list(
+        stage_transition.PROVIDER_DEFAULT_COMMANDS["huggingface"]
+    )
+    command_by_id[next(iter(command_by_id))] = ["wrong"]
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="exact wildcard listener command"
+    ):
+        stage_transition._verify_listener_repair_target_commands(
+            plan=plan,
+            journal=journal,
+            docker_prefix=["docker"],
+        )
+
+    first_candidate_id = next(iter(command_by_id))
+    command_by_id[first_candidate_id] = list(
+        stage_transition.PROVIDER_WILDCARD_COMMANDS["huggingface"]
+    )
+    environment_sha_by_id[first_candidate_id] = "b" * 64
+    with pytest.raises(stage_transition.StageTransitionError, match="listener environment"):
+        stage_transition._verify_listener_repair_target_commands(
+            plan=plan,
+            journal=journal,
+            docker_prefix=["docker"],
+        )
 
 
 def test_cloud_image_update_runner_state_is_bound_to_exact_exchange_container(
@@ -1292,13 +1634,31 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
         "exchange",
         "navigator",
     ]
+    listener_action = next(
+        action for action in plan_parser._actions if "--listener-repair" in action.option_strings
+    )
+    assert listener_action.dest == "listener_repair"
+    assert listener_action.default is False
 
 
+@pytest.mark.parametrize(
+    ("phase", "image_target", "listener_repair"),
+    [
+        ("issued-connector-activation", "exchange", False),
+        ("provider-bootstrap", None, True),
+    ],
+)
 def test_stage_transition_cli_passes_image_update_target_to_plan_builder(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    phase: str,
+    image_target: str | None,
+    listener_repair: bool,
 ) -> None:
-    """Forward the explicit CLI target without changing the selected config phase."""
+    """Forward either closed operation selector without inferring it from the phase.
+
+    中文：镜像更新与 listener repair 是独立显式操作，不从 phase 推断。
+    """
 
     captured: dict[str, Any] = {}
     monkeypatch.setattr(runtime_update, "_validate_docker_prefix", lambda _prefix: None)
@@ -1308,51 +1668,54 @@ def test_stage_transition_cli_passes_image_update_target_to_plan_builder(
         return {"operationId": "operation-1", "planSha256": "a" * 64}
 
     monkeypatch.setattr(stage_transition, "create_plan", capture_plan)
-    arguments = [
-        "plan",
-        "--phase",
-        "issued-connector-activation",
-        "--image-update-target",
-        "exchange",
-        "--active-compose-file",
-        str(tmp_path / "active-compose.yaml"),
-        "--active-env-file",
-        str(tmp_path / "active.env"),
-        "--active-image-lock",
-        str(tmp_path / "active-lock.json"),
-        "--candidate-compose-file",
-        str(tmp_path / "candidate-compose.yaml"),
-        "--candidate-env-file",
-        str(tmp_path / "candidate.env"),
-        "--candidate-image-lock",
-        str(tmp_path / "candidate-lock.json"),
-        "--secrets-dir",
-        str(tmp_path / "secrets"),
-        "--active-config-dir",
-        str(tmp_path / "config"),
-        "--candidate-config-dir",
-        str(tmp_path / "config"),
-        "--candidate-huggingface-seed",
-        str(tmp_path / "hf-seed.json"),
-        "--connector-auth-evidence",
-        str(tmp_path / "connector-evidence.json"),
-        "--connector-auth-task-id",
-        "task-1",
-        "--active-selection",
-        str(tmp_path / "runtime-selection.json"),
-        "--promote-selection",
-        str(tmp_path / "runtime-selection.json"),
-        "--backup-dir",
-        str(tmp_path / "backups"),
-        "--journal-dir",
-        str(tmp_path / "journals"),
-        "--output",
-        str(tmp_path / "plan.json"),
-    ]
+    arguments = ["plan", "--phase", phase]
+    if image_target is not None:
+        arguments.extend(["--image-update-target", image_target])
+    if listener_repair:
+        arguments.append("--listener-repair")
+    arguments.extend(
+        [
+            "--active-compose-file",
+            str(tmp_path / "active-compose.yaml"),
+            "--active-env-file",
+            str(tmp_path / "active.env"),
+            "--active-image-lock",
+            str(tmp_path / "active-lock.json"),
+            "--candidate-compose-file",
+            str(tmp_path / "candidate-compose.yaml"),
+            "--candidate-env-file",
+            str(tmp_path / "candidate.env"),
+            "--candidate-image-lock",
+            str(tmp_path / "candidate-lock.json"),
+            "--secrets-dir",
+            str(tmp_path / "secrets"),
+            "--active-config-dir",
+            str(tmp_path / "config"),
+            "--candidate-config-dir",
+            str(tmp_path / "config"),
+            "--candidate-huggingface-seed",
+            str(tmp_path / "hf-seed.json"),
+            "--connector-auth-evidence",
+            str(tmp_path / "connector-evidence.json"),
+            "--connector-auth-task-id",
+            "task-1",
+            "--active-selection",
+            str(tmp_path / "runtime-selection.json"),
+            "--promote-selection",
+            str(tmp_path / "runtime-selection.json"),
+            "--backup-dir",
+            str(tmp_path / "backups"),
+            "--journal-dir",
+            str(tmp_path / "journals"),
+            "--output",
+            str(tmp_path / "plan.json"),
+        ]
+    )
 
     assert stage_transition.main(arguments) == 0
-    assert captured["phase"] == "issued-connector-activation"
-    assert captured["image_update_target"] == "exchange"
+    assert captured["phase"] == phase
+    assert captured["image_update_target"] == image_target
+    assert captured["listener_repair"] is listener_repair
 
 
 def _image_update_selection_inputs() -> tuple[
@@ -1512,6 +1875,102 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
             candidate_inputs=changed_seed_inputs,
             runtime_config_identity=identity,
         )
+
+
+def _listener_repair_selection_inputs() -> tuple[
+    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]
+]:
+    """Build one bootstrap selector and candidate command-source record for repair tests."""
+
+    active_compose = [{"path": "/private/active-compose.yaml", "sha256": "a" * 64}]
+    candidate_compose = [{"path": "/private/candidate-compose.yaml", "sha256": "b" * 64}]
+    env_files = [{"path": "/private/runtime.env", "sha256": "c" * 64}]
+    image_lock = {"path": "/private/images.json", "sha256": "d" * 64}
+    config_files = [{"path": "navigator-principal-config.json", "sha256": "e" * 64}]
+    secret_files = [{"name": "exchange-hmac", "sha256": "f" * 64}]
+    seed = {"path": "/private/huggingface-oauth.json", "sha256": "1" * 64}
+    mount_identity = {"navigator": []}
+    active_inputs = {
+        "composeFiles": active_compose,
+        "envFiles": env_files,
+        "imageLock": image_lock,
+        "configDirectoryFiles": config_files,
+        "secretFiles": secret_files,
+    }
+    candidate_inputs = {
+        "composeFiles": candidate_compose,
+        "envFiles": env_files,
+        "imageLock": image_lock,
+        "configDirectoryFiles": config_files,
+        "secretFiles": secret_files,
+        "huggingfaceSeed": seed,
+        "runpodKey": None,
+    }
+    selection = {
+        "schemaVersion": stage_transition.SELECTION_SCHEMA,
+        "project": "cyrene-teams-cloud",
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "2" * 64,
+        "phase": "provider-bootstrap",
+        "composeFiles": active_compose,
+        "envFiles": env_files,
+        "imageLock": image_lock,
+        "secretsDir": "/private/secrets",
+        "configDir": "/private/config",
+        "huggingfaceSeed": seed,
+        "runpodKey": None,
+        "runtimeConfigIdentity": mount_identity,
+        "updatedAtUtc": "2026-10-26T12:00:00+00:00",
+    }
+    selection_record = {
+        "path": "/private/runtime-selection.json",
+        "sha256": "3" * 64,
+        "document": selection,
+    }
+    runtime_identity = {"active": mount_identity, "candidate": copy.deepcopy(mount_identity)}
+    return active_inputs, candidate_inputs, selection_record, runtime_identity
+
+
+def test_listener_repair_requires_the_current_bootstrap_selector_and_unchanged_inputs() -> None:
+    """Keep listener repair on selector-v2 with identical env, lock, config, and mounts."""
+
+    active_inputs, candidate_inputs, selection, identity = _listener_repair_selection_inputs()
+    kwargs = {
+        "phase": "provider-bootstrap",
+        "project": "cyrene-teams-cloud",
+        "selection_record": selection,
+        "selection_path": "/private/runtime-selection.json",
+        "active_config_dir": "/private/config",
+        "candidate_config_dir": "/private/config",
+        "active_secrets_dir": "/private/secrets",
+        "active_inputs": active_inputs,
+        "candidate_inputs": candidate_inputs,
+        "runtime_config_identity": identity,
+    }
+    stage_transition._validate_listener_repair_selection_contract(**kwargs)
+
+    changed_env = copy.deepcopy(kwargs)
+    changed_env["candidate_inputs"] = copy.deepcopy(candidate_inputs)
+    changed_env["candidate_inputs"]["envFiles"][0]["sha256"] = "9" * 64
+    with pytest.raises(stage_transition.StageTransitionError, match="env and image lock inputs"):
+        stage_transition._validate_listener_repair_selection_contract(**changed_env)
+
+    changed_lock = copy.deepcopy(kwargs)
+    changed_lock["candidate_inputs"] = copy.deepcopy(candidate_inputs)
+    changed_lock["candidate_inputs"]["imageLock"]["sha256"] = "8" * 64
+    with pytest.raises(stage_transition.StageTransitionError, match="env and image lock inputs"):
+        stage_transition._validate_listener_repair_selection_contract(**changed_lock)
+
+    changed_config = copy.deepcopy(kwargs)
+    changed_config["candidate_inputs"] = copy.deepcopy(candidate_inputs)
+    changed_config["candidate_inputs"]["configDirectoryFiles"][0]["sha256"] = "7" * 64
+    with pytest.raises(stage_transition.StageTransitionError, match="every config, secret"):
+        stage_transition._validate_listener_repair_selection_contract(**changed_config)
+
+    changed_phase = copy.deepcopy(kwargs)
+    changed_phase["phase"] = "issued-connector-activation"
+    with pytest.raises(stage_transition.StageTransitionError, match="provider-bootstrap selector"):
+        stage_transition._validate_listener_repair_selection_contract(**changed_phase)
 
 
 @pytest.mark.parametrize(
@@ -3075,6 +3534,463 @@ def _exchange_readiness_fixture(tmp_path: Path) -> tuple[dict[str, Any], dict[st
         "catalog": {"schemaVersion": 1, "items": catalog_items},
     }
     return snapshot, compose
+
+
+def _listener_repair_readiness_fixture(
+    tmp_path: Path, *, include_live_catalog: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build the exact frozen 11 plus existing issued HF/Azure/GCP metadata fixture."""
+
+    snapshot, compose = _exchange_readiness_fixture(tmp_path)
+    base_bindings: list[dict[str, Any]] = []
+    base_catalog: list[dict[str, Any]] = []
+    base_connections: list[dict[str, Any]] = []
+    repository_scope = []
+    for index in range(10):
+        connection_ref = f"10000000-0000-4000-8000-{index + 1:012d}"
+        repository_id = f"github-repository-{index}"
+        owner = "example-org"
+        name = f"repository-{index}"
+        repository_scope.append({"repositoryId": repository_id, "owner": owner, "name": name})
+        binding_id = f"exchange-github-{connection_ref}"
+        tool = {
+            "toolId": "github.repository.list",
+            "operationId": "github.repository.list",
+            "resourceProjection": "profile",
+            "mutating": False,
+        }
+        base_bindings.append(
+            {
+                "bindingId": binding_id,
+                "connectionRef": connection_ref,
+                "providerId": "github",
+                "profileRef": "github-profile",
+                "tools": [tool],
+            }
+        )
+        base_catalog.append(
+            {
+                "bindingId": binding_id,
+                "capabilityId": "tool.provider.v1",
+                "providerId": "github",
+                "connectionRef": connection_ref,
+                "profileRef": "github-profile",
+                "tools": [
+                    {
+                        "id": tool["toolId"],
+                        "name": "List repositories",
+                        "description": "List repositories visible to the issued GitHub profile.",
+                        "readOnly": True,
+                        "inputSchema": {"type": "object", "additionalProperties": False},
+                    }
+                ],
+            }
+        )
+        base_connections.append(
+            {
+                "connectionRef": connection_ref,
+                "providerId": "github",
+                "profileRef": "github-profile",
+                "profileAlias": None,
+                "targetAlias": None,
+                "accessMode": "workspace_operator",
+                "readOnly": False,
+                "targetScope": {
+                    "repositoryId": repository_id,
+                    "repository": f"{owner}/{name}",
+                },
+            }
+        )
+
+    computer_connection = "20000000-0000-4000-8000-000000000001"
+    computer_binding_id = f"exchange-computer-{computer_connection}"
+    computer_tool = {
+        "toolId": "computer.directory.list",
+        "operationId": "computer.directory.list",
+        "resourceProjection": "computer_directory",
+        "mutating": False,
+    }
+    base_bindings.append(
+        {
+            "bindingId": computer_binding_id,
+            "connectionRef": computer_connection,
+            "providerId": "computer",
+            "profileRef": "computer-profile",
+            "tools": [computer_tool],
+        }
+    )
+    base_catalog.append(
+        {
+            "bindingId": computer_binding_id,
+            "capabilityId": "tool.provider.v1",
+            "providerId": "computer",
+            "connectionRef": computer_connection,
+            "profileRef": "computer-profile",
+            "tools": [
+                {
+                    "id": computer_tool["toolId"],
+                    "name": "List workspace directory",
+                    "description": "List bounded entries in the authorized workspace.",
+                    "readOnly": True,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+        }
+    )
+    base_connections.append(
+        {
+            "connectionRef": computer_connection,
+            "providerId": "computer",
+            "profileRef": "computer-profile",
+            "profileAlias": "computer-profile",
+            "accessMode": "workspace_operator",
+            "readOnly": False,
+        }
+    )
+    base_profiles = [
+        {
+            "profileRef": "github-profile",
+            "profileAlias": None,
+            "providerId": "github",
+            "authStatus": "healthy",
+            "authMode": "github_app",
+            "accessMode": "workspace_operator",
+            "targetScope": {"repositories": repository_scope},
+        },
+        {
+            "profileRef": "computer-profile",
+            "profileAlias": "computer-profile",
+            "providerId": "computer",
+            "accessMode": "workspace_operator",
+            "targetScope": {
+                "maxCommandTimeoutMs": 30000,
+                "maxFileBytes": 1048576,
+                "maxReadBytes": 1048576,
+                "maxDirectoryDepth": 8,
+            },
+        },
+    ]
+
+    for binding in snapshot["bindings"]:
+        provider = binding["providerId"]
+        if provider == "huggingface":
+            operation_ids = [
+                "huggingface.file.download",
+                "huggingface.models.list",
+                "huggingface.repo.get",
+            ]
+        else:
+            operation_ids = (
+                sorted(preflight.CONNECTOR_MODEL_READONLY_OPERATIONS[provider])
+                if include_live_catalog
+                else sorted(
+                    operation
+                    for operation in preflight.CONNECTOR_OPERATION_POLICIES
+                    if operation.startswith("cloud.") and operation != "cloud.resource.restart"
+                )
+            )
+        binding["tools"] = []
+        catalog_item = next(
+            item
+            for item in snapshot["catalog"]["items"]
+            if item["bindingId"] == binding["bindingId"]
+        )
+        catalog_item["tools"] = []
+        for operation in operation_ids:
+            tool_id, resource_projection, mutating = preflight.CONNECTOR_OPERATION_POLICIES[
+                operation
+            ]
+            binding_tool = {
+                "toolId": tool_id,
+                "operationId": operation,
+                "resourceProjection": resource_projection,
+                "mutating": mutating,
+            }
+            binding["tools"].append(binding_tool)
+            if include_live_catalog:
+                catalog_item["tools"].append(
+                    {
+                        "id": tool_id,
+                        "name": f"Read {operation}",
+                        "description": "Read one issued provider scope.",
+                        "readOnly": not mutating,
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                    }
+                )
+        if provider in {"azure", "gcp"}:
+            profile = next(row for row in snapshot["profiles"] if row["providerId"] == provider)
+            connection = next(
+                row for row in snapshot["connections"] if row["providerId"] == provider
+            )
+            profile["readOnly"] = include_live_catalog
+            connection["readOnly"] = include_live_catalog
+
+    base_bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
+    base_catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
+    base_bindings_path.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": base_bindings}), encoding="utf-8"
+    )
+    base_catalog_path.write_text(
+        json.dumps({"schemaVersion": 1, "items": base_catalog}), encoding="utf-8"
+    )
+    compose["services"]["computer-runtime"] = {}
+    snapshot["profiles"].extend(base_profiles)
+    snapshot["connections"].extend(base_connections)
+    snapshot["bindings"] = base_bindings + snapshot["bindings"]
+    snapshot["catalog"] = {
+        "schemaVersion": 1,
+        "items": (base_catalog + snapshot["catalog"]["items"] if include_live_catalog else []),
+    }
+    return snapshot, compose
+
+
+def test_listener_repair_precheck_verifies_issued_state_without_live_catalog(
+    tmp_path: Path,
+) -> None:
+    """Verify actual 14 issued rows and scopes while explicitly leaving ListTools NOT_RUN.
+
+    中文：修复前证明 owner、连接、scope 与只读 operation map，但不声称目录已读取。
+    """
+
+    snapshot, compose = _listener_repair_readiness_fixture(tmp_path, include_live_catalog=False)
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase="provider-bootstrap",
+        listener_repair=True,
+        include_live_catalog=False,
+    )
+
+    assert receipt["status"] == "ISSUED_STATE_VERIFIED"
+    assert receipt["catalogStatus"] == "NOT_LIVE_CATALOG"
+    assert receipt["catalogSha256"] is None
+    assert receipt["profileCount"] == 5
+    assert receipt["connectionCount"] == 14
+    assert receipt["bindingCount"] == 14
+    assert receipt["verifiedProviderIds"] == [
+        "azure",
+        "computer",
+        "gcp",
+        "github",
+        "huggingface",
+    ]
+    assert len(receipt["issuedStateSha256"]) == 64
+
+
+@pytest.mark.parametrize("provider", ["azure", "gcp"])
+def test_listener_repair_precheck_requires_complete_cloud_issued_operation_map(
+    tmp_path: Path,
+    provider: str,
+) -> None:
+    """Metadata-only Exchange export must include the full 13-operation Cloud map."""
+
+    snapshot, compose = _listener_repair_readiness_fixture(tmp_path, include_live_catalog=False)
+    binding = next(row for row in snapshot["bindings"] if row["providerId"] == provider)
+    full_cloud_operations = {
+        operation
+        for operation in preflight.CONNECTOR_OPERATION_POLICIES
+        if operation.startswith("cloud.") and operation != "cloud.resource.restart"
+    }
+    assert len(full_cloud_operations) == 13
+    assert {tool["operationId"] for tool in binding["tools"]} == full_cloud_operations
+
+    binding["tools"].pop()
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="complete canonical operation map",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase="provider-bootstrap",
+            listener_repair=True,
+            include_live_catalog=False,
+        )
+
+    unsafe_hf_binding = copy.deepcopy(snapshot)
+    hf_binding = next(
+        row for row in unsafe_hf_binding["bindings"] if row["providerId"] == "huggingface"
+    )
+    hf_binding["tools"].append(
+        {
+            "toolId": "huggingface.file.upload",
+            "operationId": "huggingface.file.upload",
+            "resourceProjection": "huggingface_repository",
+            "mutating": True,
+        }
+    )
+    with pytest.raises(preflight.PreflightError, match="write, CLI, duplicate"):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=unsafe_hf_binding,
+            compose=compose,
+            phase="provider-bootstrap",
+            listener_repair=True,
+            include_live_catalog=False,
+        )
+
+
+def test_listener_repair_postcheck_requires_full_live_catalog_for_all_14_rows(
+    tmp_path: Path,
+) -> None:
+    """Require the native post-repair catalog while preserving frozen Navigator's 11 rows."""
+
+    snapshot, compose = _listener_repair_readiness_fixture(tmp_path, include_live_catalog=True)
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase="provider-bootstrap",
+        listener_repair=True,
+        include_live_catalog=True,
+    )
+
+    assert receipt["status"] == "LIVE_VERIFIED"
+    assert receipt["catalogStatus"] == "LIVE_VERIFIED"
+    assert receipt["connectionCount"] == 14
+    assert receipt["bindingCount"] == 14
+    assert receipt["verifiedProviderIds"] == [
+        "azure",
+        "computer",
+        "gcp",
+        "github",
+        "huggingface",
+    ]
+    assert receipt["issuedStateSha256"] == stage_transition._exchange_issued_metadata_sha256(
+        snapshot
+    )
+
+    changed_scope = copy.deepcopy(snapshot)
+    next(row for row in changed_scope["connections"] if row["providerId"] == "azure")[
+        "targetScope"
+    ]["targetRef"] = "unissued-scope"
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="cloud profile scope/read-only"
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=changed_scope,
+            compose=compose,
+            phase="provider-bootstrap",
+            listener_repair=True,
+            include_live_catalog=True,
+        )
+
+    missing_catalog = copy.deepcopy(snapshot)
+    missing_catalog["catalog"]["items"] = [
+        item for item in missing_catalog["catalog"]["items"] if item["providerId"] != "huggingface"
+    ]
+    with pytest.raises(
+        preflight.PreflightError, match="must match every non-empty connector binding"
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=missing_catalog,
+            compose=compose,
+            phase="provider-bootstrap",
+            listener_repair=True,
+            include_live_catalog=True,
+        )
+
+
+def test_listener_repair_hf_list_operation_matches_issued_repo_type(tmp_path: Path) -> None:
+    """Do not let a model-scoped HF profile expose dataset/space list operations."""
+
+    snapshot, compose = _listener_repair_readiness_fixture(tmp_path, include_live_catalog=True)
+    hf_binding = next(row for row in snapshot["bindings"] if row["providerId"] == "huggingface")
+    operations = {tool["operationId"] for tool in hf_binding["tools"]}
+    assert operations == {
+        "huggingface.file.download",
+        "huggingface.models.list",
+        "huggingface.repo.get",
+    }
+
+    next(tool for tool in hf_binding["tools"] if tool["operationId"] == "huggingface.models.list")[
+        "operationId"
+    ] = "huggingface.datasets.list"
+    next(tool for tool in hf_binding["tools"] if tool["toolId"] == "huggingface.models.list")[
+        "toolId"
+    ] = "huggingface.datasets.list"
+    hf_catalog = next(
+        item for item in snapshot["catalog"]["items"] if item["providerId"] == "huggingface"
+    )
+    next(tool for tool in hf_catalog["tools"] if tool["id"] == "huggingface.models.list")["id"] = (
+        "huggingface.datasets.list"
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="list operation does not match the issued repository type",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase="provider-bootstrap",
+            listener_repair=True,
+            include_live_catalog=True,
+        )
+
+
+def test_listener_repair_precheck_rejects_new_or_unconfigured_issued_connections(
+    tmp_path: Path,
+) -> None:
+    """Do not infer or accept an extra provider binding beyond the exact current 14 rows."""
+
+    snapshot, compose = _listener_repair_readiness_fixture(tmp_path, include_live_catalog=False)
+    extra = copy.deepcopy(snapshot["bindings"][-1])
+    extra["connectionRef"] = "90000000-0000-4000-8000-000000000001"
+    extra["bindingId"] = f"exchange-runpod-{extra['connectionRef']}"
+    extra["providerId"] = "runpod"
+    snapshot["bindings"].append(extra)
+    with pytest.raises(stage_transition.StageTransitionError, match="exactly the existing 14"):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase="provider-bootstrap",
+            listener_repair=True,
+            include_live_catalog=False,
+        )
+
+
+def test_listener_repair_reads_existing_exchange_store_without_provider_list_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use Exchange's canonical metadata exporter, with no live catalog request before repair."""
+
+    snapshot, compose = _listener_repair_readiness_fixture(tmp_path, include_live_catalog=False)
+    captured: list[str] = []
+
+    def checked(argv: list[str], **_kwargs: Any) -> str:
+        captured.extend(argv)
+        return json.dumps(snapshot, separators=(",", ":"))
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked)
+    receipt = stage_transition._read_live_exchange_issued_state(
+        compose=compose,
+        container_id="a" * 64,
+        image_id=_image_id(78),
+        docker_prefix=["docker"],
+    )
+
+    assert captured[:4] == [
+        "docker",
+        "exec",
+        "a" * 64,
+        stage_transition.EXCHANGE_SECRET_ENV_ENTRYPOINT,
+    ]
+    assert captured[captured.index("-c") + 1] == stage_transition._EXCHANGE_ISSUED_STATE_PYTHON
+    assert "include_profile_metadata=True" in stage_transition._EXCHANGE_ISSUED_STATE_PYTHON
+    assert "include_live_catalog=False" in stage_transition._EXCHANGE_ISSUED_STATE_PYTHON
+    assert "list_tool_catalog" not in stage_transition._EXCHANGE_ISSUED_STATE_PYTHON
+    assert receipt["catalogStatus"] == "NOT_LIVE_CATALOG"
+    assert receipt["exchangeContainerId"] == "a" * 64
+    assert receipt["exchangeImageId"] == _image_id(78)
 
 
 @pytest.mark.parametrize("target", ["exchange", "cloud-management-phase2"])

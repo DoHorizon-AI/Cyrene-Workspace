@@ -141,6 +141,22 @@ Navigator image update still requires a healthy fresh process instance. The V1
 and does not update selector-v2; do not use it for an active 14-service
 selector-v2 deployment.
 
+For a deployed 14-service `provider-bootstrap` selector whose multi-network
+Hugging Face or Cloud Management listener is bound to one Docker address,
+`stage-transition plan --listener-repair` provides a closed command-only repair.
+It requires the current selector-v2, the exact 14-service inventory, unchanged
+images, environment/config/secret files, provider seed, roles, and mount
+identities; only the fixed HF and Cloud `--listen 0.0.0.0:7443` command arrays
+may change. The plan and apply both verify the disabled Exchange runner and
+idle durable refresh work, pause ingress, drain the same Navigator generation,
+and snapshot Work SQLite. Apply updates HF and Cloud with no dependencies,
+checks both exact command and environment readbacks, then requires the pinned
+Exchange's live readiness command to return and validate all 14 bindings and
+the native tool catalog before selector promotion and ingress resume. The
+metadata-only precheck does not call provider `ListTools` and is not live
+catalog evidence. Do not use this repair during issued activation or with an
+image/configuration update.
+
 现有 selector-v2 可在保留 `provider-bootstrap` 或
 `issued-connector-activation` 配置阶段的同时，只更新一个 Exchange 或
 Navigator 镜像。使用 `runtime_update.py stage-transition plan`，传入 selector
@@ -158,6 +174,19 @@ generation。Provider bootstrap 阶段将当前完整 live binding 和 tool cata
 阶段还会核对各已配置 Provider 的 live profile/connection scope。Navigator 镜像更新
 仍要求健康的新 process instance。V1 `runtime_update.py plan --target exchange` 面向
 Stage 1 inventory，且不会推进 selector-v2；已有 14-service selector-v2 部署不可用该 V1 命令。
+
+对于已部署的 14-service `provider-bootstrap` selector，如果多网卡 Hugging Face
+或 Cloud Management 监听绑定到单个 Docker 地址，可用
+`stage-transition plan --listener-repair` 执行封闭的 command-only 修复。它要求当前
+selector-v2、精确 14-service inventory，以及镜像、环境/配置/secret 文件、Provider
+seed、角色和 mount identity 全部不变；只允许 HF 与 Cloud 的固定
+`--listen 0.0.0.0:7443` command 数组变化。plan/apply 都核验 Exchange runner 已关闭且
+持久 refresh 工作空闲，暂停 ingress，drain 同一 Navigator generation，并在线备份
+Work SQLite。Apply 以 no-deps 更新 HF 与 Cloud，核验两个目标容器的精确 command 与
+环境读回，然后要求 pinned Exchange 的 live readiness 命令返回并校验全部 14 个
+binding 和原生 tool catalog，之后才提升 selector 并恢复 ingress。修复前的 metadata-only
+检查不会调用 Provider `ListTools`，不能视为 live catalog 证据。issued activation 阶段
+或任何镜像/配置更新不得使用此修复。
 
 ### Private provider credential setup / 私有 Provider 凭据配置
 

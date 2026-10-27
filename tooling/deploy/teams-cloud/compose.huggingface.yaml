@@ -32,6 +32,21 @@ services:
     image: ${CYRENE_IMAGE_HUGGINGFACE_PROVIDER:?build and lock the Hugging Face provider image first}
     pull_policy: never
     restart: unless-stopped
+    command:
+      - --entrypoint
+      - huggingface_provider.plugin:HuggingFaceProvider
+      - --capability
+      - tool.provider.v1
+      - --interface-version
+      - "1"
+      - --listen
+      - 0.0.0.0:7443
+      - --tls-cert-file
+      - /run/secrets/huggingface-server-cert
+      - --tls-key-file
+      - /run/secrets/huggingface-server-key
+      - --tls-client-ca-file
+      - /run/secrets/huggingface-client-ca
     logging: *huggingface-logging
     environment:
       CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_HUGGINGFACE_BINDING_ID:?Hugging Face provider binding ID is required}

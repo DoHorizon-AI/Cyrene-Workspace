@@ -38,6 +38,7 @@ DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/stage-transition")
 PHASES = {"provider-bootstrap", "issued-connector-activation"}
 IMAGE_UPDATE_TARGETS = frozenset({"cloud-management-phase2", "exchange", "navigator"})
 CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
+PROVIDER_LISTENER_REPAIR_TARGETS = ("huggingface", "cloud-management-phase2")
 EXCHANGE_CLOUD_RUNNER_ENV = "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
 EXCHANGE_READINESS_IMAGE_TARGETS = frozenset({"cloud-management-phase2", "exchange"})
 NEW_SERVICES = {"huggingface", "cloud-management-phase2"}
@@ -56,14 +57,18 @@ SQLITE_ADDITIVE_SCHEMA_OBJECTS = {"table:work_credential_authorization_health"}
 ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR = "account_center_schema_downgrade_unsupported"
 
 
-def _exchange_readiness_required(phase: str, image_update_target: str | None) -> bool:
+def _exchange_readiness_required(
+    phase: str, image_update_target: str | None, *, listener_repair: bool = False
+) -> bool:
     """Require live Exchange verification for activation or a dependent image update.
 
     中文：连接器激活以及 Exchange/Cloud 镜像更新都必须现场验证连接器目录。
     """
 
-    return phase == "issued-connector-activation" or image_update_target in (
-        EXCHANGE_READINESS_IMAGE_TARGETS
+    return (
+        phase == "issued-connector-activation"
+        or image_update_target in EXCHANGE_READINESS_IMAGE_TARGETS
+        or listener_repair
     )
 
 
@@ -87,6 +92,88 @@ EXCHANGE_READINESS_EXECUTABLE = (
 )
 EXCHANGE_SECRET_ENV_ENTRYPOINT = "/usr/local/bin/cyrene-secret-env-entrypoint"
 EXCHANGE_INTEGRATION_DATABASE = "/data/integrations.sqlite3"
+_EXCHANGE_ISSUED_STATE_PYTHON = r"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from cyrene_exchange_product.cli import _integration_connector_export_data
+from cyrene_exchange_product.integrations.cli import build_production_services
+
+database, issuer, subject, organization_id, workspace_id = sys.argv[1:]
+arguments = argparse.Namespace(
+    issuer=issuer,
+    subject=subject,
+    organization_id=organization_id,
+    workspace_id=workspace_id,
+)
+services = build_production_services(Path(database))
+try:
+    exported = _integration_connector_export_data(
+        services,
+        arguments,
+        include_profile_metadata=True,
+        include_live_catalog=False,
+    )
+    result = {
+        "schemaVersion": 1,
+        "actor": {
+            "issuer": issuer,
+            "subject": subject,
+            "organizationId": organization_id,
+            "workspaceId": workspace_id,
+        },
+        **exported,
+    }
+    encoded = json.dumps(result, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > 16 * 1024 * 1024:
+        raise SystemExit("issued connector metadata exceeds its bounded size")
+    print(encoded)
+finally:
+    services.close()
+"""
+PROVIDER_DEFAULT_COMMANDS = {
+    "huggingface": (
+        "--entrypoint",
+        "huggingface_provider.plugin:HuggingFaceProvider",
+        "--capability",
+        "tool.provider.v1",
+        "--interface-version",
+        "1",
+        "--listen",
+        "huggingface:7443",
+        "--tls-cert-file",
+        "/run/secrets/huggingface-server-cert",
+        "--tls-key-file",
+        "/run/secrets/huggingface-server-key",
+        "--tls-client-ca-file",
+        "/run/secrets/huggingface-client-ca",
+    ),
+    "cloud-management-phase2": (
+        "--entrypoint",
+        "cloud_management_provider.plugin:CloudManagementProvider",
+        "--capability",
+        "tool.provider.v1",
+        "--interface-version",
+        "1",
+        "--listen",
+        "cloud-management:7443",
+        "--tls-cert-file",
+        "/run/secrets/cloud-management-server-cert",
+        "--tls-key-file",
+        "/run/secrets/cloud-management-server-key",
+        "--tls-client-ca-file",
+        "/run/secrets/cloud-management-client-ca",
+    ),
+}
+PROVIDER_WILDCARD_COMMANDS = {
+    service: tuple(
+        "0.0.0.0:7443" if index == command.index("--listen") + 1 else value
+        for index, value in enumerate(command)
+    )
+    for service, command in PROVIDER_DEFAULT_COMMANDS.items()
+}
 
 _SQLITE_REPORT_PYTHON = r"""
 import base64
@@ -880,6 +967,403 @@ def _verify_cloud_runner_idle(
     return observed
 
 
+def _service_command_readback(*, container_id: str, docker_prefix: list[str]) -> list[str]:
+    """Read the exact command array for one sealed provider container.
+
+    中文：只读取目标容器的命令参数，不使用容器名或宽泛查询。
+    """
+
+    if FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError("provider listener container ID is malformed")
+    try:
+        output = runtime_update._checked_stdout(
+            [
+                *docker_prefix,
+                "inspect",
+                "--format",
+                "{{json .Config.Cmd}}",
+                container_id,
+            ],
+            label="provider listener command readback",
+        )
+        command = runtime_update._decode_json_output(output, "provider listener command")
+    except runtime_update.RuntimeUpdateError as error:
+        raise StageTransitionError(
+            "provider listener command could not be verified from its exact container"
+        ) from error
+    if not isinstance(command, list) or any(not isinstance(value, str) for value in command):
+        raise StageTransitionError("provider listener command readback is malformed")
+    return command
+
+
+def _docker_environment_sha256(value: Any) -> str:
+    """Hash a normalized Docker environment without retaining any variable values.
+
+    中文：仅在私有计划中绑定环境读回，绝不持久化或输出环境变量原文。
+    """
+
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise StageTransitionError("provider listener environment readback is malformed")
+    environment: dict[str, str] = {}
+    for item in value:
+        name, separator, content = item.partition("=")
+        if not separator or not name or "\x00" in name or name in environment:
+            raise StageTransitionError("provider listener environment readback is ambiguous")
+        environment[name] = content
+    return _sha256_bytes(_canonical_json(environment))
+
+
+def _service_environment_sha256(*, container_id: str, docker_prefix: list[str]) -> str:
+    """Read and immediately hash one exact provider container's environment."""
+
+    if FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError("provider listener container ID is malformed")
+    try:
+        output = runtime_update._checked_stdout(
+            [
+                *docker_prefix,
+                "inspect",
+                "--format",
+                "{{json .Config.Env}}",
+                container_id,
+            ],
+            label="provider listener environment readback",
+        )
+        environment = runtime_update._decode_json_output(output, "provider listener environment")
+    except runtime_update.RuntimeUpdateError as error:
+        raise StageTransitionError(
+            "provider listener environment could not be verified from its exact container"
+        ) from error
+    return _docker_environment_sha256(environment)
+
+
+def _listener_repair_state_record(
+    *,
+    active_compose: dict[str, Any],
+    candidate_compose: dict[str, Any],
+    active_services: dict[str, Any],
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Bind both default commands and exact containers to the candidate wildcard commands.
+
+    中文：计划要求实际旧命令仍绑定 hostname，候选只把 listen 参数改为通配地址。
+    """
+
+    records: dict[str, dict[str, Any]] = {}
+    for service_name in PROVIDER_LISTENER_REPAIR_TARGETS:
+        active_definition = active_compose.get("services", {}).get(service_name)
+        candidate_definition = candidate_compose.get("services", {}).get(service_name)
+        live = active_services.get(service_name)
+        if not isinstance(active_definition, dict) or not isinstance(candidate_definition, dict):
+            raise StageTransitionError(f"provider listener service {service_name} is missing")
+        if not isinstance(live, dict):
+            raise StageTransitionError(
+                f"active provider listener service {service_name} is missing"
+            )
+        active_command = active_definition.get("command")
+        if active_command is not None and active_command != list(
+            PROVIDER_DEFAULT_COMMANDS[service_name]
+        ):
+            raise StageTransitionError(
+                f"active {service_name} Compose command is not the hostname-bound default"
+            )
+        candidate_command = candidate_definition.get("command")
+        if candidate_command != list(PROVIDER_WILDCARD_COMMANDS[service_name]):
+            raise StageTransitionError(
+                f"candidate {service_name} Compose command is not the fixed wildcard command"
+            )
+        container_id = live.get("containerId")
+        image_id = live.get("imageId")
+        if (
+            not isinstance(container_id, str)
+            or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None
+            or not isinstance(image_id, str)
+            or IMAGE_ID_RE.fullmatch(image_id) is None
+        ):
+            raise StageTransitionError(f"active {service_name} container identity is malformed")
+        observed_command = _service_command_readback(
+            container_id=container_id,
+            docker_prefix=docker_prefix,
+        )
+        if observed_command != list(PROVIDER_DEFAULT_COMMANDS[service_name]):
+            raise StageTransitionError(
+                f"active {service_name} container command is not the exact hostname-bound default"
+            )
+        records[service_name] = {
+            "containerId": container_id,
+            "imageId": image_id,
+            "activeCommand": observed_command,
+            "candidateCommand": list(candidate_command),
+            "environmentSha256": _service_environment_sha256(
+                container_id=container_id, docker_prefix=docker_prefix
+            ),
+        }
+    return {"services": records}
+
+
+def _validate_listener_repair_state_record(
+    value: Any, active_services: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate the closed command/container record for the two provider targets."""
+
+    if not isinstance(value, dict) or set(value) != {"services", "issuedState"}:
+        raise StageTransitionError("provider listener repair state is malformed")
+    services = value.get("services")
+    if not isinstance(services, dict) or set(services) != set(PROVIDER_LISTENER_REPAIR_TARGETS):
+        raise StageTransitionError("provider listener repair service set is malformed")
+    validated: dict[str, dict[str, Any]] = {}
+    for service_name in PROVIDER_LISTENER_REPAIR_TARGETS:
+        row = services.get(service_name)
+        active = active_services.get(service_name)
+        if (
+            not isinstance(row, dict)
+            or set(row)
+            != {
+                "containerId",
+                "imageId",
+                "activeCommand",
+                "candidateCommand",
+                "environmentSha256",
+            }
+            or not isinstance(active, dict)
+            or row.get("containerId") != active.get("containerId")
+            or row.get("imageId") != active.get("imageId")
+            or row.get("activeCommand") != list(PROVIDER_DEFAULT_COMMANDS[service_name])
+            or row.get("candidateCommand") != list(PROVIDER_WILDCARD_COMMANDS[service_name])
+            or not isinstance(row.get("environmentSha256"), str)
+            or SHA256_RE.fullmatch(row["environmentSha256"]) is None
+        ):
+            raise StageTransitionError("provider listener repair command identity is malformed")
+        validated[service_name] = dict(row)
+    issued = value.get("issuedState")
+    issued_fields = {
+        "exchangeContainerId",
+        "exchangeImageId",
+        "issuedStateSha256",
+        "catalogStatus",
+        "profileCount",
+        "connectionCount",
+        "bindingCount",
+        "verifiedProviderIds",
+    }
+    exchange = active_services.get("exchange")
+    if (
+        not isinstance(issued, dict)
+        or set(issued) != issued_fields
+        or not isinstance(exchange, dict)
+        or issued.get("exchangeContainerId") != exchange.get("containerId")
+        or issued.get("exchangeImageId") != exchange.get("imageId")
+        or issued.get("catalogStatus") != "NOT_LIVE_CATALOG"
+        or not isinstance(issued.get("issuedStateSha256"), str)
+        or SHA256_RE.fullmatch(issued["issuedStateSha256"]) is None
+        or any(
+            isinstance(issued.get(field), bool)
+            or not isinstance(issued.get(field), int)
+            or issued[field] < 1
+            for field in ("profileCount", "connectionCount", "bindingCount")
+        )
+        or issued.get("profileCount") != 5
+        or issued.get("connectionCount") != 14
+        or issued.get("bindingCount") != 14
+        or issued.get("verifiedProviderIds")
+        != ["azure", "computer", "gcp", "github", "huggingface"]
+    ):
+        raise StageTransitionError("listener repair issued-state evidence is malformed")
+    return {"services": validated, "issuedState": dict(issued)}
+
+
+def _exchange_issued_metadata_sha256(snapshot: dict[str, Any]) -> str:
+    """Hash actor-scoped issue state, excluding catalog-derived maps and flags.
+
+    中文：Cloud readOnly 标记会随真实目录变化，权限仍由 server config 与 post-readiness 核验。
+    """
+
+    profiles = snapshot.get("profiles")
+    connections = snapshot.get("connections")
+    if not isinstance(profiles, list) or not isinstance(connections, list):
+        raise StageTransitionError("Exchange issued profile metadata is malformed")
+    stable_profiles = []
+    for source in profiles:
+        row = dict(source)
+        if row.get("providerId") in {"azure", "gcp", "runpod"}:
+            row.pop("readOnly", None)
+        stable_profiles.append(row)
+    stable_connections = []
+    for source in connections:
+        row = dict(source)
+        if row.get("providerId") in {"azure", "gcp", "runpod"}:
+            row.pop("readOnly", None)
+        stable_connections.append(row)
+    projection = {
+        "actor": snapshot.get("actor"),
+        "profiles": sorted(
+            stable_profiles,
+            key=lambda row: (row["providerId"], row["profileRef"]),
+        ),
+        "connections": sorted(
+            stable_connections,
+            key=lambda row: (row["providerId"], row["connectionRef"]),
+        ),
+        "bindings": [
+            {key: row[key] for key in ("bindingId", "connectionRef", "providerId", "profileRef")}
+            for row in _sorted_exchange_bindings(snapshot.get("bindings"))
+        ],
+    }
+    return _sha256_bytes(_canonical_json(projection))
+
+
+def _read_live_exchange_issued_state(
+    *,
+    compose: dict[str, Any],
+    container_id: str,
+    image_id: str,
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Read Store bindings and Account Center scopes without calling provider ListTools.
+
+    中文：只用 Exchange 的真实 actor-scoped store/profile 导出，目录明确标为未读取。
+    """
+
+    if (
+        FULL_CONTAINER_ID_RE.fullmatch(container_id) is None
+        or IMAGE_ID_RE.fullmatch(image_id) is None
+    ):
+        raise StageTransitionError("Exchange issued-state container identity is malformed")
+    actor = preflight._connector_bootstrap_actor(compose)
+    if any(not isinstance(value, str) or not value for value in actor.values()):
+        raise StageTransitionError("candidate Exchange issued-state actor is incomplete")
+    python = str(Path(EXCHANGE_READINESS_EXECUTABLE).with_name("python"))
+    argv = [
+        *docker_prefix,
+        "exec",
+        container_id,
+        EXCHANGE_SECRET_ENV_ENTRYPOINT,
+        python,
+        "-c",
+        _EXCHANGE_ISSUED_STATE_PYTHON,
+        EXCHANGE_INTEGRATION_DATABASE,
+        actor["issuer"],
+        actor["subject"],
+        actor["organizationId"],
+        actor["workspaceId"],
+    ]
+    try:
+        output = runtime_update._checked_stdout(
+            argv,
+            label="Exchange issued connector metadata readback",
+            timeout_seconds=120,
+        )
+    except runtime_update.RuntimeUpdateError as error:
+        raise StageTransitionError(
+            "Exchange issued connector metadata could not be verified without ListTools"
+        ) from error
+    if len(output.encode("utf-8")) > 16 * 1024 * 1024:
+        raise StageTransitionError("Exchange issued connector metadata exceeds its bounded size")
+    try:
+        snapshot = json.loads(output, object_pairs_hook=preflight._unique_json_object)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError("Exchange issued connector metadata is invalid JSON") from error
+    receipt = _verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase="provider-bootstrap",
+        listener_repair=True,
+        include_live_catalog=False,
+    )
+    receipt["exchangeContainerId"] = container_id
+    receipt["exchangeImageId"] = image_id
+    receipt["issuedStateSha256"] = _exchange_issued_metadata_sha256(snapshot)
+    receipt["catalogStatus"] = "NOT_LIVE_CATALOG"
+    return receipt
+
+
+def _verify_listener_repair_active_state(
+    *,
+    plan: dict[str, Any],
+    active_compose: dict[str, Any],
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Recheck exact old provider commands and actor-scoped issued metadata before replacement."""
+
+    expected = _validate_listener_repair_state_record(
+        plan.get("listenerRepairState"), plan["activeServices"]
+    )
+    for service_name, row in expected["services"].items():
+        observed = _service_command_readback(
+            container_id=row["containerId"], docker_prefix=docker_prefix
+        )
+        if observed != row["activeCommand"]:
+            raise StageTransitionError(
+                f"active {service_name} listener command changed after planning"
+            )
+        if (
+            _service_environment_sha256(
+                container_id=row["containerId"], docker_prefix=docker_prefix
+            )
+            != row["environmentSha256"]
+        ):
+            raise StageTransitionError(
+                f"active {service_name} listener environment changed after planning"
+            )
+    exchange = plan["activeServices"].get("exchange")
+    if not isinstance(exchange, dict):
+        raise StageTransitionError("active Exchange service is missing for listener repair")
+    receipt = _read_live_exchange_issued_state(
+        compose=active_compose,
+        container_id=exchange["containerId"],
+        image_id=exchange["imageId"],
+        docker_prefix=docker_prefix,
+    )
+    expected_issued = plan["listenerRepairState"]["issuedState"]
+    if any(
+        receipt.get(field) != expected_issued.get(field)
+        for field in (
+            "exchangeContainerId",
+            "exchangeImageId",
+            "issuedStateSha256",
+            "catalogStatus",
+            "profileCount",
+            "connectionCount",
+            "bindingCount",
+            "verifiedProviderIds",
+        )
+    ):
+        raise StageTransitionError(
+            "Exchange issued connections or Account Center scopes changed after listener repair planning"
+        )
+    return receipt
+
+
+def _verify_listener_repair_target_commands(
+    *, plan: dict[str, Any], journal: dict[str, Any], docker_prefix: list[str]
+) -> None:
+    """Require both recreated provider containers to run the exact wildcard command."""
+
+    state = _validate_listener_repair_state_record(
+        plan.get("listenerRepairState"), plan["activeServices"]
+    )
+    for service_name, row in state["services"].items():
+        progress = journal["targetProgress"].get(service_name)
+        container_id = progress.get("candidateContainerId") if isinstance(progress, dict) else None
+        if (
+            not isinstance(container_id, str)
+            or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None
+        ):
+            raise StageTransitionError(f"updated {service_name} container ID is missing")
+        observed = _service_command_readback(container_id=container_id, docker_prefix=docker_prefix)
+        if observed != row["candidateCommand"]:
+            raise StageTransitionError(
+                f"updated {service_name} container does not run the exact wildcard listener command"
+            )
+        if (
+            _service_environment_sha256(container_id=container_id, docker_prefix=docker_prefix)
+            != row["environmentSha256"]
+        ):
+            raise StageTransitionError(
+                f"updated {service_name} listener environment differs from the active container"
+            )
+
+
 def _mount_rows(service: dict[str, Any], field: str) -> list[dict[str, Any]]:
     """Return validated Compose mount rows for one service field."""
 
@@ -962,6 +1446,7 @@ def _validate_phase_topology(
     *,
     phase: str,
     image_update_target: str | None = None,
+    listener_repair: bool = False,
     active: dict[str, Any],
     candidate: dict[str, Any],
     active_lock: dict[str, Any],
@@ -982,6 +1467,18 @@ def _validate_phase_topology(
     _validate_compose_definition_deltas(active, candidate)
     old_services = _runtime_service_inventory(active)
     new_services = _runtime_service_inventory(candidate)
+    if listener_repair:
+        if image_update_target is not None:
+            raise StageTransitionError("listener repair cannot also select an image update target")
+        return _validate_listener_repair_topology(
+            phase=phase,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+            old_services=old_services,
+            new_services=new_services,
+        )
     if image_update_target is not None:
         return _validate_image_update_topology(
             phase=phase,
@@ -1167,6 +1664,80 @@ def _validate_image_update_topology(
             "configChanged": False,
         }
     return [target], target_images
+
+
+def _validate_listener_repair_topology(
+    *,
+    phase: str,
+    active: dict[str, Any],
+    candidate: dict[str, Any],
+    active_lock: dict[str, Any],
+    candidate_lock: dict[str, Any],
+    old_services: dict[str, dict[str, Any]],
+    new_services: dict[str, dict[str, Any]],
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """Allow only the closed HF/Cloud listener argument replacement on 14 services.
+
+    中文：Bootstrap listener repair 只能改两项 listen 地址，镜像与其它配置必须原样保留。
+    """
+
+    if phase != "provider-bootstrap":
+        raise StageTransitionError("provider listener repair is limited to provider-bootstrap")
+    if set(old_services) != SERVICE_SET or set(new_services) != SERVICE_SET:
+        raise StageTransitionError(
+            "provider listener repair requires the exact 14-service topology"
+        )
+    if not set(PROVIDER_LISTENER_REPAIR_TARGETS) <= set(old_services):
+        raise StageTransitionError("provider listener repair requires both HF and Cloud services")
+    active_definition = copy.deepcopy(active)
+    candidate_definition = copy.deepcopy(candidate)
+    for service_name in PROVIDER_LISTENER_REPAIR_TARGETS:
+        active_service = active_definition.get("services", {}).get(service_name)
+        candidate_service = candidate_definition.get("services", {}).get(service_name)
+        if not isinstance(active_service, dict) or not isinstance(candidate_service, dict):
+            raise StageTransitionError(
+                f"provider listener repair service {service_name} is missing"
+            )
+        active_command = active_service.get("command")
+        if active_command is not None and active_command != list(
+            PROVIDER_DEFAULT_COMMANDS[service_name]
+        ):
+            raise StageTransitionError(
+                f"active {service_name} command is not the exact hostname-bound image default"
+            )
+        if candidate_service.get("command") != list(PROVIDER_WILDCARD_COMMANDS[service_name]):
+            raise StageTransitionError(
+                f"candidate {service_name} command must change only its listener to 0.0.0.0:7443"
+            )
+        active_service.pop("command", None)
+        candidate_service.pop("command", None)
+    if active_definition != candidate_definition:
+        raise StageTransitionError(
+            "provider listener repair may change only the HF and Cloud listener commands"
+        )
+    if active_lock != candidate_lock:
+        raise StageTransitionError("provider listener repair must preserve the exact image lock")
+    active_ids = _lock_image_ids(active_lock)
+    candidate_ids = _lock_image_ids(candidate_lock)
+    target_images: dict[str, dict[str, Any]] = {}
+    for service_name in SERVICE_ORDER:
+        active_image = _service_image(active, active_ids, service_name)
+        candidate_image = _service_image(candidate, candidate_ids, service_name)
+        if active_image != candidate_image:
+            raise StageTransitionError(f"provider listener repair changes image for {service_name}")
+        if _mounted_file_digests(active, service_name) != _mounted_file_digests(
+            candidate, service_name
+        ):
+            raise StageTransitionError(
+                f"provider listener repair changes mounted configuration for {service_name}"
+            )
+        target_images[service_name] = {
+            "active": active_image,
+            "candidate": candidate_image,
+            "added": False,
+            "configChanged": False,
+        }
+    return list(PROVIDER_LISTENER_REPAIR_TARGETS), target_images
 
 
 def _expected_mount_identity(compose: dict[str, Any], service_name: str) -> list[dict[str, Any]]:
@@ -1408,6 +1979,97 @@ def _validate_image_update_selection_contract(
         or selection.get("runtimeConfigIdentity") != runtime_config_identity.get("active")
     ):
         raise StageTransitionError("image update must preserve every service mount identity")
+
+
+def _validate_listener_repair_selection_contract(
+    *,
+    phase: str,
+    project: str,
+    selection_record: Any,
+    selection_path: str,
+    active_config_dir: str,
+    candidate_config_dir: str,
+    active_secrets_dir: str,
+    active_inputs: dict[str, Any],
+    candidate_inputs: dict[str, Any],
+    runtime_config_identity: Any,
+) -> None:
+    """Bind command-only repair to the current bootstrap selector and all frozen inputs.
+
+    中文：listener repair 只能替换 Compose 命令，运行配置、密钥、目录和镜像锁保持冻结。
+    """
+
+    selection = selection_record.get("document") if isinstance(selection_record, dict) else None
+    expected_fields = {
+        "schemaVersion",
+        "project",
+        "operationId",
+        "planSha256",
+        "phase",
+        "composeFiles",
+        "envFiles",
+        "imageLock",
+        "secretsDir",
+        "configDir",
+        "huggingfaceSeed",
+        "runpodKey",
+        "runtimeConfigIdentity",
+        "updatedAtUtc",
+    }
+    if (
+        phase != "provider-bootstrap"
+        or not isinstance(selection_record, dict)
+        or set(selection_record) != {"path", "sha256", "document"}
+        or selection_record.get("path") != selection_path
+        or not isinstance(selection_record.get("sha256"), str)
+        or SHA256_RE.fullmatch(selection_record["sha256"]) is None
+        or not isinstance(selection, dict)
+        or set(selection) != expected_fields
+        or selection.get("schemaVersion") != SELECTION_SCHEMA
+        or selection.get("project") != project
+        or selection.get("phase") != phase
+        or not isinstance(selection.get("operationId"), str)
+        or not selection["operationId"]
+        or not isinstance(selection.get("updatedAtUtc"), str)
+        or not isinstance(selection.get("planSha256"), str)
+        or SHA256_RE.fullmatch(selection["planSha256"]) is None
+    ):
+        raise StageTransitionError(
+            "listener repair requires the exact current provider-bootstrap selector v2"
+        )
+    if (
+        active_config_dir != candidate_config_dir
+        or selection.get("configDir") != active_config_dir
+        or selection.get("secretsDir") != active_secrets_dir
+    ):
+        raise StageTransitionError(
+            "listener repair must preserve the selected config and secret directories"
+        )
+    if (
+        selection.get("composeFiles") != active_inputs.get("composeFiles")
+        or selection.get("envFiles") != active_inputs.get("envFiles")
+        or selection.get("imageLock") != active_inputs.get("imageLock")
+        or active_inputs.get("envFiles") != candidate_inputs.get("envFiles")
+        or active_inputs.get("imageLock", {}).get("sha256")
+        != candidate_inputs.get("imageLock", {}).get("sha256")
+    ):
+        raise StageTransitionError("listener repair must preserve active env and image lock inputs")
+    if (
+        active_inputs.get("configDirectoryFiles") != candidate_inputs.get("configDirectoryFiles")
+        or active_inputs.get("secretFiles") != candidate_inputs.get("secretFiles")
+        or candidate_inputs.get("huggingfaceSeed") != selection.get("huggingfaceSeed")
+        or candidate_inputs.get("runpodKey") != selection.get("runpodKey")
+    ):
+        raise StageTransitionError(
+            "listener repair must preserve every config, secret, HF seed, and provider key"
+        )
+    if (
+        not isinstance(runtime_config_identity, dict)
+        or set(runtime_config_identity) != {"active", "candidate"}
+        or runtime_config_identity.get("active") != runtime_config_identity.get("candidate")
+        or selection.get("runtimeConfigIdentity") != runtime_config_identity.get("active")
+    ):
+        raise StageTransitionError("listener repair must preserve every service mount identity")
 
 
 def _validate_runtime_config_identity(
@@ -2591,6 +3253,7 @@ def create_plan(
     *,
     phase: str,
     image_update_target: str | None = None,
+    listener_repair: bool = False,
     active_compose_files: list[Path],
     active_env_files: list[Path],
     active_image_lock: Path,
@@ -2639,6 +3302,10 @@ def create_plan(
         raise StageTransitionError(
             "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
         )
+    if listener_repair and (phase != "provider-bootstrap" or image_update_target is not None):
+        raise StageTransitionError(
+            "provider listener repair is a separate provider-bootstrap operation"
+        )
     if ingress_exposure not in {"public-cutover", "host-fronted-staging"}:
         raise StageTransitionError(
             "ingress exposure must be public-cutover or host-fronted-staging"
@@ -2674,9 +3341,15 @@ def create_plan(
     )
     secrets_dir = _validate_private_directory(secrets_dir, "active secrets", expected_uid=10001)
     backup_dir = _validate_private_directory(backup_dir, "SQLite backup", require_artifact=True)
-    if image_update_target is None and active_config_dir == candidate_config_dir:
+    if (
+        image_update_target is None
+        and not listener_repair
+        and active_config_dir == candidate_config_dir
+    ):
         raise StageTransitionError("candidate config directory must be separate from active config")
-    if image_update_target is not None and active_config_dir != candidate_config_dir:
+    if (
+        image_update_target is not None or listener_repair
+    ) and active_config_dir != candidate_config_dir:
         raise StageTransitionError("image update must keep the active config directory")
     if not connector_auth_task_id or len(connector_auth_task_id) > 128:
         raise StageTransitionError("connector auth task ID is malformed")
@@ -2731,7 +3404,7 @@ def create_plan(
         raise StageTransitionError("active or candidate Compose could not be rendered") from error
     active_inputs["secretFiles"] = _secret_manifest(active_compose, "active")
     candidate_inputs["secretFiles"] = _secret_manifest(candidate_compose, "candidate")
-    if image_update_target is None:
+    if image_update_target is None and not listener_repair:
         _validate_active_candidate_configs(
             active_config_dir, candidate_config_dir, active_compose, candidate_compose
         )
@@ -2746,6 +3419,7 @@ def create_plan(
     targets, target_images = _validate_phase_topology(
         phase=phase,
         image_update_target=image_update_target,
+        listener_repair=listener_repair,
         active=active_compose,
         candidate=candidate_compose,
         active_lock=active_lock,
@@ -2808,8 +3482,10 @@ def create_plan(
         raise StageTransitionError(
             "candidate preflight did not return the scoped read-only readiness contract"
         )
-    if image_update_target is not None and active_selection_file is None:
-        raise StageTransitionError("image update requires the existing runtime selector v2")
+    if (image_update_target is not None or listener_repair) and active_selection_file is None:
+        raise StageTransitionError(
+            "image-only/repair update requires the existing runtime selector v2"
+        )
     if (
         active_selection_file is not None
         and active_selection_file.resolve() != promote_selection_file.resolve()
@@ -2844,22 +3520,39 @@ def create_plan(
     _verify_runtime_config_identity_sources(
         candidate_mount_identity, "candidate runtime configuration"
     )
-    _validate_image_update_selection_contract(
-        target=image_update_target,
-        phase=phase,
-        project=project,
-        selection_record=selection_state,
-        selection_path=str(promote_selection_file.resolve()),
-        active_config_dir=str(active_config_dir),
-        candidate_config_dir=str(candidate_config_dir),
-        active_secrets_dir=str(secrets_dir),
-        active_inputs=active_inputs,
-        candidate_inputs=candidate_inputs,
-        runtime_config_identity={
-            "active": active_mount_identity,
-            "candidate": candidate_mount_identity,
-        },
-    )
+    if listener_repair:
+        _validate_listener_repair_selection_contract(
+            phase=phase,
+            project=project,
+            selection_record=selection_state,
+            selection_path=str(promote_selection_file.resolve()),
+            active_config_dir=str(active_config_dir),
+            candidate_config_dir=str(candidate_config_dir),
+            active_secrets_dir=str(secrets_dir),
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity={
+                "active": active_mount_identity,
+                "candidate": candidate_mount_identity,
+            },
+        )
+    else:
+        _validate_image_update_selection_contract(
+            target=image_update_target,
+            phase=phase,
+            project=project,
+            selection_record=selection_state,
+            selection_path=str(promote_selection_file.resolve()),
+            active_config_dir=str(active_config_dir),
+            candidate_config_dir=str(candidate_config_dir),
+            active_secrets_dir=str(secrets_dir),
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity={
+                "active": active_mount_identity,
+                "candidate": candidate_mount_identity,
+            },
+        )
     edge_service = _runtime_service_inventory(active_compose).get("teams-ingress")
     if not isinstance(edge_service, dict):
         raise StageTransitionError("active Teams ingress service is missing")
@@ -2874,16 +3567,40 @@ def create_plan(
     if not isinstance(edge_container, dict) or not isinstance(navigator_container, dict):
         raise StageTransitionError("active Teams ingress or Navigator container is missing")
     cloud_runner_state = None
-    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET:
+    listener_repair_state = None
+    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET or listener_repair:
         exchange_service = active_services.get("exchange")
         if not isinstance(exchange_service, dict):
-            raise StageTransitionError("active Exchange service is missing for Cloud image update")
+            raise StageTransitionError("active Exchange service is missing for provider transition")
         cloud_runner_state = _cloud_runner_state_record(
             active_compose=active_compose,
             candidate_compose=candidate_compose,
             exchange_service=exchange_service,
             docker_prefix=docker_prefix,
         )
+    if listener_repair:
+        listener_repair_state = _listener_repair_state_record(
+            active_compose=active_compose,
+            candidate_compose=candidate_compose,
+            active_services=active_services,
+            docker_prefix=docker_prefix,
+        )
+        issued_state = _read_live_exchange_issued_state(
+            compose=candidate_compose,
+            container_id=active_services["exchange"]["containerId"],
+            image_id=active_services["exchange"]["imageId"],
+            docker_prefix=docker_prefix,
+        )
+        listener_repair_state["issuedState"] = {
+            "exchangeContainerId": issued_state["exchangeContainerId"],
+            "exchangeImageId": issued_state["exchangeImageId"],
+            "issuedStateSha256": issued_state["issuedStateSha256"],
+            "catalogStatus": issued_state["catalogStatus"],
+            "profileCount": issued_state["profileCount"],
+            "connectionCount": issued_state["connectionCount"],
+            "bindingCount": issued_state["bindingCount"],
+            "verifiedProviderIds": issued_state["verifiedProviderIds"],
+        }
     edge_status = runtime_update._current_edge_status(
         docker_prefix, edge_container["containerId"], timeout_seconds=15
     )
@@ -2910,6 +3627,11 @@ def create_plan(
         "phase": phase,
         **({"imageUpdateTarget": image_update_target} if image_update_target is not None else {}),
         **({"cloudRunnerState": cloud_runner_state} if cloud_runner_state is not None else {}),
+        **(
+            {"listenerRepairState": listener_repair_state}
+            if listener_repair_state is not None
+            else {}
+        ),
         "createdAtUtc": _utc_now(),
         "project": project,
         "activeInputs": active_inputs,
@@ -2986,10 +3708,14 @@ def create_plan(
             "minimumMemAvailableMiB": minimum_mem_available_mib,
         },
         "exchangeReadiness": {
-            "required": _exchange_readiness_required(phase, image_update_target),
+            "required": _exchange_readiness_required(
+                phase, image_update_target, listener_repair=listener_repair
+            ),
             "status": (
                 "PENDING_LIVE_READBACK"
-                if _exchange_readiness_required(phase, image_update_target)
+                if _exchange_readiness_required(
+                    phase, image_update_target, listener_repair=listener_repair
+                )
                 else "NOT_REQUIRED_PROVIDER_BOOTSTRAP"
             ),
         },
@@ -3051,6 +3777,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         "policy",
         "planSha256",
     }
+    listener_repair = False
     if set(plan) == required:
         image_update_target = None
     elif set(plan) == required | {"imageUpdateTarget"}:
@@ -3065,6 +3792,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         image_update_target = plan.get("imageUpdateTarget")
         if image_update_target != CLOUD_IMAGE_UPDATE_TARGET:
             image_update_target = "__invalid__"
+    elif set(plan) == required | {"listenerRepairState", "cloudRunnerState"}:
+        image_update_target = None
+        listener_repair = True
     else:
         image_update_target = "__invalid__"
     if image_update_target == "__invalid__" or plan.get("schemaVersion") != PLAN_SCHEMA:
@@ -3081,6 +3811,8 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError(
             "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
         )
+    if listener_repair and plan.get("phase") != "provider-bootstrap":
+        raise StageTransitionError("provider listener repair is limited to provider-bootstrap")
     if (
         not isinstance(plan.get("targets"), list)
         or not plan["targets"]
@@ -3092,9 +3824,30 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError("stage transition targets are not in canonical dependency order")
     if image_update_target is not None and plan["targets"] != [image_update_target]:
         raise StageTransitionError("image update plan must contain exactly its selected target")
+    if listener_repair and plan["targets"] != list(PROVIDER_LISTENER_REPAIR_TARGETS):
+        raise StageTransitionError("listener repair plan must contain exactly its two providers")
     active_runtime_services = set(plan.get("activeServices", {}))
-    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET:
+    if listener_repair:
+        if active_runtime_services != SERVICE_SET or set(plan["candidateServices"]) != SERVICE_SET:
+            raise StageTransitionError("listener repair plan must retain the exact 14 services")
+        for service_name, row in plan["candidateServices"].items():
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"active", "candidate", "added", "configChanged"}
+                or not isinstance(row.get("active"), dict)
+                or row.get("candidate") != row.get("active")
+                or row.get("added") is not False
+                or row.get("configChanged") is not False
+            ):
+                raise StageTransitionError(
+                    f"listener repair plan changes the immutable image for {service_name}"
+                )
+    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET or listener_repair:
         _validate_cloud_runner_state_record(plan.get("cloudRunnerState"), plan["activeServices"])
+    if listener_repair:
+        _validate_listener_repair_state_record(
+            plan.get("listenerRepairState"), plan["activeServices"]
+        )
     added_services = {
         name
         for name, row in plan.get("candidateServices", {}).items()
@@ -3122,19 +3875,33 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     for field in ("activeInputs", "candidateInputs"):
         if not isinstance(plan.get(field), dict):
             raise StageTransitionError(f"stage transition {field} record is malformed")
-    _validate_image_update_selection_contract(
-        target=image_update_target,
-        phase=plan["phase"],
-        project=plan["project"],
-        selection_record=plan["activeSelection"],
-        selection_path=plan["candidateSelectionFile"],
-        active_config_dir=plan["activeConfigDir"],
-        candidate_config_dir=plan["candidateConfigDir"],
-        active_secrets_dir=plan["activeSecretsDir"],
-        active_inputs=plan["activeInputs"],
-        candidate_inputs=plan["candidateInputs"],
-        runtime_config_identity=runtime_identity,
-    )
+    if listener_repair:
+        _validate_listener_repair_selection_contract(
+            phase=plan["phase"],
+            project=plan["project"],
+            selection_record=plan["activeSelection"],
+            selection_path=plan["candidateSelectionFile"],
+            active_config_dir=plan["activeConfigDir"],
+            candidate_config_dir=plan["candidateConfigDir"],
+            active_secrets_dir=plan["activeSecretsDir"],
+            active_inputs=plan["activeInputs"],
+            candidate_inputs=plan["candidateInputs"],
+            runtime_config_identity=runtime_identity,
+        )
+    else:
+        _validate_image_update_selection_contract(
+            target=image_update_target,
+            phase=plan["phase"],
+            project=plan["project"],
+            selection_record=plan["activeSelection"],
+            selection_path=plan["candidateSelectionFile"],
+            active_config_dir=plan["activeConfigDir"],
+            candidate_config_dir=plan["candidateConfigDir"],
+            active_secrets_dir=plan["activeSecretsDir"],
+            active_inputs=plan["activeInputs"],
+            candidate_inputs=plan["candidateInputs"],
+            runtime_config_identity=runtime_identity,
+        )
     readiness = plan.get("candidatePreflight")
     if (
         not isinstance(readiness, dict)
@@ -3180,7 +3947,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     elif host_fronted_readiness is not None:
         raise StageTransitionError("public-cutover plan must not contain host-fronted readiness")
     exchange_readiness = plan.get("exchangeReadiness")
-    exchange_readiness_required = _exchange_readiness_required(plan["phase"], image_update_target)
+    exchange_readiness_required = _exchange_readiness_required(
+        plan["phase"], image_update_target, listener_repair=listener_repair
+    )
     if (
         not isinstance(exchange_readiness, dict)
         or set(exchange_readiness) != {"required", "status"}
@@ -3584,14 +4353,190 @@ def _assert_exchange_readiness_safe_shape(snapshot: dict[str, Any]) -> None:
             raise StageTransitionError("Exchange readiness connection contains unsupported fields")
 
 
+def _listener_repair_new_provider_ids(compose: dict[str, Any]) -> set[str]:
+    """Return the closed HF/Azure/GCP set for this bootstrap-only listener repair.
+
+    中文：listener repair 只接受当前已配置的 HF、Azure 与 GCP，不含 RunPod。
+    """
+
+    if not preflight._huggingface_enabled(compose):
+        raise StageTransitionError("listener repair requires the selected Hugging Face provider")
+    cloud_service = compose.get("services", {}).get("cloud-management-phase2", {})
+    cloud_environment = (
+        cloud_service.get("environment", {}) if isinstance(cloud_service, dict) else {}
+    )
+    try:
+        cloud_document = json.loads(
+            cloud_environment.get("CYRENE_CAPABILITY_CONFIGURATION_JSON", ""),
+            object_pairs_hook=preflight._unique_json_object,
+        )
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError("candidate cloud provider scope is invalid") from error
+    profiles = cloud_document.get("profiles") if isinstance(cloud_document, dict) else None
+    if not isinstance(profiles, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("provider"), str) for row in profiles
+    ):
+        raise StageTransitionError("candidate cloud provider scope is malformed")
+    provider_ids = {row["provider"] for row in profiles}
+    if provider_ids != {"azure", "gcp"} or len(provider_ids) != len(profiles):
+        raise StageTransitionError("listener repair requires exactly the issued Azure/GCP profiles")
+    return {"huggingface", *provider_ids}
+
+
+def _verify_listener_repair_connector_projection(
+    *,
+    snapshot: dict[str, Any],
+    live_bindings: list[dict[str, Any]],
+    live_catalog: dict[str, Any],
+    candidate_bindings: list[dict[str, Any]],
+    candidate_catalog: dict[str, Any],
+    compose: dict[str, Any],
+    include_live_catalog: bool,
+) -> None:
+    """Join the frozen 11 Navigator rows to exactly three already-issued read-only rows.
+
+    中文：不合成 ID；HF、Azure、GCP 必须来自 actor-scoped Exchange 实际导出。
+    """
+
+    static_provider_ids = {row["providerId"] for row in candidate_bindings}
+    expected_static_providers = preflight._expected_connector_providers(
+        compose, "connector-auth-readonly", "provider-bootstrap"
+    )
+    expected_new_providers = _listener_repair_new_provider_ids(compose)
+    if (
+        len(candidate_bindings) != 11
+        or static_provider_ids != expected_static_providers
+        or static_provider_ids != {"github", "computer"}
+        or sum(row["providerId"] == "github" for row in candidate_bindings) != 10
+        or sum(row["providerId"] == "computer" for row in candidate_bindings) != 1
+    ):
+        raise StageTransitionError(
+            "listener repair requires the exact existing 11-binding Navigator baseline"
+        )
+    expected_provider_ids = static_provider_ids | expected_new_providers
+    live_provider_ids = {row["providerId"] for row in live_bindings}
+    connections = snapshot.get("connections")
+    profiles = snapshot.get("profiles")
+    expected_connection_counts = {
+        "azure": 1,
+        "computer": 1,
+        "gcp": 1,
+        "github": 10,
+        "huggingface": 1,
+    }
+    live_binding_counts = {
+        provider: sum(row["providerId"] == provider for row in live_bindings)
+        for provider in expected_provider_ids
+    }
+    live_connection_counts = (
+        {
+            provider: sum(
+                isinstance(row, dict) and row.get("providerId") == provider for row in connections
+            )
+            for provider in expected_provider_ids
+        }
+        if isinstance(connections, list)
+        else {}
+    )
+    live_profile_counts = (
+        {
+            provider: sum(
+                isinstance(row, dict) and row.get("providerId") == provider for row in profiles
+            )
+            for provider in expected_provider_ids
+        }
+        if isinstance(profiles, list)
+        else {}
+    )
+    if (
+        len(live_bindings) != 14
+        or live_provider_ids != expected_provider_ids
+        or not isinstance(connections, list)
+        or len(connections) != 14
+        or not isinstance(profiles, list)
+        or len(profiles) != 5
+        or live_binding_counts != expected_connection_counts
+        or live_connection_counts != expected_connection_counts
+        or live_profile_counts != {provider: 1 for provider in expected_provider_ids}
+    ):
+        raise StageTransitionError(
+            "listener repair requires exactly the existing 14 actor-scoped Exchange connections"
+        )
+    connection_refs = [row["connectionRef"] for row in connections]
+    if len(connection_refs) != len(set(connection_refs)):
+        raise StageTransitionError("Exchange issued connections contain duplicate connection IDs")
+
+    live_static_bindings = [
+        row for row in live_bindings if row["providerId"] in static_provider_ids
+    ]
+    live_new_bindings = [
+        row for row in live_bindings if row["providerId"] in expected_new_providers
+    ]
+    if _canonical_json(live_static_bindings) != _canonical_json(candidate_bindings):
+        raise StageTransitionError(
+            "live Exchange 11-binding Navigator baseline differs from its frozen configuration"
+        )
+    preflight._validate_connector_bindings_document(
+        {"schemaVersion": 1, "bindings": live_bindings}, expected_provider_ids
+    )
+    preflight._validate_new_provider_bindings_readonly(
+        {"bindings": [row for row in live_new_bindings if row["providerId"] == "huggingface"]},
+        {"huggingface"},
+    )
+    if not include_live_catalog:
+        full_cloud_operations = {
+            operation
+            for operation in preflight.CONNECTOR_OPERATION_POLICIES
+            if operation.startswith("cloud.") and operation != "cloud.resource.restart"
+        }
+        for binding in live_new_bindings:
+            if binding["providerId"] not in {"azure", "gcp"}:
+                continue
+            observed_operations = {tool["operationId"] for tool in binding["tools"]}
+            if observed_operations != full_cloud_operations:
+                raise StageTransitionError(
+                    "pre-repair Azure/GCP metadata must contain the complete canonical operation map"
+                )
+        if live_catalog["items"]:
+            raise StageTransitionError(
+                "pre-repair issued-state readback must not claim a live provider catalog"
+            )
+        return
+
+    preflight._validate_new_provider_bindings_readonly(
+        {"bindings": live_new_bindings}, expected_new_providers
+    )
+
+    live_catalog_document = {"schemaVersion": 1, "items": live_catalog["items"]}
+    preflight._validate_connector_tool_catalog_documents(
+        live_catalog_document,
+        {"schemaVersion": 1, "bindings": live_bindings},
+        expected_provider_ids,
+    )
+    static_binding_ids = {row["bindingId"] for row in candidate_bindings}
+    live_static_catalog = {
+        "schemaVersion": 1,
+        "items": [row for row in live_catalog["items"] if row["bindingId"] in static_binding_ids],
+    }
+    if _canonical_json(live_static_catalog) != _canonical_json(candidate_catalog):
+        raise StageTransitionError(
+            "live Exchange catalog for the frozen 11 Navigator bindings changed"
+        )
+
+
 def _verify_exchange_readiness_snapshot(
     *,
     snapshot: Any,
     compose: dict[str, Any],
     phase: str = "issued-connector-activation",
     image_update_target: str | None = None,
+    listener_repair: bool = False,
+    include_live_catalog: bool = True,
 ) -> dict[str, Any]:
-    """Verify the frozen catalog, then join issuer scopes only during activation."""
+    """Verify frozen tools and actor-scoped provider scopes for the selected transition.
+
+    中文：listener repair 修复前只核已签发状态，双服务健康后再核完整实时目录。
+    """
 
     if phase not in PHASES:
         raise StageTransitionError("Exchange readiness phase is unsupported")
@@ -3625,18 +4570,33 @@ def _verify_exchange_readiness_snapshot(
         raise StageTransitionError("candidate connector binding projection is malformed")
     live_bindings = _sorted_exchange_bindings(snapshot.get("bindings"))
     candidate_bindings = _sorted_exchange_bindings(bindings_document.get("bindings"))
-    if _canonical_json(live_bindings) != _canonical_json(candidate_bindings):
-        raise StageTransitionError(
-            "live Exchange issued bindings differ from the frozen Navigator binding config"
-        )
     live_catalog = _sorted_exchange_catalog(snapshot.get("catalog"))
     candidate_catalog = _sorted_exchange_catalog(catalog_document)
-    if _canonical_json(live_catalog) != _canonical_json(candidate_catalog):
-        raise StageTransitionError(
-            "live provider tool catalog differs from the frozen Navigator catalog config"
+    if listener_repair:
+        _verify_listener_repair_connector_projection(
+            snapshot=snapshot,
+            live_bindings=live_bindings,
+            live_catalog=live_catalog,
+            candidate_bindings=candidate_bindings,
+            candidate_catalog=candidate_catalog,
+            compose=compose,
+            include_live_catalog=include_live_catalog,
         )
+    else:
+        if _canonical_json(live_bindings) != _canonical_json(candidate_bindings):
+            raise StageTransitionError(
+                "live Exchange issued bindings differ from the frozen Navigator binding config"
+            )
+        if _canonical_json(live_catalog) != _canonical_json(candidate_catalog):
+            raise StageTransitionError(
+                "live provider tool catalog differs from the frozen Navigator catalog config"
+            )
 
-    if phase == "provider-bootstrap" and image_update_target in EXCHANGE_READINESS_IMAGE_TARGETS:
+    if (
+        not listener_repair
+        and phase == "provider-bootstrap"
+        and image_update_target in EXCHANGE_READINESS_IMAGE_TARGETS
+    ):
         provider_ids = sorted({row["providerId"] for row in live_bindings})
         if not provider_ids:
             raise StageTransitionError("provider-bootstrap Exchange binding inventory is empty")
@@ -3691,7 +4651,8 @@ def _verify_exchange_readiness_snapshot(
 
     expected_provider_ids = {"huggingface", *cloud_provider_ids}
     bindings_by_provider: dict[str, dict[str, Any]] = {}
-    for row in bindings_document["bindings"]:
+    provider_binding_rows = live_bindings if listener_repair else bindings_document["bindings"]
+    for row in provider_binding_rows:
         if isinstance(row, dict) and row.get("providerId") in expected_provider_ids:
             provider_id = row["providerId"]
             if provider_id in bindings_by_provider:
@@ -3789,15 +4750,20 @@ def _verify_exchange_readiness_snapshot(
         binding = bindings_by_provider[provider_id]
         catalog_item = catalog_by_binding.get(binding["bindingId"])
         if (
-            not isinstance(catalog_item, dict)
+            (include_live_catalog and not isinstance(catalog_item, dict))
             or connection["connectionRef"] != binding["connectionRef"]
             or connection["profileRef"] != binding["profileRef"]
             or profile["profileRef"] != binding["profileRef"]
             or connection["profileAlias"] != profile["profileAlias"]
             or connection["accessMode"] != profile["accessMode"]
-            or connection["readOnly"] is not True
-            or not catalog_item["tools"]
-            or any(tool.get("readOnly") is not True for tool in catalog_item["tools"])
+            or (include_live_catalog and connection["readOnly"] is not True)
+            or (
+                include_live_catalog
+                and (
+                    not catalog_item["tools"]
+                    or any(tool.get("readOnly") is not True for tool in catalog_item["tools"])
+                )
+            )
         ):
             raise StageTransitionError(
                 f"live Exchange profile/connection access mode, binding, and read-only catalog do not join for {provider_id}"
@@ -3834,6 +4800,29 @@ def _verify_exchange_readiness_snapshot(
                 raise StageTransitionError(
                     "live HF connector target does not match the Account Center repository scope"
                 )
+            target_repo_type = connection["targetScope"].get("repoType")
+            expected_list_operation = {
+                "model": "huggingface.models.list",
+                "dataset": "huggingface.datasets.list",
+                "space": "huggingface.spaces.list",
+            }.get(target_repo_type)
+            observed_list_operations = {
+                tool["operationId"]
+                for tool in binding["tools"]
+                if tool["operationId"]
+                in {
+                    "huggingface.models.list",
+                    "huggingface.datasets.list",
+                    "huggingface.spaces.list",
+                }
+            }
+            if listener_repair and (
+                expected_list_operation is None
+                or observed_list_operations != {expected_list_operation}
+            ):
+                raise StageTransitionError(
+                    "live HF list operation does not match the issued repository type"
+                )
         else:
             candidate_profiles = [
                 (alias, row)
@@ -3849,6 +4838,9 @@ def _verify_exchange_readiness_snapshot(
             if (
                 alias != plugin_profile["profile_ref"]
                 or candidate_profile.get("identityRef") != plugin_profile["identity_ref"]
+                or profile["profileRef"] != alias
+                or connection["profileRef"] != alias
+                or binding["profileRef"] != alias
             ):
                 raise StageTransitionError(
                     f"candidate Exchange profile identity does not join to Cloud Management for {provider_id}"
@@ -3870,7 +4862,7 @@ def _verify_exchange_readiness_snapshot(
                 profile["profileAlias"] != alias
                 or profile["accessMode"] != expected_access
                 or profile["targetScope"] != {"targets": expected_targets}
-                or profile.get("readOnly") is not True
+                or (include_live_catalog and profile.get("readOnly") is not True)
                 or candidate_target is None
                 or connection.get("targetScope")
                 != {"targetAlias": target_alias, "targetRef": candidate_target.get("targetRef")}
@@ -3883,18 +4875,28 @@ def _verify_exchange_readiness_snapshot(
     bindings_digest = _sha256_bytes(
         _canonical_json(_sorted_exchange_bindings(snapshot["bindings"]))
     )
-    catalog_digest = _sha256_bytes(_canonical_json(live_catalog))
+    catalog_digest = _sha256_bytes(_canonical_json(live_catalog)) if include_live_catalog else None
     return {
         "schemaVersion": 1,
-        "status": "LIVE_VERIFIED",
+        "status": "LIVE_VERIFIED" if include_live_catalog else "ISSUED_STATE_VERIFIED",
         "actorSha256": actor_digest,
         "bindingsSha256": bindings_digest,
         "catalogSha256": catalog_digest,
+        "catalogStatus": "LIVE_VERIFIED" if include_live_catalog else "NOT_LIVE_CATALOG",
         "profileCount": len(snapshot["profiles"]),
         "connectionCount": len(snapshot["connections"]),
         "bindingCount": len(snapshot["bindings"]),
-        "verifiedProviderIds": sorted(expected_provider_ids),
+        "verifiedProviderIds": sorted(
+            {row["providerId"] for row in live_bindings}
+            if listener_repair
+            else expected_provider_ids
+        ),
         "profileRefByProvider": live_profile_refs,
+        **(
+            {"issuedStateSha256": _exchange_issued_metadata_sha256(snapshot)}
+            if listener_repair
+            else {}
+        ),
     }
 
 
@@ -3957,6 +4959,8 @@ def _read_live_exchange_readiness(
             compose=compose,
             phase=plan.get("phase", "issued-connector-activation"),
             image_update_target=plan.get("imageUpdateTarget"),
+            listener_repair="listenerRepairState" in plan,
+            include_live_catalog=True,
         )
     except StageTransitionError:
         raise
@@ -3999,6 +5003,16 @@ def _record_exchange_readiness(
         image_id=image_id,
         docker_prefix=docker_prefix,
     )
+    if "listenerRepairState" in plan:
+        expected_issued = plan["listenerRepairState"]["issuedState"]
+        if (
+            receipt.get("issuedStateSha256") != expected_issued["issuedStateSha256"]
+            or receipt.get("status") != "LIVE_VERIFIED"
+            or receipt.get("catalogStatus") != "LIVE_VERIFIED"
+        ):
+            raise StageTransitionError(
+                "post-repair native Exchange readiness differs from the issued 14-connection baseline"
+            )
     journal["exchangeReadiness"]["verified"] = True
     journal["exchangeReadiness"]["receipt"] = receipt
     _write_journal(journal_path, journal, "EXCHANGE_LIVE_READINESS_VERIFIED")
@@ -4053,11 +5067,18 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "receipt": None,
         },
         "cloudRunnerIdle": {
-            "required": plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET,
+            "required": plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET
+            or "listenerRepairState" in plan,
             "planState": plan.get("cloudRunnerState"),
             "beforeTarget": None,
             "afterTarget": None,
             "postTargetReadbackFailed": False,
+        },
+        "listenerRepair": {
+            "required": "listenerRepairState" in plan,
+            "planState": plan.get("listenerRepairState"),
+            "issuedStateBeforeTarget": None,
+            "targetCommandsVerified": False,
         },
         "targetProgress": {
             service: {
@@ -4254,6 +5275,19 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(cloud_idle.get("beforeTarget"), dict)
         else "PENDING"
     )
+    listener_repair = journal.get("listenerRepair", {})
+    listener_repair_required = (
+        listener_repair.get("required") is True if isinstance(listener_repair, dict) else False
+    )
+    listener_repair_status = (
+        "NOT_REQUIRED"
+        if not listener_repair_required
+        else "LIVE_VERIFIED"
+        if listener_repair.get("targetCommandsVerified") is True and exchange_readiness_verified
+        else "ISSUED_STATE_VERIFIED"
+        if isinstance(listener_repair.get("issuedStateBeforeTarget"), dict)
+        else "PENDING"
+    )
     return {
         "schemaVersion": journal.get("schemaVersion"),
         "operationId": journal.get("operationId"),
@@ -4277,6 +5311,8 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         ),
         "cloudRunnerIdleRequired": cloud_idle_required,
         "cloudRunnerIdleStatus": cloud_idle_status,
+        "listenerRepairRequired": listener_repair_required,
+        "listenerRepairStatus": listener_repair_status,
         "selectionPromoted": journal.get("selection", {}).get("promoted"),
         "updatedAtUtc": journal.get("updatedAtUtc"),
         "lastErrorCode": journal.get("lastErrorCode"),
@@ -4461,6 +5497,12 @@ def _verify_active_baseline(
             raise StageTransitionError(
                 "Exchange runner or durable cloud/email work is no longer idle for Cloud image update"
             )
+    if "listenerRepairState" in plan:
+        _verify_listener_repair_active_state(
+            plan=plan,
+            active_compose=compose,
+            docker_prefix=docker_prefix,
+        )
     edge = runtime_update._current_edge_status(
         docker_prefix, plan["edgeDelivery"]["containerId"], timeout_seconds=15
     )
@@ -4508,6 +5550,17 @@ def _candidate_configs(
             raise StageTransitionError(
                 "candidate Exchange cloud refresh runner setting changed after planning"
             )
+    if "listenerRepairState" in plan:
+        state = _validate_listener_repair_state_record(
+            plan.get("listenerRepairState"), plan["activeServices"]
+        )
+        services = compose.get("services", {})
+        for service_name, row in state["services"].items():
+            service = services.get(service_name) if isinstance(services, dict) else None
+            if not isinstance(service, dict) or service.get("command") != row["candidateCommand"]:
+                raise StageTransitionError(
+                    f"candidate {service_name} listener command changed after planning"
+                )
     return compose, lock
 
 
@@ -4871,12 +5924,14 @@ def _resume_executor_after_transition(
     candidate_compose: dict[str, Any],
     docker_prefix: list[str],
 ) -> None:
-    """Keep the original Navigator generation for non-Navigator image updates.
+    """Keep the original Navigator generation for non-Navigator target updates.
 
-    中文：Exchange 或 Cloud 单镜像更新后恢复原 Navigator 容器与 generation。
+    中文：Exchange、Cloud 或 listener repair 后恢复原 Navigator 容器与 generation。
     """
 
-    if plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS:
+    if plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS or (
+        "listenerRepairState" in plan
+    ):
         _resume_old_executor_if_needed(
             plan=plan,
             journal=journal,
@@ -5107,11 +6162,44 @@ def _rollback_known_mutations(
         mount_identity_by_service=plan["runtimeConfigIdentity"]["active"],
     )
     runtime_update._verify_live_network_membership(active_compose, active_services, docker_prefix)
+    if "listenerRepairState" in plan:
+        listener_state = _validate_listener_repair_state_record(
+            plan.get("listenerRepairState"), plan["activeServices"]
+        )
+        for service_name, row in listener_state["services"].items():
+            current = active_services.get(service_name)
+            if not isinstance(current, dict):
+                raise StageTransitionError(
+                    f"rolled-back {service_name} provider container is missing"
+                )
+            command = _service_command_readback(
+                container_id=current["containerId"], docker_prefix=docker_prefix
+            )
+            if command != row["activeCommand"]:
+                raise StageTransitionError(
+                    f"rolled-back {service_name} provider listener command is not restored"
+                )
+            if (
+                _service_environment_sha256(
+                    container_id=current["containerId"], docker_prefix=docker_prefix
+                )
+                != row["environmentSha256"]
+            ):
+                raise StageTransitionError(
+                    f"rolled-back {service_name} provider environment is not restored"
+                )
+        _verify_cloud_runner_idle(
+            plan=plan,
+            active_compose=active_compose,
+            candidate_compose=active_compose,
+            docker_prefix=docker_prefix,
+        )
     _resume_old_executor_if_needed(
         plan=plan,
         journal=journal,
         docker_prefix=docker_prefix,
-        require_original_instance=plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS,
+        require_original_instance=plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS
+        or "listenerRepairState" in plan,
     )
     _resume_ingress_after_safe_state(
         journal=journal,
@@ -5198,6 +6286,29 @@ def apply_plan_file(
                     journal,
                     "CLOUD_RUNNER_IDLE_BEFORE_TARGET_VERIFIED",
                 )
+            if journal["listenerRepair"]["required"]:
+                issued_state = _verify_listener_repair_active_state(
+                    plan=plan,
+                    active_compose=active_compose,
+                    docker_prefix=docker_prefix,
+                )
+                journal["listenerRepair"]["issuedStateBeforeTarget"] = {
+                    field: issued_state[field]
+                    for field in (
+                        "status",
+                        "issuedStateSha256",
+                        "profileCount",
+                        "connectionCount",
+                        "bindingCount",
+                        "verifiedProviderIds",
+                        "catalogStatus",
+                    )
+                }
+                _write_journal(
+                    journal_path,
+                    journal,
+                    "LISTENER_REPAIR_ISSUED_STATE_VERIFIED",
+                )
             for service_name in plan["targets"]:
                 if (
                     service_name == "navigator"
@@ -5234,8 +6345,8 @@ def apply_plan_file(
                     )
                 if (
                     plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET
-                    and service_name == CLOUD_IMAGE_UPDATE_TARGET
-                ):
+                    or journal["listenerRepair"]["required"]
+                ) and service_name == CLOUD_IMAGE_UPDATE_TARGET:
                     try:
                         after_target = _verify_cloud_runner_idle(
                             plan=plan,
@@ -5253,7 +6364,7 @@ def apply_plan_file(
                             state="RECOVERY_REQUIRED",
                         )
                         raise StageTransitionError(
-                            "Cloud image changed but Exchange background work is no longer verifiably idle; keep ingress held for read-only recovery"
+                            "provider target changed but Exchange background work is no longer verifiably idle; keep ingress held for read-only recovery"
                         ) from error
                     journal["cloudRunnerIdle"]["afterTarget"] = after_target
                     _write_journal(
@@ -5286,6 +6397,25 @@ def apply_plan_file(
                         raise StageTransitionError(
                             "Persistence migration contract failed; keep ingress held and do not roll back the database image or restore snapshot bytes"
                         ) from error
+            if journal["listenerRepair"]["required"]:
+                _verify_listener_repair_target_commands(
+                    plan=plan,
+                    journal=journal,
+                    docker_prefix=docker_prefix,
+                )
+                journal["listenerRepair"]["targetCommandsVerified"] = True
+                _write_journal(
+                    journal_path,
+                    journal,
+                    "LISTENER_REPAIR_COMMANDS_VERIFIED",
+                )
+                _record_exchange_readiness(
+                    plan=plan,
+                    compose=candidate_compose,
+                    journal=journal,
+                    journal_path=journal_path,
+                    docker_prefix=docker_prefix,
+                )
             candidate_lock = runtime_update._load_lock(
                 Path(plan["candidateInputs"]["imageLock"]["path"])
             )
@@ -5552,6 +6682,11 @@ def _add_common_plan_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--phase", choices=sorted(PHASES), required=True)
     parser.add_argument("--image-update-target", choices=sorted(IMAGE_UPDATE_TARGETS))
+    parser.add_argument(
+        "--listener-repair",
+        action="store_true",
+        help="plan the bootstrap-only HF/Cloud wildcard-listener repair without changing images",
+    )
     parser.add_argument("--active-compose-file", type=Path, action="append", required=True)
     parser.add_argument("--active-env-file", type=Path, action="append", required=True)
     parser.add_argument("--active-image-lock", type=Path, required=True)
@@ -5626,6 +6761,7 @@ def main(argv: list[str] | None = None) -> int:
             result = create_plan(
                 phase=arguments.phase,
                 image_update_target=arguments.image_update_target,
+                listener_repair=arguments.listener_repair,
                 active_compose_files=[path.resolve() for path in arguments.active_compose_file],
                 active_env_files=[path.resolve() for path in arguments.active_env_file],
                 active_image_lock=arguments.active_image_lock.resolve(),
