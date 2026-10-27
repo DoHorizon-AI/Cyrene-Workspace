@@ -79,13 +79,19 @@ def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _private_metadata(path: Path, *, mode: int = 0o600, maximum: int = MAX_JSON) -> os.stat_result:
-    """Validate one canonical root-owned regular file without following symlinks."""
+def _private_metadata(
+    path: Path,
+    *,
+    mode: int = 0o600,
+    maximum: int = MAX_JSON,
+    allowed_owners: tuple[int, ...] = (0,),
+) -> os.stat_result:
+    """Validate a canonical private file with an explicit owner allowlist."""
     try:
         info = path.lstat()
         if (
             not stat.S_ISREG(info.st_mode)
-            or info.st_uid != 0
+            or info.st_uid not in allowed_owners
             or stat.S_IMODE(info.st_mode) != mode
             or info.st_size > maximum
             or path.resolve(strict=True) != path
@@ -104,6 +110,16 @@ def _private_file(path: Path, *, mode: int = 0o600, maximum: int = MAX_JSON) -> 
         return path.read_bytes()
     except OSError as error:
         raise ObservationBoundaryError("PRIVATE_FILE_UNAVAILABLE") from error
+
+
+def _image_lock_file(path: Path) -> bytes:
+    """Read the selector-bound lock owned by root or the runtime UID 10001."""
+
+    try:
+        _private_metadata(path, mode=0o600, maximum=16 * 1024**2, allowed_owners=(0, 10001))
+        return path.read_bytes()
+    except OSError as error:
+        raise ObservationBoundaryError("IMAGE_LOCK_FILE_UNAVAILABLE") from error
 
 
 def _private_dir(path: Path, *, create: bool = False) -> Path:
@@ -227,7 +243,7 @@ def _selection(path: Path) -> dict[str, Any]:
         or not isinstance(lock["sha256"], str)
     ):
         raise ObservationBoundaryError("OBSERVER_IMAGE_LOCK_REFERENCE_INVALID")
-    lock_raw = _private_file(Path(lock["path"]), maximum=16 * 1024**2)
+    lock_raw = _image_lock_file(Path(lock["path"]))
     lock_sha = _sha(lock_raw)
     if lock_sha != lock["sha256"]:
         raise ObservationBoundaryError("OBSERVER_IMAGE_LOCK_DIGEST_MISMATCH")

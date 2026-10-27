@@ -712,7 +712,6 @@ def _build_probe_operations(
             or binding.get("connectionRef") != connection_ref
             or binding.get("profileRef") != profile_ref
             or binding.get("providerId") != provider
-            or connection.get("readOnly") is not True
             or auth_mode not in preflight.CONNECTOR_AUTH_READONLY_AUTH_MODES.get(provider, set())
         ):
             raise DeploymentProbeError(f"active {provider} readiness identity does not join")
@@ -754,10 +753,7 @@ def _build_probe_operations(
                     f"{provider} probe target alias differs from active Exchange"
                 )
             active_profile = cloud_profiles[provider]
-            if (
-                active_profile.get("profile_ref") != profile_ref
-                or active_profile.get("read_only") is not True
-            ):
+            if active_profile.get("profile_ref") != profile_ref:
                 raise DeploymentProbeError(
                     f"active {provider} scope differs from its Exchange profile"
                 )

@@ -16,6 +16,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -203,13 +204,23 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         assert info.st_size <= maximum
         return path.read_bytes()
 
+    lock_owner = {"uid": 10001}
+
     def private_metadata(
-        path: Path, *, mode: int = 0o600, maximum: int = observation.MAX_JSON
+        path: Path,
+        *,
+        mode: int = 0o600,
+        maximum: int = observation.MAX_JSON,
+        allowed_owners: tuple[int, ...] = (0,),
     ) -> Any:
         info = path.lstat()
         assert path.is_file() and not path.is_symlink() and info.st_mode & 0o777 == mode
         assert info.st_size <= maximum
-        return info
+        assert path.resolve(strict=True) == path
+        owner = lock_owner["uid"] if path == lock_path else 0
+        if owner not in allowed_owners:
+            raise observation.ObservationBoundaryError("PRIVATE_FILE_OWNER_MODE_OR_PATH_INVALID")
+        return SimpleNamespace(st_mode=info.st_mode, st_uid=owner, st_size=info.st_size)
 
     monkeypatch.setattr(observation, "_private_dir", private_dir)
     monkeypatch.setattr(observation, "_private_file", private_file)
@@ -224,6 +235,7 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         "selectionPath": selection_path,
         "releaseDir": release_dir,
         "policy": {"sourceDirectory": str(profile_dir), "sourceHashes": hashes},
+        "lockOwner": lock_owner,
         "selected": selected,
         "state": state,
         "unit": unit,
@@ -457,6 +469,23 @@ def test_nonmatching_active_selector_is_held_without_stopping_any_unit(
             value["selectionPath"], value["releaseDir"], value["policy"]
         )
     assert stopped == []
+
+
+def test_selector_accepts_only_root_or_runtime_owned_exact_private_lock(
+    harness: dict[str, Any],
+) -> None:
+    value = harness
+    value["lockOwner"]["uid"] = 10001
+    selected = observation._selection(value["selectionPath"])
+    assert selected["imageLockSha256"] == value["selected"]["imageLock"]["sha256"]
+    value["lockOwner"]["uid"] = 0
+    observation._selection(value["selectionPath"])
+    value["lockOwner"]["uid"] = 1000
+    with pytest.raises(
+        observation.ObservationBoundaryError,
+        match="PRIVATE_FILE_OWNER_MODE_OR_PATH_INVALID",
+    ):
+        observation._selection(value["selectionPath"])
 
 
 def test_start_requires_exact_wrapper_summary_and_running_unit_readback(

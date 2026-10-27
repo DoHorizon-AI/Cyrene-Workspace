@@ -208,7 +208,7 @@ def _ready_snapshot() -> dict[str, Any]:
             "profileRef": "azure-profile",
             "profileAlias": "azure",
             "accessMode": "workspace_operator",
-            "readOnly": True,
+            "readOnly": False,
             "targetAlias": "azure-resource-group",
             "targetScope": {
                 "targetAlias": "azure-resource-group",
@@ -221,7 +221,7 @@ def _ready_snapshot() -> dict[str, Any]:
             "profileRef": "gcp-profile",
             "profileAlias": "gcp",
             "accessMode": "workspace_operator",
-            "readOnly": True,
+            "readOnly": False,
             "targetAlias": "gcp-zone",
             "targetScope": {"targetAlias": "gcp-zone", "targetRef": "target-ref-b"},
         },
@@ -237,14 +237,14 @@ def _ready_snapshot() -> dict[str, Any]:
             "providerId": "azure",
             "profileRef": "azure-profile",
             "authMode": "managed_identity",
-            "readOnly": True,
+            "readOnly": False,
             "targetScope": {"targets": {"azure-resource-group": {"targetRef": "target-ref-a"}}},
         },
         {
             "providerId": "gcp",
             "profileRef": "gcp-profile",
             "authMode": "workload_identity_federation",
-            "readOnly": True,
+            "readOnly": False,
             "targetScope": {"targets": {"gcp-zone": {"targetRef": "target-ref-b"}}},
         },
     ]
@@ -302,7 +302,7 @@ def _compose_scope() -> dict[str, Any]:
                 "provider": "azure",
                 "profile_ref": "azure-profile",
                 "identity_ref": "azure-identity",
-                "read_only": True,
+                "read_only": False,
                 "scope": {
                     "subscription_id": "subscription-a",
                     "resource_groups": ["resource-group-a"],
@@ -312,7 +312,7 @@ def _compose_scope() -> dict[str, Any]:
                 "provider": "gcp",
                 "profile_ref": "gcp-profile",
                 "identity_ref": "gcp-identity",
-                "read_only": True,
+                "read_only": False,
                 "scope": {
                     "project_id": "project-a",
                     "zones": ["region-a"],
@@ -477,6 +477,29 @@ def test_probe_plan_blocks_target_or_permission_drift_before_provider_calls() ->
     azure = next(row for row in snapshot["bindings"] if row["providerId"] == "azure")
     azure["tools"][0]["mutating"] = True
     with pytest.raises(deployment_probe.DeploymentProbeError, match="read-only"):
+        deployment_probe._build_probe_operations(
+            snapshot=snapshot,
+            compose=_compose_scope(),
+            targets=_policy()["probeTargets"],
+        )
+
+    snapshot = _ready_snapshot()
+    azure_catalog = next(
+        row
+        for row in snapshot["catalog"]["items"]
+        if row["bindingId"]
+        == next(
+            binding["bindingId"]
+            for binding in snapshot["bindings"]
+            if binding["providerId"] == "azure"
+        )
+    )
+    azure_read_tool_id = preflight.CONNECTOR_OPERATION_POLICIES["cloud.resources.list"][0]
+    azure_catalog_tool = next(
+        row for row in azure_catalog["tools"] if row["id"] == azure_read_tool_id
+    )
+    azure_catalog_tool["readOnly"] = False
+    with pytest.raises(deployment_probe.DeploymentProbeError, match="catalog"):
         deployment_probe._build_probe_operations(
             snapshot=snapshot,
             compose=_compose_scope(),
