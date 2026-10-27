@@ -118,12 +118,13 @@ connector-auth Provider bootstrap/activation 的私有 Exchange bootstrap 只有
 
 ### Phase-preserving image updates / 保留阶段状态的镜像更新
 
-An existing selector-v2 can receive a single Exchange, Navigator, or Persistence image update
+An existing selector-v2 can receive a single Exchange, Hugging Face, Navigator, or Persistence image update
 without changing its `provider-bootstrap` or `issued-connector-activation`
 configuration phase. Use `runtime_update.py stage-transition plan` with the current
 `--phase` and exactly one `--image-update-target exchange`,
-`--image-update-target navigator`, or `--image-update-target navigator-persistence`.
-Persistence is limited to `issued-connector-activation`. The selector must already exist and name the
+`--image-update-target huggingface`, `--image-update-target navigator`, or
+`--image-update-target navigator-persistence`. Hugging Face and Persistence are limited to
+`issued-connector-activation`. The selector must already exist and name the
 same phase. The plan keeps the service inventory, config and secret directories,
 config/secret manifests, HF seed, RunPod key, roles, and every service mount
 identity unchanged; only the selected image reference/ID and its build-lock row
@@ -137,6 +138,15 @@ generation. During provider bootstrap, readiness compares the full live binding
 and tool-catalog projections to the frozen current config, without requiring
 future HF/cloud profiles to be issued. During issued-connector activation, it
 also verifies each configured provider's live profile/connection scope. A
+Hugging Face image update checks the live Exchange readiness for all 14 bindings
+and the native catalog before and after replacement. Immediately before Compose,
+it joins the selected HF connection from that live snapshot to the frozen binding,
+then reads the authorization monitor state and connector invocation ledger.
+Replacement requires no active HF monitor lease, no nonterminal HF call, and
+`next_check_at` later than the current time by the configured health timeout plus
+60 seconds. The monitor keeps its normal schedule; a missing or short window stops
+the transition before the HF container changes. The original Navigator process
+resumes after the post-update Exchange check. A
 Persistence image update verifies Exchange readiness before replacement, then
 requires zero unexpired Session writer leases and an exact schema/row-digest
 match against a fresh post-drain read immediately before Compose runs. Its
@@ -166,11 +176,12 @@ catalog evidence. Do not use this repair during issued activation or with an
 image/configuration update.
 
 现有 selector-v2 可在保留 `provider-bootstrap` 或
-`issued-connector-activation` 配置阶段的同时，只更新一个 Exchange、Navigator
+`issued-connector-activation` 配置阶段的同时，只更新一个 Exchange、HF、Navigator
 或 Persistence 镜像。使用 `runtime_update.py stage-transition plan`，传入 selector
 当前的 `--phase`，并且只指定一个 `--image-update-target exchange`、
-`--image-update-target navigator` 或 `--image-update-target navigator-persistence`。
-Persistence 只允许用于 `issued-connector-activation`。必须已有 selector-v2 且其 phase 与参数一致。
+`--image-update-target huggingface`、`--image-update-target navigator` 或
+`--image-update-target navigator-persistence`。HF 与 Persistence 只允许用于
+`issued-connector-activation`。必须已有 selector-v2 且其 phase 与参数一致。
 计划固定服务集合、配置和 secrets 目录、配置/secret 清单、HF seed、RunPod key、
 角色以及每个服务的 mount identity；只允许目标镜像引用/ID 及对应 build lock 行
 变化。外部镜像锁和所有非目标 build 行必须保持完全一致。
@@ -180,7 +191,13 @@ Apply 复用 V2 ingress pause、Navigator drain、在线 Work SQLite snapshot、
 会在候选 Exchange 健康后做 live readiness 检查，再恢复同一 Navigator process
 generation。Provider bootstrap 阶段将当前完整 live binding 和 tool catalog 与冻结
 配置逐项比较，不要求尚未签发的 HF/cloud profile；issued-connector-activation
-阶段还会核对各已配置 Provider 的 live profile/connection scope。Persistence 镜像更新
+阶段还会核对各已配置 Provider 的 live profile/connection scope。HF 镜像更新会在替换前后
+核验 Exchange 的全部 14 个 binding 和原生 catalog。替换前紧邻 Compose 更新时，会从 live
+Exchange snapshot 取出 HF connection，并与冻结 binding join，再只读检查对应的授权监视器
+和 connector invocation 状态。必须没有活动 HF lease、没有未终态 HF 调用，且
+`next_check_at` 晚于当前时间至少 `health timeout + 60s`。监视器保持正常调度；缺少或过短的
+检查窗口会在 HF 容器变更前阻止操作。完成替换后的 Exchange 核验后，恢复原 Navigator process。
+Persistence 镜像更新
 会先核验 Exchange readiness，然后要求所有 Session writer lease 均已过期，并在紧贴
 Compose 更新前读取一次数据库，确认 schema 和全部行摘要与 drain 后快照完全一致。
 更新后还会再次确认 schema 与所有行摘要不变，之后才恢复原 Navigator process 和 ingress。

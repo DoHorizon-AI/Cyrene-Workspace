@@ -50,6 +50,7 @@ LEGACY_TARGETS_ONLY = ["exchange", "navigator"]
 ALLOWED_TARGETS = set(TARGET_ORDER)
 LOCK_SERVICE_FOR_TARGET = {
     "github-issues": "github-issues-provider",
+    "huggingface": "huggingface-provider",
     "navigator-persistence": "navigator-persistence",
     "navigator": "dsh-executor",
     "exchange": "exchange",
