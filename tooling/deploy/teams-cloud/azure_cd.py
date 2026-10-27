@@ -381,6 +381,40 @@ def _github_json(endpoint: str, token: str, *, urlopen: UrlOpener) -> dict[str, 
     return value
 
 
+class _GitHubArtifactRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow signed artifact storage redirects without forwarding API credentials."""
+
+    def redirect_request(
+        self, request: Any, response: Any, code: int, message: str, headers: Any, new_url: str
+    ) -> Any:
+        target = urllib.parse.urlsplit(new_url)
+        if (
+            target.scheme != "https"
+            or target.username
+            or target.password
+            or not target.hostname
+            or not (
+                target.hostname
+                in {
+                    "api.github.com",
+                    "github.com",
+                    "release-assets.githubusercontent.com",
+                    "objects.githubusercontent.com",
+                }
+                or target.hostname.endswith(".blob.core.windows.net")
+            )
+        ):
+            raise AzureCdError("publisher artifact redirect is outside trusted HTTPS storage")
+        redirected = super().redirect_request(request, response, code, message, headers, new_url)
+        if (
+            redirected is not None
+            and target.hostname != urllib.parse.urlsplit(request.full_url).hostname
+        ):
+            redirected.remove_header("Authorization")
+            redirected.remove_header("X-github-api-version")
+        return redirected
+
+
 def _github_artifact_zip(artifact_id: int, token: str, *, urlopen: UrlOpener) -> bytes:
     """Download one exact proof artifact without extracting its untrusted ZIP paths."""
 
@@ -393,8 +427,15 @@ def _github_artifact_zip(artifact_id: int, token: str, *, urlopen: UrlOpener) ->
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
+    # GitHub API authentication must stop at the redirect boundary: signed Blob
+    # URLs authenticate themselves and reject an unrelated Bearer header.
+    opener = (
+        urllib.request.build_opener(_GitHubArtifactRedirectHandler()).open
+        if urlopen is urllib.request.urlopen
+        else urlopen
+    )
     try:
-        with urlopen(request, timeout=MAX_HTTP_SECONDS) as response:
+        with opener(request, timeout=MAX_HTTP_SECONDS) as response:
             return _read_bounded_bytes(
                 response,
                 maximum_bytes=MAX_PROOF_ARCHIVE_BYTES,
@@ -483,7 +524,10 @@ def _workflow_path_matches(run: dict[str, Any], expected_path: str) -> bool:
     """Require the exact workflow file and the trusted develop ref in GitHub run metadata."""
 
     path = run.get("path")
-    return path == f"{expected_path}@refs/heads/develop"
+    # REST run metadata normally uses the bare file path. The caller separately
+    # binds develop, repository, exact commit and publisher run/attempt.
+    # 中文：API 通常仅返回文件路径；分支及不可变运行身份由调用方独立验证。
+    return path in {expected_path, f"{expected_path}@refs/heads/develop"}
 
 
 def _trusted_run(
@@ -507,6 +551,7 @@ def _trusted_run(
         and run.get("conclusion") == conclusion
         and run.get("event") == event
         and run.get("head_branch") == "develop"
+        and run.get("ref") in {None, SOURCE_REF}
         and run.get("head_sha") == head_sha
         and isinstance(repository, dict)
         and repository.get("full_name") == WORKSPACE_REPOSITORY
@@ -595,9 +640,6 @@ def _fetch_release_proof(
         head_sha=expected_head_sha,
     ):
         raise AzureCdError("publisher run is not the exact successful trusted workflow attempt")
-    if run.get("ref") != SOURCE_REF:
-        raise AzureCdError("publisher workflow ref is not the trusted develop branch")
-
     artifact_list = _github_json(
         f"/repos/{WORKSPACE_REPOSITORY}/actions/runs/{run_id}/artifacts?per_page=100",
         github_token,
@@ -728,16 +770,13 @@ def _fetch_release_proof(
         github_token,
         urlopen=urlopen,
     )
-    if (
-        not _trusted_run(
-            source_run,
-            workflow=SOURCE_WORKFLOW,
-            event="push",
-            run_id=source_id,
-            run_attempt=source_attempt,
-            head_sha=source_sha,
-        )
-        or source_run.get("ref") != SOURCE_REF
+    if not _trusted_run(
+        source_run,
+        workflow=SOURCE_WORKFLOW,
+        event="push",
+        run_id=source_id,
+        run_attempt=source_attempt,
+        head_sha=source_sha,
     ):
         raise AzureCdError("manifest source run is not the exact successful develop push")
 
