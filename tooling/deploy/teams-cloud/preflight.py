@@ -3710,7 +3710,11 @@ def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
 
 
 def _validate_codebuddy_acp_boundary(
-    config: dict[str, Any], *, secrets_dir: Path, config_dir: Path
+    config: dict[str, Any],
+    *,
+    secrets_dir: Path,
+    config_dir: Path,
+    connector_auth_phase: str | None = None,
 ) -> None:
     """Keep the ACP bridge private to Navigator and out of Compose credentials.
 
@@ -3764,6 +3768,7 @@ def _validate_codebuddy_acp_boundary(
         navigator,
         secrets_dir=secrets_dir,
         config_dir=config_dir,
+        connector_auth_phase=connector_auth_phase,
     )
 
 
@@ -3773,8 +3778,9 @@ def _validate_codebuddy_acp_mount_boundary(
     *,
     secrets_dir: Path,
     config_dir: Path,
+    connector_auth_phase: str | None = None,
 ) -> None:
-    """Keep ACP Navigator mounts, secrets, and configs to the reviewed base set."""
+    """Keep ACP mounts to the base set plus the issued-activation notification config."""
 
     volumes = navigator.get("volumes", [])
     by_target = {
@@ -3806,6 +3812,32 @@ def _validate_codebuddy_acp_mount_boundary(
     config_pairs = {
         (row.get("source"), row.get("target")) for row in configs if isinstance(row, dict)
     }
+    expected_config_pairs = {
+        ("connector-bindings", "/run/config/connector-bindings.json"),
+        ("connector-tool-catalog", "/run/config/connector-tool-catalog.json"),
+        ("responsibility-targets", "/run/config/responsibility-targets.v1.json"),
+    }
+    expected_notification_consumers = []
+    if connector_auth_phase == "issued-connector-activation":
+        notification_target = "/run/secrets/teams-credential-notifications.json"
+        expected_config_pairs.add(
+            (
+                "teams-credential-notifications",
+                notification_target,
+            )
+        )
+        expected_notification_consumers = [("navigator", notification_target)]
+    notification_consumers = [
+        (service_name, row.get("target"))
+        for service_name, service in config.get("services", {}).items()
+        if isinstance(service, dict)
+        for row in service.get("configs", [])
+        if isinstance(row, dict) and row.get("source") == "teams-credential-notifications"
+    ]
+    notification_consumer_is_exact = (
+        len(notification_consumers) == len(expected_notification_consumers)
+        and notification_consumers == expected_notification_consumers
+    )
     if (
         len(volumes) != 3
         or set(by_target) != allowed_targets
@@ -3833,13 +3865,9 @@ def _validate_codebuddy_acp_mount_boundary(
             ("internal-service-root-ca", "internal-service-root-ca"),
         }
         or len(secrets) != 4
-        or config_pairs
-        != {
-            ("connector-bindings", "/run/config/connector-bindings.json"),
-            ("connector-tool-catalog", "/run/config/connector-tool-catalog.json"),
-            ("responsibility-targets", "/run/config/responsibility-targets.v1.json"),
-        }
-        or len(configs) != 3
+        or config_pairs != expected_config_pairs
+        or len(configs) != len(expected_config_pairs)
+        or not notification_consumer_is_exact
     ):
         raise PreflightError(
             "CodeBuddy ACP Navigator must keep only its approved login, session, and Teams authorization mounts"
@@ -5547,6 +5575,7 @@ def run_preflight(
             config,
             secrets_dir=secrets_dir.resolve(),
             config_dir=config_dir.resolve(),
+            connector_auth_phase=connector_auth_phase,
         )
     if navigator_environment.get("CYRENE_RESPONSIBILITY_TARGETS_FILE"):
         if mode == "bootstrap":

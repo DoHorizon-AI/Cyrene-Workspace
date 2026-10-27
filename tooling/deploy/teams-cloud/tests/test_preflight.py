@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import importlib
 import json
@@ -36,6 +37,23 @@ transfer = importlib.import_module("transfer_arm64")
 DEPLOYMENT_ROOT = Path(__file__).resolve().parents[1]
 UUID = "00000000-0000-4000-8000-000000000001"
 UUID_2 = "00000000-0000-4000-8000-000000000002"
+
+
+def _merge_compose_fixture(base: Any, override: Any) -> Any:
+    """Merge the maps and overlay lists used by the selected Teams Compose stack."""
+
+    if isinstance(base, dict) and isinstance(override, dict):
+        result = copy.deepcopy(base)
+        for key, value in override.items():
+            result[key] = (
+                _merge_compose_fixture(result[key], value)
+                if key in result
+                else copy.deepcopy(value)
+            )
+        return result
+    if isinstance(base, list) and isinstance(override, list):
+        return copy.deepcopy(base) + copy.deepcopy(override)
+    return copy.deepcopy(override)
 
 
 @pytest.mark.parametrize("memory_mib", [3584, 3893])
@@ -1015,6 +1033,62 @@ def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
         valid, secrets_dir=secrets_dir, config_dir=config_dir
     )
 
+    with_activation_notification = json.loads(json.dumps(valid))
+    activation_navigator = with_activation_notification["services"]["navigator"]
+    activation_navigator["environment"]["TEAMS_CREDENTIAL_NOTIFICATIONS_CONFIG_FILE"] = (
+        "/run/secrets/teams-credential-notifications.json"
+    )
+    activation_navigator["configs"].append(
+        {
+            "source": "teams-credential-notifications",
+            "target": "/run/secrets/teams-credential-notifications.json",
+        }
+    )
+    preflight._validate_codebuddy_acp_boundary(
+        with_activation_notification,
+        secrets_dir=secrets_dir,
+        config_dir=config_dir,
+        connector_auth_phase="issued-connector-activation",
+    )
+
+    with_notification_during_bootstrap = json.loads(json.dumps(with_activation_notification))
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_notification_during_bootstrap,
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+            connector_auth_phase="provider-bootstrap",
+        )
+
+    with_wrong_notification_target = json.loads(json.dumps(with_activation_notification))
+    with_wrong_notification_target["services"]["navigator"]["configs"][-1]["target"] = (
+        "/run/config/other.json"
+    )
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_wrong_notification_target,
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+            connector_auth_phase="issued-connector-activation",
+        )
+
+    with_second_notification_consumer = json.loads(json.dumps(with_activation_notification))
+    with_second_notification_consumer["services"]["teams-provider"] = {
+        "configs": [
+            {
+                "source": "teams-credential-notifications",
+                "target": "/run/secrets/teams-credential-notifications.json",
+            }
+        ]
+    }
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_second_notification_consumer,
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+            connector_auth_phase="issued-connector-activation",
+        )
+
     enabled_workflows = json.loads(json.dumps(valid))
     enabled_workflows["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "true"
     preflight._validate_codebuddy_acp_boundary(
@@ -1116,6 +1190,591 @@ def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
         preflight._validate_codebuddy_acp_boundary(
             with_unbounded_temp, secrets_dir=secrets_dir, config_dir=config_dir
         )
+
+
+def test_issued_activation_full_14_overlay_preflight_accepts_notification_config_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Run one full selected-Compose candidate through CodeBuddy ACP and notification gates."""
+
+    artifact_root = tmp_path / ".artifacts" / "full-activation-overlay"
+    config_dir = artifact_root / "candidate-config"
+    secrets_dir = artifact_root / "candidate-secrets"
+    config_dir.mkdir(parents=True)
+    secrets_dir.mkdir()
+    codebuddy_home = secrets_dir / "codebuddy"
+    codebuddy_home.mkdir(mode=0o700)
+    environment_file = artifact_root / "runtime.env"
+    environment_file.write_text("TEST=1\n", encoding="utf-8")
+    environment_file.chmod(0o600)
+    image_lock = artifact_root / "image-lock.json"
+    image_lock.write_text(json.dumps({"images": [], "externalImages": {}}), encoding="utf-8")
+    image_lock.chmod(0o600)
+    connector_evidence = artifact_root / "connector-auth-evidence.json"
+    connector_evidence.write_text("{}", encoding="utf-8")
+    hf_seed = (
+        artifact_root
+        / "onboarding"
+        / "private"
+        / "provider-candidates"
+        / ("0123456789abcdef0123456789abcdef")
+        / "huggingface-oauth.json"
+    )
+    hf_seed.parent.mkdir(parents=True, mode=0o700)
+    hf_seed.write_text("{}", encoding="utf-8")
+    hf_seed.chmod(0o400)
+    anchor_file = artifact_root / "anchor.json"
+    provenance_file = artifact_root / "provenance.json"
+    anchor_file.write_text("{}", encoding="utf-8")
+    provenance_file.write_text("{}", encoding="utf-8")
+
+    compose_files = (
+        "compose.yaml",
+        "compose.computer-runtime.yaml",
+        "compose.codebuddy-acp.yaml",
+        "compose.huggingface.yaml",
+        "compose.cloud-phase2.yaml",
+        "compose.credential-notifications.yaml",
+    )
+    config: dict[str, Any] = {
+        "services": {},
+        "configs": {},
+        "secrets": {},
+        "volumes": {},
+        "networks": {},
+    }
+    for filename in compose_files:
+        overlay = yaml.safe_load((DEPLOYMENT_ROOT / filename).read_text(encoding="utf-8"))
+        config = _merge_compose_fixture(config, overlay)
+    config["name"] = "cyrene-teams-cloud"
+
+    active_profiles = set(preflight.ACTIVE_COMPOSE_PROFILES)
+    runtime_services = {
+        name
+        for name, service in config["services"].items()
+        if service.get("restart") != "no"
+        and (
+            not service.get("profiles") or active_profiles.intersection(service.get("profiles", []))
+        )
+    }
+    assert runtime_services == {
+        "postgres",
+        "workspace-authority",
+        "account-center",
+        "navigator-persistence",
+        "navigator",
+        "exchange",
+        "github-issues",
+        "teams-provider",
+        "teams-ingress",
+        "teams-public-ingress",
+        "computer-runtime",
+        "computer-runtime-proxy",
+        "huggingface",
+        "cloud-management-phase2",
+    }
+
+    owner = "11111111-1111-4111-8111-111111111111"
+    organization = "22222222-2222-4222-8222-222222222222"
+    workspace = "33333333-3333-4333-8333-333333333333"
+    tenant = "44444444-4444-4444-8444-444444444444"
+    bot_app_id = "55555555-5555-4555-8555-555555555555"
+    team_id = "66666666-6666-4666-8666-666666666666"
+    azure_identity = "77777777-7777-4777-8777-777777777777"
+    exchange_connection = "99999999-9999-4999-8999-999999999999"
+    notification_profile = "teams-credential-notifications-test"
+    subscription = "subscription-test"
+    config["services"]["navigator"]["environment"].update(
+        {
+            "TEAMS_TENANT_ID": tenant,
+            "TEAMS_ALLOWED_TEAM_IDS": team_id,
+            "TEAMS_BOT_APP_ID": bot_app_id,
+            "TEAMS_EXCHANGE_CONNECTION_REF": exchange_connection,
+        }
+    )
+    config["services"]["directory-operator"]["environment"].update(
+        {
+            "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": owner,
+            "CYRENE_ORGANIZATION_ID": organization,
+        }
+    )
+    config["services"]["workspace-authority"]["environment"].update(
+        {
+            "CYRENE_ORGANIZATION_ID": organization,
+            "CYRENE_WORKSPACE_ID": workspace,
+            "CYRENE_AUTHORITY_AAD_TENANT_ID": tenant,
+        }
+    )
+    ingress_environment = config["services"]["teams-ingress"]["environment"]
+    ingress_environment.update(
+        {
+            "TENANT_ID": tenant,
+            "TEAMS_TENANT_ID": tenant,
+            "CLIENT_ID": bot_app_id,
+            "TEAMS_BOT_APP_ID": bot_app_id,
+        }
+    )
+    exchange_configuration = _exchange_configuration({"hf", "azure", "gcp"})
+    exchange_configuration["hostSecretRefs"] = {
+        "tls/plugin-root": "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
+        "tls/exchange-plugin-client-cert": "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE",
+        "tls/exchange-plugin-client-key": "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE",
+    }
+    exchange_configuration["connectorHost"]["computerRunner"] = {
+        "profileRef": "computer-workspace-main",
+        "connectionRef": "88888888-8888-4888-8888-888888888888",
+        "organizationId": organization,
+        "workspaceId": workspace,
+        "expectedIssuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
+        "directPlugin": {
+            "bindingId": "computer-runtime",
+            "connectionRef": "grpcs://computer-runtime-proxy:7443",
+            "transport": "mtls",
+            "mtls": {
+                "rootCertificateRef": "tls/plugin-root",
+                "clientCertificateRef": "tls/exchange-plugin-client-cert",
+                "clientKeyRef": "tls/exchange-plugin-client-key",
+            },
+        },
+        "maxCommandTimeoutMs": 600000,
+        "maxFileBytes": 1048576,
+        "maxReadBytes": 65536,
+        "maxDirectoryDepth": 32,
+    }
+    notification_destination = {
+        "tenantId": tenant,
+        "teamId": team_id,
+        "channelId": "19:channel-full-overlay",
+        "conversationId": "19:conversation-full-overlay",
+        "rootThreadId": "1712345678901",
+        "serviceUrl": "https://smba.trafficmanager.net/amer/",
+    }
+    teams_exchange_profile = exchange_configuration["connectorHost"]["teamsMessages"]
+    teams_exchange_profile["connectionRef"] = exchange_connection
+    teams_exchange_profile["systemNotification"] = {
+        "profileRef": notification_profile,
+        "ownerSubject": owner,
+        "fixedRoute": notification_destination,
+    }
+    cloud_exchange_profiles = exchange_configuration["authorizationCloud"]["profiles"]
+    cloud_exchange_profiles["azure-primary"].update(
+        {
+            "identityRef": azure_identity,
+            "accessMode": "workspace_operator",
+            "targets": {"azure-read": {"targetRef": subscription, "displayName": "Azure test"}},
+        }
+    )
+    cloud_exchange_profiles["gcp-primary"].update(
+        {
+            "identityRef": "gcp-wif-test",
+            "accessMode": "workspace_operator",
+            "targets": {"gcp-read": {"targetRef": "project-test", "displayName": "GCP test"}},
+        }
+    )
+    exchange_configuration["authorizationCloud"]["monitorIntervalSeconds"] = 900
+    exchange_environment = config["services"]["exchange"]["environment"]
+    exchange_environment.update(
+        {
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(exchange_configuration),
+            "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED": "true",
+        }
+    )
+    azure_profile = {
+        "provider": "azure",
+        "profile_ref": "azure-primary",
+        "identity_ref": azure_identity,
+        "read_only": True,
+        "scope": {"subscription_id": subscription, "resource_groups": ["rg-test"]},
+        "auth": {"mode": "managed_identity", "client_id": azure_identity},
+    }
+    gcp_profile = {
+        "provider": "gcp",
+        "profile_ref": "gcp-primary",
+        "identity_ref": "gcp-wif-test",
+        "read_only": True,
+        "scope": {"project_id": "project-test", "zones": ["zone-a"]},
+        "auth": {
+            "mode": "workload_identity_federation",
+            "credential_config_ref": "cloud-management/gcp-wif-credential-config",
+        },
+    }
+    cloud_environment = config["services"]["cloud-management-phase2"]["environment"]
+    cloud_environment.update(
+        {
+            "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                {"profiles": [azure_profile, gcp_profile]}
+            ),
+            "AZURE_CLIENT_ID": azure_identity,
+            "CYRENE_CLOUD_MGMT_AZURE_SUBSCRIPTION_ID": subscription,
+        }
+    )
+    config["services"]["computer-runtime"]["environment"] = {
+        "CYRENE_COMPUTER_WORKSPACE_ROOT": "/workspace",
+        "CYRENE_COMPUTER_ARTIFACT_ROOT": "/var/lib/cyrene/artifacts",
+        "CYRENE_COMPUTER_COMMAND_DEFAULT_TIMEOUT_MS": "30000",
+        "CYRENE_COMPUTER_COMMAND_MAX_TIMEOUT_MS": "600000",
+        "CYRENE_COMPUTER_MAX_OUTPUT_BYTES": "65536",
+        "CYRENE_COMPUTER_MAX_FILE_BYTES": "1048576",
+        "CYRENE_COMPUTER_MAX_DIRECTORY_ENTRIES": "2048",
+        "CYRENE_COMPUTER_MAX_DIRECTORY_DEPTH": "32",
+        "CYRENE_COMPUTER_MAX_ARTIFACT_BYTES": "16777216",
+    }
+    computer_proxy = config["services"]["computer-runtime-proxy"]
+    computer_proxy["volumes"] = [
+        {
+            "type": "bind",
+            "source": str(DEPLOYMENT_ROOT / "Caddyfile.computer-runtime"),
+            "target": "/etc/caddy/Caddyfile",
+            "read_only": True,
+        }
+    ]
+    bootstrap_actor = preflight._connector_bootstrap_actor(config)
+    bootstrap_file = config_dir / "connector-bootstrap.json"
+    bootstrap_file.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "actor": bootstrap_actor,
+                "github": {"expectedAccessMode": "workspace_operator"},
+                "huggingface": {
+                    "profileAlias": "hf-primary",
+                    "targetAlias": "hf-model",
+                    "expectedAccessMode": "workspace_operator",
+                    "profileIdempotencyKey": "test-hf-profile",
+                },
+                "cloud": [
+                    {
+                        "profileAlias": "azure-primary",
+                        "targetAlias": "azure-read",
+                        "expectedAccessMode": "workspace_operator",
+                    },
+                    {
+                        "profileAlias": "gcp-primary",
+                        "targetAlias": "gcp-read",
+                        "expectedAccessMode": "workspace_operator",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    principal_file = config_dir / "navigator-principal-config.json"
+    principal_file.write_text(
+        json.dumps(
+            {
+                "principals": [
+                    {
+                        "actor_id": owner,
+                        "workspace_ids": [workspace],
+                        "organization_id": organization,
+                        "token_env": "NAVIGATOR_SESSION_TOKEN",
+                        "can_takeover": True,
+                        "can_publish_credential_health": True,
+                    }
+                ],
+                "product_directory": [],
+                "product_service_credentials": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    notification_file = config_dir / "teams-credential-notifications.json"
+    issued_connections = {
+        "github": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "computer": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "huggingface": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "azure": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "gcp": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    }
+    provider_profiles = {
+        "github": "github-primary",
+        "computer": "computer-workspace-main",
+        "huggingface": "hf-primary",
+        "azure": "azure-primary",
+        "gcp": "gcp-primary",
+    }
+    provider_operations = {
+        "github": "github.repository.list",
+        "computer": "computer.directory.list",
+        "huggingface": "huggingface.models.list",
+        "azure": "cloud.resources.list",
+        "gcp": "cloud.resources.list",
+    }
+    binding_rows = []
+    for provider, operation in provider_operations.items():
+        tool_id, resource_projection, mutating = preflight.CONNECTOR_OPERATION_POLICIES[operation]
+        connection_ref = issued_connections[provider]
+        binding_rows.append(
+            {
+                "bindingId": f"exchange-{provider}-{connection_ref}",
+                "connectionRef": connection_ref,
+                "providerId": provider,
+                "profileRef": provider_profiles[provider],
+                "tools": [
+                    {
+                        "toolId": tool_id,
+                        "operationId": operation,
+                        "resourceProjection": resource_projection,
+                        "mutating": mutating,
+                    }
+                ],
+            }
+        )
+    bindings_file = config_dir / "connector-bindings.json"
+    bindings_file.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": binding_rows}), encoding="utf-8"
+    )
+    catalog_file = config_dir / "connector-tool-catalog.json"
+    catalog_file.write_text('{"schemaVersion":1,"items":[]}', encoding="utf-8")
+    notification_document = {
+        "schemaVersion": 1,
+        "organizationId": organization,
+        "workspaceId": workspace,
+        "owner": {
+            "actorAadObjectId": owner,
+            "issuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
+            "subject": owner,
+            "tenantId": tenant,
+        },
+        "connections": [
+            {"connectionId": issued_connections[provider], "provider": short_name}
+            for provider, short_name in (
+                ("huggingface", "hf"),
+                ("azure", "azure"),
+                ("gcp", "gcp"),
+            )
+        ],
+        "destination": notification_destination,
+        "exchange": {"profileRef": notification_profile},
+        "pollIntervalMs": 900000,
+    }
+    notification_file.write_text(
+        json.dumps(notification_document, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    notification_file.chmod(0o600)
+    anchor_document = {"taskId": "full-activation-overlay-preflight-test"}
+    anchor_file.write_text(json.dumps(anchor_document), encoding="utf-8")
+    anchor_file.chmod(0o600)
+    provenance_document = {
+        "schemaVersion": "cyrene-teams-credential-notifications-provenance-v1",
+        "sourceAnchorSha256": hashlib.sha256(anchor_file.read_bytes()).hexdigest(),
+        "sourceTaskId": anchor_document["taskId"],
+        "candidateConfigSha256": hashlib.sha256(notification_file.read_bytes()).hexdigest(),
+        "candidateExchangeHostConfigSha256": preflight._canonical_json_digest(
+            exchange_configuration
+        ),
+        "schemaSha256": hashlib.sha256(
+            (DEPLOYMENT_ROOT / "config" / "teams-credential-notifications.schema.json").read_bytes()
+        ).hexdigest(),
+        "ownerScopeSha256": preflight._canonical_json_digest(
+            {
+                "organizationId": organization,
+                "workspaceId": workspace,
+                "owner": notification_document["owner"],
+            }
+        ),
+        "destinationSha256": preflight._canonical_json_digest(notification_destination),
+        "exchangeConnectionRef": exchange_connection,
+        "exchangeProfileRef": notification_profile,
+        "sourceWorkspaceCommit": "a" * 40,
+        "generatedAt": datetime.now(UTC).isoformat(),
+    }
+    provenance_file.write_text(json.dumps(provenance_document), encoding="utf-8")
+    provenance_file.chmod(0o600)
+    for name, row in config["configs"].items():
+        if name == "navigator-principal":
+            row["file"] = str(principal_file)
+        elif name == "connector-bindings":
+            row["file"] = str(bindings_file)
+        elif name == "connector-tool-catalog":
+            row["file"] = str(catalog_file)
+        elif name == "teams-credential-notifications":
+            row["file"] = str(notification_file)
+        elif name == "connector-bootstrap":
+            row["file"] = str(bootstrap_file)
+        else:
+            path = config_dir / Path(str(row.get("file", f"{name}.json"))).name
+            path.write_text("{}", encoding="utf-8")
+            row["file"] = str(path)
+    recovered_alias = "recovered-navigator-persistence-navigator-principal"
+    config["configs"][recovered_alias] = {"file": str(principal_file)}
+    persistence_principal_mounts = [
+        row
+        for row in config["services"]["navigator-persistence"].get("configs", [])
+        if isinstance(row, dict)
+        and row.get("source") == "navigator-principal"
+        and row.get("target") == "/run/secrets/principal-config.json"
+    ]
+    assert len(persistence_principal_mounts) == 1
+    persistence_principal_mounts[0]["source"] = recovered_alias
+    session_volume = config["volumes"].get("navigator-sessions")
+    if not isinstance(session_volume, dict):
+        session_volume = {}
+        config["volumes"]["navigator-sessions"] = session_volume
+    session_volume["name"] = "cyrene-teams-cloud_navigator-sessions"
+    config["services"]["navigator"]["volumes"] = [
+        {
+            "type": "bind",
+            "source": str(secrets_dir / "codebuddy"),
+            "target": "/home/navigator/.codebuddy",
+            "read_only": False,
+        },
+        {
+            "type": "volume",
+            "source": "navigator-sessions",
+            "target": "/var/lib/cyrene-navigator",
+        },
+        {
+            "type": "bind",
+            "source": str(config_dir),
+            "target": "/run/teams-authorization",
+            "read_only": True,
+        },
+    ]
+    config["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "false"
+    config["services"]["navigator"]["environment"]["CYRENE_WORKSPACE_ID"] = workspace
+    config["services"]["directory-operator"]["environment"][
+        "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID"
+    ] = owner
+    config["services"]["directory-operator"]["environment"]["CYRENE_ORGANIZATION_ID"] = organization
+    config["services"]["workspace-authority"]["environment"]["CYRENE_ORGANIZATION_ID"] = (
+        organization
+    )
+    config["services"]["workspace-authority"]["environment"]["CYRENE_WORKSPACE_ID"] = workspace
+    config["services"]["account-center"]["labels"]["com.cyrene.huggingface-enabled"] = "true"
+
+    for secret_name, row in config["secrets"].items():
+        if secret_name == "account-center-huggingface-oauth-source":
+            secret_path = hf_seed
+        else:
+            secret_path = secrets_dir / secret_name
+            secret_path.write_bytes(b"synthetic-private-test-secret")
+        row["file"] = str(secret_path)
+
+    private_directories = {
+        artifact_root,
+        config_dir,
+        secrets_dir,
+        codebuddy_home,
+        hf_seed.parents[0],
+        hf_seed.parents[1],
+        hf_seed.parents[2],
+        hf_seed.parents[3],
+    }
+    private_files = {
+        hf_seed: stat.S_IFREG | 0o400,
+        notification_file: stat.S_IFREG | 0o600,
+        anchor_file: stat.S_IFREG | 0o600,
+        provenance_file: stat.S_IFREG | 0o600,
+    }
+    real_stat = Path.stat
+
+    def owner_only_directory_stat(path: Path, *, follow_symlinks: bool = True) -> Any:
+        if path in private_directories:
+            return SimpleNamespace(st_uid=10001, st_mode=stat.S_IFDIR | 0o700)
+        if path in private_files:
+            return SimpleNamespace(
+                st_uid=10001,
+                st_mode=private_files[path],
+                st_size=real_stat(path, follow_symlinks=follow_symlinks).st_size,
+            )
+        return real_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", owner_only_directory_stat)
+    monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
+    monkeypatch.setattr(preflight, "_validate_runtime_config_metadata", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_secret_file", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_validate_huggingface_oauth_source", lambda *_args: None)
+    monkeypatch.setattr(preflight, "check_local_lock", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_validate_host", lambda _required: (4096, 8.0))
+    monkeypatch.setattr(preflight, "_compose_config", lambda *_args: config)
+    monkeypatch.setattr(preflight, "_validate_compose", lambda *_args: (3392.0, 1.9))
+    monkeypatch.setattr(preflight, "_parse_memavailable", lambda: 4096)
+    monkeypatch.setattr(
+        preflight,
+        "_memory_headroom",
+        lambda **_kwargs: {
+            "status": "READY",
+            "memAvailableMiB": 4096,
+            "minimumMemAvailableMiB": 1024,
+            "additionalPhaseMemoryMiB": 0,
+            "runtimeRssMeasurementRequired": False,
+        },
+    )
+    for helper in (
+        "_validate_directory_database_urls",
+        "_validate_internal_service_certificates",
+        "_validate_computer_proxy_certificate",
+        "_validate_exchange_authority_identity",
+        "_validate_keyring",
+        "_validate_connector_tool_catalog",
+        "_validate_responsibility_targets",
+        "_validate_actor_projection",
+        "_validate_account_center_config",
+        "_validate_cloud_acceptance_mount",
+        "_validate_teams_connector_config",
+        "_validate_internal_https_topology",
+        "_validate_teams_delivery_spool",
+        "_validate_github_workflow_allowlist",
+        "_validate_identity_scope",
+        "_validate_proactive_navigator_container",
+        "_validate_stage_acceptance_receipts",
+        "_validate_codebuddy_mount",
+        "_validate_host_ports",
+    ):
+        monkeypatch.setattr(preflight, helper, lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        preflight,
+        "_expected_connector_providers",
+        lambda *_args: {"github", "computer", "huggingface", "azure", "gcp"},
+    )
+    monkeypatch.setattr(preflight, "_validate_cutover_runtime", lambda *_args: {})
+    monkeypatch.setattr(
+        preflight,
+        "_connector_auth_scope_expectations",
+        lambda *_args, **_kwargs: {"expectedProviderScopeDigests": {}},
+    )
+    monkeypatch.setattr(
+        preflight,
+        "_validate_connector_auth_readonly_evidence",
+        lambda *_args, **_kwargs: "a" * 64,
+    )
+
+    report = preflight.run_preflight(
+        mode="connector-auth-readonly",
+        compose_files=[DEPLOYMENT_ROOT / name for name in compose_files],
+        env_files=[environment_file],
+        image_lock=image_lock,
+        secrets_dir=secrets_dir,
+        config_dir=config_dir,
+        github_hf_evidence=None,
+        azure_gcp_ledger=None,
+        runpod_ledger=None,
+        azure_gcp_api_evidence=None,
+        runpod_api_evidence=None,
+        docker_prefix=["docker"],
+        max_memory_mib=3584,
+        max_cpus=1.95,
+        required_free_gib=2.0,
+        minimum_mem_available_mib=1024,
+        connector_auth_phase="issued-connector-activation",
+        connector_auth_evidence=connector_evidence,
+        connector_auth_task_id="full-activation-overlay-preflight-test",
+        huggingface_seed_file=hf_seed,
+        notification_anchor_file=anchor_file,
+        notification_provenance_file=provenance_file,
+    )
+
+    assert report["credentialReadOnlyRuntimeReady"] is True
+    assert report["connectorAuthPhase"] == "issued-connector-activation"
+    assert (
+        report["credentialNotificationConfigSha256"]
+        == hashlib.sha256(notification_file.read_bytes()).hexdigest()
+    )
+    assert report["fullCloudWriteDeploymentReady"] is False
+    assert report["lifecycleAcceptance"] == "NOT_RUN"
 
 
 def test_proactive_navigator_hardening_requires_read_only_root_and_dropped_caps() -> None:
