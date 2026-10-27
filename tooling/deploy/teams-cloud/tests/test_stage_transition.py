@@ -1401,7 +1401,7 @@ def test_memory_update_timeout_stays_recovery_required_even_if_first_readback_is
 def test_memory_update_stale_compose_hash_follows_existing_selector_journals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Carry a preserved old config-hash through a normal selector promotion safely."""
+    """Carry a stale config-hash through promotion, even after a later process restart."""
 
     memory_operation = "00000000-0000-4000-8000-000000000001"
     normal_operation = "00000000-0000-4000-8000-000000000002"
@@ -1430,12 +1430,16 @@ def test_memory_update_stale_compose_hash_follows_existing_selector_journals(
             "memoryUpdateState": {
                 "candidateComposeConfigHash": active_hash,
                 "containerComposeConfigHash": container_hash,
+                "processId": 100,
+                "processStartedAt": "2026-10-27T17:00:00.000000000Z",
+                "restartCount": 3,
             },
             "candidateSelectionFile": "/private/runtime-selection.json",
             "activeServices": {
                 "teams-ingress": {
                     "containerId": "e" * 64,
                     "imageId": _image_id(1),
+                    "processId": 100,
                 }
             },
             "activeSelection": {"document": None},
@@ -1471,6 +1475,9 @@ def test_memory_update_stale_compose_hash_follows_existing_selector_journals(
                 "afterReadback": {
                     "containerId": "e" * 64,
                     "composeConfigHash": container_hash,
+                    "processId": 100,
+                    "processStartedAt": "2026-10-27T17:00:00.000000000Z",
+                    "restartCount": 3,
                 },
             },
         },
@@ -1510,7 +1517,13 @@ def test_memory_update_stale_compose_hash_follows_existing_selector_journals(
         target="teams-ingress",
         active_compose_hash=active_hash,
         container_compose_hash=container_hash,
-        active_service={"containerId": "e" * 64, "imageId": _image_id(1)},
+        active_service={
+            "containerId": "e" * 64,
+            "imageId": _image_id(1),
+            "processId": 201,
+            "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+            "restartCount": 4,
+        },
     )
     assert proof == {"operationId": memory_operation, "planSha256": "c" * 64}
 
@@ -1522,7 +1535,13 @@ def test_memory_update_stale_compose_hash_follows_existing_selector_journals(
             target="teams-ingress",
             active_compose_hash=active_hash,
             container_compose_hash=container_hash,
-            active_service={"containerId": "f" * 64, "imageId": _image_id(1)},
+            active_service={
+                "containerId": "f" * 64,
+                "imageId": _image_id(1),
+                "processId": 201,
+                "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+                "restartCount": 4,
+            },
         )
         is None
     )
