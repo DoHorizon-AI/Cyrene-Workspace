@@ -3,7 +3,7 @@
   "selectionPath": "/var/lib/cyrene-connectors-runtime/.artifacts/selection/current-runtime-selection.json",
   "journalDirectory": "/var/lib/cyrene-connectors-runtime/.artifacts/journals",
   "releaseDirectory": "/var/lib/cyrene-connectors-runtime/.artifacts/releases",
-  "probePolicyPath": "/etc/cyrene/teams-cloud-probe.json",
+  "probePolicyPath": "/var/lib/cyrene-connectors-runtime/.artifacts/deployment-policies/teams-cloud-probe.json",
   "probePolicySha256": "REPLACE_WITH_PROVISIONED_PROBE_POLICY_SHA256",
   "managedTargets": [
     "navigator-persistence",
