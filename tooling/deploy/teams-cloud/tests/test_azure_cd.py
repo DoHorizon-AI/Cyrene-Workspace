@@ -163,9 +163,8 @@ def _github_run(
         "conclusion": "success",
         "event": event,
         "head_branch": "develop",
-        "ref": "refs/heads/develop",
         "head_sha": sha,
-        "path": workflow + "@refs/heads/develop",
+        "path": workflow,
         "repository": {"id": 77, "full_name": azure_cd.WORKSPACE_REPOSITORY},
         "head_repository": {"id": 77, "full_name": azure_cd.WORKSPACE_REPOSITORY},
     }
@@ -892,3 +891,51 @@ def test_github_bridge_requires_successful_publisher_and_read_only_token() -> No
     assert "CYRENE_TEAMS_AZDO_CD_ENABLED == 'true'" in job["if"]
     assert job["steps"][0]["with"]["persist-credentials"] == "false"
     assert "azure_cd.py bridge" in job["steps"][2]["run"]
+
+
+@pytest.mark.parametrize("suffix", ["", "@refs/heads/develop"])
+def test_trusted_run_accepts_official_api_workflow_path_forms(suffix: str) -> None:
+    """The live REST shape stays bound to exact repository, branch and attempt."""
+
+    run = _github_run(500, 2, "f" * 40, "workflow_run", azure_cd.PUBLISHER_WORKFLOW)
+    run["path"] = azure_cd.PUBLISHER_WORKFLOW + suffix
+    kwargs = {
+        "workflow": azure_cd.PUBLISHER_WORKFLOW,
+        "event": "workflow_run",
+        "run_id": 500,
+        "run_attempt": 2,
+        "head_sha": "f" * 40,
+    }
+    assert azure_cd._trusted_run(run, **kwargs)
+    run["head_branch"] = "feature/untrusted"
+    assert not azure_cd._trusted_run(run, **kwargs)
+    run["head_branch"] = "develop"
+    run["ref"] = "refs/heads/main"
+    assert not azure_cd._trusted_run(run, **kwargs)
+    run.pop("ref")
+    run["path"] = azure_cd.PUBLISHER_WORKFLOW + "@refs/heads/main"
+    assert not azure_cd._trusted_run(run, **kwargs)
+
+
+def test_artifact_storage_redirect_does_not_receive_github_api_credentials() -> None:
+    """Signed Azure storage rejects the API Bearer header and must never receive it."""
+
+    request = azure_cd.urllib.request.Request(
+        "https://api.github.com/repos/DoHorizon-AI/Cyrene-Workspace/actions/artifacts/1/zip",
+        headers={"Authorization": "Bearer unit-test-only", "User-Agent": "Cyrene-Test"},
+    )
+    handler = azure_cd._GitHubArtifactRedirectHandler()
+    redirected = handler.redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        {},
+        "https://productionresultssa5.blob.core.windows.net/artifacts/proof.zip?unit-test=signed",
+    )
+    assert redirected.get_header("Authorization") is None
+    assert redirected.get_header("User-agent") == "Cyrene-Test"
+    with pytest.raises(azure_cd.AzureCdError, match="outside trusted HTTPS storage"):
+        handler.redirect_request(
+            request, None, 302, "Found", {}, "https://example.invalid/proof.zip"
+        )
