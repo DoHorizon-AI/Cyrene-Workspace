@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tarfile
 import urllib.request
@@ -270,6 +271,64 @@ def test_prepare_pins_only_six_codebuddy_runtime_images(tmp_path: Path) -> None:
     assert "binaryArtifacts" not in dsh_image
     assert "sourcePath" not in json.dumps(plan)
     assert result["releaseTag"] == result["releaseId"]
+
+
+def test_cli_prepare_subprocess_writes_plan_and_source_pins(
+    tmp_path: Path,
+) -> None:
+    """Execute the public CLI in a fresh interpreter without Docker or mocked main."""
+
+    sources, source_run = _source_records()
+    pins = {
+        "schemaVersion": release_bundle.SOURCE_PINS_SCHEMA_VERSION,
+        "sourceRun": source_run,
+        "sources": {alias: row for alias, row in sources.items() if alias != "dsh"},
+    }
+    pins_path = tmp_path / "source-pins.json"
+    pins_path.write_text(json.dumps(pins, sort_keys=True), encoding="utf-8")
+    output_dir = tmp_path / ".artifacts" / "cli-prepare"
+    script = Path(release_bundle.__file__).resolve()
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "prepare",
+            "--source-pins",
+            str(pins_path),
+            "--output-dir",
+            str(output_dir),
+            "--publisher-run-id",
+            "909",
+            "--publisher-run-attempt",
+            "2",
+            "--publisher-head-sha",
+            "f" * 40,
+            "--publisher-event",
+            "workflow_dispatch",
+        ],
+        cwd=Path(__file__).resolve().parents[4],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    summary = json.loads(completed.stdout)
+    assert summary["status"] == "PREPARED"
+    assert summary["imageCount"] == 6
+    assert set(summary["services"]) == set(release_bundle.IMAGE_SERVICES)
+    plan = json.loads((output_dir / ".private-build-plan.json").read_text(encoding="utf-8"))
+    source_lock = json.loads((output_dir / ".private-source-pins.json").read_text(encoding="utf-8"))
+    context = json.loads((output_dir / ".private-context.json").read_text(encoding="utf-8"))
+    assert {row["service"] for row in plan["images"]} == set(release_bundle.IMAGE_SERVICES)
+    assert plan["externalImages"] == {}
+    assert source_lock["releaseId"] == summary["releaseId"]
+    assert source_lock["publisherRun"]["runId"] == 909
+    assert context["releaseId"] == summary["releaseId"]
+    assert context["publisherRun"]["runAttempt"] == 2
+    assert "sourcePath" not in json.dumps(plan)
 
 
 def test_source_resolution_rejects_pull_request_event(tmp_path: Path) -> None:

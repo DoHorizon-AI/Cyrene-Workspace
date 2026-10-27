@@ -1882,10 +1882,6 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
-
-
 def _create_plan(
     template_path: Path,
     pins: dict[str, Any],
@@ -1971,3 +1967,7 @@ def _create_plan(
             "generated ARM64 release plan failed its canonical validation"
         ) from error
     return plan
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
