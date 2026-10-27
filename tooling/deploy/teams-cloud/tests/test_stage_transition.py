@@ -14,9 +14,12 @@ import copy
 import hashlib
 import importlib
 import json
+import sqlite3
 import stat
+import subprocess
 import sys
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -748,6 +751,7 @@ def _listener_repair_pair(
     ("target", "phase"),
     [
         ("exchange", "issued-connector-activation"),
+        ("huggingface", "issued-connector-activation"),
         ("navigator", "issued-connector-activation"),
         ("navigator-persistence", "issued-connector-activation"),
         ("cloud-management-phase2", "provider-bootstrap"),
@@ -1654,7 +1658,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
     active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="must be Cloud Management, Exchange, Navigator, or Persistence",
+        match="must be Cloud Management, Exchange, Hugging Face, Navigator, or Persistence",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -1693,11 +1697,25 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
             candidate_lock=candidate_lock,
         )
 
+    active, candidate, active_lock, candidate_lock = _active_image_update("huggingface")
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Hugging Face image updates require issued-connector-activation",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="provider-bootstrap",
+            image_update_target="huggingface",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
 
 def test_stage_transition_cli_closes_image_update_target_choices() -> None:
-    """Expose only the four services with explicit V2 image-update gates.
+    """Expose only the five services with explicit V2 image-update gates.
 
-    中文：CLI 只开放具备独立严格门禁的 Exchange、Navigator、Persistence 与 Cloud 目标。
+    中文：CLI 只开放具备独立严格门禁的 Exchange、HF、Navigator、Persistence 与 Cloud 目标。
     """
 
     parser = stage_transition._build_parser()
@@ -1712,6 +1730,7 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
     assert image_target_action.choices == [
         "cloud-management-phase2",
         "exchange",
+        "huggingface",
         "navigator",
         "navigator-persistence",
     ]
@@ -1860,6 +1879,19 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
     active_inputs, candidate_inputs, selection, identity = _image_update_selection_inputs()
     stage_transition._validate_image_update_selection_contract(
         target="exchange",
+        phase="issued-connector-activation",
+        project="cyrene-teams-cloud",
+        selection_record=selection,
+        selection_path="/private/runtime-selection.json",
+        active_config_dir="/private/config",
+        candidate_config_dir="/private/config",
+        active_secrets_dir="/private/secrets",
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity=identity,
+    )
+    stage_transition._validate_image_update_selection_contract(
+        target="huggingface",
         phase="issued-connector-activation",
         project="cyrene-teams-cloud",
         selection_record=selection,
@@ -2072,6 +2104,7 @@ def test_listener_repair_requires_the_current_bootstrap_selector_and_unchanged_i
     [
         ("exchange", "old", True),
         ("cloud-management-phase2", "old", True),
+        ("huggingface", "old", True),
         ("navigator-persistence", "old", True),
         ("navigator", "fresh", False),
         (None, "fresh", False),
@@ -2085,7 +2118,7 @@ def test_image_update_resumes_old_executor_or_fresh_navigator_by_target(
 ) -> None:
     """Non-Navigator image updates fence the old generation; Navigator uses the fresh gate.
 
-    中文：更新 Exchange、Cloud 或 Persistence 时沿用原实例；Navigator 镜像更新走新实例门。
+    中文：更新 Exchange、Cloud、HF 或 Persistence 时沿用原实例；Navigator 镜像更新走新实例门。
     """
 
     observed: list[tuple[str, bool]] = []
@@ -3687,6 +3720,43 @@ def test_stage_transition_summary_reports_persistence_gate_evidence() -> None:
     assert summary["persistenceSameSchemaStatus"] == "VERIFIED"
 
 
+def test_stage_transition_summary_reports_huggingface_restart_gates() -> None:
+    """Expose the before/after readiness and monitor window in normal operation status."""
+
+    journal = {
+        "schemaVersion": stage_transition.JOURNAL_SCHEMA,
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "a" * 64,
+        "project": "cyrene-teams-cloud",
+        "state": "APPLIED",
+        "phase": "APPLIED",
+        "targets": ["huggingface"],
+        "completedTargets": ["huggingface"],
+        "updatedAtUtc": "2026-10-27T00:00:00+00:00",
+        "exchangeReadiness": {"required": True, "verified": True},
+        "huggingfaceImageUpdate": {
+            "required": True,
+            "beforeReadiness": {"verified": True},
+            "monitorQuiescence": {"verified": True},
+            "afterReadiness": {"verified": True},
+        },
+        "cloudRunnerIdle": {"required": False},
+        "listenerRepair": {"required": False},
+        "selection": {"promoted": True},
+    }
+
+    summary = stage_transition._journal_summary(journal)
+    assert summary["huggingfaceImageUpdateStatus"] == "VERIFIED"
+    assert summary["huggingfaceMonitorQuiescenceStatus"] == "VERIFIED"
+    assert summary["huggingfaceBeforeReadinessStatus"] == "LIVE_VERIFIED"
+    assert summary["huggingfaceAfterReadinessStatus"] == "LIVE_VERIFIED"
+
+    journal["huggingfaceImageUpdate"]["monitorQuiescence"]["verified"] = False
+    blocked = stage_transition._journal_summary(journal)
+    assert blocked["huggingfaceMonitorQuiescenceStatus"] == "BLOCKED"
+    assert blocked["huggingfaceImageUpdateStatus"] == "BLOCKED"
+
+
 def test_preexisting_persistence_candidate_requires_exact_health_schema_but_allows_rows() -> None:
     """A reused candidate image requires the exact migrated table without assuming it is empty."""
 
@@ -4781,6 +4851,19 @@ def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
     assert cloud_image_receipt["status"] == "LIVE_VERIFIED"
     assert cloud_image_receipt["verifiedProviderIds"] == ["azure", "gcp", "huggingface"]
 
+    hf_connection_ref = next(
+        row["connectionRef"]
+        for row in snapshot["connections"]
+        if row["providerId"] == "huggingface"
+    )
+    hf_image_receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase="issued-connector-activation",
+        image_update_target="huggingface",
+    )
+    assert hf_image_receipt["huggingfaceConnectionRef"] == hf_connection_ref
+
     wrong_access_mode = copy.deepcopy(snapshot)
     next(row for row in wrong_access_mode["connections"] if row["providerId"] == "huggingface")[
         "accessMode"
@@ -4825,6 +4908,305 @@ def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
     with pytest.raises(stage_transition.StageTransitionError, match="live provider tool catalog"):
         stage_transition._verify_exchange_readiness_snapshot(
             snapshot=wrong_catalog, compose=compose
+        )
+
+
+def test_huggingface_readiness_checkpoint_uses_live_connection_reference() -> None:
+    """Bind the HF restart window to the exact connection joined by Exchange readiness."""
+
+    connection_ref = "e5e1464b-00ec-4c85-9e71-1d52eab44a38"
+    plan = {
+        "imageUpdateTarget": "huggingface",
+        "activeServices": {"exchange": {"containerId": "a" * 64, "imageId": _image_id(44)}},
+        "candidatePreflight": {
+            "expectedProviderScopeDigests": {
+                "azure": "b" * 64,
+                "gcp": "c" * 64,
+                "huggingface": "d" * 64,
+            }
+        },
+    }
+    journal = {
+        "exchangeReadiness": {
+            "receipt": {
+                "status": "LIVE_VERIFIED",
+                "catalogStatus": "LIVE_VERIFIED",
+                "exchangeContainerId": "a" * 64,
+                "exchangeImageId": _image_id(44),
+                "bindingCount": 14,
+                "connectionCount": 14,
+                "verifiedProviderIds": ["azure", "gcp", "huggingface"],
+                "snapshotSha256": "1" * 64,
+                "huggingfaceConnectionRef": connection_ref,
+            }
+        }
+    }
+
+    receipt = stage_transition._huggingface_exchange_readiness_checkpoint(plan, journal)
+    assert receipt["verified"] is True
+    assert receipt["bindingCount"] == 14
+    assert (
+        receipt["huggingfaceConnectionRefSha256"]
+        == hashlib.sha256(connection_ref.encode("utf-8")).hexdigest()
+    )
+
+    journal["exchangeReadiness"]["receipt"]["huggingfaceConnectionRef"] = "not-a-uuid"
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="lacks the exact selected HF connection"
+    ):
+        stage_transition._huggingface_exchange_readiness_checkpoint(plan, journal)
+
+
+def _create_huggingface_monitor_database(
+    path: Path,
+    *,
+    connection_ref: str,
+    actor: dict[str, str],
+    next_check_seconds: int,
+    active_monitor_lease: bool,
+    in_flight_connector_calls: int,
+) -> None:
+    """Build the Exchange monitor tables needed by the read-only restart-window probe."""
+
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE integration_connections (
+            id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+            actor_issuer TEXT NOT NULL, actor_subject TEXT NOT NULL, enabled INTEGER NOT NULL,
+            document TEXT NOT NULL
+        );
+        CREATE TABLE authorization_monitor_state (
+            connection_id TEXT PRIMARY KEY, next_check_at TEXT NOT NULL, last_checked_at TEXT,
+            claim_owner TEXT, claim_fence INTEGER NOT NULL DEFAULT 0, lease_expires_at TEXT
+        );
+        CREATE TABLE connector_invocations (
+            organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL, actor_issuer TEXT NOT NULL,
+            actor_subject TEXT NOT NULL, request_id TEXT NOT NULL, connection_ref TEXT NOT NULL,
+            provider_id TEXT NOT NULL, profile_ref TEXT NOT NULL, operation_id TEXT NOT NULL,
+            resource_ref TEXT NOT NULL, arguments_sha256 TEXT NOT NULL,
+            envelope_sha256 TEXT NOT NULL, state TEXT NOT NULL, operation_ref TEXT,
+            grant_ref TEXT NOT NULL DEFAULT '', is_mutating INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, response_json TEXT,
+            response_status INTEGER NOT NULL DEFAULT 200
+        );
+        """
+    )
+    connection_document = {
+        "id": connection_ref,
+        "organizationId": actor["organizationId"],
+        "workspaceId": actor["workspaceId"],
+        "actorIssuer": actor["issuer"],
+        "actorSubject": actor["subject"],
+        "provider": "hf",
+        "enabled": True,
+    }
+    connection.execute(
+        "INSERT INTO integration_connections VALUES(?,?,?,?,?,?,?)",
+        (
+            connection_ref,
+            actor["organizationId"],
+            actor["workspaceId"],
+            actor["issuer"],
+            actor["subject"],
+            1,
+            json.dumps(connection_document),
+        ),
+    )
+    now = datetime.now(UTC)
+    next_check_at = (now + timedelta(seconds=next_check_seconds)).isoformat()
+    claim_owner = "authorization-monitor-test" if active_monitor_lease else None
+    lease_expires_at = (now + timedelta(seconds=30)).isoformat() if active_monitor_lease else None
+    connection.execute(
+        "INSERT INTO authorization_monitor_state VALUES(?,?,?,?,?,?)",
+        (
+            connection_ref,
+            next_check_at,
+            None,
+            claim_owner,
+            1 if active_monitor_lease else 0,
+            lease_expires_at,
+        ),
+    )
+    for index in range(in_flight_connector_calls):
+        connection.execute(
+            "INSERT INTO connector_invocations "
+            "(organization_id,workspace_id,actor_issuer,actor_subject,request_id,connection_ref,"
+            "provider_id,profile_ref,operation_id,resource_ref,arguments_sha256,envelope_sha256,"
+            "state,grant_ref,is_mutating,created_at,expires_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                actor["organizationId"],
+                actor["workspaceId"],
+                actor["issuer"],
+                actor["subject"],
+                f"hf-call-{index}",
+                connection_ref,
+                "huggingface",
+                "hf-primary",
+                "huggingface.repo.get",
+                "Qwen/Qwen2.5-0.5B-Instruct",
+                "a" * 64,
+                "b" * 64,
+                "IN_PROGRESS",
+                "sha256:" + "c" * 64,
+                0,
+                int(now.timestamp()),
+                0,
+            ),
+        )
+    connection.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("next_check_seconds", "active_monitor_lease", "in_flight_connector_calls", "verified"),
+    [
+        (900, False, 0, True),
+        (900, True, 0, False),
+        (900, False, 1, False),
+        (300, False, 0, False),
+    ],
+)
+def test_huggingface_monitor_guard_requires_idle_exact_connection_and_restart_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    next_check_seconds: int,
+    active_monitor_lease: bool,
+    in_flight_connector_calls: int,
+    verified: bool,
+) -> None:
+    """Run the exact read-only Exchange SQL against a fixture and fail closed on each blocker."""
+
+    connection_ref = "e5e1464b-00ec-4c85-9e71-1d52eab44a38"
+    actor = {
+        "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+        "subject": "actor-subject",
+        "organizationId": "organization-id",
+        "workspaceId": "workspace-id",
+    }
+    database_path = tmp_path / "integrations.sqlite3"
+    _create_huggingface_monitor_database(
+        database_path,
+        connection_ref=connection_ref,
+        actor=actor,
+        next_check_seconds=next_check_seconds,
+        active_monitor_lease=active_monitor_lease,
+        in_flight_connector_calls=in_flight_connector_calls,
+    )
+    compose = {"name": "cyrene-teams-cloud", "services": {"exchange": {}}}
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_config_json",
+        lambda _compose, _name: {
+            "bindings": [{"providerId": "huggingface", "connectionRef": connection_ref}]
+        },
+    )
+    monkeypatch.setattr(
+        stage_transition.preflight, "_connector_bootstrap_actor", lambda _compose: actor
+    )
+    phases: list[str] = []
+
+    def run_readonly_exchange_script(argv: list[str], **_kwargs: Any) -> str:
+        script_index = argv.index("-c")
+        script = argv[script_index + 1]
+        arguments = list(argv[script_index + 2 :])
+        assert arguments[1] == connection_ref
+        arguments[0] = str(database_path)
+        result = subprocess.run(
+            [sys.executable, "-c", script, *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise runtime_update.RuntimeUpdateError("read-only Exchange probe failed")
+        return result.stdout
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", run_readonly_exchange_script)
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, phase: phases.append(phase),
+    )
+    plan = {
+        "imageUpdateTarget": "huggingface",
+        "activeServices": {"exchange": {"containerId": "a" * 64}},
+        "policy": {"healthTimeoutSeconds": 300},
+    }
+    journal = {
+        "exchangeReadiness": {"receipt": {"huggingfaceConnectionRef": connection_ref}},
+        "huggingfaceImageUpdate": {"required": True},
+    }
+
+    if verified:
+        result = stage_transition._verify_huggingface_monitor_quiescence(
+            plan=plan,
+            candidate_compose=compose,
+            journal=journal,
+            journal_path=tmp_path / "journal.json",
+            docker_prefix=["docker"],
+        )
+        assert result["verified"] is True
+        assert result["requiredWindowSeconds"] == 360
+        assert journal["huggingfaceImageUpdate"]["monitorQuiescence"] == result
+        assert phases == ["HUGGINGFACE_MONITOR_QUIESCENCE_VERIFIED"]
+    else:
+        with pytest.raises(stage_transition.StageTransitionError, match="blocked because"):
+            stage_transition._verify_huggingface_monitor_quiescence(
+                plan=plan,
+                candidate_compose=compose,
+                journal=journal,
+                journal_path=tmp_path / "journal.json",
+                docker_prefix=["docker"],
+            )
+        assert journal["huggingfaceImageUpdate"]["monitorQuiescence"]["verified"] is False
+        assert phases == ["HUGGINGFACE_MONITOR_NOT_QUIESCENT"]
+
+
+def test_huggingface_monitor_guard_never_guesses_a_connection_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live receipt that does not join to the selected binding blocks before the DB read."""
+
+    selected_connection = "e5e1464b-00ec-4c85-9e71-1d52eab44a38"
+    different_binding_connection = "8c473baa-3d22-4ab4-9d0e-f1086b54a400"
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_config_json",
+        lambda _compose, _name: {
+            "bindings": [
+                {
+                    "providerId": "huggingface",
+                    "connectionRef": different_binding_connection,
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: pytest.fail(
+            "monitor SQL must not run for an unjoined connection"
+        ),
+    )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="does not match the single frozen"
+    ):
+        stage_transition._verify_huggingface_monitor_quiescence(
+            plan={
+                "imageUpdateTarget": "huggingface",
+                "activeServices": {"exchange": {"containerId": "a" * 64}},
+                "policy": {"healthTimeoutSeconds": 300},
+            },
+            candidate_compose={"services": {}},
+            journal={
+                "exchangeReadiness": {"receipt": {"huggingfaceConnectionRef": selected_connection}},
+                "huggingfaceImageUpdate": {"required": True},
+            },
+            journal_path=Path("/private/journal.json"),
+            docker_prefix=["docker"],
         )
 
 

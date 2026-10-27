@@ -460,6 +460,32 @@ def test_stage_transition_maps_persistence_to_its_canonical_lock_row() -> None:
     assert "navigator-persistence" not in runtime_update.ALLOWED_TARGETS
 
 
+def test_stage_transition_maps_huggingface_to_its_canonical_lock_row() -> None:
+    """Map the HF Compose service to the `huggingface-provider` lock row."""
+
+    compose = {"services": {"huggingface": {"image": "huggingface:v2"}}}
+    lock = {
+        "images": [
+            {
+                "service": "huggingface-provider",
+                "image": "huggingface:v2",
+                "imageId": NEW_IMAGE_ID,
+                "sourceCommits": {"plugins": "e" * 40},
+            }
+        ]
+    }
+
+    assert runtime_update._target_images(compose, lock, ["huggingface"]) == {
+        "huggingface": {
+            "lockService": "huggingface-provider",
+            "image": "huggingface:v2",
+            "imageId": NEW_IMAGE_ID,
+            "sourceCommits": {"plugins": "e" * 40},
+        }
+    }
+    assert "huggingface" not in runtime_update.ALLOWED_TARGETS
+
+
 def test_runtime_plan_validation_preserves_legacy_nav_exchange_v1_policy() -> None:
     """Accept old target policies while validating the new GitHub provider contract."""
 
