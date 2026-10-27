@@ -1,0 +1,16 @@
+[Unit]
+Description=Cyrene Teams verified release reconciliation
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /usr/local/lib/cyrene-teams-deployment/current/release_deploy.py reconcile --policy /etc/cyrene/teams-cloud-deployment.json --receipt /var/lib/cyrene-connectors-runtime/.artifacts/releases/reconcile-receipt.json
+TimeoutStartSec=55min
+TimeoutStopSec=30s

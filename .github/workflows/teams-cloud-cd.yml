@@ -1,0 +1,55 @@
+name: Teams cloud ARM64 Azure CD bridge
+
+on:
+  workflow_run:
+    workflows: [Teams cloud ARM64 immutable release]
+    types: [completed]
+    branches: [develop]
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: teams-cloud-arm64-azure-cd-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  forward-verified-release:
+    if: >-
+      github.repository == 'DoHorizon-AI/Cyrene-Workspace' &&
+      github.event.workflow_run.name == 'Teams cloud ARM64 immutable release' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'develop' &&
+      github.event.workflow_run.repository.full_name == 'DoHorizon-AI/Cyrene-Workspace' &&
+      github.event.workflow_run.head_repository.full_name == 'DoHorizon-AI/Cyrene-Workspace' &&
+      vars.CYRENE_TEAMS_AZDO_CD_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the trusted integration-branch bridge
+        uses: actions/checkout@v5
+        with:
+          ref: develop
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Verify the exact publisher attempt and forward its immutable proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CYRENE_TEAMS_AZDO_WEBHOOK_SECRET: ${{ secrets.CYRENE_TEAMS_AZDO_WEBHOOK_SECRET }}
+          PUBLISHER_RUN_ID: ${{ github.event.workflow_run.id }}
+          PUBLISHER_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          PUBLISHER_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PUBLISHER_EVENT: ${{ github.event.workflow_run.event }}
+        run: |
+          set -euo pipefail
+          python3 tooling/deploy/teams-cloud/azure_cd.py bridge \
+            --run-id "$PUBLISHER_RUN_ID" \
+            --run-attempt "$PUBLISHER_RUN_ATTEMPT" \
+            --head-sha "$PUBLISHER_HEAD_SHA" \
+            --event "$PUBLISHER_EVENT"

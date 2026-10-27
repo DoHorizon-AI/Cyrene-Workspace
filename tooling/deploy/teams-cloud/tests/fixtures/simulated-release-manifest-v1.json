@@ -1,0 +1,183 @@
+{
+  "createdAtUtc": "2026-10-27T16:00:00Z",
+  "deploymentTools": {
+    "file": "deployment-tools.tar.gz",
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "sizeBytes": 1000,
+    "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "imageLock": {
+    "file": "image-lock.json",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "sizeBytes": 1000
+  },
+  "images": [
+    {
+      "archive": {
+        "file": "images/dsh-executor.docker.tar.gz",
+        "sha256": "806175f3893e170531cf5b80c4ee3567fa2c2af810a3537fa41bd680b6ce0a88",
+        "sizeBytes": 201
+      },
+      "image": "cyrene/dsh-executor:teams-arm64-aaaaaaaaaaaa-d79aa6436387-bbbbbbbbbbbb",
+      "imageId": "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+      "platform": "linux/arm64",
+      "service": "dsh-executor",
+      "sourceCommits": {
+        "dsh": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "navigator": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "workspace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "archive": {
+        "file": "images/navigator-persistence.docker.tar.gz",
+        "sha256": "a5182ed6721f4bbdc3215d88c10dab064a6bc71fb49f4d059cb6c8124d59b300",
+        "sizeBytes": 202
+      },
+      "image": "cyrene/navigator-persistence:teams-arm64-aaaaaaaaaaaa-d79aa6436387-bbbbbbbbbbbb",
+      "imageId": "sha256:0000000000000000000000000000000000000000000000000000000000000002",
+      "platform": "linux/arm64",
+      "service": "navigator-persistence",
+      "sourceCommits": {
+        "navigator": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "workspace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "archive": {
+        "file": "images/exchange.docker.tar.gz",
+        "sha256": "ab27b729d9cc4cb1c00960700446924159e9298d0f952aee3d55408b8e0b1b71",
+        "sizeBytes": 203
+      },
+      "image": "cyrene/exchange:teams-arm64-aaaaaaaaaaaa-d79aa6436387-cccccccccccc",
+      "imageId": "sha256:0000000000000000000000000000000000000000000000000000000000000003",
+      "platform": "linux/arm64",
+      "service": "exchange",
+      "sourceCommits": {
+        "exchange": "cccccccccccccccccccccccccccccccccccccccc",
+        "plugins": "dddddddddddddddddddddddddddddddddddddddd",
+        "workspace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "archive": {
+        "file": "images/huggingface-provider.docker.tar.gz",
+        "sha256": "4af6bccd1287bc6a0664ca53b9fcab3bb78de8be6b66c39e52789ab9ed6b52ab",
+        "sizeBytes": 204
+      },
+      "image": "cyrene/huggingface-provider:teams-arm64-aaaaaaaaaaaa-d79aa6436387-dddddddddddd",
+      "imageId": "sha256:0000000000000000000000000000000000000000000000000000000000000004",
+      "platform": "linux/arm64",
+      "service": "huggingface-provider",
+      "sourceCommits": {
+        "plugins": "dddddddddddddddddddddddddddddddddddddddd",
+        "workspace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "archive": {
+        "file": "images/cloud-management.docker.tar.gz",
+        "sha256": "815813d9e03434e5ea0d562add82fa4c843cc937adb9f6a1c30a9b4bd9601fda",
+        "sizeBytes": 205
+      },
+      "image": "cyrene/cloud-management:teams-arm64-aaaaaaaaaaaa-d79aa6436387-dddddddddddd",
+      "imageId": "sha256:0000000000000000000000000000000000000000000000000000000000000005",
+      "platform": "linux/arm64",
+      "service": "cloud-management",
+      "sourceCommits": {
+        "plugins": "dddddddddddddddddddddddddddddddddddddddd",
+        "workspace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "archive": {
+        "file": "images/github-issues-provider.docker.tar.gz",
+        "sha256": "8c5cf13458c23dbbf0629dc1f85aeb70515b0d6720bbbe2e1850133b9e798024",
+        "sizeBytes": 206
+      },
+      "image": "cyrene/github-issues-provider:teams-arm64-aaaaaaaaaaaa-d79aa6436387-dddddddddddd",
+      "imageId": "sha256:0000000000000000000000000000000000000000000000000000000000000006",
+      "platform": "linux/arm64",
+      "service": "github-issues-provider",
+      "sourceCommits": {
+        "plugins": "dddddddddddddddddddddddddddddddddddddddd",
+        "workspace": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "publisherRun": {
+    "event": "workflow_run",
+    "headSha": "ffffffffffffffffffffffffffffffffffffffff",
+    "repository": "DoHorizon-AI/Cyrene-Workspace",
+    "runAttempt": 1,
+    "runId": 500,
+    "workflow": ".github/workflows/teams-cloud-release.yml"
+  },
+  "releaseId": "teams-arm64-aaaaaaaaaaaa-d79aa6436387",
+  "releaseTag": "teams-arm64-aaaaaaaaaaaa-d79aa6436387",
+  "schemaVersion": "cyrene-teams-arm64-release-v1",
+  "sourceFingerprintSha256": "1abe3d3676308e3e4acdd03720d2766b333ec769c0fb60bade7b207e692c657a",
+  "sourceRun": {
+    "conclusion": "success",
+    "event": "push",
+    "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ref": "refs/heads/develop",
+    "repository": "DoHorizon-AI/Cyrene-Workspace",
+    "runAttempt": 1,
+    "runId": 11,
+    "workflow": ".github/workflows/product-contract-v1.yml"
+  },
+  "sources": {
+    "dsh": {
+      "commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "conclusion": "pinned",
+      "event": "tag",
+      "ref": "refs/tags/dsh-v0.2.0-rc.2",
+      "repository": "deepseek-ai/deepseek-harness",
+      "workflow": null,
+      "workflowRunAttempt": null,
+      "workflowRunId": null
+    },
+    "exchange": {
+      "commit": "cccccccccccccccccccccccccccccccccccccccc",
+      "conclusion": "success",
+      "event": "push",
+      "ref": "refs/heads/develop",
+      "repository": "DoHorizon-AI/Cyrene-Exchange",
+      "workflow": ".github/workflows/ci.yml",
+      "workflowRunAttempt": 1,
+      "workflowRunId": 13
+    },
+    "navigator": {
+      "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "conclusion": "success",
+      "event": "push",
+      "ref": "refs/heads/develop",
+      "repository": "DoHorizon-AI/Cyrene-Navigator",
+      "workflow": ".github/workflows/ci.yml",
+      "workflowRunAttempt": 1,
+      "workflowRunId": 12
+    },
+    "plugins": {
+      "commit": "dddddddddddddddddddddddddddddddddddddddd",
+      "conclusion": "success",
+      "event": "push",
+      "ref": "refs/heads/develop",
+      "repository": "DoHorizon-AI/Cyrene-Plugins-Official",
+      "workflow": ".github/workflows/public-ci.yml",
+      "workflowRunAttempt": 1,
+      "workflowRunId": 14
+    },
+    "workspace": {
+      "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "conclusion": "success",
+      "event": "push",
+      "ref": "refs/heads/develop",
+      "repository": "DoHorizon-AI/Cyrene-Workspace",
+      "workflow": ".github/workflows/product-contract-v1.yml",
+      "workflowRunAttempt": 1,
+      "workflowRunId": 11
+    }
+  },
+  "targetPlatform": "linux/arm64"
+}

@@ -1,0 +1,225 @@
+trigger: none
+pr: none
+
+resources:
+  webhooks:
+    - webhook: teamsCloudRelease
+      connection: cyrene-teams-arm64-releases
+      filters:
+        - path: schemaVersion
+          value: cyrene-teams-arm64-cd-event-v1
+        - path: repository
+          value: DoHorizon-AI/Cyrene-Workspace
+        - path: publisherRun.repository
+          value: DoHorizon-AI/Cyrene-Workspace
+        - path: publisherRun.workflow
+          value: .github/workflows/teams-cloud-release.yml
+        - path: publisherRun.headBranch
+          value: develop
+        - path: publisherRun.conclusion
+          value: success
+        - path: sourceRun.repository
+          value: DoHorizon-AI/Cyrene-Workspace
+        - path: sourceRun.workflow
+          value: .github/workflows/product-contract-v1.yml
+        - path: sourceRun.ref
+          value: refs/heads/develop
+        - path: sourceRun.event
+          value: push
+        - path: sourceRun.conclusion
+          value: success
+
+pool:
+  vmImage: ubuntu-24.04
+
+jobs:
+  - job: DeployTeamsCloudRelease
+    displayName: Verify and apply one immutable Teams cloud release
+    timeoutInMinutes: 70
+    cancelTimeoutInMinutes: 5
+    steps:
+      - checkout: none
+
+      - task: AzureCLI@2
+        displayName: Verify release and read back VM deployment state
+        timeoutInMinutes: 60
+        inputs:
+          azureSubscription: cyrene-teams-vm-arm-wif
+          scriptType: bash
+          scriptLocation: inlineScript
+          failOnStandardError: false
+          visibleAzLogin: false
+          useGlobalConfig: false
+          inlineScript: |
+            set -euo pipefail
+            python3 - <<'CYRENE_ADO_BOOTSTRAP'
+            import hashlib
+            import io
+            import json
+            import os
+            import re
+            import stat
+            import subprocess
+            import sys
+            import tarfile
+            import tempfile
+            import urllib.parse
+            import urllib.request
+            from pathlib import Path, PurePosixPath
+
+            MAX_EVENT = 2 * 1024 * 1024
+            MAX_ARCHIVE = 64 * 1024 * 1024
+            MAX_MEMBERS = 8192
+            ALLOWED_HOSTS = {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
+            REPO = "DoHorizon-AI/Cyrene-Workspace"
+            RELEASES = "https://github.com/DoHorizon-AI/Cyrene-Workspace/releases/download/"
+
+
+            def reject(message):
+                raise SystemExit(message)
+
+
+            def unique_pairs(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        reject("duplicate event JSON key")
+                    result[key] = value
+                return result
+
+
+            def safe_directory(path):
+                path.mkdir(mode=0o700, parents=True, exist_ok=True)
+                metadata = path.lstat()
+                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                    reject("unsafe staging directory")
+                os.chmod(path, 0o700)
+
+
+            raw = os.environ.get("CYRENE_EVENT_JSON", "")
+            if not raw or len(raw.encode("utf-8")) > MAX_EVENT:
+                reject("event payload is missing or oversized")
+            try:
+                event = json.loads(raw, object_pairs_hook=unique_pairs)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                reject("event payload is invalid JSON")
+            if not isinstance(event, dict) or event.get("schemaVersion") != "cyrene-teams-arm64-cd-event-v1":
+                reject("event schema is unsupported")
+            release = event.get("release")
+            manifest = event.get("manifest")
+            if not isinstance(release, dict) or not isinstance(manifest, dict):
+                reject("release evidence is incomplete")
+            release_id = release.get("releaseId")
+            release_tag = release.get("releaseTag")
+            manifest_sha = release.get("manifestSha256")
+            manifest_source = manifest.get("sourceRun")
+            tools = manifest.get("deploymentTools")
+            sources = manifest.get("sources")
+            workspace_source = sources.get("workspace") if isinstance(sources, dict) else None
+            if (not isinstance(release_id, str) or re.fullmatch(r"teams-arm64-[0-9a-f]{12}-[0-9a-f]{12}", release_id) is None
+                    or release_tag != release_id
+                    or release.get("releaseBaseUrl") != RELEASES + release_id
+                    or not isinstance(manifest_sha, str) or re.fullmatch(r"[0-9a-f]{64}", manifest_sha) is None
+                    or manifest.get("releaseId") != release_id or manifest.get("releaseTag") != release_id
+                    or not isinstance(manifest_source, dict) or not isinstance(tools, dict)
+                    or not isinstance(workspace_source, dict)
+                    or tools.get("file") != "deployment-tools.tar.gz"
+                    or tools.get("sourceCommit") != manifest_source.get("headSha")
+                    or tools.get("sourceCommit") != workspace_source.get("commit")
+                    or not isinstance(tools.get("sizeBytes"), int) or isinstance(tools.get("sizeBytes"), bool)
+                    or not 0 < tools["sizeBytes"] <= MAX_ARCHIVE
+                    or not isinstance(tools.get("sha256"), str) or re.fullmatch(r"[0-9a-f]{64}", tools["sha256"]) is None):
+                reject("release tool locator is invalid")
+            archive_url = RELEASES + release_id + "/deployment-tools.tar.gz"
+            request = urllib.request.Request(archive_url, headers={"User-Agent": "Cyrene-Azure-ADO-CD"})
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    final = urllib.parse.urlsplit(response.geturl())
+                    length = response.headers.get("Content-Length")
+                    if (final.scheme != "https" or final.hostname not in ALLOWED_HOSTS
+                            or (length is not None and int(length) > MAX_ARCHIVE)):
+                        reject("deployment tools redirect or size is invalid")
+                    archive_bytes = response.read(MAX_ARCHIVE + 1)
+            except (OSError, ValueError, TimeoutError):
+                reject("deployment tools download failed")
+            if len(archive_bytes) != tools["sizeBytes"] or len(archive_bytes) > MAX_ARCHIVE:
+                reject("deployment tools size mismatch")
+            if hashlib.sha256(archive_bytes).hexdigest() != tools["sha256"]:
+                reject("deployment tools digest mismatch")
+
+            source_sha = tools["sourceCommit"]
+            prefix = PurePosixPath("Cyrene-Workspace-" + source_sha + "/tooling/deploy/teams-cloud")
+            required = {"azure_cd.py", "release_bundle.py", "build_arm64.py"}
+            seen = set()
+            extracted = set()
+            total = 0
+            with tempfile.TemporaryDirectory(prefix="cyrene-teams-cd-") as temporary:
+                work = Path(temporary)
+                os.chmod(work, 0o700)
+                tool_root = work.joinpath(*prefix.parts)
+                safe_directory(tool_root)
+                try:
+                    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+                        for index, member in enumerate(archive):
+                            if index >= MAX_MEMBERS:
+                                reject("deployment tools archive has too many files")
+                            if "\\" in member.name:
+                                reject("deployment tools archive path is invalid")
+                            path = PurePosixPath(member.name)
+                            if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+                                reject("deployment tools archive path is invalid")
+                            is_prefix_member = path.parts[:len(prefix.parts)] == prefix.parts
+                            is_prefix_ancestor = (
+                                member.isdir()
+                                and 0 < len(path.parts) < len(prefix.parts)
+                                and prefix.parts[:len(path.parts)] == path.parts
+                            )
+                            if path.as_posix() in seen or not (is_prefix_member or is_prefix_ancestor):
+                                reject("deployment tools archive prefix or duplicate path is invalid")
+                            seen.add(path.as_posix())
+                            if not member.isdir() and not member.isfile():
+                                reject("deployment tools archive contains a link or special file")
+                            total += member.size
+                            if total > MAX_ARCHIVE or member.size > MAX_ARCHIVE:
+                                reject("deployment tools archive expands beyond its size bound")
+                            if is_prefix_ancestor:
+                                continue
+                            relative = path.relative_to(prefix)
+                            if not relative.parts:
+                                continue
+                            if member.isdir():
+                                continue
+                            if len(relative.parts) != 1 or relative.name not in required:
+                                continue
+                            stream = archive.extractfile(member)
+                            if stream is None:
+                                reject("deployment tool entry is unreadable")
+                            content = stream.read(MAX_ARCHIVE + 1)
+                            if len(content) != member.size or len(content) > MAX_ARCHIVE:
+                                reject("deployment tool entry has invalid size")
+                            destination = tool_root / relative.name
+                            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                            with os.fdopen(descriptor, "wb") as output:
+                                output.write(content)
+                                output.flush()
+                                os.fsync(output.fileno())
+                            extracted.add(relative.name)
+                except (OSError, EOFError, tarfile.TarError):
+                    reject("deployment tools archive is invalid")
+                if extracted != required:
+                    reject("deployment tools archive is missing its pinned CD entrypoint")
+
+                event_path = work / "event.json"
+                descriptor = os.open(event_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                result = subprocess.run(
+                    [sys.executable, str(tool_root / "azure_cd.py"), "deploy", "--event-json", str(event_path)],
+                    check=False,
+                )
+                raise SystemExit(result.returncode)
+            CYRENE_ADO_BOOTSTRAP
+        env:
+          CYRENE_EVENT_JSON: ${{ convertToJson(parameters.teamsCloudRelease.resource) }}

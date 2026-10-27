@@ -771,6 +771,30 @@ def _full_cloud_image_update(
     return active, candidate, active_lock, candidate_lock
 
 
+def _full_github_image_update(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build a GitHub provider image pair over the canonical 14-service inventory."""
+
+    active, _listener_candidate, active_lock, _candidate_lock = _listener_repair_pair(tmp_path)
+    target = "github-issues"
+    target_lock_service = runtime_update.LOCK_SERVICE_FOR_TARGET[target]
+    active_lock = copy.deepcopy(active_lock)
+    target_row = next(row for row in active_lock["images"] if row["service"] == target)
+    target_row["service"] = target_lock_service
+
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    candidate_ref = "example.invalid/github-issues:issued-update"
+    candidate["services"][target]["image"] = candidate_ref
+    candidate_row = next(
+        row for row in candidate_lock["images"] if row["service"] == target_lock_service
+    )
+    candidate_row["image"] = candidate_ref
+    candidate_row["imageId"] = _image_id(101)
+    return active, candidate, active_lock, candidate_lock
+
+
 def _active_memory_update(
     tmp_path: Path, target: str = "teams-ingress"
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -848,6 +872,58 @@ def test_issued_cloud_image_update_preserves_the_exact_fourteen_service_inventor
         stage_transition._validate_phase_topology(
             phase="issued-connector-activation",
             image_update_target="cloud-management-phase2",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def test_issued_github_image_update_preserves_exact_fourteen_service_inventory(
+    tmp_path: Path,
+) -> None:
+    """Allow only the locked GitHub provider image on the existing issued 14-service topology."""
+
+    active, candidate, active_lock, candidate_lock = _full_github_image_update(tmp_path)
+    targets, images = stage_transition._validate_phase_topology(
+        phase="issued-connector-activation",
+        image_update_target="github-issues",
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+    assert targets == ["github-issues"]
+    assert (
+        images["github-issues"]["active"]["imageId"]
+        != images["github-issues"]["candidate"]["imageId"]
+    )
+    assert set(images) == stage_transition.RUNTIME_SERVICE_SET
+    assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="GitHub Issues image updates require issued-connector-activation",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="provider-bootstrap",
+            image_update_target="github-issues",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    active, candidate, active_lock, candidate_lock = _full_github_image_update(tmp_path)
+    del active["services"]["computer-runtime"]
+    del candidate["services"]["computer-runtime"]
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="issued GitHub Issues image updates require the exact 14-service runtime topology",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target="github-issues",
             active=active,
             candidate=candidate,
             active_lock=active_lock,
@@ -2457,7 +2533,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
     active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="must be Cloud Management, Exchange, Hugging Face, Navigator, or Persistence",
+        match="must be Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -2512,9 +2588,9 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
 
 
 def test_stage_transition_cli_closes_image_update_target_choices() -> None:
-    """Expose only the five services with explicit V2 image-update gates.
+    """Expose only the six services with explicit V2 image-update gates.
 
-    中文：CLI 只开放具备独立严格门禁的 Exchange、HF、Navigator、Persistence 与 Cloud 目标。
+    中文：CLI 只开放具备独立严格门禁的 Exchange、GitHub、HF、Navigator、Persistence 与 Cloud 目标。
     """
 
     parser = stage_transition._build_parser()
@@ -2529,6 +2605,7 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
     assert image_target_action.choices == [
         "cloud-management-phase2",
         "exchange",
+        "github-issues",
         "huggingface",
         "navigator",
         "navigator-persistence",
@@ -2701,6 +2778,19 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
         runtime_config_identity=identity,
     )
     stage_transition._validate_image_update_selection_contract(
+        target="github-issues",
+        phase="issued-connector-activation",
+        project="cyrene-teams-cloud",
+        selection_record=selection,
+        selection_path="/private/runtime-selection.json",
+        active_config_dir="/private/config",
+        candidate_config_dir="/private/config",
+        active_secrets_dir="/private/secrets",
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity=identity,
+    )
+    stage_transition._validate_image_update_selection_contract(
         target="huggingface",
         phase="issued-connector-activation",
         project="cyrene-teams-cloud",
@@ -2726,6 +2816,26 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
         candidate_inputs=candidate_inputs,
         runtime_config_identity=identity,
     )
+
+    bootstrap_selection = copy.deepcopy(selection)
+    bootstrap_selection["document"]["phase"] = "provider-bootstrap"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="GitHub Issues image updates require issued-connector-activation",
+    ):
+        stage_transition._validate_image_update_selection_contract(
+            target="github-issues",
+            phase="provider-bootstrap",
+            project="cyrene-teams-cloud",
+            selection_record=bootstrap_selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity=identity,
+        )
 
     with pytest.raises(
         stage_transition.StageTransitionError, match="match an existing runtime selector"
@@ -5113,6 +5223,83 @@ def _listener_repair_readiness_fixture(
     return snapshot, compose
 
 
+def _github_image_readiness_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a full issued snapshot whose GitHub scope matches its frozen bootstrap config."""
+
+    snapshot, compose = _listener_repair_readiness_fixture(tmp_path, include_live_catalog=True)
+    bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
+    catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
+    bindings_path.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": snapshot["bindings"]}), encoding="utf-8"
+    )
+    catalog_path.write_text(
+        json.dumps(snapshot["catalog"]),
+        encoding="utf-8",
+    )
+    bootstrap_path = Path(compose["configs"]["connector-bootstrap"]["file"])
+    bootstrap = json.loads(bootstrap_path.read_text(encoding="utf-8"))
+    github_profile = next(row for row in snapshot["profiles"] if row["providerId"] == "github")
+    bootstrap["github"] = {
+        "expectedAccessMode": "workspace_operator",
+        "repositories": github_profile["targetScope"]["repositories"],
+    }
+    bootstrap_path.write_text(json.dumps(bootstrap), encoding="utf-8")
+    return snapshot, compose
+
+
+def test_github_image_readiness_returns_only_exact_issued_binding_refs(
+    tmp_path: Path,
+) -> None:
+    """Join all ten GitHub connection refs and scopes to the frozen issued projection."""
+
+    snapshot, compose = _github_image_readiness_fixture(tmp_path)
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase="issued-connector-activation",
+        image_update_target="github-issues",
+    )
+
+    expected_refs = sorted(
+        row["connectionRef"] for row in snapshot["connections"] if row["providerId"] == "github"
+    )
+    assert receipt["status"] == "LIVE_VERIFIED"
+    assert receipt["bindingCount"] == 14
+    assert receipt["connectionCount"] == 14
+    assert receipt["githubConnectionRefs"] == expected_refs
+
+    changed_scope = copy.deepcopy(snapshot)
+    github_profile = next(row for row in changed_scope["profiles"] if row["providerId"] == "github")
+    github_profile["targetScope"]["repositories"][0]["name"] = "outside-frozen-scope"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="live GitHub profile repository scope differs from the frozen bootstrap config",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=changed_scope,
+            compose=compose,
+            phase="issued-connector-activation",
+            image_update_target="github-issues",
+        )
+
+    missing_connection = copy.deepcopy(snapshot)
+    missing_connection["connections"] = [
+        row for row in missing_connection["connections"] if row["providerId"] != "github"
+    ] + [row for row in snapshot["connections"] if row["providerId"] == "github"][:-1]
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="one live profile and exactly ten issued connections/bindings",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=missing_connection,
+            compose=compose,
+            phase="issued-connector-activation",
+            image_update_target="github-issues",
+        )
+
+
 def test_listener_repair_precheck_verifies_issued_state_without_live_catalog(
     tmp_path: Path,
 ) -> None:
@@ -5909,6 +6096,59 @@ def test_cloud_readiness_checkpoint_uses_exact_issued_provider_connections() -> 
     assert receipt["verified"] is True
 
 
+def test_github_readiness_checkpoint_hashes_all_ten_exact_connection_refs() -> None:
+    """Require every GitHub connection from the issued 14-binding snapshot before mutation."""
+
+    connection_refs = [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)]
+    plan = {
+        "imageUpdateTarget": "github-issues",
+        "phase": "issued-connector-activation",
+        "activeServices": {"exchange": {"containerId": "a" * 64, "imageId": _image_id(44)}},
+        "candidatePreflight": {
+            "expectedProviderScopeDigests": {
+                "azure": "b" * 64,
+                "gcp": "c" * 64,
+                "huggingface": "d" * 64,
+            }
+        },
+    }
+    journal = {
+        "exchangeReadiness": {
+            "receipt": {
+                "status": "LIVE_VERIFIED",
+                "catalogStatus": "LIVE_VERIFIED",
+                "exchangeContainerId": "a" * 64,
+                "exchangeImageId": _image_id(44),
+                "bindingCount": 14,
+                "connectionCount": 14,
+                "verifiedProviderIds": ["azure", "gcp", "huggingface"],
+                "snapshotSha256": "1" * 64,
+                "githubConnectionRefs": connection_refs,
+            }
+        }
+    }
+
+    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+    expected_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "github": [
+                    hashlib.sha256(ref.encode("utf-8")).hexdigest()
+                    for ref in sorted(connection_refs)
+                ]
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    assert checkpoint["verified"] is True
+    assert checkpoint["connectionRefsSha256"] == expected_digest
+
+    journal["exchangeReadiness"]["receipt"]["githubConnectionRefs"] = connection_refs[:-1]
+    with pytest.raises(stage_transition.StageTransitionError, match="exact selected github"):
+        stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+
+
 def test_cloud_image_update_journal_keeps_bootstrap_and_issued_gates_separate(
     tmp_path: Path,
 ) -> None:
@@ -5958,6 +6198,62 @@ def test_cloud_image_update_journal_keeps_bootstrap_and_issued_gates_separate(
     assert bootstrap_journal["cloudImageUpdate"]["required"] is False
     assert bootstrap_journal["cloudRunnerIdle"]["required"] is True
     assert bootstrap_journal["cloudRunnerIdle"]["planState"] == bootstrap_plan["cloudRunnerState"]
+
+
+def test_github_image_update_journal_and_status_report_readiness_and_monitor_gates(
+    tmp_path: Path,
+) -> None:
+    """Record both GitHub readiness checkpoints and all-binding monitor quiescence."""
+
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("{}", encoding="utf-8")
+    target = "github-issues"
+    plan: dict[str, Any] = {
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "a" * 64,
+        "project": "cyrene-teams-cloud",
+        "phase": "issued-connector-activation",
+        "imageUpdateTarget": target,
+        "targets": [target],
+        "activeServices": {target: {"containerId": "b" * 64}},
+        "candidateServices": {
+            target: {
+                "active": {"imageId": _image_id(10)},
+                "candidate": {"imageId": _image_id(11)},
+                "added": False,
+            }
+        },
+        "edgeDelivery": {"containerId": "c" * 64, "revision": 0, "deadCount": 0},
+        "navigatorDrain": {
+            "containerId": "d" * 64,
+            "instanceId": "11111111-1111-4111-8111-111111111111",
+            "generation": 0,
+        },
+        "database": {"backupPath": "/private/database.snapshot"},
+        "exchangeReadiness": {"required": True},
+        "candidateSelectionFile": "/private/runtime-selection.json",
+        "selectionBackupPath": "/private/previous-selection.json",
+        "activeSelection": {"sha256": None},
+    }
+
+    journal = stage_transition._make_journal(plan, plan_path)
+    assert journal["githubIssuesImageUpdate"]["required"] is True
+    assert journal["cloudImageUpdate"]["required"] is False
+    journal["state"] = "APPLIED"
+    journal["githubIssuesImageUpdate"].update(
+        {
+            "beforeReadiness": {"verified": True},
+            "monitorQuiescence": {"verified": True},
+            "afterReadiness": {"verified": True},
+        }
+    )
+
+    summary = stage_transition._journal_summary(journal)
+    assert summary["githubIssuesImageUpdateRequired"] is True
+    assert summary["githubIssuesImageUpdateStatus"] == "VERIFIED"
+    assert summary["githubIssuesMonitorQuiescenceStatus"] == "VERIFIED"
+    assert summary["githubIssuesBeforeReadinessStatus"] == "LIVE_VERIFIED"
+    assert summary["githubIssuesAfterReadinessStatus"] == "LIVE_VERIFIED"
 
 
 def _create_huggingface_monitor_database(
@@ -6326,6 +6622,275 @@ def _create_cloud_monitor_database(
     connection.close()
 
 
+def _create_github_monitor_database(
+    path: Path,
+    *,
+    connection_refs: list[str],
+    actor: dict[str, str],
+    next_check_seconds: int,
+    active_monitor_ref: str | None,
+    in_flight_ref: str | None,
+    missing_monitor_ref: str | None = None,
+) -> None:
+    """Build ten actor-scoped GitHub connections and their monitor/call rows."""
+
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE integration_connections (
+            id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+            actor_issuer TEXT NOT NULL, actor_subject TEXT NOT NULL, enabled INTEGER NOT NULL,
+            document TEXT NOT NULL
+        );
+        CREATE TABLE authorization_monitor_state (
+            connection_id TEXT PRIMARY KEY, next_check_at TEXT NOT NULL, last_checked_at TEXT,
+            claim_owner TEXT, claim_fence INTEGER NOT NULL DEFAULT 0, lease_expires_at TEXT
+        );
+        CREATE TABLE connector_invocations (
+            organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL, actor_issuer TEXT NOT NULL,
+            actor_subject TEXT NOT NULL, request_id TEXT NOT NULL, connection_ref TEXT NOT NULL,
+            provider_id TEXT NOT NULL, profile_ref TEXT NOT NULL, operation_id TEXT NOT NULL,
+            resource_ref TEXT NOT NULL, arguments_sha256 TEXT NOT NULL,
+            envelope_sha256 TEXT NOT NULL, state TEXT NOT NULL, operation_ref TEXT,
+            grant_ref TEXT NOT NULL DEFAULT '', is_mutating INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, response_json TEXT,
+            response_status INTEGER NOT NULL DEFAULT 200
+        );
+        """
+    )
+    now = datetime.now(UTC)
+    for index, connection_ref in enumerate(connection_refs):
+        document = {
+            "id": connection_ref,
+            "organizationId": actor["organizationId"],
+            "workspaceId": actor["workspaceId"],
+            "actorIssuer": actor["issuer"],
+            "actorSubject": actor["subject"],
+            "provider": "github",
+            "enabled": True,
+        }
+        connection.execute(
+            "INSERT INTO integration_connections VALUES(?,?,?,?,?,?,?)",
+            (
+                connection_ref,
+                actor["organizationId"],
+                actor["workspaceId"],
+                actor["issuer"],
+                actor["subject"],
+                1,
+                json.dumps(document),
+            ),
+        )
+        if connection_ref != missing_monitor_ref:
+            has_lease = connection_ref == active_monitor_ref
+            connection.execute(
+                "INSERT INTO authorization_monitor_state VALUES(?,?,?,?,?,?)",
+                (
+                    connection_ref,
+                    (now + timedelta(seconds=next_check_seconds)).isoformat(),
+                    None,
+                    "github-authorization-monitor" if has_lease else None,
+                    1 if has_lease else 0,
+                    (now + timedelta(seconds=30)).isoformat() if has_lease else None,
+                ),
+            )
+        if connection_ref == in_flight_ref:
+            connection.execute(
+                "INSERT INTO connector_invocations "
+                "(organization_id,workspace_id,actor_issuer,actor_subject,request_id,connection_ref,"
+                "provider_id,profile_ref,operation_id,resource_ref,arguments_sha256,envelope_sha256,"
+                "state,grant_ref,is_mutating,created_at,expires_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    actor["organizationId"],
+                    actor["workspaceId"],
+                    actor["issuer"],
+                    actor["subject"],
+                    f"github-call-{index}",
+                    connection_ref,
+                    "github",
+                    "github-profile",
+                    "github.repository.get",
+                    "configured-repository",
+                    "a" * 64,
+                    "b" * 64,
+                    "IN_PROGRESS",
+                    "sha256:" + "c" * 64,
+                    0,
+                    int(now.timestamp()),
+                    0,
+                ),
+            )
+    connection.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("blocker", "verified"),
+    [
+        (None, True),
+        ("monitor-lease", False),
+        ("in-flight-call", False),
+        ("short-window", False),
+        ("missing-monitor", False),
+    ],
+)
+def test_github_issued_monitor_guard_checks_all_ten_exact_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    blocker: str | None,
+    verified: bool,
+) -> None:
+    """Probe all ten GitHub monitor states and fail closed on any missing or active row."""
+
+    connection_refs = [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)]
+    actor = {
+        "issuer": "https://login.microsoftonline.com/tenant/v2.0",
+        "subject": "actor-subject",
+        "organizationId": "organization-id",
+        "workspaceId": "workspace-id",
+    }
+    active_monitor_ref = connection_refs[0] if blocker == "monitor-lease" else None
+    in_flight_ref = connection_refs[4] if blocker == "in-flight-call" else None
+    missing_monitor_ref = connection_refs[9] if blocker == "missing-monitor" else None
+    next_check_seconds = 300 if blocker == "short-window" else 900
+    database_path = tmp_path / "integrations.sqlite3"
+    _create_github_monitor_database(
+        database_path,
+        connection_refs=connection_refs,
+        actor=actor,
+        next_check_seconds=next_check_seconds,
+        active_monitor_ref=active_monitor_ref,
+        in_flight_ref=in_flight_ref,
+        missing_monitor_ref=missing_monitor_ref,
+    )
+    bindings = [{"providerId": "github", "connectionRef": ref} for ref in connection_refs]
+    monkeypatch.setattr(
+        stage_transition, "_candidate_config_json", lambda _compose, _name: {"bindings": bindings}
+    )
+    monkeypatch.setattr(
+        stage_transition.preflight, "_connector_bootstrap_actor", lambda _compose: actor
+    )
+    phases: list[str] = []
+
+    def run_readonly_exchange_script(argv: list[str], **_kwargs: Any) -> str:
+        script_index = argv.index("-c")
+        script = argv[script_index + 1]
+        arguments = list(argv[script_index + 2 :])
+        assert json.loads(arguments[1]) == [
+            {"providerId": "github", "connectionRef": ref} for ref in connection_refs
+        ]
+        assert arguments[-1] == "false"
+        arguments[0] = str(database_path)
+        result = subprocess.run(
+            [sys.executable, "-c", script, *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise runtime_update.RuntimeUpdateError("read-only GitHub monitor probe failed")
+        return result.stdout
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", run_readonly_exchange_script)
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, phase: phases.append(phase),
+    )
+    plan = {
+        "phase": "issued-connector-activation",
+        "imageUpdateTarget": "github-issues",
+        "activeServices": {"exchange": {"containerId": "a" * 64}},
+        "policy": {"healthTimeoutSeconds": 300},
+    }
+    journal = {
+        "exchangeReadiness": {"receipt": {"githubConnectionRefs": connection_refs}},
+        "githubIssuesImageUpdate": {"required": True},
+    }
+
+    if blocker == "missing-monitor":
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="could not be verified read-only",
+        ):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose={"services": {}},
+                journal=journal,
+                journal_path=tmp_path / "journal.json",
+                docker_prefix=["docker"],
+            )
+        assert phases == []
+        return
+
+    if verified:
+        result = stage_transition._verify_provider_monitor_quiescence(
+            plan=plan,
+            candidate_compose={"services": {}},
+            journal=journal,
+            journal_path=tmp_path / "journal.json",
+            docker_prefix=["docker"],
+        )
+        assert result["verified"] is True
+        assert result["requiredWindowSeconds"] == 360
+        assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] == result
+        assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
+    else:
+        with pytest.raises(stage_transition.StageTransitionError, match="blocked because"):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose={"services": {}},
+                journal=journal,
+                journal_path=tmp_path / "journal.json",
+                docker_prefix=["docker"],
+            )
+        assert journal["githubIssuesImageUpdate"]["monitorQuiescence"]["verified"] is False
+        assert phases == ["CONNECTOR_MONITOR_NOT_QUIESCENT"]
+
+
+def test_github_monitor_guard_rejects_connection_binding_drift_before_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not probe a GitHub monitor unless all ten live refs join the frozen bindings."""
+
+    connection_refs = [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)]
+    bindings = [{"providerId": "github", "connectionRef": ref} for ref in connection_refs]
+    bindings[-1]["connectionRef"] = "20000000-0000-4000-8000-000000000001"
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_config_json",
+        lambda _compose, _name: {"bindings": bindings},
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: pytest.fail(
+            "monitor SQL must not run for a connection set outside the frozen bindings"
+        ),
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="connection refs do not match the frozen candidate bindings",
+    ):
+        stage_transition._verify_provider_monitor_quiescence(
+            plan={
+                "phase": "issued-connector-activation",
+                "imageUpdateTarget": "github-issues",
+                "candidatePreflight": {"expectedProviderScopeDigests": {"huggingface": "a" * 64}},
+                "activeServices": {"exchange": {"containerId": "a" * 64}},
+                "policy": {"healthTimeoutSeconds": 300},
+            },
+            candidate_compose={"services": {}},
+            journal={
+                "exchangeReadiness": {"receipt": {"githubConnectionRefs": connection_refs}},
+                "githubIssuesImageUpdate": {"required": True},
+            },
+            journal_path=Path("/private/journal.json"),
+            docker_prefix=["docker"],
+        )
+
+
 @pytest.mark.parametrize(
     ("blocker", "include_runpod", "verified"),
     [
@@ -6681,6 +7246,50 @@ def test_compose_stage_target_is_closed_and_never_pulls_or_builds(
             service="second-navigator",
             timeout_seconds=60,
         )
+
+
+def test_github_stage_transition_reuses_the_existing_allowlisted_compose_primitive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the V2 transaction while using the existing GitHub-only service wrapper."""
+
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        runtime_update,
+        "_compose_up",
+        lambda **kwargs: calls.append(kwargs) or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_compose_up_stage_transition",
+        lambda **_kwargs: pytest.fail(
+            "GitHub is intentionally outside the general stage-transition service order"
+        ),
+    )
+    stage_transition._compose_target_update(
+        plan={
+            "project": "cyrene-teams-cloud",
+            "candidateInputs": {
+                "composeFiles": [{"path": "/private/compose.yaml"}],
+                "envFiles": [{"path": "/private/runtime.env"}],
+            },
+            "policy": {"healthTimeoutSeconds": 120},
+        },
+        service="github-issues",
+        use_candidate=True,
+        docker_prefix=["docker"],
+    )
+
+    assert calls == [
+        {
+            "docker_prefix": ["docker"],
+            "project": "cyrene-teams-cloud",
+            "compose_files": [Path("/private/compose.yaml")],
+            "env_files": [Path("/private/runtime.env")],
+            "service": "github-issues",
+            "timeout_seconds": 120,
+        }
+    ]
 
 
 def test_hf_failure_rolls_back_hf_but_never_downgrades_migrated_account_center(

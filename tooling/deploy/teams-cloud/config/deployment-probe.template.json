@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "cyrene-teams-deployment-probe-policy-v1",
+  "owner": {
+    "issuer": "REPLACE_WITH_DIRECTORY_OWNER_ISSUER",
+    "subject": "REPLACE_WITH_DIRECTORY_OWNER_SUBJECT",
+    "organizationId": "REPLACE_WITH_DIRECTORY_ORGANIZATION_ID",
+    "workspaceId": "REPLACE_WITH_DIRECTORY_WORKSPACE_ID"
+  },
+  "runtime": {
+    "selectionPath": "/var/lib/cyrene-connectors-runtime/.artifacts/selection/current-runtime-selection.json",
+    "journalDirectory": "/var/lib/cyrene-connectors-runtime/.artifacts/journals",
+    "outputDirectory": "/var/lib/cyrene-connectors-runtime/.artifacts/deployment-probes"
+  },
+  "probeTargets": {
+    "huggingface": {
+      "targetAlias": "REPLACE_WITH_BOUND_HF_ALIAS",
+      "repoType": "model",
+      "repoId": "REPLACE_WITH_BOUND_HF_REPOSITORY"
+    },
+    "azure": {
+      "targetAlias": "REPLACE_WITH_BOUND_AZURE_ALIAS",
+      "target": {"resource_group": "REPLACE_WITH_BOUND_RESOURCE_GROUP"}
+    },
+    "gcp": {
+      "targetAlias": "REPLACE_WITH_BOUND_GCP_ALIAS",
+      "target": {"zone": "REPLACE_WITH_BOUND_ZONE"}
+    }
+  },
+  "notificationProvenanceRequired": true
+}
