@@ -236,14 +236,12 @@ def _ready_snapshot() -> dict[str, Any]:
         {
             "providerId": "azure",
             "profileRef": "azure-profile",
-            "authMode": "managed_identity",
             "readOnly": False,
             "targetScope": {"targets": {"azure-resource-group": {"targetRef": "target-ref-a"}}},
         },
         {
             "providerId": "gcp",
             "profileRef": "gcp-profile",
-            "authMode": "workload_identity_federation",
             "readOnly": False,
             "targetScope": {"targets": {"gcp-zone": {"targetRef": "target-ref-b"}}},
         },
@@ -302,6 +300,7 @@ def _compose_scope() -> dict[str, Any]:
                 "provider": "azure",
                 "profile_ref": "azure-profile",
                 "identity_ref": "azure-identity",
+                "auth": {"mode": "managed_identity"},
                 "read_only": False,
                 "scope": {
                     "subscription_id": "subscription-a",
@@ -312,6 +311,7 @@ def _compose_scope() -> dict[str, Any]:
                 "provider": "gcp",
                 "profile_ref": "gcp-profile",
                 "identity_ref": "gcp-identity",
+                "auth": {"mode": "workload_identity_federation"},
                 "read_only": False,
                 "scope": {
                     "project_id": "project-a",
@@ -503,6 +503,38 @@ def test_probe_plan_blocks_target_or_permission_drift_before_provider_calls() ->
         deployment_probe._build_probe_operations(
             snapshot=snapshot,
             compose=_compose_scope(),
+            targets=_policy()["probeTargets"],
+        )
+
+    snapshot = _ready_snapshot()
+    azure_profile = next(row for row in snapshot["profiles"] if row["providerId"] == "azure")
+    azure_profile["authMode"] = "device_oauth"
+    with pytest.raises(deployment_probe.DeploymentProbeError, match="authentication mode differs"):
+        deployment_probe._build_probe_operations(
+            snapshot=snapshot,
+            compose=_compose_scope(),
+            targets=_policy()["probeTargets"],
+        )
+
+    compose = _compose_scope()
+    cloud_config = json.loads(
+        compose["services"]["cloud-management-phase2"]["environment"][
+            "CYRENE_CAPABILITY_CONFIGURATION_JSON"
+        ]
+    )
+    azure_cloud_profile = next(
+        row for row in cloud_config["profiles"] if row["provider"] == "azure"
+    )
+    azure_cloud_profile.pop("auth")
+    compose["services"]["cloud-management-phase2"]["environment"][
+        "CYRENE_CAPABILITY_CONFIGURATION_JSON"
+    ] = json.dumps(cloud_config)
+    with pytest.raises(
+        deployment_probe.DeploymentProbeError, match="authentication mode is missing"
+    ):
+        deployment_probe._build_probe_operations(
+            snapshot=_ready_snapshot(),
+            compose=compose,
             targets=_policy()["probeTargets"],
         )
 

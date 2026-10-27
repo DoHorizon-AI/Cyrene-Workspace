@@ -701,7 +701,7 @@ def _build_probe_operations(
         connection_ref = connection.get("connectionRef")
         profile_ref = connection.get("profileRef")
         binding_id = binding.get("bindingId")
-        auth_mode = profile.get("authMode")
+        snapshot_auth_mode = profile.get("authMode")
         if (
             not isinstance(connection_ref, str)
             or not connection_ref
@@ -709,13 +709,12 @@ def _build_probe_operations(
             or not profile_ref
             or not isinstance(binding_id, str)
             or not binding_id
+            or profile.get("profileRef") != profile_ref
             or binding.get("connectionRef") != connection_ref
             or binding.get("profileRef") != profile_ref
             or binding.get("providerId") != provider
-            or auth_mode not in preflight.CONNECTOR_AUTH_READONLY_AUTH_MODES.get(provider, set())
         ):
             raise DeploymentProbeError(f"active {provider} readiness identity does not join")
-        auth_modes[provider] = auth_mode
         tools = binding.get("tools")
         if not isinstance(tools, list):
             raise DeploymentProbeError(f"active {provider} binding tool list is malformed")
@@ -756,6 +755,18 @@ def _build_probe_operations(
             if active_profile.get("profile_ref") != profile_ref:
                 raise DeploymentProbeError(
                     f"active {provider} scope differs from its Exchange profile"
+                )
+            active_auth = active_profile.get("auth")
+            auth_mode = active_auth.get("mode") if isinstance(active_auth, dict) else None
+            if not isinstance(auth_mode, str) or not auth_mode:
+                raise DeploymentProbeError(f"active {provider} authentication mode is missing")
+            if snapshot_auth_mode is not None and snapshot_auth_mode != auth_mode:
+                raise DeploymentProbeError(
+                    f"active {provider} readiness authentication mode differs from its rendered profile"
+                )
+            if auth_mode not in preflight.CONNECTOR_AUTH_READONLY_AUTH_MODES.get(provider, set()):
+                raise DeploymentProbeError(
+                    f"active {provider} rendered profile has an unsupported authentication mode"
                 )
             scope = active_profile.get("scope")
             if not isinstance(scope, dict):
@@ -812,6 +823,13 @@ def _build_probe_operations(
                 ),
             ]
 
+        if provider == "huggingface":
+            auth_mode = snapshot_auth_mode
+            if auth_mode not in preflight.CONNECTOR_AUTH_READONLY_AUTH_MODES.get(provider, set()):
+                raise DeploymentProbeError(
+                    "Hugging Face readiness authentication mode is unsupported"
+                )
+        auth_modes[provider] = auth_mode
         for operation_id, arguments, target_projection in call_specs:
             operation_policy = preflight.CONNECTOR_OPERATION_POLICIES.get(operation_id)
             if (
