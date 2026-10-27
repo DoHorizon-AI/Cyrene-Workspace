@@ -405,6 +405,35 @@ def test_runtime_plan_maps_github_compose_service_to_canonical_provider_lock_row
     }
 
 
+def test_runtime_plan_maps_cloud_management_phase_two_to_canonical_lock_row() -> None:
+    """Map the phase-two Compose service to the canonical Cloud Management lock row.
+
+    中文：复用 V2 的内部锁映射，但不扩展 legacy runtime-update CLI targets。
+    """
+
+    compose = {"services": {"cloud-management-phase2": {"image": "cloud:v2"}}}
+    lock = {
+        "images": [
+            {
+                "service": "cloud-management",
+                "image": "cloud:v2",
+                "imageId": NEW_IMAGE_ID,
+                "sourceCommits": {"plugins": "c" * 40},
+            }
+        ]
+    }
+
+    assert runtime_update._target_images(compose, lock, ["cloud-management-phase2"]) == {
+        "cloud-management-phase2": {
+            "lockService": "cloud-management",
+            "image": "cloud:v2",
+            "imageId": NEW_IMAGE_ID,
+            "sourceCommits": {"plugins": "c" * 40},
+        }
+    }
+    assert "cloud-management-phase2" not in runtime_update.ALLOWED_TARGETS
+
+
 def test_runtime_plan_validation_preserves_legacy_nav_exchange_v1_policy() -> None:
     """Accept old target policies while validating the new GitHub provider contract."""
 
