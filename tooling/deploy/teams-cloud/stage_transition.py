@@ -64,6 +64,9 @@ RUNTIME_SERVICE_ORDER = (
     "cloud-management-phase2",
 )
 RUNTIME_SERVICE_SET = frozenset(RUNTIME_SERVICE_ORDER)
+RECOVERED_PERSISTENCE_PRINCIPAL_CONFIG = "recovered-navigator-persistence-navigator-principal"
+NAVIGATOR_PRINCIPAL_CONFIG_FILENAME = "navigator-principal-config.json"
+NAVIGATOR_PRINCIPAL_CONFIG_TARGET = "/run/secrets/principal-config.json"
 PROJECT_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}\Z")
 FULL_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 IMAGE_ID_RE = runtime_update.IMAGE_ID_RE
@@ -2391,13 +2394,30 @@ def _validate_active_candidate_configs(
             raise StageTransitionError(f"candidate config {name} changes its canonical filename")
         active_digest = _sha256_file(Path(active_file))
         candidate_digest = _sha256_file(Path(candidate_file))
-        if active_digest != candidate_digest and name not in {
-            "navigator-principal",
-            "connector-bindings",
-            "connector-tool-catalog",
-            "connector-bootstrap",
-            "responsibility-targets",
-        }:
+        changed_config_is_scoped_principal = (
+            active_digest != candidate_digest
+            and _is_recovered_persistence_principal_config(
+                name=name,
+                active_file=Path(active_file),
+                candidate_file=Path(candidate_file),
+                active_config_dir=active_config_dir,
+                candidate_config_dir=candidate_config_dir,
+                active=active,
+                candidate=candidate,
+            )
+        )
+        if (
+            active_digest != candidate_digest
+            and name
+            not in {
+                "navigator-principal",
+                "connector-bindings",
+                "connector-tool-catalog",
+                "connector-bootstrap",
+                "responsibility-targets",
+            }
+            and not changed_config_is_scoped_principal
+        ):
             raise StageTransitionError(f"candidate changes unrelated Compose config {name}")
     added_configs = set(candidate_configs) - set(active_configs)
     expected_added = (
@@ -2409,6 +2429,55 @@ def _validate_active_candidate_configs(
         raise StageTransitionError(
             "candidate Compose config additions are outside the notification overlay"
         )
+
+
+def _recovered_principal_config_consumers(
+    compose: dict[str, Any], config_name: str
+) -> list[tuple[str, Any]]:
+    """Return every service/target consuming one Compose config alias."""
+
+    services = compose.get("services")
+    if not isinstance(services, dict):
+        raise StageTransitionError("Compose config consumers have no service inventory")
+    consumers: list[tuple[str, Any]] = []
+    for service_name, service in services.items():
+        if not isinstance(service_name, str) or not isinstance(service, dict):
+            raise StageTransitionError("Compose config consumer service is malformed")
+        for row in _mount_rows(service, "configs"):
+            if row.get("source") == config_name:
+                consumers.append((service_name, row.get("target")))
+    return consumers
+
+
+def _is_recovered_persistence_principal_config(
+    *,
+    name: str,
+    active_file: Path,
+    candidate_file: Path,
+    active_config_dir: Path,
+    candidate_config_dir: Path,
+    active: dict[str, Any],
+    candidate: dict[str, Any],
+) -> bool:
+    """Scope the recovery alias exception to the one Persistence principal mount.
+
+    中文：仅允许已存在的恢复别名切换同名 owner principal 文件，不扩展其他 config alias。
+    """
+
+    if name != RECOVERED_PERSISTENCE_PRINCIPAL_CONFIG:
+        return False
+    if (
+        active_file.name != NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+        or candidate_file.name != NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+        or active_file.resolve(strict=True).parent != active_config_dir.resolve(strict=True)
+        or candidate_file.resolve(strict=True).parent != candidate_config_dir.resolve(strict=True)
+    ):
+        return False
+    expected_consumer = [("navigator-persistence", NAVIGATOR_PRINCIPAL_CONFIG_TARGET)]
+    return (
+        _recovered_principal_config_consumers(active, name) == expected_consumer
+        and _recovered_principal_config_consumers(candidate, name) == expected_consumer
+    )
 
 
 def _validate_active_candidate_secrets(active: dict[str, Any], candidate: dict[str, Any]) -> None:
