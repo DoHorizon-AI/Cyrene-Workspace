@@ -144,7 +144,13 @@ def _manifest() -> dict[str, Any]:
     }
 
 
-def _write_tools_archive(path: Path, workspace_sha: str, *, omit: set[str] | None = None) -> None:
+def _write_tools_archive(
+    path: Path,
+    workspace_sha: str,
+    *,
+    omit: set[str] | None = None,
+    automation: bool = False,
+) -> None:
     """Create a git-archive-shaped fixture with ancestor directories and required tools."""
 
     source_root = f"Cyrene-Workspace-{workspace_sha}"
@@ -166,7 +172,10 @@ def _write_tools_archive(path: Path, workspace_sha: str, *, omit: set[str] | Non
             info.mode = 0o755
             info.size = 0
             archive.addfile(info)
-        for name in sorted(release_bundle.REQUIRED_DEPLOYMENT_TOOL_FILES - omitted):
+        members = release_bundle.REQUIRED_DEPLOYMENT_TOOL_FILES
+        if automation:
+            members |= release_bundle.AUTOMATION_DEPLOYMENT_TOOL_FILES
+        for name in sorted(members - omitted):
             content = f"fixture:{name}\n".encode()
             info = tarfile.TarInfo(prefix + name)
             info.size = len(content)
@@ -786,6 +795,34 @@ def test_bundle_verifier_requires_deployer_reconcile_and_preflight_inputs(tmp_pa
         match="deployment tools archive is missing required runtime members",
     ):
         release_bundle.verify_release_bundle(root)
+
+
+@pytest.mark.parametrize("missing", [None, "config/work-actor-token-map.schema.json"])
+def test_optional_automation_tools_are_verified_as_one_feature_closure(
+    tmp_path: Path, missing: str | None
+) -> None:
+    """Old bundles remain valid; an advertised pilot cannot omit its private-map contract."""
+
+    root = tmp_path / "release"
+    manifest = _write_bundle(root)
+    release_bundle.verify_release_bundle(root)
+    tools_path = root / "deployment-tools.tar.gz"
+    _write_tools_archive(
+        tools_path,
+        manifest["sourceRun"]["headSha"],
+        automation=True,
+        omit=set() if missing is None else {missing},
+    )
+    tools_bytes = tools_path.read_bytes()
+    manifest["deploymentTools"].update(
+        sha256=hashlib.sha256(tools_bytes).hexdigest(), sizeBytes=len(tools_bytes)
+    )
+    (root / "release-manifest.json").write_text(json.dumps(manifest, sort_keys=True))
+    if missing is None:
+        release_bundle.verify_release_bundle(root)
+    else:
+        with pytest.raises(release_bundle.ReleaseBundleError, match="missing required runtime"):
+            release_bundle.verify_release_bundle(root)
 
 
 def test_tools_archive_rejects_nonancestor_directory_outside_pinned_prefix(tmp_path: Path) -> None:

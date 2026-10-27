@@ -165,7 +165,7 @@ services:
       - /usr/local/bin/cyrene-secret-env-entrypoint
       - /usr/local/bin/cyrene-maintainer-subjects
     environment:
-      CYRENE_SECRET_FILE_MAP: CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL=/run/secrets/directory-operator-database-url
+      CYRENE_SECRET_FILE_MAP: CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL=/run/secrets/directory-operator-database-url,CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL=/run/secrets/directory-runtime-reader-database-url
       CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID: ${CYRENE_DIRECTORY_OPERATOR_ACTOR_ID:?verified Directory operator actor ID is required}
       CYRENE_WORKSPACE_ID: ${CYRENE_WORKSPACE_ID:?workspace ID is required}
       CYRENE_ORGANIZATION_ID: ${CYRENE_ORGANIZATION_ID:?organization ID is required}
@@ -173,6 +173,8 @@ services:
     secrets:
       - source: directory-operator-database-url
         target: directory-operator-database-url
+      - source: directory-runtime-reader-database-url
+        target: directory-runtime-reader-database-url
       - source: postgres-root-ca
         target: postgres-root-ca
     volumes:

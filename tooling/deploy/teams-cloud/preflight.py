@@ -50,6 +50,12 @@ SECRET_SIZE_MINIMUMS = {
     "account-center-exchange-hmac-key": 32,
     "cloud-management-exchange-hmac-key": 32,
     "github-issues-webhook-secret": 32,
+    "teams-private-bridge-token": 32,
+    "work-actor-token-01": 32,
+    "work-actor-token-02": 32,
+    "work-actor-token-03": 32,
+    "work-actor-token-04": 32,
+    "work-actor-token-05": 32,
 }
 RAW32_SECRET_NAMES = {"authority-signing-seed", "navigator-exchange-hmac-key"}
 HEX32_SECRET_NAMES = {
@@ -58,6 +64,10 @@ HEX32_SECRET_NAMES = {
     "account-center-hf-provider-hmac-key",
     "cloud-management-exchange-hmac-key",
     "exchange-hf-auth-context-hmac-key",
+    "account-center-graph-provider-hmac-key",
+    "account-center-ado-provider-hmac-key",
+    "exchange-graph-auth-context-hmac-key",
+    "exchange-ado-auth-context-hmac-key",
 }
 HUGGINGFACE_OPTIONAL_SECRET_NAMES = {
     "account-center-hf-provider-hmac-key",
@@ -143,6 +153,12 @@ PEM_PRIVATE_KEY_NAMES = {
     "cloud-management-health-client-key",
     "computer-runtime-proxy-server-key",
     "account-center-github-app-private-key",
+    "microsoft-graph-server-key",
+    "microsoft-graph-health-client-key",
+    "microsoft-graph-account-center-client-key",
+    "azure-devops-observation-server-key",
+    "azure-devops-observation-health-client-key",
+    "azure-devops-observation-account-center-client-key",
 }
 PEM_CERTIFICATE_NAMES = {
     "postgres-server-cert",
@@ -171,6 +187,12 @@ PEM_CERTIFICATE_NAMES = {
     "cloud-management-server-cert",
     "cloud-management-health-client-cert",
     "computer-runtime-proxy-server-cert",
+    "microsoft-graph-server-cert",
+    "microsoft-graph-health-client-cert",
+    "microsoft-graph-account-center-client-cert",
+    "azure-devops-observation-server-cert",
+    "azure-devops-observation-health-client-cert",
+    "azure-devops-observation-account-center-client-cert",
 }
 SECRET_CONTENT_VALIDATED_NAMES = (
     RAW32_SECRET_NAMES
@@ -183,6 +205,19 @@ PLACEHOLDER_RE = re.compile(
     r"(replace[_ -]?with|example\.invalid|changeme|placeholder|<[^>]+>)", re.IGNORECASE
 )
 SECRET_NAME_RE = re.compile(r"(secret|token|password|private.?key|api.?key)", re.IGNORECASE)
+AUTOMATION_WORKFLOW_TOKEN_SLOTS = tuple(
+    (f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}", f"work-actor-token-{index:02d}")
+    for index in range(1, 6)
+)
+AUTOMATION_WORKFLOW_SECRET_NAMES = {
+    "teams-private-bridge-token",
+    *(secret for _environment, secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS),
+}
+AUTOMATION_HEALTH_TARGET = "/run/cyrene/automation-health"
+AUTOMATION_PROVIDER_SERVICE_NAMES = {
+    "microsoft-graph",
+    "azure-devops-observation",
+}
 
 
 class PreflightError(ValueError):
@@ -498,6 +533,68 @@ def _validate_keyring(path: Path, expected_key_id: str | None = None) -> None:
             raise PreflightError("Authority public keyring keys must be raw Ed25519 public keys")
 
 
+def _automation_workflow_markers_present(services: Any, configured_secrets: Any = None) -> bool:
+    """Detect any part of the optional private-workflow overlay, including partial overlays."""
+
+    if not isinstance(services, dict):
+        return False
+    if (
+        isinstance(configured_secrets, dict)
+        and set(configured_secrets) & AUTOMATION_WORKFLOW_SECRET_NAMES
+    ):
+        return True
+    navigator = services.get("navigator")
+    persistence = services.get("navigator-persistence")
+    navigator_environment = navigator.get("environment", {}) if isinstance(navigator, dict) else {}
+    persistence_environment = (
+        persistence.get("environment", {}) if isinstance(persistence, dict) else {}
+    )
+    marker_names = {
+        "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED",
+        "CYRENE_WORK_ACTOR_TOKEN_MAP_FILE",
+        "CYRENE_AUTOMATION_SOURCE_BINDINGS_FILE",
+    }
+    if isinstance(navigator_environment, dict) and marker_names.intersection(navigator_environment):
+        return True
+    for environment in (navigator_environment, persistence_environment):
+        encoded = (
+            environment.get("CYRENE_SECRET_FILE_MAP", "") if isinstance(environment, dict) else ""
+        )
+        if isinstance(encoded, str) and any(
+            marker in encoded
+            for marker in (
+                "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
+                "CYRENE_WORK_ACTOR_TOKEN_",
+                "/run/secrets/teams-private-bridge-token",
+            )
+        ):
+            return True
+    for service in services.values():
+        if not isinstance(service, dict):
+            continue
+        if any(
+            isinstance(row, dict) and row.get("source") in AUTOMATION_WORKFLOW_SECRET_NAMES
+            for row in service.get("secrets", [])
+        ):
+            return True
+        if any(
+            isinstance(row, dict) and row.get("target") == AUTOMATION_HEALTH_TARGET
+            for row in service.get("volumes", [])
+        ):
+            return True
+    return False
+
+
+def _uuid(value: Any) -> bool:
+    """Accept canonical lowercase UUID strings for private identity references."""
+
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value)
+        is not None
+    )
+
+
 def _validate_principal_configuration(
     path: Path,
     services: dict[str, Any],
@@ -516,35 +613,95 @@ def _validate_principal_configuration(
     expected_workspace = navigator_environment.get("CYRENE_WORKSPACE_ID")
     expected_organization = operator_environment.get("CYRENE_ORGANIZATION_ID")
     principals = document.get("principals") if isinstance(document, dict) else None
+    automation_overlay = _automation_workflow_markers_present(services)
+    expected_principal_count = 7 if automation_overlay else 1
     if (
         not isinstance(principals, list)
-        or len(principals) != 1
-        or not isinstance(principals[0], dict)
+        or len(principals) != expected_principal_count
+        or any(not isinstance(principal, dict) for principal in principals)
     ):
         raise PreflightError(
-            "production Navigator must use exactly one bootstrapped owner principal"
+            "production Navigator principal list does not match its enabled actor profile"
         )
-    principal = principals[0]
+    by_token_env: dict[str, dict[str, Any]] = {}
+    for principal in principals:
+        token_env = principal.get("token_env")
+        if not isinstance(token_env, str) or token_env in by_token_env:
+            raise PreflightError("Navigator Work principal token references must be unique")
+        by_token_env[token_env] = principal
+    session = by_token_env.get("NAVIGATOR_SESSION_TOKEN")
     if (
-        principal.get("actor_id") != expected_actor
-        or principal.get("workspace_ids") != [expected_workspace]
-        or principal.get("organization_id") != expected_organization
-        or principal.get("token_env") != "NAVIGATOR_SESSION_TOKEN"
-        or principal.get("can_takeover") is not True
+        session is None
+        or session.get("actor_id") != expected_actor
+        or session.get("workspace_ids") != [expected_workspace]
+        or session.get("organization_id") != expected_organization
+        or session.get("can_takeover") is not True
+        or session.get("actor_private_scope", False) is not False
+        or session.get("can_write_harness", False) is not False
+        or session.get("can_bind_teams_private_conversations", False) is not False
     ):
         raise PreflightError(
-            "Navigator must use the scoped owner as its trusted durable Work writer principal"
+            "Navigator must preserve the scoped owner session principal and its existing grants"
+        )
+    if automation_overlay:
+        expected_tokens = {
+            "NAVIGATOR_SESSION_TOKEN",
+            *(environment for environment, _secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS),
+            "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
+        }
+        if set(by_token_env) != expected_tokens:
+            raise PreflightError(
+                "automation Work principals must be the existing owner session, five private writers, and one bridge"
+            )
+        writer_actor_ids: set[str] = set()
+        for index, (token_env, _secret) in enumerate(AUTOMATION_WORKFLOW_TOKEN_SLOTS, start=1):
+            principal = by_token_env[token_env]
+            actor_id = principal.get("actor_id")
+            if (
+                not _uuid(actor_id)
+                or principal.get("workspace_ids") != [expected_workspace]
+                or principal.get("organization_id") != expected_organization
+                or principal.get("can_takeover") is not True
+                or principal.get("can_write_harness") is not True
+                or principal.get("actor_private_scope") is not True
+                or principal.get("can_publish_credential_health") is not False
+                or principal.get("can_bind_teams_private_conversations") is not False
+                or (index == 1 and actor_id != expected_actor)
+                or (index > 1 and actor_id == expected_actor)
+                or actor_id in writer_actor_ids
+            ):
+                raise PreflightError(
+                    "automation Work writer principals must keep exact actor-private grants and unique actors"
+                )
+            writer_actor_ids.add(actor_id)
+        bridge = by_token_env["CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN"]
+        if (
+            bridge.get("actor_id") != "teams-private-bridge"
+            or bridge.get("workspace_ids") != [expected_workspace]
+            or bridge.get("organization_id") != expected_organization
+            or bridge.get("can_takeover") is not False
+            or bridge.get("can_write_harness") is not False
+            or bridge.get("actor_private_scope") is not False
+            or bridge.get("can_publish_credential_health") is not False
+            or bridge.get("can_bind_teams_private_conversations") is not True
+        ):
+            raise PreflightError(
+                "private Teams bridge must use its non-human identity and only the conversation-bind grant"
+            )
+    elif len(by_token_env) != 1:
+        raise PreflightError(
+            "owner-only deployment must retain exactly its original session principal"
         )
     if document.get("product_directory") != [] or document.get("product_service_credentials") != []:
         raise PreflightError("unconfigured Product proxy credentials must remain absent")
     if connector_auth_phase == "provider-bootstrap":
-        if principal.get("can_publish_credential_health") not in {None, False}:
+        if session.get("can_publish_credential_health") not in {None, False}:
             raise PreflightError(
                 "credential notification publishing must remain disabled during provider bootstrap"
             )
     elif (
         connector_auth_phase == "issued-connector-activation"
-        and principal.get("can_publish_credential_health") is not True
+        and session.get("can_publish_credential_health") is not True
     ):
         raise PreflightError(
             "credential notification activation requires the owner publishing role"
@@ -594,6 +751,511 @@ def _validate_actor_projection(path: Path, services: dict[str, Any]) -> None:
         )
 
 
+def _private_runtime_json(path: Path, name: str, *, maximum_bytes: int = 1_000_000) -> Any:
+    """Read one small owner-only runtime JSON file while rejecting aliases and duplicate keys."""
+
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise PreflightError(f"private automation configuration is unavailable: {name}") from error
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 10001
+        or metadata.st_mode & 0o077
+        or not metadata.st_mode & 0o400
+        or metadata.st_size < 1
+        or metadata.st_size > maximum_bytes
+    ):
+        raise PreflightError(f"private automation configuration metadata is unsafe: {name}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError(f"private automation configuration is invalid JSON: {name}") from error
+
+
+def _parse_secret_file_map(service: Any, label: str) -> dict[str, str]:
+    """Parse the launcher secret map with unique names and canonical container paths."""
+
+    environment = service.get("environment", {}) if isinstance(service, dict) else {}
+    encoded = environment.get("CYRENE_SECRET_FILE_MAP") if isinstance(environment, dict) else None
+    if not isinstance(encoded, str) or not encoded:
+        raise PreflightError(f"{label} must declare its exact secret-file map")
+    result: dict[str, str] = {}
+    for part in encoded.split(","):
+        if part.count("=") != 1:
+            raise PreflightError(f"{label} secret-file map is malformed")
+        name, path = part.split("=", 1)
+        if (
+            not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", name)
+            or not re.fullmatch(r"/run/secrets/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", path)
+            or name in result
+        ):
+            raise PreflightError(f"{label} secret-file map has duplicate or unsafe entries")
+        result[name] = path
+    return result
+
+
+def _secret_mount_pairs(service: Any, label: str) -> set[tuple[str, str]]:
+    """Return the exact source/target pairs attached to one Compose service."""
+
+    rows = service.get("secrets", []) if isinstance(service, dict) else []
+    if not isinstance(rows, list):
+        raise PreflightError(f"{label} secret mounts are malformed")
+    pairs: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise PreflightError(f"{label} secret mounts are malformed")
+        source = row.get("source")
+        target = row.get("target", source)
+        if not isinstance(source, str) or not isinstance(target, str) or (source, target) in pairs:
+            raise PreflightError(f"{label} secret mounts contain duplicates or invalid names")
+        pairs.add((source, target))
+    return pairs
+
+
+def _validate_automation_source_bindings(
+    document: Any,
+    *,
+    actor_ids: set[str],
+    connector_bindings: Any,
+    organization_id: str,
+    workspace_id: str,
+    tenant_id: str,
+) -> list[dict[str, Any]]:
+    """Validate fixed source selectors; do not infer or grant upstream access."""
+
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schemaVersion", "targets"}
+        or document.get("schemaVersion") != 1
+        or not isinstance(document.get("targets"), list)
+        or not 1 <= len(document["targets"]) <= 100
+    ):
+        raise PreflightError("automation source bindings have an unsupported schema")
+    seen_bindings: set[str] = set()
+    seen_targets: set[tuple[str, str]] = set()
+    targets: list[dict[str, Any]] = []
+    for row in document["targets"]:
+        if not isinstance(row, dict):
+            raise PreflightError("automation source binding is malformed")
+        kind = row.get("kind")
+        if not isinstance(kind, str):
+            raise PreflightError("automation source binding kind is invalid")
+        expected_fields = {
+            "training_run": {
+                "actorId",
+                "targetId",
+                "kind",
+                "bindingId",
+                "product",
+                "resourceKind",
+                "resourceId",
+                "organizationId",
+                "workspaceId",
+            },
+            "product_resource": {
+                "actorId",
+                "targetId",
+                "kind",
+                "bindingId",
+                "product",
+                "resourceKind",
+                "resourceId",
+                "organizationId",
+                "workspaceId",
+            },
+            "host_health": {
+                "actorId",
+                "targetId",
+                "kind",
+                "bindingId",
+                "hostRef",
+                "mountDirectory",
+                "mountGid",
+                "maxAgeSeconds",
+                "maxClockSkewSeconds",
+            },
+            "planner_plan": {
+                "actorId",
+                "targetId",
+                "kind",
+                "bindingId",
+                "connectionRef",
+                "profileRef",
+                "tenantId",
+                "planId",
+            },
+        }.get(kind)
+        if expected_fields is None or set(row) != expected_fields:
+            raise PreflightError("automation source binding contains an unsupported field or kind")
+        actor_id = row.get("actorId")
+        target_id = row.get("targetId")
+        binding_id = row.get("bindingId")
+        if (
+            not _uuid(actor_id)
+            or actor_id not in actor_ids
+            or not isinstance(target_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,511}", target_id)
+            or not _uuid(binding_id)
+            or binding_id in seen_bindings
+            or (actor_id, target_id) in seen_targets
+        ):
+            raise PreflightError("automation source binding identity or lookup alias is invalid")
+        seen_bindings.add(binding_id)
+        seen_targets.add((actor_id, target_id))
+        if kind in {"training_run", "product_resource"}:
+            if (
+                not _uuid(row.get("resourceId"))
+                or row.get("organizationId") != organization_id
+                or row.get("workspaceId") != workspace_id
+            ):
+                raise PreflightError("Product source binding does not match its scoped Workspace")
+            if kind == "training_run" and (
+                row.get("product") != "yield" or row.get("resourceKind") != "training-run"
+            ):
+                raise PreflightError("training source binding must select a Yield training run")
+            if kind == "product_resource" and (
+                not isinstance(row.get("product"), str)
+                or not isinstance(row.get("resourceKind"), str)
+                or (row.get("product"), row.get("resourceKind"))
+                not in {
+                    ("catalyst", "dataset-version"),
+                    ("echo", "evaluation-run"),
+                    ("reactor", "deployment"),
+                }
+            ):
+                raise PreflightError("Product source binding does not match a fixed resource type")
+        elif kind == "host_health":
+            if (
+                not isinstance(row.get("hostRef"), str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", row["hostRef"])
+                or row.get("mountDirectory") != AUTOMATION_HEALTH_TARGET
+                or type(row.get("mountGid")) is not int
+                or not 0 <= row["mountGid"] <= 2_147_483_647
+                or type(row.get("maxAgeSeconds")) is not int
+                or not 1 <= row["maxAgeSeconds"] <= 600
+                or type(row.get("maxClockSkewSeconds")) is not int
+                or not 0 <= row["maxClockSkewSeconds"] <= 120
+            ):
+                raise PreflightError(
+                    "host-health binding exceeds the sanitized observation boundary"
+                )
+        else:
+            for field in ("connectionRef", "profileRef", "planId"):
+                value = row.get(field)
+                if not isinstance(value, str) or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}", value
+                ):
+                    raise PreflightError("Planner binding contains an unsafe lookup reference")
+            if row.get("tenantId") != tenant_id:
+                raise PreflightError("Planner source binding must stay within the verified tenant")
+            _require_planner_operations_for_binding(row, connector_bindings)
+        targets.append(row)
+    return targets
+
+
+def _require_planner_operations_for_binding(
+    source: dict[str, Any], connector_bindings: Any
+) -> None:
+    """Bind a Planner source to one actor/profile connection exposing both required reads."""
+
+    if (
+        not isinstance(connector_bindings, dict)
+        or set(connector_bindings) != {"schemaVersion", "bindings"}
+        or connector_bindings.get("schemaVersion") != 1
+        or not isinstance(connector_bindings.get("bindings"), list)
+    ):
+        raise PreflightError("Planner source requires a validated connector binding document")
+    matching = [
+        binding
+        for binding in connector_bindings["bindings"]
+        if isinstance(binding, dict)
+        and binding.get("providerId") == "microsoft_graph"
+        and binding.get("connectionRef") == source.get("connectionRef")
+        and binding.get("profileRef") == source.get("profileRef")
+    ]
+    if len(matching) != 1:
+        raise PreflightError(
+            "Planner source must resolve to one matching actor-bound Graph connection"
+        )
+    tools = matching[0].get("tools")
+    if not isinstance(tools, list):
+        raise PreflightError("Planner Graph binding has no fixed read-operation map")
+    operations = {tool.get("operationId"): tool for tool in tools if isinstance(tool, dict)}
+    for operation_id in (
+        "microsoft_graph.planner.plan.get",
+        "microsoft_graph.planner.tasks.list",
+    ):
+        tool = operations.get(operation_id)
+        if (
+            not isinstance(tool, dict)
+            or tool.get("toolId") != operation_id
+            or tool.get("resourceProjection") != "microsoft_graph_plan"
+            or tool.get("mutating") is not False
+        ):
+            raise PreflightError(
+                "Planner source requires both matching plan metadata and task-list read operations"
+            )
+
+
+def _validate_automation_workflow_configuration(
+    config: dict[str, Any], *, config_dir: Path, secrets_dir: Path
+) -> bool:
+    """Validate the optional actor-scoped preparation profile without claiming live acceptance."""
+
+    services = config.get("services", {})
+    if not _automation_workflow_markers_present(services, config.get("secrets")):
+        return False
+    navigator = services.get("navigator")
+    persistence = services.get("navigator-persistence")
+    if not isinstance(navigator, dict) or not isinstance(persistence, dict):
+        raise PreflightError("automation workflow overlay requires Navigator and Persistence")
+    navigator_environment = navigator.get("environment", {})
+    expected_navigator_environment = {
+        "CYRENE_WORK_ACTOR_TOKEN_MAP_FILE": "/run/teams-authorization/work-actor-token-map.json",
+        "CYRENE_AUTOMATION_SOURCE_BINDINGS_FILE": "/run/teams-authorization/automation-source-bindings.json",
+    }
+    if (
+        not isinstance(navigator_environment, dict)
+        or any(
+            navigator_environment.get(key) != value
+            for key, value in expected_navigator_environment.items()
+        )
+        or navigator_environment.get("CYRENE_WORKFLOWS_ENABLED") not in {"false", "true"}
+        or navigator_environment.get("CYRENE_TEAMS_PERSONAL_CHAT_ENABLED") not in {"false", "true"}
+    ):
+        raise PreflightError(
+            "automation workflow environment must use its exact private config paths"
+        )
+
+    expected_navigator_secret_map = {
+        "CYRENE_SESSION_TOKEN": "/run/secrets/navigator-session-token",
+        "TEAMS_NAVIGATOR_HMAC_KEY": "/run/secrets/teams-navigator-hmac-key",
+        "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN": "/run/secrets/teams-private-bridge-token",
+        **{
+            environment: f"/run/secrets/{secret}"
+            for environment, secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS
+        },
+    }
+    expected_persistence_secret_map = {
+        "NAVIGATOR_SESSION_TOKEN": "/run/secrets/navigator-session-token",
+        "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN": "/run/secrets/teams-private-bridge-token",
+        **{
+            environment: f"/run/secrets/{secret}"
+            for environment, secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS
+        },
+    }
+    if _parse_secret_file_map(navigator, "Navigator") != expected_navigator_secret_map:
+        raise PreflightError(
+            "Navigator actor tokens must remain separate from the existing session token"
+        )
+    if (
+        _parse_secret_file_map(persistence, "Navigator Persistence")
+        != expected_persistence_secret_map
+    ):
+        raise PreflightError("Persistence actor tokens must use their dedicated secret slots")
+    authorization_mounts = [
+        row
+        for row in navigator.get("volumes", [])
+        if isinstance(row, dict) and row.get("target") == "/run/teams-authorization"
+    ]
+    if (
+        len(authorization_mounts) != 1
+        or authorization_mounts[0].get("type") != "bind"
+        or authorization_mounts[0].get("read_only") is not True
+        or not isinstance(authorization_mounts[0].get("source"), str)
+        or Path(authorization_mounts[0]["source"]).resolve() != config_dir.resolve()
+    ):
+        raise PreflightError(
+            "automation identity and source maps require the existing read-only config mount"
+        )
+    base_navigator_secret_pairs = {
+        ("navigator-exchange-hmac-key", "navigator-exchange-hmac-key"),
+        ("navigator-session-token", "navigator-session-token"),
+        ("teams-navigator-hmac-key", "teams-navigator-hmac-key"),
+        ("internal-service-root-ca", "internal-service-root-ca"),
+    }
+    base_persistence_secret_pairs = {
+        ("navigator-session-token", "navigator-session-token"),
+        ("navigator-persistence-tls-cert", "navigator-persistence-tls-cert"),
+        ("navigator-persistence-tls-key", "navigator-persistence-tls-key"),
+        ("internal-service-root-ca", "internal-service-root-ca"),
+    }
+    automation_pairs = {(name, name) for name in AUTOMATION_WORKFLOW_SECRET_NAMES}
+    if (
+        _secret_mount_pairs(navigator, "Navigator")
+        != base_navigator_secret_pairs | automation_pairs
+        or _secret_mount_pairs(persistence, "Navigator Persistence")
+        != base_persistence_secret_pairs | automation_pairs
+    ):
+        raise PreflightError("automation secrets must mount only to Navigator and Persistence")
+    consumers: dict[str, set[str]] = {name: set() for name in AUTOMATION_WORKFLOW_SECRET_NAMES}
+    for service_name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        for row in service.get("secrets", []):
+            if isinstance(row, dict) and row.get("source") in consumers:
+                consumers[row["source"]].add(service_name)
+    if any(value != {"navigator", "navigator-persistence"} for value in consumers.values()):
+        raise PreflightError(
+            "automation actor and bridge secrets have an unexpected service consumer"
+        )
+    for secret_name in AUTOMATION_WORKFLOW_SECRET_NAMES:
+        secret = config.get("secrets", {}).get(secret_name)
+        source = secret.get("file") if isinstance(secret, dict) else None
+        if (
+            not isinstance(source, str)
+            or Path(source).resolve() != (secrets_dir / secret_name).resolve()
+        ):
+            raise PreflightError(
+                "automation Work secrets must resolve to their dedicated private files"
+            )
+
+    actor_map = _private_runtime_json(
+        config_dir / "work-actor-token-map.json", "work actor token map"
+    )
+    actor_projection = _private_runtime_json(
+        config_dir / "teams-actor-subjects.json", "Teams actor projection"
+    )
+    source_bindings = _private_runtime_json(
+        config_dir / "automation-source-bindings.json", "automation source bindings"
+    )
+    connector_bindings = _private_runtime_json(
+        config_dir / "connector-bindings.json", "connector bindings"
+    )
+    environment = navigator_environment
+    operator_environment = services.get("directory-operator", {}).get("environment", {})
+    owner_id = operator_environment.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID")
+    organization_id = operator_environment.get("CYRENE_ORGANIZATION_ID")
+    workspace_id = environment.get("CYRENE_WORKSPACE_ID")
+    tenant_id = environment.get("TEAMS_TENANT_ID")
+    if (
+        not isinstance(actor_map, dict)
+        or set(actor_map) != {"schemaVersion", "workspaceId", "actors"}
+        or actor_map.get("schemaVersion") != 1
+        or actor_map.get("workspaceId") != workspace_id
+        or not isinstance(actor_map.get("actors"), list)
+        or len(actor_map["actors"]) != 5
+    ):
+        raise PreflightError(
+            "automation actor map must define exactly five private writer identities"
+        )
+    actor_by_token: dict[str, str] = {}
+    for row in actor_map["actors"]:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"actorAadObjectId", "tokenEnv"}
+            or not _uuid(row.get("actorAadObjectId"))
+            or row.get("tokenEnv")
+            not in {name for name, _secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS}
+            or row.get("tokenEnv") in actor_by_token
+            or row.get("actorAadObjectId") in actor_by_token.values()
+        ):
+            raise PreflightError(
+                "automation actor map contains a duplicate or unsafe identity reference"
+            )
+        actor_by_token[row["tokenEnv"]] = row["actorAadObjectId"]
+    expected_actor_tokens = {name for name, _secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS}
+    if (
+        set(actor_by_token) != expected_actor_tokens
+        or actor_by_token.get("CYRENE_WORK_ACTOR_TOKEN_01") != owner_id
+    ):
+        raise PreflightError(
+            "automation actor map must bind slot 01 to the owner and four pilot actors"
+        )
+    projection_subjects = (
+        actor_projection.get("subjects") if isinstance(actor_projection, dict) else None
+    )
+    if (
+        not isinstance(projection_subjects, list)
+        or len(projection_subjects) != 5
+        or set(projection_subjects) != set(actor_by_token.values())
+        or actor_projection.get("workspaceId") != workspace_id
+        or actor_projection.get("issuer") != f"https://login.microsoftonline.com/{tenant_id}/v2.0"
+    ):
+        raise PreflightError(
+            "automation actors must match the current five-person Directory projection"
+        )
+
+    principal_document = _private_runtime_json(
+        config_dir / "navigator-principal-config.json", "Navigator principal configuration"
+    )
+    principals = (
+        principal_document.get("principals") if isinstance(principal_document, dict) else None
+    )
+    if not isinstance(principals, list):
+        raise PreflightError("Navigator Work principal configuration is unavailable")
+    principals_by_token = {row.get("token_env"): row for row in principals if isinstance(row, dict)}
+    for token_env, actor_id in actor_by_token.items():
+        principal = principals_by_token.get(token_env)
+        if not isinstance(principal, dict) or principal.get("actor_id") != actor_id:
+            raise PreflightError(
+                "actor token map does not match its immutable Work principal identity"
+            )
+    if (
+        not isinstance(owner_id, str)
+        or not isinstance(organization_id, str)
+        or not isinstance(workspace_id, str)
+        or not isinstance(tenant_id, str)
+    ):
+        raise PreflightError("automation pilot identity scope is incomplete")
+    _validate_automation_source_bindings(
+        source_bindings,
+        actor_ids=set(actor_by_token.values()),
+        connector_bindings=connector_bindings,
+        organization_id=organization_id,
+        workspace_id=workspace_id,
+        tenant_id=tenant_id,
+    )
+    _validate_automation_health_mount(config, source_bindings)
+    return True
+
+
+def _validate_automation_health_mount(config: dict[str, Any], source_bindings: Any) -> None:
+    """Expose only the root-produced health projection through one read-only directory mount."""
+
+    navigator = config.get("services", {}).get("navigator", {})
+    volumes = navigator.get("volumes", []) if isinstance(navigator, dict) else []
+    matches = [
+        row
+        for row in volumes
+        if isinstance(row, dict) and row.get("target") == AUTOMATION_HEALTH_TARGET
+    ]
+    if len(matches) != 1:
+        raise PreflightError(
+            "Navigator must mount exactly one sanitized automation health directory"
+        )
+    mount = matches[0]
+    source = mount.get("source")
+    bind = mount.get("bind")
+    try:
+        path = Path(source) if isinstance(source, str) else Path("")
+        metadata = path.lstat()
+    except OSError as error:
+        raise PreflightError("root-owned automation health directory is unavailable") from error
+    if (
+        mount.get("type") != "bind"
+        or mount.get("read_only") is not True
+        or bind != {"create_host_path": False}
+        or not path.is_absolute()
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 10001
+        or stat.S_IMODE(metadata.st_mode) != 0o750
+    ):
+        raise PreflightError(
+            "automation health mount must be an exact root-owned read-only directory"
+        )
+    targets = source_bindings.get("targets", []) if isinstance(source_bindings, dict) else []
+    for row in targets:
+        if row.get("kind") == "host_health" and row.get("mountGid") != metadata.st_gid:
+            raise PreflightError(
+                "host-health selector group does not match the sanitized export directory"
+            )
+
+
 CONNECTOR_OPERATION_POLICIES = {
     "github.repository.list": ("github.repository.list", "profile", False),
     "github.repository.get": ("github.repository.get", "github_repository", False),
@@ -629,6 +1291,21 @@ CONNECTOR_OPERATION_POLICIES = {
     "github.issue.comment.create": ("github.issue.comment.create", "github_issue", True),
     "github.issue.state.update": ("github.issue.state.update", "github_issue", True),
     "github.vendor.cli.execute": ("github_vendor_cli", "profile", True),
+    "azure_devops.observations.poll": (
+        "azure_devops.observations.poll",
+        "azure_devops_source",
+        False,
+    ),
+    "microsoft_graph.planner.plan.get": (
+        "microsoft_graph.planner.plan.get",
+        "microsoft_graph_plan",
+        False,
+    ),
+    "microsoft_graph.planner.tasks.list": (
+        "microsoft_graph.planner.tasks.list",
+        "microsoft_graph_plan",
+        False,
+    ),
     "computer.command.execute": ("computer.command.execute", "computer_workspace", True),
     "computer.file.read": ("computer.file.read", "computer_file", False),
     "computer.file.write": ("computer.file.write", "computer_file", True),
@@ -659,6 +1336,9 @@ CONNECTOR_OPERATION_POLICIES = {
 # Provider-owned catalog inputs, including GitHub rerun evidence fields.
 # Exchange derives computer workspace scope from its host-owned profile, outside tool schemas.
 CONNECTOR_PROVIDER_REQUIRED_ARGUMENTS = {
+    "azure_devops.observations.poll": ("target",),
+    "microsoft_graph.planner.plan.get": ("plan_id",),
+    "microsoft_graph.planner.tasks.list": ("plan_id",),
     "github.issues.search": ("repository_id", "repository"),
     "github.actions.jobs.list": ("repository_id", "repository", "run_id"),
     "github.actions.job.logs.read": (
@@ -734,7 +1414,16 @@ def _validate_connector_bindings_document(
         return
     seen_connection_refs: set[str] = set()
     seen_binding_ids: set[str] = set()
-    supported_providers = {"github", "huggingface", "azure", "gcp", "runpod", "computer"}
+    supported_providers = {
+        "github",
+        "huggingface",
+        "azure",
+        "gcp",
+        "runpod",
+        "computer",
+        "microsoft_graph",
+        "azure_devops",
+    }
     for binding in bindings:
         if (
             not isinstance(binding, dict)
@@ -796,6 +1485,8 @@ def _validate_connector_bindings_document(
                 or (provider == "huggingface" and operation.startswith("huggingface."))
                 or (provider == "computer" and operation.startswith("computer."))
                 or (provider in {"azure", "gcp", "runpod"} and operation.startswith("cloud."))
+                or (provider == "microsoft_graph" and operation.startswith("microsoft_graph."))
+                or (provider == "azure_devops" and operation.startswith("azure_devops."))
             )
             if (
                 expected is None
@@ -1056,6 +1747,32 @@ def _huggingface_enabled(config: dict[str, Any]) -> bool:
     return enabled == "true"
 
 
+def _automation_provider_ids(config: dict[str, Any]) -> set[str]:
+    """Detect the explicit Graph/ADO plugin pair and reject a partially composed pair."""
+
+    services = config.get("services", {})
+    if not isinstance(services, dict):
+        raise PreflightError("rendered Compose service inventory is malformed")
+    present_services = AUTOMATION_PROVIDER_SERVICE_NAMES & set(services)
+    secrets = config.get("secrets", {})
+    secret_markers = {
+        "account-center-graph-provider-hmac-key",
+        "account-center-ado-provider-hmac-key",
+        "exchange-graph-auth-context-hmac-key",
+        "exchange-ado-auth-context-hmac-key",
+    }
+    has_secret_markers = isinstance(secrets, dict) and bool(secret_markers & set(secrets))
+    if not present_services and not has_secret_markers:
+        return set()
+    if present_services != AUTOMATION_PROVIDER_SERVICE_NAMES or not has_secret_markers:
+        raise PreflightError(
+            "Microsoft Graph and Azure DevOps provider overlays must be enabled together"
+        )
+    if not isinstance(secrets, dict) or not secret_markers <= set(secrets):
+        raise PreflightError("Graph/ADO provider overlay must define its complete signing-key set")
+    return {"microsoft_graph", "azure_devops"}
+
+
 def _expected_connector_providers(
     config: dict[str, Any], mode: str, connector_auth_phase: str | None = None
 ) -> set[str]:
@@ -1063,7 +1780,12 @@ def _expected_connector_providers(
 
     has_computer_runner = "computer-runtime" in config.get("services", {})
     providers = {"github"} | ({"huggingface"} if _huggingface_enabled(config) else set())
+    automation_provider_ids = _automation_provider_ids(config)
     if mode == "connector-auth-readonly":
+        if automation_provider_ids:
+            raise PreflightError(
+                "Microsoft Graph and Azure DevOps require their actor-owned OAuth/source setup, outside the generic connector auth evidence flow"
+            )
         if connector_auth_phase == "provider-bootstrap":
             return {"github"} | ({"computer"} if has_computer_runner else set())
         if connector_auth_phase == "issued-connector-activation":
@@ -1095,15 +1817,24 @@ def _expected_connector_providers(
             return providers | cloud_provider_ids | ({"computer"} if has_computer_runner else set())
         raise PreflightError("connector auth phase is required for connector-auth-readonly mode")
     if mode in {"stage1", "staging"}:
-        return providers | ({"computer"} if has_computer_runner else set())
+        return (
+            providers | automation_provider_ids | ({"computer"} if has_computer_runner else set())
+        )
     if mode == "stage2":
-        return providers | {"azure", "gcp"} | ({"computer"} if has_computer_runner else set())
+        return (
+            providers
+            | automation_provider_ids
+            | {"azure", "gcp"}
+            | ({"computer"} if has_computer_runner else set())
+        )
     if mode == "stage3":
         return (
             providers
+            | automation_provider_ids
             | {"azure", "gcp", "runpod"}
             | ({"computer"} if has_computer_runner else set())
         )
+    providers.update(automation_provider_ids)
     providers.update({"computer"} if has_computer_runner else set())
     services = config.get("services", {})
     cloud_service = services.get("cloud-management-phase2")
@@ -1647,6 +2378,339 @@ def _validate_huggingface_profile_selection(compose: dict[str, Any], mode: str) 
     return huggingface_enabled
 
 
+def _network_names(service: Any, label: str) -> set[str]:
+    """Read one Compose service's network set without accepting malformed declarations."""
+
+    networks = service.get("networks", {}) if isinstance(service, dict) else None
+    if isinstance(networks, dict) and all(isinstance(name, str) for name in networks):
+        return set(networks)
+    if isinstance(networks, list) and all(isinstance(name, str) for name in networks):
+        return set(networks)
+    raise PreflightError(f"{label} network declaration is malformed")
+
+
+def _validate_ado_source_activation(sources: Any) -> None:
+    """Check bounded ADO source selections without treating them as OAuth/source ACL proof."""
+
+    source_ids: set[str] = set()
+    for source in sources:
+        if not isinstance(source, dict):
+            raise PreflightError("Azure DevOps activation source is malformed")
+        kind = source.get("kind")
+        common = {"source_id", "kind", "project_id", "project_name", "profile_ref"}
+        allowed_by_kind = {
+            "project_pipelines": common,
+            "pipeline_runs": common | {"pipeline_id"},
+            "release_deployments": common | {"definition_id", "definition_environment_id"},
+        }
+        expected = allowed_by_kind.get(kind)
+        if expected is None:
+            raise PreflightError("Azure DevOps activation has an unsupported source kind")
+        required = expected
+        if kind == "release_deployments":
+            required = common
+            if "definition_environment_id" in source:
+                required = required | {"definition_id", "definition_environment_id"}
+        if set(source) != required:
+            raise PreflightError("Azure DevOps source contains an unsupported or missing field")
+        source_id = source.get("source_id")
+        if (
+            not isinstance(source_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", source_id)
+            or source_id in source_ids
+            or not _uuid(source.get("project_id"))
+            or not _uuid(source.get("profile_ref"))
+            or not isinstance(source.get("project_name"), str)
+            or not 1 <= len(source["project_name"]) <= 128
+            or any(ord(char) < 32 for char in source["project_name"])
+        ):
+            raise PreflightError("Azure DevOps source identity or project metadata is invalid")
+        source_ids.add(source_id)
+        numeric_fields = (
+            ("pipeline_id",)
+            if kind == "pipeline_runs"
+            else ("definition_id", "definition_environment_id")
+            if kind == "release_deployments"
+            else ()
+        )
+        if any(
+            type(source[field]) is not int or not 1 <= source[field] <= 2_147_483_647
+            for field in numeric_fields
+        ):
+            raise PreflightError("Azure DevOps numeric source filters are invalid")
+
+
+def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
+    """Validate the opt-in Graph/ADO mTLS pair and their bounded process envelope."""
+
+    if not _automation_provider_ids(config):
+        return False
+    services = config["services"]
+    networks = config.get("networks", {})
+    account_center = services.get("account-center")
+    exchange = services.get("exchange")
+    if not isinstance(account_center, dict) or not isinstance(exchange, dict):
+        raise PreflightError("Graph/ADO providers require the existing Account Center and Exchange")
+    account_map = _parse_secret_file_map(account_center, "Account Center")
+    exchange_map = _parse_secret_file_map(exchange, "Exchange")
+
+    providers = (
+        {
+            "service": "microsoft-graph",
+            "plugin": "cyrene.providers.microsoft-graph",
+            "caller": "microsoft-graph-provider",
+            "exchange_env": "EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY",
+            "provider_env": "GRAPH_ACCOUNT_CENTER_PROVIDER_HMAC_KEY",
+            "root_env": "GRAPH_ACCOUNT_CENTER_ROOT_CERTIFICATE",
+            "cert_env": "GRAPH_ACCOUNT_CENTER_CLIENT_CERTIFICATE",
+            "key_env": "GRAPH_ACCOUNT_CENTER_CLIENT_KEY",
+            "exchange_ref": "microsoft-graph/exchange-verification-key",
+            "provider_ref": "microsoft-graph/account-center-provider-signing-key",
+            "root_ref": "microsoft-graph/account-center-root-certificate",
+            "cert_ref": "microsoft-graph/account-center-client-certificate",
+            "key_ref": "microsoft-graph/account-center-client-key",
+            "exchange_secret": "exchange-graph-auth-context-hmac-key",
+            "provider_secret": "account-center-graph-provider-hmac-key",
+            "server_cert": "microsoft-graph-server-cert",
+            "server_key": "microsoft-graph-server-key",
+            "health_cert": "microsoft-graph-health-client-cert",
+            "health_key": "microsoft-graph-health-client-key",
+            "account_cert": "microsoft-graph-account-center-client-cert",
+            "account_key": "microsoft-graph-account-center-client-key",
+            "health_ca": "exchange-plugin-root-ca",
+            "exchange_network": "graph-exchange-private",
+            "account_network": "graph-account-center-private",
+            "egress_network": "graph-egress",
+        },
+        {
+            "service": "azure-devops-observation",
+            "plugin": "cyrene.providers.azure-devops-observation",
+            "caller": "azure-devops-observation-provider",
+            "exchange_env": "EXCHANGE_ADO_AUTH_CONTEXT_HMAC_KEY",
+            "provider_env": "ADO_ACCOUNT_CENTER_PROVIDER_HMAC_KEY",
+            "root_env": "ADO_ACCOUNT_CENTER_ROOT_CERTIFICATE",
+            "cert_env": "ADO_ACCOUNT_CENTER_CLIENT_CERTIFICATE",
+            "key_env": "ADO_ACCOUNT_CENTER_CLIENT_KEY",
+            "exchange_ref": "azure-devops-observation/exchange-verification-key",
+            "provider_ref": "azure-devops-observation/account-center-provider-signing-key",
+            "root_ref": "azure-devops-observation/account-center-root-certificate",
+            "cert_ref": "azure-devops-observation/account-center-client-certificate",
+            "key_ref": "azure-devops-observation/account-center-client-key",
+            "exchange_secret": "exchange-ado-auth-context-hmac-key",
+            "provider_secret": "account-center-ado-provider-hmac-key",
+            "server_cert": "azure-devops-observation-server-cert",
+            "server_key": "azure-devops-observation-server-key",
+            "health_cert": "azure-devops-observation-health-client-cert",
+            "health_key": "azure-devops-observation-health-client-key",
+            "account_cert": "azure-devops-observation-account-center-client-cert",
+            "account_key": "azure-devops-observation-account-center-client-key",
+            "health_ca": "exchange-plugin-root-ca",
+            "exchange_network": "ado-exchange-private",
+            "account_network": "ado-account-center-private",
+            "egress_network": "ado-egress",
+        },
+    )
+    for row in providers:
+        service = services[row["service"]]
+        environment = service.get("environment", {})
+        expected_map = {
+            row["exchange_env"]: f"/run/secrets/{row['exchange_secret']}",
+            row["provider_env"]: f"/run/secrets/{row['provider_secret']}",
+            row["root_env"]: "/run/secrets/exchange-plugin-root-ca",
+            row["cert_env"]: f"/run/secrets/{row['account_cert']}",
+            row["key_env"]: f"/run/secrets/{row['account_key']}",
+        }
+        expected_secrets = {
+            (row["exchange_secret"], row["exchange_secret"]),
+            (row["provider_secret"], row["provider_secret"]),
+            ("exchange-plugin-root-ca", "exchange-plugin-root-ca"),
+            ("exchange-plugin-client-ca", f"{row['service']}-client-ca"),
+            (row["server_cert"], row["server_cert"]),
+            (row["server_key"], row["server_key"]),
+            (row["health_cert"], row["health_cert"]),
+            (row["health_key"], row["health_key"]),
+            (row["account_cert"], row["account_cert"]),
+            (row["account_key"], row["account_key"]),
+        }
+        required_networks = {row["exchange_network"], row["account_network"], row["egress_network"]}
+        binding_id = (
+            environment.get("CYRENE_CAPABILITY_BINDING_ID")
+            if isinstance(environment, dict)
+            else None
+        )
+        if (
+            service.get("pull_policy") != "never"
+            or service.get("restart") != "unless-stopped"
+            or service.get("read_only") is not True
+            or "ALL" not in service.get("cap_drop", [])
+            or service.get("cap_add")
+            or "no-new-privileges:true" not in service.get("security_opt", [])
+            or service.get("tmpfs") != ["/tmp:rw,nosuid,nodev,noexec,size=16m"]
+            or service.get("privileged") is True
+            or service.get("ports")
+            or service.get("expose") != ["7443"]
+            or service.get("volumes")
+            or service.get("configs")
+            or _memory_limit_bytes(service.get("mem_limit")) != 192 * MIB
+            or _memory_limit_bytes(service.get("memswap_limit")) != 192 * MIB
+            or _cpu_limit_decimal(service.get("cpus")) != Decimal("0.10")
+            or service.get("pids_limit") != 96
+            or _network_names(service, row["service"]) != required_networks
+            or service.get("depends_on", {}).get("account-center", {}).get("condition")
+            != "service_healthy"
+            or _secret_mount_pairs(service, row["service"]) != expected_secrets
+            or not isinstance(binding_id, str)
+            or not binding_id
+            or PLACEHOLDER_RE.search(binding_id)
+            or _parse_secret_file_map(service, row["service"]) != expected_map
+        ):
+            raise PreflightError(
+                f"{row['service']} must keep the fixed bounded mTLS provider envelope and secret set"
+            )
+        provider_config = _json_environment_object(
+            service, "CYRENE_CAPABILITY_CONFIGURATION_JSON", row["service"]
+        )
+        account_profile = provider_config.get("account_center")
+        expected_fields = (
+            {
+                "exchange_caller_id",
+                "exchange_verification_key_ref",
+                "account_center",
+                "read_only",
+                "timeout_seconds",
+                "max_page_size",
+                "sharepointTargets",
+                "hostSecretRefs",
+            }
+            if row["service"] == "microsoft-graph"
+            else {
+                "binding_id",
+                "exchange_caller_id",
+                "exchange_verification_key_ref",
+                "account_center",
+                "organization",
+                "tenant_id",
+                "authorized_sources",
+                "timeout_seconds",
+                "hostSecretRefs",
+            }
+        )
+        expected_mtls_refs = {
+            "root_cert_ref": row["root_ref"],
+            "client_cert_ref": row["cert_ref"],
+            "client_key_ref": row["key_ref"],
+        }
+        if row["service"] == "microsoft-graph":
+            if set(provider_config) - expected_fields:
+                raise PreflightError(
+                    "Microsoft Graph activation contains an unsupported host field"
+                )
+        else:
+            if (
+                set(provider_config) - expected_fields
+                or provider_config.get("binding_id") not in {None, binding_id}
+                or not isinstance(provider_config.get("organization"), str)
+                or not re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9-]{0,63}", provider_config["organization"]
+                )
+                or not _uuid(provider_config.get("tenant_id"))
+                or not isinstance(provider_config.get("authorized_sources"), list)
+                or not 1 <= len(provider_config["authorized_sources"]) <= 100
+            ):
+                raise PreflightError(
+                    "Azure DevOps activation must pin a tenant, organization and source list"
+                )
+            _validate_ado_source_activation(provider_config["authorized_sources"])
+        expected_host_refs = {
+            row["exchange_ref"]: row["exchange_env"],
+            row["provider_ref"]: row["provider_env"],
+            row["root_ref"]: row["root_env"],
+            row["cert_ref"]: row["cert_env"],
+            row["key_ref"]: row["key_env"],
+        }
+        if (
+            provider_config.get("exchange_caller_id") != "exchange-service"
+            or provider_config.get("exchange_verification_key_ref") != row["exchange_ref"]
+            or not isinstance(account_profile, dict)
+            or account_profile.get("connection_ref") != "grpcs://account-center:7443"
+            or account_profile.get("transport") != "mtls"
+            or account_profile.get("caller_id") != row["caller"]
+            or account_profile.get("signing_key_ref") != row["provider_ref"]
+            or account_profile.get("mtls") != expected_mtls_refs
+            or provider_config.get("hostSecretRefs") != expected_host_refs
+        ):
+            raise PreflightError(f"{row['service']} must use its fixed Account Center mTLS profile")
+        healthcheck = service.get("healthcheck")
+        test = healthcheck.get("test") if isinstance(healthcheck, dict) else None
+        command = " ".join(str(part) for part in test) if isinstance(test, list) else ""
+        if any(
+            fragment not in command
+            for fragment in (
+                "/usr/local/bin/cyrene-plugin-grpc-health",
+                f"{row['service']}:7443",
+                row["plugin"],
+                f"/run/secrets/{row['health_ca']}",
+                f"/run/secrets/{row['health_cert']}",
+                f"/run/secrets/{row['health_key']}",
+            )
+        ):
+            raise PreflightError(f"{row['service']} must use its fixed gRPC mTLS health probe")
+        for network_name in (row["exchange_network"], row["account_network"]):
+            network = networks.get(network_name) if isinstance(networks, dict) else None
+            if not isinstance(network, dict) or network.get("internal") is not True:
+                raise PreflightError(
+                    "Graph/ADO Account Center and Exchange networks must be internal"
+                )
+        egress = networks.get(row["egress_network"]) if isinstance(networks, dict) else None
+        if not isinstance(egress, dict) or egress.get("internal") is True:
+            raise PreflightError("Graph/ADO provider egress must use a separate outbound network")
+
+    for name, required_networks in (
+        ("account-center", {"graph-account-center-private", "ado-account-center-private"}),
+        ("exchange", {"graph-exchange-private", "ado-exchange-private"}),
+    ):
+        service = services[name]
+        if not required_networks <= _network_names(service, name):
+            raise PreflightError(f"{name} must join the Graph/ADO private provider networks")
+        mapping = account_map if name == "account-center" else exchange_map
+        mounted = {f"/run/secrets/{target}" for target in _service_secret_targets(service)}
+        if not set(mapping.values()) <= mounted:
+            raise PreflightError(f"{name} secret-file map references an unmounted secret")
+    exchange_dependencies = exchange.get("depends_on", {})
+    if any(
+        not isinstance(exchange_dependencies.get(name), dict)
+        or exchange_dependencies[name].get("condition") != "service_healthy"
+        for name in AUTOMATION_PROVIDER_SERVICE_NAMES
+    ):
+        raise PreflightError("Exchange must wait for both Graph/ADO gRPC health probes")
+    expected_account_mappings = {
+        "CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY": "/run/secrets/account-center-graph-provider-hmac-key",
+        "CYRENE_ACCOUNT_CENTER_ADO_PROVIDER_HMAC_KEY": "/run/secrets/account-center-ado-provider-hmac-key",
+    }
+    expected_exchange_mappings = {
+        "EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY": "/run/secrets/exchange-graph-auth-context-hmac-key",
+        "EXCHANGE_ADO_AUTH_CONTEXT_HMAC_KEY": "/run/secrets/exchange-ado-auth-context-hmac-key",
+    }
+    if (
+        any(account_map.get(key) != value for key, value in expected_account_mappings.items())
+        or any(exchange_map.get(key) != value for key, value in expected_exchange_mappings.items())
+        or not {
+            ("account-center-graph-provider-hmac-key", "account-center-graph-provider-hmac-key"),
+            ("account-center-ado-provider-hmac-key", "account-center-ado-provider-hmac-key"),
+        }
+        <= _secret_mount_pairs(account_center, "Account Center")
+        or not {
+            ("exchange-graph-auth-context-hmac-key", "exchange-graph-auth-context-hmac-key"),
+            ("exchange-ado-auth-context-hmac-key", "exchange-ado-auth-context-hmac-key"),
+        }
+        <= _secret_mount_pairs(exchange, "Exchange")
+    ):
+        raise PreflightError(
+            "Graph/ADO signing and Exchange context keys must remain separately mounted"
+        )
+    return True
+
+
 def _validate_provider_listener_addresses(compose: dict[str, Any]) -> None:
     """Require multi-network DirectPlugin providers to bind all container interfaces.
 
@@ -1655,7 +2719,11 @@ def _validate_provider_listener_addresses(compose: dict[str, Any]) -> None:
 
     services = compose.get("services", {})
     required_services = {"account-center", "github-issues", "teams-provider"}
-    provider_services = {"huggingface", "cloud-management-phase2"}
+    provider_services = {
+        "huggingface",
+        "cloud-management-phase2",
+        *AUTOMATION_PROVIDER_SERVICE_NAMES,
+    }
     for service_name in sorted(required_services | provider_services):
         service = services.get(service_name)
         if service is None and service_name in provider_services:
@@ -1683,6 +2751,7 @@ def _validate_profile_stage(compose: dict[str, Any], mode: str) -> None:
     _validate_huggingface_profile_selection(compose, mode)
     _validate_exchange_profile_stage(compose, mode)
     _validate_computer_runtime_boundary(compose)
+    _validate_automation_provider_topology(compose)
     if mode in {"staging", "stage1"} and ("cloud-management-phase2" in services):
         raise PreflightError(
             "cloud provider services must not be included before the preceding-stage evidence"
@@ -3809,6 +4878,11 @@ def _validate_codebuddy_acp_mount_boundary(
         "/var/lib/cyrene-navigator",
         "/run/teams-authorization",
     }
+    automation_overlay = _automation_workflow_markers_present(
+        config.get("services", {}), config.get("secrets")
+    )
+    if automation_overlay:
+        allowed_targets.add(AUTOMATION_HEALTH_TARGET)
     session_volume = by_target.get("/var/lib/cyrene-navigator", {})
     codebuddy_home = by_target.get("/home/navigator/.codebuddy", {})
     actor_projection = by_target.get("/run/teams-authorization", {})
@@ -3845,6 +4919,14 @@ def _validate_codebuddy_acp_mount_boundary(
             )
         )
         expected_notification_consumers = [("navigator", notification_target)]
+    expected_secret_pairs = {
+        ("navigator-exchange-hmac-key", "navigator-exchange-hmac-key"),
+        ("navigator-session-token", "navigator-session-token"),
+        ("teams-navigator-hmac-key", "teams-navigator-hmac-key"),
+        ("internal-service-root-ca", "internal-service-root-ca"),
+    }
+    if automation_overlay:
+        expected_secret_pairs |= {(name, name) for name in AUTOMATION_WORKFLOW_SECRET_NAMES}
     notification_consumers = [
         (service_name, row.get("target"))
         for service_name, service in config.get("services", {}).items()
@@ -3857,7 +4939,7 @@ def _validate_codebuddy_acp_mount_boundary(
         and notification_consumers == expected_notification_consumers
     )
     if (
-        len(volumes) != 3
+        len(volumes) != (4 if automation_overlay else 3)
         or set(by_target) != allowed_targets
         or codebuddy_home.get("type") != "bind"
         or codebuddy_home.get("read_only", False) is not False
@@ -3875,14 +4957,8 @@ def _validate_codebuddy_acp_mount_boundary(
         or not isinstance(actor_projection.get("source"), str)
         or not actor_projection.get("source")
         or Path(str(actor_projection.get("source", ""))).resolve() != config_dir.resolve()
-        or secret_pairs
-        != {
-            ("navigator-exchange-hmac-key", "navigator-exchange-hmac-key"),
-            ("navigator-session-token", "navigator-session-token"),
-            ("teams-navigator-hmac-key", "teams-navigator-hmac-key"),
-            ("internal-service-root-ca", "internal-service-root-ca"),
-        }
-        or len(secrets) != 4
+        or secret_pairs != expected_secret_pairs
+        or len(secrets) != len(expected_secret_pairs)
         or config_pairs != expected_config_pairs
         or len(configs) != len(expected_config_pairs)
         or not notification_consumer_is_exact
@@ -5586,6 +6662,12 @@ def run_preflight(
         notification_provenance_file=notification_provenance_file,
         candidate_runpod_key_file=candidate_runpod_key_file,
     )
+    automation_workflows_present = _validate_automation_workflow_configuration(
+        config,
+        config_dir=config_dir.resolve(),
+        secrets_dir=secrets_dir.resolve(),
+    )
+    automation_providers_present = bool(_automation_provider_ids(config))
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
     execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
     if execution_backend == "codebuddy-acp":
@@ -5696,6 +6778,15 @@ def run_preflight(
         "serviceCount": len(config["services"]),
         "imageLock": str(image_lock.resolve()),
     }
+    if automation_workflows_present:
+        result["automationWorkflowConfiguration"] = "PREPARE_ONLY_VALIDATED"
+        result["automationWorkflowsEnabled"] = (
+            navigator_environment.get("CYRENE_WORKFLOWS_ENABLED") == "true"
+        )
+        result["automationSourceAuthorization"] = "NOT_CHECKED_BY_LOCAL_PREFLIGHT"
+    if automation_providers_present:
+        result["automationProviderConfiguration"] = "PREPARE_ONLY_VALIDATED"
+        result["automationProviderOAuthAndSourceAccess"] = "NOT_RUN"
     if mode == "connector-auth-readonly":
         result.update(
             {

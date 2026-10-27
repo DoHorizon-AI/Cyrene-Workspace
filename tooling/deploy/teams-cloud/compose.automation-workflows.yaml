@@ -1,0 +1,59 @@
+services:
+  navigator-persistence:
+    environment:
+      CYRENE_SECRET_FILE_MAP: NAVIGATOR_SESSION_TOKEN=/run/secrets/navigator-session-token,CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN=/run/secrets/teams-private-bridge-token,CYRENE_WORK_ACTOR_TOKEN_01=/run/secrets/work-actor-token-01,CYRENE_WORK_ACTOR_TOKEN_02=/run/secrets/work-actor-token-02,CYRENE_WORK_ACTOR_TOKEN_03=/run/secrets/work-actor-token-03,CYRENE_WORK_ACTOR_TOKEN_04=/run/secrets/work-actor-token-04,CYRENE_WORK_ACTOR_TOKEN_05=/run/secrets/work-actor-token-05
+    secrets:
+      - source: teams-private-bridge-token
+        target: teams-private-bridge-token
+      - source: work-actor-token-01
+        target: work-actor-token-01
+      - source: work-actor-token-02
+        target: work-actor-token-02
+      - source: work-actor-token-03
+        target: work-actor-token-03
+      - source: work-actor-token-04
+        target: work-actor-token-04
+      - source: work-actor-token-05
+        target: work-actor-token-05
+
+  navigator:
+    environment:
+      CYRENE_WORK_ACTOR_TOKEN_MAP_FILE: /run/teams-authorization/work-actor-token-map.json
+      CYRENE_AUTOMATION_SOURCE_BINDINGS_FILE: /run/teams-authorization/automation-source-bindings.json
+      CYRENE_WORKFLOWS_ENABLED: ${CYRENE_WORKFLOWS_ENABLED:-false}
+      CYRENE_TEAMS_PERSONAL_CHAT_ENABLED: ${CYRENE_TEAMS_PERSONAL_CHAT_ENABLED:-false}
+      CYRENE_SECRET_FILE_MAP: CYRENE_SESSION_TOKEN=/run/secrets/navigator-session-token,TEAMS_NAVIGATOR_HMAC_KEY=/run/secrets/teams-navigator-hmac-key,CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN=/run/secrets/teams-private-bridge-token,CYRENE_WORK_ACTOR_TOKEN_01=/run/secrets/work-actor-token-01,CYRENE_WORK_ACTOR_TOKEN_02=/run/secrets/work-actor-token-02,CYRENE_WORK_ACTOR_TOKEN_03=/run/secrets/work-actor-token-03,CYRENE_WORK_ACTOR_TOKEN_04=/run/secrets/work-actor-token-04,CYRENE_WORK_ACTOR_TOKEN_05=/run/secrets/work-actor-token-05
+    secrets:
+      - source: teams-private-bridge-token
+        target: teams-private-bridge-token
+      - source: work-actor-token-01
+        target: work-actor-token-01
+      - source: work-actor-token-02
+        target: work-actor-token-02
+      - source: work-actor-token-03
+        target: work-actor-token-03
+      - source: work-actor-token-04
+        target: work-actor-token-04
+      - source: work-actor-token-05
+        target: work-actor-token-05
+    volumes:
+      - type: bind
+        source: ${CYRENE_AUTOMATION_HEALTH_EXPORT_DIR:?provision the root-owned sanitized health export directory}
+        target: /run/cyrene/automation-health
+        read_only: true
+        bind:
+          create_host_path: false
+
+secrets:
+  teams-private-bridge-token:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/teams-private-bridge-token
+  work-actor-token-01:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/work-actor-token-01
+  work-actor-token-02:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/work-actor-token-02
+  work-actor-token-03:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/work-actor-token-03
+  work-actor-token-04:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/work-actor-token-04
+  work-actor-token-05:
+    file: ${CYRENE_SECRETS_DIR:?provision the private secrets directory}/work-actor-token-05

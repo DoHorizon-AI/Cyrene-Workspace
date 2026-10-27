@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-automation-work-principals-patch-v1.schema.json",
+  "title": "Private actor principals to add to the existing Work principal file",
+  "description": "A merge fragment only. Never mount this as navigator-principal-config.json or replace existing global principals with it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "privateWriterPrincipals", "privateTeamsBridgePrincipal"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "privateWriterPrincipals": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": false,
+      "prefixItems": [
+        {"$ref": "#/$defs/ownerWriter"},
+        {"$ref": "#/$defs/pilotWriter01"},
+        {"$ref": "#/$defs/pilotWriter02"},
+        {"$ref": "#/$defs/pilotWriter03"},
+        {"$ref": "#/$defs/pilotWriter04"}
+      ]
+    },
+    "privateTeamsBridgePrincipal": {"$ref": "#/$defs/bridgePrincipal"}
+  },
+  "$defs": {
+    "principalBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "token_env",
+        "actor_id",
+        "workspace_ids",
+        "organization_id",
+        "can_takeover",
+        "actor_private_scope",
+        "can_write_harness",
+        "can_publish_credential_health",
+        "can_bind_teams_private_conversations"
+      ],
+      "properties": {
+        "token_env": {"type": "string"},
+          "actor_id": {"type": "string", "pattern": "^(?:REPLACE_WITH_[A-Z0-9_]+|teams-private-bridge)$"},
+        "workspace_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"type": "string", "pattern": "^REPLACE_WITH_[A-Z0-9_]+$"}
+        },
+        "organization_id": {"type": "string", "pattern": "^REPLACE_WITH_[A-Z0-9_]+$"},
+        "can_takeover": {"type": "boolean"},
+        "actor_private_scope": {"type": "boolean"},
+        "can_write_harness": {"type": "boolean"},
+        "can_publish_credential_health": {"type": "boolean"},
+        "can_bind_teams_private_conversations": {"type": "boolean"}
+      }
+    },
+    "ownerWriter": {
+      "allOf": [
+        {"$ref": "#/$defs/principalBase"},
+        {
+          "properties": {
+            "token_env": {"const": "CYRENE_WORK_ACTOR_TOKEN_01"},
+            "actor_id": {"const": "REPLACE_WITH_OWNER_AAD_OBJECT_ID"},
+            "can_takeover": {"const": true},
+            "actor_private_scope": {"const": true},
+            "can_write_harness": {"const": true},
+            "can_publish_credential_health": {"const": false},
+            "can_bind_teams_private_conversations": {"const": false}
+          }
+        }
+      ]
+    },
+    "pilotWriter01": {"$ref": "#/$defs/pilotWriter01Exact"},
+    "pilotWriter01Exact": {
+      "allOf": [
+        {"$ref": "#/$defs/principalBase"},
+        {"properties": {
+          "token_env": {"const": "CYRENE_WORK_ACTOR_TOKEN_02"},
+          "actor_id": {"const": "REPLACE_WITH_APPROVED_PILOT_ACTOR_01_AAD_OBJECT_ID"},
+          "can_takeover": {"const": true}, "actor_private_scope": {"const": true},
+          "can_write_harness": {"const": true}, "can_publish_credential_health": {"const": false},
+          "can_bind_teams_private_conversations": {"const": false}
+        }}
+      ]
+    },
+    "pilotWriter02": {
+      "allOf": [
+        {"$ref": "#/$defs/principalBase"},
+        {"properties": {
+          "token_env": {"const": "CYRENE_WORK_ACTOR_TOKEN_03"},
+          "actor_id": {"const": "REPLACE_WITH_APPROVED_PILOT_ACTOR_02_AAD_OBJECT_ID"},
+          "can_takeover": {"const": true}, "actor_private_scope": {"const": true},
+          "can_write_harness": {"const": true}, "can_publish_credential_health": {"const": false},
+          "can_bind_teams_private_conversations": {"const": false}
+        }}
+      ]
+    },
+    "pilotWriter03": {
+      "allOf": [
+        {"$ref": "#/$defs/principalBase"},
+        {"properties": {
+          "token_env": {"const": "CYRENE_WORK_ACTOR_TOKEN_04"},
+          "actor_id": {"const": "REPLACE_WITH_APPROVED_PILOT_ACTOR_03_AAD_OBJECT_ID"},
+          "can_takeover": {"const": true}, "actor_private_scope": {"const": true},
+          "can_write_harness": {"const": true}, "can_publish_credential_health": {"const": false},
+          "can_bind_teams_private_conversations": {"const": false}
+        }}
+      ]
+    },
+    "pilotWriter04": {
+      "allOf": [
+        {"$ref": "#/$defs/principalBase"},
+        {"properties": {
+          "token_env": {"const": "CYRENE_WORK_ACTOR_TOKEN_05"},
+          "actor_id": {"const": "REPLACE_WITH_APPROVED_PILOT_ACTOR_04_AAD_OBJECT_ID"},
+          "can_takeover": {"const": true}, "actor_private_scope": {"const": true},
+          "can_write_harness": {"const": true}, "can_publish_credential_health": {"const": false},
+          "can_bind_teams_private_conversations": {"const": false}
+        }}
+      ]
+    },
+    "bridgePrincipal": {
+      "allOf": [
+        {"$ref": "#/$defs/principalBase"},
+        {
+          "properties": {
+            "token_env": {"const": "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN"},
+            "actor_id": {"const": "teams-private-bridge"},
+            "can_takeover": {"const": false},
+            "actor_private_scope": {"const": false},
+            "can_write_harness": {"const": false},
+            "can_publish_credential_health": {"const": false},
+            "can_bind_teams_private_conversations": {"const": true}
+          }
+        }
+      ]
+    }
+  }
+}

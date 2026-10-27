@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/teams-cloud-automation-source-bindings-v1.schema.json",
+  "title": "Private automation source target selections",
+  "description": "Host-selected lookup bindings only. A row is not an authorization grant; every poll requires current source ACL authorization.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "targets"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {"oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["actorId", "targetId", "kind", "bindingId", "product", "resourceKind", "resourceId", "organizationId", "workspaceId"],
+          "properties": {
+            "actorId": {"type": "string", "format": "uuid"},
+            "targetId": {"$ref": "#/$defs/targetId"},
+            "kind": {"const": "training_run"},
+            "bindingId": {"type": "string", "format": "uuid"},
+            "product": {"const": "yield"},
+            "resourceKind": {"const": "training-run"},
+            "resourceId": {"type": "string", "format": "uuid"},
+            "organizationId": {"type": "string", "minLength": 1, "maxLength": 256},
+            "workspaceId": {"type": "string", "minLength": 1, "maxLength": 256}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["actorId", "targetId", "kind", "bindingId", "product", "resourceKind", "resourceId", "organizationId", "workspaceId"],
+          "properties": {
+            "actorId": {"type": "string", "format": "uuid"},
+            "targetId": {"$ref": "#/$defs/targetId"},
+            "kind": {"const": "product_resource"},
+            "bindingId": {"type": "string", "format": "uuid"},
+            "product": {"enum": ["catalyst", "echo", "reactor"]},
+            "resourceKind": {"enum": ["dataset-version", "evaluation-run", "deployment"]},
+            "resourceId": {"type": "string", "format": "uuid"},
+            "organizationId": {"type": "string", "minLength": 1, "maxLength": 256},
+            "workspaceId": {"type": "string", "minLength": 1, "maxLength": 256}
+          },
+          "allOf": [
+            {"if": {"properties": {"product": {"const": "catalyst"}}}, "then": {"properties": {"resourceKind": {"const": "dataset-version"}}}},
+            {"if": {"properties": {"product": {"const": "echo"}}}, "then": {"properties": {"resourceKind": {"const": "evaluation-run"}}}},
+            {"if": {"properties": {"product": {"const": "reactor"}}}, "then": {"properties": {"resourceKind": {"const": "deployment"}}}}
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["actorId", "targetId", "kind", "bindingId", "hostRef", "mountDirectory", "mountGid", "maxAgeSeconds", "maxClockSkewSeconds"],
+          "properties": {
+            "actorId": {"type": "string", "format": "uuid"},
+            "targetId": {"$ref": "#/$defs/targetId"},
+            "kind": {"const": "host_health"},
+            "bindingId": {"type": "string", "format": "uuid"},
+            "hostRef": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+            "mountDirectory": {"type": "string", "pattern": "^/(?!.*(?:^|/)\\.\\.(?:/|$)).+$"},
+            "mountGid": {"type": "integer", "minimum": 0, "maximum": 2147483647},
+            "maxAgeSeconds": {"type": "integer", "minimum": 1, "maximum": 600},
+            "maxClockSkewSeconds": {"type": "integer", "minimum": 0, "maximum": 120}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["actorId", "targetId", "kind", "bindingId", "connectionRef", "profileRef", "tenantId", "planId"],
+          "properties": {
+            "actorId": {"type": "string", "format": "uuid"},
+            "targetId": {"$ref": "#/$defs/targetId"},
+            "kind": {"const": "planner_plan"},
+            "bindingId": {"type": "string", "format": "uuid"},
+            "connectionRef": {"$ref": "#/$defs/safeReference"},
+            "profileRef": {"$ref": "#/$defs/safeReference"},
+            "tenantId": {"type": "string", "format": "uuid"},
+            "planId": {"$ref": "#/$defs/safeReference"}
+          }
+        }
+      ]}
+    }
+  },
+  "$defs": {
+    "targetId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$"},
+    "safeReference": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$"}
+  }
+}
