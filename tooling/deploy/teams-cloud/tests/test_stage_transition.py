@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 stage_transition = importlib.import_module("stage_transition")
@@ -635,53 +636,110 @@ def _active_image_update(
     return active, candidate, active_lock, candidate_lock
 
 
-def _listener_repair_pair() -> tuple[
-    dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]
-]:
-    """Build the exact 14-service topology with only HF/Cloud command changes."""
+def _merge_compose_fixture_value(base: Any, override: Any) -> Any:
+    """Apply the Compose map/list override shape needed by the canonical test inputs."""
 
-    services: dict[str, dict[str, Any]] = {}
-    lock_rows: list[tuple[str, str, int]] = []
-    for index, service_name in enumerate(stage_transition.SERVICE_ORDER, start=1):
-        image = f"{service_name}:fixed"
-        if service_name == "navigator-persistence":
-            service = _mount_service(image)
-        elif service_name == "navigator":
-            service = _mount_service(image, executor=True)
-        else:
-            profiles = (
-                ["cloud-phase2"]
-                if service_name == "cloud-management-phase2"
-                else ["public-ingress"]
-                if service_name == "teams-public-ingress"
-                else None
+    if isinstance(base, dict) and isinstance(override, dict):
+        merged = copy.deepcopy(base)
+        for key, value in override.items():
+            merged[key] = (
+                _merge_compose_fixture_value(merged[key], value)
+                if key in merged
+                else copy.deepcopy(value)
             )
-            service = _service(image, profiles=profiles)
-        services[service_name] = service
+        return merged
+    if isinstance(base, list) and isinstance(override, list):
+        return copy.deepcopy(base) + copy.deepcopy(override)
+    return copy.deepcopy(override)
+
+
+def _listener_repair_pair(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Render the selected canonical Compose overlays into the fixed 14-service shape.
+
+    中文：服务键、profile 和实际挂载引用来自正式 Compose 文件，不从六个更新目标合成。
+    """
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    compose_names = (
+        "compose.yaml",
+        "compose.computer-runtime.yaml",
+        "compose.codebuddy-acp.yaml",
+        "compose.huggingface.yaml",
+        "compose.cloud-phase2.yaml",
+        "compose.credential-notifications.yaml",
+    )
+    active: dict[str, Any] = {
+        "services": {},
+        "networks": {},
+        "volumes": {},
+        "configs": {},
+        "secrets": {},
+    }
+    for compose_name in compose_names:
+        document = yaml.safe_load((deployment_root / compose_name).read_text(encoding="utf-8"))
+        for field in ("services", "networks", "volumes", "configs", "secrets"):
+            rows = document.get(field)
+            if isinstance(rows, dict):
+                active[field] = _merge_compose_fixture_value(active[field], rows)
+        if document.get("name"):
+            active["name"] = document["name"]
+
+    active["name"] = "cyrene-teams-cloud"
+    runtime_services = stage_transition._runtime_service_inventory(active)
+    assert set(runtime_services) == stage_transition.RUNTIME_SERVICE_SET
+
+    for field in ("configs", "secrets"):
+        definitions = active[field]
+        for name, definition in definitions.items():
+            source = tmp_path / f"{field}-{name}"
+            source.write_text(f"fixture:{field}:{name}", encoding="utf-8")
+            definition["file"] = str(source)
+
+    lock_rows: list[tuple[str, str, int]] = []
+    for index, service_name in enumerate(stage_transition.RUNTIME_SERVICE_ORDER, start=1):
+        image = f"example.invalid/{service_name}:fixed"
+        active["services"][service_name]["image"] = image
         lock_rows.append((service_name, image, index))
-    services["exchange"]["environment"][stage_transition.EXCHANGE_CLOUD_RUNNER_ENV] = "false"
-    active_services = copy.deepcopy(services)
-    candidate_services = copy.deepcopy(services)
+
+    persistence = active["services"]["navigator-persistence"]
+    persistence["environment"]["NAVIGATOR_DATABASE_PATH"] = stage_transition.DATABASE_PATH
+    persistence["volumes"] = [
+        {
+            "type": "volume",
+            "source": "navigator-sessions",
+            "target": stage_transition.DATABASE_VOLUME_TARGET,
+        }
+    ]
+    navigator = active["services"]["navigator"]
+    navigator["volumes"] = [
+        {
+            "type": "bind",
+            "source": "/private/codebuddy",
+            "target": stage_transition.CODEBUDDY_HOME_TARGET,
+        },
+        {
+            "type": "volume",
+            "source": "navigator-sessions",
+            "target": stage_transition.DATABASE_VOLUME_TARGET,
+        },
+    ]
+    active["services"]["exchange"]["environment"][stage_transition.EXCHANGE_CLOUD_RUNNER_ENV] = (
+        "false"
+    )
+    active["services"]["huggingface"]["command"] = list(
+        stage_transition.PROVIDER_DEFAULT_COMMANDS["huggingface"]
+    )
+    active["services"]["cloud-management-phase2"]["command"] = list(
+        stage_transition.PROVIDER_DEFAULT_COMMANDS["cloud-management-phase2"]
+    )
+
+    candidate = copy.deepcopy(active)
     for service_name in stage_transition.PROVIDER_LISTENER_REPAIR_TARGETS:
-        candidate_services[service_name]["command"] = list(
+        candidate["services"][service_name]["command"] = list(
             stage_transition.PROVIDER_WILDCARD_COMMANDS[service_name]
         )
-    active = {
-        "name": "cyrene-teams-cloud",
-        "services": active_services,
-        "networks": {},
-        "volumes": {},
-        "configs": {},
-        "secrets": {},
-    }
-    candidate = {
-        "name": "cyrene-teams-cloud",
-        "services": candidate_services,
-        "networks": {},
-        "volumes": {},
-        "configs": {},
-        "secrets": {},
-    }
     lock = _lock(lock_rows)
     return active, candidate, lock, copy.deepcopy(lock)
 
@@ -719,13 +777,15 @@ def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
     assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
 
 
-def test_listener_repair_changes_only_the_two_wildcard_command_arrays() -> None:
+def test_listener_repair_changes_only_the_two_wildcard_command_arrays(
+    tmp_path: Path,
+) -> None:
     """Keep all 14 service images fixed while replacing only the two listener arguments.
 
     中文：目标只能是 HF 与 Cloud，且两组 argv 除 listen 地址外必须逐项一致。
     """
 
-    active, candidate, active_lock, candidate_lock = _listener_repair_pair()
+    active, candidate, active_lock, candidate_lock = _listener_repair_pair(tmp_path)
     targets, service_images = stage_transition._validate_phase_topology(
         phase="provider-bootstrap",
         listener_repair=True,
@@ -736,7 +796,7 @@ def test_listener_repair_changes_only_the_two_wildcard_command_arrays() -> None:
     )
 
     assert targets == ["huggingface", "cloud-management-phase2"]
-    assert set(service_images) == stage_transition.SERVICE_SET
+    assert set(service_images) == stage_transition.RUNTIME_SERVICE_SET
     assert all(row["active"] == row["candidate"] for row in service_images.values())
     assert all(
         row["added"] is False and row["configChanged"] is False for row in service_images.values()
@@ -757,14 +817,15 @@ def test_listener_repair_changes_only_the_two_wildcard_command_arrays() -> None:
         ("environment", "may change only the HF and Cloud listener commands"),
         ("image_lock", "preserve the exact image lock"),
         ("missing_service", "exact 14-service topology"),
+        ("extra_service", "exact 14-service topology"),
     ],
 )
 def test_listener_repair_rejects_anything_beyond_the_two_listener_commands(
-    mutation: str, message: str
+    tmp_path: Path, mutation: str, message: str
 ) -> None:
     """Reject other argv, config, image-lock, or topology changes in repair mode."""
 
-    active, candidate, active_lock, candidate_lock = _listener_repair_pair()
+    active, candidate, active_lock, candidate_lock = _listener_repair_pair(tmp_path)
     if mutation == "hostname":
         candidate["services"]["huggingface"]["command"][
             candidate["services"]["huggingface"]["command"].index("--listen") + 1
@@ -777,6 +838,9 @@ def test_listener_repair_rejects_anything_beyond_the_two_listener_commands(
         candidate_lock["images"][0]["imageId"] = _image_id(90)
     elif mutation == "missing_service":
         del candidate["services"]["account-center"]
+    elif mutation == "extra_service":
+        active["services"]["unexpected-runtime"] = _service("unexpected:fixed")
+        candidate["services"]["unexpected-runtime"] = _service("unexpected:fixed")
 
     with pytest.raises(stage_transition.StageTransitionError, match=message):
         stage_transition._validate_phase_topology(
@@ -789,10 +853,10 @@ def test_listener_repair_rejects_anything_beyond_the_two_listener_commands(
         )
 
 
-def test_listener_repair_is_not_available_during_issued_activation() -> None:
+def test_listener_repair_is_not_available_during_issued_activation(tmp_path: Path) -> None:
     """Keep this listener repair closed to the bootstrap runner-off phase."""
 
-    active, candidate, active_lock, candidate_lock = _listener_repair_pair()
+    active, candidate, active_lock, candidate_lock = _listener_repair_pair(tmp_path)
     with pytest.raises(
         stage_transition.StageTransitionError,
         match="limited to provider-bootstrap",
@@ -858,11 +922,12 @@ def test_listener_repair_environment_fingerprint_is_order_independent_and_closed
 
 
 def test_listener_repair_state_reads_exact_active_commands_and_validates_target_readback(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Bind both old and new command arrays to their exact service container IDs."""
 
-    active, candidate, _active_lock, _candidate_lock = _listener_repair_pair()
+    active, candidate, _active_lock, _candidate_lock = _listener_repair_pair(tmp_path)
     active_services = {
         service_name: {"containerId": f"{index:064x}", "imageId": _image_id(index)}
         for index, service_name in enumerate(

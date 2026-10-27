@@ -44,6 +44,26 @@ EXCHANGE_READINESS_IMAGE_TARGETS = frozenset({"cloud-management-phase2", "exchan
 NEW_SERVICES = {"huggingface", "cloud-management-phase2"}
 SERVICE_ORDER = runtime_update.STAGE_TRANSITION_TARGET_ORDER
 SERVICE_SET = set(SERVICE_ORDER)
+# Exact long-running inventory for the active Teams cloud Compose profiles. Keep this
+# separate from SERVICE_SET, which is only the six mutable targets in a staged update.
+# 中文：这是完整运行拓扑；SERVICE_SET 仅表示六个可更新目标。
+RUNTIME_SERVICE_ORDER = (
+    "postgres",
+    "workspace-authority",
+    "account-center",
+    "navigator-persistence",
+    "navigator",
+    "exchange",
+    "github-issues",
+    "teams-provider",
+    "teams-ingress",
+    "teams-public-ingress",
+    "computer-runtime",
+    "computer-runtime-proxy",
+    "huggingface",
+    "cloud-management-phase2",
+)
+RUNTIME_SERVICE_SET = frozenset(RUNTIME_SERVICE_ORDER)
 PROJECT_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}\Z")
 FULL_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 IMAGE_ID_RE = runtime_update.IMAGE_ID_RE
@@ -1683,7 +1703,7 @@ def _validate_listener_repair_topology(
 
     if phase != "provider-bootstrap":
         raise StageTransitionError("provider listener repair is limited to provider-bootstrap")
-    if set(old_services) != SERVICE_SET or set(new_services) != SERVICE_SET:
+    if set(old_services) != RUNTIME_SERVICE_SET or set(new_services) != RUNTIME_SERVICE_SET:
         raise StageTransitionError(
             "provider listener repair requires the exact 14-service topology"
         )
@@ -1720,7 +1740,7 @@ def _validate_listener_repair_topology(
     active_ids = _lock_image_ids(active_lock)
     candidate_ids = _lock_image_ids(candidate_lock)
     target_images: dict[str, dict[str, Any]] = {}
-    for service_name in SERVICE_ORDER:
+    for service_name in RUNTIME_SERVICE_ORDER:
         active_image = _service_image(active, active_ids, service_name)
         candidate_image = _service_image(candidate, candidate_ids, service_name)
         if active_image != candidate_image:
@@ -3828,7 +3848,10 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError("listener repair plan must contain exactly its two providers")
     active_runtime_services = set(plan.get("activeServices", {}))
     if listener_repair:
-        if active_runtime_services != SERVICE_SET or set(plan["candidateServices"]) != SERVICE_SET:
+        if (
+            active_runtime_services != RUNTIME_SERVICE_SET
+            or set(plan["candidateServices"]) != RUNTIME_SERVICE_SET
+        ):
             raise StageTransitionError("listener repair plan must retain the exact 14 services")
         for service_name, row in plan["candidateServices"].items():
             if (
