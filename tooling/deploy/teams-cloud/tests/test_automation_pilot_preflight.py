@@ -167,13 +167,23 @@ def _fixtures(tmp_path: Path) -> tuple[dict[str, Any], Path, Path, dict[str, Any
             },
             "navigator-persistence": {
                 "environment": {
+                    "TEAMS_TASK_ACTOR_SUBJECTS_FILE": "/run/teams-authorization/teams-actor-subjects.json",
                     "CYRENE_SECRET_FILE_MAP": ",".join(
                         f"{key}={value}" for key, value in persistence_map.items()
-                    )
+                    ),
                 },
                 "secrets": [
                     {"source": name, "target": target}
                     for name, target in sorted(persistence_secret_pairs)
+                ],
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": str(config_dir),
+                        "target": "/run/teams-authorization",
+                        "read_only": True,
+                        "bind": {"create_host_path": False},
+                    }
                 ],
             },
             "directory-operator": {
@@ -266,6 +276,99 @@ def test_private_pilot_preflight_binds_five_directory_actors_and_safe_source_sel
     assert preflight._validate_automation_workflow_configuration(
         config, config_dir=config_dir, secrets_dir=secrets_dir
     )
+
+
+def test_pilot_cannot_assign_existing_model_authorization_to_another_member(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, config_dir, secrets_dir, documents = _fixtures(tmp_path)
+    _patch_private_document_loader(monkeypatch, documents)
+    config["services"]["navigator"]["environment"]["CYRENE_TEAMS_MODEL_ACTOR_SUBJECT"] = ACTORS[1]
+    with pytest.raises(preflight.PreflightError, match="model authorization"):
+        preflight._validate_automation_workflow_configuration(
+            config, config_dir=config_dir, secrets_dir=secrets_dir
+        )
+
+
+def test_personal_transport_requires_matching_work_policy_bot_and_actor_targets(
+    tmp_path: Path,
+) -> None:
+    """An enabled Navigator alone cannot admit a half-configured private transport."""
+
+    config, config_dir, _secrets, _documents = _fixtures(tmp_path)
+    bot = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    config["services"]["navigator"]["environment"].update(
+        CYRENE_TEAMS_PERSONAL_CHAT_ENABLED="true", TEAMS_BOT_APP_ID=bot
+    )
+    config["services"]["teams-ingress"] = {"environment": {"TEAMS_PERSONAL_CHAT_ENABLED": "true"}}
+    config["services"]["teams-provider"] = {
+        "environment": {
+            "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                {
+                    "bot_app_id": bot,
+                    "tenant_id": TENANT,
+                    "personal_chat_enabled": True,
+                }
+            )
+        }
+    }
+    profile = {
+        "botAppId": bot,
+        "expectedIssuer": f"https://login.microsoftonline.com/{TENANT}/v2.0",
+        "workspaceId": WORKSPACE,
+        "personalActorSubjects": ACTORS.copy(),
+    }
+    config["services"]["exchange"] = {
+        "environment": {
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                {
+                    "connectorHost": {"teamsMessages": profile},
+                }
+            ),
+        }
+    }
+    principal_document = {
+        "teams_private_conversations": {
+            "actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE",
+            "workspace_id": WORKSPACE,
+            "issuer": f"https://login.microsoftonline.com/{TENANT}/v2.0",
+            "tenant_id": TENANT,
+            "bot_app_id": bot,
+        }
+    }
+    preflight._validate_automation_personal_delivery(
+        config,
+        config_dir=config_dir,
+        actor_ids=set(ACTORS),
+        tenant_id=TENANT,
+        principal_document=principal_document,
+    )
+    config["services"]["teams-ingress"]["environment"]["TEAMS_PERSONAL_CHAT_ENABLED"] = "false"
+    with pytest.raises(preflight.PreflightError, match="personal Teams transport"):
+        preflight._validate_automation_personal_delivery(
+            config,
+            config_dir=config_dir,
+            actor_ids=set(ACTORS),
+            tenant_id=TENANT,
+            principal_document=principal_document,
+        )
+    config["services"]["teams-ingress"]["environment"]["TEAMS_PERSONAL_CHAT_ENABLED"] = "true"
+    profile["personalActorSubjects"] = [OWNER]
+    config["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps(
+        {
+            "connectorHost": {"teamsMessages": profile},
+        }
+    )
+    with pytest.raises(preflight.PreflightError, match="personal Teams transport"):
+        preflight._validate_automation_personal_delivery(
+            config,
+            config_dir=config_dir,
+            actor_ids=set(ACTORS),
+            tenant_id=TENANT,
+            principal_document=principal_document,
+        )
 
 
 def test_private_pilot_preflight_rejects_partial_actor_token_map(

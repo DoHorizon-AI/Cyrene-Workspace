@@ -1,6 +1,7 @@
 services:
   navigator-persistence:
     environment:
+      TEAMS_TASK_ACTOR_SUBJECTS_FILE: /run/teams-authorization/teams-actor-subjects.json
       CYRENE_SECRET_FILE_MAP: NAVIGATOR_SESSION_TOKEN=/run/secrets/navigator-session-token,CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN=/run/secrets/teams-private-bridge-token,CYRENE_WORK_ACTOR_TOKEN_01=/run/secrets/work-actor-token-01,CYRENE_WORK_ACTOR_TOKEN_02=/run/secrets/work-actor-token-02,CYRENE_WORK_ACTOR_TOKEN_03=/run/secrets/work-actor-token-03,CYRENE_WORK_ACTOR_TOKEN_04=/run/secrets/work-actor-token-04,CYRENE_WORK_ACTOR_TOKEN_05=/run/secrets/work-actor-token-05
     secrets:
       - source: teams-private-bridge-token
@@ -15,6 +16,17 @@ services:
         target: work-actor-token-04
       - source: work-actor-token-05
         target: work-actor-token-05
+    volumes:
+      - type: bind
+        source: ${CYRENE_CONFIG_DIR:?provision the private configuration directory}
+        target: /run/teams-authorization
+        read_only: true
+        bind:
+          create_host_path: false
+
+  teams-ingress:
+    environment:
+      TEAMS_PERSONAL_CHAT_ENABLED: ${CYRENE_TEAMS_PERSONAL_CHAT_ENABLED:-false}
 
   navigator:
     environment:
@@ -22,6 +34,7 @@ services:
       CYRENE_AUTOMATION_SOURCE_BINDINGS_FILE: /run/teams-authorization/automation-source-bindings.json
       CYRENE_WORKFLOWS_ENABLED: ${CYRENE_WORKFLOWS_ENABLED:-false}
       CYRENE_TEAMS_PERSONAL_CHAT_ENABLED: ${CYRENE_TEAMS_PERSONAL_CHAT_ENABLED:-false}
+      CYRENE_TEAMS_MODEL_ACTOR_SUBJECT: ${CYRENE_TEAMS_MODEL_ACTOR_SUBJECT:-}
       CYRENE_SECRET_FILE_MAP: CYRENE_SESSION_TOKEN=/run/secrets/navigator-session-token,TEAMS_NAVIGATOR_HMAC_KEY=/run/secrets/teams-navigator-hmac-key,CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN=/run/secrets/teams-private-bridge-token,CYRENE_WORK_ACTOR_TOKEN_01=/run/secrets/work-actor-token-01,CYRENE_WORK_ACTOR_TOKEN_02=/run/secrets/work-actor-token-02,CYRENE_WORK_ACTOR_TOKEN_03=/run/secrets/work-actor-token-03,CYRENE_WORK_ACTOR_TOKEN_04=/run/secrets/work-actor-token-04,CYRENE_WORK_ACTOR_TOKEN_05=/run/secrets/work-actor-token-05
     secrets:
       - source: teams-private-bridge-token

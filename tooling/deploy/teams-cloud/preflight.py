@@ -1164,6 +1164,9 @@ def _validate_automation_workflow_configuration(
         raise PreflightError(
             "automation actor map must bind slot 01 to the owner and four pilot actors"
         )
+    model_actor = environment.get("CYRENE_TEAMS_MODEL_ACTOR_SUBJECT", "")
+    if not isinstance(model_actor, str) or model_actor not in ("", owner_id):
+        raise PreflightError("the existing model authorization may select only the approved owner")
     projection_subjects = (
         actor_projection.get("subjects") if isinstance(actor_projection, dict) else None
     )
@@ -1209,7 +1212,90 @@ def _validate_automation_workflow_configuration(
         tenant_id=tenant_id,
     )
     _validate_automation_health_mount(config, source_bindings)
+    _validate_automation_personal_delivery(
+        config,
+        config_dir=config_dir,
+        actor_ids=set(actor_by_token.values()),
+        tenant_id=tenant_id,
+        principal_document=principal_document,
+    )
     return True
+
+
+def _validate_automation_personal_delivery(
+    config: dict[str, Any],
+    *,
+    config_dir: Path,
+    actor_ids: set[str],
+    tenant_id: str,
+    principal_document: dict[str, Any],
+) -> None:
+    """Bind optional personal delivery to the same host-selected actors and bot.
+
+    中文：私聊启用时核对同一 actor、Bot 与当前 Directory 投影配置，不把配置当作安装证明。
+    """
+
+    services = config.get("services", {})
+    persistence = services.get("navigator-persistence", {})
+    projection_target = "/run/teams-authorization/teams-actor-subjects.json"
+    mounts = [
+        row
+        for row in persistence.get("volumes", [])
+        if isinstance(row, dict) and row.get("target") == "/run/teams-authorization"
+    ]
+    if (
+        persistence.get("environment", {}).get("TEAMS_TASK_ACTOR_SUBJECTS_FILE")
+        != projection_target
+        or len(mounts) != 1
+        or mounts[0].get("type") != "bind"
+        or mounts[0].get("read_only") is not True
+        or mounts[0].get("bind") != {"create_host_path": False}
+        or Path(str(mounts[0].get("source", ""))).resolve() != config_dir.resolve()
+    ):
+        raise PreflightError("private Work policy requires the current read-only actor projection")
+    environment = services.get("navigator", {}).get("environment", {})
+    if environment.get("CYRENE_TEAMS_PERSONAL_CHAT_ENABLED") != "true":
+        return
+    bot_app_id = environment.get("TEAMS_BOT_APP_ID")
+    expected_policy = {
+        "actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE",
+        "workspace_id": environment.get("CYRENE_WORKSPACE_ID"),
+        "issuer": f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        "tenant_id": tenant_id,
+        "bot_app_id": bot_app_id,
+    }
+    ingress = services.get("teams-ingress", {}).get("environment", {})
+    provider = _json_environment_object(
+        services.get("teams-provider", {}),
+        "CYRENE_CAPABILITY_CONFIGURATION_JSON",
+        "Teams provider",
+    )
+    exchange = _json_environment_object(
+        services.get("exchange", {}),
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON",
+        "Exchange integration",
+    )
+    connector_host = exchange.get("connectorHost")
+    profile = connector_host.get("teamsMessages") if isinstance(connector_host, dict) else None
+    subjects = profile.get("personalActorSubjects") if isinstance(profile, dict) else None
+    if (
+        not _uuid(bot_app_id)
+        or ingress.get("TEAMS_PERSONAL_CHAT_ENABLED") != "true"
+        or provider.get("personal_chat_enabled") is not True
+        or provider.get("bot_app_id") != bot_app_id
+        or provider.get("tenant_id") != tenant_id
+        or not isinstance(subjects, list)
+        or len(subjects) != len(actor_ids)
+        or any(not _uuid(subject) for subject in subjects)
+        or set(subjects) != actor_ids
+        or profile.get("botAppId") != bot_app_id
+        or profile.get("expectedIssuer") != expected_policy["issuer"]
+        or profile.get("workspaceId") != expected_policy["workspace_id"]
+        or principal_document.get("teams_private_conversations") != expected_policy
+    ):
+        raise PreflightError(
+            "personal Teams transport must match the actor map, bot and Work policy"
+        )
 
 
 def _validate_automation_health_mount(config: dict[str, Any], source_bindings: Any) -> None:

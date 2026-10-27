@@ -18,6 +18,26 @@ this preparation does not complete the four-source notification MVP.
 适配器已有本地测试和强制授权接口，但其生产 ACL／凭据客户端尚未实现；仅填写选择器
 文件仍不会启用这些来源。因此本次准备不能算四类来源通知 MVP 已完成。
 
+Personal transport has four matching host settings: Navigator's
+`CYRENE_TEAMS_PERSONAL_CHAT_ENABLED`, the ingress `TEAMS_PERSONAL_CHAT_ENABLED`,
+the Teams provider's `personal_chat_enabled`, and Exchange
+`connectorHost.teamsMessages.personalActorSubjects`. Work also needs its fixed
+`teams_private_conversations` policy and the current read-only actor projection.
+The optional overlay wires the ingress flag and Work mount; preflight rejects a
+partial or mismatched activation. A real personal installation is still required.
+
+私聊传输需对齐上述四项宿主设置，以及 Work 的固定私聊策略和实时只读 actor 投影。
+overlay 已接好 ingress 开关和 Work 挂载；预检拒绝不完整或不一致的启用配置，但配置
+通过仍不能代替真人安装验证。
+
+The existing CodeBuddy/model login is restricted by the separate explicit
+`CYRENE_TEAMS_MODEL_ACTOR_SUBJECT` selector. The prepared pilot selects only the
+approved owner; empty means no shared-model entitlement in multi-actor mode.
+Adding a Directory member or receiving a notification does not grant model use.
+
+现有 CodeBuddy／模型登录通过独立的 `CYRENE_TEAMS_MODEL_ACTOR_SUBJECT` 明确绑定给本人。
+多人模式留空时不授予共享模型使用权；添加 Directory 成员或接收通知都不会继承该授权。
+
 ## Authority files and secret references / 授权文件与密钥引用
 
 Use the existing private `.artifacts` configuration and secrets directories outside every source worktree. Do not commit populated versions or copy real tenant, actor, connection, plan, Product, host, pipeline, or release IDs into a template. The actor token map and source binding map contain private selectors, not credential values or grants.

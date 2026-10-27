@@ -76,7 +76,13 @@ def test_workflow_overlay_defaults_disabled_and_only_adds_private_credentials() 
         (DEPLOYMENT_ROOT / "compose.automation-workflows.yaml").read_text(encoding="utf-8")
     )
     base = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text(encoding="utf-8"))
-    assert set(overlay["services"]) == {"navigator", "navigator-persistence"}
+    assert set(overlay["services"]) == {"navigator", "navigator-persistence", "teams-ingress"}
+    assert set(overlay["services"]) <= set(base["services"])
+    assert overlay["services"]["teams-ingress"] == {
+        "environment": {
+            "TEAMS_PERSONAL_CHAT_ENABLED": "${CYRENE_TEAMS_PERSONAL_CHAT_ENABLED:-false}"
+        }
+    }
     assert overlay["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] == (
         "${CYRENE_WORKFLOWS_ENABLED:-false}"
     )
@@ -117,6 +123,13 @@ def test_workflow_overlay_defaults_disabled_and_only_adds_private_credentials() 
     } <= mapped_envs
     assert len(mapped_envs) == len(mappings)
     persistence_environment = overlay["services"]["navigator-persistence"]["environment"]
+    assert persistence_environment["TEAMS_TASK_ACTOR_SUBJECTS_FILE"] == (
+        "/run/teams-authorization/teams-actor-subjects.json"
+    )
+    persistence_auth_mount = overlay["services"]["navigator-persistence"]["volumes"][0]
+    assert persistence_auth_mount["target"] == "/run/teams-authorization"
+    assert persistence_auth_mount["read_only"] is True
+    assert persistence_auth_mount["bind"]["create_host_path"] is False
     persistence_mappings = persistence_environment["CYRENE_SECRET_FILE_MAP"].split(",")
     persistence_envs = {mapping.partition("=")[0] for mapping in persistence_mappings}
     assert work_token_envs <= persistence_envs
