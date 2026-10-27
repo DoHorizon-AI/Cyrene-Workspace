@@ -52,6 +52,7 @@ LOCK_SERVICE_FOR_TARGET = {
     "github-issues": "github-issues-provider",
     "navigator": "dsh-executor",
     "exchange": "exchange",
+    "cloud-management-phase2": "cloud-management",
 }
 CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
 FULL_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")

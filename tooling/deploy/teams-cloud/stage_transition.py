@@ -36,7 +36,10 @@ JOURNAL_SCHEMA = "cyrene-teams-stage-transition-journal-v1"
 SELECTION_SCHEMA = "cyrene-teams-runtime-selection-v2"
 DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/stage-transition")
 PHASES = {"provider-bootstrap", "issued-connector-activation"}
-IMAGE_UPDATE_TARGETS = frozenset({"exchange", "navigator"})
+IMAGE_UPDATE_TARGETS = frozenset({"cloud-management-phase2", "exchange", "navigator"})
+CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
+EXCHANGE_CLOUD_RUNNER_ENV = "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
+EXCHANGE_READINESS_IMAGE_TARGETS = frozenset({"cloud-management-phase2", "exchange"})
 NEW_SERVICES = {"huggingface", "cloud-management-phase2"}
 SERVICE_ORDER = runtime_update.STAGE_TRANSITION_TARGET_ORDER
 SERVICE_SET = set(SERVICE_ORDER)
@@ -54,9 +57,14 @@ ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR = "account_center_schema_downgrade_unsupp
 
 
 def _exchange_readiness_required(phase: str, image_update_target: str | None) -> bool:
-    """Require live Exchange verification for activation or an Exchange image update."""
+    """Require live Exchange verification for activation or a dependent image update.
 
-    return phase == "issued-connector-activation" or image_update_target == "exchange"
+    中文：连接器激活以及 Exchange/Cloud 镜像更新都必须现场验证连接器目录。
+    """
+
+    return phase == "issued-connector-activation" or image_update_target in (
+        EXCHANGE_READINESS_IMAGE_TARGETS
+    )
 
 
 CLOUD_MANAGEMENT_TLS_SECRET_NAMES = frozenset(
@@ -558,6 +566,320 @@ def _service_image(compose: dict[str, Any], image_ids: dict[str, str], name: str
     return {"imageRef": image_ref, "imageId": image_id}
 
 
+def _exchange_cloud_runner_compose_value(compose: dict[str, Any]) -> str:
+    """Require the Exchange background refresh runner to be explicitly disabled.
+
+    中文：Compose 必须显式配置 runner=false，不能依赖默认值。
+    """
+
+    services = compose.get("services", {})
+    exchange = services.get("exchange") if isinstance(services, dict) else None
+    environment = exchange.get("environment", {}) if isinstance(exchange, dict) else None
+    value = environment.get(EXCHANGE_CLOUD_RUNNER_ENV) if isinstance(environment, dict) else None
+    if value != "false":
+        raise StageTransitionError(
+            "Cloud Management image update requires Exchange AuthorizationCloudRunner=false"
+        )
+    return value
+
+
+def _exchange_integration_database_container_path(
+    *, container_id: str, docker_prefix: list[str]
+) -> str:
+    """Require the exact Exchange container command to use its separately mounted DB.
+
+    中文：只接受镜像固定的产品数据库路径，拒绝不明 CLI override。
+    """
+
+    if FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError("Exchange cloud runner container identity is malformed")
+    try:
+        output = runtime_update._checked_stdout(
+            [
+                *docker_prefix,
+                "inspect",
+                "--format",
+                "{{json .Config.Cmd}}",
+                container_id,
+            ],
+            label="Exchange integration database command readback",
+        )
+        command = runtime_update._decode_json_output(
+            output, "Exchange integration database command readback"
+        )
+    except runtime_update.RuntimeUpdateError as error:
+        raise StageTransitionError(
+            "Exchange integration database path could not be verified from its exact container"
+        ) from error
+    if not isinstance(command, list) or any(not isinstance(value, str) for value in command):
+        raise StageTransitionError("Exchange container command readback is malformed")
+    database_paths = [
+        command[index + 1]
+        for index, value in enumerate(command[:-1])
+        if value == "--integration-database"
+    ]
+    if database_paths != [EXCHANGE_INTEGRATION_DATABASE]:
+        raise StageTransitionError(
+            "Exchange container is not pinned to the canonical integration database path"
+        )
+    return database_paths[0]
+
+
+def _exchange_cloud_runner_container_value(*, container_id: str, docker_prefix: list[str]) -> str:
+    """Read only the runner flag from Docker metadata without retaining other env values.
+
+    中文：只返回精确 runner 标记，不持久化或输出其余容器环境变量。
+    """
+
+    if FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError("Exchange cloud runner container identity is malformed")
+    try:
+        output = runtime_update._checked_stdout(
+            [
+                *docker_prefix,
+                "inspect",
+                "--format",
+                "{{json .Config.Env}}",
+                container_id,
+            ],
+            label="Exchange cloud runner environment readback",
+        )
+        environment = runtime_update._decode_json_output(
+            output, "Exchange cloud runner environment readback"
+        )
+    except runtime_update.RuntimeUpdateError as error:
+        raise StageTransitionError(
+            "Exchange cloud runner state could not be verified from its exact container"
+        ) from error
+    if not isinstance(environment, list) or any(not isinstance(item, str) for item in environment):
+        raise StageTransitionError("Exchange cloud runner environment readback is malformed")
+    matching = [
+        item.partition("=")[2]
+        for item in environment
+        if item.partition("=")[0] == EXCHANGE_CLOUD_RUNNER_ENV
+    ]
+    if matching != ["false"]:
+        raise StageTransitionError(
+            "Cloud Management image update requires the live Exchange runner to be explicitly disabled"
+        )
+    return "false"
+
+
+def _exchange_cloud_runner_idle_counts(
+    *, container_id: str, docker_prefix: list[str]
+) -> dict[str, int]:
+    """Read only fixed outbox/monitor counts from the exact Exchange SQLite file.
+
+    中文：只查非终态作业与未过期 lease 的计数，不读取任务文档或凭据。
+    """
+
+    if FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError("Exchange cloud runner container identity is malformed")
+    python = str(Path(EXCHANGE_READINESS_EXECUTABLE).with_name("python"))
+    script = (
+        "import json,sqlite3,sys\n"
+        "database_path,now_utc=sys.argv[1:3]\n"
+        "connection=sqlite3.connect('file:'+database_path+'?mode=ro',uri=True,timeout=5)\n"
+        "try:\n"
+        " connection.execute('PRAGMA query_only=ON')\n"
+        " connection.execute('BEGIN')\n"
+        " cloud_nonterminal=connection.execute(\"SELECT COUNT(*) FROM cloud_refresh_outbox WHERE state IN ('QUEUED','RUNNING')\").fetchone()[0]\n"
+        " cloud_active_leases=connection.execute(\"SELECT COUNT(*) FROM cloud_refresh_outbox WHERE state IN ('QUEUED','RUNNING') AND claim_owner IS NOT NULL AND lease_expires_at>?\",(now_utc,)).fetchone()[0]\n"
+        ' monitor_active_leases=connection.execute("SELECT COUNT(*) FROM authorization_monitor_state WHERE claim_owner IS NOT NULL AND lease_expires_at>?",(now_utc,)).fetchone()[0]\n'
+        " email_nonterminal=connection.execute(\"SELECT COUNT(*) FROM email_notification_outbox WHERE state IN ('READY','CLAIMED','SENDING')\").fetchone()[0]\n"
+        " result={'cloudRefreshNonterminalCount':cloud_nonterminal,'cloudRefreshActiveLeaseCount':cloud_active_leases,'authorizationMonitorActiveLeaseCount':monitor_active_leases,'emailNotificationNonterminalCount':email_nonterminal}\n"
+        " print(json.dumps(result,sort_keys=True,separators=(',',':')))\n"
+        "finally:\n"
+        " connection.close()\n"
+    )
+    try:
+        output = runtime_update._checked_stdout(
+            [
+                *docker_prefix,
+                "exec",
+                "--user",
+                "10001:10001",
+                container_id,
+                python,
+                "-c",
+                script,
+                EXCHANGE_INTEGRATION_DATABASE,
+                datetime.now(UTC).isoformat(),
+            ],
+            label="Exchange cloud worker idle readback",
+            timeout_seconds=15,
+        )
+        report = runtime_update._decode_json_output(output, "Exchange cloud worker idle report")
+    except runtime_update.RuntimeUpdateError as error:
+        raise StageTransitionError(
+            "Exchange cloud refresh and monitor queues could not be verified read-only"
+        ) from error
+    expected_fields = {
+        "cloudRefreshNonterminalCount",
+        "cloudRefreshActiveLeaseCount",
+        "authorizationMonitorActiveLeaseCount",
+        "emailNotificationNonterminalCount",
+    }
+    if (
+        not isinstance(report, dict)
+        or set(report) != expected_fields
+        or any(
+            isinstance(report.get(field), bool)
+            or not isinstance(report.get(field), int)
+            or report[field] < 0
+            for field in expected_fields
+        )
+    ):
+        raise StageTransitionError("Exchange cloud worker idle report is malformed")
+    if any(report[field] != 0 for field in expected_fields):
+        raise StageTransitionError(
+            "Exchange has queued/running cloud, authorization-monitor, or email work"
+        )
+    return report
+
+
+def _cloud_runner_state_record(
+    *,
+    active_compose: dict[str, Any],
+    candidate_compose: dict[str, Any],
+    exchange_service: dict[str, Any],
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Bind the disabled runner state to the exact active Exchange container.
+
+    中文：候选和活动配置以及活动容器都必须指向同一关闭状态。
+    """
+
+    active_value = _exchange_cloud_runner_compose_value(active_compose)
+    candidate_value = _exchange_cloud_runner_compose_value(candidate_compose)
+    container_id = exchange_service.get("containerId")
+    image_id = exchange_service.get("imageId")
+    if (
+        not isinstance(container_id, str)
+        or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None
+        or not isinstance(image_id, str)
+        or IMAGE_ID_RE.fullmatch(image_id) is None
+    ):
+        raise StageTransitionError("active Exchange container identity is malformed")
+    integration_database_path = _exchange_integration_database_container_path(
+        container_id=container_id, docker_prefix=docker_prefix
+    )
+    live_value = _exchange_cloud_runner_container_value(
+        container_id=container_id, docker_prefix=docker_prefix
+    )
+    idle_counts = _exchange_cloud_runner_idle_counts(
+        container_id=container_id, docker_prefix=docker_prefix
+    )
+    return {
+        "exchangeContainerId": container_id,
+        "exchangeImageId": image_id,
+        "integrationDatabasePath": integration_database_path,
+        "environmentName": EXCHANGE_CLOUD_RUNNER_ENV,
+        "activeComposeValue": active_value,
+        "candidateComposeValue": candidate_value,
+        "liveContainerValue": live_value,
+        "idleCounts": idle_counts,
+    }
+
+
+def _validate_cloud_runner_state_record(
+    value: Any, active_services: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate the closed, secret-free runner quiescence evidence in one plan.
+
+    中文：计划中的 Exchange 容器身份必须与活动服务快照完全一致。
+    """
+
+    fields = {
+        "exchangeContainerId",
+        "exchangeImageId",
+        "integrationDatabasePath",
+        "environmentName",
+        "activeComposeValue",
+        "candidateComposeValue",
+        "liveContainerValue",
+        "idleCounts",
+    }
+    exchange = active_services.get("exchange")
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or not isinstance(exchange, dict)
+        or value.get("exchangeContainerId") != exchange.get("containerId")
+        or value.get("exchangeImageId") != exchange.get("imageId")
+        or value.get("environmentName") != EXCHANGE_CLOUD_RUNNER_ENV
+        or any(
+            value.get(field) != "false"
+            for field in (
+                "activeComposeValue",
+                "candidateComposeValue",
+                "liveContainerValue",
+            )
+        )
+    ):
+        raise StageTransitionError("Cloud image update runner-state evidence is malformed")
+    container_id = value.get("exchangeContainerId")
+    image_id = value.get("exchangeImageId")
+    if (
+        not isinstance(container_id, str)
+        or FULL_CONTAINER_ID_RE.fullmatch(container_id) is None
+        or not isinstance(image_id, str)
+        or IMAGE_ID_RE.fullmatch(image_id) is None
+        or value.get("integrationDatabasePath") != EXCHANGE_INTEGRATION_DATABASE
+    ):
+        raise StageTransitionError("Cloud image update runner-state evidence is malformed")
+    idle_counts = value.get("idleCounts")
+    count_fields = {
+        "cloudRefreshNonterminalCount",
+        "cloudRefreshActiveLeaseCount",
+        "authorizationMonitorActiveLeaseCount",
+        "emailNotificationNonterminalCount",
+    }
+    if (
+        not isinstance(idle_counts, dict)
+        or set(idle_counts) != count_fields
+        or any(
+            isinstance(idle_counts.get(field), bool)
+            or not isinstance(idle_counts.get(field), int)
+            or idle_counts[field] != 0
+            for field in count_fields
+        )
+    ):
+        raise StageTransitionError("Cloud image update worker queues are not idle")
+    return dict(value)
+
+
+def _verify_cloud_runner_idle(
+    *,
+    plan: dict[str, Any],
+    active_compose: dict[str, Any],
+    candidate_compose: dict[str, Any],
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Recheck the frozen runner-off and durable-job-idle contract.
+
+    中文：每个切换边界都复核 runner 仍关闭且持久队列与租约仍为空。
+    """
+
+    expected = _validate_cloud_runner_state_record(
+        plan.get("cloudRunnerState"), plan["activeServices"]
+    )
+    exchange_service = plan["activeServices"].get("exchange")
+    if not isinstance(exchange_service, dict):
+        raise StageTransitionError("active Exchange service is missing for Cloud image update")
+    observed = _cloud_runner_state_record(
+        active_compose=active_compose,
+        candidate_compose=candidate_compose,
+        exchange_service=exchange_service,
+        docker_prefix=docker_prefix,
+    )
+    if observed != expected:
+        raise StageTransitionError(
+            "Exchange runner or durable cloud/email work changed after Cloud update planning"
+        )
+    return observed
+
+
 def _mount_rows(service: dict[str, Any], field: str) -> list[dict[str, Any]]:
     """Return validated Compose mount rows for one service field."""
 
@@ -662,6 +984,7 @@ def _validate_phase_topology(
     new_services = _runtime_service_inventory(candidate)
     if image_update_target is not None:
         return _validate_image_update_topology(
+            phase=phase,
             target=image_update_target,
             active=active,
             candidate=candidate,
@@ -765,6 +1088,7 @@ def _validate_phase_topology(
 
 def _validate_image_update_topology(
     *,
+    phase: str,
     target: str,
     active: dict[str, Any],
     candidate: dict[str, Any],
@@ -773,10 +1097,19 @@ def _validate_image_update_topology(
     old_services: dict[str, dict[str, Any]],
     new_services: dict[str, dict[str, Any]],
 ) -> tuple[list[str], dict[str, dict[str, Any]]]:
-    """Allow one immutable Exchange or Navigator image change on an existing topology."""
+    """Allow one immutable service image change on an existing topology.
+
+    中文：镜像更新沿用现有 14 服务拓扑，只能替换一个已授权目标。
+    """
 
     if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
-        raise StageTransitionError("image update target must be Exchange or Navigator")
+        raise StageTransitionError(
+            "image update target must be Cloud Management, Exchange, or Navigator"
+        )
+    if target == CLOUD_IMAGE_UPDATE_TARGET and phase != "provider-bootstrap":
+        raise StageTransitionError(
+            "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+        )
     if set(old_services) != set(new_services):
         raise StageTransitionError("image update must keep the exact active service inventory")
     if sum(name == "navigator" for name in new_services) != 1:
@@ -1005,7 +1338,9 @@ def _validate_image_update_selection_contract(
     if target is None:
         return
     if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
-        raise StageTransitionError("image update target must be Exchange or Navigator")
+        raise StageTransitionError(
+            "image update target must be Cloud Management, Exchange, or Navigator"
+        )
     if (
         not isinstance(selection_record, dict)
         or set(selection_record) != {"path", "sha256", "document"}
@@ -2297,7 +2632,13 @@ def create_plan(
     if image_update_target is not None and (
         not isinstance(image_update_target, str) or image_update_target not in IMAGE_UPDATE_TARGETS
     ):
-        raise StageTransitionError("image update target must be Exchange or Navigator")
+        raise StageTransitionError(
+            "image update target must be Cloud Management, Exchange, or Navigator"
+        )
+    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and phase != "provider-bootstrap":
+        raise StageTransitionError(
+            "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+        )
     if ingress_exposure not in {"public-cutover", "host-fronted-staging"}:
         raise StageTransitionError(
             "ingress exposure must be public-cutover or host-fronted-staging"
@@ -2532,6 +2873,17 @@ def create_plan(
     navigator_container = active_services.get("navigator")
     if not isinstance(edge_container, dict) or not isinstance(navigator_container, dict):
         raise StageTransitionError("active Teams ingress or Navigator container is missing")
+    cloud_runner_state = None
+    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET:
+        exchange_service = active_services.get("exchange")
+        if not isinstance(exchange_service, dict):
+            raise StageTransitionError("active Exchange service is missing for Cloud image update")
+        cloud_runner_state = _cloud_runner_state_record(
+            active_compose=active_compose,
+            candidate_compose=candidate_compose,
+            exchange_service=exchange_service,
+            docker_prefix=docker_prefix,
+        )
     edge_status = runtime_update._current_edge_status(
         docker_prefix, edge_container["containerId"], timeout_seconds=15
     )
@@ -2557,6 +2909,7 @@ def create_plan(
         "operationId": operation_id,
         "phase": phase,
         **({"imageUpdateTarget": image_update_target} if image_update_target is not None else {}),
+        **({"cloudRunnerState": cloud_runner_state} if cloud_runner_state is not None else {}),
         "createdAtUtc": _utc_now(),
         "project": project,
         "activeInputs": active_inputs,
@@ -2700,12 +3053,18 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     }
     if set(plan) == required:
         image_update_target = None
-    elif (
-        set(plan) == required | {"imageUpdateTarget"}
-        and isinstance(plan.get("imageUpdateTarget"), str)
-        and plan["imageUpdateTarget"] in IMAGE_UPDATE_TARGETS
-    ):
-        image_update_target = plan["imageUpdateTarget"]
+    elif set(plan) == required | {"imageUpdateTarget"}:
+        image_update_target = plan.get("imageUpdateTarget")
+        if (
+            not isinstance(image_update_target, str)
+            or image_update_target not in IMAGE_UPDATE_TARGETS
+            or image_update_target == CLOUD_IMAGE_UPDATE_TARGET
+        ):
+            image_update_target = "__invalid__"
+    elif set(plan) == required | {"imageUpdateTarget", "cloudRunnerState"}:
+        image_update_target = plan.get("imageUpdateTarget")
+        if image_update_target != CLOUD_IMAGE_UPDATE_TARGET:
+            image_update_target = "__invalid__"
     else:
         image_update_target = "__invalid__"
     if image_update_target == "__invalid__" or plan.get("schemaVersion") != PLAN_SCHEMA:
@@ -2715,6 +3074,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             raise StageTransitionError(f"stage transition {field} record is malformed")
     if plan.get("phase") not in PHASES or not isinstance(plan.get("project"), str):
         raise StageTransitionError("stage transition plan identity is malformed")
+    if (
+        image_update_target == CLOUD_IMAGE_UPDATE_TARGET
+        and plan.get("phase") != "provider-bootstrap"
+    ):
+        raise StageTransitionError(
+            "Cloud Management image updates require provider-bootstrap while the Exchange runner is off"
+        )
     if (
         not isinstance(plan.get("targets"), list)
         or not plan["targets"]
@@ -2727,6 +3093,8 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if image_update_target is not None and plan["targets"] != [image_update_target]:
         raise StageTransitionError("image update plan must contain exactly its selected target")
     active_runtime_services = set(plan.get("activeServices", {}))
+    if image_update_target == CLOUD_IMAGE_UPDATE_TARGET:
+        _validate_cloud_runner_state_record(plan.get("cloudRunnerState"), plan["activeServices"])
     added_services = {
         name
         for name, row in plan.get("candidateServices", {}).items()
@@ -3268,7 +3636,7 @@ def _verify_exchange_readiness_snapshot(
             "live provider tool catalog differs from the frozen Navigator catalog config"
         )
 
-    if phase == "provider-bootstrap" and image_update_target == "exchange":
+    if phase == "provider-bootstrap" and image_update_target in EXCHANGE_READINESS_IMAGE_TARGETS:
         provider_ids = sorted({row["providerId"] for row in live_bindings})
         if not provider_ids:
             raise StageTransitionError("provider-bootstrap Exchange binding inventory is empty")
@@ -3684,6 +4052,13 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "verified": False,
             "receipt": None,
         },
+        "cloudRunnerIdle": {
+            "required": plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET,
+            "planState": plan.get("cloudRunnerState"),
+            "beforeTarget": None,
+            "afterTarget": None,
+            "postTargetReadbackFailed": False,
+        },
         "targetProgress": {
             service: {
                 "phase": "PREPARED",
@@ -3863,6 +4238,22 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(exchange_readiness, dict)
         else False
     )
+    cloud_idle = journal.get("cloudRunnerIdle", {})
+    cloud_idle_required = (
+        cloud_idle.get("required") is True if isinstance(cloud_idle, dict) else False
+    )
+    cloud_idle_status = (
+        "NOT_REQUIRED"
+        if not cloud_idle_required
+        else "RECOVERY_REQUIRED"
+        if cloud_idle.get("postTargetReadbackFailed") is True
+        else "IDLE_VERIFIED"
+        if isinstance(cloud_idle.get("beforeTarget"), dict)
+        and isinstance(cloud_idle.get("afterTarget"), dict)
+        else "PRE_TARGET_VERIFIED"
+        if isinstance(cloud_idle.get("beforeTarget"), dict)
+        else "PENDING"
+    )
     return {
         "schemaVersion": journal.get("schemaVersion"),
         "operationId": journal.get("operationId"),
@@ -3884,6 +4275,8 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
             if exchange_readiness_required
             else "NOT_REQUIRED"
         ),
+        "cloudRunnerIdleRequired": cloud_idle_required,
+        "cloudRunnerIdleStatus": cloud_idle_status,
         "selectionPromoted": journal.get("selection", {}).get("promoted"),
         "updatedAtUtc": journal.get("updatedAtUtc"),
         "lastErrorCode": journal.get("lastErrorCode"),
@@ -4051,6 +4444,23 @@ def _verify_active_baseline(
         raise StageTransitionError(
             "active service IDs/images/network inventory changed after planning"
         )
+    if plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET:
+        state = _validate_cloud_runner_state_record(
+            plan.get("cloudRunnerState"), plan["activeServices"]
+        )
+        exchange = services.get("exchange")
+        if not isinstance(exchange, dict):
+            raise StageTransitionError("active Exchange service is missing for Cloud image update")
+        current_state = _cloud_runner_state_record(
+            active_compose=compose,
+            candidate_compose=compose,
+            exchange_service=exchange,
+            docker_prefix=docker_prefix,
+        )
+        if current_state != state:
+            raise StageTransitionError(
+                "Exchange runner or durable cloud/email work is no longer idle for Cloud image update"
+            )
     edge = runtime_update._current_edge_status(
         docker_prefix, plan["edgeDelivery"]["containerId"], timeout_seconds=15
     )
@@ -4090,6 +4500,14 @@ def _candidate_configs(
         raise StageTransitionError("candidate Compose could not be re-rendered") from error
     if compose.get("name") != plan["project"]:
         raise StageTransitionError("candidate Compose project changed after planning")
+    if plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET:
+        state = _validate_cloud_runner_state_record(
+            plan.get("cloudRunnerState"), plan["activeServices"]
+        )
+        if _exchange_cloud_runner_compose_value(compose) != state["candidateComposeValue"]:
+            raise StageTransitionError(
+                "candidate Exchange cloud refresh runner setting changed after planning"
+            )
     return compose, lock
 
 
@@ -4453,9 +4871,12 @@ def _resume_executor_after_transition(
     candidate_compose: dict[str, Any],
     docker_prefix: list[str],
 ) -> None:
-    """Keep the same Navigator generation for Exchange-only image updates."""
+    """Keep the original Navigator generation for non-Navigator image updates.
 
-    if plan.get("imageUpdateTarget") == "exchange":
+    中文：Exchange 或 Cloud 单镜像更新后恢复原 Navigator 容器与 generation。
+    """
+
+    if plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS:
         _resume_old_executor_if_needed(
             plan=plan,
             journal=journal,
@@ -4690,7 +5111,7 @@ def _rollback_known_mutations(
         plan=plan,
         journal=journal,
         docker_prefix=docker_prefix,
-        require_original_instance=plan.get("imageUpdateTarget") == "exchange",
+        require_original_instance=plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS,
     )
     _resume_ingress_after_safe_state(
         journal=journal,
@@ -4764,6 +5185,19 @@ def apply_plan_file(
                     journal,
                     "PERSISTENCE_CANDIDATE_SCHEMA_VERIFIED",
                 )
+            if journal["cloudRunnerIdle"]["required"]:
+                before_target = _verify_cloud_runner_idle(
+                    plan=plan,
+                    active_compose=active_compose,
+                    candidate_compose=candidate_compose,
+                    docker_prefix=docker_prefix,
+                )
+                journal["cloudRunnerIdle"]["beforeTarget"] = before_target
+                _write_journal(
+                    journal_path,
+                    journal,
+                    "CLOUD_RUNNER_IDLE_BEFORE_TARGET_VERIFIED",
+                )
             for service_name in plan["targets"]:
                 if (
                     service_name == "navigator"
@@ -4786,8 +5220,8 @@ def apply_plan_file(
                     service_name=service_name,
                 )
                 if (
-                    plan.get("imageUpdateTarget") == "exchange"
-                    and service_name == "exchange"
+                    plan.get("imageUpdateTarget") in EXCHANGE_READINESS_IMAGE_TARGETS
+                    and service_name == plan.get("imageUpdateTarget")
                     and journal["exchangeReadiness"]["required"]
                     and journal["exchangeReadiness"]["verified"] is not True
                 ):
@@ -4797,6 +5231,35 @@ def apply_plan_file(
                         journal=journal,
                         journal_path=journal_path,
                         docker_prefix=docker_prefix,
+                    )
+                if (
+                    plan.get("imageUpdateTarget") == CLOUD_IMAGE_UPDATE_TARGET
+                    and service_name == CLOUD_IMAGE_UPDATE_TARGET
+                ):
+                    try:
+                        after_target = _verify_cloud_runner_idle(
+                            plan=plan,
+                            active_compose=candidate_compose,
+                            candidate_compose=candidate_compose,
+                            docker_prefix=docker_prefix,
+                        )
+                    except StageTransitionError as error:
+                        journal["cloudRunnerIdle"]["postTargetReadbackFailed"] = True
+                        journal["lastErrorCode"] = "cloud_runner_idle_post_target_unverified"
+                        _write_journal(
+                            journal_path,
+                            journal,
+                            "RECOVERY_REQUIRED",
+                            state="RECOVERY_REQUIRED",
+                        )
+                        raise StageTransitionError(
+                            "Cloud image changed but Exchange background work is no longer verifiably idle; keep ingress held for read-only recovery"
+                        ) from error
+                    journal["cloudRunnerIdle"]["afterTarget"] = after_target
+                    _write_journal(
+                        journal_path,
+                        journal,
+                        "CLOUD_RUNNER_IDLE_AFTER_TARGET_VERIFIED",
                     )
                 if service_name == "navigator-persistence":
                     try:

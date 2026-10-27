@@ -634,16 +634,27 @@ def _active_image_update(
     return active, candidate, active_lock, candidate_lock
 
 
-@pytest.mark.parametrize("target", ["exchange", "navigator"])
+@pytest.mark.parametrize(
+    ("target", "phase"),
+    [
+        ("exchange", "issued-connector-activation"),
+        ("navigator", "issued-connector-activation"),
+        ("cloud-management-phase2", "provider-bootstrap"),
+    ],
+)
 def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
     target: str,
+    phase: str,
 ) -> None:
-    """Update one built image while preserving every service/configuration in the phase."""
+    """Update one built image while preserving every service/configuration in the phase.
+
+    中文：单目标镜像更新保留现有拓扑、配置与其余镜像。
+    """
 
     active, candidate, active_lock, candidate_lock = _active_image_update(target)
 
     targets, images = stage_transition._validate_phase_topology(
-        phase="issued-connector-activation",
+        phase=phase,
         image_update_target=target,
         active=active,
         candidate=candidate,
@@ -654,6 +665,483 @@ def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
     assert targets == [target]
     assert images[target]["active"]["imageId"] != images[target]["candidate"]["imageId"]
     assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
+
+
+def test_cloud_image_update_runner_state_is_bound_to_exact_exchange_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require bootstrap Compose and the live Exchange container to both disable the runner.
+
+    中文：只核对精确 Exchange 容器、DB 路径和零待处理计数，不保留其他 env。
+    """
+
+    exchange_container = {
+        "containerId": "a" * 64,
+        "imageId": _image_id(54),
+    }
+    compose = {
+        "services": {
+            "exchange": {
+                "environment": {
+                    stage_transition.EXCHANGE_CLOUD_RUNNER_ENV: "false",
+                }
+            }
+        }
+    }
+    docker_requests: list[list[str]] = []
+
+    def checked_stdout(argv: list[str], **_kwargs: Any) -> str:
+        docker_requests.append(argv)
+        if "{{json .Config.Cmd}}" in argv:
+            return json.dumps(
+                ["serve", "--integration-database", stage_transition.EXCHANGE_INTEGRATION_DATABASE]
+            )
+        if "{{json .Config.Env}}" in argv:
+            return json.dumps(
+                [
+                    "SENSITIVE_ENV_VALUE=must-not-enter-the-plan",
+                    f"{stage_transition.EXCHANGE_CLOUD_RUNNER_ENV}=false",
+                ]
+            )
+        return json.dumps(
+            {
+                "cloudRefreshNonterminalCount": 0,
+                "cloudRefreshActiveLeaseCount": 0,
+                "authorizationMonitorActiveLeaseCount": 0,
+                "emailNotificationNonterminalCount": 0,
+            }
+        )
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked_stdout)
+    state = stage_transition._cloud_runner_state_record(
+        active_compose=compose,
+        candidate_compose=copy.deepcopy(compose),
+        exchange_service=exchange_container,
+        docker_prefix=["docker"],
+    )
+
+    assert state == {
+        "exchangeContainerId": "a" * 64,
+        "exchangeImageId": _image_id(54),
+        "integrationDatabasePath": stage_transition.EXCHANGE_INTEGRATION_DATABASE,
+        "environmentName": stage_transition.EXCHANGE_CLOUD_RUNNER_ENV,
+        "activeComposeValue": "false",
+        "candidateComposeValue": "false",
+        "liveContainerValue": "false",
+        "idleCounts": {
+            "cloudRefreshNonterminalCount": 0,
+            "cloudRefreshActiveLeaseCount": 0,
+            "authorizationMonitorActiveLeaseCount": 0,
+            "emailNotificationNonterminalCount": 0,
+        },
+    }
+    assert all("SENSITIVE_ENV_VALUE" not in str(value) for value in state.values())
+    assert len(docker_requests) == 3
+    assert docker_requests[0][2:4] == ["--format", "{{json .Config.Cmd}}"]
+    assert docker_requests[1][2:4] == ["--format", "{{json .Config.Env}}"]
+    idle_command = docker_requests[2]
+    assert idle_command[1:4] == ["exec", "--user", "10001:10001"]
+    idle_script = idle_command[idle_command.index("-c") + 1]
+    assert "mode=ro" in idle_script and "PRAGMA query_only=ON" in idle_script
+    assert "cloud_refresh_outbox" in idle_script
+    assert "authorization_monitor_state" in idle_script
+    assert "email_notification_outbox" in idle_script
+    assert "document" not in idle_script
+    assert (
+        stage_transition._validate_cloud_runner_state_record(
+            state,
+            {"exchange": exchange_container},
+        )
+        == state
+    )
+
+
+@pytest.mark.parametrize(
+    ("active_value", "candidate_value", "container_environment"),
+    [
+        ("true", "false", [f"{stage_transition.EXCHANGE_CLOUD_RUNNER_ENV}=false"]),
+        ("false", "true", [f"{stage_transition.EXCHANGE_CLOUD_RUNNER_ENV}=false"]),
+        ("false", "false", [f"{stage_transition.EXCHANGE_CLOUD_RUNNER_ENV}=true"]),
+        ("false", "false", []),
+        (
+            "false",
+            "false",
+            [
+                f"{stage_transition.EXCHANGE_CLOUD_RUNNER_ENV}=false",
+                f"{stage_transition.EXCHANGE_CLOUD_RUNNER_ENV}=false",
+            ],
+        ),
+    ],
+)
+def test_cloud_image_update_fails_closed_when_exchange_runner_is_not_exactly_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    active_value: str,
+    candidate_value: str,
+    container_environment: list[str],
+) -> None:
+    """Reject runner activity, missing flags, and duplicate runtime env entries.
+
+    中文：env 不明确为单个 false 时，Cloud 镜像更新必须失败关闭。
+    """
+
+    def compose(value: str) -> dict[str, Any]:
+        return {
+            "services": {
+                "exchange": {"environment": {stage_transition.EXCHANGE_CLOUD_RUNNER_ENV: value}}
+            }
+        }
+
+    def checked_stdout(argv: list[str], **_kwargs: Any) -> str:
+        if "{{json .Config.Cmd}}" in argv:
+            return json.dumps(
+                ["serve", "--integration-database", stage_transition.EXCHANGE_INTEGRATION_DATABASE]
+            )
+        if "{{json .Config.Env}}" in argv:
+            return json.dumps(container_environment)
+        return json.dumps(
+            {
+                "cloudRefreshNonterminalCount": 0,
+                "cloudRefreshActiveLeaseCount": 0,
+                "authorizationMonitorActiveLeaseCount": 0,
+                "emailNotificationNonterminalCount": 0,
+            }
+        )
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked_stdout)
+
+    with pytest.raises(stage_transition.StageTransitionError):
+        stage_transition._cloud_runner_state_record(
+            active_compose=compose(active_value),
+            candidate_compose=compose(candidate_value),
+            exchange_service={"containerId": "b" * 64, "imageId": _image_id(55)},
+            docker_prefix=["docker"],
+        )
+
+
+def test_cloud_runner_plan_record_rejects_changed_exchange_identity() -> None:
+    """Bind runner evidence to the planned Exchange container and immutable image.
+
+    中文：计划不能跨 Exchange 容器或镜像复用。
+    """
+
+    state = {
+        "exchangeContainerId": "a" * 64,
+        "exchangeImageId": _image_id(54),
+        "integrationDatabasePath": stage_transition.EXCHANGE_INTEGRATION_DATABASE,
+        "environmentName": stage_transition.EXCHANGE_CLOUD_RUNNER_ENV,
+        "activeComposeValue": "false",
+        "candidateComposeValue": "false",
+        "liveContainerValue": "false",
+        "idleCounts": {
+            "cloudRefreshNonterminalCount": 0,
+            "cloudRefreshActiveLeaseCount": 0,
+            "authorizationMonitorActiveLeaseCount": 0,
+            "emailNotificationNonterminalCount": 0,
+        },
+    }
+    active_services = {"exchange": {"containerId": "a" * 64, "imageId": _image_id(54)}}
+    assert stage_transition._validate_cloud_runner_state_record(state, active_services) == state
+
+    with pytest.raises(stage_transition.StageTransitionError, match="runner-state evidence"):
+        stage_transition._validate_cloud_runner_state_record(
+            state,
+            {"exchange": {"containerId": "c" * 64, "imageId": _image_id(54)}},
+        )
+
+    unsafe = {**state, "liveContainerValue": "true"}
+    with pytest.raises(stage_transition.StageTransitionError, match="runner-state evidence"):
+        stage_transition._validate_cloud_runner_state_record(unsafe, active_services)
+
+
+def test_cloud_runner_idle_recheck_is_bound_to_the_frozen_plan_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan/apply checkpoints must observe the exact sealed Exchange idle record.
+
+    中文：云作业、授权监视租约或邮件队列变化都必须阻断切换。
+    """
+
+    state = {
+        "exchangeContainerId": "a" * 64,
+        "exchangeImageId": _image_id(54),
+        "integrationDatabasePath": stage_transition.EXCHANGE_INTEGRATION_DATABASE,
+        "environmentName": stage_transition.EXCHANGE_CLOUD_RUNNER_ENV,
+        "activeComposeValue": "false",
+        "candidateComposeValue": "false",
+        "liveContainerValue": "false",
+        "idleCounts": {
+            "cloudRefreshNonterminalCount": 0,
+            "cloudRefreshActiveLeaseCount": 0,
+            "authorizationMonitorActiveLeaseCount": 0,
+            "emailNotificationNonterminalCount": 0,
+        },
+    }
+    plan = {
+        "cloudRunnerState": state,
+        "activeServices": {"exchange": {"containerId": "a" * 64, "imageId": _image_id(54)}},
+    }
+    active_compose = {"services": {"exchange": {}}}
+    candidate_compose = {"services": {"exchange": {}}}
+    observed = {"value": state}
+    monkeypatch.setattr(
+        stage_transition,
+        "_cloud_runner_state_record",
+        lambda **_kwargs: observed["value"],
+    )
+
+    assert (
+        stage_transition._verify_cloud_runner_idle(
+            plan=plan,
+            active_compose=active_compose,
+            candidate_compose=candidate_compose,
+            docker_prefix=["docker"],
+        )
+        == state
+    )
+
+    observed["value"] = {
+        **state,
+        "idleCounts": {**state["idleCounts"], "cloudRefreshNonterminalCount": 1},
+    }
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="changed after Cloud update planning"
+    ):
+        stage_transition._verify_cloud_runner_idle(
+            plan=plan,
+            active_compose=active_compose,
+            candidate_compose=candidate_compose,
+            docker_prefix=["docker"],
+        )
+
+
+def test_cloud_image_update_requires_all_exchange_job_queues_and_leases_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block replacement while any fixed Exchange background queue or lease is active.
+
+    中文：Cloud refresh、授权监视器或邮件队列任一非空都不能重启 Cloud provider。
+    """
+
+    compose = {
+        "services": {
+            "exchange": {
+                "environment": {
+                    stage_transition.EXCHANGE_CLOUD_RUNNER_ENV: "false",
+                }
+            }
+        }
+    }
+
+    def checked_stdout(argv: list[str], **_kwargs: Any) -> str:
+        if "{{json .Config.Cmd}}" in argv:
+            return json.dumps(
+                ["serve", "--integration-database", stage_transition.EXCHANGE_INTEGRATION_DATABASE]
+            )
+        if "{{json .Config.Env}}" in argv:
+            return json.dumps([f"{stage_transition.EXCHANGE_CLOUD_RUNNER_ENV}=false"])
+        return json.dumps(
+            {
+                "cloudRefreshNonterminalCount": 0,
+                "cloudRefreshActiveLeaseCount": 1,
+                "authorizationMonitorActiveLeaseCount": 0,
+                "emailNotificationNonterminalCount": 0,
+            }
+        )
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked_stdout)
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="queued/running cloud, authorization-monitor, or email work",
+    ):
+        stage_transition._cloud_runner_state_record(
+            active_compose=compose,
+            candidate_compose=copy.deepcopy(compose),
+            exchange_service={"containerId": "d" * 64, "imageId": _image_id(56)},
+            docker_prefix=["docker"],
+        )
+
+
+def test_cloud_image_update_requires_exact_container_database_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not inspect a guessed Exchange DB when the live command selects another path.
+
+    中文：活动命令未固定正式数据库路径时，读取检查失败关闭。
+    """
+
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: json.dumps(
+            ["serve", "--integration-database", "/tmp/unexpected.sqlite3"]
+        ),
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="not pinned to the canonical integration database path",
+    ):
+        stage_transition._exchange_integration_database_container_path(
+            container_id="e" * 64,
+            docker_prefix=["docker"],
+        )
+
+
+def test_cloud_image_update_rechecks_active_exchange_runner_before_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject active Exchange runner drift before ingress pause or Navigator drain.
+
+    中文：活动 runner 状态不再与冻结回执一致时，不开始 Cloud 替换。
+    """
+
+    exchange_id = "a" * 64
+    exchange_image_id = _image_id(54)
+    navigator_id = "b" * 64
+    edge_id = "c" * 64
+    instance_id = "11111111-1111-4111-8111-111111111111"
+    compose = {
+        "name": "cyrene-teams-cloud",
+        "services": {
+            "exchange": {
+                "environment": {
+                    stage_transition.EXCHANGE_CLOUD_RUNNER_ENV: "false",
+                }
+            }
+        },
+    }
+    active_services = {
+        "exchange": {"containerId": exchange_id, "imageId": exchange_image_id},
+        "navigator": {"containerId": navigator_id, "imageId": _image_id(2)},
+        "teams-ingress": {"containerId": edge_id, "imageId": _image_id(3)},
+    }
+    cloud_state = {
+        "exchangeContainerId": exchange_id,
+        "exchangeImageId": exchange_image_id,
+        "integrationDatabasePath": stage_transition.EXCHANGE_INTEGRATION_DATABASE,
+        "environmentName": stage_transition.EXCHANGE_CLOUD_RUNNER_ENV,
+        "activeComposeValue": "false",
+        "candidateComposeValue": "false",
+        "liveContainerValue": "false",
+        "idleCounts": {
+            "cloudRefreshNonterminalCount": 0,
+            "cloudRefreshActiveLeaseCount": 0,
+            "authorizationMonitorActiveLeaseCount": 0,
+            "emailNotificationNonterminalCount": 0,
+        },
+    }
+    monkeypatch.setattr(stage_transition.preflight, "_compose_config", lambda *_args: compose)
+    monkeypatch.setattr(runtime_update, "_load_lock", lambda _path: {})
+    monkeypatch.setattr(
+        stage_transition,
+        "_live_service_inventory",
+        lambda **_kwargs: active_services,
+    )
+    live_state = {"value": cloud_state}
+    monkeypatch.setattr(
+        stage_transition,
+        "_cloud_runner_state_record",
+        lambda **_kwargs: live_state["value"],
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_edge_status",
+        lambda *_args, **_kwargs: {"paused": False, "revision": 7, "dead_count": 0},
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_navigator_status",
+        lambda *_args, **_kwargs: {
+            "mode": "accepting",
+            "instanceId": instance_id,
+            "generation": 4,
+        },
+    )
+    plan = {
+        "imageUpdateTarget": "cloud-management-phase2",
+        "project": "cyrene-teams-cloud",
+        "activeInputs": {
+            "composeFiles": [],
+            "envFiles": [],
+            "imageLock": {"path": "/private/active-image-lock.json"},
+        },
+        "runtimeConfigIdentity": {"active": {}},
+        "activeServices": active_services,
+        "cloudRunnerState": cloud_state,
+        "edgeDelivery": {"containerId": edge_id, "revision": 7, "deadCount": 0},
+        "navigatorDrain": {
+            "containerId": navigator_id,
+            "instanceId": instance_id,
+            "generation": 4,
+        },
+    }
+
+    stage_transition._verify_active_baseline(plan, ["docker"])
+
+    live_state["value"] = {**cloud_state, "liveContainerValue": "true"}
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="runner or durable cloud/email work is no longer idle",
+    ):
+        stage_transition._verify_active_baseline(plan, ["docker"])
+
+
+def test_cloud_candidate_render_keeps_exchange_runner_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-render the frozen candidate before apply and keep its Exchange runner off.
+
+    中文：候选 Compose 不能重新启用背景 runner。
+    """
+
+    candidate = {
+        "name": "cyrene-teams-cloud",
+        "services": {
+            "exchange": {
+                "environment": {
+                    stage_transition.EXCHANGE_CLOUD_RUNNER_ENV: "false",
+                }
+            }
+        },
+    }
+    monkeypatch.setattr(runtime_update, "_load_lock", lambda _path: {})
+    monkeypatch.setattr(stage_transition.preflight, "_compose_config", lambda *_args: candidate)
+    plan = {
+        "imageUpdateTarget": "cloud-management-phase2",
+        "project": "cyrene-teams-cloud",
+        "candidateInputs": {
+            "composeFiles": [],
+            "envFiles": [],
+            "imageLock": {"path": "/private/candidate-image-lock.json"},
+        },
+        "activeServices": {"exchange": {"containerId": "a" * 64, "imageId": _image_id(54)}},
+        "cloudRunnerState": {
+            "exchangeContainerId": "a" * 64,
+            "exchangeImageId": _image_id(54),
+            "integrationDatabasePath": stage_transition.EXCHANGE_INTEGRATION_DATABASE,
+            "environmentName": stage_transition.EXCHANGE_CLOUD_RUNNER_ENV,
+            "activeComposeValue": "false",
+            "candidateComposeValue": "false",
+            "liveContainerValue": "false",
+            "idleCounts": {
+                "cloudRefreshNonterminalCount": 0,
+                "cloudRefreshActiveLeaseCount": 0,
+                "authorizationMonitorActiveLeaseCount": 0,
+                "emailNotificationNonterminalCount": 0,
+            },
+        },
+    }
+
+    rendered, _lock = stage_transition._candidate_configs(plan, ["docker"])
+    assert rendered == candidate
+
+    candidate["services"]["exchange"]["environment"][stage_transition.EXCHANGE_CLOUD_RUNNER_ENV] = (
+        "true"
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="AuthorizationCloudRunner=false",
+    ):
+        stage_transition._candidate_configs(plan, ["docker"])
 
 
 def test_image_update_rejects_config_and_non_target_image_changes() -> None:
@@ -757,7 +1245,8 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
 
     active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
     with pytest.raises(
-        stage_transition.StageTransitionError, match="must be Exchange or Navigator"
+        stage_transition.StageTransitionError,
+        match="must be Cloud Management, Exchange, or Navigator",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -768,9 +1257,26 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
             candidate_lock=candidate_lock,
         )
 
+    active, candidate, active_lock, candidate_lock = _active_image_update("cloud-management-phase2")
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Cloud Management image updates require provider-bootstrap",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target="cloud-management-phase2",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
 
 def test_stage_transition_cli_closes_image_update_target_choices() -> None:
-    """Expose only the two existing services whose image updates have explicit V2 gates."""
+    """Expose the three services with explicit V2 image-update gates.
+
+    中文：CLI 只开放具备独立严格门禁的 Exchange、Navigator 与 Cloud 目标。
+    """
 
     parser = stage_transition._build_parser()
     commands = next(action for action in parser._actions if action.dest == "command")
@@ -781,7 +1287,11 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
         if "--image-update-target" in action.option_strings
     )
 
-    assert image_target_action.choices == ["exchange", "navigator"]
+    assert image_target_action.choices == [
+        "cloud-management-phase2",
+        "exchange",
+        "navigator",
+    ]
 
 
 def test_stage_transition_cli_passes_image_update_target_to_plan_builder(
@@ -1005,26 +1515,35 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
 
 
 @pytest.mark.parametrize(
-    ("target", "expected"),
-    [("exchange", "old"), ("navigator", "fresh"), (None, "fresh")],
+    ("target", "expected", "strict_old"),
+    [
+        ("exchange", "old", True),
+        ("cloud-management-phase2", "old", True),
+        ("navigator", "fresh", False),
+        (None, "fresh", False),
+    ],
 )
-def test_image_update_resumes_the_existing_executor_only_for_exchange(
+def test_image_update_resumes_old_executor_or_fresh_navigator_by_target(
     monkeypatch: pytest.MonkeyPatch,
     target: str | None,
     expected: str,
+    strict_old: bool,
 ) -> None:
-    """Exchange-only updates resume the old generation; Navigator updates keep the fresh gate."""
+    """Non-Navigator image updates fence the old generation; Navigator uses the fresh gate.
 
-    observed: list[str] = []
+    中文：只更新 Exchange 或 Cloud 时沿用原执行器实例，更新 Navigator 则走新实例门。
+    """
+
+    observed: list[tuple[str, bool]] = []
     monkeypatch.setattr(
         stage_transition,
         "_resume_old_executor_if_needed",
-        lambda **_kwargs: observed.append("old"),
+        lambda **kwargs: observed.append(("old", kwargs.get("require_original_instance") is True)),
     )
     monkeypatch.setattr(
         stage_transition,
         "_resume_live_navigator",
-        lambda **_kwargs: observed.append("fresh"),
+        lambda **_kwargs: observed.append(("fresh", False)),
     )
 
     stage_transition._resume_executor_after_transition(
@@ -1034,7 +1553,7 @@ def test_image_update_resumes_the_existing_executor_only_for_exchange(
         docker_prefix=["docker"],
     )
 
-    assert observed == [expected]
+    assert observed == [(expected, strict_old)]
 
 
 def test_resume_old_executor_accepts_only_the_planned_navigator_generation(
@@ -1290,8 +1809,10 @@ def test_resume_old_executor_resumes_only_the_journaled_drain_generation(
     ("phase", "target", "required"),
     [
         ("provider-bootstrap", "exchange", True),
+        ("provider-bootstrap", "cloud-management-phase2", True),
         ("provider-bootstrap", "navigator", False),
         ("issued-connector-activation", "exchange", True),
+        ("issued-connector-activation", "cloud-management-phase2", True),
         ("issued-connector-activation", "navigator", True),
         ("provider-bootstrap", None, False),
         ("issued-connector-activation", None, True),
@@ -2556,10 +3077,15 @@ def _exchange_readiness_fixture(tmp_path: Path) -> tuple[dict[str, Any], dict[st
     return snapshot, compose
 
 
-def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
+@pytest.mark.parametrize("target", ["exchange", "cloud-management-phase2"])
+def test_bootstrap_image_readiness_preserves_only_existing_bindings(
     tmp_path: Path,
+    target: str,
 ) -> None:
-    """A bootstrap-phase image update verifies the current catalog without requiring future providers."""
+    """A bootstrap-phase image update verifies the current catalog without requiring future providers.
+
+    中文：Bootstrap 镜像更新只校验当前已启用绑定，不要求尚未签发的连接器。
+    """
 
     snapshot, compose = _exchange_readiness_fixture(tmp_path)
     bindings: list[dict[str, Any]] = []
@@ -2674,7 +3200,7 @@ def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
         snapshot=snapshot,
         compose=compose,
         phase="provider-bootstrap",
-        image_update_target="exchange",
+        image_update_target=target,
     )
 
     assert receipt["verifiedProviderIds"] == ["computer", "github"]
@@ -2690,7 +3216,7 @@ def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
             snapshot=changed_snapshot,
             compose=compose,
             phase="provider-bootstrap",
-            image_update_target="exchange",
+            image_update_target=target,
         )
 
     changed_catalog = copy.deepcopy(snapshot)
@@ -2703,7 +3229,7 @@ def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
             snapshot=changed_catalog,
             compose=compose,
             phase="provider-bootstrap",
-            image_update_target="exchange",
+            image_update_target=target,
         )
 
 
@@ -2878,6 +3404,15 @@ def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
     assert receipt["status"] == "LIVE_VERIFIED"
     assert receipt["verifiedProviderIds"] == ["azure", "gcp", "huggingface"]
     assert receipt["bindingCount"] == 3
+
+    cloud_image_receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase="issued-connector-activation",
+        image_update_target="cloud-management-phase2",
+    )
+    assert cloud_image_receipt["status"] == "LIVE_VERIFIED"
+    assert cloud_image_receipt["verifiedProviderIds"] == ["azure", "gcp", "huggingface"]
 
     wrong_access_mode = copy.deepcopy(snapshot)
     next(row for row in wrong_access_mode["connections"] if row["providerId"] == "huggingface")[
