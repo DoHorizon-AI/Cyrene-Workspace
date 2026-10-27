@@ -14,4 +14,3 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 /usr/local/lib/cyrene-teams-deployment/current/release_deploy.py reconcile --policy /etc/cyrene/teams-cloud-deployment.json --receipt /var/lib/cyrene-connectors-runtime/.artifacts/releases/reconcile-receipt.json
 TimeoutStartSec=55min
 TimeoutStopSec=30s
-
