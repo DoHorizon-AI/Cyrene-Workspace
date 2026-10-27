@@ -771,6 +771,19 @@ def _full_cloud_image_update(
     return active, candidate, active_lock, candidate_lock
 
 
+def _active_memory_update(
+    tmp_path: Path, target: str = "teams-ingress"
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build an exact 14-service Compose pair with one no-swap memory increase."""
+
+    active, _unused_candidate, active_lock, _unused_lock = _listener_repair_pair(tmp_path)
+    candidate = copy.deepcopy(active)
+    candidate_service = candidate["services"][target]
+    candidate_service["mem_limit"] = "256m"
+    candidate_service["memswap_limit"] = "256m"
+    return active, candidate, active_lock
+
+
 @pytest.mark.parametrize(
     ("target", "phase"),
     [
@@ -839,6 +852,732 @@ def test_issued_cloud_image_update_preserves_the_exact_fourteen_service_inventor
             candidate=candidate,
             active_lock=active_lock,
             candidate_lock=candidate_lock,
+        )
+
+
+def test_memory_update_changes_only_one_existing_service_no_swap_limit(tmp_path: Path) -> None:
+    """Permit one strictly higher memory limit while retaining all 14 service images."""
+
+    active, candidate, lock = _active_memory_update(tmp_path)
+    targets, services = stage_transition._validate_phase_topology(
+        phase="issued-connector-activation",
+        memory_update_target="teams-ingress",
+        active=active,
+        candidate=candidate,
+        active_lock=lock,
+        candidate_lock=copy.deepcopy(lock),
+    )
+
+    assert targets == ["teams-ingress"]
+    assert set(services) == stage_transition.RUNTIME_SERVICE_SET
+    assert services["teams-ingress"]["configChanged"] is True
+    assert all(
+        row["added"] is False
+        and row["configChanged"] is (name == "teams-ingress")
+        and row["active"] == row["candidate"]
+        for name, row in services.items()
+    )
+
+
+def test_memory_update_accepts_matching_optional_deploy_memory_limit(tmp_path: Path) -> None:
+    """Keep a present deploy memory limit equal to the Compose service limit."""
+
+    active, candidate, lock = _active_memory_update(tmp_path)
+    active_service = active["services"]["teams-ingress"]
+    candidate_service = candidate["services"]["teams-ingress"]
+    active_service["deploy"] = {"resources": {"limits": {"memory": "128m", "cpus": "0.05"}}}
+    candidate_service["deploy"] = {"resources": {"limits": {"memory": "256m", "cpus": "0.05"}}}
+
+    targets, _services = stage_transition._validate_phase_topology(
+        phase="issued-connector-activation",
+        memory_update_target="teams-ingress",
+        active=active,
+        candidate=candidate,
+        active_lock=lock,
+        candidate_lock=lock,
+    )
+    assert targets == ["teams-ingress"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("decrease", "only increase"),
+        ("swap", "no-swap"),
+        ("cpu", "only the selected service memory limit fields"),
+        ("security", "only the selected service memory limit fields"),
+        ("lock", "exact image lock"),
+        ("deploy_mismatch", "deploy.resources.limits.memory must match"),
+        ("bootstrap_phase", "issued-connector-activation"),
+    ],
+)
+def test_memory_update_rejects_decreases_and_unrelated_drift(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    """Reject decreases, swap, image, CPU, security, or phase changes before apply."""
+
+    active, candidate, lock = _active_memory_update(tmp_path)
+    target = candidate["services"]["teams-ingress"]
+    phase = "issued-connector-activation"
+    candidate_lock = copy.deepcopy(lock)
+    if mutation == "decrease":
+        target["mem_limit"] = target["memswap_limit"] = "64m"
+    elif mutation == "swap":
+        target["memswap_limit"] = "512m"
+    elif mutation == "cpu":
+        target["cpus"] = "0.10"
+    elif mutation == "security":
+        target["security_opt"] = ["no-new-privileges:true"]
+    elif mutation == "lock":
+        candidate_lock["images"][0]["imageId"] = _image_id(999)
+    elif mutation == "deploy_mismatch":
+        target["deploy"] = {"resources": {"limits": {"memory": "512m"}}}
+    else:
+        phase = "provider-bootstrap"
+
+    with pytest.raises(stage_transition.StageTransitionError, match=message):
+        stage_transition._validate_phase_topology(
+            phase=phase,
+            memory_update_target="teams-ingress",
+            active=active,
+            candidate=candidate,
+            active_lock=lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def test_memory_update_rejects_unbounded_inventory_and_non_target_selection(tmp_path: Path) -> None:
+    """Require exactly 14 active services and a target from the runtime inventory."""
+
+    active, candidate, lock = _active_memory_update(tmp_path)
+    with pytest.raises(stage_transition.StageTransitionError, match="one existing runtime service"):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            memory_update_target="operator-bootstrap",
+            active=active,
+            candidate=candidate,
+            active_lock=lock,
+            candidate_lock=lock,
+        )
+
+    active, candidate, lock = _active_memory_update(tmp_path)
+    del active["services"]["computer-runtime"]
+    del candidate["services"]["computer-runtime"]
+    with pytest.raises(stage_transition.StageTransitionError, match="exact active 14-service"):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            memory_update_target="teams-ingress",
+            active=active,
+            candidate=candidate,
+            active_lock=lock,
+            candidate_lock=lock,
+        )
+
+
+def test_memory_update_actual_capacity_checks_all_fourteen_live_containers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use actual Docker limits, not only Compose totals, for the host capacity gate."""
+
+    compose, _candidate, _lock = _active_memory_update(tmp_path)
+    live = stage_transition._runtime_service_inventory(compose)
+    services: dict[str, dict[str, Any]] = {}
+    rows: list[dict[str, Any]] = []
+    total_bytes = 0
+    for index, name in enumerate(stage_transition.RUNTIME_SERVICE_ORDER, start=1):
+        service = live[name]
+        memory_bytes = preflight._memory_limit_bytes(service["mem_limit"])
+        cpu_limit = preflight._cpu_limit_decimal(service["cpus"])
+        assert memory_bytes is not None and cpu_limit is not None
+        total_bytes += memory_bytes
+        container_id = f"{index:064x}"
+        image_id = _image_id(index)
+        services[name] = {
+            "containerId": container_id,
+            "imageRef": service["image"],
+            "imageId": image_id,
+        }
+        rows.append(
+            {
+                "Id": container_id,
+                "Image": image_id,
+                "Config": {
+                    "Image": service["image"],
+                    "Labels": {
+                        "com.docker.compose.project": compose["name"],
+                        "com.docker.compose.service": name,
+                    },
+                },
+                "HostConfig": {
+                    "Memory": memory_bytes,
+                    "MemorySwap": memory_bytes,
+                    "NanoCpus": int(cpu_limit * 1_000_000_000),
+                },
+            }
+        )
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda _argv, **_kwargs: json.dumps(rows),
+    )
+
+    capacity = stage_transition._memory_update_actual_capacity(
+        compose=compose,
+        services=services,
+        max_memory_mib=3584,
+        max_cpus=1.95,
+        docker_prefix=["docker"],
+    )
+    assert capacity["serviceCount"] == 14
+    assert capacity["totalMemoryBytes"] == total_bytes
+    assert capacity["maxMemoryBytes"] == 3584 * preflight.MIB
+    assert capacity["totalNanoCpus"] <= 1_950_000_000
+
+    rows[0]["HostConfig"]["Memory"] += preflight.MIB
+    with pytest.raises(stage_transition.StageTransitionError, match="actual memory limits differ"):
+        stage_transition._memory_update_actual_capacity(
+            compose=compose,
+            services=services,
+            max_memory_mib=3584,
+            max_cpus=1.95,
+            docker_prefix=["docker"],
+        )
+
+
+def test_memory_update_process_identity_is_pinned_before_and_after() -> None:
+    """Require the same healthy process, start time, and restart count around update."""
+
+    active_service = {
+        "containerId": "a" * 64,
+        "imageRef": "example.invalid/teams-ingress:fixed",
+        "imageId": _image_id(7),
+    }
+    planned_state = {
+        "containerComposeConfigHash": "b" * 64,
+        "containerConfigSha256": "c" * 64,
+        "hostConfigSha256WithoutMemory": "d" * 64,
+        "processId": 1879250,
+        "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+        "restartCount": 4,
+    }
+    readback = {
+        "containerId": active_service["containerId"],
+        "imageRef": active_service["imageRef"],
+        "imageId": active_service["imageId"],
+        "composeConfigHash": planned_state["containerComposeConfigHash"],
+        "containerConfigSha256": planned_state["containerConfigSha256"],
+        "hostConfigSha256WithoutMemory": planned_state["hostConfigSha256WithoutMemory"],
+        "processId": planned_state["processId"],
+        "processStartedAt": planned_state["processStartedAt"],
+        "restartCount": planned_state["restartCount"],
+        "memoryBytes": 128 * preflight.MIB,
+        "memorySwapBytes": 128 * preflight.MIB,
+        "health": "healthy",
+    }
+
+    stage_transition._verify_memory_update_snapshot(
+        readback,
+        planned_state,
+        active_service,
+        expected_memory_bytes=128 * preflight.MIB,
+    )
+
+    for field, changed in (
+        ("processId", planned_state["processId"] + 1),
+        ("processStartedAt", "2026-10-27T18:00:01.000000000Z"),
+        ("restartCount", planned_state["restartCount"] + 1),
+    ):
+        mutated_readback = dict(readback)
+        mutated_readback[field] = changed
+        with pytest.raises(stage_transition.StageTransitionError, match="read-back differs"):
+            stage_transition._verify_memory_update_snapshot(
+                mutated_readback,
+                planned_state,
+                active_service,
+                expected_memory_bytes=128 * preflight.MIB,
+            )
+
+
+def _install_memory_update_apply_mocks(
+    monkeypatch: pytest.MonkeyPatch, *, after_memory_bytes: int
+) -> tuple[dict[str, Any], dict[str, Any], list[list[str]]]:
+    """Prepare a journaled hot-update fixture with read-only Docker responses."""
+
+    container_id = "a" * 64
+    image_id = _image_id(7)
+    actual_hash = "b" * 64
+    config_hash = "c" * 64
+    host_hash = "d" * 64
+    state = {
+        "activeMemoryBytes": 128 * preflight.MIB,
+        "candidateMemoryBytes": 256 * preflight.MIB,
+        "activeRuntimeMemoryBytes": 3392 * preflight.MIB,
+        "activeRuntimeNanoCpus": 1_900_000_000,
+        "activeComposeConfigHash": actual_hash,
+        "candidateComposeConfigHash": "e" * 64,
+        "containerComposeConfigHash": actual_hash,
+        "configHashRelation": "MATCHES_ACTIVE",
+        "configHashProofOperationId": None,
+        "configHashProofPlanSha256": None,
+        "containerConfigSha256": config_hash,
+        "hostConfigSha256WithoutMemory": host_hash,
+        "processId": 1879250,
+        "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+        "restartCount": 4,
+    }
+    active_service = {
+        "containerId": container_id,
+        "imageRef": "example.invalid/teams-ingress:fixed",
+        "imageId": image_id,
+        "health": "healthy",
+        "networkNames": ["teams-proxy-private"],
+        "mounts": [],
+    }
+    plan = {
+        "project": "cyrene-teams-cloud",
+        "memoryUpdateTarget": "teams-ingress",
+        "memoryUpdateState": state,
+        "activeServices": {"teams-ingress": active_service},
+        "candidateServices": {"teams-ingress": {"active": {}, "candidate": {}}},
+        "runtimeConfigIdentity": {
+            "active": {"teams-ingress": []},
+            "candidate": {"teams-ingress": []},
+        },
+        "candidatePreflight": {
+            "maxMemoryMiB": 3584,
+            "maxCpus": 1.95,
+            "minimumMemAvailableMiB": 1024,
+        },
+        "edgeDelivery": {"containerId": "f" * 64, "revision": 12, "deadCount": 0},
+        "navigatorDrain": {
+            "containerId": "9" * 64,
+            "instanceId": "navigator-instance",
+            "generation": 3,
+        },
+    }
+    journal: dict[str, Any] = {
+        "state": "RUNNING",
+        "completedTargets": [],
+        "targetProgress": {"teams-ingress": {"phase": "PREPARED", "applyIntent": False}},
+        "memoryUpdate": {
+            "required": True,
+            "target": "teams-ingress",
+            "plannedState": state,
+            "attemptIntent": False,
+            "beforeReadback": None,
+            "afterReadback": None,
+            "beforeRuntimeLimits": None,
+            "afterRuntimeLimits": None,
+            "beforeExchangeReadiness": None,
+            "afterExchangeReadiness": None,
+            "outcome": "NOT_STARTED",
+        },
+        "exchangeReadiness": {"required": True, "verified": False, "receipt": None},
+        "edge": {"initialDeadCount": 0, "latestDeadCount": 0},
+        "selection": {"promoted": False},
+    }
+    snapshots = [
+        {
+            "containerId": container_id,
+            "imageRef": active_service["imageRef"],
+            "imageId": image_id,
+            "memoryBytes": 128 * preflight.MIB,
+            "memorySwapBytes": 128 * preflight.MIB,
+            "processId": 1879250,
+            "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+            "restartCount": 4,
+            "health": "healthy",
+            "composeConfigHash": actual_hash,
+            "containerConfigSha256": config_hash,
+            "hostConfigSha256WithoutMemory": host_hash,
+        },
+        {
+            "containerId": container_id,
+            "imageRef": active_service["imageRef"],
+            "imageId": image_id,
+            "memoryBytes": after_memory_bytes,
+            "memorySwapBytes": after_memory_bytes,
+            "processId": 1879250,
+            "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+            "restartCount": 4,
+            "health": "healthy",
+            "composeConfigHash": actual_hash,
+            "containerConfigSha256": config_hash,
+            "hostConfigSha256WithoutMemory": host_hash,
+        },
+    ]
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        stage_transition, "_memory_update_container_snapshot", lambda **_kwargs: snapshots.pop(0)
+    )
+    monkeypatch.setattr(
+        stage_transition, "_verify_memory_update_config_hash_relation", lambda **_kwargs: None
+    )
+    capacities = iter(
+        [
+            {
+                "serviceCount": 14,
+                "totalMemoryBytes": 3392 * preflight.MIB,
+                "totalNanoCpus": 1_900_000_000,
+            },
+            {
+                "serviceCount": 14,
+                "totalMemoryBytes": 3520 * preflight.MIB,
+                "totalNanoCpus": 1_900_000_000,
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        stage_transition, "_memory_update_actual_capacity", lambda **_kwargs: next(capacities)
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_record_exchange_readiness",
+        lambda **_kwargs: journal["exchangeReadiness"].update(
+            verified=True, receipt={"status": "LIVE_VERIFIED", "bindingCount": 14}
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_edge_status",
+        lambda *_args, **_kwargs: {"paused": False, "revision": 12, "dead_count": 0},
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_current_navigator_status",
+        lambda *_args, **_kwargs: {
+            "mode": "accepting",
+            "instanceId": "navigator-instance",
+            "generation": 3,
+        },
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_run_command",
+        lambda argv, **_kwargs: commands.append(argv) or SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr(
+        stage_transition, "_live_service_inventory", lambda **_kwargs: plan["activeServices"]
+    )
+    monkeypatch.setattr(runtime_update, "_verify_live_network_membership", lambda *_args: None)
+    monkeypatch.setattr(
+        stage_transition,
+        "_validate_post_update_capacity",
+        lambda **_kwargs: {"memAvailableMiB": 2048, "totalRssMiB": 500},
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_promote_selection",
+        lambda **_kwargs: {"operationId": "memory-operation"},
+    )
+    monkeypatch.setattr(
+        stage_transition, "_selection_summary", lambda _selection: {"promoted": True}
+    )
+    monkeypatch.setattr(
+        stage_transition, "_journal_summary", lambda _journal: {"state": _journal["state"]}
+    )
+
+    def write_journal(
+        _path: Path, current: dict[str, Any], phase: str, *, state: str | None = None
+    ) -> None:
+        current["phase"] = phase
+        if state is not None:
+            current["state"] = state
+
+    monkeypatch.setattr(stage_transition, "_write_journal", write_journal)
+    for name in ("_pause_edge", "_drain_navigator"):
+        monkeypatch.setattr(
+            runtime_update,
+            name,
+            lambda _name=name, **_kwargs: pytest.fail(f"unexpected {_name}"),
+        )
+    monkeypatch.setattr(
+        stage_transition,
+        "_atomic_sqlite_snapshot",
+        lambda **_kwargs: pytest.fail("unexpected SQLite snapshot"),
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_compose_target_update",
+        lambda **_kwargs: pytest.fail("unexpected Compose recreation"),
+    )
+    return plan, journal, commands
+
+
+def test_memory_update_uses_one_docker_update_without_pausing_or_recreating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Apply one in-place memory/swap increase and preserve ingress and Navigator."""
+
+    plan, journal, commands = _install_memory_update_apply_mocks(
+        monkeypatch, after_memory_bytes=256 * preflight.MIB
+    )
+    result = stage_transition._apply_memory_update(
+        plan=plan,
+        active_compose={"name": "cyrene-teams-cloud", "services": {}},
+        candidate_compose={"name": "cyrene-teams-cloud", "services": {}},
+        candidate_lock={},
+        journal=journal,
+        journal_path=tmp_path / "journal.json",
+        docker_prefix=["docker"],
+    )
+
+    assert commands == [
+        [
+            "docker",
+            "update",
+            "--memory",
+            str(256 * preflight.MIB),
+            "--memory-swap",
+            str(256 * preflight.MIB),
+            plan["activeServices"]["teams-ingress"]["containerId"],
+        ]
+    ]
+    assert result["state"] == "APPLIED"
+    assert journal["targetProgress"]["teams-ingress"]["phase"] == "APPLIED"
+    assert journal["memoryUpdate"]["afterRuntimeLimits"]["totalMemoryBytes"] == 3520 * preflight.MIB
+
+
+def test_memory_update_partial_readback_requires_recovery_without_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never lower or replay a limit when the single Docker update reads back partially."""
+
+    plan, journal, commands = _install_memory_update_apply_mocks(
+        monkeypatch, after_memory_bytes=192 * preflight.MIB
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="partial or its identity changed"
+    ):
+        stage_transition._apply_memory_update(
+            plan=plan,
+            active_compose={"name": "cyrene-teams-cloud", "services": {}},
+            candidate_compose={"name": "cyrene-teams-cloud", "services": {}},
+            candidate_lock={},
+            journal=journal,
+            journal_path=tmp_path / "journal.json",
+            docker_prefix=["docker"],
+        )
+
+    assert len(commands) == 1
+    assert journal["state"] == "RECOVERY_REQUIRED"
+    assert journal["memoryUpdate"]["outcome"] == "RECOVERY_REQUIRED"
+    assert journal["selection"]["promoted"] is False
+
+
+def test_memory_update_timeout_stays_recovery_required_even_if_first_readback_is_old(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Treat a timed-out Docker API as still in flight even when one read sees old limits."""
+
+    plan, journal, commands = _install_memory_update_apply_mocks(
+        monkeypatch, after_memory_bytes=128 * preflight.MIB
+    )
+
+    def timed_out(argv: list[str], **_kwargs: Any) -> None:
+        commands.append(argv)
+        raise runtime_update.RuntimeUpdateOutcomeUnknown("simulated timeout")
+
+    monkeypatch.setattr(runtime_update, "_run_command", timed_out)
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="daemon outcome may still complete"
+    ):
+        stage_transition._apply_memory_update(
+            plan=plan,
+            active_compose={"name": "cyrene-teams-cloud", "services": {}},
+            candidate_compose={"name": "cyrene-teams-cloud", "services": {}},
+            candidate_lock={},
+            journal=journal,
+            journal_path=tmp_path / "journal.json",
+            docker_prefix=["docker"],
+        )
+
+    assert len(commands) == 1
+    assert journal["state"] == "RECOVERY_REQUIRED"
+    assert journal["memoryUpdate"]["outcome"] == "RECOVERY_REQUIRED"
+    assert journal["selection"]["promoted"] is False
+
+
+def test_memory_update_stale_compose_hash_follows_existing_selector_journals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carry a stale config-hash through promotion, even after a later process restart."""
+
+    memory_operation = "00000000-0000-4000-8000-000000000001"
+    normal_operation = "00000000-0000-4000-8000-000000000002"
+    current_selector = {
+        "schemaVersion": stage_transition.SELECTION_SCHEMA,
+        "operationId": normal_operation,
+    }
+    previous_selector = {
+        "schemaVersion": stage_transition.SELECTION_SCHEMA,
+        "operationId": memory_operation,
+    }
+    current_sha = stage_transition._sha256_bytes(
+        stage_transition._canonical_json(current_selector) + b"\n"
+    )
+    previous_sha = stage_transition._sha256_bytes(
+        stage_transition._canonical_json(previous_selector) + b"\n"
+    )
+    active_hash = "a" * 64
+    container_hash = "b" * 64
+    plan_sha_by_op = {memory_operation: "c" * 64, normal_operation: "d" * 64}
+    plan_by_path = {
+        str(tmp_path / f"{memory_operation}.plan.json"): {
+            "operationId": memory_operation,
+            "planSha256": plan_sha_by_op[memory_operation],
+            "memoryUpdateTarget": "teams-ingress",
+            "memoryUpdateState": {
+                "candidateComposeConfigHash": active_hash,
+                "containerComposeConfigHash": container_hash,
+                "processId": 100,
+                "processStartedAt": "2026-10-27T17:00:00.000000000Z",
+                "restartCount": 3,
+            },
+            "candidateSelectionFile": "/private/runtime-selection.json",
+            "activeServices": {
+                "teams-ingress": {
+                    "containerId": "e" * 64,
+                    "imageId": _image_id(1),
+                    "processId": 100,
+                }
+            },
+            "activeSelection": {"document": None},
+        },
+        str(tmp_path / f"{normal_operation}.plan.json"): {
+            "operationId": normal_operation,
+            "planSha256": plan_sha_by_op[normal_operation],
+            "candidateSelectionFile": "/private/runtime-selection.json",
+            "activeSelection": {
+                "document": previous_selector,
+                "sha256": previous_sha,
+            },
+        },
+    }
+    for plan_path in plan_by_path:
+        path = Path(plan_path)
+        path.write_text("{}", encoding="utf-8")
+        path.chmod(0o600)
+    journal_by_id = {
+        memory_operation: {
+            "state": "APPLIED",
+            "planSha256": plan_sha_by_op[memory_operation],
+            "planPath": str(tmp_path / f"{memory_operation}.plan.json"),
+            "selection": {
+                "path": "/private/runtime-selection.json",
+                "promoted": True,
+                "newSha256": previous_sha,
+            },
+            "memoryUpdate": {
+                "required": True,
+                "target": "teams-ingress",
+                "outcome": "APPLIED_SAME_CONTAINER",
+                "afterReadback": {
+                    "containerId": "e" * 64,
+                    "composeConfigHash": container_hash,
+                    "processId": 100,
+                    "processStartedAt": "2026-10-27T17:00:00.000000000Z",
+                    "restartCount": 3,
+                },
+            },
+        },
+        normal_operation: {
+            "state": "APPLIED",
+            "planSha256": plan_sha_by_op[normal_operation],
+            "planPath": str(tmp_path / f"{normal_operation}.plan.json"),
+            "selection": {
+                "path": "/private/runtime-selection.json",
+                "promoted": True,
+                "newSha256": current_sha,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        stage_transition,
+        "_journal_path",
+        lambda _directory, operation_id: tmp_path / f"{operation_id}.json",
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_read_journal",
+        lambda path: journal_by_id[Path(path).stem],
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_read_json",
+        lambda path, _label: plan_by_path[str(path)],
+    )
+    monkeypatch.setattr(stage_transition, "_validate_plan", lambda _plan: None)
+    monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
+
+    proof = stage_transition._prior_memory_update_hash_proof(
+        selection_record={"document": current_selector, "sha256": current_sha},
+        selection_path="/private/runtime-selection.json",
+        journal_dir=tmp_path,
+        target="teams-ingress",
+        active_compose_hash=active_hash,
+        container_compose_hash=container_hash,
+        active_service={
+            "containerId": "e" * 64,
+            "imageId": _image_id(1),
+            "processId": 201,
+            "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+            "restartCount": 4,
+        },
+    )
+    assert proof == {"operationId": memory_operation, "planSha256": "c" * 64}
+
+    assert (
+        stage_transition._prior_memory_update_hash_proof(
+            selection_record={"document": current_selector, "sha256": current_sha},
+            selection_path="/private/runtime-selection.json",
+            journal_dir=tmp_path,
+            target="teams-ingress",
+            active_compose_hash=active_hash,
+            container_compose_hash=container_hash,
+            active_service={
+                "containerId": "f" * 64,
+                "imageId": _image_id(1),
+                "processId": 201,
+                "processStartedAt": "2026-10-27T18:00:00.000000000Z",
+                "restartCount": 4,
+            },
+        )
+        is None
+    )
+
+
+def test_memory_update_compose_hash_uses_canonical_profile_and_output_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Use Compose's selected-service hash and reject any ambiguous CLI output."""
+
+    calls: list[list[str]] = []
+    expected_hash = "a" * 64
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda argv, **_kwargs: calls.append(argv) or f"teams-ingress {expected_hash}\n",
+    )
+    actual_hash = stage_transition._compose_service_config_hash(
+        service_name="teams-ingress",
+        compose_files=[tmp_path / "active.yaml"],
+        env_files=[tmp_path / "runtime.env"],
+        docker_prefix=["docker"],
+    )
+    assert actual_hash == expected_hash
+    assert calls[0][-3:] == ["config", "--hash", "teams-ingress"]
+    assert [
+        calls[0][index + 1] for index, item in enumerate(calls[0][:-1]) if item == "--profile"
+    ] == list(preflight.ACTIVE_COMPOSE_PROFILES)
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", lambda *_args, **_kwargs: "ambiguous")
+    with pytest.raises(stage_transition.StageTransitionError, match="config hash is malformed"):
+        stage_transition._compose_service_config_hash(
+            service_name="teams-ingress",
+            compose_files=[tmp_path / "active.yaml"],
+            env_files=[tmp_path / "runtime.env"],
+            docker_prefix=["docker"],
         )
 
 
@@ -1794,6 +2533,12 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
         "navigator",
         "navigator-persistence",
     ]
+    memory_target_action = next(
+        action
+        for action in plan_parser._actions
+        if "--memory-update-target" in action.option_strings
+    )
+    assert memory_target_action.choices == sorted(stage_transition.RUNTIME_SERVICE_SET)
     listener_action = next(
         action for action in plan_parser._actions if "--listener-repair" in action.option_strings
     )
@@ -1802,10 +2547,11 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
 
 
 @pytest.mark.parametrize(
-    ("phase", "image_target", "listener_repair"),
+    ("phase", "image_target", "memory_target", "listener_repair"),
     [
-        ("issued-connector-activation", "exchange", False),
-        ("provider-bootstrap", None, True),
+        ("issued-connector-activation", "exchange", None, False),
+        ("provider-bootstrap", None, None, True),
+        ("issued-connector-activation", None, "teams-ingress", False),
     ],
 )
 def test_stage_transition_cli_passes_image_update_target_to_plan_builder(
@@ -1813,6 +2559,7 @@ def test_stage_transition_cli_passes_image_update_target_to_plan_builder(
     tmp_path: Path,
     phase: str,
     image_target: str | None,
+    memory_target: str | None,
     listener_repair: bool,
 ) -> None:
     """Forward either closed operation selector without inferring it from the phase.
@@ -1831,6 +2578,8 @@ def test_stage_transition_cli_passes_image_update_target_to_plan_builder(
     arguments = ["plan", "--phase", phase]
     if image_target is not None:
         arguments.extend(["--image-update-target", image_target])
+    if memory_target is not None:
+        arguments.extend(["--memory-update-target", memory_target])
     if listener_repair:
         arguments.append("--listener-repair")
     arguments.extend(
@@ -1875,6 +2624,7 @@ def test_stage_transition_cli_passes_image_update_target_to_plan_builder(
     assert stage_transition.main(arguments) == 0
     assert captured["phase"] == phase
     assert captured["image_update_target"] == image_target
+    assert captured["memory_update_target"] == memory_target
     assert captured["listener_repair"] is listener_repair
 
 
@@ -2059,6 +2809,63 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
             active_secrets_dir="/private/secrets",
             active_inputs=active_inputs,
             candidate_inputs=changed_seed_inputs,
+            runtime_config_identity=identity,
+        )
+
+
+def test_memory_update_requires_same_selector_env_lock_and_mount_identity() -> None:
+    """Bind a hot memory update to the active selector and identical runtime inputs."""
+
+    active_inputs, candidate_inputs, selection, identity = _image_update_selection_inputs()
+    candidate_inputs["imageLock"] = copy.deepcopy(active_inputs["imageLock"])
+    stage_transition._validate_image_update_selection_contract(
+        target=None,
+        memory_update_target="teams-ingress",
+        phase="issued-connector-activation",
+        project="cyrene-teams-cloud",
+        selection_record=selection,
+        selection_path="/private/runtime-selection.json",
+        active_config_dir="/private/config",
+        candidate_config_dir="/private/config",
+        active_secrets_dir="/private/secrets",
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity=identity,
+    )
+
+    changed_env = copy.deepcopy(candidate_inputs)
+    changed_env["envFiles"][0]["sha256"] = "9" * 64
+    with pytest.raises(stage_transition.StageTransitionError, match="env files and image lock"):
+        stage_transition._validate_image_update_selection_contract(
+            target=None,
+            memory_update_target="teams-ingress",
+            phase="issued-connector-activation",
+            project="cyrene-teams-cloud",
+            selection_record=selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=changed_env,
+            runtime_config_identity=identity,
+        )
+
+    changed_lock = copy.deepcopy(candidate_inputs)
+    changed_lock["imageLock"]["sha256"] = "8" * 64
+    with pytest.raises(stage_transition.StageTransitionError, match="env files and image lock"):
+        stage_transition._validate_image_update_selection_contract(
+            target=None,
+            memory_update_target="teams-ingress",
+            phase="issued-connector-activation",
+            project="cyrene-teams-cloud",
+            selection_record=selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=changed_lock,
             runtime_config_identity=identity,
         )
 

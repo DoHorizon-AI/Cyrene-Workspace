@@ -24,6 +24,7 @@ import tempfile
 import time
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,10 @@ RUNTIME_SERVICE_ORDER = (
     "cloud-management-phase2",
 )
 RUNTIME_SERVICE_SET = frozenset(RUNTIME_SERVICE_ORDER)
+# A hot memory update may target one already-running service from the active profile.
+# It never adds a service or changes the mutable-stage target set.
+MEMORY_UPDATE_TARGETS = RUNTIME_SERVICE_SET
+MEMORY_UPDATE_MUTATION_MODE = "DOCKER_UPDATE_IN_PLACE_MEMORY_ONLY"
 RECOVERED_PERSISTENCE_PRINCIPAL_CONFIG = "recovered-navigator-persistence-navigator-principal"
 NAVIGATOR_PRINCIPAL_CONFIG_FILENAME = "navigator-principal-config.json"
 NAVIGATOR_PRINCIPAL_CONFIG_TARGET = "/run/secrets/principal-config.json"
@@ -1751,6 +1756,7 @@ def _validate_phase_topology(
     *,
     phase: str,
     image_update_target: str | None = None,
+    memory_update_target: str | None = None,
     listener_repair: bool = False,
     active: dict[str, Any],
     candidate: dict[str, Any],
@@ -1773,10 +1779,23 @@ def _validate_phase_topology(
     old_services = _runtime_service_inventory(active)
     new_services = _runtime_service_inventory(candidate)
     if listener_repair:
-        if image_update_target is not None:
-            raise StageTransitionError("listener repair cannot also select an image update target")
+        if image_update_target is not None or memory_update_target is not None:
+            raise StageTransitionError("listener repair cannot select another update target")
         return _validate_listener_repair_topology(
             phase=phase,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+            old_services=old_services,
+            new_services=new_services,
+        )
+    if image_update_target is not None and memory_update_target is not None:
+        raise StageTransitionError("image and memory update modes are mutually exclusive")
+    if memory_update_target is not None:
+        return _validate_memory_update_topology(
+            phase=phase,
+            target=memory_update_target,
             active=active,
             candidate=candidate,
             active_lock=active_lock,
@@ -1886,6 +1905,585 @@ def _validate_phase_topology(
             "provider bootstrap must include both newly locked provider services"
         )
     return ordered_targets, target_images
+
+
+def _memory_update_limit_bytes(service: dict[str, Any], label: str) -> int:
+    """Read finite no-swap memory limits, including an optional deploy limit.
+
+    中文：Compose 资源字段必须明确有限，且 swap 字节数等于 memory 字节数。
+    """
+
+    memory_bytes = preflight._memory_limit_bytes(service.get("mem_limit"))
+    memory_swap_bytes = preflight._memory_limit_bytes(service.get("memswap_limit"))
+    if memory_bytes is None or memory_swap_bytes is None:
+        raise StageTransitionError(f"{label} must declare finite mem_limit and memswap_limit")
+    if memory_swap_bytes != memory_bytes:
+        raise StageTransitionError(f"{label} must preserve the existing no-swap memory policy")
+
+    deploy = service.get("deploy")
+    if deploy is not None and not isinstance(deploy, dict):
+        raise StageTransitionError(f"{label} deploy configuration is malformed")
+    resources = deploy.get("resources") if isinstance(deploy, dict) else None
+    if resources is not None and not isinstance(resources, dict):
+        raise StageTransitionError(f"{label} deploy.resources is malformed")
+    limits = resources.get("limits") if isinstance(resources, dict) else None
+    if limits is not None and not isinstance(limits, dict):
+        raise StageTransitionError(f"{label} deploy.resources.limits is malformed")
+    if isinstance(limits, dict) and "memory" in limits:
+        deploy_memory_bytes = preflight._memory_limit_bytes(limits.get("memory"))
+        if deploy_memory_bytes != memory_bytes:
+            raise StageTransitionError(
+                f"{label} deploy.resources.limits.memory must match mem_limit"
+            )
+    return memory_bytes
+
+
+def _compose_without_service_memory_limits(compose: dict[str, Any], target: str) -> dict[str, Any]:
+    """Copy Compose while removing only the target's supported memory fields."""
+
+    result = copy.deepcopy(compose)
+    services = result.get("services")
+    service = services.get(target) if isinstance(services, dict) else None
+    if not isinstance(service, dict):
+        raise StageTransitionError(f"memory update target {target} has no Compose service")
+    service.pop("mem_limit", None)
+    service.pop("memswap_limit", None)
+    deploy = service.get("deploy")
+    resources = deploy.get("resources") if isinstance(deploy, dict) else None
+    limits = resources.get("limits") if isinstance(resources, dict) else None
+    if isinstance(limits, dict):
+        limits.pop("memory", None)
+    return result
+
+
+def _validate_memory_update_topology(
+    *,
+    phase: str,
+    target: str,
+    active: dict[str, Any],
+    candidate: dict[str, Any],
+    active_lock: dict[str, Any],
+    candidate_lock: dict[str, Any],
+    old_services: dict[str, dict[str, Any]],
+    new_services: dict[str, dict[str, Any]],
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """Allow one existing service's finite no-swap memory limit to increase in place."""
+
+    if phase != "issued-connector-activation":
+        raise StageTransitionError("memory updates require issued-connector-activation")
+    if not isinstance(target, str) or target not in MEMORY_UPDATE_TARGETS:
+        raise StageTransitionError("memory update target must be one existing runtime service")
+    if set(old_services) != RUNTIME_SERVICE_SET or set(new_services) != RUNTIME_SERVICE_SET:
+        raise StageTransitionError("memory update requires the exact active 14-service topology")
+    if target not in old_services or target not in new_services:
+        raise StageTransitionError("memory update target is not active in the selected runtime")
+    if active_lock != candidate_lock:
+        raise StageTransitionError("memory update must preserve the exact image lock")
+
+    active_service = old_services[target]
+    candidate_service = new_services[target]
+    active_memory = _memory_update_limit_bytes(active_service, f"active {target} service")
+    candidate_memory = _memory_update_limit_bytes(candidate_service, f"candidate {target} service")
+    if candidate_memory <= active_memory:
+        raise StageTransitionError("memory updates may only increase the selected service limit")
+    if _compose_without_service_memory_limits(
+        active, target
+    ) != _compose_without_service_memory_limits(candidate, target):
+        raise StageTransitionError(
+            "memory update may change only the selected service memory limit fields"
+        )
+
+    target_images: dict[str, dict[str, Any]] = {}
+    active_ids = _lock_image_ids(active_lock)
+    candidate_ids = _lock_image_ids(candidate_lock)
+    for service_name in RUNTIME_SERVICE_ORDER:
+        active_image = _service_image(active, active_ids, service_name)
+        candidate_image = _service_image(candidate, candidate_ids, service_name)
+        if active_image != candidate_image:
+            raise StageTransitionError("memory update must preserve every service image ID")
+        if _mounted_file_digests(active, service_name) != _mounted_file_digests(
+            candidate, service_name
+        ):
+            raise StageTransitionError(
+                f"memory update changes mounted configuration for {service_name}"
+            )
+        target_images[service_name] = {
+            "active": active_image,
+            "candidate": candidate_image,
+            "added": False,
+            "configChanged": service_name == target,
+        }
+    target_healthcheck = candidate_service.get("healthcheck")
+    if not isinstance(target_healthcheck, dict):
+        raise StageTransitionError("memory update target must expose a health check")
+    return [target], target_images
+
+
+def _memory_update_container_snapshot(
+    *,
+    container_id: str,
+    project: str,
+    service_name: str,
+    expected_image: dict[str, str],
+    expected_mounts: list[dict[str, Any]],
+    expected_network_names: list[str],
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Read one healthy container and fingerprint its immutable Docker configuration."""
+
+    if FULL_CONTAINER_ID_RE.fullmatch(container_id) is None:
+        raise StageTransitionError("memory update container ID is malformed")
+    rows = runtime_update._decode_json_output(
+        runtime_update._checked_stdout(
+            [*docker_prefix, "inspect", container_id],
+            label=f"{service_name} memory update identity",
+        ),
+        f"{service_name} memory update identity",
+    )
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise StageTransitionError("memory update container inspection is ambiguous")
+    row = rows[0]
+    config = row.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    host_config = row.get("HostConfig")
+    state = row.get("State")
+    image_ref = config.get("Image") if isinstance(config, dict) else None
+    image_id = row.get("Image")
+    compose_config_hash = (
+        labels.get("com.docker.compose.config-hash") if isinstance(labels, dict) else None
+    )
+    memory_bytes = host_config.get("Memory") if isinstance(host_config, dict) else None
+    memory_swap_bytes = host_config.get("MemorySwap") if isinstance(host_config, dict) else None
+    process_id = state.get("Pid") if isinstance(state, dict) else None
+    process_started_at = state.get("StartedAt") if isinstance(state, dict) else None
+    restart_count = row.get("RestartCount")
+    if (
+        not isinstance(config, dict)
+        or not isinstance(labels, dict)
+        or labels.get("com.docker.compose.project") != project
+        or labels.get("com.docker.compose.service") != service_name
+        or not isinstance(compose_config_hash, str)
+        or SHA256_RE.fullmatch(compose_config_hash) is None
+        or image_ref != expected_image.get("imageRef")
+        or image_id != expected_image.get("imageId")
+        or not isinstance(host_config, dict)
+        or isinstance(memory_bytes, bool)
+        or not isinstance(memory_bytes, int)
+        or memory_bytes <= 0
+        or isinstance(memory_swap_bytes, bool)
+        or not isinstance(memory_swap_bytes, int)
+        or memory_swap_bytes <= 0
+        or not isinstance(state, dict)
+        or state.get("Running") is not True
+        or state.get("Paused") is True
+        or isinstance(process_id, bool)
+        or not isinstance(process_id, int)
+        or process_id <= 0
+        or not isinstance(process_started_at, str)
+        or not process_started_at.strip()
+        or isinstance(restart_count, bool)
+        or not isinstance(restart_count, int)
+        or restart_count < 0
+        or not isinstance(state.get("Health"), dict)
+        or state["Health"].get("Status") != "healthy"
+    ):
+        raise StageTransitionError(
+            f"{service_name} container identity, no-swap limits, or health is not exact"
+        )
+    actual_id = row.get("Id")
+    if actual_id != container_id:
+        raise StageTransitionError(f"{service_name} container ID changed during inspection")
+    networks_record = row.get("NetworkSettings")
+    networks = networks_record.get("Networks") if isinstance(networks_record, dict) else None
+    mounts = row.get("Mounts")
+    if (
+        not isinstance(networks, dict)
+        or sorted(networks) != expected_network_names
+        or not _service_mounts_match(mounts, expected_mounts)
+    ):
+        raise StageTransitionError(f"{service_name} network or mount identity changed")
+    host_config_without_memory = dict(host_config)
+    host_config_without_memory.pop("Memory", None)
+    host_config_without_memory.pop("MemorySwap", None)
+    return {
+        "containerId": actual_id,
+        "imageRef": image_ref,
+        "imageId": image_id,
+        "memoryBytes": memory_bytes,
+        "memorySwapBytes": memory_swap_bytes,
+        "processId": process_id,
+        "processStartedAt": process_started_at,
+        "restartCount": restart_count,
+        "health": state["Health"]["Status"],
+        "composeConfigHash": compose_config_hash,
+        "containerConfigSha256": _sha256_bytes(_canonical_json(config)),
+        "hostConfigSha256WithoutMemory": _sha256_bytes(_canonical_json(host_config_without_memory)),
+    }
+
+
+def _compose_service_config_hash(
+    *,
+    service_name: str,
+    compose_files: list[Path],
+    env_files: list[Path],
+    docker_prefix: list[str],
+) -> str:
+    """Return Docker Compose's own hash for the exact selected service definition."""
+
+    argv = [*docker_prefix, "compose"]
+    for env_file in env_files:
+        argv.extend(["--env-file", str(env_file.resolve())])
+    for compose_file in compose_files:
+        argv.extend(["--file", str(compose_file.resolve())])
+    for profile in preflight.ACTIVE_COMPOSE_PROFILES:
+        argv.extend(["--profile", profile])
+    argv.extend(["config", "--hash", service_name])
+    output = runtime_update._checked_stdout(
+        argv, label=f"{service_name} Compose config hash", timeout_seconds=30
+    )
+    rows = output.splitlines()
+    fields = rows[0].split() if len(rows) == 1 else []
+    if len(fields) != 2 or fields[0] != service_name or SHA256_RE.fullmatch(fields[1]) is None:
+        raise StageTransitionError(f"{service_name} Compose config hash is malformed")
+    return fields[1]
+
+
+def _prior_memory_update_hash_proof(
+    *,
+    selection_record: dict[str, Any],
+    selection_path: str,
+    journal_dir: Path,
+    target: str,
+    active_compose_hash: str,
+    container_compose_hash: str,
+    active_service: dict[str, Any],
+) -> dict[str, str] | None:
+    """Follow selector-linked journals to prove this container's intentional stale hash."""
+
+    current = selection_record.get("document")
+    expected_digest = selection_record.get("sha256")
+    for _ in range(64):
+        if not isinstance(current, dict) or not isinstance(current.get("operationId"), str):
+            return None
+        try:
+            journal = _read_journal(_journal_path(journal_dir, current["operationId"]))
+            if (
+                journal.get("state") != "APPLIED"
+                or journal.get("selection", {}).get("promoted") is not True
+                or journal.get("selection", {}).get("path") != selection_path
+                or journal.get("selection", {}).get("newSha256") != expected_digest
+                or _sha256_bytes(_canonical_json(current) + b"\n") != expected_digest
+            ):
+                return None
+            plan_path = Path(journal["planPath"])
+            plan_metadata = plan_path.lstat()
+            if (
+                not preflight._private_artifact(plan_path)
+                or plan_metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(plan_metadata.st_mode) != 0o600
+            ):
+                return None
+            plan = _read_json(plan_path, "selector-linked transition plan")
+            _validate_plan(plan)
+        except (OSError, StageTransitionError):
+            return None
+        if plan.get("operationId") != current.get("operationId") or plan.get(
+            "planSha256"
+        ) != journal.get("planSha256"):
+            return None
+        if plan.get("candidateSelectionFile") != selection_path:
+            return None
+
+        prior_update = journal.get("memoryUpdate")
+        prior_state = plan.get("memoryUpdateState")
+        prior_service = plan.get("activeServices", {}).get(target)
+        prior_after = prior_update.get("afterReadback") if isinstance(prior_update, dict) else None
+        if (
+            journal.get("state") == "APPLIED"
+            and isinstance(prior_update, dict)
+            and prior_update.get("required") is True
+            and prior_update.get("target") == target
+            and prior_update.get("outcome") == "APPLIED_SAME_CONTAINER"
+            and isinstance(prior_state, dict)
+            and prior_state.get("candidateComposeConfigHash") == active_compose_hash
+            and prior_state.get("containerComposeConfigHash") == container_compose_hash
+            and isinstance(prior_service, dict)
+            and prior_service.get("containerId") == active_service.get("containerId")
+            and prior_service.get("imageId") == active_service.get("imageId")
+            and isinstance(prior_after, dict)
+            and prior_after.get("containerId") == active_service.get("containerId")
+            and prior_after.get("composeConfigHash") == container_compose_hash
+        ):
+            return {"operationId": plan["operationId"], "planSha256": plan["planSha256"]}
+
+        # A prior completed update proves selector/hash lineage only; the current plan pins
+        # the current process independently, so a restart between completed updates is valid.
+        previous = plan.get("activeSelection")
+        previous_document = previous.get("document") if isinstance(previous, dict) else None
+        previous_digest = previous.get("sha256") if isinstance(previous, dict) else None
+        if (
+            not isinstance(previous_document, dict)
+            or not isinstance(previous_digest, str)
+            or _sha256_bytes(_canonical_json(previous_document) + b"\n") != previous_digest
+        ):
+            return None
+        current = previous_document
+        expected_digest = previous_digest
+    return None
+
+
+def _verify_memory_update_config_hash_relation(
+    *, plan: dict[str, Any], snapshot: dict[str, Any]
+) -> None:
+    """Reconfirm active or selector-journal-proven stale Compose hash before mutation."""
+
+    target = plan["memoryUpdateTarget"]
+    state = plan["memoryUpdateState"]
+    active_hash = state["activeComposeConfigHash"]
+    actual_hash = snapshot.get("composeConfigHash")
+    if actual_hash != state["containerComposeConfigHash"]:
+        raise StageTransitionError("live Compose config-hash changed after memory update planning")
+    if state["configHashRelation"] == "MATCHES_ACTIVE":
+        if actual_hash != active_hash:
+            raise StageTransitionError(
+                "live Compose config-hash no longer matches the active selector"
+            )
+        return
+    active_service = plan["activeServices"][target]
+    proof = _prior_memory_update_hash_proof(
+        selection_record=plan["activeSelection"],
+        selection_path=plan["candidateSelectionFile"],
+        journal_dir=Path(plan["journalDir"]),
+        target=target,
+        active_compose_hash=active_hash,
+        container_compose_hash=actual_hash,
+        active_service=active_service,
+    )
+    if proof != {
+        "operationId": state["configHashProofOperationId"],
+        "planSha256": state["configHashProofPlanSha256"],
+    }:
+        raise StageTransitionError("stale Compose config-hash lost its selector-journal proof")
+
+
+def _memory_update_actual_capacity(
+    *,
+    compose: dict[str, Any],
+    services: dict[str, dict[str, Any]],
+    max_memory_mib: int,
+    max_cpus: float,
+    docker_prefix: list[str],
+) -> dict[str, int]:
+    """Verify actual memory and CPU caps for every active service."""
+
+    expected = _runtime_service_inventory(compose)
+    if set(expected) != RUNTIME_SERVICE_SET or set(services) != RUNTIME_SERVICE_SET:
+        raise StageTransitionError("memory capacity read-back requires the exact 14 services")
+    container_ids = [services[name].get("containerId") for name in RUNTIME_SERVICE_ORDER]
+    if any(
+        not isinstance(item, str) or FULL_CONTAINER_ID_RE.fullmatch(item) is None
+        for item in container_ids
+    ):
+        raise StageTransitionError("memory capacity read-back has a malformed container ID")
+    rows = runtime_update._decode_json_output(
+        runtime_update._checked_stdout(
+            [*docker_prefix, "inspect", *container_ids], label="14-service memory limit read-back"
+        ),
+        "14-service memory limit read-back",
+    )
+    if not isinstance(rows, list) or len(rows) != len(RUNTIME_SERVICE_ORDER):
+        raise StageTransitionError("Docker returned an incomplete 14-service memory inventory")
+    total_bytes = 0
+    total_nano_cpus = 0
+    seen: set[str] = set()
+    for row in rows:
+        config = row.get("Config") if isinstance(row, dict) else None
+        labels = config.get("Labels") if isinstance(config, dict) else None
+        name = labels.get("com.docker.compose.service") if isinstance(labels, dict) else None
+        host_config = row.get("HostConfig") if isinstance(row, dict) else None
+        if not isinstance(name, str) or name not in expected:
+            raise StageTransitionError("memory capacity read-back contains an unknown service")
+        expected_memory = _memory_update_limit_bytes(expected[name], f"selected {name} service")
+        expected_cpus = preflight._cpu_limit_decimal(expected[name].get("cpus"))
+        expected_nano_cpus = (
+            int(expected_cpus * 1_000_000_000) if expected_cpus is not None else None
+        )
+        actual_memory = host_config.get("Memory") if isinstance(host_config, dict) else None
+        actual_swap = host_config.get("MemorySwap") if isinstance(host_config, dict) else None
+        actual_nano_cpus = host_config.get("NanoCpus") if isinstance(host_config, dict) else None
+        if (
+            name not in expected
+            or name in seen
+            or labels.get("com.docker.compose.project") != compose.get("name")
+            or row.get("Id") != services[name].get("containerId")
+            or row.get("Image") != services[name].get("imageId")
+            or config.get("Image") != services[name].get("imageRef")
+            or isinstance(actual_memory, bool)
+            or not isinstance(actual_memory, int)
+            or actual_memory != expected_memory
+            or isinstance(actual_swap, bool)
+            or not isinstance(actual_swap, int)
+            or actual_swap != expected_memory
+            or isinstance(actual_nano_cpus, bool)
+            or not isinstance(actual_nano_cpus, int)
+            or actual_nano_cpus != expected_nano_cpus
+        ):
+            raise StageTransitionError(
+                f"actual memory limits differ from selected Compose for {name}"
+            )
+        seen.add(name)
+        total_bytes += actual_memory
+        total_nano_cpus += actual_nano_cpus
+    maximum_bytes = max_memory_mib * preflight.MIB
+    if total_bytes > maximum_bytes:
+        raise StageTransitionError(
+            "actual 14-service memory limits exceed the canonical host budget"
+        )
+    maximum_nano_cpus = int(Decimal(str(max_cpus)) * 1_000_000_000)
+    if total_nano_cpus > maximum_nano_cpus:
+        raise StageTransitionError("actual 14-service CPU limits exceed the canonical host budget")
+    return {
+        "serviceCount": len(seen),
+        "totalMemoryBytes": total_bytes,
+        "maxMemoryBytes": maximum_bytes,
+        "totalNanoCpus": total_nano_cpus,
+        "maxNanoCpus": maximum_nano_cpus,
+    }
+
+
+def _memory_update_plan_state(
+    *,
+    target: str,
+    active_compose: dict[str, Any],
+    candidate_compose: dict[str, Any],
+    active_services: dict[str, dict[str, Any]],
+    runtime_config_identity: dict[str, list[dict[str, Any]]],
+    active_compose_files: list[Path],
+    active_env_files: list[Path],
+    candidate_compose_files: list[Path],
+    candidate_env_files: list[Path],
+    selection_record: dict[str, Any],
+    journal_dir: Path,
+    max_memory_mib: int,
+    max_cpus: float,
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Freeze active and desired limits plus the selected running container identity."""
+
+    active_service = _runtime_service_inventory(active_compose)[target]
+    candidate_service = _runtime_service_inventory(candidate_compose)[target]
+    active_memory = _memory_update_limit_bytes(active_service, f"active {target} service")
+    candidate_memory = _memory_update_limit_bytes(candidate_service, f"candidate {target} service")
+    if candidate_memory <= active_memory:
+        raise StageTransitionError("memory update must increase a no-swap service limit")
+    live_service = active_services.get(target)
+    if not isinstance(live_service, dict):
+        raise StageTransitionError("memory update target is missing from the active runtime")
+    snapshot = _memory_update_container_snapshot(
+        container_id=live_service["containerId"],
+        project=active_compose["name"],
+        service_name=target,
+        expected_image={
+            "imageRef": live_service["imageRef"],
+            "imageId": live_service["imageId"],
+        },
+        expected_mounts=runtime_config_identity[target],
+        expected_network_names=live_service["networkNames"],
+        docker_prefix=docker_prefix,
+    )
+    if snapshot["memoryBytes"] != active_memory or snapshot["memorySwapBytes"] != active_memory:
+        raise StageTransitionError(
+            "active container memory and memory-swap differ from the selected Compose limits"
+        )
+    active_hash = _compose_service_config_hash(
+        service_name=target,
+        compose_files=active_compose_files,
+        env_files=active_env_files,
+        docker_prefix=docker_prefix,
+    )
+    candidate_hash = _compose_service_config_hash(
+        service_name=target,
+        compose_files=candidate_compose_files,
+        env_files=candidate_env_files,
+        docker_prefix=docker_prefix,
+    )
+    if active_hash == candidate_hash:
+        raise StageTransitionError("Compose config hash did not capture the selected memory change")
+    hash_proof: dict[str, str] | None = None
+    if snapshot["composeConfigHash"] != active_hash:
+        hash_proof = _prior_memory_update_hash_proof(
+            selection_record=selection_record,
+            selection_path=selection_record["path"],
+            journal_dir=journal_dir,
+            target=target,
+            active_compose_hash=active_hash,
+            container_compose_hash=snapshot["composeConfigHash"],
+            active_service=live_service,
+        )
+        if hash_proof is None:
+            raise StageTransitionError(
+                "live Compose config hash is stale without selector-linked memory-update proof"
+            )
+    actual_capacity = _memory_update_actual_capacity(
+        compose=active_compose,
+        services=active_services,
+        max_memory_mib=max_memory_mib,
+        max_cpus=max_cpus,
+        docker_prefix=docker_prefix,
+    )
+    return {
+        "activeMemoryBytes": active_memory,
+        "candidateMemoryBytes": candidate_memory,
+        "activeComposeConfigHash": active_hash,
+        "candidateComposeConfigHash": candidate_hash,
+        "containerComposeConfigHash": snapshot["composeConfigHash"],
+        "configHashRelation": (
+            "MATCHES_ACTIVE" if hash_proof is None else "SELECTOR_JOURNAL_PROVEN_STALE"
+        ),
+        "configHashProofOperationId": (
+            hash_proof["operationId"] if hash_proof is not None else None
+        ),
+        "configHashProofPlanSha256": (hash_proof["planSha256"] if hash_proof is not None else None),
+        "containerConfigSha256": snapshot["containerConfigSha256"],
+        "hostConfigSha256WithoutMemory": snapshot["hostConfigSha256WithoutMemory"],
+        "processId": snapshot["processId"],
+        "processStartedAt": snapshot["processStartedAt"],
+        "restartCount": snapshot["restartCount"],
+        "activeRuntimeMemoryBytes": actual_capacity["totalMemoryBytes"],
+        "activeRuntimeNanoCpus": actual_capacity["totalNanoCpus"],
+    }
+
+
+def _verify_memory_update_snapshot(
+    snapshot: dict[str, Any],
+    memory_update: dict[str, Any],
+    active_service: dict[str, Any],
+    *,
+    expected_memory_bytes: int,
+) -> None:
+    """Require a pinned container with only its intended memory values changed."""
+
+    if (
+        snapshot.get("composeConfigHash") != memory_update.get("containerComposeConfigHash")
+        or snapshot.get("containerConfigSha256") != memory_update.get("containerConfigSha256")
+        or snapshot.get("hostConfigSha256WithoutMemory")
+        != memory_update.get("hostConfigSha256WithoutMemory")
+    ):
+        raise StageTransitionError("memory update changed immutable container configuration")
+    if (
+        snapshot.get("containerId") != active_service.get("containerId")
+        or snapshot.get("imageRef") != active_service.get("imageRef")
+        or snapshot.get("imageId") != active_service.get("imageId")
+        or snapshot.get("processId") != memory_update.get("processId")
+        or snapshot.get("processStartedAt") != memory_update.get("processStartedAt")
+        or snapshot.get("restartCount") != memory_update.get("restartCount")
+        or snapshot.get("memoryBytes") != expected_memory_bytes
+        or snapshot.get("memorySwapBytes") != expected_memory_bytes
+        or snapshot.get("health") != "healthy"
+    ):
+        raise StageTransitionError(
+            "memory update read-back differs from the pinned container or exact desired limits"
+        )
 
 
 def _validate_image_update_topology(
@@ -2214,6 +2812,7 @@ def _candidate_runtime_config_identity(
 def _validate_image_update_selection_contract(
     *,
     target: str | None,
+    memory_update_target: str | None = None,
     phase: str,
     project: str,
     selection_record: Any,
@@ -2225,23 +2824,37 @@ def _validate_image_update_selection_contract(
     candidate_inputs: dict[str, Any],
     runtime_config_identity: Any,
 ) -> None:
-    """Bind an image-only update to the existing selector and unchanged runtime inputs."""
+    """Bind a one-service update to the existing selector and frozen runtime identity."""
 
-    if target is None:
+    if target is None and memory_update_target is None:
         return
-    if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
+    is_memory_update = memory_update_target is not None
+    selected_target = memory_update_target if is_memory_update else target
+    allowed_targets = MEMORY_UPDATE_TARGETS if is_memory_update else IMAGE_UPDATE_TARGETS
+    if not isinstance(selected_target, str) or selected_target not in allowed_targets:
+        operation = "memory" if is_memory_update else "image"
         raise StageTransitionError(
-            "image update target must be Cloud Management, Exchange, Hugging Face, Navigator, or Persistence"
+            f"{operation} update target is outside its closed service allowlist"
         )
-    if target == HUGGINGFACE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+    if is_memory_update and phase != "issued-connector-activation":
+        raise StageTransitionError("memory updates require issued-connector-activation")
+    if (
+        not is_memory_update
+        and target == HUGGINGFACE_IMAGE_UPDATE_TARGET
+        and phase != "issued-connector-activation"
+    ):
         raise StageTransitionError(
             "Hugging Face image updates require issued-connector-activation and the existing connector runtime"
         )
-    if target == CLOUD_IMAGE_UPDATE_TARGET and phase not in PHASES:
+    if not is_memory_update and target == CLOUD_IMAGE_UPDATE_TARGET and phase not in PHASES:
         raise StageTransitionError(
             "Cloud Management image updates require provider-bootstrap or issued-connector-activation"
         )
-    if target == PERSISTENCE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+    if (
+        not is_memory_update
+        and target == PERSISTENCE_IMAGE_UPDATE_TARGET
+        and phase != "issued-connector-activation"
+    ):
         raise StageTransitionError(
             "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
@@ -2305,6 +2918,11 @@ def _validate_image_update_selection_contract(
         "configDirectoryFiles"
     ) or active_inputs.get("secretFiles") != candidate_inputs.get("secretFiles"):
         raise StageTransitionError("image update must preserve config and secret file manifests")
+    if is_memory_update and (
+        candidate_inputs.get("envFiles") != active_inputs.get("envFiles")
+        or candidate_inputs.get("imageLock") != active_inputs.get("imageLock")
+    ):
+        raise StageTransitionError("memory update must preserve selected env files and image lock")
     if (
         not isinstance(runtime_config_identity, dict)
         or set(runtime_config_identity) != {"active", "candidate"}
@@ -3845,6 +4463,7 @@ def create_plan(
     *,
     phase: str,
     image_update_target: str | None = None,
+    memory_update_target: str | None = None,
     listener_repair: bool = False,
     active_compose_files: list[Path],
     active_env_files: list[Path],
@@ -3890,6 +4509,15 @@ def create_plan(
         raise StageTransitionError(
             "image update target must be Cloud Management, Exchange, Hugging Face, Navigator, or Persistence"
         )
+    if image_update_target is not None and memory_update_target is not None:
+        raise StageTransitionError("image and memory update modes are mutually exclusive")
+    if memory_update_target is not None and (
+        not isinstance(memory_update_target, str)
+        or memory_update_target not in MEMORY_UPDATE_TARGETS
+    ):
+        raise StageTransitionError("memory update target must be one existing runtime service")
+    if memory_update_target is not None and phase != "issued-connector-activation":
+        raise StageTransitionError("memory updates require issued-connector-activation")
     if (
         image_update_target == HUGGINGFACE_IMAGE_UPDATE_TARGET
         and phase != "issued-connector-activation"
@@ -3908,7 +4536,11 @@ def create_plan(
         raise StageTransitionError(
             "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
-    if listener_repair and (phase != "provider-bootstrap" or image_update_target is not None):
+    if listener_repair and (
+        phase != "provider-bootstrap"
+        or image_update_target is not None
+        or memory_update_target is not None
+    ):
         raise StageTransitionError(
             "provider listener repair is a separate provider-bootstrap operation"
         )
@@ -3938,6 +4570,15 @@ def create_plan(
         or minimum_mem_available_mib <= 0
     ):
         raise StageTransitionError("host resource limits are malformed")
+    if memory_update_target is not None and (
+        max_memory_mib > 3584
+        or max_cpus > 1.95
+        or required_free_gib < 2.0
+        or minimum_mem_available_mib < MEMORY_RESERVE_DEFAULT_MIB
+    ):
+        raise StageTransitionError(
+            "memory updates require the canonical 3584 MiB/1.95 CPU/2 GiB/1 GiB host safeguards"
+        )
     _validate_output_directory(plan_path)
     active_config_dir = _validate_private_directory(
         active_config_dir, "active config", expected_uid=10001
@@ -3949,12 +4590,13 @@ def create_plan(
     backup_dir = _validate_private_directory(backup_dir, "SQLite backup", require_artifact=True)
     if (
         image_update_target is None
+        and memory_update_target is None
         and not listener_repair
         and active_config_dir == candidate_config_dir
     ):
         raise StageTransitionError("candidate config directory must be separate from active config")
     if (
-        image_update_target is not None or listener_repair
+        image_update_target is not None or memory_update_target is not None or listener_repair
     ) and active_config_dir != candidate_config_dir:
         raise StageTransitionError("image update must keep the active config directory")
     if not connector_auth_task_id or len(connector_auth_task_id) > 128:
@@ -4010,7 +4652,7 @@ def create_plan(
         raise StageTransitionError("active or candidate Compose could not be rendered") from error
     active_inputs["secretFiles"] = _secret_manifest(active_compose, "active")
     candidate_inputs["secretFiles"] = _secret_manifest(candidate_compose, "candidate")
-    if image_update_target is None and not listener_repair:
+    if image_update_target is None and memory_update_target is None and not listener_repair:
         _validate_active_candidate_configs(
             active_config_dir, candidate_config_dir, active_compose, candidate_compose
         )
@@ -4025,6 +4667,7 @@ def create_plan(
     targets, target_images = _validate_phase_topology(
         phase=phase,
         image_update_target=image_update_target,
+        memory_update_target=memory_update_target,
         listener_repair=listener_repair,
         active=active_compose,
         candidate=candidate_compose,
@@ -4088,7 +4731,9 @@ def create_plan(
         raise StageTransitionError(
             "candidate preflight did not return the scoped read-only readiness contract"
         )
-    if (image_update_target is not None or listener_repair) and active_selection_file is None:
+    if (
+        image_update_target is not None or memory_update_target is not None or listener_repair
+    ) and active_selection_file is None:
         raise StageTransitionError(
             "image-only/repair update requires the existing runtime selector v2"
         )
@@ -4145,6 +4790,7 @@ def create_plan(
     else:
         _validate_image_update_selection_contract(
             target=image_update_target,
+            memory_update_target=memory_update_target,
             phase=phase,
             project=project,
             selection_record=selection_state,
@@ -4223,7 +4869,7 @@ def create_plan(
 
     operation_id = str(uuid.uuid4())
     backup_path = backup_dir / f"{operation_id}.navigator-sessions.sqlite3"
-    if backup_path.exists() or backup_path.is_symlink():
+    if memory_update_target is None and (backup_path.exists() or backup_path.is_symlink()):
         raise StageTransitionError("online SQLite backup output already exists")
     selection_backup_path = backup_dir / f"{operation_id}.active-selection.previous.json"
     if selection_backup_path.exists() or selection_backup_path.is_symlink():
@@ -4233,6 +4879,9 @@ def create_plan(
         "operationId": operation_id,
         "phase": phase,
         **({"imageUpdateTarget": image_update_target} if image_update_target is not None else {}),
+        **(
+            {"memoryUpdateTarget": memory_update_target} if memory_update_target is not None else {}
+        ),
         **({"cloudRunnerState": cloud_runner_state} if cloud_runner_state is not None else {}),
         **(
             {"listenerRepairState": listener_repair_state}
@@ -4285,10 +4934,10 @@ def create_plan(
             "generation": navigator_status["generation"],
         },
         "database": {
-            "service": "navigator-persistence",
-            "volume": "navigator-sessions",
-            "containerPath": DATABASE_PATH,
-            "backupPath": str(backup_path),
+            "service": "navigator-persistence" if memory_update_target is None else None,
+            "volume": "navigator-sessions" if memory_update_target is None else None,
+            "containerPath": DATABASE_PATH if memory_update_target is None else None,
+            "backupPath": str(backup_path) if memory_update_target is None else None,
         },
         "candidatePreflight": {
             "mode": candidate_preflight["mode"],
@@ -4332,16 +4981,47 @@ def create_plan(
             "noDependencies": True,
             "pull": False,
             "build": False,
-            "forceRecreate": True,
+            "forceRecreate": memory_update_target is None,
+            **(
+                {
+                    "mutationMode": MEMORY_UPDATE_MUTATION_MODE,
+                    "ingressMutation": "NONE",
+                    "navigatorMutation": "NONE",
+                    "databaseMutation": "NONE",
+                }
+                if memory_update_target is not None
+                else {}
+            ),
             "preserveNamedVolumes": True,
-            "databaseRollback": "IMAGE_CONFIG_ONLY_NEVER_RESTORE_SNAPSHOT",
+            "databaseRollback": (
+                "IMAGE_CONFIG_ONLY_NEVER_RESTORE_SNAPSHOT"
+                if memory_update_target is None
+                else "NONE_NO_DATABASE_MUTATION"
+            ),
             "unknownDockerMutation": "RECOVERY_REQUIRED_NO_REPLAY",
-            "pauseHolder": operation_id,
+            "pauseHolder": None if memory_update_target is not None else operation_id,
             "drainTimeoutSeconds": drain_timeout_seconds,
             "healthTimeoutSeconds": health_timeout_seconds,
             "selectionPromotion": "AFTER_ALL_HEALTH_AND_RESOURCE_READBACK",
         },
     }
+    if memory_update_target is not None:
+        plan["memoryUpdateState"] = _memory_update_plan_state(
+            target=memory_update_target,
+            active_compose=active_compose,
+            candidate_compose=candidate_compose,
+            active_services=active_services,
+            runtime_config_identity=active_mount_identity,
+            active_compose_files=active_compose_files,
+            active_env_files=active_env_files,
+            candidate_compose_files=candidate_compose_files,
+            candidate_env_files=candidate_env_files,
+            selection_record=selection_state,
+            journal_dir=journal_dir,
+            max_memory_mib=max_memory_mib,
+            max_cpus=max_cpus,
+            docker_prefix=docker_prefix,
+        )
     plan["planSha256"] = _sha256_bytes(_canonical_json(plan))
     _validate_plan(plan)
     try:
@@ -4385,6 +5065,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         "planSha256",
     }
     listener_repair = False
+    memory_update_target = None
     if set(plan) == required:
         image_update_target = None
     elif set(plan) == required | {"imageUpdateTarget"}:
@@ -4408,9 +5089,21 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     elif set(plan) == required | {"listenerRepairState", "cloudRunnerState"}:
         image_update_target = None
         listener_repair = True
+    elif set(plan) == required | {"memoryUpdateTarget", "memoryUpdateState"}:
+        image_update_target = None
+        memory_update_target = plan.get("memoryUpdateTarget")
+        if (
+            not isinstance(memory_update_target, str)
+            or memory_update_target not in MEMORY_UPDATE_TARGETS
+        ):
+            memory_update_target = "__invalid__"
     else:
         image_update_target = "__invalid__"
-    if image_update_target == "__invalid__" or plan.get("schemaVersion") != PLAN_SCHEMA:
+    if (
+        image_update_target == "__invalid__"
+        or memory_update_target == "__invalid__"
+        or plan.get("schemaVersion") != PLAN_SCHEMA
+    ):
         raise StageTransitionError("stage transition plan has an unsupported closed schema")
     for field in ("activeServices", "candidateServices"):
         if not isinstance(plan.get(field), dict):
@@ -4439,6 +5132,8 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError(
             "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
+    if memory_update_target is not None and plan.get("phase") != "issued-connector-activation":
+        raise StageTransitionError("memory updates require issued-connector-activation")
     if listener_repair and plan.get("phase") != "provider-bootstrap":
         raise StageTransitionError("provider listener repair is limited to provider-bootstrap")
     if (
@@ -4448,10 +5143,14 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         or len(set(plan["targets"])) != len(plan["targets"])
     ):
         raise StageTransitionError("stage transition plan lacks its ordered service targets")
-    if plan["targets"] != [name for name in SERVICE_ORDER if name in set(plan["targets"])]:
+    if memory_update_target is None and plan["targets"] != [
+        name for name in SERVICE_ORDER if name in set(plan["targets"])
+    ]:
         raise StageTransitionError("stage transition targets are not in canonical dependency order")
     if image_update_target is not None and plan["targets"] != [image_update_target]:
         raise StageTransitionError("image update plan must contain exactly its selected target")
+    if memory_update_target is not None and plan["targets"] != [memory_update_target]:
+        raise StageTransitionError("memory update plan must contain exactly its selected target")
     if listener_repair and plan["targets"] != list(PROVIDER_LISTENER_REPAIR_TARGETS):
         raise StageTransitionError("listener repair plan must contain exactly its two providers")
     active_runtime_services = set(plan.get("activeServices", {}))
@@ -4473,6 +5172,141 @@ def _validate_plan(plan: dict[str, Any]) -> None:
                 raise StageTransitionError(
                     f"listener repair plan changes the immutable image for {service_name}"
                 )
+    if memory_update_target is not None:
+        if (
+            active_runtime_services != RUNTIME_SERVICE_SET
+            or set(plan["candidateServices"]) != RUNTIME_SERVICE_SET
+        ):
+            raise StageTransitionError("memory update plan must retain the exact 14 services")
+        for service_name, row in plan["candidateServices"].items():
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"active", "candidate", "added", "configChanged"}
+                or not isinstance(row.get("active"), dict)
+                or row.get("candidate") != row.get("active")
+                or row.get("added") is not False
+                or row.get("configChanged") is not (service_name == memory_update_target)
+            ):
+                raise StageTransitionError(
+                    f"memory update plan changes the image or unselected service {service_name}"
+                )
+        memory_state = plan.get("memoryUpdateState")
+        expected_memory_state_fields = {
+            "activeMemoryBytes",
+            "candidateMemoryBytes",
+            "activeComposeConfigHash",
+            "candidateComposeConfigHash",
+            "containerComposeConfigHash",
+            "configHashRelation",
+            "configHashProofOperationId",
+            "configHashProofPlanSha256",
+            "containerConfigSha256",
+            "hostConfigSha256WithoutMemory",
+            "processId",
+            "processStartedAt",
+            "restartCount",
+            "activeRuntimeMemoryBytes",
+            "activeRuntimeNanoCpus",
+        }
+        active_target = plan["activeServices"].get(memory_update_target)
+        if (
+            not isinstance(memory_state, dict)
+            or set(memory_state) != expected_memory_state_fields
+            or not isinstance(active_target, dict)
+            or any(
+                isinstance(memory_state.get(field), bool)
+                or not isinstance(memory_state.get(field), int)
+                or memory_state[field] <= 0
+                for field in (
+                    "activeMemoryBytes",
+                    "candidateMemoryBytes",
+                    "processId",
+                    "activeRuntimeMemoryBytes",
+                    "activeRuntimeNanoCpus",
+                )
+            )
+            or memory_state["candidateMemoryBytes"] <= memory_state["activeMemoryBytes"]
+            or isinstance(memory_state.get("restartCount"), bool)
+            or not isinstance(memory_state.get("restartCount"), int)
+            or memory_state["restartCount"] < 0
+            or not isinstance(memory_state.get("processStartedAt"), str)
+            or not memory_state["processStartedAt"].strip()
+            or not isinstance(active_target.get("containerId"), str)
+            or FULL_CONTAINER_ID_RE.fullmatch(active_target["containerId"]) is None
+            or not isinstance(active_target.get("imageId"), str)
+            or IMAGE_ID_RE.fullmatch(active_target["imageId"]) is None
+            or any(
+                not isinstance(memory_state.get(field), str)
+                or SHA256_RE.fullmatch(memory_state[field]) is None
+                for field in (
+                    "activeComposeConfigHash",
+                    "candidateComposeConfigHash",
+                    "containerComposeConfigHash",
+                    "containerConfigSha256",
+                    "hostConfigSha256WithoutMemory",
+                )
+            )
+            or memory_state["activeComposeConfigHash"] == memory_state["candidateComposeConfigHash"]
+            or memory_state.get("configHashRelation")
+            not in {"MATCHES_ACTIVE", "SELECTOR_JOURNAL_PROVEN_STALE"}
+            or (
+                memory_state["configHashRelation"] == "MATCHES_ACTIVE"
+                and (
+                    memory_state["containerComposeConfigHash"]
+                    != memory_state["activeComposeConfigHash"]
+                    or memory_state.get("configHashProofOperationId") is not None
+                    or memory_state.get("configHashProofPlanSha256") is not None
+                )
+            )
+            or (
+                memory_state["configHashRelation"] == "SELECTOR_JOURNAL_PROVEN_STALE"
+                and (
+                    memory_state["containerComposeConfigHash"]
+                    == memory_state["activeComposeConfigHash"]
+                    or not isinstance(memory_state.get("configHashProofOperationId"), str)
+                    or not isinstance(memory_state.get("configHashProofPlanSha256"), str)
+                    or SHA256_RE.fullmatch(memory_state["configHashProofPlanSha256"]) is None
+                )
+            )
+        ):
+            raise StageTransitionError(
+                "memory update target identity and no-swap limits are malformed"
+            )
+        if memory_state["configHashRelation"] == "SELECTOR_JOURNAL_PROVEN_STALE":
+            try:
+                if (
+                    str(uuid.UUID(memory_state["configHashProofOperationId"]))
+                    != memory_state["configHashProofOperationId"]
+                ):
+                    raise ValueError("non-canonical operation ID")
+            except ValueError as error:
+                raise StageTransitionError(
+                    "memory update config-hash proof reference is malformed"
+                ) from error
+        policy = plan.get("policy")
+        if (
+            not isinstance(policy, dict)
+            or policy.get("mutationMode") != MEMORY_UPDATE_MUTATION_MODE
+            or policy.get("forceRecreate") is not False
+            or policy.get("ingressMutation") != "NONE"
+            or policy.get("navigatorMutation") != "NONE"
+            or policy.get("databaseMutation") != "NONE"
+            or policy.get("updateOrder") != [memory_update_target]
+            or policy.get("noDependencies") is not True
+            or policy.get("pull") is not False
+            or policy.get("build") is not False
+            or policy.get("preserveNamedVolumes") is not True
+            or policy.get("databaseRollback") != "NONE_NO_DATABASE_MUTATION"
+            or policy.get("pauseHolder") is not None
+            or policy.get("selectionPromotion") != "AFTER_ALL_HEALTH_AND_RESOURCE_READBACK"
+            or policy.get("unknownDockerMutation") != "RECOVERY_REQUIRED_NO_REPLAY"
+            or not isinstance(plan.get("database"), dict)
+            or plan["database"].get("service") is not None
+            or plan["database"].get("volume") is not None
+            or plan["database"].get("containerPath") is not None
+            or plan["database"].get("backupPath") is not None
+        ):
+            raise StageTransitionError("memory update plan permits an unsafe mutation")
     if "cloudRunnerState" in plan or listener_repair:
         _validate_cloud_runner_state_record(plan.get("cloudRunnerState"), plan["activeServices"])
     if listener_repair:
@@ -4522,6 +5356,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     else:
         _validate_image_update_selection_contract(
             target=image_update_target,
+            memory_update_target=memory_update_target,
             phase=plan["phase"],
             project=plan["project"],
             selection_record=plan["activeSelection"],
@@ -4547,6 +5382,27 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         or readiness.get("lifecycleAcceptance") != "NOT_RUN"
     ):
         raise StageTransitionError("stage transition candidate readiness record is malformed")
+    if memory_update_target is not None and (
+        isinstance(readiness.get("maxMemoryMiB"), bool)
+        or not isinstance(readiness.get("maxMemoryMiB"), int)
+        or readiness["maxMemoryMiB"] > 3584
+        or isinstance(readiness.get("maxCpus"), bool)
+        or not isinstance(readiness.get("maxCpus"), (int, float))
+        or readiness["maxCpus"] > 1.95
+        or isinstance(readiness.get("requiredFreeGiB"), bool)
+        or not isinstance(readiness.get("requiredFreeGiB"), (int, float))
+        or readiness["requiredFreeGiB"] < 2.0
+        or isinstance(readiness.get("minimumMemAvailableMiB"), bool)
+        or not isinstance(readiness.get("minimumMemAvailableMiB"), int)
+        or readiness["minimumMemAvailableMiB"] < MEMORY_RESERVE_DEFAULT_MIB
+        or plan["memoryUpdateState"]["activeRuntimeMemoryBytes"]
+        > readiness["maxMemoryMiB"] * preflight.MIB
+        or plan["memoryUpdateState"]["activeRuntimeNanoCpus"]
+        > int(Decimal(str(readiness["maxCpus"])) * 1_000_000_000)
+    ):
+        raise StageTransitionError(
+            "memory update plan weakens the canonical host resource safeguards"
+        )
     host_fronted_readiness = readiness.get("hostFrontedIngressReadiness")
     if readiness["ingressExposure"] == "host-fronted-staging":
         if (
@@ -5768,7 +6624,9 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "initialRevision": plan["edgeDelivery"]["revision"],
             "initialDeadCount": plan["edgeDelivery"]["deadCount"],
             "latestDeadCount": plan["edgeDelivery"]["deadCount"],
-            "pauseHolder": plan["operationId"],
+            "pauseHolder": (
+                None if plan.get("memoryUpdateTarget") is not None else plan["operationId"]
+            ),
             "pauseIntent": False,
             "pauseRevision": None,
             "resumeRevision": None,
@@ -5785,12 +6643,26 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "drained": False,
         },
         "database": {
+            "required": plan.get("memoryUpdateTarget") is None,
             "backupPath": plan["database"]["backupPath"],
             "backupSha256": None,
             "snapshot": None,
             "preUpdateQuiescence": None,
             "postMigration": None,
             "restorePerformed": False,
+        },
+        "memoryUpdate": {
+            "required": plan.get("memoryUpdateTarget") is not None,
+            "target": plan.get("memoryUpdateTarget"),
+            "plannedState": plan.get("memoryUpdateState"),
+            "attemptIntent": False,
+            "beforeReadback": None,
+            "afterReadback": None,
+            "beforeRuntimeLimits": None,
+            "afterRuntimeLimits": None,
+            "beforeExchangeReadiness": None,
+            "afterExchangeReadiness": None,
+            "outcome": "NOT_STARTED",
         },
         "exchangeReadiness": {
             "required": plan["exchangeReadiness"]["required"],
@@ -6109,6 +6981,25 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(listener_repair.get("issuedStateBeforeTarget"), dict)
         else "PENDING"
     )
+    memory_update = journal.get("memoryUpdate", {})
+    memory_update_required = (
+        memory_update.get("required") is True if isinstance(memory_update, dict) else False
+    )
+    memory_planned_state = (
+        memory_update.get("plannedState") if isinstance(memory_update, dict) else None
+    )
+    memory_after = memory_update.get("afterReadback") if isinstance(memory_update, dict) else None
+    memory_update_status = (
+        "NOT_REQUIRED"
+        if not memory_update_required
+        else "VERIFIED"
+        if journal.get("state") == "APPLIED" and isinstance(memory_after, dict)
+        else "NO_MUTATION"
+        if journal.get("state") == "FAILED_NO_MUTATION"
+        else "RECOVERY_REQUIRED"
+        if journal.get("state") == "RECOVERY_REQUIRED"
+        else "PENDING"
+    )
     return {
         "schemaVersion": journal.get("schemaVersion"),
         "operationId": journal.get("operationId"),
@@ -6118,6 +7009,11 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         "phase": journal.get("phase"),
         "targets": journal.get("targets"),
         "completedTargets": journal.get("completedTargets"),
+        "databaseOperation": (
+            "NOT_REQUIRED_MEMORY_UPDATE"
+            if memory_update_required
+            else "READ_ONLY_BACKUP_AND_MIGRATION_GUARDS"
+        ),
         "databaseBackupSha256": db.get("backupSha256") if isinstance(db, dict) else None,
         "databaseUserVersion": database_snapshot.get("userVersion")
         if isinstance(database_snapshot, dict)
@@ -6185,6 +7081,26 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         "cloudRunnerIdleStatus": cloud_idle_status,
         "listenerRepairRequired": listener_repair_required,
         "listenerRepairStatus": listener_repair_status,
+        "memoryUpdateRequired": memory_update_required,
+        "memoryUpdateTarget": memory_update.get("target")
+        if isinstance(memory_update, dict)
+        else None,
+        "memoryUpdateStatus": memory_update_status,
+        "memoryUpdateDesiredBytes": (
+            memory_planned_state.get("candidateMemoryBytes")
+            if isinstance(memory_planned_state, dict)
+            else None
+        ),
+        "memoryUpdateContainerPreserved": (
+            memory_after.get("containerId") == memory_planned_state.get("containerId")
+            if isinstance(memory_after, dict) and isinstance(memory_planned_state, dict)
+            else None
+        ),
+        "composeConfigHashPreserved": (
+            memory_after.get("composeConfigHash") == memory_planned_state.get("composeConfigHash")
+            if isinstance(memory_after, dict) and isinstance(memory_planned_state, dict)
+            else None
+        ),
         "selectionPromoted": journal.get("selection", {}).get("promoted"),
         "updatedAtUtc": journal.get("updatedAtUtc"),
         "lastErrorCode": journal.get("lastErrorCode"),
@@ -6547,6 +7463,323 @@ def _update_target(
     progress["healthyContainerId"] = current["containerId"]
     journal["completedTargets"].append(service_name)
     _write_journal(journal_path, journal, f"{service_name.upper().replace('-', '_')}_APPLIED")
+
+
+def _apply_memory_update(
+    *,
+    plan: dict[str, Any],
+    active_compose: dict[str, Any],
+    candidate_compose: dict[str, Any],
+    candidate_lock: dict[str, Any],
+    journal: dict[str, Any],
+    journal_path: Path,
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Increase one running container's memory without pausing service traffic.
+
+    中文：只调用 Docker 的单容器 update；任何不确定结果都只读核对，不回降或重放。
+    """
+
+    target = plan["memoryUpdateTarget"]
+    planned = plan["memoryUpdateState"]
+    active_service = plan["activeServices"][target]
+    progress = journal["targetProgress"][target]
+    memory_update = journal["memoryUpdate"]
+
+    def mark_recovery(error_code: str, phase: str) -> None:
+        memory_update["outcome"] = "RECOVERY_REQUIRED"
+        journal["lastErrorCode"] = error_code
+        _write_journal(journal_path, journal, phase, state="RECOVERY_REQUIRED")
+
+    def inspect_target() -> dict[str, Any]:
+        return _memory_update_container_snapshot(
+            container_id=active_service["containerId"],
+            project=plan["project"],
+            service_name=target,
+            expected_image={
+                "imageRef": active_service["imageRef"],
+                "imageId": active_service["imageId"],
+            },
+            expected_mounts=plan["runtimeConfigIdentity"]["active"][target],
+            expected_network_names=active_service["networkNames"],
+            docker_prefix=docker_prefix,
+        )
+
+    def mark_no_mutation(error_code: str, phase: str) -> None:
+        progress["phase"] = "FAILED_NO_MUTATION"
+        progress["applyIntent"] = False
+        memory_update["outcome"] = "FAILED_NO_MUTATION"
+        journal["lastErrorCode"] = error_code
+        _write_journal(journal_path, journal, phase, state="FAILED_NO_MUTATION")
+
+    # Read-only provider and target checks finish before the one bounded Docker update.
+    try:
+        _record_exchange_readiness(
+            plan=plan,
+            compose=candidate_compose,
+            journal=journal,
+            journal_path=journal_path,
+            docker_prefix=docker_prefix,
+        )
+        memory_update["beforeExchangeReadiness"] = copy.deepcopy(
+            journal["exchangeReadiness"]["receipt"]
+        )
+        _write_journal(journal_path, journal, "MEMORY_UPDATE_EXCHANGE_READINESS_BEFORE_VERIFIED")
+        before = inspect_target()
+        _verify_memory_update_snapshot(
+            before,
+            planned,
+            active_service,
+            expected_memory_bytes=planned["activeMemoryBytes"],
+        )
+        _verify_memory_update_config_hash_relation(plan=plan, snapshot=before)
+        active_limits = _memory_update_actual_capacity(
+            compose=active_compose,
+            services=plan["activeServices"],
+            max_memory_mib=plan["candidatePreflight"]["maxMemoryMiB"],
+            max_cpus=plan["candidatePreflight"]["maxCpus"],
+            docker_prefix=docker_prefix,
+        )
+        if (
+            active_limits["totalMemoryBytes"] != planned["activeRuntimeMemoryBytes"]
+            or active_limits["totalNanoCpus"] != planned["activeRuntimeNanoCpus"]
+        ):
+            raise StageTransitionError("actual 14-service resource limits changed after planning")
+        memory_update["beforeRuntimeLimits"] = active_limits
+        edge_status = runtime_update._current_edge_status(
+            docker_prefix, plan["edgeDelivery"]["containerId"], timeout_seconds=15
+        )
+        if (
+            edge_status.get("paused") is not False
+            or edge_status.get("revision") != plan["edgeDelivery"]["revision"]
+            or edge_status.get("dead_count") != plan["edgeDelivery"]["deadCount"]
+        ):
+            raise StageTransitionError("Teams ingress delivery state changed before memory update")
+        navigator_status = runtime_update._current_navigator_status(
+            docker_prefix, plan["navigatorDrain"]["containerId"], timeout_seconds=15
+        )
+        if (
+            navigator_status.get("mode") != "accepting"
+            or navigator_status.get("instanceId") != plan["navigatorDrain"]["instanceId"]
+            or navigator_status.get("generation") != plan["navigatorDrain"]["generation"]
+        ):
+            raise StageTransitionError(
+                "Navigator is not accepting on its planned process generation"
+            )
+    except (
+        OSError,
+        StageTransitionError,
+        runtime_update.RuntimeUpdateError,
+        preflight.PreflightError,
+        subprocess.SubprocessError,
+    ) as error:
+        mark_no_mutation(
+            "memory_update_pre_mutation_gate_failed",
+            "MEMORY_UPDATE_BLOCKED_BEFORE_MUTATION",
+        )
+        raise StageTransitionError(
+            "memory update failed a read-only gate before mutation"
+        ) from error
+
+    memory_update["beforeReadback"] = before
+    memory_update["attemptIntent"] = True
+    memory_update["outcome"] = "UPDATE_INTENT_RECORDED"
+    progress["applyIntent"] = True
+    progress["phase"] = "APPLY_REQUESTED"
+    _write_journal(journal_path, journal, "MEMORY_UPDATE_DOCKER_UPDATE_INTENT_RECORDED")
+
+    # Docker Engine updates these cgroup limits in place; Compose up would recreate the service.
+    command_error: BaseException | None = None
+    command_outcome_unknown = False
+    try:
+        update_result = runtime_update._run_command(
+            [
+                *docker_prefix,
+                "update",
+                "--memory",
+                str(planned["candidateMemoryBytes"]),
+                "--memory-swap",
+                str(planned["candidateMemoryBytes"]),
+                active_service["containerId"],
+            ],
+            timeout_seconds=30,
+            external_mutation=True,
+        )
+    except runtime_update.RuntimeUpdateOutcomeUnknown as error:
+        command_error = error
+        command_outcome_unknown = True
+    except (OSError, runtime_update.RuntimeUpdateError, subprocess.SubprocessError) as error:
+        command_error = error
+
+    # Reconcile exactly once after the request; never retry or lower a possibly raised limit.
+    try:
+        observed = inspect_target()
+    except (
+        OSError,
+        StageTransitionError,
+        runtime_update.RuntimeUpdateError,
+        subprocess.SubprocessError,
+    ) as error:
+        mark_recovery("memory_update_readback_unavailable", "MEMORY_UPDATE_OUTCOME_UNKNOWN")
+        raise StageTransitionError(
+            "memory update outcome is unknown; no retry or rollback was attempted"
+        ) from error
+    try:
+        _verify_memory_update_snapshot(
+            observed,
+            planned,
+            active_service,
+            expected_memory_bytes=planned["candidateMemoryBytes"],
+        )
+    except StageTransitionError as desired_state_error:
+        try:
+            _verify_memory_update_snapshot(
+                observed,
+                planned,
+                active_service,
+                expected_memory_bytes=planned["activeMemoryBytes"],
+            )
+        except StageTransitionError as partial_state_error:
+            memory_update["afterReadback"] = observed
+            mark_recovery(
+                "memory_update_partial_or_identity_mismatch",
+                "MEMORY_UPDATE_PARTIAL_READBACK_RECOVERY_REQUIRED",
+            )
+            raise StageTransitionError(
+                "memory update is partial or its identity changed; leave the limit untouched for recovery"
+            ) from partial_state_error
+        if command_outcome_unknown:
+            memory_update["afterReadback"] = observed
+            mark_recovery(
+                "memory_update_timed_out_readback_not_final",
+                "MEMORY_UPDATE_TIMEOUT_READBACK_RECOVERY_REQUIRED",
+            )
+            raise StageTransitionError(
+                "Docker update timed out; the old limits were observed once but the daemon outcome may still complete"
+            ) from command_error
+        mark_no_mutation(
+            "memory_update_command_failed_without_change",
+            "MEMORY_UPDATE_FAILED_NO_MUTATION",
+        )
+        message = (
+            "Docker memory update returned an error; exact old limits remain"
+            if command_error is not None or update_result.returncode != 0
+            else "Docker returned success but exact old limits remain"
+        )
+        raise StageTransitionError(message + "; no retry was attempted") from (
+            command_error or desired_state_error
+        )
+
+    memory_update["outcome"] = (
+        "READBACK_CONFIRMED_APPLIED"
+        if command_error is not None or update_result.returncode != 0
+        else "APPLY_AND_READBACK_VERIFIED"
+    )
+    memory_update["afterReadback"] = observed
+
+    progress["candidateContainerId"] = active_service["containerId"]
+    progress["healthyContainerId"] = active_service["containerId"]
+    progress["phase"] = "TARGET_READBACK_VERIFIED"
+    progress["applyIntent"] = False
+    _write_journal(journal_path, journal, "MEMORY_UPDATE_TARGET_READBACK_VERIFIED")
+
+    try:
+        candidate_services = _live_service_inventory(
+            compose=candidate_compose,
+            image_lock=candidate_lock,
+            docker_prefix=docker_prefix,
+            mount_identity_by_service=plan["runtimeConfigIdentity"]["candidate"],
+        )
+        if candidate_services != plan["activeServices"]:
+            raise StageTransitionError(
+                "memory update changed a container ID, image, network, health, or mount identity"
+            )
+        runtime_update._verify_live_network_membership(
+            candidate_compose, candidate_services, docker_prefix
+        )
+        candidate_limits = _memory_update_actual_capacity(
+            compose=candidate_compose,
+            services=candidate_services,
+            max_memory_mib=plan["candidatePreflight"]["maxMemoryMiB"],
+            max_cpus=plan["candidatePreflight"]["maxCpus"],
+            docker_prefix=docker_prefix,
+        )
+        expected_total_bytes = planned["activeRuntimeMemoryBytes"] + (
+            planned["candidateMemoryBytes"] - planned["activeMemoryBytes"]
+        )
+        if (
+            candidate_limits["totalMemoryBytes"] != expected_total_bytes
+            or candidate_limits["totalNanoCpus"] != planned["activeRuntimeNanoCpus"]
+        ):
+            raise StageTransitionError(
+                "actual 14-service resource limits differ from the exact increase"
+            )
+        memory_update["afterRuntimeLimits"] = candidate_limits
+        _record_exchange_readiness(
+            plan=plan,
+            compose=candidate_compose,
+            journal=journal,
+            journal_path=journal_path,
+            docker_prefix=docker_prefix,
+        )
+        memory_update["afterExchangeReadiness"] = copy.deepcopy(
+            journal["exchangeReadiness"]["receipt"]
+        )
+        _write_journal(journal_path, journal, "MEMORY_UPDATE_EXCHANGE_READINESS_AFTER_VERIFIED")
+        journal["resourceReadback"] = _validate_post_update_capacity(
+            compose=candidate_compose,
+            services=candidate_services,
+            docker_prefix=docker_prefix,
+            minimum_available_mib=plan["candidatePreflight"]["minimumMemAvailableMiB"],
+        )
+        _write_journal(journal_path, journal, "MEMORY_UPDATE_HOST_CAPACITY_READBACK_VERIFIED")
+        edge_status = runtime_update._current_edge_status(
+            docker_prefix, plan["edgeDelivery"]["containerId"], timeout_seconds=15
+        )
+        runtime_update._verify_edge_dead_count(
+            journal["edge"], edge_status.get("dead_count"), "memory update readback"
+        )
+        if (
+            edge_status.get("paused") is not False
+            or edge_status.get("revision") != plan["edgeDelivery"]["revision"]
+        ):
+            raise StageTransitionError("Teams ingress was paused or revised during memory update")
+        navigator_status = runtime_update._current_navigator_status(
+            docker_prefix, plan["navigatorDrain"]["containerId"], timeout_seconds=15
+        )
+        if (
+            navigator_status.get("mode") != "accepting"
+            or navigator_status.get("instanceId") != plan["navigatorDrain"]["instanceId"]
+            or navigator_status.get("generation") != plan["navigatorDrain"]["generation"]
+        ):
+            raise StageTransitionError("Navigator process changed during memory update")
+        selection = _promote_selection(
+            plan=plan,
+            journal=journal,
+            journal_path=journal_path,
+        )
+    except (
+        OSError,
+        StageTransitionError,
+        runtime_update.RuntimeUpdateError,
+        preflight.PreflightError,
+        subprocess.SubprocessError,
+    ) as error:
+        mark_recovery("memory_update_post_apply_readback_failed", "MEMORY_UPDATE_RECOVERY_REQUIRED")
+        raise StageTransitionError(
+            "memory was increased, but a later readiness or selector read-back failed; do not lower it automatically"
+        ) from error
+
+    progress["phase"] = "APPLIED"
+    progress["applyIntent"] = False
+    if target not in journal["completedTargets"]:
+        journal["completedTargets"].append(target)
+    memory_update["outcome"] = "APPLIED_SAME_CONTAINER"
+    _write_journal(journal_path, journal, "APPLIED", state="APPLIED")
+    return {
+        **_journal_summary(journal),
+        "activeRuntimeSelection": _selection_summary(selection),
+    }
 
 
 def _current_selection_digest(path: Path) -> str | None:
@@ -7142,8 +8375,63 @@ def apply_plan_file(
         _candidate_preflight(plan)
         active_compose, _active_lock = _verify_active_baseline(plan, docker_prefix)
         candidate_compose, _candidate_lock = _candidate_configs(plan, docker_prefix)
+        if plan.get("memoryUpdateTarget") is not None:
+            targets, candidate_services = _validate_phase_topology(
+                phase=plan["phase"],
+                memory_update_target=plan["memoryUpdateTarget"],
+                active=active_compose,
+                candidate=candidate_compose,
+                active_lock=_active_lock,
+                candidate_lock=_candidate_lock,
+            )
+            if targets != plan["targets"] or candidate_services != plan["candidateServices"]:
+                raise StageTransitionError(
+                    "memory update topology changed after the plan was sealed"
+                )
+            active_memory = _memory_update_limit_bytes(
+                _runtime_service_inventory(active_compose)[plan["memoryUpdateTarget"]],
+                "active memory update service",
+            )
+            candidate_memory = _memory_update_limit_bytes(
+                _runtime_service_inventory(candidate_compose)[plan["memoryUpdateTarget"]],
+                "candidate memory update service",
+            )
+            memory_state = plan["memoryUpdateState"]
+            active_hash = _compose_service_config_hash(
+                service_name=plan["memoryUpdateTarget"],
+                compose_files=[Path(row["path"]) for row in plan["activeInputs"]["composeFiles"]],
+                env_files=[Path(row["path"]) for row in plan["activeInputs"]["envFiles"]],
+                docker_prefix=docker_prefix,
+            )
+            candidate_hash = _compose_service_config_hash(
+                service_name=plan["memoryUpdateTarget"],
+                compose_files=[
+                    Path(row["path"]) for row in plan["candidateInputs"]["composeFiles"]
+                ],
+                env_files=[Path(row["path"]) for row in plan["candidateInputs"]["envFiles"]],
+                docker_prefix=docker_prefix,
+            )
+            if (
+                active_memory != memory_state["activeMemoryBytes"]
+                or candidate_memory != memory_state["candidateMemoryBytes"]
+                or active_hash != memory_state["activeComposeConfigHash"]
+                or candidate_hash != memory_state["candidateComposeConfigHash"]
+            ):
+                raise StageTransitionError(
+                    "memory limits or Compose hash changed after the plan was sealed"
+                )
         journal = _make_journal(plan, plan_path)
         _create_initial_journal(journal_path, journal)
+        if plan.get("memoryUpdateTarget") is not None:
+            return _apply_memory_update(
+                plan=plan,
+                active_compose=active_compose,
+                candidate_compose=candidate_compose,
+                candidate_lock=_candidate_lock,
+                journal=journal,
+                journal_path=journal_path,
+                docker_prefix=docker_prefix,
+            )
         try:
             runtime_update._pause_edge(
                 plan=plan,
@@ -7695,6 +8983,7 @@ def _add_common_plan_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("--phase", choices=sorted(PHASES), required=True)
     parser.add_argument("--image-update-target", choices=sorted(IMAGE_UPDATE_TARGETS))
+    parser.add_argument("--memory-update-target", choices=sorted(MEMORY_UPDATE_TARGETS))
     parser.add_argument(
         "--listener-repair",
         action="store_true",
@@ -7774,6 +9063,7 @@ def main(argv: list[str] | None = None) -> int:
             result = create_plan(
                 phase=arguments.phase,
                 image_update_target=arguments.image_update_target,
+                memory_update_target=arguments.memory_update_target,
                 listener_repair=arguments.listener_repair,
                 active_compose_files=[path.resolve() for path in arguments.active_compose_file],
                 active_env_files=[path.resolve() for path in arguments.active_env_file],
