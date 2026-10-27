@@ -3817,13 +3817,27 @@ def _validate_codebuddy_acp_mount_boundary(
         ("connector-tool-catalog", "/run/config/connector-tool-catalog.json"),
         ("responsibility-targets", "/run/config/responsibility-targets.v1.json"),
     }
+    expected_notification_consumers = []
     if connector_auth_phase == "issued-connector-activation":
+        notification_target = "/run/secrets/teams-credential-notifications.json"
         expected_config_pairs.add(
             (
                 "teams-credential-notifications",
-                "/run/secrets/teams-credential-notifications.json",
+                notification_target,
             )
         )
+        expected_notification_consumers = [("navigator", notification_target)]
+    notification_consumers = [
+        (service_name, row.get("target"))
+        for service_name, service in config.get("services", {}).items()
+        if isinstance(service, dict)
+        for row in service.get("configs", [])
+        if isinstance(row, dict) and row.get("source") == "teams-credential-notifications"
+    ]
+    notification_consumer_is_exact = (
+        len(notification_consumers) == len(expected_notification_consumers)
+        and notification_consumers == expected_notification_consumers
+    )
     if (
         len(volumes) != 3
         or set(by_target) != allowed_targets
@@ -3853,6 +3867,7 @@ def _validate_codebuddy_acp_mount_boundary(
         or len(secrets) != 4
         or config_pairs != expected_config_pairs
         or len(configs) != len(expected_config_pairs)
+        or not notification_consumer_is_exact
     ):
         raise PreflightError(
             "CodeBuddy ACP Navigator must keep only its approved login, session, and Teams authorization mounts"

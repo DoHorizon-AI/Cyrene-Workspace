@@ -1072,6 +1072,23 @@ def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
             connector_auth_phase="issued-connector-activation",
         )
 
+    with_second_notification_consumer = json.loads(json.dumps(with_activation_notification))
+    with_second_notification_consumer["services"]["teams-provider"] = {
+        "configs": [
+            {
+                "source": "teams-credential-notifications",
+                "target": "/run/secrets/teams-credential-notifications.json",
+            }
+        ]
+    }
+    with pytest.raises(preflight.PreflightError, match="approved login, session"):
+        preflight._validate_codebuddy_acp_boundary(
+            with_second_notification_consumer,
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+            connector_auth_phase="issued-connector-activation",
+        )
+
     enabled_workflows = json.loads(json.dumps(valid))
     enabled_workflows["services"]["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "true"
     preflight._validate_codebuddy_acp_boundary(
