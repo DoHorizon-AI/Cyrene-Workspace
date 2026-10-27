@@ -2564,7 +2564,9 @@ def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
     snapshot, compose = _exchange_readiness_fixture(tmp_path)
     bindings: list[dict[str, Any]] = []
     catalog_items: list[dict[str, Any]] = []
-    existing = [("github", "github-connection", "github-profile", index) for index in range(10)]
+    existing = [
+        ("github", f"github-connection-{index}", "github-profile", index) for index in range(10)
+    ]
     existing.append(("computer", "computer-connection", "computer-profile", 10))
     for provider, connection_ref, profile_ref, index in existing:
         binding_id = f"legacy-{provider}-{index}"
@@ -2609,43 +2611,60 @@ def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
     bindings_path.write_text(json.dumps({"schemaVersion": 1, "bindings": bindings}))
     catalog_document = {"schemaVersion": 1, "items": catalog_items}
     catalog_path.write_text(json.dumps(catalog_document))
+    github_repositories = [
+        {
+            "repositoryId": f"github-repository-{index}",
+            "owner": "example-org",
+            "name": f"repository-{index}",
+        }
+        for index in range(10)
+    ]
     snapshot["profiles"] = [
         {
             "profileRef": "github-profile",
-            "profileAlias": "github-primary",
+            "profileAlias": None,
             "providerId": "github",
-            "authStatus": "connected",
-            "accessMode": "actor_owned",
-            "targetScope": {"repositories": []},
+            "authStatus": "healthy",
+            "accessMode": "workspace_operator",
+            "authMode": "github_app",
+            "targetScope": {"repositories": github_repositories},
         },
         {
             "profileRef": "computer-profile",
-            "profileAlias": "computer-primary",
+            "profileAlias": "computer-profile",
             "providerId": "computer",
             "accessMode": "workspace_operator",
-            "targetScope": {"targets": {}},
+            "targetScope": {
+                "maxCommandTimeoutMs": 30000,
+                "maxFileBytes": 1048576,
+                "maxReadBytes": 1048576,
+                "maxDirectoryDepth": 8,
+            },
         },
     ]
     snapshot["connections"] = [
         {
-            "connectionRef": "github-connection",
+            "connectionRef": f"github-connection-{index}",
             "providerId": "github",
             "profileRef": "github-profile",
-            "profileAlias": "github-primary",
-            "targetAlias": "github-read",
-            "accessMode": "actor_owned",
-            "readOnly": True,
-            "targetScope": {"repositories": []},
-        },
+            "profileAlias": None,
+            "targetAlias": None,
+            "accessMode": "workspace_operator",
+            "readOnly": False,
+            "targetScope": {
+                "repositoryId": f"github-repository-{index}",
+                "repository": f"example-org/repository-{index}",
+            },
+        }
+        for index in range(10)
+    ] + [
         {
             "connectionRef": "computer-connection",
             "providerId": "computer",
             "profileRef": "computer-profile",
-            "profileAlias": "computer-primary",
-            "targetAlias": "computer-read",
+            "profileAlias": "computer-profile",
             "accessMode": "workspace_operator",
-            "readOnly": True,
-            "targetScope": {"targetAlias": "computer-read", "targetRef": "desktop"},
+            "readOnly": False,
         },
     ]
     snapshot["bindings"] = bindings
@@ -2661,7 +2680,7 @@ def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
     assert receipt["verifiedProviderIds"] == ["computer", "github"]
     assert receipt["bindingCount"] == 11
     assert receipt["profileCount"] == 2
-    assert receipt["connectionCount"] == 2
+    assert receipt["connectionCount"] == 11
     assert receipt["profileRefByProvider"] == {}
 
     changed_snapshot = copy.deepcopy(snapshot)
@@ -2686,6 +2705,165 @@ def test_bootstrap_exchange_image_readiness_preserves_only_existing_bindings(
             phase="provider-bootstrap",
             image_update_target="exchange",
         )
+
+
+@pytest.mark.parametrize("unexpected_field", ["credentialSecretRef", "accessToken"])
+def test_exchange_readiness_safe_shape_matches_the_official_issued_fourteen_dto(
+    unexpected_field: str,
+) -> None:
+    """Accept the exact 10 GitHub + HF/Azure/GCP + computer DTO and reject secret extras."""
+
+    github_repositories = [
+        {
+            "repositoryId": f"github-repository-{index}",
+            "owner": "example-org",
+            "name": f"repository-{index}",
+        }
+        for index in range(10)
+    ]
+    hf_repository = {
+        "repoType": "model",
+        "repoId": "example-org/private-model",
+        "permissions": ["read"],
+    }
+    profiles = [
+        {
+            "profileRef": "github-profile",
+            "profileAlias": None,
+            "providerId": "github",
+            "authStatus": "healthy",
+            "authMode": "github_app",
+            "accessMode": "workspace_operator",
+            "targetScope": {"repositories": github_repositories},
+        },
+        {
+            "profileRef": "hf-profile",
+            "profileAlias": "hf-primary",
+            "providerId": "huggingface",
+            "authStatus": "healthy",
+            "authMode": "device_oauth",
+            "accessMode": "workspace_operator",
+            "targetScope": {"repositories": [hf_repository]},
+        },
+        {
+            "profileRef": "azure-profile",
+            "profileAlias": "azure-primary",
+            "providerId": "azure",
+            "accessMode": "workspace_operator",
+            "targetScope": {
+                "targets": {"azure-read": {"targetRef": "sub-123"}},
+            },
+            "readOnly": True,
+        },
+        {
+            "profileRef": "gcp-profile",
+            "profileAlias": "gcp-primary",
+            "providerId": "gcp",
+            "accessMode": "workspace_operator",
+            "targetScope": {
+                "targets": {"gcp-read": {"targetRef": "project-123"}},
+            },
+            "readOnly": True,
+        },
+        {
+            "profileRef": "computer-profile",
+            "profileAlias": "computer-profile",
+            "providerId": "computer",
+            "accessMode": "workspace_operator",
+            "targetScope": {
+                "maxCommandTimeoutMs": 30000,
+                "maxFileBytes": 1048576,
+                "maxReadBytes": 1048576,
+                "maxDirectoryDepth": 8,
+            },
+        },
+    ]
+    connections = [
+        {
+            "connectionRef": f"github-connection-{index}",
+            "providerId": "github",
+            "profileRef": "github-profile",
+            "profileAlias": None,
+            "targetAlias": None,
+            "accessMode": "workspace_operator",
+            "readOnly": False,
+            "targetScope": {
+                "repositoryId": f"github-repository-{index}",
+                "repository": f"example-org/repository-{index}",
+            },
+        }
+        for index in range(10)
+    ]
+    connections.extend(
+        [
+            {
+                "connectionRef": "hf-connection",
+                "providerId": "huggingface",
+                "profileRef": "hf-profile",
+                "profileAlias": "hf-primary",
+                "targetAlias": "hf-model",
+                "accessMode": "workspace_operator",
+                "readOnly": True,
+                "targetScope": hf_repository,
+            },
+            {
+                "connectionRef": "azure-connection",
+                "providerId": "azure",
+                "profileRef": "azure-profile",
+                "profileAlias": "azure-primary",
+                "targetAlias": "azure-read",
+                "accessMode": "workspace_operator",
+                "readOnly": True,
+                "targetScope": {"targetAlias": "azure-read", "targetRef": "sub-123"},
+            },
+            {
+                "connectionRef": "gcp-connection",
+                "providerId": "gcp",
+                "profileRef": "gcp-profile",
+                "profileAlias": "gcp-primary",
+                "targetAlias": "gcp-read",
+                "accessMode": "workspace_operator",
+                "readOnly": True,
+                "targetScope": {"targetAlias": "gcp-read", "targetRef": "project-123"},
+            },
+            {
+                "connectionRef": "computer-connection",
+                "providerId": "computer",
+                "profileRef": "computer-profile",
+                "profileAlias": "computer-profile",
+                "accessMode": "workspace_operator",
+                "readOnly": False,
+            },
+        ]
+    )
+    assert len(connections) == 14
+    snapshot = {"profiles": profiles, "connections": connections}
+
+    stage_transition._assert_exchange_readiness_safe_shape(snapshot)
+
+    missing_github_alias = copy.deepcopy(snapshot)
+    del missing_github_alias["connections"][0]["targetAlias"]
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Exchange readiness connection contains unsupported fields",
+    ):
+        stage_transition._assert_exchange_readiness_safe_shape(missing_github_alias)
+
+    computer_with_scope = copy.deepcopy(snapshot)
+    computer_with_scope["connections"][-1]["targetScope"] = {"targets": {}}
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Exchange readiness connection contains unsupported fields",
+    ):
+        stage_transition._assert_exchange_readiness_safe_shape(computer_with_scope)
+
+    unsafe = copy.deepcopy(snapshot)
+    unsafe["connections"][-1][unexpected_field] = "secret://must-not-be-exported"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Exchange readiness connection contains unsupported fields",
+    ):
+        stage_transition._assert_exchange_readiness_safe_shape(unsafe)
 
 
 def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
@@ -2745,6 +2923,72 @@ def test_exchange_readiness_requires_live_issued_profiles_bindings_and_catalog(
     with pytest.raises(stage_transition.StageTransitionError, match="live provider tool catalog"):
         stage_transition._verify_exchange_readiness_snapshot(
             snapshot=wrong_catalog, compose=compose
+        )
+
+
+def test_exchange_readiness_hf_profile_scope_is_order_insensitive_but_exact(
+    tmp_path: Path,
+) -> None:
+    """Treat repository order as nonsemantic while preserving permissions and duplicate checks."""
+
+    snapshot, compose = _exchange_readiness_fixture(tmp_path)
+    hf_profile = next(row for row in snapshot["profiles"] if row["providerId"] == "huggingface")
+    second_repository = {
+        "repoType": "dataset",
+        "repoId": "example-org/private-dataset",
+        "permissions": ["read"],
+    }
+    hf_profile["targetScope"]["repositories"].insert(0, second_repository)
+    exchange_service = compose["services"]["exchange"]
+    config_variable = "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    exchange_config = json.loads(exchange_service["environment"][config_variable])
+    exchange_hf_profile = exchange_config["authorizationCloud"]["profiles"]["hf-primary"]
+    exchange_hf_profile["accountScopes"]["repositories"].append(
+        {
+            "repoType": "dataset",
+            "repoId": "example-org/private-dataset",
+            "permissions": ["read"],
+        }
+    )
+    exchange_service["environment"][config_variable] = json.dumps(exchange_config)
+
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+    )
+    assert receipt["status"] == "LIVE_VERIFIED"
+
+    changed_permissions = copy.deepcopy(snapshot)
+    changed_hf_profile = next(
+        row for row in changed_permissions["profiles"] if row["providerId"] == "huggingface"
+    )
+    changed_repository = next(
+        row
+        for row in changed_hf_profile["targetScope"]["repositories"]
+        if row["repoType"] == "dataset"
+    )
+    changed_repository["permissions"] = ["read", "write"]
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="live Account Center HF profile scope/access mode differs",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=changed_permissions,
+            compose=compose,
+        )
+
+    duplicate_repository = copy.deepcopy(snapshot)
+    duplicate_hf_profile = next(
+        row for row in duplicate_repository["profiles"] if row["providerId"] == "huggingface"
+    )
+    duplicate_hf_profile["targetScope"]["repositories"].append(copy.deepcopy(second_repository))
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="repository scope is invalid",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=duplicate_repository,
+            compose=compose,
         )
 
 
