@@ -62,11 +62,13 @@ selector、恢复本 operation 持有的 ingress，并回读最终 delivery revi
 中分别规划的剩余目标。
 
 Recovery authorization is one-shot. If the authorized command fails or its process
-outcome is uncertain, the journal remains `RECOVERY_REQUIRED`; do not rerun `commit`,
-`apply`, or `resume`. Keep ingress paused, preserve the receipt and journal, and perform
-a read-only audit before defining a separate reviewed recovery action. This path does
-not install the release reconciler timer.
+outcome is uncertain, the journal remains `RUNNING` or `RECOVERY_REQUIRED`; neither
+state allows replay. Do not rerun `commit`, `apply`, or `resume`. Keep ingress paused,
+preserve the receipt and journal, and perform a read-only audit before defining a
+separate reviewed recovery action. This path does not install the release reconciler
+timer.
 
-恢复授权仅可执行一次。如果授权命令失败或进程结果不确定，journal 保持
-`RECOVERY_REQUIRED`；不得重跑 `commit`、`apply` 或 `resume`。保持 ingress 暂停并保留回执与
-journal，先完成只读审计，再定义单独审核的恢复动作。此入口不会安装发行协调 timer。
+恢复授权仅可执行一次。如果授权命令失败或进程结果不确定，journal 保持 `RUNNING` 或
+`RECOVERY_REQUIRED`；这两种状态都不能重放。不得重跑 `commit`、`apply` 或 `resume`。保持
+ingress 暂停并保留回执与 journal，先完成只读审计，再定义单独审核的恢复动作。此入口不会
+安装发行协调 timer。
