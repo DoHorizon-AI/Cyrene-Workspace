@@ -260,6 +260,26 @@ def _compare_reports(expected: dict[str, Any], actual: dict[str, Any], label: st
         raise ForwardRecoveryError(f"{label} differs from exact source-migration read-back")
 
 
+def _validate_ingress_quiescence(edge: dict[str, Any], journal: dict[str, Any]) -> dict[str, Any]:
+    """Require this operation's pause and no outstanding delivery before recovery."""
+
+    if (
+        edge.get("paused") is not True
+        or edge.get("revision") != journal["edge"].get("pauseRevision")
+        or journal["edge"].get("pauseHolder") != journal["operationId"]
+        or edge.get("active_delivery_count") != 0
+    ):
+        raise ForwardRecoveryError(
+            "Teams ingress is not held by this operation or active delivery has not drained"
+        )
+    return {
+        "paused": True,
+        "revision": edge["revision"],
+        "activeDeliveryCount": edge["active_delivery_count"],
+        "deadLetterCount": edge["dead_count"],
+    }
+
+
 def _candidate_source_replay(
     *,
     plan: dict[str, Any],
@@ -395,7 +415,7 @@ def _mixed_runtime_readback(
     plan: dict[str, Any],
     journal: dict[str, Any],
     docker_prefix: list[str],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Verify all fourteen services at the precise post-Persistence/pre-next-target boundary."""
 
     stage_transition._verify_all_inputs(plan)
@@ -437,12 +457,7 @@ def _mixed_runtime_readback(
     runtime_update._verify_edge_dead_count(
         journal["edge"], edge["dead_count"], "forward-recovery gate"
     )
-    if (
-        edge.get("paused") is not True
-        or edge.get("revision") != journal["edge"].get("pauseRevision")
-        or journal["edge"].get("pauseHolder") != journal["operationId"]
-    ):
-        raise ForwardRecoveryError("Teams ingress is not held by this exact operation")
+    ingress_proof = _validate_ingress_quiescence(edge, journal)
     nav = runtime_update._current_navigator_status(
         docker_prefix, journal["navigator"]["initialContainerId"], timeout_seconds=15
     )
@@ -480,10 +495,28 @@ def _mixed_runtime_readback(
         or journal["navigator"].get("drained") is not True
     ):
         raise ForwardRecoveryError("the exact original Navigator drain is not held")
+    quiescence = {
+        "ingress": ingress_proof,
+        "persistenceActiveWriterLeaseCount": active_leases,
+        "navigator": {
+            "containerIdSha256": _sha256_bytes(
+                journal["navigator"]["initialContainerId"].encode("utf-8")
+            ),
+            "instanceIdSha256": _sha256_bytes(str(nav["instanceId"]).encode("utf-8")),
+            "generation": nav["generation"],
+            "countsComplete": nav["countsComplete"],
+            "activeTasks": nav["activeTasks"],
+            "dispatchActive": dispatches["active"],
+            "dispatchWaiting": dispatches["waiting"],
+            "activeWorkDrained": nav["activeWorkDrained"],
+            "notificationPollingPaused": notifications["pollingPaused"],
+            "notificationInFlight": notifications["inFlight"],
+        },
+    }
     readiness = journal.get("exchangeReadiness", {})
     if readiness.get("required") is not True or readiness.get("verified") is not True:
         raise ForwardRecoveryError("the operation's required Exchange readiness proof is missing")
-    return candidate_compose, candidate_lock, live
+    return candidate_compose, candidate_lock, live, quiescence
 
 
 def _build_preview(
@@ -502,7 +535,7 @@ def _build_preview(
     )
     if _candidate_image(plan, docker_prefix) != candidate_image:
         raise ForwardRecoveryError("candidate image identity changed during isolated source replay")
-    candidate_compose, candidate_lock, live_services = _mixed_runtime_readback(
+    candidate_compose, candidate_lock, live_services, quiescence = _mixed_runtime_readback(
         plan=plan, journal=journal, docker_prefix=docker_prefix
     )
     persistence_container = journal["targetProgress"][TARGET]["healthyContainerId"]
@@ -548,6 +581,7 @@ def _build_preview(
             "secondPass": second,
         },
         "liveDatabase": live_db,
+        "quiescence": quiescence,
         "liveServiceIdsSha256": _sha256_bytes(
             _canonical_json(
                 {name: row["containerId"] for name, row in sorted(live_services.items())}
@@ -705,6 +739,7 @@ def _commit_forward_recovery_locked(
         "candidateImage": fresh["candidateImage"],
         "expectedSchemaSha256": fresh["replay"]["expected"]["schemaSha256"],
         "liveSchemaSha256": fresh["liveDatabase"]["schemaSha256"],
+        "quiescenceSha256": _sha256_bytes(_canonical_json(fresh["quiescence"])),
         "recoveryModuleSha256": _sha256_file(source_path),
     }
     authorization["receiptSha256"] = _sha256_bytes(_canonical_json(authorization))
@@ -719,6 +754,7 @@ def _commit_forward_recovery_locked(
         "expectedSchemaSha256": authorization["expectedSchemaSha256"],
         "sourceCommit": SUPPORTED_NAVIGATOR_COMMIT,
         "candidateImageId": fresh["candidateImage"]["imageId"],
+        "quiescenceSha256": authorization["quiescenceSha256"],
     }
     journal["database"]["postMigration"] = {
         **fresh["liveDatabase"],

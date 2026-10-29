@@ -19,14 +19,15 @@ must expose the pinned `PersistenceStore`, `WorkStore`, and startup API source f
 their expected SHA-256 values. The migration sequence runs twice; both results must be
 identical. The resulting full schema and per-table row digests must match the live
 database exactly, and all service, writer-lease, ingress, Navigator-drain, selector,
-plan, and backup guards must still hold.
+plan, and backup guards must still hold. Fresh ingress status must report zero active
+deliveries.
 
 确认操作仍持有 Teams ingress 且 Navigator 维持原 drain 后，以 root 运行 `prepare`。该步
 以不可变 image ID 启动候选镜像，在无网络、无凭据的容器内对 sealed SQLite 备份的独立副本
 执行迁移。镜像内 `PersistenceStore`、`WorkStore` 和启动 API 的源码文件必须与固定 SHA-256
 完全一致；迁移运行两次且结果必须相同。迁移后的完整 schema 和每张表的行摘要必须与线上
 数据库完全一致，同时确认所有服务、写租约、ingress、Navigator drain、selector、plan 和
-备份条件仍满足。
+备份条件仍满足。fresh ingress status 还必须显示活动投递数为零。
 
 ```sh
 python3 "$DEPLOYMENT/persistence_forward_recovery.py" prepare \

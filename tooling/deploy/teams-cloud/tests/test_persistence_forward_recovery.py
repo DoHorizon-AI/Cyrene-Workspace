@@ -160,6 +160,26 @@ def test_expected_and_live_reports_require_exact_schema_and_every_table_digest()
         recovery._compare_reports(expected, actual, "changed schema")
 
 
+def test_ingress_quiescence_requires_the_operation_pause_and_zero_active_delivery() -> None:
+    """A stale journal pause is insufficient if live Teams forwards are still active."""
+
+    journal = {
+        "operationId": "op",
+        "edge": {"pauseHolder": "op", "pauseRevision": 43},
+    }
+    edge = {
+        "paused": True,
+        "revision": 43,
+        "active_delivery_count": 0,
+        "dead_count": 0,
+    }
+    assert recovery._validate_ingress_quiescence(edge, journal)["activeDeliveryCount"] == 0
+
+    edge["active_delivery_count"] = 1
+    with pytest.raises(recovery.ForwardRecoveryError):
+        recovery._validate_ingress_quiescence(edge, journal)
+
+
 def test_preview_state_fingerprint_is_stable_across_prepare_and_commit_time() -> None:
     """Operator confirmation binds runtime evidence, not the prepare timestamp."""
 
