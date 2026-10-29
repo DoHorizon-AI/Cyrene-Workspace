@@ -7,7 +7,7 @@ ARG AZURE_CLI_PACKAGE_VERSION=2.91.0-1~bookworm
 ARG AZURE_CLI_VERSION=2.91.0
 ARG AZURE_CLI_ARM64_SHA256=dcf43fcd7f4d538cf31c958e797e40be3e651dcacbb90de8c3aa2ab642a5ab0d
 ARG GCLOUD_CLI_VERSION=590.0.1
-ARG GCLOUD_CLI_ARM64_SHA256=c9e8618c9257b3289deb7cb5483479230d5d96230bd68a80fce17f592d0d3012
+ARG GCLOUD_CLI_ARM64_SHA256=fd760d8b1c2c4c484d7b659964994b07aaefddc6ac4350e681940477dbdbb22c
 ARG RUNPODCTL_VERSION=3.0.1
 ARG RUNPODCTL_ARM64_SHA256=7d75577b52950e40e1fbf6b34b8e1302d3d408e2f1d8637b5031c0f0b1089beb
 
@@ -47,7 +47,7 @@ RUN apt-get update \
        | AZURE_CLI_VERSION="${AZURE_CLI_VERSION}" python -c \
          'import json,os,sys; assert json.load(sys.stdin)["azure-cli"] == os.environ["AZURE_CLI_VERSION"]' \
     && curl -fsSL \
-       "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-arm.tar.gz" \
+       "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-${GCLOUD_CLI_VERSION}-linux-arm.tar.gz" \
        -o /tmp/google-cloud-cli-linux-arm.tar.gz \
     && printf '%s  /tmp/google-cloud-cli-linux-arm.tar.gz\n' \
        "${GCLOUD_CLI_ARM64_SHA256}" | sha256sum --check --status \

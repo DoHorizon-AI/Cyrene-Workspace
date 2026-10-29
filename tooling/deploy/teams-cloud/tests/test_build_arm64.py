@@ -172,6 +172,32 @@ def test_codebuddy_release_dockerfile_needs_no_private_antigravity_binary() -> N
     assert dsh_image["buildArgs"]["CODEBUDDY_PACKAGE"] == "@tencent-ai/codebuddy-code@2.163.0"
 
 
+def test_cloud_management_pins_the_versioned_gcloud_archive_and_digest() -> None:
+    """Keep the GCloud archive URL, version, and verified ARM64 digest aligned."""
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    dockerfile = (deployment_root / "Dockerfile.cloud-management").read_text(encoding="utf-8")
+    plan = json.loads(
+        (deployment_root / "config" / "build-plan.template.json").read_text(encoding="utf-8")
+    )
+    cloud_image = next(row for row in plan["images"] if row["service"] == "cloud-management")
+    build_args = cloud_image["buildArgs"]
+    docker_args = {
+        line.removeprefix("ARG ").partition("=")[0]: line.partition("=")[2]
+        for line in dockerfile.splitlines()
+        if line.startswith("ARG GCLOUD_CLI_")
+    }
+
+    assert build_args["GCLOUD_CLI_VERSION"] == "590.0.1"
+    assert build_args["GCLOUD_CLI_ARM64_SHA256"] == (
+        "fd760d8b1c2c4c484d7b659964994b07aaefddc6ac4350e681940477dbdbb22c"
+    )
+    assert build_args["GCLOUD_CLI_VERSION"] == docker_args["GCLOUD_CLI_VERSION"]
+    assert build_args["GCLOUD_CLI_ARM64_SHA256"] == docker_args["GCLOUD_CLI_ARM64_SHA256"]
+    assert "google-cloud-cli-${GCLOUD_CLI_VERSION}-linux-arm.tar.gz" in dockerfile
+    assert "downloads/google-cloud-cli-linux-arm.tar.gz" not in dockerfile
+
+
 def test_build_plan_requires_digest_pinned_base_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
