@@ -898,6 +898,10 @@ def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() 
         (DEPLOYMENT_ROOT / "config" / "proactive-assistant-workflow.v2.template.json").read_text()
     )
     assert workflow["enabled"] is False
+    assert all(
+        trigger.get("initialBaseline") == "record_without_notification"
+        for trigger in workflow["triggers"]
+    )
     preflight._validate_workflow_definition_disabled(workflow)
     assert (
         "CYRENE_HF_ENABLED=false"

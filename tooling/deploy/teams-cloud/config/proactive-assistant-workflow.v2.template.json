@@ -27,13 +27,15 @@
       "id": "morning-review",
       "kind": "review",
       "schedule": {"kind": "cron", "expression": "0 9 * * *", "timeZone": "America/New_York"},
-      "targetIds": ["REPLACE_WITH_DECIMAL_GITHUB_REPOSITORY_ID"]
+      "targetIds": ["REPLACE_WITH_DECIMAL_GITHUB_REPOSITORY_ID"],
+      "initialBaseline": "record_without_notification"
     },
     {
       "id": "afternoon-review",
       "kind": "review",
       "schedule": {"kind": "cron", "expression": "0 17 * * *", "timeZone": "America/New_York"},
-      "targetIds": ["REPLACE_WITH_DECIMAL_GITHUB_REPOSITORY_ID"]
+      "targetIds": ["REPLACE_WITH_DECIMAL_GITHUB_REPOSITORY_ID"],
+      "initialBaseline": "record_without_notification"
     }
   ],
   "actionPolicy": {
