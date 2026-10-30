@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
@@ -223,6 +224,60 @@ class FakeBridge:
             )
             return dict(self.status_value)
         raise AssertionError(f"unexpected operation: {operation}")
+
+
+class BlockingStatusBridge(FakeBridge):
+    """Hold one status operation to exercise poll admission and HTTP liveness."""
+
+    def __init__(self, port: int = setup.DEFAULT_PORT) -> None:
+        super().__init__(port)
+        self.status_started = threading.Event()
+        self.release_status = threading.Event()
+
+    def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if operation == "status":
+            self.status_started.set()
+            if not self.release_status.wait(timeout=5):
+                raise AssertionError("test did not release blocked status bridge")
+        return super().invoke(operation, payload)
+
+
+class BlockingBeginBridge(FakeBridge):
+    """Hold provider begin while repeated same-session submissions arrive."""
+
+    def __init__(self, port: int = setup.DEFAULT_PORT) -> None:
+        super().__init__(port)
+        self.begin_started = threading.Event()
+        self.release_begin = threading.Event()
+
+    def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if operation == "begin":
+            self.begin_started.set()
+            if not self.release_begin.wait(timeout=5):
+                raise AssertionError("test did not release blocked begin bridge")
+        return super().invoke(operation, payload)
+
+
+class BlockingStatusBeginBridge(FakeBridge):
+    """Hold a poll then begin to verify the status message advances between them."""
+
+    def __init__(self, port: int = setup.DEFAULT_PORT) -> None:
+        super().__init__(port)
+        self.status_started = threading.Event()
+        self.release_status = threading.Event()
+        self.begin_started = threading.Event()
+        self.release_begin = threading.Event()
+
+    def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if operation == "status":
+            self.status_started.set()
+            if not self.release_status.wait(timeout=5):
+                raise AssertionError("test did not release blocked status bridge")
+        elif operation == "begin":
+            self.begin_started.set()
+            if not self.release_begin.wait(timeout=5):
+                raise AssertionError("test did not release blocked begin bridge")
+        return super().invoke(operation, payload)
 
 
 @pytest.fixture
@@ -476,17 +531,228 @@ def test_begin_does_not_share_an_unexpired_flow_with_another_browser_session() -
 
 
 def test_concurrent_begin_calls_create_one_provider_flow() -> None:
-    """Serialize repeated button submissions so concurrent requests share one URL."""
+    """Reject a concurrent duplicate promptly instead of queuing another begin."""
+
+    bridge = BlockingBeginBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(service.begin, session)
+        assert bridge.begin_started.wait(timeout=2)
+        with pytest.raises(setup.OfficeSetupError, match="office_authorization_pending"):
+            service.begin(session)
+        bridge.release_begin.set()
+        first_url = first.result(timeout=2)
+
+    assert bridge.begin_calls == 1
+    assert urllib.parse.urlsplit(first_url).hostname == "login.microsoftonline.com"
+
+
+def test_status_poll_is_singleflight_and_reuses_only_fresh_validated_cache() -> None:
+    """Do not queue status CLI calls; a fresh safe snapshot avoids repeated cold RPCs."""
+
+    bridge = BlockingStatusBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(service.status, session)
+        assert bridge.status_started.wait(timeout=2)
+        with pytest.raises(setup.OfficeSetupError, match="office_status_busy"):
+            service.status(session)
+        bridge.release_status.set()
+        assert first.result(timeout=2)["authStatus"] == "unknown"
+
+    assert len([op for op, _ in bridge.calls if op == "status"]) == 1
+    assert service.status(session)["authStatus"] == "unknown"
+    assert len([op for op, _ in bridge.calls if op == "status"]) == 1
+    service._status_cache_at = time.monotonic() - setup.STATUS_CACHE_TTL_SECONDS - 1
+    assert service.status(session)["authStatus"] == "unknown"
+    assert len([op for op, _ in bridge.calls if op == "status"]) == 2
+
+
+def test_begin_reuses_fresh_status_snapshot_and_invalidates_after_begin() -> None:
+    """A status checked seconds ago is reused for begin, then invalidated after mutation."""
 
     bridge = FakeBridge()
     service = setup.OfficeSetupService(bridge, operator_context=operator_context())
     _, session = service.create_session()
+    service.status(session)
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        urls = list(pool.map(lambda _index: service.begin(session), range(16)))
+    service.begin(session)
+    assert [op for op, _ in bridge.calls].count("status") == 1
+    assert [op for op, _ in bridge.calls].count("begin") == 1
 
-    assert len(set(urls)) == 1
+    service.status(session)
+    assert [op for op, _ in bridge.calls].count("status") == 2
+
+
+def test_select_targets_invalidates_the_cached_status_snapshot(
+    linked_service: tuple[setup.OfficeSetupService, FakeBridge, setup.SetupSession],
+) -> None:
+    """A target revision change forces the next poll to read the updated owner state."""
+
+    service, bridge, session = linked_service
+    service.status(session)
+    service.discover(session, "todo_lists")
+    targets = {
+        "plannerPlanIds": [],
+        "sharePointListIds": [],
+        "sharePointDriveIds": [],
+        "toDoTaskListIds": ["todo-1"],
+        "calendarIds": [],
+        "freebusySubjects": [],
+    }
+    service.select_targets(session, expected_revision=0, targets_value=targets)
+
+    updated = service.status(session)
+    assert updated["credentialRevision"] == 1
+    assert [op for op, _ in bridge.calls].count("status") == 2
+
+
+def test_begin_reuses_status_that_finishes_while_it_waits_for_singleflight_lock() -> None:
+    """A poll already in flight can satisfy begin without a duplicate cold status call."""
+
+    bridge = BlockingStatusBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        status = pool.submit(service.status, session)
+        assert bridge.status_started.wait(timeout=2)
+        begin = pool.submit(service.begin, session)
+        # Let begin establish its pending state before the status bridge completes.
+        deadline = time.monotonic() + 2
+        while not service._begin_pending and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert service._begin_pending
+        bridge.release_status.set()
+        assert status.result(timeout=2)["authStatus"] == "unknown"
+        location = begin.result(timeout=2)
+
+    assert urllib.parse.urlsplit(location).hostname == "login.microsoftonline.com"
+    assert len([op for op, _ in bridge.calls if op == "status"]) == 1
     assert bridge.begin_calls == 1
+
+
+def test_new_begin_marks_cached_poll_as_preparing_not_previous_failure() -> None:
+    """A prior failure cannot clear a new attempt's popup while status is in flight."""
+
+    bridge = BlockingStatusBeginBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    with service._lock:
+        service._last_callback_message = "AUTHORIZATION_DID_NOT_COMPLETE"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        status = pool.submit(service.status, session)
+        assert bridge.status_started.wait(timeout=2)
+        begin = pool.submit(service.begin, session)
+        deadline = time.monotonic() + 2
+        while not service._begin_pending and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert service._begin_pending
+        with service._lock:
+            assert service._last_callback_message == "AUTHORIZATION_PREPARING"
+
+        bridge.release_status.set()
+        assert status.result(timeout=2)["message"] == "AUTHORIZATION_PREPARING"
+        assert bridge.begin_started.wait(timeout=2)
+        with pytest.raises(setup.OfficeSetupError, match="office_status_busy"):
+            service.status(session)
+        bridge.release_begin.set()
+        location = begin.result(timeout=2)
+
+    assert urllib.parse.urlsplit(location).hostname == "login.microsoftonline.com"
+    assert bridge.begin_calls == 1
+    assert [op for op, _ in bridge.calls].count("status") == 1
+
+
+def test_rejected_begin_clears_preparing_state_and_allows_a_later_attempt() -> None:
+    """A rejected or malformed begin result must not strand the UI in preparing state."""
+
+    class RejectOnceBridge(FakeBridge):
+        reject_next_begin = True
+
+        def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if operation == "begin" and self.reject_next_begin:
+                self.reject_next_begin = False
+                raise setup.OfficeSetupError("office_bridge_rejected")
+            return super().invoke(operation, payload)
+
+    bridge = RejectOnceBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    with pytest.raises(setup.OfficeSetupError, match="office_bridge_rejected"):
+        service.begin(session)
+    assert service.status(session)["message"] == "AUTHORIZATION_DID_NOT_COMPLETE"
+    assert service.begin(session).startswith("https://login.microsoftonline.com/")
+    assert bridge.begin_calls == 1
+
+
+def test_blocked_begin_keeps_home_and_session_responsive_and_status_unqueued() -> None:
+    """A slow owner RPC must not hold the service lock or accumulate status calls."""
+
+    bridge = BlockingStatusBridge()
+    server, thread, port = _start_server(bridge)
+    try:
+        cookie, csrf, _page = _page_session(port)
+        form = urllib.parse.urlencode({"csrf": csrf})
+
+        def submit_authorize() -> tuple[int, str]:
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            connection.request(
+                "POST",
+                "/authorize",
+                body=form,
+                headers={
+                    "Host": f"localhost:{port}",
+                    "Origin": f"http://localhost:{port}",
+                    "Cookie": cookie,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Content-Length": str(len(form)),
+                },
+            )
+            response = connection.getresponse()
+            status = response.status
+            location = response.getheader("Location", "")
+            response.read()
+            connection.close()
+            return status, location
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            authorization = pool.submit(submit_authorize)
+            assert bridge.status_started.wait(timeout=2)
+
+            # The homepage creates another session while Exchange is blocked.
+            new_cookie, _new_csrf, _new_page = _page_session(port)
+            assert new_cookie
+
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            connection.request(
+                "GET", "/api/status", headers={"Host": f"localhost:{port}", "Cookie": cookie}
+            )
+            status_response = connection.getresponse()
+            status_body = json.loads(status_response.read().decode("utf-8"))
+            assert status_response.status == HTTPStatus.SERVICE_UNAVAILABLE
+            assert status_body == {"error": "office_status_busy"}
+            connection.close()
+
+            assert len([op for op, _ in bridge.calls if op == "status"]) == 0
+            bridge.release_status.set()
+            result_status, location = authorization.result(timeout=3)
+            assert result_status == HTTPStatus.SEE_OTHER
+            assert urllib.parse.urlsplit(location).hostname == "login.microsoftonline.com"
+
+        assert len([op for op, _ in bridge.calls if op == "status"]) == 1
+        assert bridge.begin_calls == 1
+    finally:
+        bridge.release_status.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 @pytest.mark.parametrize(
@@ -631,8 +897,8 @@ def test_cas_rejects_ids_not_returned_by_exchange_discovery(
     before = len(bridge.calls)
     with pytest.raises(setup.OfficeSetupError, match="office_target_not_discovered"):
         service.select_targets(session, expected_revision=0, targets_value=targets)
-    assert len(bridge.calls) == before + 1
-    assert bridge.calls[-1][0] == "status"
+    assert len(bridge.calls) == before
+    assert not any(operation == "select-targets" for operation, _ in bridge.calls[before:])
 
 
 def test_freebusy_selection_cannot_clear_a_nonempty_host_allowlist(
@@ -798,7 +1064,26 @@ def test_reused_homepage_keeps_same_origin_referrer_policy_and_api_stays_no_refe
     bridge = FakeBridge()
     server, thread, port = _start_server(bridge)
     try:
-        cookie, _csrf, _page = _page_session(port)
+        cookie, _csrf, page_body = _page_session(port)
+        assert "Requesting Microsoft sign-in…" in page_body
+        assert "AUTHORIZATION_WAIT_NOTICE_MS=15000" in page_body
+        assert "AUTHORIZATION_WAIT_TIMEOUT_MS=135000" in page_body
+        assert "STATUS_REQUEST_TIMEOUT_MS=8000" in page_body
+        assert "new AbortController()" in page_body
+        assert "refreshInFlight" in page_body
+        assert "AUTHORIZATION_PREPARING" in page_body
+        assert "setInterval(" not in page_body
+        assert 'target="cyrene-office-oauth"' in page_body
+        assert "try{authPopupDocument=popup.document;}catch(_error){}" in page_body
+        auth_submit = page_body.split(
+            "document.getElementById('authorize').addEventListener('submit',event=>{", 1
+        )[1].split("\ndocument.getElementById('discover')", 1)[0]
+        assert 'method="post" action="/authorize"' in page_body
+        popup_access_fallback = auth_submit.split("authPopupDocument=null;", 1)[1]
+        assert "event.preventDefault()" not in popup_access_fallback
+        assert "setPopupMessage('Requesting Microsoft sign-in…')" in popup_access_fallback
+        assert "state-secret" not in page_body
+        assert "login.microsoftonline.com/organizations/oauth2" not in page_body
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
         connection.request("GET", "/", headers={"Host": f"localhost:{port}", "Cookie": cookie})
         page = connection.getresponse()
@@ -814,6 +1099,50 @@ def test_reused_homepage_keeps_same_origin_referrer_policy_and_api_stays_no_refe
         assert status.status == HTTPStatus.OK
         assert status.getheader("Referrer-Policy") == "no-referrer"
         status.read()
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_authorize_bridge_busy_renders_safe_recoverable_popup_page() -> None:
+    """A known-not-executed busy result gives the popup useful text without reflecting data."""
+
+    class BusyBridge(FakeBridge):
+        def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if operation == "status":
+                raise setup.OfficeSetupError("office_bridge_busy")
+            return super().invoke(operation, payload)
+
+    bridge = BusyBridge()
+    server, thread, port = _start_server(bridge)
+    try:
+        cookie, csrf, _page = _page_session(port)
+        form = urllib.parse.urlencode({"csrf": csrf})
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.request(
+            "POST",
+            "/authorize",
+            body=form,
+            headers={
+                "Host": f"localhost:{port}",
+                "Origin": f"http://localhost:{port}",
+                "Cookie": cookie,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(form)),
+            },
+        )
+        response = connection.getresponse()
+        body = response.read().decode("utf-8")
+        assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+        assert response.getheader("Content-Type", "").startswith("text/html")
+        assert "Office is busy preparing sign-in" in body
+        assert "Return to the Office setup page" in body
+        assert "state-secret" not in body
+        assert "authorizationUrl" not in body
+        assert "login.microsoftonline.com" not in body
+        assert bridge.begin_calls == 0
         connection.close()
     finally:
         server.shutdown()
@@ -909,8 +1238,11 @@ def test_authorize_form_repeated_post_reuses_same_url_only_for_its_cookie_sessio
         )
         pending = connection.getresponse()
         pending_body = pending.read().decode("utf-8")
-        assert pending.status == HTTPStatus.BAD_GATEWAY
-        pending_error = json.loads(pending_body).get("error")
+        assert pending.status == HTTPStatus.CONFLICT
+        assert pending.getheader("Content-Type", "").startswith("text/html")
+        pending_error = (
+            "office_authorization_pending" if "already being prepared" in pending_body else None
+        )
         has_pending_redirect = pending.getheader("Location") is not None
         pending_body_contains_state = "state-secret" in pending_body
         assert pending_error == "office_authorization_pending"
