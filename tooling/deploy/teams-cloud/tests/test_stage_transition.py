@@ -914,6 +914,26 @@ def test_office_graph_bootstrap_accepts_only_the_owner_model_personal_route() ->
         stage_transition._validate_office_graph_personal_route_compose_delta(active, candidate)
 
 
+def test_office_graph_apply_order_keeps_every_cgroup_memory_prefix_within_cap() -> None:
+    baseline_memory_mib = 3520
+    cgroup_memory_cap_mib = 3584
+    deltas_mib = {"cloud-management-phase2": -128, "microsoft-graph": 192}
+    current_memory_mib = baseline_memory_mib
+    prefix_memory_mib: dict[str, int] = {}
+
+    for service_name in stage_transition.OFFICE_GRAPH_STAGE_TARGET_ORDER:
+        current_memory_mib += deltas_mib.get(service_name, 0)
+        prefix_memory_mib[service_name] = current_memory_mib
+        assert current_memory_mib <= cgroup_memory_cap_mib
+
+    assert stage_transition.OFFICE_GRAPH_STAGE_TARGET_ORDER.index(
+        "cloud-management-phase2"
+    ) < stage_transition.OFFICE_GRAPH_STAGE_TARGET_ORDER.index("microsoft-graph")
+    assert prefix_memory_mib["cloud-management-phase2"] == 3392
+    assert prefix_memory_mib["microsoft-graph"] == cgroup_memory_cap_mib
+    assert current_memory_mib == cgroup_memory_cap_mib
+
+
 def _office_graph_cloud_memory_services() -> tuple[dict[str, Any], dict[str, Any]]:
     """Build Cloud service inventories with only the reviewed memory change."""
 

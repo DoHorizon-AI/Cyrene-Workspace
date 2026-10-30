@@ -75,8 +75,8 @@ SERVICE_SET = set(SERVICE_ORDER)
 OFFICE_GRAPH_STAGE_TARGET_ORDER = (
     "navigator-persistence",
     "account-center",
-    "microsoft-graph",
     "cloud-management-phase2",
+    "microsoft-graph",
     "exchange",
     "teams-provider",
     "teams-ingress",
