@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import http.client
 import importlib
 import json
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import threading
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -103,6 +105,7 @@ def authorization_url(
     *,
     scopes: str | None = None,
     authority: str = "organizations",
+    state: str = "state-secret-123",
 ) -> str:
     """Return a test Microsoft authorize URL with the one registered loopback URI."""
 
@@ -114,7 +117,7 @@ def authorization_url(
             "redirect_uri": f"http://localhost:{port}{setup.CALLBACK_PATH}",
             "scope": scopes
             or "openid profile User.Read offline_access Tasks.ReadWrite Calendars.ReadWrite Sites.Selected",
-            "state": "state-secret-123",
+            "state": state,
             "code_challenge": "A" * 43,
             "code_challenge_method": "S256",
         }
@@ -128,6 +131,8 @@ class FakeBridge:
     def __init__(self, port: int = setup.DEFAULT_PORT) -> None:
         self.port = port
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.begin_calls = 0
+        self.expires_at = "2099-01-01T00:00:00Z"
         self.linked = False
         self.status_value = status_document()
         self.discoveries: dict[str, dict[str, Any]] = {
@@ -165,13 +170,21 @@ class FakeBridge:
     def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((operation, dict(payload)))
         if operation == "begin":
+            self.begin_calls += 1
             return {
                 "state": "AUTHORIZATION_REQUIRED",
                 "provider": "microsoft_graph",
                 "profileRef": PROFILE_REF,
                 "linkSessionRef": LINK_REF,
-                "authorizationUrl": authorization_url(self.port),
-                "expiresAt": "2026-10-30T10:00:00Z",
+                "authorizationUrl": authorization_url(
+                    self.port,
+                    state=(
+                        "state-secret-123"
+                        if self.begin_calls == 1
+                        else f"state-secret-{self.begin_calls}"
+                    ),
+                ),
+                "expiresAt": self.expires_at,
             }
         if operation == "status":
             return dict(self.status_value)
@@ -385,14 +398,18 @@ def test_begin_and_callback_keep_code_and_state_inside_cli_stdin() -> None:
     service = setup.OfficeSetupService(bridge, operator_context=operator_context())
     _, session = service.create_session()
     auth_url = service.begin(session)
-    assert "state-secret-123" in auth_url
+    state_present = urllib.parse.parse_qs(urllib.parse.urlsplit(auth_url).query).get("state") == [
+        "state-secret-123"
+    ]
+    assert state_present
     service.complete_callback(
         "state=state-secret-123&code=code-secret-456&session_state=discard-me&client_info=discard-too"
     )
     operation, payload = bridge.calls[-1]
     assert operation == "complete"
     assert payload == {"state": "state-secret-123", "code": "code-secret-456"}
-    assert "code-secret-456" not in repr(service._active_flow)
+    code_redacted = "code-secret-456" not in repr(service._active_flow)
+    assert code_redacted
     safe = service.status(session)
     assert safe["identityVerified"] is True
     assert safe["credentialRevision"] == 0
@@ -412,6 +429,87 @@ def test_begin_and_callback_keep_code_and_state_inside_cli_stdin() -> None:
     final_status = service.status(session)
     assert final_status["identityVerified"] is True
     assert final_status["credentialRevision"] == 1
+
+
+def test_begin_reopens_same_unexpired_provider_flow_and_replaces_only_after_expiry() -> None:
+    """Reuse Exchange's verified URL for one session and use its expiry, not local TTL."""
+
+    bridge = FakeBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    first_url = service.begin(session)
+    flow = service._active_flow
+
+    assert flow is not None
+    same_url = hmac.compare_digest(service.begin(session), first_url)
+    assert same_url
+    assert bridge.begin_calls == 1
+    stored_url_matches = hmac.compare_digest(flow.authorization_url, first_url)
+    state_redacted = "state-secret-123" not in repr(flow)
+    csrf_redacted = session.csrf_token not in repr(flow)
+    assert stored_url_matches and state_redacted and csrf_redacted
+
+    flow.expires_at = setup.datetime(2000, 1, 1, tzinfo=setup.UTC)
+    replacement_url = service.begin(session)
+    replacement_is_new = not hmac.compare_digest(replacement_url, first_url)
+    assert replacement_is_new
+    assert bridge.begin_calls == 2
+
+
+def test_begin_does_not_share_an_unexpired_flow_with_another_browser_session() -> None:
+    """A second cookie session cannot receive or replace the first session's URL."""
+
+    bridge = FakeBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, owner_session = service.create_session()
+    _, other_session = service.create_session()
+    first_url = service.begin(owner_session)
+
+    with pytest.raises(setup.OfficeSetupError, match="office_authorization_pending"):
+        service.begin(other_session)
+
+    assert bridge.begin_calls == 1
+    assert service._active_flow is not None
+    assert service._active_flow.session is owner_session
+    stored_url_matches = hmac.compare_digest(service._active_flow.authorization_url, first_url)
+    assert stored_url_matches
+
+
+def test_concurrent_begin_calls_create_one_provider_flow() -> None:
+    """Serialize repeated button submissions so concurrent requests share one URL."""
+
+    bridge = FakeBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        urls = list(pool.map(lambda _index: service.begin(session), range(16)))
+
+    assert len(set(urls)) == 1
+    assert bridge.begin_calls == 1
+
+
+@pytest.mark.parametrize(
+    "expires_at",
+    [
+        "not-a-timestamp",
+        "2099-01-01T00:00:00",
+        "2000-01-01T00:00:00Z",
+        "0001-01-01T00:00:00+23:59",
+    ],
+)
+def test_begin_rejects_invalid_or_expired_provider_url_expiry(expires_at: str) -> None:
+    """Never retain or redirect to a URL with malformed, naive, or expired provider expiry."""
+
+    bridge = FakeBridge()
+    bridge.expires_at = expires_at
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    with pytest.raises(setup.OfficeSetupError, match="office_begin_response_invalid"):
+        service.begin(session)
+
+    assert service._active_flow is None
 
 
 def test_status_requires_actor_owned_matching_provider_and_never_mail_scope() -> None:
@@ -749,6 +847,76 @@ def test_authorize_form_rejects_null_and_external_origin_before_cli() -> None:
             assert rejected.status == HTTPStatus.FORBIDDEN
             assert json.loads(rejected.read().decode("utf-8")) == {"error": "origin_not_allowed"}
             assert bridge.calls == []
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_authorize_form_repeated_post_reuses_same_url_only_for_its_cookie_session() -> None:
+    """Exercise the real handler state: same-session retries redirect identically once."""
+
+    bridge = FakeBridge()
+    server, thread, port = _start_server(bridge)
+    try:
+        cookie, csrf, _page = _page_session(port)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        form = urllib.parse.urlencode({"csrf": csrf})
+        locations: list[str | None] = []
+        bodies: list[str] = []
+        for _ in range(2):
+            connection.request(
+                "POST",
+                "/authorize",
+                body=form,
+                headers={
+                    "Host": f"localhost:{port}",
+                    "Origin": f"http://localhost:{port}",
+                    "Cookie": cookie,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Content-Length": str(len(form)),
+                },
+            )
+            response = connection.getresponse()
+            locations.append(response.getheader("Location"))
+            bodies.append(response.read().decode("utf-8"))
+            assert response.status == HTTPStatus.SEE_OTHER
+
+        first_url = urllib.parse.urlsplit(locations[0] or "")
+        same_location = hmac.compare_digest(locations[0] or "", locations[1] or "")
+        assert same_location
+        assert first_url.scheme == "https"
+        assert first_url.hostname == "login.microsoftonline.com"
+        assert first_url.path.endswith("/oauth2/v2.0/authorize")
+        bodies_contain_state = any("state-secret" in body for body in bodies)
+        assert not bodies_contain_state
+        assert bridge.begin_calls == 1
+
+        other_cookie, other_csrf, _other_page = _page_session(port)
+        other_form = urllib.parse.urlencode({"csrf": other_csrf})
+        connection.request(
+            "POST",
+            "/authorize",
+            body=other_form,
+            headers={
+                "Host": f"localhost:{port}",
+                "Origin": f"http://localhost:{port}",
+                "Cookie": other_cookie,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(other_form)),
+            },
+        )
+        pending = connection.getresponse()
+        pending_body = pending.read().decode("utf-8")
+        assert pending.status == HTTPStatus.BAD_GATEWAY
+        pending_error = json.loads(pending_body).get("error")
+        has_pending_redirect = pending.getheader("Location") is not None
+        pending_body_contains_state = "state-secret" in pending_body
+        assert pending_error == "office_authorization_pending"
+        assert not has_pending_redirect
+        assert not pending_body_contains_state
+        assert bridge.begin_calls == 1
         connection.close()
     finally:
         server.shutdown()

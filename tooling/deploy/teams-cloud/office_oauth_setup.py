@@ -27,6 +27,7 @@ import urllib.parse
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Literal, Protocol
@@ -312,12 +313,28 @@ class SetupSession:
 
 @dataclass(slots=True)
 class ActiveFlow:
-    """Keep nonsecret flow references while the OAuth code remains in callback memory only."""
+    """Keep one owner flow until provider expiry without exposing its URL in repr."""
 
     profile_ref: str
     link_session_ref: str
-    expires_at: str
-    created_at: float = field(default_factory=time.monotonic)
+    expires_at: datetime
+    authorization_url: str = field(repr=False)
+    session: SetupSession = field(repr=False, compare=False)
+
+
+def _provider_expiration(value: Any) -> datetime:
+    """Parse Exchange's timezone-aware ISO 8601 expiry for an authorization URL."""
+
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise OfficeSetupError("office_begin_response_invalid")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timestamp must include a timezone")
+        return parsed.astimezone(UTC)
+    except (OverflowError, ValueError):
+        raise OfficeSetupError("office_begin_response_invalid") from None
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -753,14 +770,17 @@ class OfficeSetupService:
                 self._sessions.pop(session_id, None)
 
     def begin(self, session: SetupSession) -> str:
-        """Begin the fixed Exchange OAuth flow and return its URL only to the redirect handler."""
+        """Begin or reopen this browser session's provider flow until its URL expires."""
 
         with self._lock:
-            if (
-                self._active_flow
-                and time.monotonic() - self._active_flow.created_at < self.session_ttl
-            ):
-                raise OfficeSetupError("office_authorization_pending")
+            active_flow = self._active_flow
+            if active_flow is not None:
+                if active_flow.expires_at > datetime.now(UTC):
+                    if active_flow.session is not session:
+                        raise OfficeSetupError("office_authorization_pending")
+                    return active_flow.authorization_url
+                self._active_flow = None
+                self._last_callback_message = "AUTHORIZATION_DID_NOT_COMPLETE"
             current = _safe_status(self.bridge.invoke("status", {}), self.operator_context)
             session.credential_revision = current["credentialRevision"]
             session.enabled_features = current["enabledFeatures"]
@@ -781,16 +801,16 @@ class OfficeSetupService:
                 raise OfficeSetupError("office_begin_state_invalid")
             profile_ref = _safe_identifier(response.get("profileRef"))
             link_ref = _safe_identifier(response.get("linkSessionRef"))
-            expires_at = response.get("expiresAt")
-            if not isinstance(expires_at, str) or len(expires_at) > 128:
-                raise OfficeSetupError("office_begin_response_invalid")
+            expires_at = _provider_expiration(response.get("expiresAt"))
             auth_url = _validate_authorization_url(
                 response.get("authorizationUrl"),
                 port=self.port,
                 tenant_id=self.operator_context.tenant_id,
                 enabled_features=current["enabledFeatures"],
             )
-            self._active_flow = ActiveFlow(profile_ref, link_ref, expires_at)
+            if expires_at <= datetime.now(UTC):
+                raise OfficeSetupError("office_begin_response_invalid")
+            self._active_flow = ActiveFlow(profile_ref, link_ref, expires_at, auth_url, session)
             self._last_callback_message = "AUTHORIZATION_PENDING"
             return auth_url
 
