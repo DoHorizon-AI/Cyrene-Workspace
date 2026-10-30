@@ -57,6 +57,116 @@ def _merge_compose_fixture(base: Any, override: Any) -> Any:
     return copy.deepcopy(override)
 
 
+def _render_full_graph_compose(
+    docker: str, tmp_path: Path, safe_environment: dict[str, str]
+) -> dict[str, Any]:
+    """Render the full Graph stack with the approved host memory override."""
+
+    relative_files = (
+        "compose.yaml",
+        "compose.computer-runtime.yaml",
+        "compose.codebuddy-acp.yaml",
+        "compose.huggingface.yaml",
+        "compose.cloud-phase2.yaml",
+        "compose.runpod.yaml",
+        "compose.credential-notifications.yaml",
+        "compose.automation-workflows.yaml",
+        "compose.microsoft-graph.yaml",
+        "compose.office-oauth-setup.yaml",
+    )
+    compose_files = [DEPLOYMENT_ROOT / filename for filename in relative_files]
+    override_file = tmp_path / "teams-ingress-memory256.override.yaml"
+    override_file.write_text(
+        yaml.safe_dump(
+            {"services": {"teams-ingress": {"mem_limit": "256m", "memswap_limit": "256m"}}}
+        ),
+        encoding="utf-8",
+    )
+    compose_files.append(override_file)
+
+    full_root = tmp_path / "full-graph-render"
+    secrets_dir = full_root / "secrets"
+    config_dir = full_root / "config"
+    codebuddy_home = full_root / "codebuddy"
+    for directory in (secrets_dir, config_dir, codebuddy_home):
+        directory.mkdir(parents=True, exist_ok=True)
+    office_operator_file = config_dir / "office-operator.json"
+    office_operator_file.write_text("{}\n", encoding="utf-8")
+    office_operator_file.chmod(0o600)
+
+    compose_text = "\n".join(path.read_text(encoding="utf-8") for path in compose_files)
+    variable_names = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_text))
+    fixed_values = {
+        "CYRENE_SECRETS_DIR": str(secrets_dir),
+        "CYRENE_CONFIG_DIR": str(config_dir),
+        "CYRENE_CODEBUDDY_HOME": str(codebuddy_home),
+        "CYRENE_OFFICE_OPERATOR_CONFIG_FILE": str(office_operator_file),
+        "CYRENE_CADDYFILE": str(DEPLOYMENT_ROOT / "Caddyfile.staging"),
+        "CYRENE_COMPUTER_CADDYFILE": str(DEPLOYMENT_ROOT / "Caddyfile.computer-runtime"),
+        "CYRENE_PUBLIC_BIND": "127.0.0.1",
+        "CYRENE_HTTPS_PORT": "18443",
+        "TEAMS_FQDN": "teams.example.invalid",
+        "TEAMS_ALLOWED_TEAM_IDS": "team-probe",
+    }
+    values: dict[str, str] = {}
+    for name in variable_names:
+        if name in fixed_values:
+            values[name] = fixed_values[name]
+        elif name.endswith("_JSON"):
+            values[name] = "{}"
+        elif "IMAGE" in name:
+            values[name] = f"example.invalid/{name.lower()}:rendered-test"
+        elif name.endswith("_PORT"):
+            values[name] = "18443"
+        elif name.endswith("_ID"):
+            values[name] = "11111111-1111-4111-8111-111111111111"
+        elif name.endswith(("_DIR", "_FILE", "CADDYFILE")):
+            path = full_root / name.lower()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if name.endswith("_DIR"):
+                path.mkdir(exist_ok=True)
+            else:
+                path.touch(exist_ok=True)
+            values[name] = str(path)
+        else:
+            values[name] = "synthetic-value"
+
+    interpolation = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}")
+    for compose_file in compose_files:
+        document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        for section in ("secrets", "configs"):
+            for row in document.get(section, {}).values():
+                source = row.get("file") if isinstance(row, dict) else None
+                if not isinstance(source, str):
+                    continue
+                resolved = interpolation.sub(lambda match: values[match.group(1)], source)
+                path = Path(resolved)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(exist_ok=True)
+
+    env_file = full_root / "compose.env"
+    env_file.write_text(
+        "".join(f"{name}={value}\n" for name, value in sorted(values.items())),
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    argv = [docker, "compose", "--env-file", str(env_file)]
+    for compose_file in compose_files:
+        argv.extend(["--file", str(compose_file)])
+    for profile in preflight.ACTIVE_COMPOSE_PROFILES:
+        argv.extend(["--profile", profile])
+    argv.extend(["config", "--format", "json"])
+    rendered = subprocess.run(
+        argv,
+        capture_output=True,
+        check=False,
+        env=safe_environment,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    return json.loads(rendered.stdout)
+
+
 def test_private_bind_options_accept_only_closed_no_create_host_path_forms() -> None:
     mount = {"type": "bind", "read_only": True}
     assert preflight._private_bind_options_are_safe(mount)
@@ -336,37 +446,14 @@ def test_real_graph_and_office_oauth_overlay_render_preserves_secrets_and_loopba
         }
     ]
 
-    complete_graph_files = (
-        "compose.yaml",
-        "compose.computer-runtime.yaml",
-        "compose.codebuddy-acp.yaml",
-        "compose.huggingface.yaml",
-        "compose.cloud-phase2.yaml",
-        "compose.credential-notifications.yaml",
-        "compose.automation-workflows.yaml",
-        "compose.microsoft-graph.yaml",
-        "compose.office-oauth-setup.yaml",
-    )
-    complete_graph_config: dict[str, Any] = {
-        "services": {},
-        "configs": {},
-        "secrets": {},
-        "volumes": {},
-        "networks": {},
-    }
-    for filename in complete_graph_files:
-        overlay = yaml.safe_load((DEPLOYMENT_ROOT / filename).read_text(encoding="utf-8"))
-        complete_graph_config = _merge_compose_fixture(complete_graph_config, overlay)
-    active_profiles = set(preflight.ACTIVE_COMPOSE_PROFILES)
-    runtime_services = {
-        name
-        for name, service in complete_graph_config["services"].items()
-        if service.get("restart") != "no"
-        and (
-            not service.get("profiles") or active_profiles.intersection(service.get("profiles", []))
-        )
-    }
-    assert runtime_services == {
+    complete_graph_config = _render_full_graph_compose(docker, tmp_path, safe_environment)
+    assert complete_graph_config["services"]["exchange"]["ports"] == exchange_ports
+    runtime_services = preflight._active_compose_runtime_services(complete_graph_config)
+    assert len(complete_graph_config["services"]) == 16
+    assert "directory-operator" in complete_graph_config["services"]
+    assert complete_graph_config["services"]["directory-operator"]["restart"] == "no"
+    assert "directory-operator" not in runtime_services
+    assert set(runtime_services) == {
         "postgres",
         "workspace-authority",
         "account-center",
@@ -383,72 +470,63 @@ def test_real_graph_and_office_oauth_overlay_render_preserves_secrets_and_loopba
         "cloud-management-phase2",
         "microsoft-graph",
     }
-    locked_images: set[str] = set()
-    for service_name, service in complete_graph_config["services"].items():
-        image = f"example.invalid/{service_name}:rendered-test"
-        service["image"] = image
-        locked_images.add(image)
-    complete_graph_config["services"]["exchange"]["ports"] = exchange_ports
-    caddy = complete_graph_config["services"]["teams-public-ingress"]
-    caddy["ports"] = [
-        {
-            "target": 443,
-            "published": "18443",
-            "host_ip": "127.0.0.1",
-            "protocol": "tcp",
-        }
-    ]
-    caddy["volumes"] = [
-        {
-            "type": "bind",
-            "source": str((DEPLOYMENT_ROOT / "Caddyfile.staging").resolve()),
-            "target": "/etc/caddy/Caddyfile",
-        }
-    ]
-    memory_mib, cpus = preflight._validate_compose(
-        complete_graph_config,
-        "connector-auth-readonly",
-        3584,
-        2.0,
-        locked_images,
-        ingress_exposure="host-fronted-staging",
-        connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+    locked_images = {service["image"] for service in complete_graph_config["services"].values()}
+
+    def validate_graph_compose(config: dict[str, Any]) -> tuple[float, float]:
+        return preflight._validate_compose(
+            config,
+            "connector-auth-readonly",
+            3584,
+            1.95,
+            locked_images,
+            ingress_exposure="host-fronted-staging",
+            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        )
+
+    memory_mib, cpus = validate_graph_compose(complete_graph_config)
+    assert memory_mib == 3584
+    assert cpus == 1.95
+    preflight._validate_graph_provider_bootstrap_budget(complete_graph_config, memory_mib, cpus)
+
+    extra_runtime_service = copy.deepcopy(complete_graph_config)
+    extra_runtime_service["services"]["unexpected-active-service"] = {
+        "image": "example.invalid/unexpected-active-service:rendered-test",
+        "restart": "unless-stopped",
+        "mem_limit": "64m",
+        "memswap_limit": "64m",
+        "cpus": "0.05",
+    }
+    with pytest.raises(preflight.PreflightError, match="exact 15-service"):
+        preflight._validate_graph_provider_bootstrap_budget(extra_runtime_service, memory_mib, cpus)
+
+    over_budget_memory = copy.deepcopy(complete_graph_config)
+    over_budget_memory["services"]["teams-ingress"].update(
+        {"mem_limit": "257m", "memswap_limit": "257m"}
     )
-    assert memory_mib <= 3584
-    assert cpus <= 2.0
+    with pytest.raises(preflight.PreflightError, match="memory limits total 3585 MiB"):
+        validate_graph_compose(over_budget_memory)
+
+    over_budget_cpu = copy.deepcopy(complete_graph_config)
+    over_budget_cpu["services"]["teams-ingress"]["cpus"] = "0.06"
+    with pytest.raises(preflight.PreflightError, match="CPU limits total 1.96"):
+        validate_graph_compose(over_budget_cpu)
 
     wildcard_graph_config = copy.deepcopy(complete_graph_config)
     wildcard_graph_config["services"]["exchange"]["ports"][0]["host_ip"] = "0.0.0.0"
     with pytest.raises(preflight.PreflightError, match="Graph bootstrap requires its one"):
-        preflight._validate_compose(
-            wildcard_graph_config,
-            "connector-auth-readonly",
-            3584,
-            2.0,
-            locked_images,
-            ingress_exposure="host-fronted-staging",
-            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-        )
+        validate_graph_compose(wildcard_graph_config)
 
     extra_publisher_config = copy.deepcopy(complete_graph_config)
     extra_publisher_config["services"]["teams-provider"]["ports"] = exchange_ports
     with pytest.raises(preflight.PreflightError, match="only Teams ingress or the fixed"):
-        preflight._validate_compose(
-            extra_publisher_config,
-            "connector-auth-readonly",
-            3584,
-            2.0,
-            locked_images,
-            ingress_exposure="host-fronted-staging",
-            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-        )
+        validate_graph_compose(extra_publisher_config)
 
     with pytest.raises(preflight.PreflightError, match="absent outside Graph provider bootstrap"):
         preflight._validate_compose(
             complete_graph_config,
             "connector-auth-readonly",
             3584,
-            2.0,
+            1.95,
             locked_images,
             ingress_exposure="host-fronted-staging",
             connector_auth_phase="issued-connector-activation",

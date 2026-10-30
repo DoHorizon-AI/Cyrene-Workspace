@@ -5540,7 +5540,7 @@ def _validate_compose(
     _validate_office_oauth_loopback_ports(exchange_ports, connector_auth_phase)
     public_name = "teams-public-ingress"
     memory = 0
-    cpus = 0.0
+    cpus = Decimal(0)
     for name, service in services.items():
         if not isinstance(service, dict):
             raise PreflightError(f"Compose service {name} is malformed")
@@ -5618,14 +5618,15 @@ def _validate_compose(
         cpu_limit = _cpu_limit_decimal(service.get("cpus"))
         if cpu_limit is None:
             raise PreflightError(f"Compose service {name} lacks a finite CPU limit")
-        cpus += float(cpu_limit)
+        cpus += cpu_limit
     if memory > max_memory_mib:
         raise PreflightError(
             f"Compose cgroup memory limits total {memory:.0f} MiB, above {max_memory_mib} MiB"
         )
-    if cpus > max_cpus:
-        raise PreflightError(f"Compose CPU limits total {cpus:.2f}, above {max_cpus:.2f}")
-    return memory, cpus
+    cpu_cap = Decimal(str(max_cpus))
+    if cpus > cpu_cap:
+        raise PreflightError(f"Compose CPU limits total {float(cpus):.2f}, above {max_cpus:.2f}")
+    return memory, float(cpus)
 
 
 def _memory_headroom(
@@ -7835,6 +7836,44 @@ def _expected_stage1_services(config: dict[str, Any]) -> dict[str, dict[str, Any
     return expected
 
 
+def _active_compose_runtime_services(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Select only services started by the canonical profiles and restart policy."""
+
+    services = config.get("services")
+    if not isinstance(services, dict):
+        raise PreflightError("rendered Compose configuration has no valid services")
+    active_profiles = set(ACTIVE_COMPOSE_PROFILES)
+    active: dict[str, dict[str, Any]] = {}
+    for name, service in services.items():
+        if not isinstance(name, str) or not isinstance(service, dict):
+            raise PreflightError("rendered Compose service inventory is malformed")
+        profiles = service.get("profiles", [])
+        if not isinstance(profiles, list) or any(not isinstance(row, str) for row in profiles):
+            raise PreflightError(f"rendered Compose service profiles are malformed for {name}")
+        if service.get("restart") == "no":
+            continue
+        if profiles and not active_profiles.intersection(profiles):
+            continue
+        active[name] = service
+    return active
+
+
+def _validate_graph_provider_bootstrap_budget(
+    config: dict[str, Any], cgroup_memory_mib: float, cgroup_cpus: float
+) -> None:
+    """Require 15 active Graph-bootstrap services within the exact VM budget."""
+
+    active_services = _active_compose_runtime_services(config)
+    if (
+        len(active_services) != 15
+        or Decimal(str(cgroup_memory_mib)) != Decimal(3584)
+        or _cpu_limit_decimal(cgroup_cpus) != Decimal("1.95")
+    ):
+        raise PreflightError(
+            "Graph bootstrap must keep the exact 15-service 3584 MiB/1.95 CPU budget"
+        )
+
+
 def _validate_cutover_runtime(
     config: dict[str, Any], docker_prefix: list[str], mode: str
 ) -> dict[str, float]:
@@ -8027,12 +8066,8 @@ def run_preflight(
         ingress_exposure,
         connector_auth_phase,
     )
-    if connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and (
-        len(config.get("services", {})) != 15 or cgroup_budget_mib != 3584 or _cgroup_cpus != 1.95
-    ):
-        raise PreflightError(
-            "Graph bootstrap must keep the exact 15-service 3584 MiB/1.95 CPU budget"
-        )
+    if connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+        _validate_graph_provider_bootstrap_budget(config, cgroup_budget_mib, _cgroup_cpus)
     if recovery_only:
         memory = {
             "status": "RECOVERY_CONFIGURATION_ONLY",
