@@ -1184,7 +1184,7 @@ def test_candidate_notification_provenance_preserves_route_and_adds_only_runpod(
         json.dumps(candidate_notification), encoding="utf-8"
     )
     with pytest.raises(
-        deployment_probe.DeploymentProbeError, match="owner, workspace, route, and profile"
+        deployment_probe.DeploymentProbeError, match="outside the RunPod-only update contract"
     ):
         deployment_probe._build_notification_provenance(
             active=active,
@@ -1211,7 +1211,9 @@ def test_candidate_notification_provenance_preserves_route_and_adds_only_runpod(
     (active_dir / "connector-bindings.json").write_text(
         json.dumps({"bindings": [runpod_binding]}), encoding="utf-8"
     )
-    with pytest.raises(deployment_probe.DeploymentProbeError, match="active bindings"):
+    with pytest.raises(
+        deployment_probe.DeploymentProbeError, match="outside the RunPod-only update contract"
+    ):
         deployment_probe._build_notification_provenance(
             active=active,
             anchor_path=anchor_path,

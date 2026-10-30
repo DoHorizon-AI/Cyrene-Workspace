@@ -3630,6 +3630,213 @@ def test_recovered_persistence_principal_alias_rejects_wrong_consumer_or_source(
         )
 
 
+def _runpod_notification_config_pair(
+    tmp_path: Path,
+) -> tuple[Path, Path, dict[str, Any], dict[str, Any]]:
+    """Build an active notification overlay and a RunPod-only candidate update."""
+
+    active_dir = tmp_path / "active-config"
+    candidate_dir = tmp_path / "candidate-config"
+    active_dir.mkdir()
+    candidate_dir.mkdir()
+    active_notification = {
+        "schemaVersion": 1,
+        "organizationId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000002",
+        "owner": {"subject": "00000000-0000-4000-8000-000000000003"},
+        "connections": [
+            {"provider": provider, "connectionId": f"00000000-0000-4000-8000-{number:012x}"}
+            for number, provider in enumerate(("hf", "azure", "gcp"), start=10)
+        ],
+        "destination": {
+            "teamId": "team-a",
+            "channelId": "channel-a",
+            "rootThreadId": "12345",
+        },
+        "exchange": {"profileRef": "teams-notification-profile"},
+        "pollIntervalMs": 300000,
+    }
+    runpod_connection = "00000000-0000-4000-8000-000000000020"
+    candidate_notification = copy.deepcopy(active_notification)
+    candidate_notification["connections"].append(
+        {"provider": "runpod", "connectionId": runpod_connection}
+    )
+    (active_dir / "teams-credential-notifications.json").write_text(
+        json.dumps(active_notification), encoding="utf-8"
+    )
+    (candidate_dir / "teams-credential-notifications.json").write_text(
+        json.dumps(candidate_notification), encoding="utf-8"
+    )
+    active_bindings = [
+        {
+            "bindingId": f"00000000-0000-4000-8000-{number + 100:012x}",
+            "connectionRef": row["connectionId"],
+            "providerId": {"hf": "huggingface", "azure": "azure", "gcp": "gcp"}[row["provider"]],
+            "profileRef": f"{row['provider']}-profile",
+            "tools": [
+                {
+                    "toolId": "readonly-tool",
+                    "operationId": "readonly.operation",
+                    "resourceProjection": "profile",
+                    "mutating": False,
+                }
+            ],
+        }
+        for number, row in enumerate(active_notification["connections"])
+    ]
+    runpod_tools = [
+        "cloud.provider.health.read",
+        "cloud.resources.list",
+        "cloud.resource.get",
+        "cloud.operation.status.read",
+        "cloud.operation.logs.read",
+    ]
+    runpod_binding = {
+        "bindingId": "00000000-0000-4000-8000-000000000120",
+        "connectionRef": runpod_connection,
+        "providerId": "runpod",
+        "profileRef": "runpod-issued-profile",
+        "tools": [
+            {
+                "toolId": operation_id,
+                "operationId": operation_id,
+                "resourceProjection": "profile",
+                "mutating": False,
+            }
+            for operation_id in runpod_tools
+        ],
+    }
+    (active_dir / "connector-bindings.json").write_text(
+        json.dumps({"bindings": active_bindings}), encoding="utf-8"
+    )
+    (candidate_dir / "connector-bindings.json").write_text(
+        json.dumps({"bindings": active_bindings + [runpod_binding]}), encoding="utf-8"
+    )
+    active = {
+        "configs": {
+            "teams-credential-notifications": {
+                "file": str(active_dir / "teams-credential-notifications.json")
+            },
+            "connector-bindings": {"file": str(active_dir / "connector-bindings.json")},
+        },
+        "services": {
+            "cloud-management-phase2": {
+                "environment": {
+                    "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                        {"profiles": [{"provider": "azure"}, {"provider": "gcp"}]}
+                    )
+                }
+            }
+        },
+    }
+    candidate = copy.deepcopy(active)
+    candidate["configs"]["teams-credential-notifications"]["file"] = str(
+        candidate_dir / "teams-credential-notifications.json"
+    )
+    candidate["configs"]["connector-bindings"]["file"] = str(
+        candidate_dir / "connector-bindings.json"
+    )
+    candidate["services"]["cloud-management-phase2"]["environment"][
+        "CYRENE_CAPABILITY_CONFIGURATION_JSON"
+    ] = json.dumps(
+        {
+            "profiles": [
+                {"provider": "azure"},
+                {"provider": "gcp"},
+                {
+                    "provider": "runpod",
+                    "profile_ref": "runpod-primary",
+                    "identity_ref": "runpod-identity",
+                    "auth": {"mode": "api_key"},
+                    "read_only": True,
+                },
+            ]
+        }
+    )
+    return active_dir, candidate_dir, active, candidate
+
+
+def test_active_notification_config_allows_only_the_scoped_runpod_addition(
+    tmp_path: Path,
+) -> None:
+    """Allow an already-enabled overlay to add one read-only RunPod notification binding."""
+
+    active_dir, candidate_dir, active, candidate = _runpod_notification_config_pair(tmp_path)
+
+    stage_transition._validate_active_candidate_configs(
+        active_dir,
+        candidate_dir,
+        active,
+        candidate,
+    )
+
+
+@pytest.mark.parametrize("mutation", ["route", "existing_connection", "write_binding"])
+def test_active_notification_config_rejects_unrelated_or_mutating_runpod_updates(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Reject notification scope drift and any write or non-allowlisted RunPod binding."""
+
+    active_dir, candidate_dir, active, candidate = _runpod_notification_config_pair(tmp_path)
+    candidate_notification_path = candidate_dir / "teams-credential-notifications.json"
+    candidate_notification = json.loads(candidate_notification_path.read_text(encoding="utf-8"))
+    candidate_binding_path = candidate_dir / "connector-bindings.json"
+    candidate_binding_document = json.loads(candidate_binding_path.read_text(encoding="utf-8"))
+    runpod_binding = next(
+        row for row in candidate_binding_document["bindings"] if row["providerId"] == "runpod"
+    )
+    if mutation == "route":
+        candidate_notification["destination"]["channelId"] = "other-channel"
+        candidate_notification_path.write_text(json.dumps(candidate_notification), encoding="utf-8")
+    elif mutation == "existing_connection":
+        candidate_notification["connections"][0]["connectionId"] = (
+            "00000000-0000-4000-8000-000000000099"
+        )
+        candidate_notification_path.write_text(json.dumps(candidate_notification), encoding="utf-8")
+    else:
+        runpod_binding["tools"].append(
+            {
+                "toolId": "cloud.resource.create",
+                "operationId": "cloud.resource.create",
+                "resourceProjection": "profile",
+                "mutating": True,
+            }
+        )
+        candidate_binding_path.write_text(json.dumps(candidate_binding_document), encoding="utf-8")
+
+    with pytest.raises(stage_transition.StageTransitionError):
+        stage_transition._validate_active_candidate_configs(
+            active_dir,
+            candidate_dir,
+            active,
+            candidate,
+        )
+
+
+def test_notification_config_addition_is_expected_only_when_overlay_is_inactive(
+    tmp_path: Path,
+) -> None:
+    """Keep the one allowed config addition limited to the first overlay activation."""
+
+    active_dir = tmp_path / "active-config"
+    candidate_dir = tmp_path / "candidate-config"
+    active_dir.mkdir()
+    candidate_dir.mkdir()
+    candidate_notification = candidate_dir / "teams-credential-notifications.json"
+    candidate_notification.write_text("{}", encoding="utf-8")
+    active = {"configs": {}}
+    candidate = {
+        "configs": {"teams-credential-notifications": {"file": str(candidate_notification)}}
+    }
+    stage_transition._validate_active_candidate_configs(
+        active_dir,
+        candidate_dir,
+        active,
+        candidate,
+    )
+
+
 def test_provider_bootstrap_uses_exact_service_delta_and_order() -> None:
     """Add only HF and cloud service while upgrading persistence and the single Navigator."""
 

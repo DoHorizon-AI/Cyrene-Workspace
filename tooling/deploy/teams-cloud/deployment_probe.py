@@ -1693,105 +1693,15 @@ def _candidate_runpod_notification_config(
         candidate_config_dir, uid=RUNTIME_OWNER_UID, label="candidate notification config"
     )
     active_dir = Path(active["selector"]["configDir"])
-    if candidate_dir == active_dir:
-        raise DeploymentProbeError(
-            "candidate notification config must be separate from active config"
-        )
-    active_path = active_dir / "teams-credential-notifications.json"
-    candidate_path = candidate_dir / "teams-credential-notifications.json"
-    active_notification, _active_bytes = _read_json(
-        active_path, "active credential notification config", maximum_bytes=1024 * 1024
-    )
-    candidate_notification, _candidate_bytes = _read_json(
-        candidate_path, "candidate credential notification config", maximum_bytes=1024 * 1024
-    )
-    active_base = {key: value for key, value in active_notification.items() if key != "connections"}
-    candidate_base = {
-        key: value for key, value in candidate_notification.items() if key != "connections"
-    }
-    if active_base != candidate_base:
-        raise DeploymentProbeError(
-            "candidate notification owner, workspace, route, and profile must match active config"
-        )
-
-    def _connections_by_provider(document: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
-        rows = document.get("connections")
-        if not isinstance(rows, list):
-            raise DeploymentProbeError(f"{label} notification connections are malformed")
-        mapped: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            if (
-                not isinstance(row, dict)
-                or set(row) != {"connectionId", "provider"}
-                or not isinstance(row.get("provider"), str)
-                or not isinstance(row.get("connectionId"), str)
-                or row["provider"] in mapped
-            ):
-                raise DeploymentProbeError(f"{label} notification connections are malformed")
-            mapped[row["provider"]] = row
-        return mapped
-
-    active_connections = _connections_by_provider(active_notification, "active")
-    candidate_connections = _connections_by_provider(candidate_notification, "candidate")
-    if "runpod" in active_connections or set(candidate_connections) != set(active_connections) | {
-        "runpod"
-    }:
-        raise DeploymentProbeError(
-            "candidate notification config must add exactly one RunPod connection"
-        )
-    if any(
-        candidate_connections[provider] != active_connections[provider]
-        for provider in active_connections
-    ):
-        raise DeploymentProbeError(
-            "candidate notification config changed an existing provider route"
-        )
     try:
-        runpod_connection_id = str(uuid.UUID(candidate_connections["runpod"]["connectionId"]))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise DeploymentProbeError(
-            "candidate RunPod notification connection ID is malformed"
-        ) from error
-    if runpod_connection_id != candidate_connections["runpod"]["connectionId"]:
-        raise DeploymentProbeError("candidate RunPod notification connection ID is noncanonical")
-
-    active_binding_document = stage_transition._candidate_config_json(
-        active["compose"], "connector-bindings"
-    )
-    active_bindings = stage_transition._sorted_exchange_bindings(
-        active_binding_document.get("bindings")
-    )
-    candidate_binding_document, _binding_bytes = _read_json(
-        candidate_dir / "connector-bindings.json",
-        "candidate connector bindings",
-        maximum_bytes=1024 * 1024,
-    )
-    candidate_bindings = stage_transition._sorted_exchange_bindings(
-        candidate_binding_document.get("bindings")
-    )
-    active_non_runpod = [row for row in active_bindings if row["providerId"] != "runpod"]
-    candidate_non_runpod = [row for row in candidate_bindings if row["providerId"] != "runpod"]
-    candidate_runpod = [row for row in candidate_bindings if row["providerId"] == "runpod"]
-    if any(row["providerId"] == "runpod" for row in active_bindings):
-        raise DeploymentProbeError("active bindings already contain a RunPod connection")
-    candidate_runpod_operations = (
-        {tool["operationId"] for tool in candidate_runpod[0]["tools"]}
-        if candidate_runpod
-        else set()
-    )
-    if (
-        len(candidate_runpod) != 1
-        or active_non_runpod != candidate_non_runpod
-        or candidate_runpod[0]["connectionRef"] != runpod_connection_id
-        or not set(PROBE_OPERATIONS["runpod"]) <= candidate_runpod_operations
-        or not candidate_runpod_operations
-        <= preflight.CONNECTOR_MODEL_READONLY_OPERATIONS["runpod"]
-        or any(tool["mutating"] is not False for tool in candidate_runpod[0]["tools"])
-    ):
-        raise DeploymentProbeError(
-            "candidate bindings must preserve the active set and match the candidate RunPod connection reference"
+        return preflight._validate_runpod_notification_config_delta(
+            active_dir,
+            candidate_dir,
         )
-    return candidate_path, candidate_notification
+    except preflight.PreflightError as error:
+        raise DeploymentProbeError(
+            "candidate notification configuration is outside the RunPod-only update contract"
+        ) from error
 
 
 def _build_notification_provenance(

@@ -3390,6 +3390,40 @@ def _validate_active_candidate_configs(
                 candidate=candidate,
             )
         )
+        changed_config_is_runpod_notification = False
+        if active_digest != candidate_digest and name == "teams-credential-notifications":
+            for config_name, expected_file in (
+                ("teams-credential-notifications", "teams-credential-notifications.json"),
+                ("connector-bindings", "connector-bindings.json"),
+            ):
+                active_row = active_configs.get(config_name)
+                candidate_row = candidate_configs.get(config_name)
+                active_source = active_row.get("file") if isinstance(active_row, dict) else None
+                candidate_source = (
+                    candidate_row.get("file") if isinstance(candidate_row, dict) else None
+                )
+                if (
+                    not isinstance(active_source, str)
+                    or not isinstance(candidate_source, str)
+                    or Path(active_source).resolve(strict=True)
+                    != (active_config_dir / expected_file).resolve(strict=True)
+                    or Path(candidate_source).resolve(strict=True)
+                    != (candidate_config_dir / expected_file).resolve(strict=True)
+                ):
+                    raise StageTransitionError(
+                        "RunPod notification update must use the canonical active/candidate config files"
+                    )
+            try:
+                preflight._validate_runpod_notification_config_delta(
+                    active_config_dir,
+                    candidate_config_dir,
+                    candidate_compose=candidate,
+                )
+            except preflight.PreflightError as error:
+                raise StageTransitionError(
+                    "candidate notification config may add only one read-only RunPod connection"
+                ) from error
+            changed_config_is_runpod_notification = True
         if (
             active_digest != candidate_digest
             and name
@@ -3401,12 +3435,14 @@ def _validate_active_candidate_configs(
                 "responsibility-targets",
             }
             and not changed_config_is_scoped_principal
+            and not changed_config_is_runpod_notification
         ):
             raise StageTransitionError(f"candidate changes unrelated Compose config {name}")
     added_configs = set(candidate_configs) - set(active_configs)
     expected_added = (
         {"teams-credential-notifications"}
         if "teams-credential-notifications" in candidate_configs
+        and "teams-credential-notifications" not in active_configs
         else set()
     )
     if added_configs != expected_added:
