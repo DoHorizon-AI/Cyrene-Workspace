@@ -408,6 +408,121 @@ def _stub_project_container_readback(
     monkeypatch.setattr(runtime_update, "_checked_stdout", checked_stdout)
 
 
+def test_graph_exchange_private_network_requires_exact_live_peers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow the formal Graph Exchange network only with its two exact callers."""
+
+    project = "cyrene-teams-cloud"
+    exchange_network = f"{project}_navigator-exchange-private"
+    graph_network = f"{project}_graph-exchange-private"
+    navigator_id = "a" * 64
+    exchange_id = "b" * 64
+    graph_id = "c" * 64
+    foreign_id = "d" * 64
+    compose = {
+        "name": project,
+        "networks": {
+            "navigator-exchange-private": {"name": exchange_network},
+            "graph-exchange-private": {"name": graph_network},
+        },
+        "services": {
+            "navigator": {"networks": {"navigator-exchange-private": {}}},
+            "exchange": {
+                "networks": {
+                    "navigator-exchange-private": {},
+                    "graph-exchange-private": {},
+                }
+            },
+            "microsoft-graph": {"networks": {"graph-exchange-private": {}}},
+        },
+    }
+    services = {
+        "navigator": {
+            "containerId": navigator_id,
+            "networkNames": [exchange_network],
+        },
+        "exchange": {
+            "containerId": exchange_id,
+            "networkNames": [exchange_network, graph_network],
+        },
+        "microsoft-graph": {
+            "containerId": graph_id,
+            "networkNames": [graph_network],
+        },
+    }
+    network_inspections = {
+        exchange_network: [
+            {
+                "Name": exchange_network,
+                "Containers": {navigator_id: {}, exchange_id: {}},
+            }
+        ],
+        graph_network: [
+            {
+                "Name": graph_network,
+                "Containers": {exchange_id: {}, graph_id: {}},
+            }
+        ],
+    }
+    inspected_names: list[str] = []
+
+    def inspect_network(argv: list[str], *, label: str, timeout_seconds: float = 30.0) -> str:
+        assert argv[:3] == ["docker", "network", "inspect"]
+        assert label == "private service network inspection"
+        assert timeout_seconds == 30.0
+        network_name = argv[3]
+        inspected_names.append(network_name)
+        return json.dumps(network_inspections[network_name])
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", inspect_network)
+    runtime_update._verify_live_network_membership(compose, services, ["docker"])
+    assert inspected_names == [graph_network, exchange_network]
+
+    missing_configured_peer = copy.deepcopy(compose)
+    missing_configured_peer["services"]["microsoft-graph"]["networks"] = {}
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="standalone caller set"):
+        runtime_update._verify_live_network_membership(
+            missing_configured_peer, services, ["docker"]
+        )
+
+    extra_configured_peer = copy.deepcopy(compose)
+    extra_configured_peer["services"]["navigator"]["networks"]["graph-exchange-private"] = {}
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="unsupported consumer"):
+        runtime_update._verify_live_network_membership(extra_configured_peer, services, ["docker"])
+
+    network_inspections[graph_network] = [{"Name": graph_network, "Containers": {exchange_id: {}}}]
+    with pytest.raises(
+        runtime_update.RuntimeUpdateError, match="unknown or missing container peer"
+    ):
+        runtime_update._verify_live_network_membership(compose, services, ["docker"])
+
+    network_inspections[graph_network] = [
+        {
+            "Name": graph_network,
+            "Containers": {exchange_id: {}, graph_id: {}, foreign_id: {}},
+        }
+    ]
+    with pytest.raises(
+        runtime_update.RuntimeUpdateError, match="unknown or missing container peer"
+    ):
+        runtime_update._verify_live_network_membership(compose, services, ["docker"])
+
+    network_inspections[graph_network] = [
+        {
+            "Name": graph_network,
+            "Containers": {exchange_id: {}, graph_id: {}},
+        }
+    ]
+    unknown_network = copy.deepcopy(compose)
+    unknown_network["networks"]["office-unrecognized-private"] = {
+        "name": f"{project}_office-unrecognized-private"
+    }
+    unknown_network["services"]["exchange"]["networks"]["office-unrecognized-private"] = {}
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="unsupported network attached"):
+        runtime_update._verify_live_network_membership(unknown_network, services, ["docker"])
+
+
 def test_runtime_plan_maps_compose_navigator_to_the_canonical_dsh_lock_row() -> None:
     """Bind the Compose navigator service to the build system's DSH executor identity."""
 
