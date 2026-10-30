@@ -1875,6 +1875,105 @@ def test_internal_http_bridge_preserves_nonempty_plugins_spool_timestamps(
     assert "test-only-bearer" not in response.stdout
 
 
+@pytest.mark.parametrize(
+    ("retried_count", "valid"),
+    [
+        (0, True),
+        (1, True),
+        (True, False),
+        (-1, False),
+        (1.5, False),
+        ("1", False),
+        (None, False),
+    ],
+)
+def test_internal_http_bridge_validates_retry_dead_count_and_redacts_unknown_fields(
+    tmp_path: Path,
+    retried_count: Any,
+    valid: bool,
+) -> None:
+    """Run the real probe against HTTP and retain only a valid retry count and status fields."""
+
+    bearer = "test-only-retry-dead-bearer"
+    response_token_sentinel = "unexpected-response-token-must-not-leak"
+    document = _edge_status(paused=True, revision=57) | {
+        "retried_count": retried_count,
+        "token": response_token_sentinel,
+    }
+    request_body = {"holder": OPERATION_ID, "expected_revision": 56}
+
+    class RetryDeadHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            self.server.visited.append(
+                (
+                    self.path,
+                    self.command,
+                    self.headers.get("Authorization"),
+                    self.rfile.read(length),
+                )
+            )
+            body = json.dumps(document, separators=(",", ":")).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: Any) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RetryDeadHandler)
+    server.visited = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    token_file = tmp_path / "admin-token"
+    token_file.write_text(bearer, encoding="ascii")
+    token_file.chmod(0o400)
+    try:
+        response = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                runtime_update._INTERNAL_HTTP_SCRIPT,
+                str(token_file),
+                f"http://127.0.0.1:{server.server_port}/_internal/teams/delivery/retry-dead",
+                "POST",
+                "2",
+            ],
+            input=json.dumps(request_body, sort_keys=True, separators=(",", ":")),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert server.visited == [
+        (
+            "/_internal/teams/delivery/retry-dead",
+            "POST",
+            f"Bearer {bearer}",
+            json.dumps(request_body, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        )
+    ]
+    assert bearer not in response.stdout
+    assert response_token_sentinel not in response.stdout
+    if valid:
+        assert response.returncode == 0
+        bridge = json.loads(response.stdout)
+        assert bridge == {
+            "httpStatus": 200,
+            "document": _edge_status(paused=True, revision=57) | {"retried_count": retried_count},
+        }
+    else:
+        assert response.returncode != 0
+        assert json.loads(response.stdout) == {"bridgeError": "internal_request_failed"}
+
+
 def test_internal_http_bridge_enforces_total_request_deadline(
     tmp_path: Path,
 ) -> None:

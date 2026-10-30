@@ -3841,6 +3841,17 @@ try:
         response_document = None
     if not isinstance(response_document, dict):
         response_document = {}
+    retry_dead_route = method == "POST" and url.endswith(
+        "/_internal/teams/delivery/retry-dead"
+    )
+    if retry_dead_route:
+        retried_count = response_document.get("retried_count")
+        if (
+            isinstance(retried_count, bool)
+            or not isinstance(retried_count, int)
+            or retried_count < 0
+        ):
+            raise ValueError("internal retry count is malformed")
     if "/internal/v1/executor/drain" in url:
         fields = {
             "mode", "generation", "token", "startedAt", "instanceId", "countsComplete",
@@ -3852,6 +3863,8 @@ try:
             "retry_wait_count", "delivered_count", "rejected_count", "dead_count",
             "pending_bytes", "retained_body_bytes", "oldest_pending_at", "last_delivered_at",
         }
+        if retry_dead_route:
+            fields.add("retried_count")
     safe_document = {name: response_document[name] for name in fields if name in response_document}
     print(json.dumps({"httpStatus": status_code, "document": safe_document}, separators=(",", ":")))
 except (OSError, UnicodeError, ValueError, URLError):
