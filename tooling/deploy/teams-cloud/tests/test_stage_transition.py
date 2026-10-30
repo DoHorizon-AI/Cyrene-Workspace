@@ -14,6 +14,7 @@ import copy
 import hashlib
 import importlib
 import json
+import os
 import sqlite3
 import stat
 import subprocess
@@ -2047,6 +2048,65 @@ def test_live_service_inventory_keeps_office_loopback_owner_separate_from_ingres
     assert live["teams-public-ingress"]["containerId"] == f"{5:064x}"
     assert live["exchange"]["containerId"] == f"{6:064x}"
 
+    ingress_mode = copy.deepcopy(compose)
+    ingress_mode["services"]["exchange"]["ports"][0]["mode"] = "ingress"
+    assert run_inventory(ingress_mode)["exchange"]["containerId"] == f"{6:064x}"
+
+    docker = preflight.shutil.which("docker")
+    if docker is not None:
+        docker_home = tmp_path / "docker-home"
+        docker_config = tmp_path / "docker-config"
+        docker_home.mkdir()
+        docker_config.mkdir()
+        safe_environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(docker_home),
+            "DOCKER_CONFIG": str(docker_config),
+        }
+        version = subprocess.run(
+            [docker, "compose", "version"],
+            capture_output=True,
+            check=False,
+            env=safe_environment,
+            text=True,
+        )
+        if version.returncode == 0:
+            render_file = tmp_path / "office-port-render.yaml"
+            render_file.write_text(
+                yaml.safe_dump(
+                    {
+                        "services": {
+                            "exchange": {
+                                "image": "example.invalid/exchange:test",
+                                "ports": [office_port],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rendered = subprocess.run(
+                [
+                    docker,
+                    "compose",
+                    "--file",
+                    str(render_file),
+                    "config",
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                check=False,
+                env=safe_environment,
+                text=True,
+            )
+            assert rendered.returncode == 0, rendered.stderr
+            rendered_ports = json.loads(rendered.stdout)["services"]["exchange"]["ports"]
+            assert rendered_ports in ([office_port], [{**office_port, "mode": "ingress"}])
+            compose_render = copy.deepcopy(compose)
+            compose_render["services"]["exchange"]["ports"] = rendered_ports
+            assert run_inventory(compose_render)["exchange"]["containerId"] == f"{6:064x}"
+
     no_office_bridge = copy.deepcopy(compose)
     no_office_bridge["services"]["exchange"]["volumes"] = []
     no_office_bridge["services"]["exchange"]["ports"] = []
@@ -2056,6 +2116,8 @@ def test_live_service_inventory_keeps_office_loopback_owner_separate_from_ingres
         [{**office_port, "host_ip": "0.0.0.0"}],
         [{**office_port, "published": "52192", "target": 52192}],
         [office_port, {"host_ip": "127.0.0.1", "published": "52192", "target": 52192}],
+        [{**office_port, "mode": "host"}],
+        [{**office_port, "mode": "ingress", "publish_mode": "host"}],
     ):
         invalid = copy.deepcopy(compose)
         invalid["services"]["exchange"]["ports"] = changed_ports

@@ -793,21 +793,7 @@ def _office_oauth_setup_bridge_enabled(compose: dict[str, Any]) -> bool:
         raise StageTransitionError(
             "Exchange Office OAuth published bridge is not the exact private loopback setup"
         ) from error
-    if not mounted:
-        return False
-    expected_ports = [
-        {
-            "host_ip": "127.0.0.1",
-            "published": str(preflight.OFFICE_OAUTH_SETUP_PORT),
-            "target": preflight.OFFICE_OAUTH_SETUP_PORT,
-            "protocol": "tcp",
-        }
-    ]
-    if ports != expected_ports:
-        raise StageTransitionError(
-            "Exchange Office OAuth published bridge must be the exact loopback TCP port"
-        )
-    return True
+    return mounted
 
 
 def _service_image(compose: dict[str, Any], image_ids: dict[str, str], name: str) -> dict[str, str]:
