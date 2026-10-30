@@ -43,6 +43,8 @@ MAX_CLI_OUTPUT_BYTES = 2_000_000
 MAX_PRIVATE_CONFIG_BYTES = 16_384
 CLI_TIMEOUT_SECONDS = 60
 OWNER_UID = 10001
+MAX_DISCOVERY_PAGES = 20
+MAX_DISCOVERY_ITEMS = 1_000
 EXCHANGE_CLI = "/app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-exchange"
 INTEGRATION_DATABASE = "/data/integrations.sqlite3"
 PRIVATE_OPERATOR_CONFIG = "/run/config/office-operator.json"
@@ -55,12 +57,17 @@ ALLOWED_DISCOVERY_TYPES = frozenset(
         "freebusy_subjects",
     }
 )
-RESOURCE_TO_TARGET = {
-    "planner_plans": "plannerPlanIds",
-    "todo_lists": "toDoTaskListIds",
-    "calendars": "calendarIds",
-    "freebusy_subjects": "freebusySubjects",
-}
+OFFICE_FEATURE_KEYS = frozenset(
+    {
+        "plannerEnabled",
+        "todoEnabled",
+        "calendarEnabled",
+        "mailMetadataEnabled",
+        "mailDraftsEnabled",
+        "mailSendEnabled",
+        "sharePointDriveMetadataEnabled",
+    }
+)
 _SAFE_CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SAFE_ID_RE = re.compile(r"^[^\x00-\x20\x7f]{1,512}$")
 _SAFE_SCOPE_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,256}$")
@@ -68,6 +75,9 @@ _AUTHORIZATION_HOSTS = frozenset({"login.microsoftonline.com"})
 _EXCHANGE_PROVIDER_ID = "microsoft_graph"
 _MAX_OAUTH_STATE_BYTES = 512
 _MAX_OAUTH_CODE_BYTES = 8192
+_AADSTS_REDIRECT_URI_MISMATCH_RE = re.compile(
+    r"(?<![A-Z0-9])AADSTS50011(?![A-Z0-9])", re.IGNORECASE
+)
 
 
 class OfficeSetupError(ValueError):
@@ -295,6 +305,7 @@ class SetupSession:
     csrf_token: str
     created_at: float = field(default_factory=time.monotonic)
     credential_revision: int | None = None
+    enabled_features: dict[str, bool] | None = None
     discoveries: dict[str, DiscoverySnapshot] = field(default_factory=dict)
     callback_message: str | None = None
 
@@ -328,7 +339,13 @@ def _safe_identifier(value: Any, *, maximum: int = 512) -> str:
     return value
 
 
-def _validate_authorization_url(value: Any, *, port: int, tenant_id: str) -> str:
+def _validate_authorization_url(
+    value: Any,
+    *,
+    port: int,
+    tenant_id: str,
+    enabled_features: Mapping[str, bool],
+) -> str:
     """Allow only the expected Microsoft authorization endpoint and loopback callback."""
 
     if not isinstance(value, str) or len(value) > 16_384:
@@ -347,7 +364,7 @@ def _validate_authorization_url(value: Any, *, port: int, tenant_id: str) -> str
         or parsed.password is not None
         or parsed.fragment
         or len(path_parts) != 4
-        or path_parts[0].casefold() != tenant_id.casefold()
+        or path_parts[0].casefold() not in {tenant_id.casefold(), "organizations"}
         or path_parts[1:] != ["oauth2", "v2.0", "authorize"]
     ):
         raise OfficeSetupError("office_authorization_url_invalid")
@@ -385,8 +402,7 @@ def _validate_authorization_url(value: Any, *, port: int, tenant_id: str) -> str
     scopes = requested_scopes[0].split()
     if any(_is_mail_scope(name) for name in scopes):
         raise OfficeSetupError("office_mail_scope_forbidden")
-    if "offline_access" not in {scope.casefold() for scope in scopes}:
-        raise OfficeSetupError("office_refresh_scope_missing")
+    _validate_scope_policy(scopes, enabled_features)
     if any(
         name.casefold() in {"code", "access_token", "refresh_token", "client_secret"}
         for name in query
@@ -399,6 +415,28 @@ def _is_mail_scope(scope: str) -> bool:
     """Detect Mail permissions in short names and full Graph permission URIs."""
 
     return scope.casefold().rsplit("/", 1)[-1].startswith("mail.")
+
+
+def _scope_name(scope: str) -> str:
+    """Normalize a Graph scope URI to its permission name for exact policy checks."""
+
+    return scope.casefold().rsplit("/", 1)[-1]
+
+
+def _validate_scope_policy(scopes: Sequence[str], enabled_features: Mapping[str, bool]) -> None:
+    """Require only the OAuth permissions derived from the fixed host feature flags."""
+
+    names = {_scope_name(scope) for scope in scopes}
+    expected = {"user.read", "offline_access"}
+    if enabled_features["plannerEnabled"] or enabled_features["todoEnabled"]:
+        expected.add("tasks.readwrite")
+    if enabled_features["calendarEnabled"]:
+        expected.add("calendars.readwrite")
+    if enabled_features["sharePointDriveMetadataEnabled"]:
+        expected.add("sites.selected")
+    allowed = expected | {"openid", "profile", "email"}
+    if not expected.issubset(names) or names - allowed:
+        raise OfficeSetupError("office_oauth_scope_policy_invalid")
 
 
 def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext) -> dict[str, Any]:
@@ -419,6 +457,8 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         "refreshExpiresAt",
         "reauthRequired",
         "reauthReasonCode",
+        "enabledFeatures",
+        "targetRefCount",
     }
     if set(document) != required:
         raise OfficeSetupError("office_status_invalid")
@@ -441,6 +481,18 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         raise OfficeSetupError("office_status_identity_invalid")
     if document.get("scopeSchemaVersion") != 2:
         raise OfficeSetupError("office_status_invalid")
+    enabled_features = document.get("enabledFeatures")
+    if (
+        not isinstance(enabled_features, dict)
+        or set(enabled_features) != OFFICE_FEATURE_KEYS
+        or any(not isinstance(value, bool) for value in enabled_features.values())
+    ):
+        raise OfficeSetupError("office_status_features_invalid")
+    if any(
+        enabled_features[name]
+        for name in ("mailMetadataEnabled", "mailDraftsEnabled", "mailSendEnabled")
+    ):
+        raise OfficeSetupError("office_mail_scope_forbidden")
     scopes = document.get("requiredOAuthScopes")
     if (
         not isinstance(scopes, list)
@@ -452,11 +504,19 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         raise OfficeSetupError("office_status_scopes_invalid")
     if any(_is_mail_scope(scope) for scope in scopes):
         raise OfficeSetupError("office_mail_scope_forbidden")
+    _validate_scope_policy(scopes, enabled_features)
     revision = document.get("credentialRevision")
     if revision is not None and (
         not isinstance(revision, int) or isinstance(revision, bool) or revision < 0
     ):
         raise OfficeSetupError("office_status_revision_invalid")
+    target_ref_count = document.get("targetRefCount")
+    if (
+        not isinstance(target_ref_count, int)
+        or isinstance(target_ref_count, bool)
+        or target_ref_count < 0
+    ):
+        raise OfficeSetupError("office_status_targets_invalid")
     if not isinstance(document.get("reauthRequired"), bool):
         raise OfficeSetupError("office_status_invalid")
     for field_name in ("credentialExpiresAt", "refreshExpiresAt", "reauthReasonCode"):
@@ -469,9 +529,9 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
     identity_verified = (
         document["authStatus"] == "healthy"
         and document["accessMode"] == "actor_owned"
-        and external_subject == operator_context.external_subject
+        and isinstance(external_subject, str)
+        and external_subject.casefold() == operator_context.external_subject.casefold()
         and revision is not None
-        and revision >= 1
         and isinstance(target_scope, dict)
         and target_scope.get("workspaceId") == operator_context.workspace_id
         and document["reauthRequired"] is False
@@ -483,6 +543,10 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         "accessMode": document["accessMode"],
         "identityVerified": identity_verified and document["reauthRequired"] is False,
         "scopeSchemaVersion": document["scopeSchemaVersion"],
+        "enabledFeatures": {
+            key: value for key, value in enabled_features.items() if not key.startswith("mail")
+        },
+        "targetRefCount": target_ref_count,
         "requiredOAuthScopes": list(scopes),
         "credentialRevision": revision,
         "credentialExpiresAt": document["credentialExpiresAt"],
@@ -493,18 +557,55 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
 
 
 def _validate_discovery(
-    document: Mapping[str, Any], resource_type: str
-) -> tuple[list[dict[str, str]], DiscoverySnapshot, str | None]:
-    """Keep only short display labels and IDs from the fixed provider metadata response."""
+    document: Mapping[str, Any],
+    resource_type: str,
+    *,
+    page_cursor: str | None,
+    credential_revision: int,
+) -> tuple[list[dict[str, str]], DiscoverySnapshot, str | None, str | None, bool]:
+    """Validate one Exchange page and retain only bounded target metadata."""
 
-    expected_keys = {"resourceType", "items"}
+    expected_keys = {
+        "state",
+        "resourceType",
+        "items",
+        "pageCursor",
+        "nextCursor",
+        "complete",
+        "truncated",
+        "credentialRevision",
+    }
     allowed_keys = expected_keys | ({"siteId"} if resource_type == "sharepoint_drives" else set())
-    if (
-        not expected_keys.issubset(document)
-        or set(document) - allowed_keys
-        or document.get("resourceType") != resource_type
-    ):
+    if set(document) - allowed_keys or not expected_keys.issubset(document):
         raise OfficeSetupError("office_discovery_invalid")
+    if document.get("state") != "DISCOVERED" or document.get("resourceType") != resource_type:
+        raise OfficeSetupError("office_discovery_invalid")
+    if document.get("pageCursor") != page_cursor:
+        raise OfficeSetupError("office_discovery_cursor_mismatch")
+    next_cursor = document.get("nextCursor")
+    if next_cursor is not None and (
+        not isinstance(next_cursor, str)
+        or len(next_cursor) > 12_000
+        or not next_cursor
+        or any(ord(character) < 33 or ord(character) > 126 for character in next_cursor)
+    ):
+        raise OfficeSetupError("office_discovery_cursor_invalid")
+    complete = document.get("complete")
+    truncated = document.get("truncated")
+    if (
+        not isinstance(complete, bool)
+        or not isinstance(truncated, bool)
+        or truncated
+        or complete != (next_cursor is None)
+    ):
+        raise OfficeSetupError("office_discovery_incomplete")
+    revision = document.get("credentialRevision")
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision != credential_revision
+    ):
+        raise OfficeSetupError("office_discovery_revision_conflict")
     raw_site_id = document.get("siteId")
     site_id = _safe_identifier(raw_site_id) if raw_site_id is not None else None
     items = document.get("items")
@@ -537,7 +638,6 @@ def _validate_discovery(
         else:
             if set(item) - {"id", "displayName", "kind", "webUrl"} or "kind" not in item:
                 raise OfficeSetupError("office_discovery_item_invalid")
-            drive_type = None
             item_site_id = None
             kind = item["kind"]
         item_id = _safe_identifier(item["id"])
@@ -563,7 +663,13 @@ def _validate_discovery(
         site_ids.add(site_id)
     if resource_type == "sharepoint_drives" and safe_items and not site_ids:
         raise OfficeSetupError("office_discovery_site_missing")
-    return safe_items, DiscoverySnapshot(frozenset(ids), frozenset(site_ids), kinds), site_id
+    return (
+        safe_items,
+        DiscoverySnapshot(frozenset(ids), frozenset(site_ids), kinds),
+        site_id,
+        next_cursor,
+        complete,
+    )
 
 
 def _validate_targets(value: Any) -> dict[str, Any]:
@@ -571,7 +677,6 @@ def _validate_targets(value: Any) -> dict[str, Any]:
 
     expected_keys = {
         "plannerPlanIds",
-        "sharePointSiteId",
         "sharePointListIds",
         "sharePointDriveIds",
         "toDoTaskListIds",
@@ -581,8 +686,7 @@ def _validate_targets(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != expected_keys:
         raise OfficeSetupError("office_targets_invalid")
     result: dict[str, Any] = {}
-    array_keys = expected_keys - {"sharePointSiteId"}
-    for key in array_keys:
+    for key in expected_keys:
         rows = value[key]
         if (
             not isinstance(rows, list)
@@ -592,10 +696,6 @@ def _validate_targets(value: Any) -> dict[str, Any]:
         ):
             raise OfficeSetupError("office_targets_invalid")
         result[key] = [_safe_identifier(item) for item in rows]
-    site_id = value["sharePointSiteId"]
-    result["sharePointSiteId"] = None if site_id is None else _safe_identifier(site_id)
-    if (result["sharePointListIds"] or result["sharePointDriveIds"]) and site_id is None:
-        raise OfficeSetupError("office_targets_invalid")
     return result
 
 
@@ -618,6 +718,7 @@ class OfficeSetupService:
         self._sessions: dict[str, SetupSession] = {}
         self._active_flow: ActiveFlow | None = None
         self._last_callback_message: str | None = None
+        self._profile_ref: str | None = None
 
     def create_session(self) -> tuple[str, SetupSession]:
         """Create an isolated CSRF session and evict expired setup pages."""
@@ -660,6 +761,11 @@ class OfficeSetupService:
                 and time.monotonic() - self._active_flow.created_at < self.session_ttl
             ):
                 raise OfficeSetupError("office_authorization_pending")
+            current = _safe_status(self.bridge.invoke("status", {}), self.operator_context)
+            session.credential_revision = current["credentialRevision"]
+            session.enabled_features = current["enabledFeatures"]
+            if current["identityVerified"] and not current["reauthRequired"]:
+                raise OfficeSetupError("office_already_linked")
             response = self.bridge.invoke("begin", {})
             required = {
                 "state",
@@ -682,6 +788,7 @@ class OfficeSetupService:
                 response.get("authorizationUrl"),
                 port=self.port,
                 tenant_id=self.operator_context.tenant_id,
+                enabled_features=current["enabledFeatures"],
             )
             self._active_flow = ActiveFlow(profile_ref, link_ref, expires_at)
             self._last_callback_message = "AUTHORIZATION_PENDING"
@@ -735,7 +842,16 @@ class OfficeSetupService:
                 or any(ord(character) < 33 or ord(character) > 126 for character in state)
             ):
                 raise OfficeSetupError("office_callback_invalid")
-            self.callback_failed()
+            provider_error_fields = values.get("error", []) + values.get("error_description", [])
+            safe_failure = (
+                "AADSTS50011"
+                if any(
+                    _AADSTS_REDIRECT_URI_MISMATCH_RE.search(value)
+                    for value in provider_error_fields
+                )
+                else None
+            )
+            self.callback_failed(safe_failure)
             return
         if not isinstance(state, str) or not isinstance(code, str):
             raise OfficeSetupError("office_callback_invalid")
@@ -750,6 +866,8 @@ class OfficeSetupService:
         # Code and state are never stored, placed in argv, or returned to the browser.
         response = self.bridge.invoke("complete", {"state": state, "code": code})
         safe = _safe_status(response, self.operator_context)
+        if not safe["identityVerified"]:
+            raise OfficeSetupError("office_owner_identity_mismatch")
         with self._lock:
             if self._active_flow and safe.get("provider") != _EXCHANGE_PROVIDER_ID:
                 raise OfficeSetupError("office_callback_profile_mismatch")
@@ -758,12 +876,16 @@ class OfficeSetupService:
         self._active_flow = None
         self._last_callback_message = "AUTHORIZATION_COMPLETE"
 
-    def callback_failed(self) -> None:
+    def callback_failed(self, safe_error_code: str | None = None) -> None:
         """Forget any pending UI flow after a provider error without retaining its query."""
 
         with self._lock:
             self._active_flow = None
-            self._last_callback_message = "AUTHORIZATION_DID_NOT_COMPLETE"
+            self._last_callback_message = (
+                "AADSTS50011"
+                if safe_error_code == "AADSTS50011"
+                else "AUTHORIZATION_DID_NOT_COMPLETE"
+            )
 
     def status(self, session: SetupSession) -> dict[str, Any]:
         """Read Exchange's owner-bound profile state and expose only safe status fields."""
@@ -772,6 +894,8 @@ class OfficeSetupService:
         safe = _safe_status(response, self.operator_context)
         with self._lock:
             session.credential_revision = safe["credentialRevision"]
+            session.enabled_features = safe["enabledFeatures"]
+            self._profile_ref = response["profileRef"]
             if self._active_flow and response.get("profileRef") != self._active_flow.profile_ref:
                 raise OfficeSetupError("office_status_profile_mismatch")
             safe["message"] = self._last_callback_message or "READY"
@@ -785,13 +909,58 @@ class OfficeSetupService:
         status = self.status(session)
         if status["reauthRequired"] or not status["identityVerified"]:
             raise OfficeSetupError("office_identity_not_ready")
-        response = self.bridge.invoke("discover", {"resourceType": resource_type})
-        items, snapshot, site_id = _validate_discovery(response, resource_type)
+        feature = {
+            "planner_plans": "plannerEnabled",
+            "todo_lists": "todoEnabled",
+            "sharepoint_drives": "sharePointDriveMetadataEnabled",
+            "calendars": "calendarEnabled",
+            "freebusy_subjects": "calendarEnabled",
+        }[resource_type]
+        if not status["enabledFeatures"][feature]:
+            raise OfficeSetupError("office_feature_disabled")
+        if status["credentialRevision"] is None:
+            raise OfficeSetupError("office_identity_not_ready")
+        next_cursor: str | None = None
+        seen_cursors: set[str] = set()
+        all_items: list[dict[str, str]] = []
+        all_ids: set[str] = set()
+        all_sites: set[str] = set()
+        all_kinds: dict[str, str] = {}
+        for _page_number in range(MAX_DISCOVERY_PAGES):
+            request: dict[str, Any] = {"resourceType": resource_type}
+            if next_cursor is not None:
+                request["pageCursor"] = next_cursor
+            response = self.bridge.invoke("discover", request)
+            items, snapshot, _site_id, following_cursor, complete = _validate_discovery(
+                response,
+                resource_type,
+                page_cursor=next_cursor,
+                credential_revision=status["credentialRevision"],
+            )
+            if all_ids.intersection(snapshot.ids):
+                raise OfficeSetupError("office_discovery_duplicate_id")
+            all_ids.update(snapshot.ids)
+            all_items.extend(items)
+            all_sites.update(snapshot.site_ids)
+            all_kinds.update(snapshot.kinds)
+            if len(all_items) > MAX_DISCOVERY_ITEMS:
+                raise OfficeSetupError("office_discovery_too_many_items")
+            if complete:
+                break
+            if following_cursor is None or following_cursor in seen_cursors:
+                raise OfficeSetupError("office_discovery_cursor_invalid")
+            seen_cursors.add(following_cursor)
+            next_cursor = following_cursor
+        else:
+            raise OfficeSetupError("office_discovery_page_limit")
+        if len(all_sites) > 1:
+            raise OfficeSetupError("office_discovery_site_mismatch")
+        combined = DiscoverySnapshot(frozenset(all_ids), frozenset(all_sites), all_kinds)
         with self._lock:
-            session.discoveries[resource_type] = snapshot
-        result = {"resourceType": resource_type, "items": items}
-        if site_id is not None:
-            result["siteId"] = site_id
+            session.discoveries[resource_type] = combined
+        result: dict[str, Any] = {"resourceType": resource_type, "items": all_items}
+        if all_sites:
+            result["siteId"] = next(iter(all_sites))
         return result
 
     def select_targets(
@@ -810,64 +979,44 @@ class OfficeSetupService:
             or expected_revision != session.credential_revision
         ):
             raise OfficeSetupError("office_target_revision_conflict")
-        targets = _validate_targets(targets_value)
-        self._validate_discovery_selection(session, targets)
         latest = self.status(session)
         if latest["credentialRevision"] != expected_revision:
             raise OfficeSetupError("office_target_revision_conflict")
         if latest["reauthRequired"] or not latest["identityVerified"]:
             raise OfficeSetupError("office_identity_not_ready")
+        targets = _validate_targets(targets_value)
+        self._validate_target_features(targets, latest["enabledFeatures"])
+        self._validate_discovery_selection(session, targets)
+        freebusy = session.discoveries.get("freebusy_subjects")
+        if freebusy is not None and freebusy.ids and not targets["freebusySubjects"]:
+            raise OfficeSetupError("office_freebusy_target_required")
         response = self.bridge.invoke(
             "select-targets",
             {"expectedCredentialRevision": expected_revision, "targets": targets},
         )
-        required = {
-            "state",
-            "profileRef",
-            "scopeSchemaVersion",
-            "targetScope",
-            "credentialRevision",
-            "requiredOAuthScopes",
-        }
-        if set(response) != required or response.get("state") != "UPDATED":
+        if response.get("state") == "CONFLICT":
+            raise OfficeSetupError("office_target_revision_conflict")
+        if response.get("state") != "UPDATED":
             raise OfficeSetupError("office_target_update_invalid")
-        if not isinstance(response.get("profileRef"), str) or not _SAFE_ID_RE.fullmatch(
-            response["profileRef"]
-        ):
+        updated = _safe_status(response, self.operator_context)
+        if response.get("profileRef") != self._profile_ref:
+            raise OfficeSetupError("office_target_update_profile_mismatch")
+        revision = updated["credentialRevision"]
+        if not isinstance(revision, int) or revision != expected_revision + 1:
             raise OfficeSetupError("office_target_update_invalid")
-        revision = response.get("credentialRevision")
         if (
-            not isinstance(revision, int)
-            or isinstance(revision, bool)
-            or revision != expected_revision + 1
-        ):
-            raise OfficeSetupError("office_target_update_invalid")
-        scopes = response.get("requiredOAuthScopes")
-        if (
-            not isinstance(scopes, list)
-            or any(
-                not isinstance(item, str) or not _SAFE_SCOPE_RE.fullmatch(item) for item in scopes
-            )
-            or any(_is_mail_scope(item) for item in scopes)
+            updated["requiredOAuthScopes"] != latest["requiredOAuthScopes"]
+            or updated["enabledFeatures"] != latest["enabledFeatures"]
+            or not updated["identityVerified"]
         ):
             raise OfficeSetupError("office_target_update_scope_invalid")
-        if (
-            not isinstance(response.get("scopeSchemaVersion"), int)
-            or response["scopeSchemaVersion"] != 2
-        ):
-            raise OfficeSetupError("office_target_update_invalid")
-        if (
-            not isinstance(response.get("targetScope"), dict)
-            or response["targetScope"].get("workspaceId") != self.operator_context.workspace_id
-        ):
-            raise OfficeSetupError("office_target_update_workspace_invalid")
         with self._lock:
             session.credential_revision = revision
         return {
             "state": "UPDATED",
             "credentialRevision": revision,
             "scopeSchemaVersion": 2,
-            "requiredOAuthScopes": list(scopes),
+            "requiredOAuthScopes": list(updated["requiredOAuthScopes"]),
             "selectedCounts": {
                 "plannerPlans": len(targets["plannerPlanIds"]),
                 "toDoLists": len(targets["toDoTaskListIds"]),
@@ -896,7 +1045,7 @@ class OfficeSetupService:
         drives = session.discoveries.get("sharepoint_drives")
         selected_drives = set(targets["sharePointDriveIds"])
         selected_lists = set(targets["sharePointListIds"])
-        if (selected_drives or selected_lists or targets["sharePointSiteId"]) and drives is None:
+        if (selected_drives or selected_lists) and drives is None:
             raise OfficeSetupError("office_target_not_discovered")
         if drives is not None:
             if not selected_drives.issubset(
@@ -911,11 +1060,26 @@ class OfficeSetupService:
                 {item for item, kind in drives.kinds.items() if kind.casefold() == "list"}
             ):
                 raise OfficeSetupError("office_target_not_discovered")
-            if (
-                targets["sharePointSiteId"] is not None
-                and targets["sharePointSiteId"] not in drives.site_ids
-            ):
-                raise OfficeSetupError("office_target_not_discovered")
+
+    @staticmethod
+    def _validate_target_features(
+        targets: Mapping[str, Any], enabled_features: Mapping[str, bool]
+    ) -> None:
+        """Reject any target list whose fixed server-side Office capability is disabled."""
+
+        target_feature = {
+            "plannerPlanIds": "plannerEnabled",
+            "toDoTaskListIds": "todoEnabled",
+            "calendarIds": "calendarEnabled",
+            "freebusySubjects": "calendarEnabled",
+            "sharePointListIds": "sharePointDriveMetadataEnabled",
+            "sharePointDriveIds": "sharePointDriveMetadataEnabled",
+        }
+        if any(
+            targets[key] and not enabled_features[feature]
+            for key, feature in target_feature.items()
+        ):
+            raise OfficeSetupError("office_feature_disabled")
 
 
 def _session_cookie_id(headers: Mapping[str, str]) -> str | None:
@@ -1062,7 +1226,9 @@ async function refresh(){
     revision=data.credentialRevision;
     statusNode.textContent=data.identityVerified
       ? `Microsoft account verified · ${data.authStatus} · credential revision ${revision}`
-      : data.message==='AUTHORIZATION_DID_NOT_COMPLETE'
+      : data.message==='AADSTS50011'
+        ? 'Microsoft rejected the registered loopback redirect (AADSTS50011). The localhost callback must match the tenant app registration.'
+        : data.message==='AUTHORIZATION_DID_NOT_COMPLETE'
         ? 'Microsoft sign-in did not complete. You can try again.'
         : `Microsoft connection status: ${data.authStatus}`;
     const ready=data.identityVerified&&!data.reauthRequired;
@@ -1097,19 +1263,25 @@ document.getElementById('discover').addEventListener('click',async()=>{
   finally{document.getElementById('discover').disabled=false;}
 });
 document.getElementById('save').addEventListener('click',async()=>{
-  const values={plannerPlanIds:[],sharePointSiteId:null,sharePointListIds:[],sharePointDriveIds:[],toDoTaskListIds:[],calendarIds:[],freebusySubjects:[]};
+  const values={plannerPlanIds:[],sharePointListIds:[],sharePointDriveIds:[],toDoTaskListIds:[],calendarIds:[],freebusySubjects:[]};
   const byType={planner_plans:'plannerPlanIds',todo_lists:'toDoTaskListIds',calendars:'calendarIds',freebusy_subjects:'freebusySubjects'};
   for(const checkbox of panels.querySelectorAll('input[type=checkbox]:checked')){
     const type=checkbox.dataset.resource;
     if(type==='sharepoint_drives'){
       const item=(discovered[type]||[]).find(row=>row.id===checkbox.value);
       if(!item) continue;
-      if(item.siteId) values.sharePointSiteId=item.siteId;
       if(item.kind.toLowerCase()==='list') values.sharePointListIds.push(item.id);
       else values.sharePointDriveIds.push(item.id);
     }else if(byType[type]) values[byType[type]].push(checkbox.value);
   }
-  if(values.sharePointDriveIds.length||values.sharePointListIds.length) values.sharePointSiteId=sharePointSiteId;
+  if(Object.values(values).some(ids=>ids.length>100)){
+    document.getElementById('selection').textContent='Select no more than 100 targets in each category.';
+    return;
+  }
+  if((discovered.freebusy_subjects||[]).length&&!values.freebusySubjects.length){
+    document.getElementById('selection').textContent='Keep at least one free/busy person selected for the configured calendar capability.';
+    return;
+  }
   try{
     const result=await api('/api/select-targets',{expectedCredentialRevision:revision,targets:values});
     revision=result.credentialRevision;
