@@ -914,6 +914,52 @@ def test_office_graph_bootstrap_accepts_only_the_owner_model_personal_route() ->
         stage_transition._validate_office_graph_personal_route_compose_delta(active, candidate)
 
 
+def _office_graph_cloud_memory_services() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build Cloud service inventories with only the reviewed memory change."""
+
+    name = "cloud-management-phase2"
+    active_service = _service("cloud-management:locked")
+    active_service.update({"mem_limit": "384m", "memswap_limit": "384m", "cpus": "0.10"})
+    candidate_service = copy.deepcopy(active_service)
+    candidate_service.update({"mem_limit": "256m", "memswap_limit": "256m"})
+    return {name: active_service}, {name: candidate_service}
+
+
+def test_office_graph_cloud_memory_normalization_updates_full_comparison_values() -> None:
+    active_services, candidate_services = _office_graph_cloud_memory_services()
+
+    stage_transition._normalize_graph_cloud_memory_reallocation(active_services, candidate_services)
+
+    assert candidate_services == active_services
+    cloud = candidate_services["cloud-management-phase2"]
+    assert cloud["mem_limit"] == "384m"
+    assert cloud["memswap_limit"] == "384m"
+    assert cloud["cpus"] == "0.10"
+    assert cloud["image"] == "cloud-management:locked"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("cpus", "0.20", "preserve the Cloud CPU limit"),
+        ("image", "cloud-management:changed", "fields beyond the memory limits"),
+    ],
+)
+def test_office_graph_cloud_memory_normalization_rejects_unreviewed_changes(
+    field: str, value: str, message: str
+) -> None:
+    active_services, candidate_services = _office_graph_cloud_memory_services()
+    candidate_services["cloud-management-phase2"][field] = value
+    unnormalized = copy.deepcopy(candidate_services)
+
+    with pytest.raises(stage_transition.StageTransitionError, match=message):
+        stage_transition._normalize_graph_cloud_memory_reallocation(
+            active_services, candidate_services
+        )
+
+    assert candidate_services == unnormalized
+
+
 def test_graph_bootstrap_config_directory_guard_requires_separate_candidate() -> None:
     active_dir = Path("/private/active-config")
     candidate_dir = Path("/private/candidate-config")

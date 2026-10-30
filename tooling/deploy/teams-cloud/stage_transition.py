@@ -3128,6 +3128,7 @@ def _normalize_graph_cloud_memory_reallocation(
         raise StageTransitionError(
             "Graph bootstrap Cloud configuration changes fields beyond the memory limits"
         )
+    candidate_services[name] = candidate_normalized
 
 
 def _validate_office_graph_exchange_config_delta(
