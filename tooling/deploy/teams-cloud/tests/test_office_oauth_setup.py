@@ -669,6 +669,29 @@ def test_new_begin_marks_cached_poll_as_preparing_not_previous_failure() -> None
     assert [op for op, _ in bridge.calls].count("status") == 1
 
 
+def test_rejected_begin_clears_preparing_state_and_allows_a_later_attempt() -> None:
+    """A rejected or malformed begin result must not strand the UI in preparing state."""
+
+    class RejectOnceBridge(FakeBridge):
+        reject_next_begin = True
+
+        def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if operation == "begin" and self.reject_next_begin:
+                self.reject_next_begin = False
+                raise setup.OfficeSetupError("office_bridge_rejected")
+            return super().invoke(operation, payload)
+
+    bridge = RejectOnceBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    with pytest.raises(setup.OfficeSetupError, match="office_bridge_rejected"):
+        service.begin(session)
+    assert service.status(session)["message"] == "AUTHORIZATION_DID_NOT_COMPLETE"
+    assert service.begin(session).startswith("https://login.microsoftonline.com/")
+    assert bridge.begin_calls == 1
+
+
 def test_blocked_begin_keeps_home_and_session_responsive_and_status_unqueued() -> None:
     """A slow owner RPC must not hold the service lock or accumulate status calls."""
 

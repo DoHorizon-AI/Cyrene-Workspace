@@ -914,10 +914,9 @@ class OfficeSetupService:
                     self._last_callback_message = (
                         "READY"
                         if code == "office_already_linked"
-                        else "AUTHORIZATION_DID_NOT_COMPLETE"
-                        if code in {"office_bridge_busy", "office_bridge_unavailable"}
-                        or not begin_invoked
                         else "AUTHORIZATION_UNCONFIRMED"
+                        if code == "office_bridge_timeout" and begin_invoked
+                        else "AUTHORIZATION_DID_NOT_COMPLETE"
                     )
                     self._invalidate_status_locked()
             raise
