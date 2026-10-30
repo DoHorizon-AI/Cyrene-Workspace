@@ -3977,6 +3977,7 @@ def _call_internal_api(
             ("GET", "/_internal/teams/delivery/status"),
             ("POST", "/_internal/teams/delivery/pause"),
             ("POST", "/_internal/teams/delivery/resume"),
+            ("POST", "/_internal/teams/delivery/retry-dead"),
         }
     else:
         raise RuntimeUpdateError("internal control service is unsupported")
