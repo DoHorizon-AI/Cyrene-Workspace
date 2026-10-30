@@ -3849,6 +3849,175 @@ def _validate_teams_delivery_spool(config: dict[str, Any]) -> None:
     _validate_teams_delivery_state_directory(Path(source))
 
 
+def _validate_runpod_notification_config_delta(
+    active_config_dir: Path,
+    candidate_config_dir: Path,
+    *,
+    candidate_compose: dict[str, Any] | None = None,
+) -> tuple[Path, dict[str, Any]]:
+    """Validate the only in-place credential-notification update: one RunPod addition.
+
+    The caller owns directory permissions and later runs the full activation
+    preflight, which verifies provenance, Exchange issuance, and live readiness.
+    中文：这里只验证通知差异和只读 binding，不替代后续完整激活预检。
+    """
+
+    active_dir = active_config_dir.resolve(strict=True)
+    candidate_dir = candidate_config_dir.resolve(strict=True)
+    if active_dir == candidate_dir:
+        raise PreflightError("candidate notification config must be separate from active config")
+
+    def read_config(directory: Path, filename: str, label: str) -> dict[str, Any]:
+        path = directory / filename
+        try:
+            metadata = path.lstat()
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size > 1024 * 1024
+            ):
+                raise PreflightError(f"{label} is not a bounded regular config file")
+            raw = path.read_bytes()
+            document = json.loads(raw, object_pairs_hook=_unique_json_object)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            if isinstance(error, PreflightError):
+                raise
+            raise PreflightError(f"{label} is invalid JSON") from error
+        if not isinstance(document, dict):
+            raise PreflightError(f"{label} must be a JSON object")
+        return document
+
+    active_notification = read_config(
+        active_dir, "teams-credential-notifications.json", "active notification config"
+    )
+    candidate_notification_path = candidate_dir / "teams-credential-notifications.json"
+    candidate_notification = read_config(
+        candidate_dir,
+        "teams-credential-notifications.json",
+        "candidate notification config",
+    )
+    if {key: value for key, value in active_notification.items() if key != "connections"} != {
+        key: value for key, value in candidate_notification.items() if key != "connections"
+    }:
+        raise PreflightError(
+            "candidate notification update may not change owner, workspace, destination, Exchange profile, or polling"
+        )
+
+    def connections_by_provider(document: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
+        rows = document.get("connections")
+        if not isinstance(rows, list):
+            raise PreflightError(f"{label} notification connections are malformed")
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"connectionId", "provider"}
+                or not isinstance(row.get("provider"), str)
+                or not _uuid(row.get("connectionId"))
+                or row["provider"] in result
+            ):
+                raise PreflightError(f"{label} notification connections are malformed")
+            result[row["provider"]] = row
+        return result
+
+    active_connections = connections_by_provider(active_notification, "active")
+    candidate_connections = connections_by_provider(candidate_notification, "candidate")
+    if "runpod" in active_connections or set(candidate_connections) != (
+        set(active_connections) | {"runpod"}
+    ):
+        raise PreflightError("candidate notification update must add exactly one RunPod connection")
+    if any(
+        candidate_connections[provider] != active_connections[provider]
+        for provider in active_connections
+    ):
+        raise PreflightError(
+            "candidate notification update changed an existing provider connection"
+        )
+
+    active_bindings_doc = read_config(
+        active_dir, "connector-bindings.json", "active connector bindings"
+    )
+    candidate_bindings_doc = read_config(
+        candidate_dir, "connector-bindings.json", "candidate connector bindings"
+    )
+
+    def normalize_bindings(value: Any, label: str) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            raise PreflightError(f"{label} binding rows are malformed")
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in value:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"bindingId", "connectionRef", "providerId", "profileRef", "tools"}
+                or any(
+                    not isinstance(row.get(key), str) or not row[key]
+                    for key in ("bindingId", "connectionRef", "providerId", "profileRef")
+                )
+                or row["bindingId"] in seen
+                or not isinstance(row.get("tools"), list)
+                or not row["tools"]
+            ):
+                raise PreflightError(f"{label} binding rows are malformed")
+            seen.add(row["bindingId"])
+            tools = row["tools"]
+            if any(
+                not isinstance(tool, dict)
+                or set(tool) != {"toolId", "operationId", "resourceProjection", "mutating"}
+                or any(
+                    not isinstance(tool.get(key), str) or not tool[key]
+                    for key in ("toolId", "operationId", "resourceProjection")
+                )
+                or not isinstance(tool.get("mutating"), bool)
+                for tool in tools
+            ):
+                raise PreflightError(f"{label} binding tools are malformed")
+            rows.append({**row, "tools": sorted(tools, key=lambda tool: tool["toolId"])})
+        return sorted(rows, key=lambda row: row["bindingId"])
+
+    active_bindings = normalize_bindings(active_bindings_doc.get("bindings"), "active")
+    candidate_bindings = normalize_bindings(candidate_bindings_doc.get("bindings"), "candidate")
+    if any(row["providerId"] == "runpod" for row in active_bindings):
+        raise PreflightError("active connector bindings already contain RunPod")
+    active_other = [row for row in active_bindings if row["providerId"] != "runpod"]
+    candidate_other = [row for row in candidate_bindings if row["providerId"] != "runpod"]
+    if active_other != candidate_other:
+        raise PreflightError("candidate notification update changed existing connector bindings")
+    _validate_new_provider_bindings_readonly(candidate_bindings_doc, {"runpod"})
+    runpod_bindings = [row for row in candidate_bindings if row["providerId"] == "runpod"]
+    if len(runpod_bindings) != 1:
+        raise PreflightError("candidate must add exactly one RunPod connector binding")
+    operations = {tool["operationId"] for tool in runpod_bindings[0]["tools"]}
+    required_operations = {"cloud.provider.health.read", "cloud.resources.list"}
+    if not required_operations <= operations:
+        raise PreflightError("candidate RunPod binding must include health and Pods list reads")
+    if runpod_bindings[0]["connectionRef"] != candidate_connections["runpod"]["connectionId"]:
+        raise PreflightError("candidate RunPod notification and binding references differ")
+
+    if candidate_compose is not None:
+        cloud_service = candidate_compose.get("services", {}).get("cloud-management-phase2", {})
+        cloud_document = _json_environment_object(
+            cloud_service if isinstance(cloud_service, dict) else {},
+            "CYRENE_CAPABILITY_CONFIGURATION_JSON",
+            "Cloud Management",
+        )
+        profiles = cloud_document.get("profiles")
+        runpod_profiles = (
+            [row for row in profiles if isinstance(row, dict) and row.get("provider") == "runpod"]
+            if isinstance(profiles, list)
+            else []
+        )
+        auth = runpod_profiles[0].get("auth") if len(runpod_profiles) == 1 else None
+        if (
+            len(runpod_profiles) != 1
+            or runpod_profiles[0].get("read_only") is not True
+            or not isinstance(auth, dict)
+            or auth.get("mode") != "api_key"
+        ):
+            raise PreflightError("candidate RunPod profile must be one API-key, read-only profile")
+    return candidate_notification_path, candidate_notification
+
+
 def _validate_credential_notification_activation(
     config: dict[str, Any],
     *,
