@@ -335,9 +335,124 @@ def test_real_graph_and_office_oauth_overlay_render_preserves_secrets_and_loopba
             "mode": "ingress",
         }
     ]
-    preflight._validate_office_oauth_loopback_ports(
-        exchange_ports, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+
+    complete_graph_files = (
+        "compose.yaml",
+        "compose.computer-runtime.yaml",
+        "compose.codebuddy-acp.yaml",
+        "compose.huggingface.yaml",
+        "compose.cloud-phase2.yaml",
+        "compose.credential-notifications.yaml",
+        "compose.automation-workflows.yaml",
+        "compose.microsoft-graph.yaml",
+        "compose.office-oauth-setup.yaml",
     )
+    complete_graph_config: dict[str, Any] = {
+        "services": {},
+        "configs": {},
+        "secrets": {},
+        "volumes": {},
+        "networks": {},
+    }
+    for filename in complete_graph_files:
+        overlay = yaml.safe_load((DEPLOYMENT_ROOT / filename).read_text(encoding="utf-8"))
+        complete_graph_config = _merge_compose_fixture(complete_graph_config, overlay)
+    active_profiles = set(preflight.ACTIVE_COMPOSE_PROFILES)
+    runtime_services = {
+        name
+        for name, service in complete_graph_config["services"].items()
+        if service.get("restart") != "no"
+        and (
+            not service.get("profiles") or active_profiles.intersection(service.get("profiles", []))
+        )
+    }
+    assert runtime_services == {
+        "postgres",
+        "workspace-authority",
+        "account-center",
+        "navigator-persistence",
+        "navigator",
+        "exchange",
+        "github-issues",
+        "teams-provider",
+        "teams-ingress",
+        "teams-public-ingress",
+        "computer-runtime",
+        "computer-runtime-proxy",
+        "huggingface",
+        "cloud-management-phase2",
+        "microsoft-graph",
+    }
+    locked_images: set[str] = set()
+    for service_name, service in complete_graph_config["services"].items():
+        image = f"example.invalid/{service_name}:rendered-test"
+        service["image"] = image
+        locked_images.add(image)
+    complete_graph_config["services"]["exchange"]["ports"] = exchange_ports
+    caddy = complete_graph_config["services"]["teams-public-ingress"]
+    caddy["ports"] = [
+        {
+            "target": 443,
+            "published": "18443",
+            "host_ip": "127.0.0.1",
+            "protocol": "tcp",
+        }
+    ]
+    caddy["volumes"] = [
+        {
+            "type": "bind",
+            "source": str((DEPLOYMENT_ROOT / "Caddyfile.staging").resolve()),
+            "target": "/etc/caddy/Caddyfile",
+        }
+    ]
+    memory_mib, cpus = preflight._validate_compose(
+        complete_graph_config,
+        "connector-auth-readonly",
+        3584,
+        2.0,
+        locked_images,
+        ingress_exposure="host-fronted-staging",
+        connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+    )
+    assert memory_mib <= 3584
+    assert cpus <= 2.0
+
+    wildcard_graph_config = copy.deepcopy(complete_graph_config)
+    wildcard_graph_config["services"]["exchange"]["ports"][0]["host_ip"] = "0.0.0.0"
+    with pytest.raises(preflight.PreflightError, match="Graph bootstrap requires its one"):
+        preflight._validate_compose(
+            wildcard_graph_config,
+            "connector-auth-readonly",
+            3584,
+            2.0,
+            locked_images,
+            ingress_exposure="host-fronted-staging",
+            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        )
+
+    extra_publisher_config = copy.deepcopy(complete_graph_config)
+    extra_publisher_config["services"]["teams-provider"]["ports"] = exchange_ports
+    with pytest.raises(preflight.PreflightError, match="only Teams ingress or the fixed"):
+        preflight._validate_compose(
+            extra_publisher_config,
+            "connector-auth-readonly",
+            3584,
+            2.0,
+            locked_images,
+            ingress_exposure="host-fronted-staging",
+            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        )
+
+    with pytest.raises(preflight.PreflightError, match="absent outside Graph provider bootstrap"):
+        preflight._validate_compose(
+            complete_graph_config,
+            "connector-auth-readonly",
+            3584,
+            2.0,
+            locked_images,
+            ingress_exposure="host-fronted-staging",
+            connector_auth_phase="issued-connector-activation",
+        )
 
     def rendered_pairs(service: str) -> list[tuple[str, str]]:
         return secret_pairs(rendered_compose["services"][service]["secrets"])
@@ -373,6 +488,7 @@ def test_office_oauth_loopback_port_guard_rejects_any_other_shape() -> None:
         [{**port, "protocol": "udp"}],
         [{**port, "name": "office-oauth"}],
         [port, port],
+        [port, {**port, "published": "52192"}],
     ):
         with pytest.raises(
             preflight.PreflightError,
