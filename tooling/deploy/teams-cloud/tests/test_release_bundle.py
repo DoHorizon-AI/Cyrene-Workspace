@@ -771,6 +771,7 @@ def test_bundle_verifier_requires_deployer_reconcile_and_preflight_inputs(tmp_pa
         "config/image-lock.schema.json",
         "config/deployment-policy.template.json",
         "config/deployment-probe.template.json",
+        "config/deployment-probe.runpod.template.json",
         "config/responsibility-targets.v1.schema.json",
         "config/responsibility-targets.v1.template.json",
     }

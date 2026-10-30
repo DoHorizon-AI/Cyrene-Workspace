@@ -119,6 +119,7 @@ REQUIRED_DEPLOYMENT_TOOL_FILES = frozenset(
         "config/cyrene-github-targets.v2.template.json",
         "config/deployment-policy.template.json",
         "config/deployment-probe.template.json",
+        "config/deployment-probe.runpod.template.json",
         "config/github-only.env.template",
         "config/image-lock.schema.json",
         "config/navigator-principal-config.template.json",
