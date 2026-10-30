@@ -2231,6 +2231,282 @@ def test_codebuddy_acp_rejects_compose_owned_mcp_credentials() -> None:
         )
 
 
+def _codebuddy_authorization_file_mount_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[dict[str, Any], Path, dict[str, Path], dict[Path, dict[str, int]]]:
+    """Build one Graph automation overlay with byte-identical private child-bind files."""
+
+    artifacts_dir = tmp_path / ".artifacts"
+    config_dir = artifacts_dir / "candidate-config"
+    override_dir = artifacts_dir / "navigator-file-overrides"
+    config_dir.mkdir(parents=True)
+    override_dir.mkdir()
+    override_dir.chmod(0o700)
+    file_bytes = {
+        "work-actor-token-map.json": b'{"schemaVersion":1,"workspaceId":"workspace","actors":[]}\n',
+        "automation-source-bindings.json": b'{"schemaVersion":1,"targets":[]}\n',
+    }
+    source_paths: dict[str, Path] = {}
+    for filename, content in file_bytes.items():
+        original = config_dir / filename
+        original.write_bytes(content)
+        original.chmod(0o400)
+        source = override_dir / filename
+        source.write_bytes(content)
+        source.chmod(0o600)
+        source_paths[filename] = source
+
+    metadata_overrides: dict[Path, dict[str, int]] = {path: {} for path in source_paths.values()}
+    real_lstat = Path.lstat
+
+    def lstat_with_private_owner(path: Path) -> Any:
+        metadata = real_lstat(path)
+        if stat.S_ISDIR(metadata.st_mode) and stat.S_IMODE(metadata.st_mode) == 0o700:
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o700,
+                st_uid=0,
+                st_nlink=metadata.st_nlink,
+                st_size=metadata.st_size,
+            )
+        override = metadata_overrides.get(path)
+        if override is None:
+            return metadata
+        return SimpleNamespace(
+            st_mode=stat.S_IFREG | override.get("mode", stat.S_IMODE(metadata.st_mode)),
+            st_uid=override.get("uid", 10001),
+            st_nlink=override.get("nlink", 1),
+            st_size=override.get("size", metadata.st_size),
+        )
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_private_owner)
+
+    authorization_targets = {
+        "/run/teams-authorization/work-actor-token-map.json": "work-actor-token-map.json",
+        "/run/teams-authorization/automation-source-bindings.json": (
+            "automation-source-bindings.json"
+        ),
+    }
+    navigator = {
+        "environment": {
+            "CYRENE_WORKFLOWS_ENABLED": "false",
+            "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED": "true",
+            "CYRENE_WORK_ACTOR_TOKEN_MAP_FILE": (
+                "/run/teams-authorization/work-actor-token-map.json"
+            ),
+            "CYRENE_AUTOMATION_SOURCE_BINDINGS_FILE": (
+                "/run/teams-authorization/automation-source-bindings.json"
+            ),
+        },
+        "volumes": [
+            {
+                "type": "bind",
+                "source": str(tmp_path / "secrets" / "codebuddy"),
+                "target": "/home/navigator/.codebuddy",
+                "read_only": False,
+            },
+            {
+                "type": "volume",
+                "source": "navigator-sessions",
+                "target": "/var/lib/cyrene-navigator",
+            },
+            {
+                "type": "bind",
+                "source": str(config_dir),
+                "target": "/run/teams-authorization",
+                "read_only": True,
+            },
+            {
+                "type": "bind",
+                "source": str(tmp_path / "automation-health"),
+                "target": preflight.AUTOMATION_HEALTH_TARGET,
+                "read_only": True,
+            },
+        ],
+        "secrets": [
+            {"source": name, "target": name}
+            for name in {
+                "navigator-exchange-hmac-key",
+                "navigator-session-token",
+                "teams-navigator-hmac-key",
+                "internal-service-root-ca",
+                *preflight.AUTOMATION_WORKFLOW_SECRET_NAMES,
+            }
+        ],
+        "configs": [
+            {"source": "connector-bindings", "target": "/run/config/connector-bindings.json"},
+            {
+                "source": "connector-tool-catalog",
+                "target": "/run/config/connector-tool-catalog.json",
+            },
+            {
+                "source": "responsibility-targets",
+                "target": "/run/config/responsibility-targets.v1.json",
+            },
+            {
+                "source": "teams-credential-notifications",
+                "target": "/run/secrets/teams-credential-notifications.json",
+            },
+        ],
+    }
+    navigator["volumes"].extend(
+        {
+            "type": "bind",
+            "source": str(source_paths[filename]),
+            "target": target,
+            "read_only": True,
+            "bind": {"create_host_path": False},
+        }
+        for target, filename in authorization_targets.items()
+    )
+    config = {
+        "name": "cyrene-teams-cloud",
+        "volumes": {"navigator-sessions": {"name": "cyrene-teams-cloud_navigator-sessions"}},
+        "services": {"navigator": navigator},
+    }
+    return config, config_dir, source_paths, metadata_overrides
+
+
+def test_codebuddy_acp_allows_only_exact_graph_authorization_file_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Allow only byte-identical, owner-only child binds during the two Graph phases."""
+
+    config, config_dir, source_paths, metadata_overrides = (
+        _codebuddy_authorization_file_mount_fixture(tmp_path, monkeypatch)
+    )
+    secrets_dir = tmp_path / "secrets"
+
+    def validate(candidate: dict[str, Any], phase: str | None) -> None:
+        preflight._validate_codebuddy_acp_mount_boundary(
+            candidate,
+            candidate["services"]["navigator"],
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+            connector_auth_phase=phase,
+        )
+
+    validate(config, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+    validate(config, "issued-connector-activation")
+    assert all(
+        stat.S_IMODE((config_dir / filename).stat().st_mode) == 0o400 for filename in source_paths
+    )
+
+    invalid_cases: list[tuple[str, dict[str, Any], str | None]] = []
+    missing_one = copy.deepcopy(config)
+    missing_one["services"]["navigator"]["volumes"].pop()
+    invalid_cases.append(
+        ("missing child bind", missing_one, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+    )
+
+    wrong_phase = copy.deepcopy(config)
+    invalid_cases.append(("provider-bootstrap phase", wrong_phase, "provider-bootstrap"))
+    invalid_cases.append(("no phase", copy.deepcopy(config), None))
+
+    without_overlay = copy.deepcopy(config)
+    overlay_navigator = without_overlay["services"]["navigator"]
+    overlay_navigator["environment"].pop("CYRENE_WORK_ACTOR_TOKEN_MAP_FILE")
+    overlay_navigator["environment"].pop("CYRENE_AUTOMATION_SOURCE_BINDINGS_FILE")
+    overlay_navigator["secrets"] = [
+        {"source": name, "target": name}
+        for name in (
+            "navigator-exchange-hmac-key",
+            "navigator-session-token",
+            "teams-navigator-hmac-key",
+            "internal-service-root-ca",
+        )
+    ]
+    overlay_navigator["volumes"] = [
+        row
+        for row in overlay_navigator["volumes"]
+        if row.get("target") != preflight.AUTOMATION_HEALTH_TARGET
+    ]
+    invalid_cases.append(
+        ("no automation overlay", without_overlay, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+    )
+
+    unsafe_bind = copy.deepcopy(config)
+    unsafe_bind["services"]["navigator"]["volumes"][-1]["bind"] = {"create_host_path": True}
+    invalid_cases.append(
+        ("create host path", unsafe_bind, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+    )
+
+    extra_target = copy.deepcopy(config)
+    extra_target["services"]["navigator"]["volumes"].append(
+        {
+            "type": "bind",
+            "source": str(source_paths["work-actor-token-map.json"]),
+            "target": "/run/teams-authorization/unapproved.json",
+            "read_only": True,
+            "bind": {"create_host_path": False},
+        }
+    )
+    invalid_cases.append(
+        ("extra target", extra_target, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+    )
+
+    alternate_basename = source_paths["automation-source-bindings.json"].with_name(
+        "alternate-bindings.json"
+    )
+    alternate_basename.write_bytes((config_dir / "automation-source-bindings.json").read_bytes())
+    alternate_basename.chmod(0o600)
+    metadata_overrides[alternate_basename] = {}
+    wrong_basename = copy.deepcopy(config)
+    next(
+        row
+        for row in wrong_basename["services"]["navigator"]["volumes"]
+        if row.get("target") == "/run/teams-authorization/automation-source-bindings.json"
+    )["source"] = str(alternate_basename)
+    invalid_cases.append(
+        ("wrong basename", wrong_basename, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+    )
+
+    outside_artifacts_dir = tmp_path / "outside-artifacts"
+    outside_artifacts_dir.mkdir()
+    outside_artifacts_dir.chmod(0o700)
+    outside_artifact = outside_artifacts_dir / "work-actor-token-map.json"
+    outside_artifact.write_bytes((config_dir / outside_artifact.name).read_bytes())
+    outside_artifact.chmod(0o600)
+    metadata_overrides[outside_artifact] = {}
+    non_private_artifact = copy.deepcopy(config)
+    next(
+        row
+        for row in non_private_artifact["services"]["navigator"]["volumes"]
+        if row.get("target") == "/run/teams-authorization/work-actor-token-map.json"
+    )["source"] = str(outside_artifact)
+    invalid_cases.append(
+        (
+            "outside private artifacts",
+            non_private_artifact,
+            preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        )
+    )
+
+    for _label, candidate, phase in invalid_cases:
+        with pytest.raises(preflight.PreflightError):
+            validate(candidate, phase)
+
+    for invalid_metadata in ({"uid": 1000}, {"mode": 0o400}, {"nlink": 2}):
+        metadata_path = source_paths["work-actor-token-map.json"]
+        metadata_overrides[metadata_path] = invalid_metadata
+        with pytest.raises(preflight.PreflightError):
+            validate(config, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+        metadata_overrides[metadata_path] = {}
+
+    source = source_paths["automation-source-bindings.json"]
+    original = (config_dir / source.name).read_bytes()
+    source.write_bytes(b'{"schemaVersion":1,"targets":[{"changed":true}]}\n')
+    source.chmod(0o600)
+    with pytest.raises(preflight.PreflightError, match="differs from its original config"):
+        validate(config, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+    source.write_bytes(original)
+    source.chmod(0o600)
+
+    source.write_bytes(b"x" * 64_001)
+    source.chmod(0o600)
+    with pytest.raises(preflight.PreflightError, match="source metadata is unsafe"):
+        validate(config, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+
+
 def test_issued_activation_full_14_overlay_preflight_accepts_notification_config_mount(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

@@ -306,6 +306,11 @@ AUTOMATION_PROVIDER_SERVICE_NAMES = {
     "microsoft-graph",
     "azure-devops-observation",
 }
+CODEBUDDY_AUTHORIZATION_FILE_MOUNTS = {
+    "/run/teams-authorization/work-actor-token-map.json": "work-actor-token-map.json",
+    "/run/teams-authorization/automation-source-bindings.json": "automation-source-bindings.json",
+}
+CODEBUDDY_AUTHORIZATION_FILE_MAX_BYTES = 64_000
 
 
 class PreflightError(ValueError):
@@ -6229,6 +6234,92 @@ def _validate_codebuddy_acp_boundary(
     )
 
 
+def _validate_codebuddy_acp_authorization_file_mounts(
+    navigator: dict[str, Any],
+    *,
+    config_dir: Path,
+    connector_auth_phase: str | None,
+    automation_overlay: bool,
+) -> set[str]:
+    """Validate the optional Graph-stage child binds for Navigator authorization files."""
+
+    volumes = navigator.get("volumes", [])
+    mounts = [
+        row
+        for row in volumes
+        if isinstance(row, dict) and row.get("target") in CODEBUDDY_AUTHORIZATION_FILE_MOUNTS
+    ]
+    if not mounts:
+        return set()
+    allowed_phases = {OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE, "issued-connector-activation"}
+    if (
+        not automation_overlay
+        or connector_auth_phase not in allowed_phases
+        or len(mounts) != len(CODEBUDDY_AUTHORIZATION_FILE_MOUNTS)
+        or {row.get("target") for row in mounts} != set(CODEBUDDY_AUTHORIZATION_FILE_MOUNTS)
+    ):
+        raise PreflightError(
+            "CodeBuddy ACP authorization file mounts require the exact Graph-stage automation pair"
+        )
+
+    for mount in mounts:
+        target = mount["target"]
+        filename = CODEBUDDY_AUTHORIZATION_FILE_MOUNTS[target]
+        source_text = mount.get("source")
+        if (
+            set(mount) != {"type", "source", "target", "read_only", "bind"}
+            or mount.get("type") != "bind"
+            or mount.get("read_only") is not True
+            or mount.get("bind") != {"create_host_path": False}
+            or not isinstance(source_text, str)
+            or not source_text
+        ):
+            raise PreflightError("CodeBuddy ACP authorization file bind options are unsafe")
+
+        path = Path(source_text)
+        try:
+            metadata = path.lstat()
+            parent_metadata = path.parent.lstat()
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise PreflightError(
+                "CodeBuddy ACP authorization file source is unavailable"
+            ) from error
+        if (
+            not path.is_absolute()
+            or path.name != filename
+            or stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != 10001
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or not 2 <= metadata.st_size <= CODEBUDDY_AUTHORIZATION_FILE_MAX_BYTES
+            or resolved != path
+            or not _private_artifact(path)
+            or not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid not in {0, 10001}
+            or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+        ):
+            raise PreflightError("CodeBuddy ACP authorization file source metadata is unsafe")
+        try:
+            with path.open("rb") as source_file:
+                source_bytes = source_file.read(CODEBUDDY_AUTHORIZATION_FILE_MAX_BYTES + 1)
+            original_bytes = (config_dir / filename).read_bytes()
+        except OSError as error:
+            raise PreflightError(
+                "CodeBuddy ACP authorization file source or original config is unavailable"
+            ) from error
+        if (
+            len(source_bytes) != metadata.st_size
+            or not 2 <= len(source_bytes) <= CODEBUDDY_AUTHORIZATION_FILE_MAX_BYTES
+            or hashlib.sha256(source_bytes).digest() != hashlib.sha256(original_bytes).digest()
+        ):
+            raise PreflightError(
+                "CodeBuddy ACP authorization file source differs from its original config"
+            )
+    return set(CODEBUDDY_AUTHORIZATION_FILE_MOUNTS)
+
+
 def _validate_codebuddy_acp_mount_boundary(
     config: dict[str, Any],
     navigator: dict[str, Any],
@@ -6243,16 +6334,23 @@ def _validate_codebuddy_acp_mount_boundary(
     by_target = {
         row.get("target"): row for row in volumes if isinstance(row, dict) and row.get("target")
     }
+    automation_overlay = _automation_workflow_markers_present(
+        config.get("services", {}), config.get("secrets")
+    )
+    authorization_file_targets = _validate_codebuddy_acp_authorization_file_mounts(
+        navigator,
+        config_dir=config_dir,
+        connector_auth_phase=connector_auth_phase,
+        automation_overlay=automation_overlay,
+    )
     allowed_targets = {
         "/home/navigator/.codebuddy",
         "/var/lib/cyrene-navigator",
         "/run/teams-authorization",
     }
-    automation_overlay = _automation_workflow_markers_present(
-        config.get("services", {}), config.get("secrets")
-    )
     if automation_overlay:
         allowed_targets.add(AUTOMATION_HEALTH_TARGET)
+    allowed_targets.update(authorization_file_targets)
     session_volume = by_target.get("/var/lib/cyrene-navigator", {})
     codebuddy_home = by_target.get("/home/navigator/.codebuddy", {})
     actor_projection = by_target.get("/run/teams-authorization", {})
@@ -6312,7 +6410,7 @@ def _validate_codebuddy_acp_mount_boundary(
         and notification_consumers == expected_notification_consumers
     )
     if (
-        len(volumes) != (4 if automation_overlay else 3)
+        len(volumes) != (4 if automation_overlay else 3) + len(authorization_file_targets)
         or set(by_target) != allowed_targets
         or codebuddy_home.get("type") != "bind"
         or codebuddy_home.get("read_only", False) is not False
