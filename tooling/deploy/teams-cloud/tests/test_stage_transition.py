@@ -1046,6 +1046,79 @@ def test_graph_bootstrap_config_directory_guard_requires_separate_candidate() ->
         stage_transition._validate_plan(plan)
 
 
+def test_account_center_image_update_requires_its_closed_schema_state() -> None:
+    """Require a sealed database/budget proof in either supported selected Graph phase."""
+
+    required_fields = {
+        "schemaVersion",
+        "operationId",
+        "phase",
+        "createdAtUtc",
+        "project",
+        "activeInputs",
+        "candidateInputs",
+        "candidateInputPaths",
+        "activeConfigDir",
+        "candidateConfigDir",
+        "activeSecretsDir",
+        "journalDir",
+        "candidateSelectionFile",
+        "selectionBackupPath",
+        "activeSelection",
+        "runtimeConfigIdentity",
+        "candidateServices",
+        "targets",
+        "activeServices",
+        "edgeDelivery",
+        "navigatorDrain",
+        "database",
+        "candidatePreflight",
+        "exchangeReadiness",
+        "policy",
+        "planSha256",
+    }
+
+    def plan(*, phase: str, include_state: bool, target: str = "account-center") -> dict[str, Any]:
+        result = {field: {} for field in required_fields}
+        result.update(
+            {
+                "schemaVersion": stage_transition.PLAN_SCHEMA,
+                "operationId": "00000000-0000-4000-8000-000000000001",
+                "phase": phase,
+                "imageUpdateTarget": target,
+            }
+        )
+        if include_state:
+            result["accountCenterImageUpdateState"] = {}
+        return result
+
+    with pytest.raises(stage_transition.StageTransitionError, match="unsupported closed schema"):
+        stage_transition._validate_plan(
+            plan(phase="issued-connector-activation", include_state=False)
+        )
+    try:
+        stage_transition._validate_plan(
+            plan(
+                phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+                include_state=True,
+            )
+        )
+    except stage_transition.StageTransitionError as error:
+        assert "unsupported closed schema" not in str(error)
+    else:
+        pytest.fail("incomplete Graph-phase AC plan passed the remaining closed validation")
+    with pytest.raises(stage_transition.StageTransitionError, match="unsupported closed schema"):
+        stage_transition._validate_plan(plan(phase="provider-bootstrap", include_state=True))
+    with pytest.raises(stage_transition.StageTransitionError, match="unsupported closed schema"):
+        stage_transition._validate_plan(
+            plan(
+                phase="issued-connector-activation",
+                include_state=True,
+                target="exchange",
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "update_mode",
     [
@@ -1571,6 +1644,38 @@ def _full_github_image_update(
     return active, candidate, active_lock, candidate_lock
 
 
+def _full_account_center_image_update(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build an Account Center image pair over the exact 15-service Graph runtime."""
+
+    active, _listener_candidate, active_lock, _candidate_lock = _listener_repair_pair(tmp_path)
+    graph_image = "example.invalid/microsoft-graph:fixed"
+    active["services"]["microsoft-graph"] = _service(graph_image)
+    active_lock["images"].append(
+        {
+            "service": "microsoft-graph",
+            "image": graph_image,
+            "imageId": _image_id(102),
+            "sourceCommits": {},
+        }
+    )
+
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    candidate_image = "example.invalid/account-center:oidc-scope-fix"
+    candidate["services"][stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET]["image"] = (
+        candidate_image
+    )
+    target_lock_service = runtime_update.LOCK_SERVICE_FOR_TARGET[
+        stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+    ]
+    row = next(item for item in candidate_lock["images"] if item["service"] == target_lock_service)
+    row["image"] = candidate_image
+    row["imageId"] = _image_id(103)
+    return active, candidate, active_lock, candidate_lock
+
+
 def _active_memory_update(
     tmp_path: Path, target: str = "teams-ingress"
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -1619,6 +1724,326 @@ def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
     assert images[target]["active"]["imageId"] != images[target]["candidate"]["imageId"]
     assert set(images) == set(stage_transition._runtime_service_inventory(active))
     assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
+def test_account_center_image_update_is_one_selected_graph_phase_target_only(
+    phase: str, tmp_path: Path
+) -> None:
+    """Permit one AC image change in either exact Graph phase without changing selector phase."""
+
+    active, candidate, active_lock, candidate_lock = _full_account_center_image_update(tmp_path)
+    target = stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+    targets, images = stage_transition._validate_phase_topology(
+        phase=phase,
+        image_update_target=target,
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+
+    assert runtime_update.LOCK_SERVICE_FOR_TARGET[target] == "account-center"
+    assert target not in runtime_update.ALLOWED_TARGETS
+    assert targets == [target]
+    assert set(images) == stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
+    assert images[target]["active"]["imageId"] != images[target]["candidate"]["imageId"]
+    assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
+    assert all(row["active"] == row["candidate"] for name, row in images.items() if name != target)
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Hugging Face image updates require issued-connector-activation",
+    ):
+        stage_transition._validate_phase_topology(
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target="huggingface",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Account Center image updates require the selected Graph bootstrap or issued activation phase",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="provider-bootstrap",
+            image_update_target=target,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    candidate["services"]["exchange"]["environment"]["UNEXPECTED"] = "changed"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="image update may change only its selected service image",
+    ):
+        stage_transition._validate_phase_topology(
+            phase=phase,
+            image_update_target=target,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    active, candidate, active_lock, candidate_lock = _full_account_center_image_update(tmp_path)
+    exchange_row = next(row for row in candidate_lock["images"] if row["service"] == "exchange")
+    exchange_row["imageId"] = _image_id(104)
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="image update lock may change only the selected built service",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target=target,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    active, candidate, active_lock, candidate_lock = _full_account_center_image_update(tmp_path)
+    candidate["services"]["microsoft-graph"]["environment"]["UNEXPECTED"] = "changed"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="image update may change only its selected service image",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            image_update_target=target,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read schema/profile identity only and bind an optional Microsoft row to its actor."""
+
+    volume = tmp_path / "account-center-volume"
+    volume.mkdir()
+    database_path = volume / "accounts.sqlite3"
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "CREATE TABLE provider_profiles ("
+        "profile_ref TEXT PRIMARY KEY, anchor_issuer TEXT, anchor_subject TEXT, "
+        "organization_id TEXT, workspace_id TEXT, provider TEXT, identity_ref TEXT, "
+        "target_scope_json TEXT, external_subject TEXT, status TEXT, auth_mode TEXT)"
+    )
+    protected_rows = [
+        (
+            f"profile-{provider}",
+            "fixed-issuer",
+            f"fixed-subject-{provider}",
+            "fixed-organization",
+            "fixed-workspace",
+            provider,
+            f"identity-{provider}",
+            '{"scope":"read"}',
+            f"external-{provider}",
+            "READY",
+            "oauth",
+        )
+        for provider in sorted(stage_transition.ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS)
+    ]
+    connection.executemany(
+        f"INSERT INTO provider_profiles VALUES ({','.join('?' for _ in protected_rows[0])})",
+        protected_rows,
+    )
+    connection.execute(
+        f"PRAGMA user_version={stage_transition.ACCOUNT_CENTER_DATABASE_USER_VERSION}"
+    )
+    connection.commit()
+    connection.close()
+    protected_hash = stage_transition._sha256_bytes(
+        stage_transition._canonical_json(sorted(protected_rows))
+    )
+
+    container_id = "a" * 64
+    image_id = _image_id(103)
+    image_ref = "example.invalid/account-center:locked"
+    activation_json = '{"storage_path":"/data/accounts.sqlite3"}'
+    compose = {
+        "services": {
+            "account-center": {
+                "environment": {
+                    "CYRENE_PLUGIN_STORAGE_PATH": "/data",
+                    "CYRENE_CAPABILITY_CONFIGURATION_JSON": activation_json,
+                }
+            }
+        }
+    }
+    container = {
+        "Id": container_id,
+        "Image": image_id,
+        "Config": {
+            "Image": image_ref,
+            "Labels": {
+                "com.docker.compose.project": "cyrene-teams-cloud",
+                "com.docker.compose.service": "account-center",
+            },
+            "Env": [
+                "CYRENE_PLUGIN_STORAGE_PATH=/data",
+                f"CYRENE_CAPABILITY_CONFIGURATION_JSON={activation_json}",
+            ],
+        },
+        "State": {"Running": True, "Paused": False},
+        "Mounts": [
+            {
+                "Type": "volume",
+                "Source": str(volume),
+                "Destination": "/data",
+                "RW": True,
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: json.dumps([container]),
+    )
+    initial_file_digest = hashlib.sha256(database_path.read_bytes()).hexdigest()
+    state = stage_transition._account_center_database_state(
+        compose=compose,
+        project="cyrene-teams-cloud",
+        container_id=container_id,
+        image_ref=image_ref,
+        image_id=image_id,
+        docker_prefix=["docker"],
+    )
+    assert state["schemaVersion"] == 9
+    assert state["foreignKeyViolationCount"] == 0
+    assert state["quickCheck"] == ["ok"]
+    assert state["protectedProviderCount"] == 5
+    assert state["protectedProvidersSha256"] == protected_hash
+    assert state["additionalMicrosoftProfileCount"] == 0
+    assert state["databasePathSha256"] != str(database_path.resolve())
+    assert hashlib.sha256(database_path.read_bytes()).hexdigest() == initial_file_digest
+
+    runtime_capacity = {
+        "serviceCount": 15,
+        "totalMemoryBytes": 3_500 * preflight.MIB,
+        "maxMemoryBytes": 3584 * preflight.MIB,
+        "totalNanoCpus": 1_900_000_000,
+        "maxNanoCpus": 1_950_000_000,
+    }
+    stage_transition._validate_account_center_image_update_state(
+        {"database": state, "runtimeCapacity": runtime_capacity}
+    )
+
+    # A different deployment may have a different valid five-profile baseline.
+    # It is valid to seal that digest, but a later change from the sealed digest
+    # must be rejected by the same comparison used at apply time.
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE provider_profiles SET anchor_subject='changed-subject' "
+        "WHERE profile_ref='profile-gcp'"
+    )
+    connection.commit()
+    connection.close()
+    changed_identity = stage_transition._account_center_database_state(
+        compose=compose,
+        project="cyrene-teams-cloud",
+        container_id=container_id,
+        image_ref=image_ref,
+        image_id=image_id,
+        docker_prefix=["docker"],
+    )
+    assert changed_identity["protectedProvidersSha256"] != state["protectedProvidersSha256"]
+    stage_transition._validate_account_center_database_state(changed_identity)
+    assert not stage_transition._account_center_database_state_matches_baseline(
+        state, changed_identity
+    )
+    assert stage_transition._account_center_database_state_matches_baseline(
+        changed_identity, changed_identity
+    )
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE provider_profiles SET anchor_subject='fixed-subject-gcp' "
+        "WHERE profile_ref='profile-gcp'"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(stage_transition.StageTransitionError, match="3584 MiB/1.95 CPU"):
+        stage_transition._validate_account_center_image_update_state(
+            {
+                "database": state,
+                "runtimeCapacity": {**runtime_capacity, "totalNanoCpus": 1_950_000_001},
+            }
+        )
+
+    connection = sqlite3.connect(database_path)
+    microsoft_profile = (
+        "profile-microsoft",
+        "office-issuer",
+        "office-subject",
+        "office-organization",
+        "office-workspace",
+        "microsoft_graph",
+        "office-identity",
+        '["User.Read"]',
+        "office-external",
+        "READY",
+        "oauth",
+    )
+    connection.execute(
+        f"INSERT INTO provider_profiles VALUES ({','.join('?' for _ in microsoft_profile)})",
+        microsoft_profile,
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(
+        stage_transition.preflight,
+        "_connector_bootstrap_actor",
+        lambda _compose: {
+            "issuer": "office-issuer",
+            "subject": "office-subject",
+            "workspaceId": "office-workspace",
+        },
+    )
+    state_with_microsoft = stage_transition._account_center_database_state(
+        compose=compose,
+        project="cyrene-teams-cloud",
+        container_id=container_id,
+        image_ref=image_ref,
+        image_id=image_id,
+        docker_prefix=["docker"],
+    )
+    assert state_with_microsoft["additionalMicrosoftProfileCount"] == 1
+    assert isinstance(state_with_microsoft["additionalMicrosoftProfileIdentitySha256"], str)
+    stage_transition._validate_account_center_image_update_state(
+        {"database": state_with_microsoft, "runtimeCapacity": runtime_capacity}
+    )
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE provider_profiles SET anchor_subject='foreign-subject' "
+        "WHERE profile_ref='profile-microsoft'"
+    )
+    connection.commit()
+    connection.close()
+    with pytest.raises(stage_transition.StageTransitionError, match="owner/workspace"):
+        stage_transition._account_center_database_state(
+            compose=compose,
+            project="cyrene-teams-cloud",
+            container_id=container_id,
+            image_ref=image_ref,
+            image_id=image_id,
+            docker_prefix=["docker"],
+        )
 
 
 def test_issued_cloud_image_update_preserves_the_exact_fourteen_service_inventory(
@@ -3776,11 +4201,11 @@ def test_image_update_rejects_unchanged_or_unknown_targets(tmp_path: Path) -> No
     active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="must be Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence",
+        match="must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
-            image_update_target="account-center",
+            image_update_target="unknown-service",
             active=active,
             candidate=candidate,
             active_lock=active_lock,
@@ -3850,6 +4275,7 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
     )
 
     assert image_target_action.choices == [
+        "account-center",
         "cloud-management-phase2",
         "exchange",
         "github-issues",
@@ -3873,6 +4299,7 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
 @pytest.mark.parametrize(
     ("phase", "image_target", "memory_target", "listener_repair"),
     [
+        ("issued-connector-activation", "account-center", None, False),
         ("issued-connector-activation", "exchange", None, False),
         ("provider-bootstrap", None, None, True),
         ("issued-connector-activation", None, "teams-ingress", False),
@@ -4025,6 +4452,19 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
         runtime_config_identity=identity,
     )
     stage_transition._validate_image_update_selection_contract(
+        target=stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        phase="issued-connector-activation",
+        project="cyrene-teams-cloud",
+        selection_record=selection,
+        selection_path="/private/runtime-selection.json",
+        active_config_dir="/private/config",
+        candidate_config_dir="/private/config",
+        active_secrets_dir="/private/secrets",
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity=identity,
+    )
+    stage_transition._validate_image_update_selection_contract(
         target="github-issues",
         phase="issued-connector-activation",
         project="cyrene-teams-cloud",
@@ -4064,8 +4504,43 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
         runtime_config_identity=identity,
     )
 
+    graph_bootstrap_selection = copy.deepcopy(selection)
+    graph_bootstrap_selection["document"]["phase"] = (
+        stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    )
+    stage_transition._validate_image_update_selection_contract(
+        target=stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        project="cyrene-teams-cloud",
+        selection_record=graph_bootstrap_selection,
+        selection_path="/private/runtime-selection.json",
+        active_config_dir="/private/config",
+        candidate_config_dir="/private/config",
+        active_secrets_dir="/private/secrets",
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity=identity,
+    )
+
     bootstrap_selection = copy.deepcopy(selection)
     bootstrap_selection["document"]["phase"] = "provider-bootstrap"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Account Center image updates require the selected Graph bootstrap or issued activation phase",
+    ):
+        stage_transition._validate_image_update_selection_contract(
+            target=stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+            phase="provider-bootstrap",
+            project="cyrene-teams-cloud",
+            selection_record=bootstrap_selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity=identity,
+        )
     with pytest.raises(
         stage_transition.StageTransitionError,
         match="GitHub Issues image updates require issued-connector-activation",
@@ -4326,6 +4801,7 @@ def test_listener_repair_requires_the_current_bootstrap_selector_and_unchanged_i
 @pytest.mark.parametrize(
     ("target", "expected", "strict_old"),
     [
+        ("account-center", "old", True),
         ("exchange", "old", True),
         ("cloud-management-phase2", "old", True),
         ("huggingface", "old", True),
@@ -4342,7 +4818,7 @@ def test_image_update_resumes_old_executor_or_fresh_navigator_by_target(
 ) -> None:
     """Non-Navigator image updates fence the old generation; Navigator uses the fresh gate.
 
-    中文：更新 Exchange、Cloud、HF 或 Persistence 时沿用原实例；Navigator 镜像更新走新实例门。
+    中文：更新 AC、Exchange、Cloud、HF 或 Persistence 时沿用原实例；Navigator 走新实例门。
     """
 
     observed: list[tuple[str, bool]] = []
@@ -6853,6 +7329,213 @@ def _github_image_readiness_fixture(
     return snapshot, compose
 
 
+def _account_center_unissued_graph_readiness_fixture(
+    tmp_path: Path, *, phase: str = "issued-connector-activation"
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, str]]:
+    """Build 14 existing non-Graph connections plus a configured but unissued Graph binding."""
+
+    snapshot, compose = _github_image_readiness_fixture(tmp_path)
+    snapshot["profiles"] = [row for row in snapshot["profiles"] if row["providerId"] != "computer"]
+    snapshot["connections"] = [
+        row for row in snapshot["connections"] if row["providerId"] != "computer"
+    ]
+    snapshot["bindings"] = [row for row in snapshot["bindings"] if row["providerId"] != "computer"]
+    snapshot["catalog"]["items"] = [
+        row for row in snapshot["catalog"]["items"] if row["providerId"] != "computer"
+    ]
+    compose["services"].pop("computer-runtime", None)
+
+    cloud_service = compose["services"]["cloud-management-phase2"]
+    cloud_document = json.loads(
+        cloud_service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"]
+    )
+    cloud_document["profiles"].append(
+        {
+            "provider": "runpod",
+            "profile_ref": "runpod-primary",
+            "identity_ref": "runpod-identity",
+            "read_only": True,
+        }
+    )
+    cloud_service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(
+        cloud_document
+    )
+
+    exchange_service = compose["services"]["exchange"]
+    exchange_document = json.loads(
+        exchange_service["environment"]["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"]
+    )
+    exchange_profiles = exchange_document["authorizationCloud"]["profiles"]
+    exchange_profiles["runpod-primary"] = {
+        "provider": "runpod",
+        "identityRef": "runpod-identity",
+        "accessMode": "workspace_operator",
+        "targets": {"runpod-read": {"targetRef": "runpod-target"}},
+    }
+
+    runpod_connection_ref = "55555555-5555-4555-8555-555555555555"
+    runpod_tool = {
+        "toolId": preflight.CONNECTOR_OPERATION_POLICIES["cloud.resources.list"][0],
+        "operationId": "cloud.resources.list",
+        "resourceProjection": preflight.CONNECTOR_OPERATION_POLICIES["cloud.resources.list"][1],
+        "mutating": False,
+    }
+    runpod_binding = {
+        "bindingId": f"exchange-runpod-{runpod_connection_ref}",
+        "connectionRef": runpod_connection_ref,
+        "providerId": "runpod",
+        "profileRef": "runpod-primary",
+        "tools": [runpod_tool],
+    }
+    snapshot["profiles"].append(
+        {
+            "profileRef": "runpod-primary",
+            "profileAlias": "runpod-primary",
+            "providerId": "runpod",
+            "accessMode": "workspace_operator",
+            "targetScope": {"targets": {"runpod-read": {"targetRef": "runpod-target"}}},
+            "readOnly": True,
+        }
+    )
+    snapshot["connections"].append(
+        {
+            "connectionRef": runpod_connection_ref,
+            "providerId": "runpod",
+            "profileRef": "runpod-primary",
+            "profileAlias": "runpod-primary",
+            "targetAlias": "runpod-read",
+            "accessMode": "workspace_operator",
+            "readOnly": True,
+            "targetScope": {"targetAlias": "runpod-read", "targetRef": "runpod-target"},
+        }
+    )
+    snapshot["bindings"].append(runpod_binding)
+    snapshot["catalog"]["items"].append(
+        {
+            "bindingId": runpod_binding["bindingId"],
+            "capabilityId": "tool.provider.v1",
+            "providerId": "runpod",
+            "connectionRef": runpod_connection_ref,
+            "profileRef": "runpod-primary",
+            "tools": [
+                {
+                    "id": runpod_tool["toolId"],
+                    "name": "List RunPod resources",
+                    "description": "List resources within the issued RunPod profile.",
+                    "readOnly": True,
+                    "inputSchema": {"type": "object", "additionalProperties": False},
+                }
+            ],
+        }
+    )
+
+    graph_scope = {
+        "schemaVersion": 2,
+        "tenantId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "workspaceId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "enabledFeatures": {
+            "plannerEnabled": True,
+            "todoEnabled": False,
+            "calendarEnabled": False,
+            "mailMetadataEnabled": False,
+            "mailDraftsEnabled": False,
+            "mailSendEnabled": False,
+            "sharePointDriveMetadataEnabled": False,
+        },
+        "targets": {
+            "plannerPlanIds": [],
+            "sharePointSiteIds": [],
+            "sharePointListIds": [],
+            "sharePointDriveIds": [],
+            "toDoTaskListIds": [],
+            "calendarIds": [],
+            "mailFolderIds": [],
+            "freebusySubjects": [],
+        },
+    }
+    provider_flags = {
+        provider_name: graph_scope["enabledFeatures"][host_name]
+        for host_name, provider_name in preflight.GRAPH_OFFICE_HOST_TO_PROVIDER_FLAGS.items()
+    }
+    compose["services"]["microsoft-graph"] = {
+        "environment": {
+            "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                {"officeV2": provider_flags, "read_only": False}
+            )
+        }
+    }
+    exchange_profiles["microsoft-graph.office-owner"] = {
+        "provider": "microsoft_graph",
+        "accessMode": "actor_owned",
+        "directPlugin": {"connectionRef": "grpcs://microsoft-graph:7443", "transport": "mtls"},
+        "officeV2": graph_scope,
+    }
+    exchange_service["environment"]["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"] = json.dumps(
+        exchange_document
+    )
+
+    graph_connection_ref = "66666666-6666-4666-8666-666666666666"
+    graph_operation = "microsoft_graph.planner.plans.list"
+    graph_policy = preflight.CONNECTOR_OPERATION_POLICIES[graph_operation]
+    graph_tool = {
+        "toolId": graph_policy[0],
+        "operationId": graph_operation,
+        "resourceProjection": graph_policy[1],
+        "mutating": graph_policy[2],
+    }
+    graph_binding = {
+        "bindingId": f"exchange-microsoft_graph-{graph_connection_ref}",
+        "connectionRef": graph_connection_ref,
+        "providerId": "microsoft_graph",
+        "profileRef": "microsoft-graph-profile-ref",
+        "tools": [graph_tool],
+    }
+    if phase != stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+        snapshot["bindings"].append(graph_binding)
+        snapshot["catalog"]["items"].append(
+            {
+                "bindingId": graph_binding["bindingId"],
+                "capabilityId": "tool.provider.v1",
+                "providerId": "microsoft_graph",
+                "connectionRef": graph_connection_ref,
+                "profileRef": graph_binding["profileRef"],
+                "tools": [
+                    {
+                        "id": graph_tool["toolId"],
+                        "name": "List Planner plans",
+                        "description": "List plans in the selected owner scope.",
+                        "readOnly": True,
+                        "inputSchema": {"type": "object", "additionalProperties": False},
+                    }
+                ],
+            }
+        )
+
+    bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
+    catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
+    bindings_path.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": snapshot["bindings"]}), encoding="utf-8"
+    )
+    catalog_path.write_text(json.dumps(snapshot["catalog"]), encoding="utf-8")
+
+    database_state = {
+        "databasePathSha256": "1" * 64,
+        "schemaVersion": stage_transition.ACCOUNT_CENTER_DATABASE_USER_VERSION,
+        "schemaSha256": "2" * 64,
+        "foreignKeyViolationCount": 0,
+        "quickCheck": ["ok"],
+        "protectedProviderCount": 5,
+        "protectedProvidersSha256": "3" * 64,
+        "additionalMicrosoftProfileCount": 0,
+        "additionalMicrosoftProfileIdentitySha256": None,
+    }
+    provider_scope_digests = {
+        provider: f"{index:x}" * 64
+        for index, provider in enumerate(("huggingface", "azure", "gcp", "runpod"), start=1)
+    }
+    return snapshot, compose, database_state, provider_scope_digests
+
+
 def test_github_image_readiness_returns_only_exact_issued_binding_refs(
     tmp_path: Path,
 ) -> None:
@@ -7700,6 +8383,395 @@ def test_cloud_readiness_checkpoint_uses_exact_issued_provider_connections() -> 
     assert receipt["verified"] is True
 
 
+def test_account_center_image_update_readiness_pins_supported_provider_connections() -> None:
+    """Bind AC readiness to every existing non-Graph provider and mark Graph unverified."""
+
+    refs = {
+        "github": [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)],
+        "azure": "e5e1464b-00ec-4c85-9e71-1d52eab44a38",
+        "gcp": "8c473baa-3d22-4ab4-9d0e-f1086b54a400",
+        "huggingface": "d0b0b832-a81c-4c39-94c9-d92405f2e6c2",
+        "runpod": "f95d8e3c-8479-4b86-94ad-3aab76366d60",
+    }
+    database_state = {
+        "databasePathSha256": "1" * 64,
+        "schemaVersion": 9,
+        "schemaSha256": "2" * 64,
+        "foreignKeyViolationCount": 0,
+        "quickCheck": ["ok"],
+        "protectedProviderCount": 5,
+        "protectedProvidersSha256": "3" * 64,
+        "additionalMicrosoftProfileCount": 0,
+        "additionalMicrosoftProfileIdentitySha256": None,
+    }
+    plan = {
+        "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        "phase": "issued-connector-activation",
+        "activeServices": {"exchange": {"containerId": "a" * 64, "imageId": _image_id(44)}},
+        "candidatePreflight": {
+            "expectedProviderScopeDigests": {
+                provider: f"{index:x}" * 64
+                for index, provider in enumerate(("huggingface", "azure", "gcp", "runpod"), start=1)
+            }
+        },
+        "accountCenterImageUpdateState": {"database": database_state},
+    }
+    journal = {
+        "exchangeReadiness": {
+            "receipt": {
+                "status": "LIVE_VERIFIED",
+                "catalogStatus": "LIVE_VERIFIED",
+                "exchangeContainerId": "a" * 64,
+                "exchangeImageId": _image_id(44),
+                "bindingCount": 14,
+                "connectionCount": 14,
+                "verifiedProviderIds": ["azure", "gcp", "github", "huggingface", "runpod"],
+                "unverifiedProviderIds": ["microsoft_graph"],
+                "microsoftGraphStatus": "NOT_CONNECTED_NOT_VERIFIED",
+                "snapshotSha256": "1" * 64,
+                "connectionRefByProvider": refs,
+            }
+        }
+    }
+
+    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+    assert checkpoint["verified"] is True
+    assert checkpoint["bindingCount"] == 14
+    assert checkpoint["connectionRefsSha256"] != "0" * 64
+
+    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"]["azure"] = "invalid"
+    with pytest.raises(stage_transition.StageTransitionError, match="exact selected azure"):
+        stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+
+    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"] = dict(refs)
+    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"].pop("runpod")
+    with pytest.raises(stage_transition.StageTransitionError, match="exact existing non-Graph"):
+        stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+
+
+def test_account_center_monitor_gate_checks_existing_non_graph_connections_readonly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quiesce provider calls during AC replacement without inventing a Graph monitor row."""
+
+    provider_refs = {
+        "github": [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)],
+        "huggingface": "d0b0b832-a81c-4c85-9e71-1d52eab44a38",
+        "azure": "e5e1464b-00ec-4c85-9e71-1d52eab44a38",
+        "gcp": "8c473baa-3d22-4ab4-9d0e-f1086b54a400",
+        "runpod": "f95d8e3c-8479-4b86-94ad-3aab76366d60",
+    }
+    plan = {
+        "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        "phase": "issued-connector-activation",
+        "candidatePreflight": {
+            "expectedProviderScopeDigests": {
+                provider: "a" * 64 for provider in ("huggingface", "azure", "gcp", "runpod")
+            }
+        },
+        "activeServices": {"exchange": {"containerId": "a" * 64}},
+        "policy": {"healthTimeoutSeconds": 30},
+    }
+    journal = {
+        "exchangeReadiness": {
+            "receipt": {
+                "connectionRefByProvider": provider_refs,
+                "snapshotSha256": "b" * 64,
+            }
+        },
+        "accountCenterImageUpdate": {"required": True, "monitorQuiescence": None},
+    }
+    selected_connections: list[dict[str, Any]] = []
+
+    def capture(argv: list[str], **_kwargs: Any) -> str:
+        selected_connections.extend(json.loads(argv[-7]))
+        return json.dumps(
+            {
+                "selectedProviderCount": 5,
+                "monitorStateCount": 14,
+                "activeMonitorLeaseCount": 0,
+                "inFlightConnectorCallCount": 0,
+                "nextCheckSecondsRemaining": 120,
+                "requiredWindowSeconds": 90,
+                "nextCheckWindowSatisfied": True,
+                "cloudRefreshNonterminalCount": 0,
+            }
+        )
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", capture)
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_config_json",
+        lambda *_args, **_kwargs: {
+            "bindings": [
+                {"providerId": provider, "connectionRef": connection_ref}
+                for provider, refs in provider_refs.items()
+                for connection_ref in (refs if isinstance(refs, list) else [refs])
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        stage_transition.preflight,
+        "_connector_bootstrap_actor",
+        lambda _compose: {
+            "issuer": "issuer",
+            "subject": "subject",
+            "organizationId": "organization",
+            "workspaceId": "workspace",
+        },
+    )
+    phases: list[str] = []
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, phase: phases.append(phase),
+    )
+
+    result = stage_transition._verify_provider_monitor_quiescence(
+        plan=plan,
+        candidate_compose={},
+        journal=journal,
+        journal_path=tmp_path / "journal.json",
+        docker_prefix=["docker"],
+    )
+
+    assert result["verified"] is True
+    assert {row["providerId"] for row in selected_connections} == {
+        "azure",
+        "gcp",
+        "github",
+        "huggingface",
+        "runpod",
+    }
+    assert len(selected_connections) == 14
+    assert "microsoft_graph" not in json.dumps(selected_connections)
+    assert journal["accountCenterImageUpdate"]["monitorQuiescence"] == result
+    assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
+def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapshot(
+    phase: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project the native 14-connection snapshot into checkpoints and monitor gates."""
+
+    snapshot, compose, database_state, provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(tmp_path, phase=phase)
+    )
+    exchange_id = "a" * 64
+    exchange_image_id = _image_id(144)
+    plan = {
+        "phase": phase,
+        "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        "activeServices": {"exchange": {"containerId": exchange_id, "imageId": exchange_image_id}},
+        "candidateServices": {
+            "exchange": {
+                "active": {
+                    "imageRef": "example.invalid/exchange:locked",
+                    "imageId": exchange_image_id,
+                },
+                "candidate": {
+                    "imageRef": "example.invalid/exchange:locked",
+                    "imageId": exchange_image_id,
+                },
+                "added": False,
+                "configChanged": False,
+            }
+        },
+        "candidatePreflight": {"expectedProviderScopeDigests": provider_scope_digests},
+        "accountCenterImageUpdateState": {"database": database_state},
+        "policy": {"healthTimeoutSeconds": 30},
+    }
+    current_snapshot = snapshot
+    selected_connections: list[dict[str, Any]] = []
+    phases: list[str] = []
+
+    def checked(argv: list[str], *, label: str, **_kwargs: Any) -> str:
+        if label == "pinned Exchange connector readiness readback":
+            return json.dumps(current_snapshot, separators=(",", ":"))
+        if label == "Connector authorization monitor quiescence readback":
+            selected_connections.extend(json.loads(argv[-7]))
+            return json.dumps(
+                {
+                    "selectedProviderCount": 5,
+                    "monitorStateCount": 14,
+                    "activeMonitorLeaseCount": 0,
+                    "inFlightConnectorCallCount": 0,
+                    "nextCheckSecondsRemaining": 120,
+                    "requiredWindowSeconds": 90,
+                    "nextCheckWindowSatisfied": True,
+                    "cloudRefreshNonterminalCount": 0,
+                }
+            )
+        raise AssertionError(f"unexpected checked command label: {label}")
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked)
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, journal_phase: phases.append(journal_phase),
+    )
+
+    receipt = stage_transition._read_live_exchange_readiness(
+        plan=plan,
+        compose=compose,
+        container_id=exchange_id,
+        image_id=exchange_image_id,
+        docker_prefix=["docker"],
+    )
+    assert receipt["connectionCount"] == 14
+    assert receipt["bindingCount"] == 14
+    assert receipt["verifiedProviderIds"] == [
+        "azure",
+        "gcp",
+        "github",
+        "huggingface",
+        "runpod",
+    ]
+    assert receipt["unverifiedProviderIds"] == ["microsoft_graph"]
+    assert receipt["microsoftGraphStatus"] == "NOT_CONNECTED_NOT_VERIFIED"
+    assert set(receipt["connectionRefByProvider"]) == {
+        "github",
+        "huggingface",
+        "azure",
+        "gcp",
+        "runpod",
+    }
+    assert len(receipt["connectionRefByProvider"]["github"]) == 10
+
+    journal = {
+        "exchangeReadiness": {"receipt": receipt},
+        "accountCenterImageUpdate": {"required": True, "monitorQuiescence": None},
+    }
+    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+    assert checkpoint["verified"] is True
+    assert checkpoint["bindingCount"] == 14
+
+    monitor = stage_transition._verify_provider_monitor_quiescence(
+        plan=plan,
+        candidate_compose=compose,
+        journal=journal,
+        journal_path=tmp_path / "monitor.journal.json",
+        docker_prefix=["docker"],
+    )
+    assert monitor["verified"] is True
+    assert len(selected_connections) == 14
+    assert {row["providerId"] for row in selected_connections} == {
+        "github",
+        "huggingface",
+        "azure",
+        "gcp",
+        "runpod",
+    }
+    assert "microsoft_graph" not in json.dumps(selected_connections)
+    assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
+
+    invalid_map_journal = copy.deepcopy(journal)
+    invalid_map_journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"].pop("runpod")
+    with pytest.raises(stage_transition.StageTransitionError, match="exact existing non-Graph"):
+        stage_transition._image_update_exchange_readiness_checkpoint(plan, invalid_map_journal)
+
+    current_snapshot = copy.deepcopy(snapshot)
+    current_snapshot["connections"] = [
+        row for row in current_snapshot["connections"] if row["providerId"] != "runpod"
+    ]
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="exactly one profile and connection for runpod"
+    ):
+        stage_transition._read_live_exchange_readiness(
+            plan=plan,
+            compose=compose,
+            container_id=exchange_id,
+            image_id=exchange_image_id,
+            docker_prefix=["docker"],
+        )
+
+    current_snapshot = copy.deepcopy(snapshot)
+    current_snapshot["profiles"].append(
+        {
+            "profileRef": "microsoft-graph-profile-ref",
+            "profileAlias": "microsoft-graph.office-owner",
+            "providerId": "microsoft_graph",
+            "authStatus": "unknown",
+            "accessMode": "actor_owned",
+            "targetScope": {"schemaVersion": 2},
+            "authMode": "delegated_oauth",
+            "credentialRevision": 1,
+            "externalSubject": (
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+            ),
+            "scopeSchemaVersion": 2,
+            "enabledFeatures": ["sharepoint_drive_metadata"],
+            "requiredOAuthScopes": ["Tasks.Read"],
+            "targetRefCount": 1,
+            "credentialExpiresAt": None,
+            "refreshExpiresAt": None,
+            "reauthRequired": True,
+            "reauthReasonCode": "not_linked",
+        }
+    )
+    current_snapshot["connections"].append(
+        {
+            "connectionRef": "66666666-6666-4666-8666-666666666666",
+            "providerId": "microsoft_graph",
+            "profileRef": "microsoft-graph-profile-ref",
+            "profileAlias": "microsoft-graph.office-owner",
+            "accessMode": "actor_owned",
+            "readOnly": True,
+            "targetAlias": None,
+        }
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Graph bootstrap must not claim|appeared after the sealed empty Account Center baseline",
+    ):
+        stage_transition._read_live_exchange_readiness(
+            plan=plan,
+            compose=compose,
+            container_id=exchange_id,
+            image_id=exchange_image_id,
+            docker_prefix=["docker"],
+        )
+
+    current_snapshot = copy.deepcopy(snapshot)
+    wrong_graph_config = copy.deepcopy(compose)
+    graph_service = wrong_graph_config["services"]["microsoft-graph"]
+    graph_document = json.loads(
+        graph_service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"]
+    )
+    graph_document["officeV2"]["planner_enabled"] = False
+    graph_service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(
+        graph_document
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="host/provider scope is invalid"
+    ):
+        stage_transition._read_live_exchange_readiness(
+            plan=plan,
+            compose=wrong_graph_config,
+            container_id=exchange_id,
+            image_id=exchange_image_id,
+            docker_prefix=["docker"],
+        )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="candidate issued binding set differs|exactly one profile and connection for microsoft_graph",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase="issued-connector-activation",
+            image_update_target="huggingface",
+        )
+
+
 def test_github_readiness_checkpoint_hashes_all_ten_exact_connection_refs() -> None:
     """Require every GitHub connection from the issued 14-binding snapshot before mutation."""
 
@@ -7802,6 +8874,87 @@ def test_cloud_image_update_journal_keeps_bootstrap_and_issued_gates_separate(
     assert bootstrap_journal["cloudImageUpdate"]["required"] is False
     assert bootstrap_journal["cloudRunnerIdle"]["required"] is True
     assert bootstrap_journal["cloudRunnerIdle"]["planState"] == bootstrap_plan["cloudRunnerState"]
+
+
+def test_account_center_image_update_journal_reports_readonly_database_and_readiness_gates(
+    tmp_path: Path,
+) -> None:
+    """Record schema/profile identity and monitor evidence without claiming a DB write."""
+
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("{}", encoding="utf-8")
+    database_state = {
+        "databasePathSha256": "1" * 64,
+        "schemaVersion": 9,
+        "schemaSha256": "2" * 64,
+        "foreignKeyViolationCount": 0,
+        "quickCheck": ["ok"],
+        "protectedProviderCount": 5,
+        "protectedProvidersSha256": "3" * 64,
+        "additionalMicrosoftProfileCount": 0,
+        "additionalMicrosoftProfileIdentitySha256": None,
+    }
+    capacity_state = {
+        "serviceCount": 15,
+        "totalMemoryBytes": 3500 * preflight.MIB,
+        "maxMemoryBytes": 3584 * preflight.MIB,
+        "totalNanoCpus": 1_900_000_000,
+        "maxNanoCpus": 1_950_000_000,
+    }
+    target = stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+    plan = {
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "a" * 64,
+        "project": "cyrene-teams-cloud",
+        "phase": "issued-connector-activation",
+        "imageUpdateTarget": target,
+        "targets": [target],
+        "activeServices": {target: {"containerId": "b" * 64}},
+        "candidateServices": {
+            target: {
+                "active": {"imageId": _image_id(10)},
+                "candidate": {"imageId": _image_id(11)},
+                "added": False,
+                "configChanged": False,
+            }
+        },
+        "edgeDelivery": {"containerId": "c" * 64, "revision": 0, "deadCount": 0},
+        "navigatorDrain": {
+            "containerId": "d" * 64,
+            "instanceId": "11111111-1111-4111-8111-111111111111",
+            "generation": 0,
+        },
+        "database": {"backupPath": "/private/persistence.snapshot"},
+        "exchangeReadiness": {"required": True},
+        "accountCenterImageUpdateState": {
+            "database": database_state,
+            "runtimeCapacity": capacity_state,
+        },
+        "candidateSelectionFile": "/private/runtime-selection.json",
+        "selectionBackupPath": "/private/previous.json",
+        "activeSelection": {"sha256": "e" * 64},
+    }
+
+    journal = stage_transition._make_journal(plan, plan_path)
+    update_state = journal["accountCenterImageUpdate"]
+    assert update_state["required"] is True
+    assert update_state["databaseMutationInvoked"] is False
+    assert update_state["beforeDatabaseIdentity"] == database_state
+    assert update_state["beforeRuntimeCapacity"] == capacity_state
+
+    update_state["identityReadbackStatus"] = "VERIFIED"
+    update_state["monitorQuiescence"] = {"verified": True}
+    update_state["beforeReadiness"] = {"verified": True}
+    update_state["afterReadiness"] = {"verified": True}
+    update_state["afterDatabaseIdentity"] = database_state
+    update_state["afterRuntimeCapacity"] = capacity_state
+    journal["state"] = "APPLIED"
+    summary = stage_transition._journal_summary(journal)
+    assert summary["accountCenterImageUpdateStatus"] == "VERIFIED"
+    assert summary["accountCenterSchemaVersion"] == 9
+    assert summary["accountCenterProtectedProviderCount"] == 5
+    assert summary["accountCenterDatabaseMutationInvoked"] is False
+    assert database_state["databasePathSha256"] not in json.dumps(summary)
 
 
 def test_github_image_update_journal_and_status_report_readiness_and_monitor_gates(
