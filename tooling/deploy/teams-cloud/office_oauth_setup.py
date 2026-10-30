@@ -86,6 +86,47 @@ _MAX_OAUTH_CODE_BYTES = 8192
 _AADSTS_REDIRECT_URI_MISMATCH_RE = re.compile(
     r"(?<![A-Z0-9])AADSTS50011(?![A-Z0-9])", re.IGNORECASE
 )
+_CALLBACK_ERROR_MESSAGES = {
+    "AADSTS50011": (
+        "Microsoft rejected the registered localhost callback. Ask the administrator to verify the exact redirect URI."
+    ),
+    "office_bridge_busy": (
+        "The callback was not submitted because Office setup is busy. Do not reload or retry this callback. Return to the setup page, wait for status to recover, then start a new sign-in."
+    ),
+    "office_bridge_timeout": (
+        "Callback processing could not be confirmed. Do not retry this callback. Return to the setup page and check status before starting another sign-in."
+    ),
+    "office_bridge_unavailable": (
+        "Callback processing could not be confirmed because the Office bridge is unavailable. Check setup status before starting another sign-in."
+    ),
+    "office_bridge_rejected": (
+        "The Office bridge rejected callback processing. Check setup status before starting another sign-in."
+    ),
+    "office_callback_invalid": (
+        "Microsoft returned a callback that failed validation. Return to the setup page and start a new sign-in."
+    ),
+    "office_callback_issuer_invalid": (
+        "The callback came from an unexpected sign-in authority. Return to the setup page and use the configured Microsoft account."
+    ),
+    "office_mail_scope_forbidden": (
+        "The sign-in requested a prohibited Mail permission. Ask the administrator to review the Office permission profile."
+    ),
+    "office_owner_identity_mismatch": (
+        "The signed-in Microsoft identity does not match the configured owner. Return to the setup page and use the configured account."
+    ),
+    "office_callback_profile_mismatch": (
+        "The callback did not match the configured Office profile. Check setup status before starting another sign-in."
+    ),
+    "office_status_invalid": (
+        "The Office service returned an invalid completion status. Check setup status before starting another sign-in."
+    ),
+    "office_profile_provider_mismatch": (
+        "The Office service returned an unexpected provider status. Check setup status before starting another sign-in."
+    ),
+    "office_callback_failed": (
+        "Microsoft sign-in did not complete. Return to the setup page and start a new sign-in."
+    ),
+}
 
 
 class OfficeSetupError(ValueError):
@@ -327,6 +368,14 @@ class ActiveFlow:
     expires_at: datetime
     authorization_url: str = field(repr=False)
     session: SetupSession = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class CallbackResult:
+    """Carry only a declared callback outcome and a whitelisted safe reason."""
+
+    outcome: Literal["completed", "failed"]
+    reason: str
 
 
 def _provider_expiration(value: Any) -> datetime:
@@ -927,8 +976,8 @@ class OfficeSetupService:
                 self._begin_pending = False
             self._flow_operation_lock.release()
 
-    def complete_callback(self, query: str) -> None:
-        """Pass one loopback callback's code/state directly to the Exchange CLI stdin."""
+    def complete_callback(self, query: str) -> CallbackResult:
+        """Pass callback code/state to Exchange and return only its safe outcome."""
 
         try:
             values = urllib.parse.parse_qs(
@@ -984,8 +1033,7 @@ class OfficeSetupService:
                 )
                 else None
             )
-            self.callback_failed(safe_failure)
-            return
+            return self.callback_failed(safe_failure)
         if not isinstance(state, str) or not isinstance(code, str):
             raise OfficeSetupError("office_callback_invalid")
         if (
@@ -1013,18 +1061,21 @@ class OfficeSetupService:
                 self._active_flow = None
                 self._last_callback_message = "AUTHORIZATION_COMPLETE"
                 self._invalidate_status_locked()
+        return CallbackResult("completed", "AUTHORIZATION_COMPLETE")
 
-    def callback_failed(self, safe_error_code: str | None = None) -> None:
-        """Forget any pending UI flow after a provider error without retaining its query."""
+    def callback_failed(self, safe_error_code: str | None = None) -> CallbackResult:
+        """Forget one flow and expose only a whitelisted reason, never its query values."""
 
+        reason = (
+            safe_error_code
+            if isinstance(safe_error_code, str) and safe_error_code in _CALLBACK_ERROR_MESSAGES
+            else "office_callback_failed"
+        )
         with self._flow_operation_lock, self._lock:
             self._active_flow = None
-            self._last_callback_message = (
-                "AADSTS50011"
-                if safe_error_code == "AADSTS50011"
-                else "AUTHORIZATION_DID_NOT_COMPLETE"
-            )
+            self._last_callback_message = reason
             self._invalidate_status_locked()
+        return CallbackResult("failed", reason)
 
     def status(self, session: SetupSession) -> dict[str, Any]:
         """Read a fresh owner-bound status once, sharing the short-lived safe snapshot."""
@@ -1321,6 +1372,9 @@ def _page(*, nonce: str, csrf: str) -> bytes:
     """Build the closed, same-origin page without embedding credentials or OAuth state."""
 
     safe_csrf = json.dumps(csrf)
+    safe_callback_messages = json.dumps(
+        _CALLBACK_ERROR_MESSAGES, ensure_ascii=True, separators=(",", ":")
+    )
     document = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cyrene Office connection</title></head><body>
@@ -1343,6 +1397,7 @@ def _page(*, nonce: str, csrf: str) -> bytes:
 const csrf=__CSRF_JSON__;
 const statusNode=document.getElementById('status');
 const panels=document.getElementById('resource-panels');
+const callbackErrorMessages=__CALLBACK_ERROR_MESSAGES__;
 const groups=[
   ['planner_plans','Planner plans','plannerPlanIds'],
   ['todo_lists','To Do lists','toDoTaskListIds'],
@@ -1453,6 +1508,8 @@ async function refresh(){
       statusNode.textContent='The sign-in request could not be confirmed. Wait before trying again; no automatic retry was made.';
     }else if(data.message==='AUTHORIZATION_PREPARING'){
       statusNode.textContent='Office is preparing a Microsoft sign-in request. Keep this page open.';
+    }else if(Object.prototype.hasOwnProperty.call(callbackErrorMessages,data.message)){
+      statusNode.textContent=callbackErrorMessages[data.message];
     }else if(!authSubmitPending){
       statusNode.textContent=`Microsoft connection status: ${data.authStatus}`;
     }
@@ -1542,6 +1599,7 @@ refresh();
         document.replace("__NONCE__", nonce)
         .replace("__CSRF__", csrf)
         .replace("__CSRF_JSON__", safe_csrf)
+        .replace("__CALLBACK_ERROR_MESSAGES__", safe_callback_messages)
         .encode("utf-8")
     )
 
@@ -1585,6 +1643,37 @@ def _authorization_wait_error_page(message: str) -> bytes:
         'content="width=device-width, initial-scale=1"><title>Office sign-in status</title>'
         f"<main><h1>Office sign-in status</h1><p>{message}</p>"
         "<p>Return to the Office setup page for the current status.</p></main></html>"
+    ).encode()
+
+
+def _callback_result_page(nonce: str, result: CallbackResult) -> bytes:
+    """Render a query-free finished page from a declared result and safe reason."""
+
+    if result.outcome == "completed":
+        title = "Microsoft sign-in complete"
+        message = "Microsoft sign-in completed successfully."
+        detail = "You can close this window and return to the Office setup page."
+        reason_html = ""
+    else:
+        reason = (
+            result.reason if result.reason in _CALLBACK_ERROR_MESSAGES else "office_callback_failed"
+        )
+        title = "Microsoft sign-in not completed"
+        message = _CALLBACK_ERROR_MESSAGES[reason]
+        detail = (
+            "Do not reload this callback page. Return to the Office setup page for current status."
+        )
+        reason_html = f"<p>Safe reason: <code>{reason}</code></p>"
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f"<title>{title}</title></head><body><main><h1>{title}</h1>"
+        f'<p role="status">{message}</p>{reason_html}<p>{detail}</p>'
+        '<button id="close" type="button">Close this window</button></main>'
+        f'<script nonce="{nonce}">'
+        "try{history.replaceState(null,'','/oauth/callback')}catch(_error){}"
+        "document.getElementById('close').addEventListener('click',()=>window.close());"
+        "</script></body></html>"
     ).encode()
 
 
@@ -1756,10 +1845,14 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         if parsed.path == CALLBACK_PATH:
             try:
-                self.server.service.complete_callback(parsed.query)
-            except OfficeSetupError:
-                self.server.service.callback_failed()
-            self._redirect("/")
+                result = self.server.service.complete_callback(parsed.query)
+            except OfficeSetupError as error:
+                result = self.server.service.callback_failed(str(error))
+            self._send(
+                HTTPStatus.OK,
+                _callback_result_page(self.server.server_nonce, result),
+                "text/html; charset=utf-8",
+            )
             return
         if parsed.path == "/":
             if parsed.query or parsed.fragment:

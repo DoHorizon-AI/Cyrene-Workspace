@@ -1256,8 +1256,8 @@ def test_authorize_form_repeated_post_reuses_same_url_only_for_its_cookie_sessio
         thread.join(timeout=2)
 
 
-def test_callback_redirect_clears_code_and_state_and_only_cli_receives_them() -> None:
-    """The callback is local, query-free on redirect, and never reflects its secrets."""
+def test_callback_success_shows_query_free_completion_page_and_only_cli_receives_secrets() -> None:
+    """Success gets a finished/close page; callback code and state stay out of its response."""
 
     bridge = FakeBridge()
     server, thread, port = _start_server(bridge)
@@ -1293,17 +1293,32 @@ def test_callback_redirect_clears_code_and_state_and_only_cli_receives_them() ->
         )
         callback = connection.getresponse()
         callback_body = callback.read().decode("utf-8")
-        assert callback.status == HTTPStatus.SEE_OTHER
-        assert callback.getheader("Location") == "/"
+        assert callback.status == HTTPStatus.OK
+        assert callback.getheader("Location") is None
+        assert callback.getheader("Content-Type", "").startswith("text/html")
         assert callback.getheader("Referrer-Policy") == "no-referrer"
+        assert callback.getheader("Cache-Control") == "no-store"
+        callback_csp = callback.getheader("Content-Security-Policy", "")
+        assert "default-src 'none'" in callback_csp
+        assert "script-src 'nonce-test-nonce'" in callback_csp
+        assert "Microsoft sign-in complete" in callback_body
+        assert "You can close this window" in callback_body
+        assert "history.replaceState(null,'','/oauth/callback')" in callback_body
         assert "state-secret-123" not in callback_body
         assert "code-secret-456" not in callback_body
-        assert "state-secret-123" not in callback.getheader("Location")
-        assert "code-secret-456" not in callback.getheader("Location")
+        assert "login.microsoftonline.com" not in callback_body
         assert bridge.calls[-1] == (
             "complete",
             {"state": "state-secret-123", "code": "code-secret-456"},
         )
+        status_connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        status_connection.request(
+            "GET", "/api/status", headers={"Host": f"localhost:{port}", "Cookie": cookie}
+        )
+        status = status_connection.getresponse()
+        status_data = json.loads(status.read().decode("utf-8"))
+        assert status_data["message"] == "AUTHORIZATION_COMPLETE"
+        status_connection.close()
         connection.close()
     finally:
         server.shutdown()
@@ -1325,8 +1340,11 @@ def test_callback_provider_error_is_generic_and_never_reaches_exchange() -> None
         )
         response = connection.getresponse()
         body = response.read().decode("utf-8")
-        assert response.status == HTTPStatus.SEE_OTHER
-        assert response.getheader("Location") == "/"
+        assert response.status == HTTPStatus.OK
+        assert response.getheader("Location") is None
+        assert "Microsoft sign-in not completed" in body
+        assert "office_callback_failed" in body
+        assert "start a new sign-in" in body
         assert (
             "access_denied" not in body
             and "private-detail" not in body
@@ -1355,9 +1373,11 @@ def test_callback_redirect_registration_error_surfaces_only_aadsts_code() -> Non
         )
         response = connection.getresponse()
         body = response.read().decode("utf-8")
-        assert response.status == HTTPStatus.SEE_OTHER
-        assert response.getheader("Location") == "/"
-        assert "AADSTS50011" not in body
+        assert response.status == HTTPStatus.OK
+        assert response.getheader("Location") is None
+        assert "AADSTS50011" in body
+        assert "verify the exact redirect URI" in body
+        assert "private-detail" not in body
         assert "state-secret" not in body
         assert not any(operation == "complete" for operation, _ in bridge.calls)
 
@@ -1370,6 +1390,49 @@ def test_callback_redirect_registration_error_surfaces_only_aadsts_code() -> Non
         data = json.loads(status.read().decode("utf-8"))
         assert status.status == HTTPStatus.OK
         assert data["message"] == "AADSTS50011"
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_callback_bridge_busy_is_shown_as_unsubmitted_not_completed() -> None:
+    """A known pre-execution busy callback gets safe recovery text and is not faked as success."""
+
+    class BusyCompleteBridge(FakeBridge):
+        def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if operation == "complete":
+                raise setup.OfficeSetupError("office_bridge_busy")
+            return super().invoke(operation, payload)
+
+    bridge = BusyCompleteBridge()
+    server, thread, port = _start_server(bridge)
+    try:
+        cookie, _csrf, _page = _page_session(port)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.request(
+            "GET",
+            f"{setup.CALLBACK_PATH}?state=state-secret&code=code-secret",
+            headers={"Host": f"localhost:{port}"},
+        )
+        response = connection.getresponse()
+        body = response.read().decode("utf-8")
+        assert response.status == HTTPStatus.OK
+        assert "office_bridge_busy" in body
+        assert "callback was not submitted" in body
+        assert "Do not reload or retry this callback" in body
+        assert "Microsoft sign-in complete" not in body
+        assert "state-secret" not in body
+        assert "code-secret" not in body
+        assert not any(operation == "complete" for operation, _ in bridge.calls)
+
+        connection.request(
+            "GET", "/api/status", headers={"Host": f"localhost:{port}", "Cookie": cookie}
+        )
+        status = connection.getresponse()
+        data = json.loads(status.read().decode("utf-8"))
+        assert data["message"] == "office_bridge_busy"
         connection.close()
     finally:
         server.shutdown()
