@@ -914,8 +914,10 @@ def test_office_graph_bootstrap_accepts_only_the_owner_model_personal_route() ->
         stage_transition._validate_office_graph_personal_route_compose_delta(active, candidate)
 
 
+@pytest.mark.parametrize("actor_count", [1, 5])
+@pytest.mark.parametrize("session_health", [False, True])
 def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
-    tmp_path: Path,
+    session_health: bool, actor_count: int, tmp_path: Path
 ) -> None:
     active_dir = tmp_path / "active-config"
     candidate_dir = tmp_path / "candidate-config"
@@ -928,7 +930,7 @@ def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
         "33333333-3333-4333-8333-333333333333",
         "44444444-4444-4444-8444-444444444444",
         "55555555-5555-4555-8555-555555555555",
-    ]
+    ][:actor_count]
     workspace = "77777777-7777-4777-8777-777777777777"
     organization = "66666666-6666-4666-8666-666666666666"
     tenant = "88888888-8888-4888-8888-888888888888"
@@ -942,7 +944,7 @@ def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
         "organization_id": organization,
         "can_takeover": True,
         "can_write_harness": False,
-        "can_publish_credential_health": False,
+        "can_publish_credential_health": session_health,
         "can_bind_teams_private_conversations": False,
     }
     old_document = {
@@ -961,7 +963,7 @@ def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
     (candidate_dir / "teams-actor-subjects.json").write_text(
         json.dumps(projection), encoding="utf-8"
     )
-    token_envs = [f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}" for index in range(1, 6)]
+    token_envs = [f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}" for index in range(1, actor_count + 1)]
     actor_map = {
         "schemaVersion": 1,
         "workspaceId": workspace,
@@ -1097,8 +1099,9 @@ def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
         stage_transition._validate_office_graph_private_principal_delta(active, candidate)
 
 
+@pytest.mark.parametrize(("actor_count", "already_enabled"), [(1, False), (1, True), (5, False)])
 def test_office_graph_activation_grants_health_publishing_to_owner_session_only(
-    tmp_path: Path,
+    actor_count: int, already_enabled: bool, tmp_path: Path
 ) -> None:
     active_dir = tmp_path / "active-config"
     candidate_dir = tmp_path / "candidate-config"
@@ -1109,7 +1112,7 @@ def test_office_graph_activation_grants_health_publishing_to_owner_session_only(
         {
             "token_env": "NAVIGATOR_SESSION_TOKEN",
             "actor_id": owner,
-            "can_publish_credential_health": False,
+            "can_publish_credential_health": already_enabled,
         }
     ]
     principal_rows.extend(
@@ -1118,7 +1121,7 @@ def test_office_graph_activation_grants_health_publishing_to_owner_session_only(
             "actor_id": f"{index:08d}-1111-4111-8111-{index:012d}",
             "can_publish_credential_health": False,
         }
-        for index in range(1, 6)
+        for index in range(1, actor_count + 1)
     )
     principal_rows.append(
         {
@@ -1128,6 +1131,24 @@ def test_office_graph_activation_grants_health_publishing_to_owner_session_only(
         }
     )
     policy = {"actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE"}
+    workspace = "77777777-7777-4777-8777-777777777777"
+    actor_map = {
+        "schemaVersion": 1,
+        "workspaceId": workspace,
+        "actors": [
+            {
+                "actorAadObjectId": owner
+                if index == 1
+                else f"{index:08d}-1111-4111-8111-{index:012d}",
+                "tokenEnv": f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}",
+            }
+            for index in range(1, actor_count + 1)
+        ],
+    }
+    for directory in (active_dir, candidate_dir):
+        (directory / "work-actor-token-map.json").write_text(
+            json.dumps(actor_map), encoding="utf-8"
+        )
     active_file = active_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
     candidate_file = candidate_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
     active_file.write_text(
@@ -1211,7 +1232,12 @@ def test_office_graph_exchange_delta_allows_only_private_subject_projection() ->
     candidate["connectorHost"]["teamsMessages"]["personalActorSubjects"] = [
         "11111111-1111-4111-8111-111111111111"
     ]
-    with pytest.raises(stage_transition.StageTransitionError, match="five pilot actor subjects"):
+    stage_transition._validate_office_graph_exchange_config_delta(active, candidate)
+
+    candidate["connectorHost"]["teamsMessages"]["personalActorSubjects"] = []
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="one to five valid actor subjects"
+    ):
         stage_transition._validate_office_graph_exchange_config_delta(active, candidate)
 
 

@@ -10,7 +10,7 @@
     "schemaVersion": {"const": 1},
     "privateWriterPrincipals": {
       "type": "array",
-      "minItems": 5,
+      "minItems": 1,
       "maxItems": 5,
       "items": false,
       "prefixItems": [
