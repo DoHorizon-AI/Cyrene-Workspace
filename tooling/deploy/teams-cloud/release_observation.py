@@ -43,6 +43,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 RELEASE_RE = re.compile(r"^teams-arm64-[0-9a-f]{12}-[0-9a-f]{12}$")
 RUN_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$")
 EXPECTED_TOTALS = {"memoryBytes": 3520 * 1024**2, "nanoCpus": 1_900_000_000}
+MAX_RUNTIME_TOTALS = {"memoryBytes": 3584 * 1024**2, "nanoCpus": 1_950_000_000}
 EXPECTED_SCHEDULE = {
     "intervalSeconds": 60,
     "durationSeconds": 86400,
@@ -192,10 +193,26 @@ def _source_profile(policy: dict[str, Any]) -> dict[str, Any]:
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ObservationBoundaryError("OBSERVER_POLICY_TEMPLATE_INVALID") from error
     template_gates = template.get("hostGates") if isinstance(template, dict) else None
+    profile_version = template.get("schemaVersion", 1) if isinstance(template, dict) else None
+    expected_count = template.get("expectedServiceCount") if isinstance(template, dict) else None
+    expected_totals = template.get("expectedTotals") if isinstance(template, dict) else None
+    if profile_version == 1:
+        topology_valid = expected_count == 14 and expected_totals == EXPECTED_TOTALS
+    elif profile_version == 2:
+        topology_valid = (
+            type(expected_count) is int
+            and expected_count in {14, 15, 16}
+            and isinstance(expected_totals, dict)
+            and set(expected_totals) == {"memoryBytes", "nanoCpus"}
+            and all(type(value) is int and value > 0 for value in expected_totals.values())
+            and expected_totals["memoryBytes"] <= MAX_RUNTIME_TOTALS["memoryBytes"]
+            and expected_totals["nanoCpus"] <= MAX_RUNTIME_TOTALS["nanoCpus"]
+        )
+    else:
+        topology_valid = False
     if (
         not isinstance(template, dict)
-        or template.get("expectedServiceCount") != 14
-        or template.get("expectedTotals") != EXPECTED_TOTALS
+        or not topology_valid
         or template.get("schedule") != EXPECTED_SCHEDULE
         or not isinstance(template_gates, dict)
         or type(template_gates.get("minMemAvailableBytes")) is not int
@@ -209,16 +226,23 @@ def _source_profile(policy: dict[str, Any]) -> dict[str, Any]:
         f'EXPECTED_OBSERVER_SHA256="{actual[OBSERVER]}"'.encode(),
         f'EXPECTED_GENERATOR_SHA256="{actual[GENERATOR]}"'.encode(),
         f'EXPECTED_POLICY_SHA256="{actual[POLICY]}"'.encode(),
-        b"EXPECTED_SERVICE_COUNT=14",
-        b"EXPECTED_MEMORY_BYTES=3690987520",
-        b"EXPECTED_NANO_CPUS=1900000000",
+        f"EXPECTED_SERVICE_COUNT={expected_count}".encode(),
+        f"EXPECTED_MEMORY_BYTES={expected_totals['memoryBytes']}".encode(),
+        f"EXPECTED_NANO_CPUS={expected_totals['nanoCpus']}".encode(),
         b"MIN_MEM_AVAILABLE_BYTES=1073741824",
         b"MIN_ROOT_DISK_AVAILABLE_BYTES=2147483648",
     )
     wrapper = content[WRAPPER]
     if any(value not in wrapper for value in required_wrapper_values):
         raise ObservationBoundaryError("OBSERVER_WRAPPER_GATES_WEAKENED")
-    return {"directory": source, "hashes": actual, "sha256": profile_sha}
+    return {
+        "directory": source,
+        "hashes": actual,
+        "sha256": profile_sha,
+        "version": profile_version,
+        "expectedServiceCount": expected_count,
+        "expectedTotals": dict(expected_totals),
+    }
 
 
 def _selection(path: Path) -> dict[str, Any]:
@@ -452,18 +476,18 @@ def _unit_identity(
         or static.get("healthObserverSourceSha256") != observer_sha
         or static.get("manifestGeneratorSourceSha256") != profile["hashes"][GENERATOR]
         or static.get("healthPolicyTemplateSha256") != profile["hashes"][POLICY]
-        or static.get("expectedServiceCount") != 14
+        or static.get("expectedServiceCount") != profile["expectedServiceCount"]
         or not isinstance(static.get("serviceNames"), list)
-        or len(static["serviceNames"]) != 14
-        or len(set(static["serviceNames"])) != 14
+        or len(static["serviceNames"]) != profile["expectedServiceCount"]
+        or len(set(static["serviceNames"])) != profile["expectedServiceCount"]
     ):
         raise ObservationBoundaryError("OBSERVER_STATIC_SELECTOR_BINDING_MISMATCH")
     policy = manifest.get("policy")
     gates = policy.get("hostGates") if isinstance(policy, dict) else None
     if (
         not isinstance(policy, dict)
-        or policy.get("expectedServiceCount") != 14
-        or policy.get("expectedTotals") != EXPECTED_TOTALS
+        or policy.get("expectedServiceCount") != profile["expectedServiceCount"]
+        or policy.get("expectedTotals") != profile["expectedTotals"]
         or policy.get("schedule") != EXPECTED_SCHEDULE
         or policy.get("expectedServiceNames") != static["serviceNames"]
         or not isinstance(gates, dict)
@@ -485,6 +509,8 @@ def _unit_identity(
         "outputDirectory": str(output_dir),
         "observerSourceSha256": observer_sha,
         "expectedServiceNames": static["serviceNames"],
+        "expectedServiceCount": profile["expectedServiceCount"],
+        "expectedTotals": profile["expectedTotals"],
     }
 
 
@@ -515,6 +541,8 @@ def _sample_evidence(
     expected_count: Any,
     expected_names: list[str],
     *,
+    expected_service_count: int,
+    expected_totals: dict[str, int],
     full_run: bool,
     require_clean: bool,
 ) -> tuple[str, int, int]:
@@ -566,8 +594,8 @@ def _sample_evidence(
                     if require_clean:
                         host, totals = sample.get("host"), sample.get("resourceTotals")
                         if (
-                            sample.get("serviceCount") != 14
-                            or sample.get("projectRunningServiceCount") != 14
+                            sample.get("serviceCount") != expected_service_count
+                            or sample.get("projectRunningServiceCount") != expected_service_count
                             or sorted(names) != expected_names
                             or failures
                             or any(row["failures"] for row in services)
@@ -577,7 +605,7 @@ def _sample_evidence(
                             or not isinstance(host.get("rootDisk"), dict)
                             or type(host["rootDisk"].get("availableBytes")) is not int
                             or host["rootDisk"]["availableBytes"] < 2 * 1024**3
-                            or totals != EXPECTED_TOTALS
+                            or totals != expected_totals
                             or type(sample.get("scheduleLagSeconds")) not in {int, float}
                             or not math.isfinite(sample["scheduleLagSeconds"])
                             or sample["scheduleLagSeconds"] < 0
@@ -627,6 +655,8 @@ def _final_report(
             sample_path,
             written,
             identity.get("expectedServiceNames", []),
+            expected_service_count=identity["expectedServiceCount"],
+            expected_totals=identity["expectedTotals"],
             full_run=complete is True,
             require_clean=report.get("status") == "PASS",
         )
@@ -749,18 +779,18 @@ def _historical_manifest(
         or static.get("healthObserverSourceSha256") != profile["hashes"][OBSERVER]
         or static.get("manifestGeneratorSourceSha256") != profile["hashes"][GENERATOR]
         or static.get("healthPolicyTemplateSha256") != profile["hashes"][POLICY]
-        or static.get("expectedServiceCount") != 14
+        or static.get("expectedServiceCount") != profile["expectedServiceCount"]
         or not isinstance(static.get("serviceNames"), list)
-        or len(static["serviceNames"]) != 14
-        or len(set(static["serviceNames"])) != 14
+        or len(static["serviceNames"]) != profile["expectedServiceCount"]
+        or len(set(static["serviceNames"])) != profile["expectedServiceCount"]
     ):
         raise ObservationBoundaryError("OBSERVER_STATIC_SELECTOR_BINDING_MISMATCH")
     policy = manifest.get("policy")
     gates = policy.get("hostGates") if isinstance(policy, dict) else None
     if (
         not isinstance(policy, dict)
-        or policy.get("expectedServiceCount") != 14
-        or policy.get("expectedTotals") != EXPECTED_TOTALS
+        or policy.get("expectedServiceCount") != profile["expectedServiceCount"]
+        or policy.get("expectedTotals") != profile["expectedTotals"]
         or policy.get("schedule") != EXPECTED_SCHEDULE
         or policy.get("expectedServiceNames") != static["serviceNames"]
         or not isinstance(gates, dict)
@@ -776,6 +806,8 @@ def _historical_manifest(
         "imageLockSha256": selected["imageLockSha256"],
         "staticManifestSha256": identity["staticManifestSha256"],
         "expectedServiceNames": static["serviceNames"],
+        "expectedServiceCount": profile["expectedServiceCount"],
+        "expectedTotals": profile["expectedTotals"],
     }
 
 
@@ -1101,7 +1133,7 @@ def start_post_deployment_observation(
         or set(summary) != expected_keys
         or summary.get("status") != "OBSERVER_STARTED"
         or summary.get("evidenceClass") != "HEALTH_ONLY_NOT_BUSINESS_OR_PROVIDER_ACCEPTANCE"
-        or summary.get("serviceCount") != 14
+        or summary.get("serviceCount") != profile["expectedServiceCount"]
         or summary.get("samplesPlanned") != 1441
         or summary.get("durationSeconds") != 86400
         or summary.get("runtimeMaxSeconds") != 93600

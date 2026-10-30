@@ -371,6 +371,106 @@ def test_personal_transport_requires_matching_work_policy_bot_and_actor_targets(
         )
 
 
+def test_graph_bootstrap_requires_owner_only_personal_chat_without_enabling_workflows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, config_dir, secrets_dir, documents = _fixtures(tmp_path)
+    health_dir = Path(config["services"]["navigator"]["volumes"][0]["source"])
+    _patch_private_document_loader(monkeypatch, documents)
+    _patch_health_directory_stat(monkeypatch, health_dir)
+    bot = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    navigator = config["services"]["navigator"]["environment"]
+    navigator.update(
+        CYRENE_TEAMS_PERSONAL_CHAT_ENABLED="true",
+        CYRENE_TEAMS_MODEL_ACTOR_SUBJECT=OWNER,
+        TEAMS_BOT_APP_ID=bot,
+    )
+    config["services"]["teams-ingress"] = {"environment": {"TEAMS_PERSONAL_CHAT_ENABLED": "true"}}
+    config["services"]["teams-provider"] = {
+        "environment": {
+            "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                {"bot_app_id": bot, "tenant_id": TENANT, "personal_chat_enabled": True}
+            )
+        }
+    }
+    profile = {
+        "botAppId": bot,
+        "expectedIssuer": f"https://login.microsoftonline.com/{TENANT}/v2.0",
+        "workspaceId": WORKSPACE,
+        "personalActorSubjects": ACTORS.copy(),
+    }
+    config["services"]["exchange"] = {
+        "environment": {
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                {"connectorHost": {"teamsMessages": profile}}
+            )
+        }
+    }
+    documents["navigator-principal-config.json"]["teams_private_conversations"] = {
+        "actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE",
+        "workspace_id": WORKSPACE,
+        "issuer": f"https://login.microsoftonline.com/{TENANT}/v2.0",
+        "tenant_id": TENANT,
+        "bot_app_id": bot,
+    }
+
+    assert preflight._validate_automation_workflow_configuration(
+        config,
+        config_dir=config_dir,
+        secrets_dir=secrets_dir,
+        require_personal_delivery=True,
+    )
+
+    navigator["CYRENE_WORKFLOWS_ENABLED"] = "true"
+    with pytest.raises(preflight.PreflightError, match="keep Workflows off"):
+        preflight._validate_automation_workflow_configuration(
+            config,
+            config_dir=config_dir,
+            secrets_dir=secrets_dir,
+            require_personal_delivery=True,
+        )
+
+
+def test_teams_connector_personal_flag_must_match_navigator_route() -> None:
+    bot = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    provider = {
+        "environment": {
+            "CYRENE_CAPABILITY_BINDING_ID": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                {
+                    "bot_app_id": bot,
+                    "tenant_id": TENANT,
+                    "allowed_team_ids": ["team-1"],
+                    "client_secret_env_ref": "TEAMS_BOT_CLIENT_SECRET",
+                    "personal_chat_enabled": False,
+                }
+            ),
+            "CYRENE_SECRET_FILE_MAP": "TEAMS_BOT_CLIENT_SECRET=/run/secrets/teams-bot-client-secret",
+        },
+        "secrets": [{"source": "teams-bot-client-secret", "target": "teams-bot-client-secret"}],
+    }
+    navigator = {
+        "environment": {
+            "TEAMS_ALLOWED_TEAM_IDS": "team-1",
+            "TEAMS_BOT_APP_ID": bot,
+            "TEAMS_TENANT_ID": TENANT,
+            "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED": "false",
+        }
+    }
+    preflight._validate_teams_connector_config(provider, navigator)
+
+    navigator["environment"]["CYRENE_TEAMS_PERSONAL_CHAT_ENABLED"] = "true"
+    config = json.loads(provider["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"])
+    config["personal_chat_enabled"] = True
+    provider["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    preflight._validate_teams_connector_config(provider, navigator)
+
+    config["personal_chat_enabled"] = False
+    provider["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    with pytest.raises(preflight.PreflightError, match="Teams provider activation"):
+        preflight._validate_teams_connector_config(provider, navigator)
+
+
 def test_private_pilot_preflight_rejects_partial_actor_token_map(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

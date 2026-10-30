@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "cyrene-teams-cloud-build-v1",
+  "taskId": "office-graph-bootstrap",
+  "targetPlatform": "linux/arm64",
+  "binaryArtifacts": [
+    {
+      "id": "antigravity-cli",
+      "version": "1.4.7",
+      "sourcePath": "/absolute/path/to/Cyrene/.artifacts/proactive-assistant-v1/runtime/agy",
+      "sha256": "484f6bacb0828a4d6c2768ce94d02a3cc347e72e67572d6b97ab0ff9025474fb",
+      "stagingPath": "runtime-artifacts/antigravity/agy"
+    }
+  ],
+  "sources": {
+    "workspace": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Workspace.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Workspace"
+    },
+    "navigator": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Navigator.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Services/Cyrene-Navigator"
+    },
+    "exchange": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Exchange.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Services/Cyrene-Exchange"
+    },
+    "plugins": {
+      "remote": "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git",
+      "commit": null,
+      "checkoutPath": "Cyrene-Plugins-Official"
+    },
+    "dsh": {
+      "remote": "https://github.com/deepseek-ai/deepseek-harness.git",
+      "commit": "639ed015397290b3745d163aafe02ffee4aa3f84",
+      "checkoutPath": "deepseek-harness"
+    }
+  },
+  "images": [
+    {
+      "service": "account-center",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.account-center",
+      "context": ".",
+      "sourceRepos": ["workspace", "plugins"],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    },
+    {
+      "service": "exchange",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.exchange-integration",
+      "context": ".",
+      "sourceRepos": ["workspace", "exchange", "plugins"],
+      "sourceLabelRepo": "exchange",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db",
+        "UV_BASE_IMAGE": "ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc"
+      }
+    },
+    {
+      "service": "dsh-executor",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.dsh-executor",
+      "context": ".",
+      "sourceRepos": ["workspace", "navigator", "dsh"],
+      "sourceLabelRepo": "navigator",
+      "binaryArtifacts": ["antigravity-cli"],
+      "buildArgs": {
+        "NODE_BASE_IMAGE": "node:24.13.0-bookworm-slim@sha256:4660b1ca8b28d6d1906fd644abe34b2ed81d15434d26d845ef0aced307cf4b6f",
+        "CODEBUDDY_PACKAGE": "@tencent-ai/codebuddy-code@2.163.0",
+        "DSH_REPOSITORY": "https://github.com/deepseek-ai/deepseek-harness.git",
+        "DSH_TAG": "dsh-v0.2.0-rc.2",
+        "DSH_COMMIT": "639ed015397290b3745d163aafe02ffee4aa3f84"
+      }
+    },
+    {
+      "service": "navigator-persistence",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.navigator-persistence",
+      "context": ".",
+      "sourceRepos": ["workspace", "navigator"],
+      "sourceLabelRepo": "navigator",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db",
+        "UV_BASE_IMAGE": "ghcr.io/astral-sh/uv:0.12.3@sha256:2d890623d310b57771ce840f0da5eed5fc6d657da05ffaa45d82797b53fa3abc"
+      }
+    },
+    {
+      "service": "teams-ingress",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.teams-ingress",
+      "context": ".",
+      "sourceRepos": ["workspace", "plugins"],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    },
+    {
+      "service": "microsoft-graph",
+      "dockerfile": "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.microsoft-graph",
+      "context": ".",
+      "sourceRepos": ["workspace", "plugins"],
+      "sourceLabelRepo": "plugins",
+      "buildArgs": {
+        "PYTHON_BASE_IMAGE": "python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db"
+      }
+    }
+  ]
+}

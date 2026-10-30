@@ -159,6 +159,7 @@ def test_runtime_observation_module_is_in_the_release_tools_closure() -> None:
         for path in (
             release_bundle.REQUIRED_DEPLOYMENT_TOOL_FILES
             | release_bundle.AUTOMATION_DEPLOYMENT_TOOL_FILES
+            | release_bundle.OFFICE_GRAPH_DEPLOYMENT_TOOL_FILES
         )
         if path.startswith("config/")
     }

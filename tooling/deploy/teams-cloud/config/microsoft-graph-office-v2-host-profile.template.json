@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 2,
+  "tenantId": "REPLACE_WITH_DIRECTORY_TENANT_UUID",
+  "workspaceId": "REPLACE_WITH_DIRECTORY_WORKSPACE_UUID",
+  "enabledFeatures": {
+    "plannerEnabled": false,
+    "todoEnabled": false,
+    "calendarEnabled": false,
+    "mailMetadataEnabled": false,
+    "mailDraftsEnabled": false,
+    "mailSendEnabled": false,
+    "sharePointDriveMetadataEnabled": false
+  },
+  "targets": {
+    "plannerPlanIds": [],
+    "sharePointSiteIds": [],
+    "sharePointListIds": [],
+    "sharePointDriveIds": [],
+    "toDoTaskListIds": [],
+    "calendarIds": [],
+    "mailFolderIds": [],
+    "freebusySubjects": []
+  }
+}

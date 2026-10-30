@@ -1,0 +1,9 @@
+{
+  "planner_enabled": false,
+  "todo_enabled": false,
+  "calendar_enabled": false,
+  "mail_metadata_enabled": false,
+  "mail_drafts_enabled": false,
+  "mail_send_enabled": false,
+  "sharepoint_drive_metadata_enabled": false
+}

@@ -36,6 +36,8 @@ MIB = 1024**2
 # Keep preflight and targeted `up` on the same dependency graph; `--no-deps` starts only its target.
 # 中文：预检与定向更新使用同一依赖图；`--no-deps` 仍只启动指定目标。
 ACTIVE_COMPOSE_PROFILES = ("public-ingress", "cloud-phase2", "runpod", "directory-operator")
+OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE = "microsoft-graph-provider-bootstrap"
+OFFICE_OAUTH_SETUP_PORT = 52191
 # A nominal 4 GiB VM reports less MemTotal after firmware/kernel reservations.
 # 中文：4 GiB 规格按 guest 可见下限识别；实际可用内存仍由独立余量检查决定。
 MIN_GUEST_MEMORY_MIB = 3584
@@ -48,6 +50,8 @@ SECRET_SIZE_MINIMUMS = {
     "teams-delivery-admin-token": 32,
     "account-center-encryption-key": 32,
     "account-center-exchange-hmac-key": 32,
+    "account-center-microsoft-graph-callback-hmac-key": 32,
+    "account-center-microsoft-graph-client-secret": 16,
     "cloud-management-exchange-hmac-key": 32,
     "github-issues-webhook-secret": 32,
     "teams-private-bridge-token": 32,
@@ -65,6 +69,7 @@ HEX32_SECRET_NAMES = {
     "cloud-management-exchange-hmac-key",
     "exchange-hf-auth-context-hmac-key",
     "account-center-graph-provider-hmac-key",
+    "account-center-microsoft-graph-callback-hmac-key",
     "account-center-ado-provider-hmac-key",
     "exchange-graph-auth-context-hmac-key",
     "exchange-ado-auth-context-hmac-key",
@@ -80,13 +85,54 @@ HUGGINGFACE_OPTIONAL_SECRET_NAMES = {
     "huggingface-account-center-client-cert",
     "huggingface-account-center-client-key",
 }
-CONNECTOR_AUTH_READONLY_PHASES = {"provider-bootstrap", "issued-connector-activation"}
-CONNECTOR_AUTH_READONLY_PROVIDERS = {"huggingface", "azure", "gcp", "runpod"}
+MICROSOFT_GRAPH_OFFICE_SECRET_NAMES = {
+    "account-center-microsoft-graph-callback-hmac-key",
+    "account-center-microsoft-graph-client-secret",
+}
+CONNECTOR_AUTH_READONLY_PHASES = {
+    "provider-bootstrap",
+    "microsoft-graph-provider-bootstrap",
+    "issued-connector-activation",
+}
+CONNECTOR_AUTH_READONLY_PROVIDERS = {
+    "huggingface",
+    "azure",
+    "gcp",
+    "runpod",
+    "microsoft_graph",
+}
 CONNECTOR_AUTH_READONLY_OPERATIONS = {
     "huggingface": {"huggingface.whoami", "huggingface.repo.get"},
     "azure": {"azure.resources.list"},
     "gcp": {"gcp.compute.instances.list"},
     "runpod": {"runpod.pods.list"},
+    "microsoft_graph": {
+        "microsoft_graph.planner.plan.get",
+        "microsoft_graph.planner.plans.list",
+        "microsoft_graph.planner.tasks.list",
+        "microsoft_graph.planner.task.get",
+        "microsoft_graph.sharepoint.site.get",
+        "microsoft_graph.sharepoint.list.get",
+        "microsoft_graph.sharepoint.list.items.delta",
+        "microsoft_graph.todo.lists.list",
+        "microsoft_graph.todo.tasks.list",
+        "microsoft_graph.todo.task.get",
+        "microsoft_graph.calendar.calendars.list",
+        "microsoft_graph.calendar.events.list",
+        "microsoft_graph.calendar.event.get",
+        "microsoft_graph.calendar.freebusy.get",
+        "microsoft_graph.sharepoint.drives.list",
+        "microsoft_graph.sharepoint.drive.items.list",
+    },
+}
+GRAPH_OFFICE_HOST_TO_PROVIDER_FLAGS = {
+    "plannerEnabled": "planner_enabled",
+    "todoEnabled": "todo_enabled",
+    "calendarEnabled": "calendar_enabled",
+    "mailMetadataEnabled": "mail_metadata_enabled",
+    "mailDraftsEnabled": "mail_drafts_enabled",
+    "mailSendEnabled": "mail_send_enabled",
+    "sharePointDriveMetadataEnabled": "sharepoint_drive_metadata_enabled",
 }
 CONNECTOR_AUTH_READONLY_OPERATIONS_BY_PATH = {
     "provider_identity_bootstrap_api": CONNECTOR_AUTH_READONLY_OPERATIONS,
@@ -95,6 +141,24 @@ CONNECTOR_AUTH_READONLY_OPERATIONS_BY_PATH = {
         "azure": {"cloud.resources.list", "cloud.provider.health.read"},
         "gcp": {"cloud.resources.list", "cloud.provider.health.read"},
         "runpod": {"cloud.resources.list", "cloud.provider.health.read"},
+        "microsoft_graph": {
+            "microsoft_graph.planner.plan.get",
+            "microsoft_graph.planner.plans.list",
+            "microsoft_graph.planner.tasks.list",
+            "microsoft_graph.planner.task.get",
+            "microsoft_graph.sharepoint.site.get",
+            "microsoft_graph.sharepoint.list.get",
+            "microsoft_graph.sharepoint.list.items.delta",
+            "microsoft_graph.todo.lists.list",
+            "microsoft_graph.todo.tasks.list",
+            "microsoft_graph.todo.task.get",
+            "microsoft_graph.calendar.calendars.list",
+            "microsoft_graph.calendar.events.list",
+            "microsoft_graph.calendar.event.get",
+            "microsoft_graph.calendar.freebusy.get",
+            "microsoft_graph.sharepoint.drives.list",
+            "microsoft_graph.sharepoint.drive.items.list",
+        },
     },
 }
 CONNECTOR_AUTH_READONLY_AUTH_MODES = {
@@ -102,6 +166,7 @@ CONNECTOR_AUTH_READONLY_AUTH_MODES = {
     "azure": {"managed_identity"},
     "gcp": {"workload_identity_federation"},
     "runpod": {"api_key"},
+    "microsoft_graph": {"delegated_oauth"},
 }
 CONNECTOR_MODEL_READONLY_OPERATIONS = {
     "huggingface": {
@@ -131,6 +196,24 @@ CONNECTOR_MODEL_READONLY_OPERATIONS = {
         "cloud.resource.get",
         "cloud.operation.status.read",
         "cloud.operation.logs.read",
+    },
+    "microsoft_graph": {
+        "microsoft_graph.planner.plan.get",
+        "microsoft_graph.planner.plans.list",
+        "microsoft_graph.planner.tasks.list",
+        "microsoft_graph.planner.task.get",
+        "microsoft_graph.sharepoint.site.get",
+        "microsoft_graph.sharepoint.list.get",
+        "microsoft_graph.sharepoint.list.items.delta",
+        "microsoft_graph.todo.lists.list",
+        "microsoft_graph.todo.tasks.list",
+        "microsoft_graph.todo.task.get",
+        "microsoft_graph.calendar.calendars.list",
+        "microsoft_graph.calendar.events.list",
+        "microsoft_graph.calendar.event.get",
+        "microsoft_graph.calendar.freebusy.get",
+        "microsoft_graph.sharepoint.drives.list",
+        "microsoft_graph.sharepoint.drive.items.list",
     },
 }
 PEM_PRIVATE_KEY_NAMES = {
@@ -200,7 +283,11 @@ SECRET_CONTENT_VALIDATED_NAMES = (
     | HEX32_SECRET_NAMES
     | PEM_PRIVATE_KEY_NAMES
     | PEM_CERTIFICATE_NAMES
-    | {"teams-navigator-hmac-key", "account-center-encryption-key"}
+    | {
+        "teams-navigator-hmac-key",
+        "account-center-encryption-key",
+        "account-center-microsoft-graph-client-secret",
+    }
 )
 PLACEHOLDER_RE = re.compile(
     r"(replace[_ -]?with|example\.invalid|changeme|placeholder|<[^>]+>)", re.IGNORECASE
@@ -299,6 +386,10 @@ def _secret_file(path: Path, expected_name: str) -> None:
     if expected_name not in SECRET_CONTENT_VALIDATED_NAMES:
         return
     value = path.read_bytes()
+    if expected_name == "account-center-microsoft-graph-client-secret" and (
+        not 16 <= len(value) <= 4096 or any(byte in value for byte in (0, 10, 13))
+    ):
+        raise PreflightError("Microsoft Graph OAuth client secret file is malformed")
     if expected_name in RAW32_SECRET_NAMES and len(value) != 32:
         raise PreflightError(f"raw HMAC/signing key must contain exactly 32 bytes: {expected_name}")
     if expected_name in HEX32_SECRET_NAMES and not re.fullmatch(rb"[0-9a-fA-F]{64}", value):
@@ -695,7 +786,7 @@ def _validate_principal_configuration(
         )
     if document.get("product_directory") != [] or document.get("product_service_credentials") != []:
         raise PreflightError("unconfigured Product proxy credentials must remain absent")
-    if connector_auth_phase == "provider-bootstrap":
+    if connector_auth_phase in {"provider-bootstrap", "microsoft-graph-provider-bootstrap"}:
         if session.get("can_publish_credential_health") not in {None, False}:
             raise PreflightError(
                 "credential notification publishing must remain disabled during provider bootstrap"
@@ -1001,12 +1092,20 @@ def _require_planner_operations_for_binding(
 
 
 def _validate_automation_workflow_configuration(
-    config: dict[str, Any], *, config_dir: Path, secrets_dir: Path
+    config: dict[str, Any],
+    *,
+    config_dir: Path,
+    secrets_dir: Path,
+    require_personal_delivery: bool = False,
 ) -> bool:
     """Validate the optional actor-scoped preparation profile without claiming live acceptance."""
 
     services = config.get("services", {})
     if not _automation_workflow_markers_present(services, config.get("secrets")):
+        if require_personal_delivery:
+            raise PreflightError(
+                "Graph bootstrap requires the existing five-actor private chat overlay"
+            )
         return False
     navigator = services.get("navigator")
     persistence = services.get("navigator-persistence")
@@ -1223,6 +1322,14 @@ def _validate_automation_workflow_configuration(
         tenant_id=tenant_id,
         principal_document=principal_document,
     )
+    if require_personal_delivery and (
+        environment.get("CYRENE_WORKFLOWS_ENABLED") != "false"
+        or environment.get("CYRENE_TEAMS_PERSONAL_CHAT_ENABLED") != "true"
+        or environment.get("CYRENE_TEAMS_MODEL_ACTOR_SUBJECT") != owner_id
+    ):
+        raise PreflightError(
+            "Graph bootstrap must enable the existing personal route for the five pilot actors, keep Workflows off, and bind model access to the owner"
+        )
     return True
 
 
@@ -1391,9 +1498,119 @@ CONNECTOR_OPERATION_POLICIES = {
         "microsoft_graph_plan",
         False,
     ),
+    "microsoft_graph.planner.plans.list": (
+        "microsoft_graph.planner.plans.list",
+        "microsoft_graph_plan",
+        False,
+    ),
     "microsoft_graph.planner.tasks.list": (
         "microsoft_graph.planner.tasks.list",
         "microsoft_graph_plan",
+        False,
+    ),
+    "microsoft_graph.planner.task.get": (
+        "microsoft_graph.planner.task.get",
+        "microsoft_graph_task",
+        False,
+    ),
+    "microsoft_graph.planner.task.create": (
+        "microsoft_graph.planner.task.create",
+        "microsoft_graph_task",
+        True,
+    ),
+    "microsoft_graph.planner.task.update": (
+        "microsoft_graph.planner.task.update",
+        "microsoft_graph_task",
+        True,
+    ),
+    "microsoft_graph.sharepoint.site.get": (
+        "microsoft_graph.sharepoint.site.get",
+        "microsoft_graph_site",
+        False,
+    ),
+    "microsoft_graph.sharepoint.list.get": (
+        "microsoft_graph.sharepoint.list.get",
+        "microsoft_graph_list",
+        False,
+    ),
+    "microsoft_graph.sharepoint.list.items.delta": (
+        "microsoft_graph.sharepoint.list.items.delta",
+        "microsoft_graph_list",
+        False,
+    ),
+    "microsoft_graph.todo.lists.list": (
+        "microsoft_graph.todo.lists.list",
+        "microsoft_graph_todo_list",
+        False,
+    ),
+    "microsoft_graph.todo.tasks.list": (
+        "microsoft_graph.todo.tasks.list",
+        "microsoft_graph_todo_list",
+        False,
+    ),
+    "microsoft_graph.todo.task.get": (
+        "microsoft_graph.todo.task.get",
+        "microsoft_graph_todo_task",
+        False,
+    ),
+    "microsoft_graph.todo.task.create": (
+        "microsoft_graph.todo.task.create",
+        "microsoft_graph_todo_task",
+        True,
+    ),
+    "microsoft_graph.todo.task.update": (
+        "microsoft_graph.todo.task.update",
+        "microsoft_graph_todo_task",
+        True,
+    ),
+    "microsoft_graph.todo.task.delete": (
+        "microsoft_graph.todo.task.delete",
+        "microsoft_graph_todo_task",
+        True,
+    ),
+    "microsoft_graph.calendar.calendars.list": (
+        "microsoft_graph.calendar.calendars.list",
+        "microsoft_graph_calendar",
+        False,
+    ),
+    "microsoft_graph.calendar.events.list": (
+        "microsoft_graph.calendar.events.list",
+        "microsoft_graph_calendar",
+        False,
+    ),
+    "microsoft_graph.calendar.event.get": (
+        "microsoft_graph.calendar.event.get",
+        "microsoft_graph_event",
+        False,
+    ),
+    "microsoft_graph.calendar.event.create": (
+        "microsoft_graph.calendar.event.create",
+        "microsoft_graph_event",
+        True,
+    ),
+    "microsoft_graph.calendar.event.update": (
+        "microsoft_graph.calendar.event.update",
+        "microsoft_graph_event",
+        True,
+    ),
+    "microsoft_graph.calendar.event.delete": (
+        "microsoft_graph.calendar.event.delete",
+        "microsoft_graph_event",
+        True,
+    ),
+    "microsoft_graph.calendar.freebusy.get": (
+        "microsoft_graph.calendar.freebusy.get",
+        "microsoft_graph_freebusy",
+        False,
+    ),
+    "microsoft_graph.sharepoint.drives.list": (
+        "microsoft_graph.sharepoint.drives.list",
+        "microsoft_graph_drive",
+        False,
+    ),
+    "microsoft_graph.sharepoint.drive.items.list": (
+        "microsoft_graph.sharepoint.drive.items.list",
+        "microsoft_graph_drive_item",
         False,
     ),
     "computer.command.execute": ("computer.command.execute", "computer_workspace", True),
@@ -1429,6 +1646,36 @@ CONNECTOR_PROVIDER_REQUIRED_ARGUMENTS = {
     "azure_devops.observations.poll": ("target",),
     "microsoft_graph.planner.plan.get": ("plan_id",),
     "microsoft_graph.planner.tasks.list": ("plan_id",),
+    "microsoft_graph.planner.task.get": ("plan_id", "task_id"),
+    "microsoft_graph.planner.task.create": ("plan_id", "bucket_id", "title"),
+    "microsoft_graph.planner.task.update": ("plan_id", "task_id", "if_match", "changes"),
+    "microsoft_graph.sharepoint.site.get": ("site_id",),
+    "microsoft_graph.sharepoint.list.get": ("site_id", "list_id"),
+    "microsoft_graph.sharepoint.list.items.delta": ("site_id", "list_id"),
+    "microsoft_graph.todo.tasks.list": ("task_list_id",),
+    "microsoft_graph.todo.task.get": ("task_list_id", "task_id"),
+    "microsoft_graph.todo.task.create": ("task_list_id", "title"),
+    "microsoft_graph.todo.task.update": ("task_list_id", "task_id", "if_match", "changes"),
+    "microsoft_graph.todo.task.delete": ("task_list_id", "task_id", "if_match"),
+    "microsoft_graph.calendar.events.list": ("calendar_id", "start_date_time", "end_date_time"),
+    "microsoft_graph.calendar.event.get": ("calendar_id", "event_id"),
+    "microsoft_graph.calendar.event.create": (
+        "calendar_id",
+        "subject",
+        "start_date_time",
+        "end_date_time",
+        "transaction_id",
+    ),
+    "microsoft_graph.calendar.event.update": ("calendar_id", "event_id", "if_match", "changes"),
+    "microsoft_graph.calendar.event.delete": ("calendar_id", "event_id", "if_match"),
+    "microsoft_graph.calendar.freebusy.get": (
+        "schedules",
+        "start_date_time",
+        "end_date_time",
+        "interval_minutes",
+    ),
+    "microsoft_graph.sharepoint.drives.list": ("site_id",),
+    "microsoft_graph.sharepoint.drive.items.list": ("site_id", "drive_id"),
     "github.issues.search": ("repository_id", "repository"),
     "github.actions.jobs.list": ("repository_id", "repository", "run_id"),
     "github.actions.job.logs.read": (
@@ -1838,29 +2085,49 @@ def _huggingface_enabled(config: dict[str, Any]) -> bool:
 
 
 def _automation_provider_ids(config: dict[str, Any]) -> set[str]:
-    """Detect the explicit Graph/ADO plugin pair and reject a partially composed pair."""
+    """Detect selected Graph/ADO providers and require each provider's complete key pair."""
 
     services = config.get("services", {})
     if not isinstance(services, dict):
         raise PreflightError("rendered Compose service inventory is malformed")
-    present_services = AUTOMATION_PROVIDER_SERVICE_NAMES & set(services)
-    secrets = config.get("secrets", {})
-    secret_markers = {
-        "account-center-graph-provider-hmac-key",
-        "account-center-ado-provider-hmac-key",
-        "exchange-graph-auth-context-hmac-key",
-        "exchange-ado-auth-context-hmac-key",
+    provider_by_service = {
+        "microsoft-graph": "microsoft_graph",
+        "azure-devops-observation": "azure_devops",
     }
-    has_secret_markers = isinstance(secrets, dict) and bool(secret_markers & set(secrets))
-    if not present_services and not has_secret_markers:
-        return set()
-    if present_services != AUTOMATION_PROVIDER_SERVICE_NAMES or not has_secret_markers:
-        raise PreflightError(
-            "Microsoft Graph and Azure DevOps provider overlays must be enabled together"
+    present_services = set(provider_by_service) & set(services)
+    secrets = config.get("secrets", {})
+    required_secrets = {
+        "microsoft-graph": {
+            "account-center-graph-provider-hmac-key",
+            "exchange-graph-auth-context-hmac-key",
+        },
+        "azure-devops-observation": {
+            "account-center-ado-provider-hmac-key",
+            "exchange-ado-auth-context-hmac-key",
+        },
+    }
+    if not isinstance(secrets, dict):
+        raise PreflightError("rendered Compose secret inventory is malformed")
+    graph_service = services.get("microsoft-graph")
+    if isinstance(graph_service, dict):
+        graph_config = _json_environment_object(
+            graph_service, "CYRENE_CAPABILITY_CONFIGURATION_JSON", "Microsoft Graph"
         )
-    if not isinstance(secrets, dict) or not secret_markers <= set(secrets):
-        raise PreflightError("Graph/ADO provider overlay must define its complete signing-key set")
-    return {"microsoft_graph", "azure_devops"}
+        if "officeV2" in graph_config:
+            required_secrets["microsoft-graph"] |= MICROSOFT_GRAPH_OFFICE_SECRET_NAMES
+    present_secret_markers = {
+        service for service, names in required_secrets.items() if names & set(secrets)
+    }
+    if not present_services and not present_secret_markers:
+        return set()
+    if present_services != present_secret_markers:
+        raise PreflightError(
+            "each Graph/ADO provider service must be paired with its own secret set"
+        )
+    for service in present_services:
+        if not required_secrets[service] <= set(secrets):
+            raise PreflightError(f"{service} must define its complete signing-key set")
+    return {provider_by_service[name] for name in present_services}
 
 
 def _expected_connector_providers(
@@ -1872,12 +2139,41 @@ def _expected_connector_providers(
     providers = {"github"} | ({"huggingface"} if _huggingface_enabled(config) else set())
     automation_provider_ids = _automation_provider_ids(config)
     if mode == "connector-auth-readonly":
-        if automation_provider_ids:
+        if "azure_devops" in automation_provider_ids:
             raise PreflightError(
-                "Microsoft Graph and Azure DevOps require their actor-owned OAuth/source setup, outside the generic connector auth evidence flow"
+                "Azure DevOps requires its actor-owned source setup outside the connector auth evidence flow"
             )
-        if connector_auth_phase == "provider-bootstrap":
+        if connector_auth_phase in {"provider-bootstrap", "microsoft-graph-provider-bootstrap"}:
             return {"github"} | ({"computer"} if has_computer_runner else set())
+        if connector_auth_phase == "microsoft-graph-provider-bootstrap":
+            services = config.get("services", {})
+            cloud_service = (
+                services.get("cloud-management-phase2") if isinstance(services, dict) else None
+            )
+            cloud_document = _json_environment_object(
+                cloud_service if isinstance(cloud_service, dict) else {},
+                "CYRENE_CAPABILITY_CONFIGURATION_JSON",
+                "Cloud Management",
+            )
+            cloud_profiles = cloud_document.get("profiles")
+            cloud_provider_ids = (
+                {
+                    row.get("provider")
+                    for row in cloud_profiles
+                    if isinstance(row, dict) and isinstance(row.get("provider"), str)
+                }
+                if isinstance(cloud_profiles, list)
+                else set()
+            )
+            if cloud_provider_ids not in ({"azure", "gcp"}, {"azure", "gcp", "runpod"}):
+                raise PreflightError(
+                    "Graph provider bootstrap must preserve existing cloud profiles"
+                )
+            return (
+                {"github", "huggingface"}
+                | cloud_provider_ids
+                | ({"computer"} if has_computer_runner else set())
+            )
         if connector_auth_phase == "issued-connector-activation":
             services = config.get("services", {})
             cloud_service = (
@@ -1904,6 +2200,8 @@ def _expected_connector_providers(
                 raise PreflightError(
                     "activation provider set must include Azure/GCP and optional configured RunPod"
                 )
+            if "microsoft_graph" in automation_provider_ids:
+                providers.add("microsoft_graph")
             return providers | cloud_provider_ids | ({"computer"} if has_computer_runner else set())
         raise PreflightError("connector auth phase is required for connector-auth-readonly mode")
     if mode in {"stage1", "staging"}:
@@ -2410,14 +2708,17 @@ def _validate_connector_auth_readonly_evidence(
 
 
 def _validate_new_provider_bindings_readonly(
-    document: dict[str, Any], expected_provider_ids: set[str]
+    document: dict[str, Any],
+    expected_provider_ids: set[str],
+    *,
+    graph_office_scope: dict[str, Any] | None = None,
 ) -> None:
-    """Require exact issued HF/cloud bindings with a read-only Exchange operation set."""
+    """Require issued bindings to expose only operations granted by their host scope."""
 
     bindings = document.get("bindings") if isinstance(document, dict) else None
     if not isinstance(bindings, list):
         raise PreflightError("connector binding document is malformed")
-    if not expected_provider_ids <= {"huggingface", "azure", "gcp", "runpod"}:
+    if not expected_provider_ids <= {"huggingface", "azure", "gcp", "runpod", "microsoft_graph"}:
         raise PreflightError("activation provider set contains an unsupported connector")
     selected = [
         row
@@ -2432,22 +2733,40 @@ def _validate_new_provider_bindings_readonly(
     for provider in expected_provider_ids:
         binding = by_provider[provider]
         tools = binding.get("tools")
-        allowed_operations = CONNECTOR_MODEL_READONLY_OPERATIONS[provider]
+        allowed_operations = (
+            _graph_operations_for_office_scope(graph_office_scope)
+            if provider == "microsoft_graph" and graph_office_scope is not None
+            else CONNECTOR_MODEL_READONLY_OPERATIONS[provider]
+        )
         if not isinstance(tools, list) or not tools:
-            raise PreflightError(f"{provider} read-only binding must expose at least one safe read")
+            raise PreflightError(
+                f"{provider} binding must expose at least one authorized operation"
+            )
         operations: set[str] = set()
         for tool in tools:
             operation = tool.get("operationId") if isinstance(tool, dict) else None
+            policy = (
+                CONNECTOR_OPERATION_POLICIES.get(operation) if isinstance(operation, str) else None
+            )
             if (
                 not isinstance(operation, str)
                 or operation not in allowed_operations
-                or tool.get("mutating") is not False
+                or not isinstance(policy, tuple)
+                or tool.get("mutating") is not policy[2]
                 or operation in operations
             ):
                 raise PreflightError(
-                    f"{provider} binding contains a write, CLI, duplicate, or non-allowlisted operation"
+                    f"{provider} binding contains a write, CLI, duplicate, or operation outside its exact host scope"
                 )
             operations.add(operation)
+        if (
+            provider == "microsoft_graph"
+            and graph_office_scope is not None
+            and operations != allowed_operations
+        ):
+            raise PreflightError(
+                "Microsoft Graph binding operation set does not match its selected Office scope"
+            )
 
 
 def _validate_huggingface_profile_selection(compose: dict[str, Any], mode: str) -> bool:
@@ -2530,10 +2849,425 @@ def _validate_ado_source_activation(sources: Any) -> None:
             raise PreflightError("Azure DevOps numeric source filters are invalid")
 
 
-def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
-    """Validate the opt-in Graph/ADO mTLS pair and their bounded process envelope."""
+def _validate_office_v2_host_scope(scope: dict[str, Any], compose: dict[str, Any]) -> None:
+    """Validate the fixed owner/workspace scope carried by the Microsoft Graph host profile."""
 
-    if not _automation_provider_ids(config):
+    if not isinstance(scope, dict) or set(scope) != {
+        "schemaVersion",
+        "tenantId",
+        "workspaceId",
+        "enabledFeatures",
+        "targets",
+    }:
+        raise PreflightError("Microsoft Graph officeV2 host scope has an unsupported shape")
+    if scope.get("schemaVersion") != 2 or isinstance(scope.get("schemaVersion"), bool):
+        raise PreflightError("Microsoft Graph officeV2 host scope must use schema version 2")
+    actor = _connector_bootstrap_actor(compose)
+    issuer = actor.get("issuer")
+    tenant_id = issuer.split("/")[3] if isinstance(issuer, str) and issuer.count("/") >= 3 else None
+    if (
+        not _uuid(scope.get("tenantId"))
+        or scope.get("tenantId") != tenant_id
+        or not _uuid(scope.get("workspaceId"))
+        or scope.get("workspaceId") != actor.get("workspaceId")
+    ):
+        raise PreflightError(
+            "Microsoft Graph officeV2 tenant/workspace must match the Directory owner"
+        )
+    feature_names = {
+        "plannerEnabled",
+        "todoEnabled",
+        "calendarEnabled",
+        "mailMetadataEnabled",
+        "mailDraftsEnabled",
+        "mailSendEnabled",
+        "sharePointDriveMetadataEnabled",
+    }
+    features = scope.get("enabledFeatures")
+    if (
+        not isinstance(features, dict)
+        or set(features) != feature_names
+        or any(type(value) is not bool for value in features.values())
+    ):
+        raise PreflightError("Microsoft Graph officeV2 feature flags must be an exact boolean set")
+    targets = scope.get("targets")
+    target_names = {
+        "plannerPlanIds",
+        "sharePointSiteIds",
+        "sharePointListIds",
+        "sharePointDriveIds",
+        "toDoTaskListIds",
+        "calendarIds",
+        "mailFolderIds",
+        "freebusySubjects",
+    }
+    if not isinstance(targets, dict) or set(targets) != target_names:
+        raise PreflightError(
+            "Microsoft Graph officeV2 target list must use the exact provider schema"
+        )
+    target_limits = {
+        "plannerPlanIds": 128,
+        "sharePointSiteIds": 255 + 1 + 36 + 1 + 36,
+        "sharePointListIds": 36,
+        "sharePointDriveIds": 512,
+        "toDoTaskListIds": 512,
+        "calendarIds": 512,
+        "mailFolderIds": 512,
+        "freebusySubjects": 320,
+    }
+    for name, values in targets.items():
+        if (
+            not isinstance(values, list)
+            or len(values) > 100
+            or any(not isinstance(value, str) for value in values)
+            or len(values) != len(set(values))
+            or any(
+                not value
+                or len(value) > target_limits[name]
+                or "*" in value
+                or any(ord(char) < 32 for char in value)
+                for value in values
+            )
+        ):
+            raise PreflightError(
+                f"Microsoft Graph officeV2 {name} must be a bounded exact allowlist"
+            )
+    if any(not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) for value in targets["plannerPlanIds"]):
+        raise PreflightError("Microsoft Graph Planner plan IDs are malformed")
+    if any(not _uuid(value) for value in targets["sharePointListIds"]):
+        raise PreflightError("Microsoft Graph SharePoint list IDs must be UUIDs")
+    if any(
+        not re.fullmatch(r"[A-Za-z0-9.-]{1,255},[0-9a-fA-F-]{36},[0-9a-fA-F-]{36}", value)
+        for value in targets["sharePointSiteIds"]
+    ):
+        raise PreflightError("Microsoft Graph SharePoint site IDs are malformed")
+    if len(targets["sharePointSiteIds"]) > 1 or (
+        features["sharePointDriveMetadataEnabled"] and len(targets["sharePointSiteIds"]) != 1
+    ):
+        raise PreflightError(
+            "Microsoft Graph SharePoint metadata must bind exactly one selected site"
+        )
+    disabled_targets = {
+        "plannerEnabled": {"plannerPlanIds"},
+        "todoEnabled": {"toDoTaskListIds"},
+        "calendarEnabled": {"calendarIds", "freebusySubjects"},
+        "sharePointDriveMetadataEnabled": {
+            "sharePointSiteIds",
+            "sharePointListIds",
+            "sharePointDriveIds",
+        },
+    }
+    mail_enabled = any(
+        features[name] for name in ("mailMetadataEnabled", "mailDraftsEnabled", "mailSendEnabled")
+    )
+    if not mail_enabled and targets["mailFolderIds"]:
+        raise PreflightError(
+            "disabled Microsoft Graph mail features must not retain target folders"
+        )
+    for feature, target_names in disabled_targets.items():
+        if not features[feature] and any(targets[name] for name in target_names):
+            raise PreflightError(
+                f"disabled Microsoft Graph feature {feature} must not retain targets"
+            )
+    if targets["freebusySubjects"] and not features["calendarEnabled"]:
+        raise PreflightError("Microsoft Graph free/busy subjects require the calendar feature")
+
+
+def _validate_graph_provider_office_flags(provider_flags: Any, host_scope: dict[str, Any]) -> None:
+    """Bind provider tool gates to the camel-case Exchange scope without copying targets."""
+
+    expected = {
+        provider_name: host_scope["enabledFeatures"][host_name]
+        for host_name, provider_name in GRAPH_OFFICE_HOST_TO_PROVIDER_FLAGS.items()
+    }
+    if (
+        not isinstance(provider_flags, dict)
+        or set(provider_flags) != set(expected)
+        or any(type(value) is not bool for value in provider_flags.values())
+        or provider_flags != expected
+    ):
+        raise PreflightError(
+            "Microsoft Graph provider Office flags must explicitly map the Exchange scope"
+        )
+    if any(
+        provider_flags[name]
+        for name in ("mail_metadata_enabled", "mail_drafts_enabled", "mail_send_enabled")
+    ):
+        raise PreflightError("Microsoft Graph Mail features are deferred in this provider release")
+
+
+def _exchange_graph_office_scope(compose: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the unique Exchange-owned Graph scope, if a Graph profile is configured."""
+
+    exchange = compose.get("services", {}).get("exchange")
+    if not isinstance(exchange, dict):
+        return None
+    if not exchange.get("environment", {}).get("CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"):
+        return None
+    document = _json_environment_object(
+        exchange, "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON", "Exchange"
+    )
+    authorization = document.get("authorizationCloud")
+    profiles = authorization.get("profiles") if isinstance(authorization, dict) else None
+    if not isinstance(profiles, dict):
+        return None
+    rows = [
+        row
+        for row in profiles.values()
+        if isinstance(row, dict) and row.get("provider") == "microsoft_graph"
+    ]
+    if len(rows) != 1:
+        if rows:
+            raise PreflightError("Exchange must configure exactly one Microsoft Graph profile")
+        return None
+    scope = rows[0].get("officeV2")
+    if scope is not None:
+        _validate_office_v2_host_scope(scope, compose)
+    return scope
+
+
+def _graph_operations_for_office_scope(scope: dict[str, Any]) -> set[str]:
+    """Derive the exact Graph tool set permitted by enabled features and selected targets."""
+
+    features = scope["enabledFeatures"]
+    targets = scope["targets"]
+    operations: set[str] = set()
+    if features["plannerEnabled"]:
+        operations.add("microsoft_graph.planner.plans.list")
+        if targets["plannerPlanIds"]:
+            operations.update(
+                {
+                    "microsoft_graph.planner.plan.get",
+                    "microsoft_graph.planner.tasks.list",
+                    "microsoft_graph.planner.task.get",
+                }
+            )
+            operations.update(
+                {
+                    "microsoft_graph.planner.task.create",
+                    "microsoft_graph.planner.task.update",
+                }
+            )
+    if features["todoEnabled"]:
+        operations.add("microsoft_graph.todo.lists.list")
+        if targets["toDoTaskListIds"]:
+            operations.update(
+                {
+                    "microsoft_graph.todo.tasks.list",
+                    "microsoft_graph.todo.task.get",
+                    "microsoft_graph.todo.task.create",
+                    "microsoft_graph.todo.task.update",
+                    "microsoft_graph.todo.task.delete",
+                }
+            )
+    if features["calendarEnabled"]:
+        operations.add("microsoft_graph.calendar.calendars.list")
+        if targets["calendarIds"]:
+            operations.update(
+                {
+                    "microsoft_graph.calendar.events.list",
+                    "microsoft_graph.calendar.event.get",
+                    "microsoft_graph.calendar.event.create",
+                    "microsoft_graph.calendar.event.update",
+                    "microsoft_graph.calendar.event.delete",
+                }
+            )
+        if targets["freebusySubjects"]:
+            operations.add("microsoft_graph.calendar.freebusy.get")
+    if features["sharePointDriveMetadataEnabled"]:
+        operations.add("microsoft_graph.sharepoint.drives.list")
+        if targets["sharePointListIds"]:
+            operations.update(
+                {
+                    "microsoft_graph.sharepoint.list.get",
+                    "microsoft_graph.sharepoint.list.items.delta",
+                }
+            )
+        if targets["sharePointDriveIds"]:
+            operations.add("microsoft_graph.sharepoint.drive.items.list")
+        if targets["sharePointSiteIds"]:
+            operations.add("microsoft_graph.sharepoint.site.get")
+    return operations
+
+
+def _graph_public_target_scope(scope: dict[str, Any]) -> dict[str, Any]:
+    """Build the exact Account Center v2 public scope from the Exchange host profile."""
+
+    features = scope["enabledFeatures"]
+    targets = scope["targets"]
+    planner_enabled = features["plannerEnabled"]
+    todo_enabled = features["todoEnabled"]
+    calendar_enabled = features["calendarEnabled"]
+    sharepoint_enabled = features["sharePointDriveMetadataEnabled"]
+    return {
+        "schemaVersion": 2,
+        "tenantId": scope["tenantId"],
+        "workspaceId": scope["workspaceId"],
+        "planner": {
+            "planIds": list(targets["plannerPlanIds"]),
+            "tasksRead": planner_enabled,
+            "tasksWrite": planner_enabled,
+        },
+        "sharepoint": {
+            "enabled": sharepoint_enabled,
+            "siteId": (targets["sharePointSiteIds"][0] if sharepoint_enabled else None),
+            "listIds": list(targets["sharePointListIds"]),
+            "driveIds": list(targets["sharePointDriveIds"]),
+            "metadataRead": sharepoint_enabled,
+            "contentRead": False,
+        },
+        "todo": {
+            "enabled": todo_enabled,
+            "taskListIds": list(targets["toDoTaskListIds"]),
+            "tasksRead": todo_enabled,
+            "tasksWrite": todo_enabled,
+        },
+        "calendar": {
+            "enabled": calendar_enabled,
+            "calendarIds": list(targets["calendarIds"]),
+            "eventsRead": calendar_enabled,
+            "eventsWrite": calendar_enabled,
+            "freebusyRead": calendar_enabled,
+            "freebusySubjects": list(targets["freebusySubjects"]),
+            "attendeesWrite": False,
+        },
+        "mail": {
+            "enabled": False,
+            "folderIds": [],
+            "metadataRead": False,
+            "bodyRead": False,
+            "draftsWrite": False,
+            "sendEnabled": False,
+        },
+    }
+
+
+def _graph_expected_oauth_scopes(scope: dict[str, Any]) -> set[str]:
+    """Derive the delegated OAuth union from the fixed Office v2 feature scope."""
+
+    features = scope["enabledFeatures"]
+    required = {"openid", "profile", "offline_access", "User.Read"}
+    if features["plannerEnabled"] or features["todoEnabled"]:
+        required.add("Tasks.ReadWrite")
+    if features["sharePointDriveMetadataEnabled"]:
+        required.add("Sites.Selected")
+    if features["calendarEnabled"]:
+        required.add("Calendars.ReadWrite")
+    return required
+
+
+def _graph_enabled_feature_names(scope: dict[str, Any]) -> set[str]:
+    """Derive safe readiness feature labels from the public Account Center target scope."""
+
+    public_scope = _graph_public_target_scope(scope)
+    features: set[str] = set()
+    if public_scope["planner"]["tasksRead"]:
+        features.add("planner_read")
+    if public_scope["planner"]["tasksWrite"]:
+        features.add("planner_write")
+    if public_scope["todo"]["tasksRead"]:
+        features.add("todo_read")
+    if public_scope["todo"]["tasksWrite"]:
+        features.add("todo_write")
+    if public_scope["calendar"]["eventsRead"]:
+        features.add("calendar_read")
+    if public_scope["calendar"]["eventsWrite"]:
+        features.add("calendar_write")
+    if public_scope["calendar"]["freebusyRead"] and public_scope["calendar"]["freebusySubjects"]:
+        features.add("calendar_freebusy_read")
+    if public_scope["sharepoint"]["metadataRead"]:
+        features.add("sharepoint_drive_metadata_read")
+    return features
+
+
+def _graph_target_ref_count(scope: dict[str, Any]) -> int:
+    """Count every explicit Office target reference without counting feature flags."""
+
+    return sum(len(values) for values in scope["targets"].values())
+
+
+def _validate_office_oauth_setup_mount(
+    compose: dict[str, Any], connector_auth_phase: str | None
+) -> None:
+    """Mount one private owner-pins file only during the Graph OAuth bootstrap window."""
+
+    exchange = compose.get("services", {}).get("exchange", {})
+    volumes = exchange.get("volumes", []) if isinstance(exchange, dict) else []
+    if not isinstance(volumes, list):
+        raise PreflightError("Exchange office setup volume list is malformed")
+    mounted = [
+        row
+        for row in volumes
+        if isinstance(row, dict) and row.get("target") == "/run/config/office-operator.json"
+    ]
+    if connector_auth_phase != OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+        if mounted:
+            raise PreflightError(
+                "Office OAuth operator config mount must be absent outside Graph bootstrap"
+            )
+        return
+    if (
+        len(mounted) != 1
+        or mounted[0].get("type") != "bind"
+        or mounted[0].get("read_only") is not True
+        or mounted[0].get("bind") != {"create_host_path": False}
+        or set(mounted[0]) - {"type", "source", "target", "read_only", "bind"}
+    ):
+        raise PreflightError("Graph bootstrap requires one read-only owner config bind in Exchange")
+    source_text = mounted[0].get("source")
+    if not isinstance(source_text, str):
+        raise PreflightError("Office OAuth operator config source is malformed")
+    path = Path(source_text)
+    try:
+        metadata = path.lstat()
+        parent_metadata = path.parent.lstat()
+        if (
+            path.name != "office-operator.json"
+            or path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != 10001
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size > 16_384
+            or path.resolve(strict=True) != path
+            or not _private_artifact(path)
+            or path.parent.resolve(strict=True) != path.parent
+            or not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != 10001
+            or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+        ):
+            raise PreflightError(
+                "Office OAuth operator config must be a private UID 10001 mode 0600 file"
+            )
+        document = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
+        )
+    except PreflightError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PreflightError("Office OAuth operator config is unavailable or invalid") from error
+    if (
+        not isinstance(document, dict)
+        or set(document) != {"schemaVersion", "actor", "bindingRef", "profileIdempotencyKey"}
+        or document.get("schemaVersion") != 1
+        or isinstance(document.get("schemaVersion"), bool)
+        or document.get("actor") != _connector_bootstrap_actor(compose)
+        or not isinstance(document.get("bindingRef"), str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", document["bindingRef"])
+        or not isinstance(document.get("profileIdempotencyKey"), str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", document["profileIdempotencyKey"])
+        or PLACEHOLDER_RE.search(json.dumps(document, sort_keys=True))
+    ):
+        raise PreflightError(
+            "Office OAuth operator config must match the Directory owner and exact schema"
+        )
+
+
+def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
+    """Validate each explicitly selected Graph/ADO mTLS provider independently."""
+
+    provider_ids = _automation_provider_ids(config)
+    if not provider_ids:
         return False
     services = config["services"]
     networks = config.get("networks", {})
@@ -2541,8 +3275,36 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
     exchange = services.get("exchange")
     if not isinstance(account_center, dict) or not isinstance(exchange, dict):
         raise PreflightError("Graph/ADO providers require the existing Account Center and Exchange")
+    exchange_graph_scope = _exchange_graph_office_scope(config)
+    if provider_ids == {"microsoft_graph"}:
+        cloud = services.get("cloud-management-phase2")
+        if (
+            not isinstance(cloud, dict)
+            or _memory_limit_bytes(cloud.get("mem_limit")) != 256 * MIB
+            or _memory_limit_bytes(cloud.get("memswap_limit")) != 256 * MIB
+            or _cpu_limit_decimal(cloud.get("cpus")) != Decimal("0.10")
+        ):
+            raise PreflightError(
+                "Graph-only Office deployment must use the reviewed 256 MiB Cloud reallocation"
+            )
     account_map = _parse_secret_file_map(account_center, "Account Center")
     exchange_map = _parse_secret_file_map(exchange, "Exchange")
+    if isinstance(exchange_graph_scope, dict):
+        callback_env = "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY"
+        callback_path = "/run/secrets/account-center-microsoft-graph-callback-hmac-key"
+        callback_pair = (
+            "account-center-microsoft-graph-callback-hmac-key",
+            "account-center-microsoft-graph-callback-hmac-key",
+        )
+        if (
+            account_map.get(callback_env) != callback_path
+            or exchange_map.get(callback_env) != callback_path
+            or callback_pair not in _secret_mount_pairs(account_center, "Account Center")
+            or callback_pair not in _secret_mount_pairs(exchange, "Exchange")
+        ):
+            raise PreflightError(
+                "Exchange and Account Center must mount the same dedicated Graph OAuth callback HMAC key"
+            )
 
     providers = (
         {
@@ -2550,6 +3312,7 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
             "plugin": "cyrene.providers.microsoft-graph",
             "caller": "microsoft-graph-provider",
             "exchange_env": "EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY",
+            "account_provider_env": "CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY",
             "provider_env": "GRAPH_ACCOUNT_CENTER_PROVIDER_HMAC_KEY",
             "root_env": "GRAPH_ACCOUNT_CENTER_ROOT_CERTIFICATE",
             "cert_env": "GRAPH_ACCOUNT_CENTER_CLIENT_CERTIFICATE",
@@ -2577,6 +3340,7 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
             "plugin": "cyrene.providers.azure-devops-observation",
             "caller": "azure-devops-observation-provider",
             "exchange_env": "EXCHANGE_ADO_AUTH_CONTEXT_HMAC_KEY",
+            "account_provider_env": "CYRENE_ACCOUNT_CENTER_ADO_PROVIDER_HMAC_KEY",
             "provider_env": "ADO_ACCOUNT_CENTER_PROVIDER_HMAC_KEY",
             "root_env": "ADO_ACCOUNT_CENTER_ROOT_CERTIFICATE",
             "cert_env": "ADO_ACCOUNT_CENTER_CLIENT_CERTIFICATE",
@@ -2600,7 +3364,13 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
             "egress_network": "ado-egress",
         },
     )
+    selected_services = {
+        "microsoft-graph" if provider == "microsoft_graph" else "azure-devops-observation"
+        for provider in provider_ids
+    }
     for row in providers:
+        if row["service"] not in selected_services:
+            continue
         service = services[row["service"]]
         environment = service.get("environment", {})
         expected_map = {
@@ -2643,7 +3413,12 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
             or service.get("configs")
             or _memory_limit_bytes(service.get("mem_limit")) != 192 * MIB
             or _memory_limit_bytes(service.get("memswap_limit")) != 192 * MIB
-            or _cpu_limit_decimal(service.get("cpus")) != Decimal("0.10")
+            or _cpu_limit_decimal(service.get("cpus"))
+            != (
+                Decimal("0.05")
+                if row["service"] == "microsoft-graph" and provider_ids == {"microsoft_graph"}
+                else Decimal("0.10")
+            )
             or service.get("pids_limit") != 96
             or _network_names(service, row["service"]) != required_networks
             or service.get("depends_on", {}).get("account-center", {}).get("condition")
@@ -2671,6 +3446,7 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
                 "max_page_size",
                 "sharepointTargets",
                 "hostSecretRefs",
+                "officeV2",
             }
             if row["service"] == "microsoft-graph"
             else {
@@ -2691,10 +3467,30 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
             "client_key_ref": row["key_ref"],
         }
         if row["service"] == "microsoft-graph":
-            if set(provider_config) - expected_fields:
+            if set(provider_config) - expected_fields or (
+                provider_ids == {"microsoft_graph"} and "officeV2" not in provider_config
+            ):
                 raise PreflightError(
-                    "Microsoft Graph activation contains an unsupported host field"
+                    "Microsoft Graph host profile must use the versioned officeV2 scope"
                 )
+            if "officeV2" in provider_config:
+                if not isinstance(exchange_graph_scope, dict):
+                    raise PreflightError(
+                        "Microsoft Graph provider flags require the Exchange-owned officeV2 scope"
+                    )
+                _validate_graph_provider_office_flags(
+                    provider_config["officeV2"], exchange_graph_scope
+                )
+                write_enabled = any(
+                    exchange_graph_scope["enabledFeatures"][feature]
+                    for feature in ("plannerEnabled", "todoEnabled", "calendarEnabled")
+                )
+                if provider_config.get("read_only") is not (not write_enabled):
+                    raise PreflightError(
+                        "Microsoft Graph read_only must match its enabled Office write features"
+                    )
+            elif provider_config.get("read_only") is not True:
+                raise PreflightError("legacy Microsoft Graph profile must remain read-only")
         else:
             if (
                 set(provider_config) - expected_fields
@@ -2755,13 +3551,15 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
         if not isinstance(egress, dict) or egress.get("internal") is True:
             raise PreflightError("Graph/ADO provider egress must use a separate outbound network")
 
-    for name, required_networks in (
-        ("account-center", {"graph-account-center-private", "ado-account-center-private"}),
-        ("exchange", {"graph-exchange-private", "ado-exchange-private"}),
+    active_provider_rows = [row for row in providers if row["service"] in selected_services]
+    for name, network_field in (
+        ("account-center", "account_network"),
+        ("exchange", "exchange_network"),
     ):
+        required_networks = {row[network_field] for row in active_provider_rows}
         service = services[name]
         if not required_networks <= _network_names(service, name):
-            raise PreflightError(f"{name} must join the Graph/ADO private provider networks")
+            raise PreflightError(f"{name} must join every selected provider's private network")
         mapping = account_map if name == "account-center" else exchange_map
         mounted = {f"/run/secrets/{target}" for target in _service_secret_targets(service)}
         if not set(mapping.values()) <= mounted:
@@ -2770,33 +3568,31 @@ def _validate_automation_provider_topology(config: dict[str, Any]) -> bool:
     if any(
         not isinstance(exchange_dependencies.get(name), dict)
         or exchange_dependencies[name].get("condition") != "service_healthy"
-        for name in AUTOMATION_PROVIDER_SERVICE_NAMES
+        for name in selected_services
     ):
-        raise PreflightError("Exchange must wait for both Graph/ADO gRPC health probes")
+        raise PreflightError("Exchange must wait for every selected provider gRPC health probe")
     expected_account_mappings = {
-        "CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY": "/run/secrets/account-center-graph-provider-hmac-key",
-        "CYRENE_ACCOUNT_CENTER_ADO_PROVIDER_HMAC_KEY": "/run/secrets/account-center-ado-provider-hmac-key",
+        row["account_provider_env"]: f"/run/secrets/{row['provider_secret']}"
+        for row in active_provider_rows
     }
     expected_exchange_mappings = {
-        "EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY": "/run/secrets/exchange-graph-auth-context-hmac-key",
-        "EXCHANGE_ADO_AUTH_CONTEXT_HMAC_KEY": "/run/secrets/exchange-ado-auth-context-hmac-key",
+        row["exchange_env"]: f"/run/secrets/{row['exchange_secret']}"
+        for row in active_provider_rows
+    }
+    expected_account_secrets = {
+        (row["provider_secret"], row["provider_secret"]) for row in active_provider_rows
+    }
+    expected_exchange_secrets = {
+        (row["exchange_secret"], row["exchange_secret"]) for row in active_provider_rows
     }
     if (
         any(account_map.get(key) != value for key, value in expected_account_mappings.items())
         or any(exchange_map.get(key) != value for key, value in expected_exchange_mappings.items())
-        or not {
-            ("account-center-graph-provider-hmac-key", "account-center-graph-provider-hmac-key"),
-            ("account-center-ado-provider-hmac-key", "account-center-ado-provider-hmac-key"),
-        }
-        <= _secret_mount_pairs(account_center, "Account Center")
-        or not {
-            ("exchange-graph-auth-context-hmac-key", "exchange-graph-auth-context-hmac-key"),
-            ("exchange-ado-auth-context-hmac-key", "exchange-ado-auth-context-hmac-key"),
-        }
-        <= _secret_mount_pairs(exchange, "Exchange")
+        or not expected_account_secrets <= _secret_mount_pairs(account_center, "Account Center")
+        or not expected_exchange_secrets <= _secret_mount_pairs(exchange, "Exchange")
     ):
         raise PreflightError(
-            "Graph/ADO signing and Exchange context keys must remain separately mounted"
+            "selected Graph/ADO signing and Exchange context keys must remain separately mounted"
         )
     return True
 
@@ -3235,6 +4031,8 @@ def _expected_exchange_providers(compose: dict[str, Any], mode: str) -> set[str]
         providers.update({"azure", "gcp"})
     if isinstance(cloud_service, dict) and "runpod" in cloud_service.get("profiles", []):
         providers.add("runpod")
+    if "microsoft-graph" in services:
+        providers.add("microsoft_graph")
     return providers
 
 
@@ -3328,9 +4126,10 @@ def _validate_exchange_profile_stage(compose: dict[str, Any], mode: str) -> None
         if isinstance(profile, dict)
     ):
         endpoint = profile.get("directPlugin")
-        expected_target = (
-            "grpcs://huggingface:7443" if provider == "hf" else "grpcs://cloud-management:7443"
-        )
+        expected_target = {
+            "hf": "grpcs://huggingface:7443",
+            "microsoft_graph": "grpcs://microsoft-graph:7443",
+        }.get(provider, "grpcs://cloud-management:7443")
         if (
             not isinstance(endpoint, dict)
             or endpoint.get("connectionRef") != expected_target
@@ -3339,6 +4138,43 @@ def _validate_exchange_profile_stage(compose: dict[str, Any], mode: str) -> None
             raise PreflightError(
                 f"Exchange {provider} profile must target its private mTLS Provider service"
             )
+        if provider == "microsoft_graph":
+            graph_service = services.get("microsoft-graph")
+            graph_config = _json_environment_object(
+                graph_service if isinstance(graph_service, dict) else {},
+                "CYRENE_CAPABILITY_CONFIGURATION_JSON",
+                "Microsoft Graph",
+            )
+            host_scope = profile.get("officeV2")
+            provider_flags = graph_config.get("officeV2")
+            if not isinstance(host_scope, dict) or not isinstance(provider_flags, dict):
+                raise PreflightError(
+                    "Exchange and Microsoft Graph must use their versioned Office v2 scopes"
+                )
+            _validate_office_v2_host_scope(host_scope, compose)
+            _validate_graph_provider_office_flags(provider_flags, host_scope)
+            account_center_host = document.get("accountCenter")
+            host_secret_refs = document.get("hostSecretRefs")
+            if (
+                not isinstance(account_center_host, dict)
+                or account_center_host.get("callbackCallerId") != "microsoft-entra-callback"
+                or account_center_host.get("callbackSigningKeyRef")
+                != "account-center/caller-hmac-keys/microsoft-graph-callback"
+                or not isinstance(host_secret_refs, dict)
+                or host_secret_refs.get("account-center/caller-hmac-keys/microsoft-graph-callback")
+                != "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY"
+            ):
+                raise PreflightError(
+                    "Exchange Graph OAuth completion must use the dedicated callback caller and HMAC ref"
+                )
+            write_enabled = any(
+                host_scope["enabledFeatures"][feature]
+                for feature in ("plannerEnabled", "todoEnabled", "calendarEnabled")
+            )
+            if graph_config.get("read_only") is not (not write_enabled):
+                raise PreflightError(
+                    "Microsoft Graph read_only must match its enabled Office write features"
+                )
 
 
 def _verify_provider_profiles(encoded: Any, required: set[str]) -> None:
@@ -3411,7 +4247,10 @@ def _verify_uami(client_id: Any) -> None:
 
 
 def _validate_account_center_config(
-    service: dict[str, Any], *, huggingface_enabled: bool = True
+    service: dict[str, Any],
+    *,
+    huggingface_enabled: bool = True,
+    microsoft_graph_office_v2_enabled: bool = False,
 ) -> None:
     """Keep GitHub credentials host-managed and make HF references explicitly optional."""
 
@@ -3482,6 +4321,96 @@ def _validate_account_center_config(
     for ref, env_name in expected.items():
         if refs.get(ref) != env_name:
             raise PreflightError(f"Account Center hostSecretRef mapping is missing for {ref}")
+    if microsoft_graph_office_v2_enabled:
+        graph_client_secret_ref = "microsoft-graph/client-secret"
+        graph_callback_key_ref = "account-center/caller-hmac-keys/microsoft-graph-callback"
+        graph_provider_key_ref = "account-center/caller-hmac-keys/microsoft-graph-provider"
+        graph_client_id = config.get("microsoft_graph_client_id")
+        graph_callback_caller = config.get("microsoft_graph_callback_caller_id")
+        graph_callback_uri = config.get("microsoft_graph_callback_uri")
+        graph_provider_caller = config.get("microsoft_graph_provider_caller_id")
+        graph_secret_ref = config.get("microsoft_graph_client_secret_ref")
+        expected_graph_host_refs = {
+            graph_client_secret_ref: "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CLIENT_SECRET",
+            graph_callback_key_ref: "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY",
+            graph_provider_key_ref: "CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY",
+        }
+        caller_key_refs = config.get("caller_key_refs")
+        if (
+            not isinstance(graph_client_id, str)
+            or not re.fullmatch(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                graph_client_id,
+            )
+            or graph_callback_uri != "http://localhost:52191/oauth/callback"
+            or graph_callback_caller != "microsoft-entra-callback"
+            or graph_provider_caller != "microsoft-graph-provider"
+            or graph_secret_ref != graph_client_secret_ref
+            or any(
+                refs.get(reference) != env_name
+                for reference, env_name in expected_graph_host_refs.items()
+            )
+            or not isinstance(caller_key_refs, dict)
+            or caller_key_refs.get(graph_callback_caller) != graph_callback_key_ref
+            or caller_key_refs.get(graph_provider_caller) != graph_provider_key_ref
+        ):
+            raise PreflightError(
+                "Account Center Graph OAuth must use its fixed localhost callback and dedicated client/caller secrets"
+            )
+        method_callers = config.get("method_callers", {})
+        if not isinstance(method_callers, dict):
+            raise PreflightError("Account Center Graph method caller map is malformed")
+        exchange_caller = config.get("exchange_caller_id")
+        expected_graph_roles = {
+            "begin_microsoft_graph_link": {exchange_caller},
+            "complete_microsoft_graph_link": {graph_callback_caller},
+            "begin_microsoft_graph_scope_upgrade": {exchange_caller},
+            "complete_microsoft_graph_scope_upgrade": {graph_callback_caller},
+            "update_microsoft_graph_v2_scope": {exchange_caller},
+            "list_provider_profiles": {exchange_caller, graph_provider_caller},
+            "redeem_provider_credential_lease": {
+                "github-issues-service",
+                "huggingface-provider",
+                graph_provider_caller,
+            },
+        }
+        if "redeem_provider_credential_lease" not in method_callers:
+            raise PreflightError(
+                "Account Center Graph lease redemption must preserve the existing GitHub/HF callers and add its provider"
+            )
+        for method, allowed_callers in expected_graph_roles.items():
+            if method in method_callers:
+                configured_callers = method_callers[method]
+                if (
+                    not isinstance(configured_callers, list)
+                    or any(not isinstance(caller, str) for caller in configured_callers)
+                    or len(configured_callers) != len(set(configured_callers))
+                    or set(configured_callers) != allowed_callers
+                ):
+                    raise PreflightError(
+                        f"Account Center Graph method callers are not exact for {method}"
+                    )
+        workspace_operator_refs = config.get("workspace_operator_profile_refs", [])
+        if (
+            not isinstance(workspace_operator_refs, list)
+            or any(
+                not isinstance(reference, str) or not reference
+                for reference in workspace_operator_refs
+            )
+            or len(workspace_operator_refs) != len(set(workspace_operator_refs))
+        ):
+            raise PreflightError("Account Center workspace-operator profile refs are malformed")
+    elif any(
+        config.get(field) is not None
+        for field in (
+            "microsoft_graph_client_id",
+            "microsoft_graph_client_secret_ref",
+            "microsoft_graph_callback_uri",
+            "microsoft_graph_callback_caller_id",
+            "microsoft_graph_provider_caller_id",
+        )
+    ):
+        raise PreflightError("Graph OAuth client refs must remain absent without Office v2")
     mappings = set(environment.get("CYRENE_SECRET_FILE_MAP", "").split(","))
     mapped_names = {part.split("=", 1)[0] for part in mappings if "=" in part}
     if any(name not in mapped_names for name in refs.values()):
@@ -3758,18 +4687,24 @@ def _validate_teams_connector_config(service: dict[str, Any], navigator: dict[st
         "bot_app_id",
         "tenant_id",
         "allowed_team_ids",
+        "personal_chat_enabled",
         "client_secret_env_ref",
         "service_url",
         "timeout_seconds",
     }
     navigator_environment = navigator.get("environment", {})
     team_ids = navigator_environment.get("TEAMS_ALLOWED_TEAM_IDS", "").split(",")
+    personal_flag = navigator_environment.get("CYRENE_TEAMS_PERSONAL_CHAT_ENABLED", "false")
+    if personal_flag not in {"false", "true"}:
+        raise PreflightError("Teams personal chat flag must be the exact lowercase true or false")
+    personal_chat_enabled = personal_flag == "true"
     if (
         set(config) - allowed_fields
         or config.get("binding_id") not in {None, environment.get("CYRENE_CAPABILITY_BINDING_ID")}
         or config.get("bot_app_id") != navigator_environment.get("TEAMS_BOT_APP_ID")
         or config.get("tenant_id") != navigator_environment.get("TEAMS_TENANT_ID")
         or config.get("allowed_team_ids") != team_ids
+        or config.get("personal_chat_enabled", False) is not personal_chat_enabled
         or config.get("client_secret_env_ref") != "TEAMS_BOT_CLIENT_SECRET"
     ):
         raise PreflightError(
@@ -4141,7 +5076,13 @@ def _validate_credential_notification_activation(
         raise PreflightError(
             "credential notification config must pin exactly the configured issued provider connections"
         )
-    short_names = {"huggingface": "hf", "azure": "azure", "gcp": "gcp", "runpod": "runpod"}
+    short_names = {
+        "huggingface": "hf",
+        "azure": "azure",
+        "gcp": "gcp",
+        "runpod": "runpod",
+        "microsoft_graph": "microsoft_graph",
+    }
     if not expected_provider_ids <= set(short_names):
         raise PreflightError("credential notification provider set is unsupported")
     provider_map = {short_names[provider]: provider for provider in sorted(expected_provider_ids)}
@@ -4477,12 +5418,32 @@ def _validate_compose(
     max_cpus: float,
     locked_images: set[str],
     ingress_exposure: str = "public-cutover",
+    connector_auth_phase: str | None = None,
 ) -> tuple[float, float]:
     """Enforce network exposure and aggregate cgroup limits from rendered Compose."""
 
     services = config.get("services")
     if not isinstance(services, dict):
         raise PreflightError("rendered Compose has no services")
+    exchange = services.get("exchange")
+    exchange_ports = exchange.get("ports", []) if isinstance(exchange, dict) else []
+    expected_office_setup_port = [
+        {
+            "host_ip": "127.0.0.1",
+            "published": str(OFFICE_OAUTH_SETUP_PORT),
+            "target": OFFICE_OAUTH_SETUP_PORT,
+            "protocol": "tcp",
+        }
+    ]
+    if connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+        if exchange_ports != expected_office_setup_port:
+            raise PreflightError(
+                "Graph bootstrap requires its one temporary Exchange OAuth loopback"
+            )
+    elif exchange_ports:
+        raise PreflightError(
+            "Exchange OAuth loopback must be absent outside Graph provider bootstrap"
+        )
     public_name = "teams-public-ingress"
     memory = 0
     cpus = 0.0
@@ -4501,7 +5462,22 @@ def _validate_compose(
             )
         ports = service.get("ports") or []
         if ports and name != public_name:
-            raise PreflightError(f"only the Teams public ingress may publish host ports ({name})")
+            expected_office_setup_port = [
+                {
+                    "host_ip": "127.0.0.1",
+                    "published": str(OFFICE_OAUTH_SETUP_PORT),
+                    "target": OFFICE_OAUTH_SETUP_PORT,
+                    "protocol": "tcp",
+                }
+            ]
+            if not (
+                name == "exchange"
+                and connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+                and ports == expected_office_setup_port
+            ):
+                raise PreflightError(
+                    f"only Teams ingress or the fixed temporary OAuth loopback may publish ports ({name})"
+                )
         if name == public_name:
             targets = {
                 int(row.get("target", 0)): (str(row.get("published", "")), row.get("host_ip"))
@@ -4592,8 +5568,13 @@ def _memory_headroom(
             raise PreflightError("stage 2 Cloud Management memory limit is unavailable")
         additional_mib = math.ceil(limit / MIB)
     elif mode == "connector-auth-readonly":
-        if connector_auth_phase == "provider-bootstrap":
-            for service_name in ("huggingface", "cloud-management-phase2"):
+        if connector_auth_phase in {"provider-bootstrap", "microsoft-graph-provider-bootstrap"}:
+            service_names = (
+                ("huggingface", "cloud-management-phase2")
+                if connector_auth_phase == "provider-bootstrap"
+                else ("microsoft-graph",)
+            )
+            for service_name in service_names:
                 service = config.get("services", {}).get(service_name)
                 limit = (
                     _memory_limit_bytes(service.get("mem_limit"))
@@ -4671,6 +5652,8 @@ def _validate_secrets_and_configs(
             )
     resolved_secrets = config.get("secrets", {})
     huggingface_enabled = _huggingface_enabled(config)
+    graph_office_scope = _exchange_graph_office_scope(config)
+    graph_office_enabled = isinstance(graph_office_scope, dict)
     present_huggingface_secrets = set(resolved_secrets) & HUGGINGFACE_OPTIONAL_SECRET_NAMES
     if huggingface_enabled and present_huggingface_secrets != HUGGINGFACE_OPTIONAL_SECRET_NAMES:
         raise PreflightError(
@@ -4678,6 +5661,13 @@ def _validate_secrets_and_configs(
         )
     if not huggingface_enabled and present_huggingface_secrets:
         raise PreflightError("GitHub-only Compose must not define Hugging Face secrets")
+    present_graph_office_secrets = set(resolved_secrets) & MICROSOFT_GRAPH_OFFICE_SECRET_NAMES
+    if graph_office_enabled and present_graph_office_secrets != MICROSOFT_GRAPH_OFFICE_SECRET_NAMES:
+        raise PreflightError(
+            "Graph Office OAuth requires its dedicated client and callback secrets"
+        )
+    if not graph_office_enabled and present_graph_office_secrets:
+        raise PreflightError("Graph OAuth secrets must stay absent outside the Office v2 scope")
     phase_secrets = {
         "cloud-management-exchange-hmac-key": {
             "stage2",
@@ -4794,6 +5784,7 @@ def _validate_secrets_and_configs(
         _secret_file(path, path.name)
     _validate_directory_database_urls(secrets_dir)
     _validate_internal_service_certificates(secrets_dir)
+    _validate_microsoft_graph_certificates(config, secrets_dir)
     _validate_computer_proxy_certificate(config, secrets_dir)
     _validate_exchange_authority_identity(config, secrets_dir)
     resolved_configs = config.get("configs", {})
@@ -4857,6 +5848,7 @@ def _validate_secrets_and_configs(
         _validate_account_center_config(
             account_center,
             huggingface_enabled=huggingface_enabled,
+            microsoft_graph_office_v2_enabled=graph_office_enabled,
         )
     cloud_service = config.get("services", {}).get("cloud-management-phase2")
     if isinstance(cloud_service, dict) and mode in {
@@ -4911,7 +5903,16 @@ def _validate_secrets_and_configs(
             expected_provider_ids = _expected_connector_providers(
                 config, mode, connector_auth_phase
             ) - {"github", "computer"}
-            _validate_new_provider_bindings_readonly(bindings_document, expected_provider_ids)
+            graph_office_scope = (
+                _exchange_graph_office_scope(config)
+                if "microsoft_graph" in expected_provider_ids
+                else None
+            )
+            _validate_new_provider_bindings_readonly(
+                bindings_document,
+                expected_provider_ids,
+                graph_office_scope=graph_office_scope,
+            )
             notification_inputs = _validate_credential_notification_activation(
                 config,
                 config_dir=config_dir,
@@ -5892,6 +6893,55 @@ def _validate_internal_service_certificates(secrets_dir: Path) -> None:
             raise PreflightError(f"{prefix} TLS certificate and private key do not match")
 
 
+def _validate_microsoft_graph_certificates(config: dict[str, Any], secrets_dir: Path) -> None:
+    """Verify Graph service/health/client leaf purpose, SAN, issuer, and key pairs."""
+
+    if "microsoft-graph" not in config.get("services", {}):
+        return
+    root = secrets_dir / "exchange-plugin-root-ca"
+    identities = (
+        ("microsoft-graph-server", "sslserver", "TLS Web Server Authentication", True),
+        ("microsoft-graph-health-client", "sslclient", "TLS Web Client Authentication", False),
+        (
+            "microsoft-graph-account-center-client",
+            "sslclient",
+            "TLS Web Client Authentication",
+            False,
+        ),
+    )
+    for prefix, purpose, expected_eku, needs_service_san in identities:
+        certificate = secrets_dir / f"{prefix}-cert"
+        private_key = secrets_dir / f"{prefix}-key"
+        _run(
+            [
+                "openssl",
+                "verify",
+                "-purpose",
+                purpose,
+                "-CAfile",
+                str(root),
+                str(certificate),
+            ]
+        )
+        eku = _run(
+            ["openssl", "x509", "-in", str(certificate), "-noout", "-ext", "extendedKeyUsage"]
+        )
+        if expected_eku not in eku:
+            raise PreflightError(f"{prefix} certificate has the wrong extended key usage")
+        certificate_text = _run(["openssl", "x509", "-in", str(certificate), "-noout", "-text"])
+        if needs_service_san:
+            if "DNS:microsoft-graph" not in certificate_text:
+                raise PreflightError("Microsoft Graph server certificate lacks its service DNS SAN")
+        elif "X509v3 Subject Alternative Name" in certificate_text:
+            raise PreflightError(f"{prefix} client certificate must not carry a DNS SAN")
+        certificate_public_key = _run(
+            ["openssl", "x509", "-in", str(certificate), "-pubkey", "-noout"]
+        )
+        private_key_public_key = _run(["openssl", "pkey", "-in", str(private_key), "-pubout"])
+        if certificate_public_key != private_key_public_key:
+            raise PreflightError(f"{prefix} certificate and private key do not match")
+
+
 def _validate_computer_proxy_certificate(config: dict[str, Any], secrets_dir: Path) -> None:
     """Verify the Caddy proxy leaf certificate, key pair, and Exchange-facing DNS SAN."""
 
@@ -6823,15 +7873,16 @@ def run_preflight(
     if mode == "connector-auth-readonly":
         if connector_auth_phase not in CONNECTOR_AUTH_READONLY_PHASES:
             raise PreflightError(
-                "connector auth phase must be provider-bootstrap or issued-connector-activation"
+                "connector auth phase must be provider bootstrap, Graph provider bootstrap, or issued activation"
             )
         if connector_auth_evidence is None or not connector_auth_task_id:
             raise PreflightError("connector auth evidence and its exact task ID are required")
         if huggingface_seed_file is None:
             raise PreflightError("the exact candidate HF seed path is required")
-        if connector_auth_phase == "provider-bootstrap" and (
-            notification_anchor_file is not None or notification_provenance_file is not None
-        ):
+        if connector_auth_phase in {
+            "provider-bootstrap",
+            "microsoft-graph-provider-bootstrap",
+        } and (notification_anchor_file is not None or notification_provenance_file is not None):
             raise PreflightError("provider bootstrap must not include notification anchor inputs")
         if connector_auth_phase == "issued-connector-activation" and (
             notification_anchor_file is None or notification_provenance_file is None
@@ -6881,6 +7932,11 @@ def run_preflight(
         row["localImage"] for row in image_lock_data.get("externalImages", {}).values()
     )
     config = _compose_config(docker_prefix, compose_files, env_files)
+    _validate_office_oauth_setup_mount(config, connector_auth_phase)
+    if connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and _automation_provider_ids(
+        config
+    ) != {"microsoft_graph"}:
+        raise PreflightError("Graph provider bootstrap must exclude Azure DevOps")
     cgroup_budget_mib, _cgroup_cpus = _validate_compose(
         config,
         mode,
@@ -6888,7 +7944,14 @@ def run_preflight(
         max_cpus,
         locked_images,
         ingress_exposure,
+        connector_auth_phase,
     )
+    if connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and (
+        len(config.get("services", {})) != 15 or cgroup_budget_mib != 3584 or _cgroup_cpus != 1.95
+    ):
+        raise PreflightError(
+            "Graph bootstrap must keep the exact 15-service 3584 MiB/1.95 CPU budget"
+        )
     if recovery_only:
         memory = {
             "status": "RECOVERY_CONFIGURATION_ONLY",
@@ -6925,6 +7988,7 @@ def run_preflight(
         config,
         config_dir=config_dir.resolve(),
         secrets_dir=secrets_dir.resolve(),
+        require_personal_delivery=connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
     )
     automation_providers_present = bool(_automation_provider_ids(config))
     navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})

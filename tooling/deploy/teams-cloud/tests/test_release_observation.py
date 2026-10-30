@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -284,6 +285,50 @@ def _stop_report(value: dict[str, Any]) -> tuple[bytes, bytes]:
     report_raw = _raw(report)
     _write(report_path, report_raw)
     return report_raw, sample
+
+
+def _versioned_profile_policy(
+    value: dict[str, Any], *, service_count: int, totals: dict[str, int]
+) -> dict[str, Any]:
+    """Re-seal a synthetic observer source profile with one exact version-2 budget."""
+
+    source_dir = Path(value["policy"]["sourceDirectory"])
+    contents = {name: (source_dir / name).read_bytes() for name in observation.FILES}
+    template = json.loads(contents[observation.POLICY])
+    template.update(
+        schemaVersion=2,
+        expectedServiceCount=service_count,
+        expectedTotals=totals,
+    )
+    contents[observation.POLICY] = _raw(template)
+    wrapper = contents[observation.WRAPPER].decode()
+    policy_sha = hashlib.sha256(contents[observation.POLICY]).hexdigest()
+    wrapper = re.sub(
+        r"EXPECTED_SERVICE_COUNT=[0-9]+", f"EXPECTED_SERVICE_COUNT={service_count}", wrapper
+    )
+    wrapper = re.sub(
+        r"EXPECTED_MEMORY_BYTES=[0-9]+",
+        f"EXPECTED_MEMORY_BYTES={totals['memoryBytes']}",
+        wrapper,
+    )
+    wrapper = re.sub(
+        r"EXPECTED_NANO_CPUS=[0-9]+",
+        f"EXPECTED_NANO_CPUS={totals['nanoCpus']}",
+        wrapper,
+    )
+    wrapper = re.sub(
+        r'EXPECTED_POLICY_SHA256="[0-9a-f]{64}"',
+        f'EXPECTED_POLICY_SHA256="{policy_sha}"',
+        wrapper,
+    )
+    contents[observation.WRAPPER] = wrapper.encode()
+    hashes = {name: hashlib.sha256(raw).hexdigest() for name, raw in contents.items()}
+    profile_sha = hashlib.sha256(_raw(hashes)).hexdigest()
+    profile_dir = source_dir.parent / profile_sha
+    profile_dir.mkdir(mode=0o700)
+    for name, raw in contents.items():
+        _write(profile_dir / name, raw)
+    return {"sourceDirectory": str(profile_dir), "sourceHashes": hashes}
 
 
 def _completed_run(value: dict[str, Any], *, fail_one_sample: bool = False) -> dict[str, Any]:
@@ -685,3 +730,29 @@ def test_wrapper_cannot_pin_a_different_observer_generation(harness: dict[str, A
         observation.start_post_deployment_observation(
             value["selectionPath"], value["releaseDir"], value["policy"]
         )
+
+
+def test_graph_observer_profile_v2_binds_15_services_to_the_approved_budget(
+    harness: dict[str, Any],
+) -> None:
+    value = harness
+    approved = {
+        "memoryBytes": 3584 * 1024**2,
+        "nanoCpus": 1_950_000_000,
+    }
+    policy = _versioned_profile_policy(value, service_count=15, totals=approved)
+    profile = observation._source_profile(policy)
+    assert profile["version"] == 2
+    assert profile["expectedServiceCount"] == 15
+    assert profile["expectedTotals"] == approved
+
+    over_budget = {
+        "memoryBytes": approved["memoryBytes"] + 1,
+        "nanoCpus": approved["nanoCpus"],
+    }
+    invalid_policy = _versioned_profile_policy(value, service_count=15, totals=over_budget)
+    with pytest.raises(
+        observation.ObservationBoundaryError,
+        match="OBSERVER_PROFILE_GATES_WEAKENED",
+    ):
+        observation._source_profile(invalid_policy)
