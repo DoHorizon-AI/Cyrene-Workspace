@@ -1002,6 +1002,7 @@ def test_credential_notice_overlay_is_optional_private_and_owner_scoped() -> Non
         "azure",
         "gcp",
         "runpod",
+        "microsoft_graph",
     ]
     destination_properties = schema["properties"]["destination"]["properties"]
     assert destination_properties["rootThreadId"]["pattern"] == "^0*[1-9][0-9]*$"
