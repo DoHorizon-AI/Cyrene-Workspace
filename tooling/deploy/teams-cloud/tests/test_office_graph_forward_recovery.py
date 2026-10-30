@@ -32,9 +32,7 @@ def _source_journal() -> tuple[dict[str, object], dict[str, object]]:
         "phase": recovery.st.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
         "targets": list(recovery.st.OFFICE_GRAPH_STAGE_TARGET_ORDER),
         "candidateServices": {
-            "account-center": {
-                "active": {"imageId": recovery.OLD_ACCOUNT_CENTER_IMAGE_ID}
-            }
+            "account-center": {"active": {"imageId": recovery.OLD_ACCOUNT_CENTER_IMAGE_ID}}
         },
     }
     progress = {
@@ -210,9 +208,7 @@ def test_core_recovery_receipt_binds_exact_normalized_fourteen_service_state() -
     """The source recovery journal must retain P and the restored AC identity exactly."""
 
     document = _core_recovery_journal()
-    receipt = recovery._validate_core_recovery_journal(
-        document, recovery.ORIGINAL_JOURNAL_SHA256
-    )
+    receipt = recovery._validate_core_recovery_journal(document, recovery.ORIGINAL_JOURNAL_SHA256)
     assert set(receipt["runtimeContainers"]) == set(recovery.st.RUNTIME_SERVICE_SET)
 
     bad = copy.deepcopy(document)
@@ -341,9 +337,7 @@ def test_candidate_preflight_accepts_one_declared_operator_outside_runtime_budge
             "_runtime_service_inventory",
             return_value={name: {} for name in runtime_names},
         ),
-        mock.patch.object(
-            recovery.st.preflight, "run_preflight", return_value=preflight_result
-        ),
+        mock.patch.object(recovery.st.preflight, "run_preflight", return_value=preflight_result),
     ):
         result = recovery._implementation_preflight(
             source=source,
@@ -440,9 +434,7 @@ def test_forward_source_database_receipt_allows_lease_churn_but_binds_profile_id
         "snapshotPath": "/private/account-center-before-forward.sqlite3",
         "snapshotSha256": "e" * 64,
     }
-    baseline = recovery._validate_source_database_evidence(
-        evidence, snapshot, live, database_path
-    )
+    baseline = recovery._validate_source_database_evidence(evidence, snapshot, live, database_path)
     assert baseline["profilesIdentitySha256"] == "c" * 64
 
     changed_profile = copy.deepcopy(live)
@@ -466,6 +458,7 @@ def test_private_snapshot_accepts_only_readonly_mode_0400_artifacts(tmp_path: Pa
     snapshot.chmod(0o600)
     with pytest.raises(recovery.ForwardRecoveryError):
         recovery._private_readonly_snapshot(snapshot, "fixture snapshot")
+
 
 def test_final_database_gate_allows_lease_row_churn_but_protects_schema_and_profiles() -> None:
     """Long-lived credential lease rows can change without weakening owner/scope checks."""

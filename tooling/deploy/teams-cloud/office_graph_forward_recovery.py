@@ -140,17 +140,13 @@ def _read_private_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _file_record(
-    path: Path, label: str, *, expected_uid: int | None = None
-) -> dict[str, str]:
+def _file_record(path: Path, label: str, *, expected_uid: int | None = None) -> dict[str, str]:
     _private_regular(path, label, expected_uid=expected_uid)
     resolved = path.resolve(strict=True)
     return {"path": str(resolved), "sha256": _sha256_file(resolved)}
 
 
-def _verify_file_record(
-    record: Any, label: str, *, expected_uid: int | None = None
-) -> Path:
+def _verify_file_record(record: Any, label: str, *, expected_uid: int | None = None) -> Path:
     if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
         raise ForwardRecoveryError(f"{label} plan reference is malformed")
     path_text = record.get("path")
@@ -249,8 +245,7 @@ def _validate_original_failure(
     )
     progress = journal.get("targetProgress")
     _require(
-        isinstance(progress, dict)
-        and set(progress) == set(st.OFFICE_GRAPH_STAGE_TARGET_ORDER),
+        isinstance(progress, dict) and set(progress) == set(st.OFFICE_GRAPH_STAGE_TARGET_ORDER),
         "source target journal is not the closed Graph bootstrap set",
     )
     persistence = progress[st.PERSISTENCE_IMAGE_UPDATE_TARGET]
@@ -343,10 +338,8 @@ def _validate_core_recovery_journal(
     restored_account_center = receipt.get("restoredAccountCenter")
     _require(
         isinstance(restored_account_center, dict)
-        and restored_account_center.get("containerId")
-        == containers["account-center"]["id"]
-        and restored_account_center.get("imageId")
-        == containers["account-center"]["imageId"]
+        and restored_account_center.get("containerId") == containers["account-center"]["id"]
+        and restored_account_center.get("imageId") == containers["account-center"]["imageId"]
         and restored_account_center.get("health") == "healthy",
         "core recovery Account Center identity is not the restored live container",
     )
@@ -630,9 +623,7 @@ def _require_no_gpu(compose: dict[str, Any]) -> None:
             raise ForwardRecoveryError(f"Graph bootstrap candidate requests a GPU for {name}")
 
 
-def _preflight_projection(
-    result: dict[str, Any], source: dict[str, Any]
-) -> dict[str, Any]:
+def _preflight_projection(result: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
     """Retain stable read-only preflight evidence and fixed budget values."""
 
     planned_inputs = source["candidatePreflight"]
@@ -653,9 +644,7 @@ def _preflight_projection(
         "fullCloudWriteDeploymentReady": result["fullCloudWriteDeploymentReady"],
         "lifecycleAcceptance": result["lifecycleAcceptance"],
         "expectedProviderScopeDigests": result["expectedProviderScopeDigests"],
-        "huggingfaceRepositoryScopeDigestSha256": result[
-            "huggingfaceRepositoryScopeDigestSha256"
-        ],
+        "huggingfaceRepositoryScopeDigestSha256": result["huggingfaceRepositoryScopeDigestSha256"],
         "notificationInputs": {
             key: value for key, value in result.items() if key.startswith("credentialNotification")
         },
@@ -675,7 +664,9 @@ def _render_candidate(
 
     override = _read_private_json(override_path, "fixed Account Center Compose override")
     _validate_fixed_override(override)
-    original_compose_files = [Path(row["path"]) for row in source["candidateInputs"]["composeFiles"]]
+    original_compose_files = [
+        Path(row["path"]) for row in source["candidateInputs"]["composeFiles"]
+    ]
     compose_files = [*original_compose_files, override_path]
     env_files = [Path(row["path"]) for row in source["candidateInputs"]["envFiles"]]
     original_lock_path = Path(source["candidateInputs"]["imageLock"]["path"])
@@ -693,12 +684,9 @@ def _render_candidate(
     )
     candidate_rows = st.runtime_update._image_rows_by_service(new_lock)
     _require(
-        st._service_image(
-            candidate_compose, st._lock_image_ids(new_lock), "account-center"
-        )
+        st._service_image(candidate_compose, st._lock_image_ids(new_lock), "account-center")
         == {"imageRef": FIXED_ACCOUNT_CENTER_IMAGE_REF, "imageId": FIXED_ACCOUNT_CENTER_IMAGE_ID}
-        and candidate_rows["account-center"]["sourceCommits"]["plugins"]
-        == FIXED_PLUGINS_COMMIT,
+        and candidate_rows["account-center"]["sourceCommits"]["plugins"] == FIXED_PLUGINS_COMMIT,
         "rendered Account Center candidate differs from the exact fixed image lock",
     )
     _require(
@@ -787,18 +775,25 @@ def _capture_context(
     ).resolve(strict=True)
     _require(
         source_journal_path.resolve(strict=True) == expected_journal_path
-        and Path(source_journal["planPath"]).resolve(strict=True) == source_path.resolve(strict=True),
+        and Path(source_journal["planPath"]).resolve(strict=True)
+        == source_path.resolve(strict=True),
         "original plan and full journal paths do not resolve to the same operation",
     )
     core_path = _verify_file_record(records["coreRecoveryJournal"], "core recovery journal")
     core_document = _read_private_json(core_path, "core recovery journal")
     core_receipt = _validate_core_recovery_journal(core_document, source_journal_sha)
-    database_path = _verify_file_record(records["databaseEvidence"], "Account Center database evidence")
+    database_path = _verify_file_record(
+        records["databaseEvidence"], "Account Center database evidence"
+    )
     database_evidence = _read_private_json(database_path, "Account Center database evidence")
-    migration_path = _verify_file_record(records["migrationEvidence"], "Account Center migration evidence")
+    migration_path = _verify_file_record(
+        records["migrationEvidence"], "Account Center migration evidence"
+    )
     migration_evidence = _read_private_json(migration_path, "Account Center migration evidence")
     _validate_migration_evidence(migration_evidence, database_evidence)
-    override_path = _verify_file_record(records["fixedAcOverride"], "fixed Account Center Compose override")
+    override_path = _verify_file_record(
+        records["fixedAcOverride"], "fixed Account Center Compose override"
+    )
     override = _read_private_json(override_path, "fixed Account Center Compose override")
     _validate_fixed_override(override)
     lock_path = _verify_file_record(records["candidateImageLock"], "candidate image lock")
@@ -814,9 +809,7 @@ def _capture_context(
 
     docker = source["policy"]["dockerPrefix"]
     st.runtime_update._validate_docker_prefix(docker)
-    source_lock = st.runtime_update._load_lock(
-        Path(source["candidateInputs"]["imageLock"]["path"])
-    )
+    source_lock = st.runtime_update._load_lock(Path(source["candidateInputs"]["imageLock"]["path"]))
     candidate_lock = st.runtime_update._load_lock(lock_path)
     _validate_candidate_lock_delta(source_lock, candidate_lock)
     inventory, containers = core_recovery._inventory(source["project"], docker)
@@ -827,8 +820,7 @@ def _capture_context(
     for name, container in containers.items():
         health = container.get("State", {}).get("Health", {}).get("Status")
         _require(
-            container.get("State", {}).get("Running") is True
-            and health in (None, "healthy"),
+            container.get("State", {}).get("Running") is True and health in (None, "healthy"),
             f"live {name} service is not healthy",
         )
     database_baseline, live_database = _database_baseline(database_evidence, containers)
@@ -889,7 +881,10 @@ def _active_service_rows(source: dict[str, Any], context: dict[str, Any]) -> dic
             "health": health,
             "networkNames": sorted(network_settings),
         }
-    _require(set(rows) == set(st.RUNTIME_SERVICE_SET), "live mixed inventory is not the exact 14 services")
+    _require(
+        set(rows) == set(st.RUNTIME_SERVICE_SET),
+        "live mixed inventory is not the exact 14 services",
+    )
     return rows
 
 
@@ -1152,8 +1147,7 @@ def _validate_plan_inputs(plan: dict[str, Any], expected: str) -> dict[str, Any]
         and context["databaseBaseline"] == expected_baseline["accountCenterDatabase"]
         and context["controls"][0] == expected_baseline["edge"]
         and context["controls"][1] == expected_baseline["navigator"]
-        and context["source"]["activeSelection"]["sha256"]
-        == expected_baseline["selectorSha256"]
+        and context["source"]["activeSelection"]["sha256"] == expected_baseline["selectorSha256"]
         and context["candidatePreflight"] == expected_baseline["candidatePreflight"],
         "live baseline or fresh provider proof changed after the plan was prepared",
     )
@@ -1298,9 +1292,9 @@ def apply_forward_plan(args: argparse.Namespace) -> dict[str, Any]:
             journal["officeGraphForwardRecovery"]["persistenceSnapshotSha256"] = snapshot.get(
                 "backupSha256"
             )
-            journal["officeGraphForwardRecovery"]["persistenceSchemaSha256"] = preserved_persistence[
-                "schemaSha256"
-            ]
+            journal["officeGraphForwardRecovery"]["persistenceSchemaSha256"] = (
+                preserved_persistence["schemaSha256"]
+            )
             st._write_journal(journal_path, journal, "FORWARD_PRESERVED_PERSISTENCE_VERIFIED")
 
             # ── Phase 2: Apply only the remaining Graph bootstrap tail ───────
@@ -1338,12 +1332,12 @@ def apply_forward_plan(args: argparse.Namespace) -> dict[str, Any]:
                         isinstance(container_raw, list) and len(container_raw) == 1,
                         "migrated Account Center container inspection is ambiguous",
                     )
-                    journal["officeGraphForwardRecovery"][
-                        "accountCenterDatabaseAfterMigration"
-                    ] = _read_migrated_account_center(
-                        container_raw[0],
-                        context["databaseBaseline"]["databasePath"],
-                        before_profiles,
+                    journal["officeGraphForwardRecovery"]["accountCenterDatabaseAfterMigration"] = (
+                        _read_migrated_account_center(
+                            container_raw[0],
+                            context["databaseBaseline"]["databasePath"],
+                            before_profiles,
+                        )
                     )
                     st._write_journal(journal_path, journal, "ACCOUNT_CENTER_V9_READBACK_VERIFIED")
                 elif service == "exchange":
@@ -1438,9 +1432,7 @@ def apply_forward_plan(args: argparse.Namespace) -> dict[str, Any]:
                 journal_path=journal_path,
                 docker_prefix=docker,
             )
-            delivery = st._verify_final_delivery_readback(
-                journal=journal, docker_prefix=docker
-            )
+            delivery = st._verify_final_delivery_readback(journal=journal, docker_prefix=docker)
             journal["edge"]["latestDeadCount"] = delivery["dead_count"]
             journal["officeGraphForwardRecovery"]["state"] = FORWARD_APPLIED_STATE
             journal["officeGraphForwardRecovery"]["selector"] = st._selection_summary(selection)
