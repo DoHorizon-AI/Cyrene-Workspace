@@ -260,6 +260,7 @@ def test_preflight_projection_ignores_only_the_host_fronted_check_timestamp() ->
     first = {
         "mode": "connector-auth-readonly",
         "connectorAuthPhase": recovery.st.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "serviceCount": 16,
         "hostFrontedIngressReadiness": {
             "status": "HOST_FRONTED_STAGING_READY",
             "checkedAtUtc": "2026-10-30T12:00:00Z",
@@ -279,7 +280,10 @@ def test_preflight_projection_ignores_only_the_host_fronted_check_timestamp() ->
             "ingressExposure": "host-fronted-staging",
             "hostCaddyBinary": "/usr/local/bin/caddy",
             "opensslBinary": "openssl",
-        }
+        },
+        "runtimeConfigIdentity": {
+            "candidate": {name: [] for name in recovery.st.OFFICE_GRAPH_RUNTIME_SERVICE_SET}
+        },
     }
     second = copy.deepcopy(first)
     second["hostFrontedIngressReadiness"]["checkedAtUtc"] = "2026-10-30T12:05:00Z"
@@ -291,6 +295,84 @@ def test_preflight_projection_ignores_only_the_host_fronted_check_timestamp() ->
     assert recovery._preflight_projection(first, source) != recovery._preflight_projection(
         second, source
     )
+
+    projected = recovery._preflight_projection(first, source)
+    assert projected["declaredComposeServiceCount"] == 16
+    assert projected["runtimeServiceCount"] == 15
+
+
+def test_candidate_preflight_accepts_one_declared_operator_outside_runtime_budget() -> None:
+    """The temporary directory operator is declared in Compose but is not a runtime service."""
+
+    runtime_names = set(recovery.st.OFFICE_GRAPH_RUNTIME_SERVICE_SET)
+    candidate_compose = {
+        "services": {**{name: {} for name in runtime_names}, "directory-operator": {}}
+    }
+    source = {
+        "candidateInputs": {
+            "huggingfaceSeed": {"path": "/private/hf-seed"},
+            "runpodKey": None,
+            "envFiles": [],
+            "notificationAnchor": None,
+            "notificationProvenance": None,
+        },
+        "activeSecretsDir": "/private/secrets",
+        "candidateConfigDir": "/private/config",
+        "policy": {"dockerPrefix": ["docker"]},
+        "candidatePreflight": {
+            "ingressExposure": "host-fronted-staging",
+            "hostCaddyBinary": "/usr/local/bin/caddy",
+            "opensslBinary": "openssl",
+        },
+    }
+    preflight_result = {
+        "mode": "connector-auth-readonly",
+        "connectorAuthPhase": recovery.st.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "credentialReadOnlyRuntimeReady": True,
+        "fullCloudWriteDeploymentReady": False,
+        "lifecycleAcceptance": "NOT_RUN",
+        "composeCgroupMemoryLimitMiB": recovery.MAX_MEMORY_MIB,
+        "composeCgroupCpuLimit": recovery.MAX_CPUS,
+        "serviceCount": 16,
+    }
+    with (
+        mock.patch.object(
+            recovery.st,
+            "_runtime_service_inventory",
+            return_value={name: {} for name in runtime_names},
+        ),
+        mock.patch.object(
+            recovery.st.preflight, "run_preflight", return_value=preflight_result
+        ),
+    ):
+        result = recovery._implementation_preflight(
+            source=source,
+            candidate_compose=candidate_compose,
+            candidate_compose_files=[Path("/private/candidate.json")],
+            candidate_lock_path=Path("/private/image-lock.json"),
+            auth_path=Path("/private/auth.json"),
+            auth_task_id="office-forward-auth-20261030",
+        )
+    assert result["serviceCount"] == 16
+
+    invalid = {**preflight_result, "serviceCount": 15}
+    with (
+        mock.patch.object(
+            recovery.st,
+            "_runtime_service_inventory",
+            return_value={name: {} for name in runtime_names},
+        ),
+        mock.patch.object(recovery.st.preflight, "run_preflight", return_value=invalid),
+        pytest.raises(recovery.ForwardRecoveryError),
+    ):
+        recovery._implementation_preflight(
+            source=source,
+            candidate_compose=candidate_compose,
+            candidate_compose_files=[Path("/private/candidate.json")],
+            candidate_lock_path=Path("/private/image-lock.json"),
+            auth_path=Path("/private/auth.json"),
+            auth_task_id="office-forward-auth-20261030",
+        )
 
 
 def test_fixed_migration_proof_requires_an_isolated_repeated_v8_to_v9_pass() -> None:
