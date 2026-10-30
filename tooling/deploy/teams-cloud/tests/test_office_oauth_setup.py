@@ -47,6 +47,7 @@ ENABLED_FEATURES = {
     "mailSendEnabled": False,
     "sharePointDriveMetadataEnabled": True,
 }
+EXCHANGE_PROFILE_ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,299}$")
 
 
 def status_document(
@@ -92,7 +93,7 @@ def operator_context() -> setup.OperatorContext:
         subject=SUBJECT,
         organization_id=ORGANIZATION,
         workspace_id=WORKSPACE,
-        binding_ref="microsoft-graph/office-owner",
+        binding_ref="microsoft-graph.office-owner",
         profile_idempotency_key="office-owner-test-link",
     )
 
@@ -237,6 +238,8 @@ def test_operator_template_matches_exact_private_schema_shape() -> None:
     assert schema["additionalProperties"] is False
     assert set(template) == {"schemaVersion", "actor", "bindingRef", "profileIdempotencyKey"}
     assert set(template["actor"]) == {"issuer", "subject", "organizationId", "workspaceId"}
+    assert template["bindingRef"] == operator_context().binding_ref
+    assert EXCHANGE_PROFILE_ALIAS_RE.fullmatch(template["bindingRef"])
     serialized = json.dumps(template).casefold()
     assert "token" not in serialized
     assert "secret" not in serialized
