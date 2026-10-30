@@ -46,6 +46,7 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `runtime_update.py` | Owner-confirmed, drain-aware Navigator/Exchange update plan, apply, rollback recovery, and status / 需 owner 明确应用的 Navigator/Exchange 排空热更新计划、回滚恢复与状态查询 |
 | `persistence_forward_recovery.py`, [`PERSISTENCE_FORWARD_RECOVERY.md`](PERSISTENCE_FORWARD_RECOVERY.md) | One-shot, exact-image/source migration proof and explicit forward-only recovery for the pinned Persistence schema-gate failure / 针对固定 Persistence schema 门禁故障的一次性精确镜像/源码迁移证明与显式向前恢复 |
 | `account_center_core_recovery.py` | Restore only the old Account Center after a proven, unmigrated v8 Graph-bootstrap failure; retain upgraded Persistence and record the mixed runtime / 仅在证明仍为 v8 时恢复旧授权服务，保留新 Persistence 并明确记录混合运行状态 |
+| `office_graph_forward_recovery.py` | One-shot forward continuation from the exact restored mixed Graph-bootstrap state; preserve applied Persistence and promote only after the fixed AC migration, full health, and resource readback / 从精确恢复后的混合 Graph 引导状态一次性前向续跑；保留已应用的 Persistence，并在固定 AC 迁移、完整健康与资源回读通过后才提升 selector |
 | `host_fronted_canary.py` | Read-only readiness gate for an existing host Caddy front and the private locked ingress / 现有宿主机 Caddy 与锁定私有 ingress 的只读就绪门禁 |
 | `plugin_grpc_health_probe.py` | Verify private DirectPluginRuntime mTLS health and plugin identity / 通过内网 mTLS 核验 DirectPluginRuntime 健康状态与插件身份 |
 | `acceptance_budget.py` | Legacy CLI resource lifecycle runner for unrelated task IDs; rejects CLI mutation plans for this task / 供其他 task ID 使用的旧版 CLI 生命周期 runner；本任务会拒绝 CLI 资源变更计划 |
