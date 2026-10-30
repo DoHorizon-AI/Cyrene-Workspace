@@ -579,13 +579,20 @@ def _page_session(port: int) -> tuple[str, str, str]:
     response = connection.getresponse()
     assert response.status == HTTPStatus.SEE_OTHER
     assert response.getheader("Location") == f"http://localhost:{port}/"
+    assert response.getheader("Referrer-Policy") == "no-referrer"
     response.read()
     connection.request("GET", "/", headers={"Host": f"localhost:{port}"})
     response = connection.getresponse()
     page = response.read().decode("utf-8")
     assert response.status == HTTPStatus.OK
-    assert "default-src 'none'" in response.getheader("Content-Security-Policy", "")
-    assert "connect-src 'self'" in response.getheader("Content-Security-Policy", "")
+    assert response.getheader("Referrer-Policy") == "same-origin"
+    csp = response.getheader("Content-Security-Policy", "")
+    assert "default-src 'none'" in csp
+    assert "connect-src 'self'" in csp
+    form_action = next(
+        part.strip() for part in csp.split(";") if part.strip().startswith("form-action ")
+    )
+    assert form_action == "form-action 'self' https://login.microsoftonline.com"
     cookie = response.getheader("Set-Cookie").split(";", maxsplit=1)[0]
     csrf = re.search(r'name="csrf" value="([^"]+)"', page)
     assert csrf is not None
@@ -629,6 +636,24 @@ def test_loopback_accepts_localhost_and_127_but_requires_matching_origin_and_csr
         mismatched.read()
         assert bridge.calls == []
 
+        for external_origin in ("https://attacker.example", "null"):
+            connection.request(
+                "POST",
+                "/api/discover",
+                body=json.dumps({"csrf": csrf, "resourceType": "todo_lists"}),
+                headers={
+                    "Host": f"localhost:{port}",
+                    "Origin": external_origin,
+                    "Cookie": cookie,
+                    "Content-Type": "application/json",
+                    "X-Cyrene-CSRF": csrf,
+                },
+            )
+            external = connection.getresponse()
+            assert external.status == HTTPStatus.FORBIDDEN
+            external.read()
+            assert bridge.calls == []
+
         connection.request(
             "POST",
             "/api/discover",
@@ -662,6 +687,68 @@ def test_loopback_accepts_localhost_and_127_but_requires_matching_origin_and_csr
         result = json.loads(accepted.read().decode("utf-8"))
         assert accepted.status == HTTPStatus.OK
         assert result["items"][0]["id"] == "todo-1"
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_reused_homepage_keeps_same_origin_referrer_policy_and_api_stays_no_referrer() -> None:
+    """Limit same-origin referrers to page GETs while API responses stay no-referrer."""
+
+    bridge = FakeBridge()
+    server, thread, port = _start_server(bridge)
+    try:
+        cookie, _csrf, _page = _page_session(port)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.request("GET", "/", headers={"Host": f"localhost:{port}", "Cookie": cookie})
+        page = connection.getresponse()
+        assert page.status == HTTPStatus.OK
+        assert page.getheader("Referrer-Policy") == "same-origin"
+        assert "https://login.microsoftonline.com" in page.getheader("Content-Security-Policy", "")
+        page.read()
+
+        connection.request(
+            "GET", "/api/status", headers={"Host": f"localhost:{port}", "Cookie": cookie}
+        )
+        status = connection.getresponse()
+        assert status.status == HTTPStatus.OK
+        assert status.getheader("Referrer-Policy") == "no-referrer"
+        status.read()
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_authorize_form_rejects_null_and_external_origin_before_cli() -> None:
+    """Keep the native authorize form fail-closed for null and foreign origins."""
+
+    bridge = FakeBridge()
+    server, thread, port = _start_server(bridge)
+    try:
+        cookie, csrf, _page = _page_session(port)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        form = urllib.parse.urlencode({"csrf": csrf})
+        for origin in ("null", "https://attacker.example"):
+            connection.request(
+                "POST",
+                "/authorize",
+                body=form,
+                headers={
+                    "Host": f"localhost:{port}",
+                    "Origin": origin,
+                    "Cookie": cookie,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Content-Length": str(len(form)),
+                },
+            )
+            rejected = connection.getresponse()
+            assert rejected.status == HTTPStatus.FORBIDDEN
+            assert json.loads(rejected.read().decode("utf-8")) == {"error": "origin_not_allowed"}
+            assert bridge.calls == []
         connection.close()
     finally:
         server.shutdown()
@@ -708,6 +795,7 @@ def test_callback_redirect_clears_code_and_state_and_only_cli_receives_them() ->
         callback_body = callback.read().decode("utf-8")
         assert callback.status == HTTPStatus.SEE_OTHER
         assert callback.getheader("Location") == "/"
+        assert callback.getheader("Referrer-Policy") == "no-referrer"
         assert "state-secret-123" not in callback_body
         assert "code-secret-456" not in callback_body
         assert "state-secret-123" not in callback.getheader("Location")
