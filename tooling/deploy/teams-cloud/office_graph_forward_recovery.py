@@ -601,6 +601,7 @@ def _implementation_preflight(
         and result.get("credentialReadOnlyRuntimeReady") is True
         and result.get("fullCloudWriteDeploymentReady") is False
         and result.get("lifecycleAcceptance") == "NOT_RUN"
+        and result.get("serviceCount") == MAX_RUNTIME_SERVICES
         and result.get("composeCgroupMemoryLimitMiB") == MAX_MEMORY_MIB
         and result.get("composeCgroupCpuLimit") == MAX_CPUS,
         "fresh read-only preflight did not prove the fixed 15-service resource budget",
@@ -627,9 +628,12 @@ def _require_no_gpu(compose: dict[str, Any]) -> None:
             raise ForwardRecoveryError(f"Graph bootstrap candidate requests a GPU for {name}")
 
 
-def _preflight_projection(result: dict[str, Any]) -> dict[str, Any]:
+def _preflight_projection(
+    result: dict[str, Any], source: dict[str, Any]
+) -> dict[str, Any]:
     """Retain stable read-only preflight evidence and fixed budget values."""
 
+    planned_inputs = source["candidatePreflight"]
     host_fronted = result.get("hostFrontedIngressReadiness")
     if isinstance(host_fronted, dict):
         host_fronted = copy.deepcopy(host_fronted)
@@ -637,9 +641,9 @@ def _preflight_projection(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "mode": result["mode"],
         "phase": result["connectorAuthPhase"],
-        "ingressExposure": result["ingressExposure"],
-        "hostCaddyBinary": result["hostCaddyBinary"],
-        "opensslBinary": result["opensslBinary"],
+        "ingressExposure": planned_inputs["ingressExposure"],
+        "hostCaddyBinary": planned_inputs["hostCaddyBinary"],
+        "opensslBinary": planned_inputs["opensslBinary"],
         "hostFrontedIngressReadiness": host_fronted,
         "credentialReadOnlyRuntimeReady": result["credentialReadOnlyRuntimeReady"],
         "fullCloudWriteDeploymentReady": result["fullCloudWriteDeploymentReady"],
@@ -851,7 +855,7 @@ def _capture_context(
         "candidateCompose": candidate_compose,
         "candidateLock": candidate_lock,
         "candidateComposeFiles": compose_files,
-        "candidatePreflight": _preflight_projection(preflight_result),
+        "candidatePreflight": _preflight_projection(preflight_result, source),
     }
 
 

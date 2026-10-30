@@ -260,9 +260,6 @@ def test_preflight_projection_ignores_only_the_host_fronted_check_timestamp() ->
     first = {
         "mode": "connector-auth-readonly",
         "connectorAuthPhase": recovery.st.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-        "ingressExposure": "host-fronted-staging",
-        "hostCaddyBinary": "/usr/local/bin/caddy",
-        "opensslBinary": "openssl",
         "hostFrontedIngressReadiness": {
             "status": "HOST_FRONTED_STAGING_READY",
             "checkedAtUtc": "2026-10-30T12:00:00Z",
@@ -277,12 +274,23 @@ def test_preflight_projection_ignores_only_the_host_fronted_check_timestamp() ->
         "composeCgroupMemoryLimitMiB": recovery.MAX_MEMORY_MIB,
         "composeCgroupCpuLimit": recovery.MAX_CPUS,
     }
+    source = {
+        "candidatePreflight": {
+            "ingressExposure": "host-fronted-staging",
+            "hostCaddyBinary": "/usr/local/bin/caddy",
+            "opensslBinary": "openssl",
+        }
+    }
     second = copy.deepcopy(first)
     second["hostFrontedIngressReadiness"]["checkedAtUtc"] = "2026-10-30T12:05:00Z"
-    assert recovery._preflight_projection(first) == recovery._preflight_projection(second)
+    assert recovery._preflight_projection(first, source) == recovery._preflight_projection(
+        second, source
+    )
 
     second["hostFrontedIngressReadiness"]["publicTls"] = "FAIL"
-    assert recovery._preflight_projection(first) != recovery._preflight_projection(second)
+    assert recovery._preflight_projection(first, source) != recovery._preflight_projection(
+        second, source
+    )
 
 
 def test_fixed_migration_proof_requires_an_isolated_repeated_v8_to_v9_pass() -> None:
