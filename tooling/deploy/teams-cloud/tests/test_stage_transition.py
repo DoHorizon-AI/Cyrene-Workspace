@@ -1047,7 +1047,7 @@ def test_graph_bootstrap_config_directory_guard_requires_separate_candidate() ->
 
 
 def test_account_center_image_update_requires_its_closed_schema_state() -> None:
-    """Reject an AC image target unless its issued-phase database/budget proof is sealed."""
+    """Require a sealed database/budget proof in either supported selected Graph phase."""
 
     required_fields = {
         "schemaVersion",
@@ -1096,6 +1096,17 @@ def test_account_center_image_update_requires_its_closed_schema_state() -> None:
         stage_transition._validate_plan(
             plan(phase="issued-connector-activation", include_state=False)
         )
+    try:
+        stage_transition._validate_plan(
+            plan(
+                phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+                include_state=True,
+            )
+        )
+    except stage_transition.StageTransitionError as error:
+        assert "unsupported closed schema" not in str(error)
+    else:
+        pytest.fail("incomplete Graph-phase AC plan passed the remaining closed validation")
     with pytest.raises(stage_transition.StageTransitionError, match="unsupported closed schema"):
         stage_transition._validate_plan(plan(phase="provider-bootstrap", include_state=True))
     with pytest.raises(stage_transition.StageTransitionError, match="unsupported closed schema"):
@@ -1715,15 +1726,19 @@ def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
     assert all(row["configChanged"] is False and row["added"] is False for row in images.values())
 
 
-def test_account_center_image_update_is_one_issued_graph_target_only(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
+def test_account_center_image_update_is_one_selected_graph_phase_target_only(
+    phase: str, tmp_path: Path
 ) -> None:
-    """Permit one Account Center image change only on the exact 15-service Graph runtime."""
+    """Permit one AC image change in either exact Graph phase without changing selector phase."""
 
     active, candidate, active_lock, candidate_lock = _full_account_center_image_update(tmp_path)
     target = stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
     targets, images = stage_transition._validate_phase_topology(
-        phase="issued-connector-activation",
+        phase=phase,
         image_update_target=target,
         active=active,
         candidate=candidate,
@@ -1741,7 +1756,20 @@ def test_account_center_image_update_is_one_issued_graph_target_only(
 
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="Account Center image updates require issued-connector-activation",
+        match="Hugging Face image updates require issued-connector-activation",
+    ):
+        stage_transition._validate_phase_topology(
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target="huggingface",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Account Center image updates require the selected Graph bootstrap or issued activation phase",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -1758,7 +1786,7 @@ def test_account_center_image_update_is_one_issued_graph_target_only(
         match="image update may change only its selected service image",
     ):
         stage_transition._validate_phase_topology(
-            phase="issued-connector-activation",
+            phase=phase,
             image_update_target=target,
             active=active,
             candidate=candidate,
@@ -4476,11 +4504,29 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
         runtime_config_identity=identity,
     )
 
+    graph_bootstrap_selection = copy.deepcopy(selection)
+    graph_bootstrap_selection["document"]["phase"] = (
+        stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    )
+    stage_transition._validate_image_update_selection_contract(
+        target=stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        project="cyrene-teams-cloud",
+        selection_record=graph_bootstrap_selection,
+        selection_path="/private/runtime-selection.json",
+        active_config_dir="/private/config",
+        candidate_config_dir="/private/config",
+        active_secrets_dir="/private/secrets",
+        active_inputs=active_inputs,
+        candidate_inputs=candidate_inputs,
+        runtime_config_identity=identity,
+    )
+
     bootstrap_selection = copy.deepcopy(selection)
     bootstrap_selection["document"]["phase"] = "provider-bootstrap"
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="Account Center image updates require issued-connector-activation",
+        match="Account Center image updates require the selected Graph bootstrap or issued activation phase",
     ):
         stage_transition._validate_image_update_selection_contract(
             target=stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
@@ -7283,6 +7329,213 @@ def _github_image_readiness_fixture(
     return snapshot, compose
 
 
+def _account_center_unissued_graph_readiness_fixture(
+    tmp_path: Path, *, phase: str = "issued-connector-activation"
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, str]]:
+    """Build 14 existing non-Graph connections plus a configured but unissued Graph binding."""
+
+    snapshot, compose = _github_image_readiness_fixture(tmp_path)
+    snapshot["profiles"] = [row for row in snapshot["profiles"] if row["providerId"] != "computer"]
+    snapshot["connections"] = [
+        row for row in snapshot["connections"] if row["providerId"] != "computer"
+    ]
+    snapshot["bindings"] = [row for row in snapshot["bindings"] if row["providerId"] != "computer"]
+    snapshot["catalog"]["items"] = [
+        row for row in snapshot["catalog"]["items"] if row["providerId"] != "computer"
+    ]
+    compose["services"].pop("computer-runtime", None)
+
+    cloud_service = compose["services"]["cloud-management-phase2"]
+    cloud_document = json.loads(
+        cloud_service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"]
+    )
+    cloud_document["profiles"].append(
+        {
+            "provider": "runpod",
+            "profile_ref": "runpod-primary",
+            "identity_ref": "runpod-identity",
+            "read_only": True,
+        }
+    )
+    cloud_service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(
+        cloud_document
+    )
+
+    exchange_service = compose["services"]["exchange"]
+    exchange_document = json.loads(
+        exchange_service["environment"]["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"]
+    )
+    exchange_profiles = exchange_document["authorizationCloud"]["profiles"]
+    exchange_profiles["runpod-primary"] = {
+        "provider": "runpod",
+        "identityRef": "runpod-identity",
+        "accessMode": "workspace_operator",
+        "targets": {"runpod-read": {"targetRef": "runpod-target"}},
+    }
+
+    runpod_connection_ref = "55555555-5555-4555-8555-555555555555"
+    runpod_tool = {
+        "toolId": preflight.CONNECTOR_OPERATION_POLICIES["cloud.resources.list"][0],
+        "operationId": "cloud.resources.list",
+        "resourceProjection": preflight.CONNECTOR_OPERATION_POLICIES["cloud.resources.list"][1],
+        "mutating": False,
+    }
+    runpod_binding = {
+        "bindingId": f"exchange-runpod-{runpod_connection_ref}",
+        "connectionRef": runpod_connection_ref,
+        "providerId": "runpod",
+        "profileRef": "runpod-primary",
+        "tools": [runpod_tool],
+    }
+    snapshot["profiles"].append(
+        {
+            "profileRef": "runpod-primary",
+            "profileAlias": "runpod-primary",
+            "providerId": "runpod",
+            "accessMode": "workspace_operator",
+            "targetScope": {"targets": {"runpod-read": {"targetRef": "runpod-target"}}},
+            "readOnly": True,
+        }
+    )
+    snapshot["connections"].append(
+        {
+            "connectionRef": runpod_connection_ref,
+            "providerId": "runpod",
+            "profileRef": "runpod-primary",
+            "profileAlias": "runpod-primary",
+            "targetAlias": "runpod-read",
+            "accessMode": "workspace_operator",
+            "readOnly": True,
+            "targetScope": {"targetAlias": "runpod-read", "targetRef": "runpod-target"},
+        }
+    )
+    snapshot["bindings"].append(runpod_binding)
+    snapshot["catalog"]["items"].append(
+        {
+            "bindingId": runpod_binding["bindingId"],
+            "capabilityId": "tool.provider.v1",
+            "providerId": "runpod",
+            "connectionRef": runpod_connection_ref,
+            "profileRef": "runpod-primary",
+            "tools": [
+                {
+                    "id": runpod_tool["toolId"],
+                    "name": "List RunPod resources",
+                    "description": "List resources within the issued RunPod profile.",
+                    "readOnly": True,
+                    "inputSchema": {"type": "object", "additionalProperties": False},
+                }
+            ],
+        }
+    )
+
+    graph_scope = {
+        "schemaVersion": 2,
+        "tenantId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "workspaceId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "enabledFeatures": {
+            "plannerEnabled": True,
+            "todoEnabled": False,
+            "calendarEnabled": False,
+            "mailMetadataEnabled": False,
+            "mailDraftsEnabled": False,
+            "mailSendEnabled": False,
+            "sharePointDriveMetadataEnabled": False,
+        },
+        "targets": {
+            "plannerPlanIds": [],
+            "sharePointSiteIds": [],
+            "sharePointListIds": [],
+            "sharePointDriveIds": [],
+            "toDoTaskListIds": [],
+            "calendarIds": [],
+            "mailFolderIds": [],
+            "freebusySubjects": [],
+        },
+    }
+    provider_flags = {
+        provider_name: graph_scope["enabledFeatures"][host_name]
+        for host_name, provider_name in preflight.GRAPH_OFFICE_HOST_TO_PROVIDER_FLAGS.items()
+    }
+    compose["services"]["microsoft-graph"] = {
+        "environment": {
+            "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+                {"officeV2": provider_flags, "read_only": False}
+            )
+        }
+    }
+    exchange_profiles["microsoft-graph.office-owner"] = {
+        "provider": "microsoft_graph",
+        "accessMode": "actor_owned",
+        "directPlugin": {"connectionRef": "grpcs://microsoft-graph:7443", "transport": "mtls"},
+        "officeV2": graph_scope,
+    }
+    exchange_service["environment"]["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"] = json.dumps(
+        exchange_document
+    )
+
+    graph_connection_ref = "66666666-6666-4666-8666-666666666666"
+    graph_operation = "microsoft_graph.planner.plans.list"
+    graph_policy = preflight.CONNECTOR_OPERATION_POLICIES[graph_operation]
+    graph_tool = {
+        "toolId": graph_policy[0],
+        "operationId": graph_operation,
+        "resourceProjection": graph_policy[1],
+        "mutating": graph_policy[2],
+    }
+    graph_binding = {
+        "bindingId": f"exchange-microsoft_graph-{graph_connection_ref}",
+        "connectionRef": graph_connection_ref,
+        "providerId": "microsoft_graph",
+        "profileRef": "microsoft-graph-profile-ref",
+        "tools": [graph_tool],
+    }
+    if phase != stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+        snapshot["bindings"].append(graph_binding)
+        snapshot["catalog"]["items"].append(
+            {
+                "bindingId": graph_binding["bindingId"],
+                "capabilityId": "tool.provider.v1",
+                "providerId": "microsoft_graph",
+                "connectionRef": graph_connection_ref,
+                "profileRef": graph_binding["profileRef"],
+                "tools": [
+                    {
+                        "id": graph_tool["toolId"],
+                        "name": "List Planner plans",
+                        "description": "List plans in the selected owner scope.",
+                        "readOnly": True,
+                        "inputSchema": {"type": "object", "additionalProperties": False},
+                    }
+                ],
+            }
+        )
+
+    bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
+    catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
+    bindings_path.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": snapshot["bindings"]}), encoding="utf-8"
+    )
+    catalog_path.write_text(json.dumps(snapshot["catalog"]), encoding="utf-8")
+
+    database_state = {
+        "databasePathSha256": "1" * 64,
+        "schemaVersion": stage_transition.ACCOUNT_CENTER_DATABASE_USER_VERSION,
+        "schemaSha256": "2" * 64,
+        "foreignKeyViolationCount": 0,
+        "quickCheck": ["ok"],
+        "protectedProviderCount": 5,
+        "protectedProvidersSha256": "3" * 64,
+        "additionalMicrosoftProfileCount": 0,
+        "additionalMicrosoftProfileIdentitySha256": None,
+    }
+    provider_scope_digests = {
+        provider: f"{index:x}" * 64
+        for index, provider in enumerate(("huggingface", "azure", "gcp", "runpod"), start=1)
+    }
+    return snapshot, compose, database_state, provider_scope_digests
+
+
 def test_github_image_readiness_returns_only_exact_issued_binding_refs(
     tmp_path: Path,
 ) -> None:
@@ -8131,13 +8384,25 @@ def test_cloud_readiness_checkpoint_uses_exact_issued_provider_connections() -> 
 
 
 def test_account_center_image_update_readiness_pins_supported_provider_connections() -> None:
-    """Bind AC replacement readiness to the exact existing Exchange provider references."""
+    """Bind AC readiness to every existing non-Graph provider and mark Graph unverified."""
 
     refs = {
+        "github": [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)],
         "azure": "e5e1464b-00ec-4c85-9e71-1d52eab44a38",
         "gcp": "8c473baa-3d22-4ab4-9d0e-f1086b54a400",
         "huggingface": "d0b0b832-a81c-4c39-94c9-d92405f2e6c2",
-        "microsoft_graph": "f95d8e3c-8479-4b86-94ad-3aab76366d60",
+        "runpod": "f95d8e3c-8479-4b86-94ad-3aab76366d60",
+    }
+    database_state = {
+        "databasePathSha256": "1" * 64,
+        "schemaVersion": 9,
+        "schemaSha256": "2" * 64,
+        "foreignKeyViolationCount": 0,
+        "quickCheck": ["ok"],
+        "protectedProviderCount": 5,
+        "protectedProvidersSha256": "3" * 64,
+        "additionalMicrosoftProfileCount": 0,
+        "additionalMicrosoftProfileIdentitySha256": None,
     }
     plan = {
         "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
@@ -8145,9 +8410,11 @@ def test_account_center_image_update_readiness_pins_supported_provider_connectio
         "activeServices": {"exchange": {"containerId": "a" * 64, "imageId": _image_id(44)}},
         "candidatePreflight": {
             "expectedProviderScopeDigests": {
-                provider: f"{index:x}" * 64 for index, provider in enumerate(refs, start=1)
+                provider: f"{index:x}" * 64
+                for index, provider in enumerate(("huggingface", "azure", "gcp", "runpod"), start=1)
             }
         },
+        "accountCenterImageUpdateState": {"database": database_state},
     }
     journal = {
         "exchangeReadiness": {
@@ -8158,9 +8425,9 @@ def test_account_center_image_update_readiness_pins_supported_provider_connectio
                 "exchangeImageId": _image_id(44),
                 "bindingCount": 14,
                 "connectionCount": 14,
-                "verifiedProviderIds": sorted(
-                    plan["candidatePreflight"]["expectedProviderScopeDigests"]
-                ),
+                "verifiedProviderIds": ["azure", "gcp", "github", "huggingface", "runpod"],
+                "unverifiedProviderIds": ["microsoft_graph"],
+                "microsoftGraphStatus": "NOT_CONNECTED_NOT_VERIFIED",
                 "snapshotSha256": "1" * 64,
                 "connectionRefByProvider": refs,
             }
@@ -8176,6 +8443,11 @@ def test_account_center_image_update_readiness_pins_supported_provider_connectio
     with pytest.raises(stage_transition.StageTransitionError, match="exact selected azure"):
         stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
 
+    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"] = dict(refs)
+    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"].pop("runpod")
+    with pytest.raises(stage_transition.StageTransitionError, match="exact existing non-Graph"):
+        stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+
 
 def test_account_center_monitor_gate_checks_existing_non_graph_connections_readonly(
     tmp_path: Path,
@@ -8184,15 +8456,19 @@ def test_account_center_monitor_gate_checks_existing_non_graph_connections_reado
     """Quiesce provider calls during AC replacement without inventing a Graph monitor row."""
 
     provider_refs = {
+        "github": [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)],
+        "huggingface": "d0b0b832-a81c-4c85-9e71-1d52eab44a38",
         "azure": "e5e1464b-00ec-4c85-9e71-1d52eab44a38",
         "gcp": "8c473baa-3d22-4ab4-9d0e-f1086b54a400",
-        "microsoft_graph": "f95d8e3c-8479-4b86-94ad-3aab76366d60",
+        "runpod": "f95d8e3c-8479-4b86-94ad-3aab76366d60",
     }
     plan = {
         "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
         "phase": "issued-connector-activation",
         "candidatePreflight": {
-            "expectedProviderScopeDigests": {provider: "a" * 64 for provider in provider_refs}
+            "expectedProviderScopeDigests": {
+                provider: "a" * 64 for provider in ("huggingface", "azure", "gcp", "runpod")
+            }
         },
         "activeServices": {"exchange": {"containerId": "a" * 64}},
         "policy": {"healthTimeoutSeconds": 30},
@@ -8212,8 +8488,8 @@ def test_account_center_monitor_gate_checks_existing_non_graph_connections_reado
         selected_connections.extend(json.loads(argv[-7]))
         return json.dumps(
             {
-                "selectedProviderCount": 2,
-                "monitorStateCount": 2,
+                "selectedProviderCount": 5,
+                "monitorStateCount": 14,
                 "activeMonitorLeaseCount": 0,
                 "inFlightConnectorCallCount": 0,
                 "nextCheckSecondsRemaining": 120,
@@ -8229,8 +8505,9 @@ def test_account_center_monitor_gate_checks_existing_non_graph_connections_reado
         "_candidate_config_json",
         lambda *_args, **_kwargs: {
             "bindings": [
-                {"providerId": provider, "connectionRef": provider_refs[provider]}
-                for provider in ("azure", "gcp")
+                {"providerId": provider, "connectionRef": connection_ref}
+                for provider, refs in provider_refs.items()
+                for connection_ref in (refs if isinstance(refs, list) else [refs])
             ]
         },
     )
@@ -8260,10 +8537,239 @@ def test_account_center_monitor_gate_checks_existing_non_graph_connections_reado
     )
 
     assert result["verified"] is True
-    assert [row["providerId"] for row in selected_connections] == ["azure", "gcp"]
+    assert {row["providerId"] for row in selected_connections} == {
+        "azure",
+        "gcp",
+        "github",
+        "huggingface",
+        "runpod",
+    }
+    assert len(selected_connections) == 14
     assert "microsoft_graph" not in json.dumps(selected_connections)
     assert journal["accountCenterImageUpdate"]["monitorQuiescence"] == result
     assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
+def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapshot(
+    phase: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project the native 14-connection snapshot into checkpoints and monitor gates."""
+
+    snapshot, compose, database_state, provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(tmp_path, phase=phase)
+    )
+    exchange_id = "a" * 64
+    exchange_image_id = _image_id(144)
+    plan = {
+        "phase": phase,
+        "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        "activeServices": {"exchange": {"containerId": exchange_id, "imageId": exchange_image_id}},
+        "candidateServices": {
+            "exchange": {
+                "active": {
+                    "imageRef": "example.invalid/exchange:locked",
+                    "imageId": exchange_image_id,
+                },
+                "candidate": {
+                    "imageRef": "example.invalid/exchange:locked",
+                    "imageId": exchange_image_id,
+                },
+                "added": False,
+                "configChanged": False,
+            }
+        },
+        "candidatePreflight": {"expectedProviderScopeDigests": provider_scope_digests},
+        "accountCenterImageUpdateState": {"database": database_state},
+        "policy": {"healthTimeoutSeconds": 30},
+    }
+    current_snapshot = snapshot
+    selected_connections: list[dict[str, Any]] = []
+    phases: list[str] = []
+
+    def checked(argv: list[str], *, label: str, **_kwargs: Any) -> str:
+        if label == "pinned Exchange connector readiness readback":
+            return json.dumps(current_snapshot, separators=(",", ":"))
+        if label == "Connector authorization monitor quiescence readback":
+            selected_connections.extend(json.loads(argv[-7]))
+            return json.dumps(
+                {
+                    "selectedProviderCount": 5,
+                    "monitorStateCount": 14,
+                    "activeMonitorLeaseCount": 0,
+                    "inFlightConnectorCallCount": 0,
+                    "nextCheckSecondsRemaining": 120,
+                    "requiredWindowSeconds": 90,
+                    "nextCheckWindowSatisfied": True,
+                    "cloudRefreshNonterminalCount": 0,
+                }
+            )
+        raise AssertionError(f"unexpected checked command label: {label}")
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked)
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, journal_phase: phases.append(journal_phase),
+    )
+
+    receipt = stage_transition._read_live_exchange_readiness(
+        plan=plan,
+        compose=compose,
+        container_id=exchange_id,
+        image_id=exchange_image_id,
+        docker_prefix=["docker"],
+    )
+    assert receipt["connectionCount"] == 14
+    assert receipt["bindingCount"] == 14
+    assert receipt["verifiedProviderIds"] == [
+        "azure",
+        "gcp",
+        "github",
+        "huggingface",
+        "runpod",
+    ]
+    assert receipt["unverifiedProviderIds"] == ["microsoft_graph"]
+    assert receipt["microsoftGraphStatus"] == "NOT_CONNECTED_NOT_VERIFIED"
+    assert set(receipt["connectionRefByProvider"]) == {
+        "github",
+        "huggingface",
+        "azure",
+        "gcp",
+        "runpod",
+    }
+    assert len(receipt["connectionRefByProvider"]["github"]) == 10
+
+    journal = {
+        "exchangeReadiness": {"receipt": receipt},
+        "accountCenterImageUpdate": {"required": True, "monitorQuiescence": None},
+    }
+    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+    assert checkpoint["verified"] is True
+    assert checkpoint["bindingCount"] == 14
+
+    monitor = stage_transition._verify_provider_monitor_quiescence(
+        plan=plan,
+        candidate_compose=compose,
+        journal=journal,
+        journal_path=tmp_path / "monitor.journal.json",
+        docker_prefix=["docker"],
+    )
+    assert monitor["verified"] is True
+    assert len(selected_connections) == 14
+    assert {row["providerId"] for row in selected_connections} == {
+        "github",
+        "huggingface",
+        "azure",
+        "gcp",
+        "runpod",
+    }
+    assert "microsoft_graph" not in json.dumps(selected_connections)
+    assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
+
+    invalid_map_journal = copy.deepcopy(journal)
+    invalid_map_journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"].pop("runpod")
+    with pytest.raises(stage_transition.StageTransitionError, match="exact existing non-Graph"):
+        stage_transition._image_update_exchange_readiness_checkpoint(plan, invalid_map_journal)
+
+    current_snapshot = copy.deepcopy(snapshot)
+    current_snapshot["connections"] = [
+        row for row in current_snapshot["connections"] if row["providerId"] != "runpod"
+    ]
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="exactly one profile and connection for runpod"
+    ):
+        stage_transition._read_live_exchange_readiness(
+            plan=plan,
+            compose=compose,
+            container_id=exchange_id,
+            image_id=exchange_image_id,
+            docker_prefix=["docker"],
+        )
+
+    current_snapshot = copy.deepcopy(snapshot)
+    current_snapshot["profiles"].append(
+        {
+            "profileRef": "microsoft-graph-profile-ref",
+            "profileAlias": "microsoft-graph.office-owner",
+            "providerId": "microsoft_graph",
+            "authStatus": "unknown",
+            "accessMode": "actor_owned",
+            "targetScope": {"schemaVersion": 2},
+            "authMode": "delegated_oauth",
+            "credentialRevision": 1,
+            "externalSubject": (
+                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+            ),
+            "scopeSchemaVersion": 2,
+            "enabledFeatures": ["sharepoint_drive_metadata"],
+            "requiredOAuthScopes": ["Tasks.Read"],
+            "targetRefCount": 1,
+            "credentialExpiresAt": None,
+            "refreshExpiresAt": None,
+            "reauthRequired": True,
+            "reauthReasonCode": "not_linked",
+        }
+    )
+    current_snapshot["connections"].append(
+        {
+            "connectionRef": "66666666-6666-4666-8666-666666666666",
+            "providerId": "microsoft_graph",
+            "profileRef": "microsoft-graph-profile-ref",
+            "profileAlias": "microsoft-graph.office-owner",
+            "accessMode": "actor_owned",
+            "readOnly": True,
+            "targetAlias": None,
+        }
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Graph bootstrap must not claim|appeared after the sealed empty Account Center baseline",
+    ):
+        stage_transition._read_live_exchange_readiness(
+            plan=plan,
+            compose=compose,
+            container_id=exchange_id,
+            image_id=exchange_image_id,
+            docker_prefix=["docker"],
+        )
+
+    current_snapshot = copy.deepcopy(snapshot)
+    wrong_graph_config = copy.deepcopy(compose)
+    graph_service = wrong_graph_config["services"]["microsoft-graph"]
+    graph_document = json.loads(
+        graph_service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"]
+    )
+    graph_document["officeV2"]["planner_enabled"] = False
+    graph_service["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(
+        graph_document
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="host/provider scope is invalid"
+    ):
+        stage_transition._read_live_exchange_readiness(
+            plan=plan,
+            compose=wrong_graph_config,
+            container_id=exchange_id,
+            image_id=exchange_image_id,
+            docker_prefix=["docker"],
+        )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="candidate issued binding set differs|exactly one profile and connection for microsoft_graph",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase="issued-connector-activation",
+            image_update_target="huggingface",
+        )
 
 
 def test_github_readiness_checkpoint_hashes_all_ten_exact_connection_refs() -> None:

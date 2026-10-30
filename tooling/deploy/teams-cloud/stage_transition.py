@@ -54,6 +54,9 @@ IMAGE_UPDATE_TARGETS = frozenset(
     }
 )
 ACCOUNT_CENTER_IMAGE_UPDATE_TARGET = "account-center"
+ACCOUNT_CENTER_IMAGE_UPDATE_PHASES = frozenset(
+    {OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE, "issued-connector-activation"}
+)
 CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
 GITHUB_ISSUES_IMAGE_UPDATE_TARGET = "github-issues"
 HUGGINGFACE_IMAGE_UPDATE_TARGET = "huggingface"
@@ -1090,7 +1093,7 @@ def _verify_provider_monitor_quiescence(
         include_cloud_refresh = True
     elif (
         target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
-        and plan.get("phase") == "issued-connector-activation"
+        and plan.get("phase") in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
     ):
         target_journal_key = "accountCenterImageUpdate"
         expected_scope_digests = plan.get("candidatePreflight", {}).get(
@@ -1098,12 +1101,16 @@ def _verify_provider_monitor_quiescence(
         )
         if not isinstance(expected_scope_digests, dict):
             raise StageTransitionError("candidate Account Center provider scopes are malformed")
-        required_providers = sorted(
-            set(expected_scope_digests) & {"github", "huggingface", "azure", "gcp", "runpod"}
-        )
-        if not required_providers:
+        if "microsoft_graph" in expected_scope_digests:
             raise StageTransitionError(
-                "Account Center image update requires the existing provider monitor bindings"
+                "Account Center monitor scopes must exclude the unissued Microsoft Graph profile"
+            )
+        required_providers = sorted(
+            (set(expected_scope_digests) & {"huggingface", "azure", "gcp", "runpod"}) | {"github"}
+        )
+        if not {"github", "huggingface", "azure", "gcp"} <= set(required_providers):
+            raise StageTransitionError(
+                "Account Center image update requires the existing GitHub/HF/Azure/GCP monitor bindings"
             )
         include_cloud_refresh = False
     else:
@@ -3940,9 +3947,12 @@ def _validate_image_update_topology(
         raise StageTransitionError(
             "image update target must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
         )
-    if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+    if (
+        target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        and phase not in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
+    ):
         raise StageTransitionError(
-            "Account Center image updates require issued-connector-activation and the existing Graph runtime"
+            "Account Center image updates require the selected Graph bootstrap or issued activation phase"
         )
     if target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
         raise StageTransitionError(
@@ -4620,10 +4630,10 @@ def _validate_image_update_selection_contract(
     if (
         not is_memory_update
         and target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
-        and phase != "issued-connector-activation"
+        and phase not in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
     ):
         raise StageTransitionError(
-            "Account Center image updates require issued-connector-activation and the existing Graph runtime"
+            "Account Center image updates require the selected Graph bootstrap or issued activation phase"
         )
     if (
         not is_memory_update
@@ -6765,10 +6775,12 @@ def create_plan(
             "image update target must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
         )
     if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET and (
-        phase != "issued-connector-activation" or max_memory_mib != 3584 or max_cpus != 1.95
+        phase not in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
+        or max_memory_mib != 3584
+        or max_cpus != 1.95
     ):
         raise StageTransitionError(
-            "Account Center image updates require issued activation and the 3584 MiB/1.95 CPU budget"
+            "Account Center image updates require the selected Graph phase and 3584 MiB/1.95 CPU budget"
         )
     if image_update_target is not None and memory_update_target is not None:
         raise StageTransitionError("image and memory update modes are mutually exclusive")
@@ -6795,10 +6807,10 @@ def create_plan(
         )
     if (
         image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
-        and phase != "issued-connector-activation"
+        and phase not in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
     ):
         raise StageTransitionError(
-            "Account Center image updates require issued-connector-activation and the existing Graph runtime"
+            "Account Center image updates require the selected Graph bootstrap or issued activation phase"
         )
     if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and phase not in PHASES:
         raise StageTransitionError(
@@ -7405,7 +7417,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         image_update_target = plan.get("imageUpdateTarget")
         if (
             image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
-            or plan.get("phase") != "issued-connector-activation"
+            or plan.get("phase") not in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
         ):
             image_update_target = "__invalid__"
     elif set(plan) == required | {"imageUpdateTarget", "cloudRunnerState"}:
@@ -7480,13 +7492,16 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if listener_repair and plan.get("phase") != "provider-bootstrap":
         raise StageTransitionError("provider listener repair is limited to provider-bootstrap")
     if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and (
-        image_update_target is not None or memory_update_target is not None or listener_repair
+        (
+            image_update_target is not None
+            and image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        )
+        or memory_update_target is not None
+        or listener_repair
     ):
-        raise StageTransitionError("Graph bootstrap cannot be combined with another update mode")
-    if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and (
-        image_update_target is not None or memory_update_target is not None or listener_repair
-    ):
-        raise StageTransitionError("Graph provider bootstrap has one closed multi-image transition")
+        raise StageTransitionError(
+            "Graph bootstrap permits only its closed Account Center image continuation"
+        )
     if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and "cloudRunnerState" in plan:
         raise StageTransitionError("Graph provider bootstrap must not change the cloud runner")
     if (
@@ -7513,7 +7528,10 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError("listener repair plan must contain exactly its two providers")
     active_runtime_services = set(plan.get("activeServices", {}))
     candidate_runtime_services = set(plan.get("candidateServices", {}))
-    if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+    if (
+        plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        and image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+    ):
         expected_targets = {
             "account-center",
             "exchange",
@@ -8716,6 +8734,152 @@ def _github_image_update_connection_refs(
     return sorted(connection_refs)
 
 
+def _validate_unissued_account_center_graph_contract(
+    *,
+    compose: dict[str, Any],
+    bindings_document: Any,
+    catalog: dict[str, Any],
+    phase: str,
+) -> None:
+    """Keep configured Graph scope and catalog checks while OAuth has no issued profile."""
+
+    services = compose.get("services")
+    graph_service = services.get("microsoft-graph") if isinstance(services, dict) else None
+    graph_environment = (
+        graph_service.get("environment") if isinstance(graph_service, dict) else None
+    )
+    encoded_graph_config = (
+        graph_environment.get("CYRENE_CAPABILITY_CONFIGURATION_JSON")
+        if isinstance(graph_environment, dict)
+        else None
+    )
+    exchange_service = services.get("exchange") if isinstance(services, dict) else None
+    exchange_environment = (
+        exchange_service.get("environment") if isinstance(exchange_service, dict) else None
+    )
+    encoded_exchange_config = (
+        exchange_environment.get("CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON")
+        if isinstance(exchange_environment, dict)
+        else None
+    )
+    try:
+        graph_config = json.loads(
+            encoded_graph_config, object_pairs_hook=preflight._unique_json_object
+        )
+        exchange_config = json.loads(
+            encoded_exchange_config, object_pairs_hook=preflight._unique_json_object
+        )
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError(
+            "unissued Microsoft Graph service/Exchange configuration is invalid"
+        ) from error
+    authorization_cloud = (
+        exchange_config.get("authorizationCloud") if isinstance(exchange_config, dict) else None
+    )
+    configured_profiles = (
+        authorization_cloud.get("profiles") if isinstance(authorization_cloud, dict) else None
+    )
+    graph_profiles = (
+        [
+            (alias, row)
+            for alias, row in configured_profiles.items()
+            if isinstance(row, dict) and row.get("provider") == "microsoft_graph"
+        ]
+        if isinstance(configured_profiles, dict)
+        else []
+    )
+    if not isinstance(graph_config, dict) or len(graph_profiles) != 1:
+        raise StageTransitionError(
+            "unissued Microsoft Graph requires its exact configured service and host profile"
+        )
+    _graph_alias, graph_host_profile = graph_profiles[0]
+    graph_office_scope = graph_host_profile.get("officeV2")
+    graph_provider_scope = graph_config.get("officeV2")
+    try:
+        preflight._validate_office_v2_host_scope(graph_office_scope, compose)
+        preflight._validate_graph_provider_office_flags(graph_provider_scope, graph_office_scope)
+        graph_operations = preflight._graph_operations_for_office_scope(graph_office_scope)
+    except (preflight.PreflightError, KeyError, TypeError, ValueError) as error:
+        raise StageTransitionError(
+            "unissued Microsoft Graph host/provider scope is invalid"
+        ) from error
+    if not graph_operations:
+        raise StageTransitionError("unissued Microsoft Graph scope has no enabled Office feature")
+    write_enabled = any(
+        graph_office_scope["enabledFeatures"][feature]
+        for feature in ("plannerEnabled", "todoEnabled", "calendarEnabled")
+    )
+    if graph_config.get("read_only") is not (not write_enabled):
+        raise StageTransitionError(
+            "unissued Microsoft Graph provider read-only mode differs from its Office scope"
+        )
+
+    candidate_bindings = (
+        bindings_document.get("bindings") if isinstance(bindings_document, dict) else None
+    )
+    graph_bindings = (
+        [
+            row
+            for row in candidate_bindings
+            if isinstance(row, dict) and row.get("providerId") == "microsoft_graph"
+        ]
+        if isinstance(candidate_bindings, list)
+        else []
+    )
+    catalog_items = catalog.get("items") if isinstance(catalog, dict) else None
+    graph_catalog_items = (
+        [
+            row
+            for row in catalog_items
+            if isinstance(row, dict) and row.get("providerId") == "microsoft_graph"
+        ]
+        if isinstance(catalog_items, list)
+        else []
+    )
+    if phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+        if graph_bindings or graph_catalog_items:
+            raise StageTransitionError(
+                "Graph bootstrap must keep unissued Graph bindings/catalog entries absent"
+            )
+        return
+    if len(graph_bindings) != 1:
+        raise StageTransitionError(
+            "unissued Microsoft Graph requires its single frozen host binding"
+        )
+    graph_binding = graph_bindings[0]
+    try:
+        preflight._validate_new_provider_bindings_readonly(
+            {"bindings": graph_bindings},
+            {"microsoft_graph"},
+            graph_office_scope=graph_office_scope,
+        )
+    except preflight.PreflightError as error:
+        raise StageTransitionError(
+            "unissued Microsoft Graph operation map differs from its configured Office scope"
+        ) from error
+    if len(graph_catalog_items) != 1:
+        raise StageTransitionError(
+            "unissued Microsoft Graph requires its single frozen tool catalog entry"
+        )
+    graph_catalog = graph_catalog_items[0]
+    mapped_tools = {row["toolId"]: row for row in graph_binding["tools"]}
+    catalog_tools = {row["id"]: row for row in graph_catalog["tools"]}
+    if (
+        graph_catalog.get("bindingId") != graph_binding.get("bindingId")
+        or graph_catalog.get("connectionRef") != graph_binding.get("connectionRef")
+        or graph_catalog.get("profileRef") != graph_binding.get("profileRef")
+        or set(mapped_tools) != set(catalog_tools)
+        or any(
+            catalog_tools[tool_id].get("readOnly")
+            is not (not preflight.CONNECTOR_OPERATION_POLICIES[row["operationId"]][2])
+            for tool_id, row in mapped_tools.items()
+        )
+    ):
+        raise StageTransitionError(
+            "unissued Microsoft Graph tool catalog differs from its frozen operation map"
+        )
+
+
 def _verify_exchange_readiness_snapshot(
     *,
     snapshot: Any,
@@ -8724,6 +8888,7 @@ def _verify_exchange_readiness_snapshot(
     image_update_target: str | None = None,
     listener_repair: bool = False,
     include_live_catalog: bool = True,
+    account_center_database_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verify frozen tools and actor-scoped provider scopes for the selected transition.
 
@@ -8751,6 +8916,23 @@ def _verify_exchange_readiness_snapshot(
             "pinned Exchange readiness actor differs from candidate owner scope"
         )
     _assert_exchange_readiness_safe_shape(snapshot)
+
+    account_center_graph_unissued = False
+    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        if phase not in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES or not isinstance(
+            account_center_database_state, dict
+        ):
+            raise StageTransitionError(
+                "Account Center readiness requires its sealed database identity baseline"
+            )
+        _validate_account_center_database_state(account_center_database_state)
+        account_center_graph_unissued = (
+            account_center_database_state["additionalMicrosoftProfileCount"] == 0
+        )
+    elif account_center_database_state is not None:
+        raise StageTransitionError(
+            "Account Center database baseline is valid only for its issued image update"
+        )
 
     bindings_document = _candidate_config_json(compose, "connector-bindings")
     catalog_document = _candidate_config_json(compose, "connector-tool-catalog")
@@ -8815,18 +8997,19 @@ def _verify_exchange_readiness_snapshot(
             raise StageTransitionError(
                 "Graph bootstrap must not claim an issued Office profile before OAuth completes"
             )
-        return {
-            "schemaVersion": 1,
-            "status": "LIVE_VERIFIED",
-            "actorSha256": _sha256_bytes(_canonical_json(actor)),
-            "bindingsSha256": _sha256_bytes(_canonical_json(live_bindings)),
-            "catalogSha256": _sha256_bytes(_canonical_json(live_catalog)),
-            "profileCount": len(snapshot["profiles"]),
-            "connectionCount": len(snapshot["connections"]),
-            "bindingCount": len(live_bindings),
-            "verifiedProviderIds": sorted(provider_ids),
-            "profileRefByProvider": {},
-        }
+        if image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+            return {
+                "schemaVersion": 1,
+                "status": "LIVE_VERIFIED",
+                "actorSha256": _sha256_bytes(_canonical_json(actor)),
+                "bindingsSha256": _sha256_bytes(_canonical_json(live_bindings)),
+                "catalogSha256": _sha256_bytes(_canonical_json(live_catalog)),
+                "profileCount": len(snapshot["profiles"]),
+                "connectionCount": len(snapshot["connections"]),
+                "bindingCount": len(live_bindings),
+                "verifiedProviderIds": sorted(provider_ids),
+                "profileRefByProvider": {},
+            }
 
     cloud_service = compose.get("services", {}).get("cloud-management-phase2", {})
     cloud_env = cloud_service.get("environment", {}) if isinstance(cloud_service, dict) else {}
@@ -8865,7 +9048,8 @@ def _verify_exchange_readiness_snapshot(
         )
 
     expected_provider_ids = {"huggingface", *cloud_provider_ids}
-    if "microsoft-graph" in compose.get("services", {}):
+    graph_service_configured = "microsoft-graph" in compose.get("services", {})
+    if graph_service_configured and not account_center_graph_unissued:
         expected_provider_ids.add("microsoft_graph")
     bindings_by_provider: dict[str, dict[str, Any]] = {}
     provider_binding_rows = live_bindings if listener_repair else bindings_document["bindings"]
@@ -8911,6 +9095,35 @@ def _verify_exchange_readiness_snapshot(
     )
     if not isinstance(configured_profiles, dict):
         raise StageTransitionError("candidate Exchange provider profiles are unavailable")
+
+    graph_connection_status: str | None = None
+    if account_center_graph_unissued:
+        graph_profiles = [
+            row for row in snapshot["profiles"] if row.get("providerId") == "microsoft_graph"
+        ]
+        graph_connections = [
+            row for row in snapshot["connections"] if row.get("providerId") == "microsoft_graph"
+        ]
+        if graph_profiles or graph_connections:
+            raise StageTransitionError(
+                "Microsoft Graph profile or connection appeared after the sealed empty Account Center baseline"
+            )
+        if graph_service_configured:
+            _validate_unissued_account_center_graph_contract(
+                compose=compose,
+                bindings_document=bindings_document,
+                catalog=live_catalog,
+                phase=phase,
+            )
+        graph_connection_status = "NOT_CONNECTED_NOT_VERIFIED"
+    elif (
+        image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        and account_center_database_state["additionalMicrosoftProfileCount"] == 1
+        and not graph_service_configured
+    ):
+        raise StageTransitionError(
+            "sealed Account Center Graph profile has no configured Microsoft Graph service"
+        )
 
     bootstrap = _candidate_config_json(compose, "connector-bootstrap")
     hf_bootstrap = bootstrap.get("huggingface")
@@ -9204,8 +9417,15 @@ def _verify_exchange_readiness_snapshot(
             compose=compose,
             frozen_bindings=candidate_bindings,
         )
-        if image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
-        and phase == "issued-connector-activation"
+        if image_update_target
+        in {GITHUB_ISSUES_IMAGE_UPDATE_TARGET, ACCOUNT_CENTER_IMAGE_UPDATE_TARGET}
+        and (
+            phase == "issued-connector-activation"
+            or (
+                image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+            )
+        )
         else None
     )
     actor_digest = _sha256_bytes(_canonical_json(actor))
@@ -9213,7 +9433,10 @@ def _verify_exchange_readiness_snapshot(
         _canonical_json(_sorted_exchange_bindings(snapshot["bindings"]))
     )
     catalog_digest = _sha256_bytes(_canonical_json(live_catalog)) if include_live_catalog else None
-    return {
+    verified_provider_ids = set(expected_provider_ids)
+    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        verified_provider_ids.add("github")
+    result = {
         "schemaVersion": 1,
         "status": "LIVE_VERIFIED" if include_live_catalog else "ISSUED_STATE_VERIFIED",
         "actorSha256": actor_digest,
@@ -9222,11 +9445,16 @@ def _verify_exchange_readiness_snapshot(
         "catalogStatus": "LIVE_VERIFIED" if include_live_catalog else "NOT_LIVE_CATALOG",
         "profileCount": len(snapshot["profiles"]),
         "connectionCount": len(snapshot["connections"]),
-        "bindingCount": len(snapshot["bindings"]),
+        "bindingCount": len(snapshot["bindings"])
+        - int(
+            account_center_graph_unissued
+            and graph_service_configured
+            and phase != OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        ),
         "verifiedProviderIds": sorted(
             {row["providerId"] for row in live_bindings}
             if listener_repair
-            else expected_provider_ids
+            else verified_provider_ids
         ),
         "profileRefByProvider": live_profile_refs,
         **(
@@ -9246,8 +9474,24 @@ def _verify_exchange_readiness_snapshot(
             else {}
         ),
         **(
+            {
+                "connectionRefByProvider": {
+                    "github": github_connection_refs,
+                    **{
+                        provider: connection_ref
+                        for provider, connection_ref in live_connection_refs.items()
+                        if provider != "microsoft_graph"
+                    },
+                }
+            }
+            if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+            and phase in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
+            else {}
+        ),
+        **(
             {"githubConnectionRefs": github_connection_refs}
-            if github_connection_refs is not None
+            if image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+            and github_connection_refs is not None
             else {}
         ),
         **(
@@ -9256,6 +9500,12 @@ def _verify_exchange_readiness_snapshot(
             else {}
         ),
     }
+    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        result["unverifiedProviderIds"] = (
+            ["microsoft_graph"] if account_center_graph_unissued else []
+        )
+        result["microsoftGraphStatus"] = graph_connection_status or "CONNECTED_VERIFIED"
+    return result
 
 
 def _read_live_exchange_readiness(
@@ -9319,6 +9569,12 @@ def _read_live_exchange_readiness(
             image_update_target=plan.get("imageUpdateTarget"),
             listener_repair="listenerRepairState" in plan,
             include_live_catalog=True,
+            account_center_database_state=(
+                plan.get("accountCenterImageUpdateState", {}).get("database")
+                if plan.get("imageUpdateTarget") == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                and isinstance(plan.get("accountCenterImageUpdateState"), dict)
+                else None
+            ),
         )
     except StageTransitionError:
         raise
@@ -9384,6 +9640,8 @@ def _image_update_exchange_readiness_checkpoint(
     target = plan.get("imageUpdateTarget")
     exchange = plan.get("activeServices", {}).get("exchange")
     receipt = journal.get("exchangeReadiness", {}).get("receipt")
+    if not isinstance(receipt, dict):
+        raise StageTransitionError("Exchange readiness receipt is missing")
     expected_scope_digests = plan.get("candidatePreflight", {}).get("expectedProviderScopeDigests")
     if not isinstance(expected_scope_digests, dict):
         raise StageTransitionError("candidate provider scope digests are malformed")
@@ -9412,17 +9670,28 @@ def _image_update_exchange_readiness_checkpoint(
         connection_refs = refs if isinstance(refs, dict) else {}
     elif (
         target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
-        and plan.get("phase") == "issued-connector-activation"
+        and plan.get("phase") in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
     ):
+        state = plan.get("accountCenterImageUpdateState")
+        database_state = state.get("database") if isinstance(state, dict) else None
+        _validate_account_center_database_state(database_state)
+        if "microsoft_graph" in expected_scope_digests:
+            raise StageTransitionError(
+                "Account Center monitor scopes must exclude the unissued Microsoft Graph profile"
+            )
         expected_monitor_providers = sorted(
-            set(expected_scope_digests) & {"github", "huggingface", "azure", "gcp", "runpod"}
+            (set(expected_scope_digests) & {"huggingface", "azure", "gcp", "runpod"}) | {"github"}
         )
+        if not {"github", "huggingface", "azure", "gcp"} <= set(expected_monitor_providers):
+            raise StageTransitionError(
+                "Account Center update requires the existing GitHub/HF/Azure/GCP connections"
+            )
         refs = receipt.get("connectionRefByProvider") if isinstance(receipt, dict) else None
-        connection_refs = (
-            {provider: refs.get(provider) for provider in expected_monitor_providers}
-            if isinstance(refs, dict)
-            else {}
-        )
+        if not isinstance(refs, dict) or set(refs) != set(expected_monitor_providers):
+            raise StageTransitionError(
+                "Account Center readiness lacks the exact existing non-Graph connection map"
+            )
+        connection_refs = dict(refs)
     else:
         raise StageTransitionError(
             "Exchange readiness checkpoint is outside its closed image-update route"
@@ -9456,6 +9725,26 @@ def _image_update_exchange_readiness_checkpoint(
                 raise StageTransitionError(f"live {provider} connection reference is not canonical")
             canonical_provider_refs.append(canonical_connection_ref)
         canonical_refs[provider] = sorted(canonical_provider_refs)
+    expected_verified_provider_ids = sorted(expected_scope_digests)
+    if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        state = plan.get("accountCenterImageUpdateState")
+        database_state = state.get("database") if isinstance(state, dict) else None
+        _validate_account_center_database_state(database_state)
+        expected_verified = set(expected_scope_digests) | {"github"}
+        graph_unissued = database_state["additionalMicrosoftProfileCount"] == 0
+        if graph_unissued:
+            expected_verified.discard("microsoft_graph")
+        else:
+            expected_verified.add("microsoft_graph")
+        expected_verified_provider_ids = sorted(expected_verified)
+        if receipt.get("unverifiedProviderIds") != (
+            ["microsoft_graph"] if graph_unissued else []
+        ) or receipt.get("microsoftGraphStatus") != (
+            "NOT_CONNECTED_NOT_VERIFIED" if graph_unissued else "CONNECTED_VERIFIED"
+        ):
+            raise StageTransitionError(
+                "Account Center Graph readiness does not match its sealed profile baseline"
+            )
     if (
         not isinstance(exchange, dict)
         or not isinstance(receipt, dict)
@@ -9465,7 +9754,7 @@ def _image_update_exchange_readiness_checkpoint(
         or receipt.get("exchangeImageId") != exchange.get("imageId")
         or receipt.get("bindingCount") != 14
         or receipt.get("connectionCount") != 14
-        or receipt.get("verifiedProviderIds") != sorted(expected_scope_digests)
+        or receipt.get("verifiedProviderIds") != expected_verified_provider_ids
         or receipt.get("snapshotSha256") is None
         or SHA256_RE.fullmatch(str(receipt.get("snapshotSha256"))) is None
     ):
@@ -11605,19 +11894,23 @@ def apply_plan_file(
                 )
             for service_name in plan["targets"]:
                 if (
-                    plan.get("imageUpdateTarget")
-                    in {
-                        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
-                        HUGGINGFACE_IMAGE_UPDATE_TARGET,
-                        CLOUD_IMAGE_UPDATE_TARGET,
-                        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
-                    }
-                    and plan.get("phase") == "issued-connector-activation"
-                    and service_name == plan.get("imageUpdateTarget")
-                ):
+                    (
+                        plan.get("imageUpdateTarget") == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                        and plan.get("phase") in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
+                    )
+                    or (
+                        plan.get("imageUpdateTarget")
+                        in {
+                            HUGGINGFACE_IMAGE_UPDATE_TARGET,
+                            CLOUD_IMAGE_UPDATE_TARGET,
+                            GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+                        }
+                        and plan.get("phase") == "issued-connector-activation"
+                    )
+                ) and service_name == plan.get("imageUpdateTarget"):
                     if journal["exchangeReadiness"]["required"] is not True:
                         raise StageTransitionError(
-                            "issued provider image update requires Exchange live readiness"
+                            "provider image update requires Exchange live readiness"
                         )
                     _record_exchange_readiness(
                         plan=plan,
@@ -11729,16 +12022,20 @@ def apply_plan_file(
                     service_name=service_name,
                 )
                 if (
-                    plan.get("imageUpdateTarget")
-                    in {
-                        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
-                        HUGGINGFACE_IMAGE_UPDATE_TARGET,
-                        CLOUD_IMAGE_UPDATE_TARGET,
-                        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
-                    }
-                    and plan.get("phase") == "issued-connector-activation"
-                    and service_name == plan.get("imageUpdateTarget")
-                ):
+                    (
+                        plan.get("imageUpdateTarget") == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                        and plan.get("phase") in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
+                    )
+                    or (
+                        plan.get("imageUpdateTarget")
+                        in {
+                            HUGGINGFACE_IMAGE_UPDATE_TARGET,
+                            CLOUD_IMAGE_UPDATE_TARGET,
+                            GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+                        }
+                        and plan.get("phase") == "issued-connector-activation"
+                    )
+                ) and service_name == plan.get("imageUpdateTarget"):
                     _record_exchange_readiness(
                         plan=plan,
                         compose=candidate_compose,
