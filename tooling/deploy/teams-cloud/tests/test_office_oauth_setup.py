@@ -31,12 +31,22 @@ PROFILE_REF = "profile-office-owner"
 LINK_REF = "link-office-owner"
 SCOPES = [
     "openid",
+    "profile",
+    "User.Read",
     "offline_access",
-    "Tasks.Read",
     "Tasks.ReadWrite",
-    "Calendars.Read",
     "Calendars.ReadWrite",
+    "Sites.Selected",
 ]
+ENABLED_FEATURES = {
+    "plannerEnabled": True,
+    "todoEnabled": True,
+    "calendarEnabled": True,
+    "mailMetadataEnabled": False,
+    "mailDraftsEnabled": False,
+    "mailSendEnabled": False,
+    "sharePointDriveMetadataEnabled": True,
+}
 
 
 def status_document(
@@ -48,6 +58,8 @@ def status_document(
     target_scope: dict[str, Any] | None = None,
     reauth_required: bool = False,
     scopes: list[str] | None = None,
+    enabled_features: dict[str, bool] | None = None,
+    target_ref_count: int = 0,
 ) -> dict[str, Any]:
     """Build the exact safe status projection emitted by the fixed Exchange CLI."""
 
@@ -66,6 +78,8 @@ def status_document(
         "refreshExpiresAt": None,
         "reauthRequired": reauth_required,
         "reauthReasonCode": None,
+        "enabledFeatures": dict(ENABLED_FEATURES if enabled_features is None else enabled_features),
+        "targetRefCount": target_ref_count,
     }
 
 
@@ -83,7 +97,7 @@ def operator_context() -> setup.OperatorContext:
     )
 
 
-def authorization_url(port: int, *, scopes: str = "openid offline_access Tasks.Read") -> str:
+def authorization_url(port: int, *, scopes: str | None = None) -> str:
     """Return a test Microsoft authorize URL with the one registered loopback URI."""
 
     query = urllib.parse.urlencode(
@@ -92,7 +106,8 @@ def authorization_url(port: int, *, scopes: str = "openid offline_access Tasks.R
             "response_type": "code",
             "response_mode": "query",
             "redirect_uri": f"http://localhost:{port}{setup.CALLBACK_PATH}",
-            "scope": scopes,
+            "scope": scopes
+            or "openid profile User.Read offline_access Tasks.ReadWrite Calendars.ReadWrite Sites.Selected",
             "state": "state-secret-123",
             "code_challenge": "A" * 43,
             "code_challenge_method": "S256",
@@ -160,22 +175,34 @@ class FakeBridge:
                 state="LINKED",
                 auth_status="healthy",
                 external_subject=EXTERNAL_SUBJECT,
-                revision=1,
+                revision=0,
                 target_scope={"workspaceId": WORKSPACE},
             )
             return dict(self.status_value)
         if operation == "discover":
-            return dict(self.discoveries[payload["resourceType"]])
+            document = dict(self.discoveries[payload["resourceType"]])
+            document.update(
+                {
+                    "state": "DISCOVERED",
+                    "pageCursor": payload.get("pageCursor"),
+                    "nextCursor": None,
+                    "complete": True,
+                    "truncated": False,
+                    "credentialRevision": self.status_value["credentialRevision"],
+                }
+            )
+            return document
         if operation == "select-targets":
             revision = int(payload["expectedCredentialRevision"]) + 1
-            return {
-                "state": "UPDATED",
-                "profileRef": PROFILE_REF,
-                "scopeSchemaVersion": 2,
-                "targetScope": {"workspaceId": WORKSPACE},
-                "credentialRevision": revision,
-                "requiredOAuthScopes": list(SCOPES),
-            }
+            self.status_value = status_document(
+                state="UPDATED",
+                auth_status="healthy",
+                external_subject=EXTERNAL_SUBJECT,
+                revision=revision,
+                target_scope={"workspaceId": WORKSPACE, **payload["targets"]},
+                target_ref_count=sum(len(rows) for rows in payload["targets"].values()),
+            )
+            return dict(self.status_value)
         raise AssertionError(f"unexpected operation: {operation}")
 
 
@@ -190,7 +217,7 @@ def linked_service() -> tuple[setup.OfficeSetupService, FakeBridge, setup.SetupS
         state="LINKED",
         auth_status="healthy",
         external_subject=EXTERNAL_SUBJECT,
-        revision=1,
+        revision=0,
         target_scope={"workspaceId": WORKSPACE},
     )
     return service, bridge, session
@@ -296,28 +323,51 @@ def test_authorization_url_accepts_only_loopback_and_no_mail_scope() -> None:
     """Pin Microsoft sign-in to the registered localhost callback and deny Mail scopes."""
 
     url = authorization_url(setup.DEFAULT_PORT)
-    assert setup._validate_authorization_url(url, port=setup.DEFAULT_PORT, tenant_id=TENANT) == url
+    assert (
+        setup._validate_authorization_url(
+            url,
+            port=setup.DEFAULT_PORT,
+            tenant_id=TENANT,
+            enabled_features=ENABLED_FEATURES,
+        )
+        == url
+    )
     with pytest.raises(setup.OfficeSetupError, match="office_callback_uri_invalid"):
         setup._validate_authorization_url(
             url.replace("localhost", "127.0.0.1"),
             port=setup.DEFAULT_PORT,
             tenant_id=TENANT,
+            enabled_features=ENABLED_FEATURES,
         )
     mail_url = authorization_url(
         setup.DEFAULT_PORT,
         scopes="openid https://graph.microsoft.com/Mail.Read",
     )
     with pytest.raises(setup.OfficeSetupError, match="office_mail_scope_forbidden"):
-        setup._validate_authorization_url(mail_url, port=setup.DEFAULT_PORT, tenant_id=TENANT)
+        setup._validate_authorization_url(
+            mail_url,
+            port=setup.DEFAULT_PORT,
+            tenant_id=TENANT,
+            enabled_features=ENABLED_FEATURES,
+        )
     with pytest.raises(setup.OfficeSetupError, match="office_authorization_url_invalid"):
         setup._validate_authorization_url(
             url.replace(TENANT, SUBJECT),
             port=setup.DEFAULT_PORT,
             tenant_id=TENANT,
+            enabled_features=ENABLED_FEATURES,
         )
-    no_refresh = authorization_url(setup.DEFAULT_PORT, scopes="openid Tasks.Read")
-    with pytest.raises(setup.OfficeSetupError, match="office_refresh_scope_missing"):
-        setup._validate_authorization_url(no_refresh, port=setup.DEFAULT_PORT, tenant_id=TENANT)
+    no_refresh = authorization_url(
+        setup.DEFAULT_PORT,
+        scopes="openid profile User.Read Tasks.ReadWrite Calendars.ReadWrite Sites.Selected",
+    )
+    with pytest.raises(setup.OfficeSetupError, match="office_oauth_scope_policy_invalid"):
+        setup._validate_authorization_url(
+            no_refresh,
+            port=setup.DEFAULT_PORT,
+            tenant_id=TENANT,
+            enabled_features=ENABLED_FEATURES,
+        )
 
 
 def test_begin_and_callback_keep_code_and_state_inside_cli_stdin() -> None:
@@ -337,8 +387,23 @@ def test_begin_and_callback_keep_code_and_state_inside_cli_stdin() -> None:
     assert "code-secret-456" not in repr(service._active_flow)
     safe = service.status(session)
     assert safe["identityVerified"] is True
+    assert safe["credentialRevision"] == 0
     assert safe["message"] == "AUTHORIZATION_COMPLETE"
     assert "externalSubject" not in safe
+    service.discover(session, "todo_lists")
+    targets = {
+        "plannerPlanIds": [],
+        "sharePointListIds": [],
+        "sharePointDriveIds": [],
+        "toDoTaskListIds": ["todo-1"],
+        "calendarIds": [],
+        "freebusySubjects": [],
+    }
+    updated = service.select_targets(session, expected_revision=0, targets_value=targets)
+    assert updated["credentialRevision"] == 1
+    final_status = service.status(session)
+    assert final_status["identityVerified"] is True
+    assert final_status["credentialRevision"] == 1
 
 
 def test_status_requires_actor_owned_matching_provider_and_never_mail_scope() -> None:
@@ -348,7 +413,7 @@ def test_status_requires_actor_owned_matching_provider_and_never_mail_scope() ->
         state="LINKED",
         auth_status="healthy",
         external_subject=EXTERNAL_SUBJECT,
-        revision=1,
+        revision=0,
         target_scope={"workspaceId": WORKSPACE},
         scopes=["openid", "Mail.Read"],
     )
@@ -358,7 +423,7 @@ def test_status_requires_actor_owned_matching_provider_and_never_mail_scope() ->
         state="LINKED",
         auth_status="healthy",
         external_subject=EXTERNAL_SUBJECT,
-        revision=1,
+        revision=0,
         target_scope={"workspaceId": WORKSPACE},
     )
     bad_owner["accessMode"] = "workspace_operator"
@@ -375,20 +440,71 @@ def test_discovery_and_cas_selection_accept_only_server_observed_targets(
         service.discover(session, resource_type)
     targets = {
         "plannerPlanIds": ["plan-1"],
-        "sharePointSiteId": "site-1",
         "sharePointListIds": [],
         "sharePointDriveIds": ["drive-1"],
         "toDoTaskListIds": ["todo-1"],
         "calendarIds": ["calendar-1"],
         "freebusySubjects": ["person@dohorizon.com"],
     }
-    result = service.select_targets(session, expected_revision=1, targets_value=targets)
+    result = service.select_targets(session, expected_revision=0, targets_value=targets)
     assert result["state"] == "UPDATED"
-    assert result["credentialRevision"] == 2
+    assert result["credentialRevision"] == 1
     operation, payload = bridge.calls[-1]
     assert operation == "select-targets"
-    assert payload == {"expectedCredentialRevision": 1, "targets": targets}
+    assert payload == {"expectedCredentialRevision": 0, "targets": targets}
     assert "scopes" not in payload and "tenantId" not in payload and "workspaceId" not in payload
+    assert service.status(session)["credentialRevision"] == 1
+
+
+def test_discovery_follows_opaque_continuation_only_inside_the_server() -> None:
+    """Collect complete owner metadata pages and never expose a signed provider cursor."""
+
+    class PagingBridge(FakeBridge):
+        def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if operation != "discover" or payload.get("resourceType") != "todo_lists":
+                return super().invoke(operation, payload)
+            self.calls.append((operation, dict(payload)))
+            cursor = payload.get("pageCursor")
+            if cursor is None:
+                return {
+                    "state": "DISCOVERED",
+                    "resourceType": "todo_lists",
+                    "items": [{"id": "todo-1", "displayName": "One", "kind": "task_list"}],
+                    "pageCursor": None,
+                    "nextCursor": "signed-cursor-private",
+                    "complete": False,
+                    "truncated": False,
+                    "credentialRevision": 0,
+                }
+            return {
+                "state": "DISCOVERED",
+                "resourceType": "todo_lists",
+                "items": [{"id": "todo-2", "displayName": "Two", "kind": "task_list"}],
+                "pageCursor": cursor,
+                "nextCursor": None,
+                "complete": True,
+                "truncated": False,
+                "credentialRevision": 0,
+            }
+
+    bridge = PagingBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=0,
+        target_scope={"workspaceId": WORKSPACE},
+    )
+    discovered = service.discover(session, "todo_lists")
+    assert [item["id"] for item in discovered["items"]] == ["todo-1", "todo-2"]
+    assert "signed-cursor-private" not in json.dumps(discovered)
+    page_calls = [payload for operation, payload in bridge.calls if operation == "discover"]
+    assert page_calls == [
+        {"resourceType": "todo_lists"},
+        {"resourceType": "todo_lists", "pageCursor": "signed-cursor-private"},
+    ]
 
 
 def test_cas_rejects_ids_not_returned_by_exchange_discovery(
@@ -400,7 +516,6 @@ def test_cas_rejects_ids_not_returned_by_exchange_discovery(
     service.discover(session, "todo_lists")
     targets = {
         "plannerPlanIds": [],
-        "sharePointSiteId": None,
         "sharePointListIds": [],
         "sharePointDriveIds": [],
         "toDoTaskListIds": ["attacker-chosen-id"],
@@ -409,8 +524,9 @@ def test_cas_rejects_ids_not_returned_by_exchange_discovery(
     }
     before = len(bridge.calls)
     with pytest.raises(setup.OfficeSetupError, match="office_target_not_discovered"):
-        service.select_targets(session, expected_revision=1, targets_value=targets)
-    assert len(bridge.calls) == before
+        service.select_targets(session, expected_revision=0, targets_value=targets)
+    assert len(bridge.calls) == before + 1
+    assert bridge.calls[-1][0] == "status"
 
 
 def _start_server(bridge: FakeBridge) -> tuple[setup.OfficeSetupServer, threading.Thread, int]:
@@ -456,7 +572,7 @@ def test_loopback_accepts_localhost_and_127_but_requires_matching_origin_and_csr
         state="LINKED",
         auth_status="healthy",
         external_subject=EXTERNAL_SUBJECT,
-        revision=1,
+        revision=0,
         target_scope={"workspaceId": WORKSPACE},
     )
     server, thread, port = _start_server(bridge)
