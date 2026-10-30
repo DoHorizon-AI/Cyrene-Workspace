@@ -368,7 +368,9 @@ def test_private_bind_options_accept_only_closed_no_create_host_path_forms() -> 
         assert not preflight._private_bind_options_are_safe(invalid)
 
 
-def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path) -> None:
+def test_real_docker_compose_render_keeps_private_bind_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Render long bind syntax with the installed Compose CLI, without starting containers."""
 
     docker = preflight.shutil.which("docker")
@@ -399,6 +401,31 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
     empty_bind_source.chmod(0o600)
     actor_config = tmp_path / "actor-config"
     actor_config.mkdir()
+    authorization_config, config_dir, source_paths, _metadata_overrides = (
+        _codebuddy_authorization_file_mount_fixture(tmp_path, monkeypatch)
+    )
+    authorization_bind_shapes = {
+        "authorization-bind-omitted-probe": None,
+        "authorization-bind-empty-probe": {},
+        "authorization-bind-explicit-false-probe": {"create_host_path": False},
+    }
+    authorization_bind_probes = {}
+    for service_name, bind_options in authorization_bind_shapes.items():
+        mounts = []
+        for target, filename in preflight.CODEBUDDY_AUTHORIZATION_FILE_MOUNTS.items():
+            mount = {
+                "type": "bind",
+                "source": str(source_paths[filename]),
+                "target": target,
+                "read_only": True,
+            }
+            if bind_options is not None:
+                mount["bind"] = dict(bind_options)
+            mounts.append(mount)
+        authorization_bind_probes[service_name] = {
+            "image": "example.invalid/compose-bind-probe:latest",
+            "volumes": mounts,
+        }
     compose_file = tmp_path / "compose.yaml"
     compose_file.write_text(
         yaml.safe_dump(
@@ -439,6 +466,7 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
                             }
                         ],
                     },
+                    **authorization_bind_probes,
                 }
             }
         ),
@@ -477,6 +505,27 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
         stage_transition._validate_office_graph_oauth_setup_delta(
             {"exchange": {"volumes": []}},
             {"exchange": {"volumes": [candidate_mount]}},
+        )
+
+    for service_name in authorization_bind_shapes:
+        candidate = copy.deepcopy(authorization_config)
+        navigator = candidate["services"]["navigator"]
+        rendered_mounts = compose["services"][service_name]["volumes"]
+        assert len(rendered_mounts) == len(preflight.CODEBUDDY_AUTHORIZATION_FILE_MOUNTS)
+        for mount in rendered_mounts:
+            assert mount["read_only"] is True
+            assert preflight._private_bind_options_are_safe(mount)
+        navigator["volumes"] = [
+            row
+            for row in navigator["volumes"]
+            if row.get("target") not in preflight.CODEBUDDY_AUTHORIZATION_FILE_MOUNTS
+        ] + rendered_mounts
+        preflight._validate_codebuddy_acp_mount_boundary(
+            candidate,
+            navigator,
+            secrets_dir=tmp_path / "secrets",
+            config_dir=config_dir,
+            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
         )
 
 
@@ -2387,6 +2436,19 @@ def test_codebuddy_acp_allows_only_exact_graph_authorization_file_pair(
 
     validate(config, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
     validate(config, "issued-connector-activation")
+    for bind_shape in (None, {}, {"create_host_path": False}):
+        normalized_shape = copy.deepcopy(config)
+        child_mounts = [
+            row
+            for row in normalized_shape["services"]["navigator"]["volumes"]
+            if row.get("target") in preflight.CODEBUDDY_AUTHORIZATION_FILE_MOUNTS
+        ]
+        for mount in child_mounts:
+            if bind_shape is None:
+                mount.pop("bind")
+            else:
+                mount["bind"] = dict(bind_shape)
+        validate(normalized_shape, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
     assert all(
         stat.S_IMODE((config_dir / filename).stat().st_mode) == 0o400 for filename in source_paths
     )
@@ -2424,10 +2486,20 @@ def test_codebuddy_acp_allows_only_exact_graph_authorization_file_pair(
         ("no automation overlay", without_overlay, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
     )
 
-    unsafe_bind = copy.deepcopy(config)
-    unsafe_bind["services"]["navigator"]["volumes"][-1]["bind"] = {"create_host_path": True}
+    for label, bind_shape in (
+        ("create host path", {"create_host_path": True}),
+        ("null bind", None),
+        ("unknown bind option", {"create_host_path": False, "propagation": "rshared"}),
+    ):
+        unsafe_bind = copy.deepcopy(config)
+        child_mount = unsafe_bind["services"]["navigator"]["volumes"][-1]
+        child_mount["bind"] = bind_shape
+        invalid_cases.append((label, unsafe_bind, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE))
+
+    unknown_mount_key = copy.deepcopy(config)
+    unknown_mount_key["services"]["navigator"]["volumes"][-1]["consistency"] = "delegated"
     invalid_cases.append(
-        ("create host path", unsafe_bind, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
+        ("unknown mount key", unknown_mount_key, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE)
     )
 
     extra_target = copy.deepcopy(config)

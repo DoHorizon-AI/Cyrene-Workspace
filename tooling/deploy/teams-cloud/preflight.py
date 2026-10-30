@@ -6266,11 +6266,13 @@ def _validate_codebuddy_acp_authorization_file_mounts(
         target = mount["target"]
         filename = CODEBUDDY_AUTHORIZATION_FILE_MOUNTS[target]
         source_text = mount.get("source")
+        required_mount_keys = {"type", "source", "target", "read_only"}
         if (
-            set(mount) != {"type", "source", "target", "read_only", "bind"}
+            not required_mount_keys <= set(mount)
+            or set(mount) - required_mount_keys - {"bind"}
             or mount.get("type") != "bind"
             or mount.get("read_only") is not True
-            or mount.get("bind") != {"create_host_path": False}
+            or not _private_bind_options_are_safe(mount)
             or not isinstance(source_text, str)
             or not source_text
         ):
