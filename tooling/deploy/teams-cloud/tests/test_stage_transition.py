@@ -914,6 +914,103 @@ def test_office_graph_bootstrap_accepts_only_the_owner_model_personal_route() ->
         stage_transition._validate_office_graph_personal_route_compose_delta(active, candidate)
 
 
+def test_graph_bootstrap_config_directory_guard_requires_separate_candidate() -> None:
+    active_dir = Path("/private/active-config")
+    candidate_dir = Path("/private/candidate-config")
+
+    stage_transition._validate_config_directory_policy(
+        image_update_target=None,
+        memory_update_target=None,
+        listener_repair=False,
+        active_config_dir=active_dir,
+        candidate_config_dir=candidate_dir,
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="candidate config directory must be separate",
+    ):
+        stage_transition._validate_config_directory_policy(
+            image_update_target=None,
+            memory_update_target=None,
+            listener_repair=False,
+            active_config_dir=active_dir,
+            candidate_config_dir=active_dir,
+        )
+
+    plan = {
+        "schemaVersion": stage_transition.PLAN_SCHEMA,
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "createdAtUtc": "2026-10-30T12:00:00+00:00",
+        "project": "cyrene-teams-cloud",
+        "activeInputs": {},
+        "candidateInputs": {},
+        "candidateInputPaths": {},
+        "activeConfigDir": str(active_dir),
+        "candidateConfigDir": str(active_dir),
+        "activeSecretsDir": "/private/secrets",
+        "journalDir": "/private/journal",
+        "candidateSelectionFile": "/private/selection.json",
+        "selectionBackupPath": "/private/selection.previous.json",
+        "activeSelection": {},
+        "runtimeConfigIdentity": {},
+        "candidateServices": {},
+        "targets": [],
+        "activeServices": {},
+        "edgeDelivery": {},
+        "navigatorDrain": {},
+        "database": {},
+        "candidatePreflight": {},
+        "exchangeReadiness": {},
+        "policy": {},
+        "planSha256": "a" * 64,
+    }
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="candidate config directory must be separate",
+    ):
+        stage_transition._validate_plan(plan)
+
+    plan["candidateConfigDir"] = str(candidate_dir)
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="lacks its ordered service targets",
+    ):
+        stage_transition._validate_plan(plan)
+
+
+@pytest.mark.parametrize(
+    "update_mode",
+    [
+        {"image_update_target": "exchange"},
+        {"memory_update_target": "navigator"},
+        {"listener_repair": True},
+    ],
+)
+def test_in_place_update_modes_still_require_the_active_config_directory(
+    update_mode: dict[str, Any],
+) -> None:
+    active_dir = Path("/private/active-config")
+    stage_transition._validate_config_directory_policy(
+        image_update_target=update_mode.get("image_update_target"),
+        memory_update_target=update_mode.get("memory_update_target"),
+        listener_repair=update_mode.get("listener_repair", False),
+        active_config_dir=active_dir,
+        candidate_config_dir=active_dir,
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="image update must keep the active config directory",
+    ):
+        stage_transition._validate_config_directory_policy(
+            image_update_target=update_mode.get("image_update_target"),
+            memory_update_target=update_mode.get("memory_update_target"),
+            listener_repair=update_mode.get("listener_repair", False),
+            active_config_dir=active_dir,
+            candidate_config_dir=Path("/private/candidate-config"),
+        )
+
+
 @pytest.mark.parametrize("actor_count", [1, 5])
 @pytest.mark.parametrize("session_health", [False, True])
 def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
@@ -4885,7 +4982,7 @@ def test_same_plan_apply_rechecks_journal_under_lock_and_never_overwrites_recove
         "candidateInputs": {},
         "candidateInputPaths": {},
         "activeConfigDir": str(tmp_path),
-        "candidateConfigDir": str(tmp_path),
+        "candidateConfigDir": str(tmp_path / "candidate-config"),
         "activeSecretsDir": str(tmp_path),
         "journalDir": str(journal_dir),
         "candidateSelectionFile": str(selection_path),

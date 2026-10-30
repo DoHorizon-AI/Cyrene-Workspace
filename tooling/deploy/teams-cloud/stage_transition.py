@@ -4588,6 +4588,44 @@ def _validate_private_directory(
     return resolved
 
 
+def _validate_config_directory_policy(
+    *,
+    image_update_target: str | None,
+    memory_update_target: str | None,
+    listener_repair: bool,
+    active_config_dir: Path | str,
+    candidate_config_dir: Path | str,
+) -> None:
+    """Keep normal transitions isolated and in-place update modes on the active config.
+
+    中文：Graph bootstrap adds a private candidate config directory; image, memory, and
+    listener-only updates continue to use the active directory.
+    """
+
+    try:
+        active_path = Path(active_config_dir)
+        candidate_path = Path(candidate_config_dir)
+        if (
+            not active_path.is_absolute()
+            or not candidate_path.is_absolute()
+            or active_path.resolve() != active_path
+            or candidate_path.resolve() != candidate_path
+        ):
+            raise StageTransitionError(
+                "transition config directories must be canonical absolute paths"
+            )
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise StageTransitionError("transition config directory inputs are malformed") from error
+
+    in_place_update = (
+        image_update_target is not None or memory_update_target is not None or listener_repair
+    )
+    if in_place_update and active_path != candidate_path:
+        raise StageTransitionError("image update must keep the active config directory")
+    if not in_place_update and active_path == candidate_path:
+        raise StageTransitionError("candidate config directory must be separate from active config")
+
+
 def _validate_active_candidate_configs(
     active_config_dir: Path,
     candidate_config_dir: Path,
@@ -6211,21 +6249,13 @@ def create_plan(
     )
     secrets_dir = _validate_private_directory(secrets_dir, "active secrets", expected_uid=10001)
     backup_dir = _validate_private_directory(backup_dir, "SQLite backup", require_artifact=True)
-    if (
-        image_update_target is None
-        and memory_update_target is None
-        and not listener_repair
-        and phase != OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-        and active_config_dir == candidate_config_dir
-    ):
-        raise StageTransitionError("candidate config directory must be separate from active config")
-    if (
-        image_update_target is not None
-        or memory_update_target is not None
-        or listener_repair
-        or phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-    ) and active_config_dir != candidate_config_dir:
-        raise StageTransitionError("image update must keep the active config directory")
+    _validate_config_directory_policy(
+        image_update_target=image_update_target,
+        memory_update_target=memory_update_target,
+        listener_repair=listener_repair,
+        active_config_dir=active_config_dir,
+        candidate_config_dir=candidate_config_dir,
+    )
     if not connector_auth_task_id or len(connector_auth_task_id) > 128:
         raise StageTransitionError("connector auth task ID is malformed")
     if phase == "issued-connector-activation" and (
@@ -6751,6 +6781,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             raise StageTransitionError(f"stage transition {field} record is malformed")
     if plan.get("phase") not in PHASES or not isinstance(plan.get("project"), str):
         raise StageTransitionError("stage transition plan identity is malformed")
+    _validate_config_directory_policy(
+        image_update_target=image_update_target,
+        memory_update_target=memory_update_target,
+        listener_repair=listener_repair,
+        active_config_dir=plan["activeConfigDir"],
+        candidate_config_dir=plan["candidateConfigDir"],
+    )
     if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and (
         plan.get("phase") not in {"provider-bootstrap", "issued-connector-activation"}
         or (plan.get("phase") == "provider-bootstrap" and "cloudRunnerState" not in plan)
