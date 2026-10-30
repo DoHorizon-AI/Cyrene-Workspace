@@ -1283,6 +1283,10 @@ def _validate_automation_workflow_configuration(
         raise PreflightError(
             "the current Directory projection must remain within configured pilot actors"
         )
+    if require_personal_delivery and set(projection_subjects) != set(actor_by_token.values()):
+        raise PreflightError(
+            "Graph bootstrap pilot subjects must exactly match the current Directory projection"
+        )
 
     principal_document = _private_runtime_json(
         config_dir / "navigator-principal-config.json", "Navigator principal configuration"
@@ -1306,6 +1310,10 @@ def _validate_automation_workflow_configuration(
         or not isinstance(tenant_id, str)
     ):
         raise PreflightError("automation pilot identity scope is incomplete")
+    if require_personal_delivery and source_bindings != {"schemaVersion": 1, "targets": []}:
+        raise PreflightError(
+            "Graph bootstrap must keep automation source bindings empty until real tasks are selected"
+        )
     _validate_automation_source_bindings(
         source_bindings,
         actor_ids=set(actor_by_token.values()),

@@ -2386,9 +2386,87 @@ def _validate_office_graph_oauth_setup_delta(
 def _validate_office_graph_private_principal_delta(
     active: dict[str, Any], candidate: dict[str, Any]
 ) -> None:
-    """Permit only the frozen actor-scoped private Teams conversation policy."""
+    """Permit the exact six-principal/private-chat extension of the owner-only baseline.
 
-    def principal_document(compose: dict[str, Any], label: str) -> tuple[str, dict[str, Any]]:
+    中文：保留唯一原 session principal，只追加canonical五writer、bridge与Teams策略。
+    """
+
+    def config_directory(compose: dict[str, Any], label: str) -> Path:
+        navigator = compose.get("services", {}).get("navigator", {})
+        volumes = navigator.get("volumes", []) if isinstance(navigator, dict) else []
+        rows = [
+            row
+            for row in volumes
+            if isinstance(row, dict) and row.get("target") == "/run/teams-authorization"
+        ]
+        if (
+            len(rows) != 1
+            or rows[0].get("type") != "bind"
+            or rows[0].get("read_only") is not True
+            or not isinstance(rows[0].get("source"), str)
+            or not Path(rows[0]["source"]).is_absolute()
+        ):
+            raise StageTransitionError(f"Graph bootstrap {label} actor config bind is malformed")
+        path = Path(rows[0]["source"])
+        try:
+            metadata = path.lstat()
+            resolved = path.resolve(strict=True)
+        except OSError as error:
+            raise StageTransitionError(
+                f"Graph bootstrap {label} actor config directory is unavailable"
+            ) from error
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or resolved != path:
+            raise StageTransitionError(f"Graph bootstrap {label} actor config directory is unsafe")
+        return path
+
+    active_directory = config_directory(active, "active")
+    candidate_directory = config_directory(candidate, "candidate")
+    if active_directory == candidate_directory:
+        raise StageTransitionError(
+            "Graph bootstrap requires an isolated candidate actor config directory"
+        )
+
+    def directory_entries(directory: Path, label: str) -> dict[str, Path]:
+        entries: dict[str, Path] = {}
+        try:
+            children = list(directory.iterdir())
+        except OSError as error:
+            raise StageTransitionError(
+                f"Graph bootstrap {label} actor config inventory is unavailable"
+            ) from error
+        for child in children:
+            if child.is_symlink() or not child.is_file() or child.name in entries:
+                raise StageTransitionError(
+                    f"Graph bootstrap {label} actor config inventory is unsafe"
+                )
+            entries[child.name] = child
+        return entries
+
+    active_files = directory_entries(active_directory, "active")
+    candidate_files = directory_entries(candidate_directory, "candidate")
+    allowed_new_files = {"work-actor-token-map.json", "automation-source-bindings.json"}
+    if (
+        not set(active_files) <= set(candidate_files)
+        or set(candidate_files) - set(active_files) - allowed_new_files
+        or "work-actor-token-map.json" not in candidate_files
+        or "automation-source-bindings.json" not in candidate_files
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap may add only the Work actor map and empty automation source bindings"
+        )
+    for filename in set(active_files) & set(candidate_files) - {
+        NAVIGATOR_PRINCIPAL_CONFIG_FILENAME,
+        "work-actor-token-map.json",
+        "automation-source-bindings.json",
+    }:
+        if _sha256_file(active_files[filename]) != _sha256_file(candidate_files[filename]):
+            raise StageTransitionError(
+                f"Graph bootstrap changes unrelated private config {filename}"
+            )
+
+    def principal_document(
+        compose: dict[str, Any], directory: Path, label: str
+    ) -> tuple[str, dict[str, Any]]:
         configs = compose.get("configs", {})
         config_name = None
         row = None
@@ -2405,39 +2483,189 @@ def _validate_office_graph_private_principal_delta(
         if not isinstance(row, dict) or not isinstance(row.get("file"), str):
             raise StageTransitionError(f"Graph bootstrap {label} principal config is missing")
         path = Path(row["file"])
-        if path.name != NAVIGATOR_PRINCIPAL_CONFIG_FILENAME:
+        expected_path = directory / NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+        if path.resolve(strict=True) != expected_path.resolve(strict=True):
             raise StageTransitionError(
                 f"Graph bootstrap {label} principal config path is not canonical"
             )
-        document = _read_json(path, f"{label} Navigator principal config")
-        if not isinstance(document, dict):
-            raise StageTransitionError(f"Graph bootstrap {label} principal config is malformed")
+        document = _read_json(expected_path, f"{label} Navigator principal config")
         return config_name, document
 
-    active_name, old = principal_document(active, "active")
-    candidate_name, new = principal_document(candidate, "candidate")
+    active_name, old = principal_document(active, active_directory, "active")
+    candidate_name, new = principal_document(candidate, candidate_directory, "candidate")
     if active_name != candidate_name:
         raise StageTransitionError("Graph bootstrap changes the Navigator principal config alias")
     services = candidate.get("services", {})
     navigator_environment = services.get("navigator", {}).get("environment", {})
+    operator_environment = services.get("directory-operator", {}).get("environment", {})
     tenant = navigator_environment.get("TEAMS_TENANT_ID")
+    workspace = navigator_environment.get("CYRENE_WORKSPACE_ID")
+    organization = operator_environment.get("CYRENE_ORGANIZATION_ID")
+    owner = operator_environment.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID")
+    bot_app_id = navigator_environment.get("TEAMS_BOT_APP_ID")
+    if any(
+        not preflight._uuid(value) for value in (owner, workspace, organization, tenant, bot_app_id)
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap owner, tenant, workspace, or bot identity is malformed"
+        )
     policy = {
         "actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE",
-        "workspace_id": navigator_environment.get("CYRENE_WORKSPACE_ID"),
+        "workspace_id": workspace,
         "issuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
         "tenant_id": tenant,
-        "bot_app_id": navigator_environment.get("TEAMS_BOT_APP_ID"),
+        "bot_app_id": bot_app_id,
     }
-    candidate_policy = new.get("teams_private_conversations")
-    if candidate_policy != policy:
-        raise StageTransitionError(
-            "Graph bootstrap principal config lacks the exact five-actor Teams policy"
+
+    actor_map = _read_json(
+        candidate_directory / "work-actor-token-map.json", "Graph bootstrap Work actor map"
+    )
+    actor_projection = _read_json(
+        candidate_directory / "teams-actor-subjects.json",
+        "Graph bootstrap Directory subject projection",
+    )
+    source_bindings = _read_json(
+        candidate_directory / "automation-source-bindings.json",
+        "Graph bootstrap automation source bindings",
+    )
+    writer_slots = [f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}" for index in range(1, 6)]
+    actor_rows = actor_map.get("actors")
+    if (
+        set(actor_map) != {"schemaVersion", "workspaceId", "actors"}
+        or actor_map.get("schemaVersion") != 1
+        or actor_map.get("workspaceId") != workspace
+        or not isinstance(actor_rows, list)
+        or len(actor_rows) != 5
+        or [row.get("tokenEnv") for row in actor_rows if isinstance(row, dict)] != writer_slots
+        or any(
+            not isinstance(row, dict)
+            or set(row) != {"actorAadObjectId", "tokenEnv"}
+            or not preflight._uuid(row.get("actorAadObjectId"))
+            for row in actor_rows
         )
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap Work actor map does not match the five fixed token slots"
+        )
+    actor_by_token = {row["tokenEnv"]: row["actorAadObjectId"] for row in actor_rows}
+    actor_ids = list(actor_by_token.values())
+    if len(set(actor_ids)) != 5 or actor_by_token.get(writer_slots[0]) != owner:
+        raise StageTransitionError(
+            "Graph bootstrap Work actor map has duplicate actors or a non-owner slot 01"
+        )
+    subjects = actor_projection.get("subjects")
+    if (
+        set(actor_projection) != {"schemaVersion", "workspaceId", "issuer", "subjects"}
+        or actor_projection.get("schemaVersion") != 1
+        or actor_projection.get("workspaceId") != workspace
+        or actor_projection.get("issuer") != policy["issuer"]
+        or not isinstance(subjects, list)
+        or len(subjects) != 5
+        or any(not preflight._uuid(subject) for subject in subjects)
+        or len(set(subjects)) != 5
+        or set(subjects) != set(actor_ids)
+        or source_bindings != {"schemaVersion": 1, "targets": []}
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap Directory projection must match five actors and source bindings must be empty"
+        )
+    connector_host = preflight._json_environment_object(
+        services.get("exchange", {}),
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON",
+        "Exchange integration",
+    ).get("connectorHost")
+    teams_profile = (
+        connector_host.get("teamsMessages") if isinstance(connector_host, dict) else None
+    )
+    if (
+        not isinstance(teams_profile, dict)
+        or not isinstance(teams_profile.get("personalActorSubjects"), list)
+        or len(teams_profile["personalActorSubjects"]) != 5
+        or any(not preflight._uuid(subject) for subject in teams_profile["personalActorSubjects"])
+        or len(set(teams_profile["personalActorSubjects"])) != 5
+        or set(teams_profile["personalActorSubjects"]) != set(subjects)
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap personal chat subjects must match the five Directory-projected actors"
+        )
+
+    old_rows = old.get("principals")
+    new_rows = new.get("principals")
+    expected_tokens = [
+        "NAVIGATOR_SESSION_TOKEN",
+        *writer_slots,
+        "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
+    ]
+    if (
+        not isinstance(old_rows, list)
+        or len(old_rows) != 1
+        or not isinstance(old_rows[0], dict)
+        or old_rows[0].get("token_env") != "NAVIGATOR_SESSION_TOKEN"
+        or old_rows[0].get("actor_id") != owner
+        or not isinstance(new_rows, list)
+        or [row.get("token_env") for row in new_rows if isinstance(row, dict)] != expected_tokens
+        or any(not isinstance(row, dict) for row in new_rows)
+        or new_rows[0] != old_rows[0]
+        or "teams_private_conversations" in old
+        or new.get("teams_private_conversations") != policy
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap must preserve the owner session and add only the five writers, bridge, and private-chat policy"
+        )
+
+    principal_fields = {
+        "token_env",
+        "actor_id",
+        "workspace_ids",
+        "organization_id",
+        "can_takeover",
+        "actor_private_scope",
+        "can_write_harness",
+        "can_publish_credential_health",
+        "can_bind_teams_private_conversations",
+    }
+    expected_writer_flags = {
+        "can_takeover": True,
+        "actor_private_scope": True,
+        "can_write_harness": True,
+        "can_publish_credential_health": False,
+        "can_bind_teams_private_conversations": False,
+    }
+    for token_env, principal in zip(writer_slots, new_rows[1:6], strict=True):
+        if (
+            set(principal) != principal_fields
+            or principal.get("actor_id") != actor_by_token[token_env]
+            or principal.get("workspace_ids") != old_rows[0].get("workspace_ids")
+            or principal.get("organization_id") != old_rows[0].get("organization_id")
+            or any(
+                principal.get(field) is not value for field, value in expected_writer_flags.items()
+            )
+        ):
+            raise StageTransitionError(
+                "Graph bootstrap writer principals exceed the canonical private-writer patch"
+            )
+    bridge = new_rows[-1]
+    if (
+        set(bridge) != principal_fields
+        or bridge.get("actor_id") != "teams-private-bridge"
+        or bridge.get("workspace_ids") != old_rows[0].get("workspace_ids")
+        or bridge.get("organization_id") != old_rows[0].get("organization_id")
+        or bridge.get("can_takeover") is not False
+        or bridge.get("actor_private_scope") is not False
+        or bridge.get("can_write_harness") is not False
+        or bridge.get("can_publish_credential_health") is not False
+        or bridge.get("can_bind_teams_private_conversations") is not True
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap Teams bridge principal exceeds its narrow bind-only role"
+        )
+
     normalized = copy.deepcopy(new)
     normalized.pop("teams_private_conversations", None)
+    normalized["principals"] = [new_rows[0]]
     if old != normalized:
         raise StageTransitionError(
-            "Graph bootstrap changes principal permissions beyond the Teams route"
+            "Graph bootstrap changes existing owner principal fields beyond the private-chat route"
         )
 
 
