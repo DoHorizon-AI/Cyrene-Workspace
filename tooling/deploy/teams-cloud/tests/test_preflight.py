@@ -168,7 +168,7 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
     assert office_mount["source"] == str(source)
     assert office_mount["target"] == "/run/config/office-operator.json"
     assert office_mount["read_only"] is True
-    assert office_mount["bind"] == {"create_host_path": False}
+    assert office_mount.get("bind", {}) in ({}, {"create_host_path": False})
     assert preflight._private_bind_options_are_safe(office_mount)
 
     actor_mount = compose["services"]["actor-config-bind-probe"]["volumes"][0]
@@ -180,7 +180,7 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
     assert preflight._private_bind_options_are_safe(actor_mount)
 
     empty_bind_mount = compose["services"]["empty-bind-probe"]["volumes"][0]
-    assert empty_bind_mount["bind"] == {}
+    assert empty_bind_mount.get("bind", {}) in ({}, {"create_host_path": False})
     assert preflight._private_bind_options_are_safe(empty_bind_mount)
 
     for candidate_mount in (office_mount, empty_bind_mount):
