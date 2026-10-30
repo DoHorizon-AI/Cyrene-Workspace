@@ -796,6 +796,54 @@ def _office_oauth_setup_bridge_enabled(compose: dict[str, Any]) -> bool:
     return mounted
 
 
+def _validate_office_oauth_internal_networks(networks: Any, *, docker_prefix: list[str]) -> None:
+    """Require every attached Exchange network to be the exact inspected internal network."""
+
+    if not isinstance(networks, dict) or not networks:
+        raise StageTransitionError("Exchange Office OAuth network inventory is empty or malformed")
+    network_ids: dict[str, str] = {}
+    for name, attachment in networks.items():
+        network_id = attachment.get("NetworkID") if isinstance(attachment, dict) else None
+        if (
+            not isinstance(name, str)
+            or not name
+            or not isinstance(network_id, str)
+            or FULL_CONTAINER_ID_RE.fullmatch(network_id) is None
+        ):
+            raise StageTransitionError(
+                "Exchange Office OAuth attached network identity is malformed"
+            )
+        network_ids[name] = network_id
+    try:
+        inspected = runtime_update._decode_json_output(
+            runtime_update._checked_stdout(
+                [*docker_prefix, "network", "inspect", *sorted(network_ids)],
+                label="Exchange Office OAuth internal network inspection",
+            ),
+            "Exchange Office OAuth internal network inspection",
+        )
+    except runtime_update.RuntimeUpdateError as error:
+        raise StageTransitionError("Exchange Office OAuth network inspection failed") from error
+    if not isinstance(inspected, list) or len(inspected) != len(network_ids):
+        raise StageTransitionError("Exchange Office OAuth network inspection is incomplete")
+    observed: dict[str, str] = {}
+    for row in inspected:
+        name = row.get("Name") if isinstance(row, dict) else None
+        network_id = row.get("Id") if isinstance(row, dict) else None
+        if (
+            not isinstance(name, str)
+            or name in observed
+            or network_ids.get(name) != network_id
+            or row.get("Internal") is not True
+        ):
+            raise StageTransitionError(
+                "Exchange Office OAuth attached network is not the exact internal network"
+            )
+        observed[name] = network_id
+    if set(observed) != set(network_ids):
+        raise StageTransitionError("Exchange Office OAuth network inspection names changed")
+
+
 def _service_image(compose: dict[str, Any], image_ids: dict[str, str], name: str) -> dict[str, str]:
     """Resolve one Compose service to its exact locked immutable image reference and ID."""
 
@@ -5379,6 +5427,8 @@ def _live_service_inventory(
     published_container_ids: list[str] = []
     office_oauth_container_ids: list[str] = []
     published_values: set[str] = set()
+    office_oauth_network_ports: Any = None
+    office_oauth_networks: Any = None
     for row in rows:
         config_row = row.get("Config")
         labels = config_row.get("Labels") if isinstance(config_row, dict) else None
@@ -5459,6 +5509,10 @@ def _live_service_inventory(
                 )
             if office_oauth_setup_enabled and service_name == "exchange":
                 office_oauth_container_ids.append(row["Id"])
+                office_oauth_network_ports = (
+                    networks_record.get("Ports") if isinstance(networks_record, dict) else None
+                )
+                office_oauth_networks = networks
             else:
                 published_container_ids.append(row["Id"])
                 published_values.update(
@@ -5503,6 +5557,20 @@ def _live_service_inventory(
         office_port = str(preflight.OFFICE_OAUTH_SETUP_PORT)
         if len(office_oauth_container_ids) != 1:
             raise StageTransitionError("Exchange Office OAuth port has no unique project container")
+        office_port_key = f"{office_port}/tcp"
+        if (
+            not isinstance(office_oauth_network_ports, dict)
+            or not office_oauth_network_ports
+            or office_port_key not in office_oauth_network_ports
+            or any(
+                not isinstance(key, str)
+                or re.fullmatch(r"[1-9][0-9]{0,4}/(?:tcp|udp|sctp)", key) is None
+                or int(key.split("/", 1)[0]) > 65535
+                for key in office_oauth_network_ports
+            )
+        ):
+            raise StageTransitionError("Exchange Office OAuth NetworkSettings.Ports is unknown")
+        office_network_binding = office_oauth_network_ports[office_port_key]
         published = runtime_update._checked_stdout(
             [
                 *docker_prefix,
@@ -5515,14 +5583,42 @@ def _live_service_inventory(
             label="Exchange Office OAuth published port ownership",
         )
         port_ids = [value.strip() for value in published.splitlines() if value.strip()]
-        if len(port_ids) != 1:
-            raise StageTransitionError(
-                f"published Exchange Office OAuth TCP {office_port} is not uniquely owned"
+        if office_network_binding is None:
+            if any(binding is not None for binding in office_oauth_network_ports.values()):
+                raise StageTransitionError(
+                    "unpublished Exchange Office OAuth bridge has an actual port publication"
+                )
+            _validate_office_oauth_internal_networks(
+                office_oauth_networks, docker_prefix=docker_prefix
             )
-        if not port_ids[0].startswith(office_oauth_container_ids[0][:12]):
-            raise StageTransitionError(
-                f"published Exchange Office OAuth TCP {office_port} has a non-Exchange owner"
-            )
+            if port_ids:
+                raise StageTransitionError(
+                    f"internal Exchange Office OAuth TCP {office_port} was published by Docker"
+                )
+        else:
+            if (
+                not isinstance(office_network_binding, list)
+                or len(office_network_binding) != 1
+                or not isinstance(office_network_binding[0], dict)
+                or set(office_network_binding[0]) != {"HostIp", "HostPort"}
+                or office_network_binding[0].get("HostIp") != "127.0.0.1"
+                or office_network_binding[0].get("HostPort") != office_port
+                or any(
+                    key != office_port_key and binding is not None
+                    for key, binding in office_oauth_network_ports.items()
+                )
+            ):
+                raise StageTransitionError(
+                    "published Exchange Office OAuth TCP must be its exact loopback binding"
+                )
+            if len(port_ids) != 1:
+                raise StageTransitionError(
+                    f"published Exchange Office OAuth TCP {office_port} is not uniquely owned"
+                )
+            if not port_ids[0].startswith(office_oauth_container_ids[0][:12]):
+                raise StageTransitionError(
+                    f"published Exchange Office OAuth TCP {office_port} has a non-Exchange owner"
+                )
     return by_service
 
 
