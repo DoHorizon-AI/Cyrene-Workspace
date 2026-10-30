@@ -151,11 +151,14 @@ AUTOMATION_DEPLOYMENT_TOOL_FILES = frozenset(
         "Dockerfile.azure-devops-observation",
         "pilot_subjects.py",
         "maintainer_subjects.py",
+        "office_oauth_setup.py",
         "export_automation_observations.py",
         "config/automation-source-bindings.schema.json",
         "config/automation-work-principals.patch.schema.json",
         "config/automation-work-principals.patch.template.json",
         "config/build-plan.automation-providers.template.json",
+        "config/office-operator.schema.json",
+        "config/office-operator.template.json",
         "config/work-actor-token-map.schema.json",
     }
 )

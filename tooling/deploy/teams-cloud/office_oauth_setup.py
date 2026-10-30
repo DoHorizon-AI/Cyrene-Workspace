@@ -498,9 +498,12 @@ def _validate_discovery(
     """Keep only short display labels and IDs from the fixed provider metadata response."""
 
     expected_keys = {"resourceType", "items"}
-    if resource_type == "sharepoint_drives":
-        expected_keys.add("siteId")
-    if set(document) != expected_keys or document.get("resourceType") != resource_type:
+    allowed_keys = expected_keys | ({"siteId"} if resource_type == "sharepoint_drives" else set())
+    if (
+        not expected_keys.issubset(document)
+        or set(document) - allowed_keys
+        or document.get("resourceType") != resource_type
+    ):
         raise OfficeSetupError("office_discovery_invalid")
     raw_site_id = document.get("siteId")
     site_id = _safe_identifier(raw_site_id) if raw_site_id is not None else None
@@ -512,11 +515,33 @@ def _validate_discovery(
     site_ids: set[str] = set()
     kinds: dict[str, str] = {}
     for item in items:
-        if not isinstance(item, dict) or not {"id", "displayName", "kind"}.issubset(item):
+        if not isinstance(item, dict) or not {"id", "displayName"}.issubset(item):
             raise OfficeSetupError("office_discovery_item_invalid")
+        if resource_type == "sharepoint_drives":
+            if set(item) - {"id", "displayName", "driveType", "siteId", "kind"}:
+                raise OfficeSetupError("office_discovery_item_invalid")
+            drive_type = item.get("driveType") or item.get("kind")
+            item_site_id_value = item.get("siteId") or site_id
+            if (
+                site_id is not None
+                and item_site_id_value is not None
+                and item_site_id_value != site_id
+            ):
+                raise OfficeSetupError("office_discovery_item_invalid")
+            item_site_id = (
+                _safe_identifier(item_site_id_value) if item_site_id_value is not None else None
+            )
+            if drive_type is None:
+                raise OfficeSetupError("office_discovery_item_invalid")
+            kind = "list" if str(drive_type).casefold() == "list" else "drive"
+        else:
+            if set(item) - {"id", "displayName", "kind", "webUrl"} or "kind" not in item:
+                raise OfficeSetupError("office_discovery_item_invalid")
+            drive_type = None
+            item_site_id = None
+            kind = item["kind"]
         item_id = _safe_identifier(item["id"])
         display_name = item["displayName"]
-        kind = item["kind"]
         if (
             not isinstance(display_name, str)
             or not display_name.strip()
@@ -530,9 +555,14 @@ def _validate_discovery(
         ids.add(item_id)
         kinds[item_id] = kind
         safe = {"id": item_id, "displayName": display_name, "kind": kind}
+        if item_site_id is not None:
+            site_ids.add(item_site_id)
+            safe["siteId"] = item_site_id
         safe_items.append(safe)
     if site_id:
         site_ids.add(site_id)
+    if resource_type == "sharepoint_drives" and safe_items and not site_ids:
+        raise OfficeSetupError("office_discovery_site_missing")
     return safe_items, DiscoverySnapshot(frozenset(ids), frozenset(site_ids), kinds), site_id
 
 
@@ -989,7 +1019,7 @@ const groups=[
   ['planner_plans','Planner plans','plannerPlanIds'],
   ['todo_lists','To Do lists','toDoTaskListIds'],
   ['calendars','Calendars','calendarIds'],
-  ['sharepoint_drives','SharePoint lists and libraries','sharePointResources'],
+  ['sharepoint_drives','SharePoint document libraries','sharePointResources'],
   ['freebusy_subjects','Free/busy people','freebusySubjects']
 ];
 let revision=null;
@@ -1056,7 +1086,7 @@ document.getElementById('discover').addEventListener('click',async()=>{
       try{
         const result=await api('/api/discover',{resourceType:type});
         discovered[type]=result.items;
-        if(type==='sharepoint_drives') sharePointSiteId=result.siteId||null;
+        if(type==='sharepoint_drives') sharePointSiteId=result.siteId||(result.items.find(item=>item.siteId)||{}).siteId||null;
       }catch(error){discovered[type]=[];errors.push(type);}
     }
     renderAll();
@@ -1074,6 +1104,7 @@ document.getElementById('save').addEventListener('click',async()=>{
     if(type==='sharepoint_drives'){
       const item=(discovered[type]||[]).find(row=>row.id===checkbox.value);
       if(!item) continue;
+      if(item.siteId) values.sharePointSiteId=item.siteId;
       if(item.kind.toLowerCase()==='list') values.sharePointListIds.push(item.id);
       else values.sharePointDriveIds.push(item.id);
     }else if(byType[type]) values[byType[type]].push(checkbox.value);

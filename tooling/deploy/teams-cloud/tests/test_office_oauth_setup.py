@@ -20,6 +20,7 @@ import pytest
 DEPLOYMENT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DEPLOYMENT_ROOT))
 setup = importlib.import_module("office_oauth_setup")
+release_bundle = importlib.import_module("release_bundle")
 
 TENANT = "11111111-1111-4111-8111-111111111111"
 SUBJECT = "22222222-2222-4222-8222-222222222222"
@@ -123,8 +124,14 @@ class FakeBridge:
             },
             "sharepoint_drives": {
                 "resourceType": "sharepoint_drives",
-                "siteId": "site-1",
-                "items": [{"id": "drive-1", "displayName": "Documents", "kind": "drive"}],
+                "items": [
+                    {
+                        "id": "drive-1",
+                        "displayName": "Documents",
+                        "driveType": "documentLibrary",
+                        "siteId": "site-1",
+                    }
+                ],
             },
             "freebusy_subjects": {
                 "resourceType": "freebusy_subjects",
@@ -203,6 +210,16 @@ def test_operator_template_matches_exact_private_schema_shape() -> None:
     assert "secret" not in serialized
     assert "mail" not in serialized
     assert "officev2" not in serialized
+
+
+def test_office_setup_runtime_and_contract_are_in_release_tool_closure() -> None:
+    """Package the temporary UI and its exact operator contract with deployment tools."""
+
+    assert {
+        "office_oauth_setup.py",
+        "config/office-operator.schema.json",
+        "config/office-operator.template.json",
+    } <= release_bundle.AUTOMATION_DEPLOYMENT_TOOL_FILES
 
 
 def test_operator_config_pins_exact_owner_and_workspace() -> None:
