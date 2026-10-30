@@ -385,9 +385,7 @@ def test_graph_bootstrap_requires_owner_only_personal_chat_without_enabling_work
         CYRENE_TEAMS_MODEL_ACTOR_SUBJECT=OWNER,
         TEAMS_BOT_APP_ID=bot,
     )
-    config["services"]["teams-ingress"] = {
-        "environment": {"TEAMS_PERSONAL_CHAT_ENABLED": "true"}
-    }
+    config["services"]["teams-ingress"] = {"environment": {"TEAMS_PERSONAL_CHAT_ENABLED": "true"}}
     config["services"]["teams-provider"] = {
         "environment": {
             "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(

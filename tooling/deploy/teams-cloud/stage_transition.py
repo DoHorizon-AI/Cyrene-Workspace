@@ -37,7 +37,11 @@ JOURNAL_SCHEMA = "cyrene-teams-stage-transition-journal-v1"
 SELECTION_SCHEMA = "cyrene-teams-runtime-selection-v2"
 DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/stage-transition")
 OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE = "microsoft-graph-provider-bootstrap"
-PHASES = {"provider-bootstrap", OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE, "issued-connector-activation"}
+PHASES = {
+    "provider-bootstrap",
+    OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+    "issued-connector-activation",
+}
 IMAGE_UPDATE_TARGETS = frozenset(
     {
         "cloud-management-phase2",
@@ -146,14 +150,11 @@ def _runtime_service_shape(services: dict[str, Any], label: str) -> frozenset[st
 
     names = frozenset(services)
     optional = names - RUNTIME_SERVICE_SET
-    if (
-        not RUNTIME_SERVICE_SET <= names
-        or optional not in {
-            frozenset(),
-            frozenset({"microsoft-graph"}),
-            frozenset(OPTIONAL_RUNTIME_SERVICE_ORDER),
-        }
-    ):
+    if not RUNTIME_SERVICE_SET <= names or optional not in {
+        frozenset(),
+        frozenset({"microsoft-graph"}),
+        frozenset(OPTIONAL_RUNTIME_SERVICE_ORDER),
+    }:
         suffix = (
             "exact active 14-service topology or supported Graph/ADO extension"
             if "memory update" in label
@@ -1930,9 +1931,11 @@ def _validate_phase_topology(
                 "provider bootstrap must add only Hugging Face and Cloud Management without removing services"
             )
     elif phase == "issued-connector-activation":
-        if _runtime_service_shape(old_services, "active issued activation") != _runtime_service_shape(
-            new_services, "candidate issued activation"
-        ) or set(new_services) != set(old_services):
+        if _runtime_service_shape(
+            old_services, "active issued activation"
+        ) != _runtime_service_shape(new_services, "candidate issued activation") or set(
+            new_services
+        ) != set(old_services):
             raise StageTransitionError(
                 "issued connector activation must preserve the exact supported runtime services"
             )
@@ -2039,13 +2042,17 @@ def _validate_office_graph_provider_bootstrap_topology(
             "Microsoft Graph provider bootstrap must add exactly one service to the active 14-service runtime"
         )
     if sum(name == "navigator" for name in new_services) != 1:
-        raise StageTransitionError("Graph provider bootstrap must retain exactly one Navigator executor")
+        raise StageTransitionError(
+            "Graph provider bootstrap must retain exactly one Navigator executor"
+        )
 
     try:
         active_rows = runtime_update._image_rows_by_service(active_lock)
         candidate_rows = runtime_update._image_rows_by_service(candidate_lock)
     except runtime_update.RuntimeUpdateError as error:
-        raise StageTransitionError("active or candidate Graph image inventory is malformed") from error
+        raise StageTransitionError(
+            "active or candidate Graph image inventory is malformed"
+        ) from error
     if not set(active_rows) <= set(candidate_rows):
         raise StageTransitionError("Graph candidate image lock removes an existing build service")
     if set(candidate_rows) - set(active_rows) != {"microsoft-graph"}:
@@ -2102,7 +2109,9 @@ def _validate_office_graph_provider_bootstrap_topology(
         image_changed = old_image is None or old_image != candidate_image
         if config_changed or mounted_files_changed or image_changed:
             if name not in expected_targets:
-                raise StageTransitionError(f"Graph bootstrap changes non-target runtime service {name}")
+                raise StageTransitionError(
+                    f"Graph bootstrap changes non-target runtime service {name}"
+                )
             changed.add(name)
         target_images[name] = {
             "active": old_image,
@@ -2145,7 +2154,10 @@ def _validate_office_graph_provider_compose_delta(
         "microsoft-graph-account-center-client-cert",
         "microsoft-graph-account-center-client-key",
     }
-    graph_account_secret = ("account-center-graph-provider-hmac-key", "account-center-graph-provider-hmac-key")
+    graph_account_secret = (
+        "account-center-graph-provider-hmac-key",
+        "account-center-graph-provider-hmac-key",
+    )
     graph_callback_secret = (
         "account-center-microsoft-graph-callback-hmac-key",
         "account-center-microsoft-graph-callback-hmac-key",
@@ -2154,7 +2166,10 @@ def _validate_office_graph_provider_compose_delta(
         "account-center-microsoft-graph-client-secret",
         "account-center-microsoft-graph-client-secret",
     )
-    graph_exchange_secret = ("exchange-graph-auth-context-hmac-key", "exchange-graph-auth-context-hmac-key")
+    graph_exchange_secret = (
+        "exchange-graph-auth-context-hmac-key",
+        "exchange-graph-auth-context-hmac-key",
+    )
     account_map_key = "CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY"
     account_callback_map_key = "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY"
     account_client_map_key = "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CLIENT_SECRET"
@@ -2211,11 +2226,15 @@ def _validate_office_graph_provider_compose_delta(
         active_map = preflight._parse_secret_file_map(active_service, service_name)
         candidate_map = preflight._parse_secret_file_map(candidate_service, service_name)
         if candidate_map != active_map | secret_map_additions[service_name]:
-            raise StageTransitionError(f"Graph bootstrap changes an unrelated {service_name} secret mapping")
+            raise StageTransitionError(
+                f"Graph bootstrap changes an unrelated {service_name} secret mapping"
+            )
         old_pairs = preflight._secret_mount_pairs(active_service, service_name)
         new_pairs = preflight._secret_mount_pairs(candidate_service, service_name)
         if new_pairs != old_pairs | secret_mount_additions[service_name]:
-            raise StageTransitionError(f"Graph bootstrap changes an unrelated {service_name} secret mount")
+            raise StageTransitionError(
+                f"Graph bootstrap changes an unrelated {service_name} secret mount"
+            )
 
     active_account = active.get("services", {}).get("account-center", {})
     candidate_account = candidate.get("services", {}).get("account-center", {})
@@ -2237,8 +2256,12 @@ def _validate_office_graph_provider_compose_delta(
     )
     old_authorization = old_integrations.get("authorizationCloud")
     new_authorization = new_integrations.get("authorizationCloud")
-    old_profiles = old_authorization.get("profiles") if isinstance(old_authorization, dict) else None
-    new_profiles = new_authorization.get("profiles") if isinstance(new_authorization, dict) else None
+    old_profiles = (
+        old_authorization.get("profiles") if isinstance(old_authorization, dict) else None
+    )
+    new_profiles = (
+        new_authorization.get("profiles") if isinstance(new_authorization, dict) else None
+    )
     if not isinstance(old_profiles, dict) or not isinstance(new_profiles, dict):
         raise StageTransitionError("Graph bootstrap Exchange profile map is malformed")
     new_graph_profiles = {
@@ -2260,9 +2283,7 @@ def _validate_office_graph_provider_compose_delta(
     # Remove only the reviewed Graph additions and temporary UI route before comparing every
     # remaining Compose field byte-for-structure. 中文：端口只用于授权窗口，后续issued阶段会移除。
     for services in (active_services, candidate_services):
-        services["account-center"]["environment"].pop(
-            "CYRENE_CAPABILITY_CONFIGURATION_JSON", None
-        )
+        services["account-center"]["environment"].pop("CYRENE_CAPABILITY_CONFIGURATION_JSON", None)
         for name in ("account-center", "exchange"):
             service = services[name]
             environment = service.get("environment", {})
@@ -2291,8 +2312,7 @@ def _validate_office_graph_provider_compose_delta(
             row
             for row in exchange.get("volumes", [])
             if not (
-                isinstance(row, dict)
-                and row.get("target") == "/run/config/office-operator.json"
+                isinstance(row, dict) and row.get("target") == "/run/config/office-operator.json"
             )
         ]
 
@@ -2325,7 +2345,9 @@ def _validate_office_graph_provider_compose_delta(
                 if isinstance(row, dict) and isinstance(row.get("file"), str):
                     row["file"] = Path(row["file"]).name
     if active_normalized != candidate_normalized:
-        raise StageTransitionError("Graph bootstrap changes Compose fields outside its closed overlay")
+        raise StageTransitionError(
+            "Graph bootstrap changes Compose fields outside its closed overlay"
+        )
 
 
 def _validate_office_graph_oauth_setup_delta(
@@ -2356,7 +2378,9 @@ def _validate_office_graph_oauth_setup_delta(
         or not isinstance(candidate_rows[0].get("source"), str)
         or set(candidate_rows[0]) - {"type", "source", "target", "read_only", "bind"}
     ):
-        raise StageTransitionError("Graph bootstrap Office operator config mount is not read-only and exact")
+        raise StageTransitionError(
+            "Graph bootstrap Office operator config mount is not read-only and exact"
+        )
 
 
 def _validate_office_graph_private_principal_delta(
@@ -2374,13 +2398,17 @@ def _validate_office_graph_private_principal_delta(
             consumers = _recovered_principal_config_consumers(compose, name)
             if consumers == [("navigator-persistence", NAVIGATOR_PRINCIPAL_CONFIG_TARGET)]:
                 if config_name is not None:
-                    raise StageTransitionError("Graph bootstrap has ambiguous Navigator principal configs")
+                    raise StageTransitionError(
+                        "Graph bootstrap has ambiguous Navigator principal configs"
+                    )
                 config_name, row = name, candidate_row
         if not isinstance(row, dict) or not isinstance(row.get("file"), str):
             raise StageTransitionError(f"Graph bootstrap {label} principal config is missing")
         path = Path(row["file"])
         if path.name != NAVIGATOR_PRINCIPAL_CONFIG_FILENAME:
-            raise StageTransitionError(f"Graph bootstrap {label} principal config path is not canonical")
+            raise StageTransitionError(
+                f"Graph bootstrap {label} principal config path is not canonical"
+            )
         document = _read_json(path, f"{label} Navigator principal config")
         if not isinstance(document, dict):
             raise StageTransitionError(f"Graph bootstrap {label} principal config is malformed")
@@ -2402,11 +2430,15 @@ def _validate_office_graph_private_principal_delta(
     }
     candidate_policy = new.get("teams_private_conversations")
     if candidate_policy != policy:
-        raise StageTransitionError("Graph bootstrap principal config lacks the exact five-actor Teams policy")
+        raise StageTransitionError(
+            "Graph bootstrap principal config lacks the exact five-actor Teams policy"
+        )
     normalized = copy.deepcopy(new)
     normalized.pop("teams_private_conversations", None)
     if old != normalized:
-        raise StageTransitionError("Graph bootstrap changes principal permissions beyond the Teams route")
+        raise StageTransitionError(
+            "Graph bootstrap changes principal permissions beyond the Teams route"
+        )
 
 
 def _validate_office_graph_personal_route_compose_delta(
@@ -2421,8 +2453,12 @@ def _validate_office_graph_personal_route_compose_delta(
     services = {
         label: (active_services.get(label), candidate_services.get(label)) for label in names
     }
-    if any(not isinstance(old, dict) or not isinstance(new, dict) for old, new in services.values()):
-        raise StageTransitionError("Graph bootstrap requires the existing five-actor Teams route services")
+    if any(
+        not isinstance(old, dict) or not isinstance(new, dict) for old, new in services.values()
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap requires the existing five-actor Teams route services"
+        )
 
     navigator_old, navigator_new = services["navigator"]
     persistence_old, persistence_new = services["navigator-persistence"]
@@ -2432,9 +2468,13 @@ def _validate_office_graph_personal_route_compose_delta(
     owner_environment = owner_row.get("environment", {}) if isinstance(owner_row, dict) else {}
     owner_id = owner_environment.get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID")
     if not preflight._uuid(owner_id):
-        raise StageTransitionError("Graph bootstrap owner model binding has no verified Directory operator")
+        raise StageTransitionError(
+            "Graph bootstrap owner model binding has no verified Directory operator"
+        )
 
-    def environment_pair(service_pair: tuple[dict[str, Any], dict[str, Any]], label: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    def environment_pair(
+        service_pair: tuple[dict[str, Any], dict[str, Any]], label: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         old_environment = service_pair[0].get("environment", {})
         new_environment = service_pair[1].get("environment", {})
         if not isinstance(old_environment, dict) or not isinstance(new_environment, dict):
@@ -2446,7 +2486,9 @@ def _validate_office_graph_personal_route_compose_delta(
     persistence_old_env, persistence_new_env = environment_pair(
         (persistence_old, persistence_new), "Navigator Persistence"
     )
-    provider_old_env, provider_new_env = environment_pair((provider_old, provider_new), "Teams provider")
+    provider_old_env, provider_new_env = environment_pair(
+        (provider_old, provider_new), "Teams provider"
+    )
 
     nav_values = {
         "CYRENE_WORK_ACTOR_TOKEN_MAP_FILE": "/run/teams-authorization/work-actor-token-map.json",
@@ -2463,14 +2505,20 @@ def _validate_office_graph_personal_route_compose_delta(
                 )
             if key == "CYRENE_WORKFLOWS_ENABLED":
                 raise StageTransitionError("Graph bootstrap must keep Workflows disabled")
-            raise StageTransitionError(f"Graph bootstrap Navigator personal route requires {key}={expected}")
+            raise StageTransitionError(
+                f"Graph bootstrap Navigator personal route requires {key}={expected}"
+            )
         previous = nav_old_env.get(key)
         if key in {"CYRENE_WORKFLOWS_ENABLED"} and previous not in {None, "false"}:
             raise StageTransitionError("Graph bootstrap must keep Navigator Workflows disabled")
         if key == "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED" and previous not in {None, "false"}:
-            raise StageTransitionError("Graph bootstrap personal chat may only change from disabled to enabled")
+            raise StageTransitionError(
+                "Graph bootstrap personal chat may only change from disabled to enabled"
+            )
         if key == "CYRENE_TEAMS_MODEL_ACTOR_SUBJECT" and previous not in {None, "", owner_id}:
-            raise StageTransitionError("Graph bootstrap cannot transfer model access from another actor")
+            raise StageTransitionError(
+                "Graph bootstrap cannot transfer model access from another actor"
+            )
         if key not in {
             "CYRENE_WORKFLOWS_ENABLED",
             "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED",
@@ -2502,20 +2550,20 @@ def _validate_office_graph_personal_route_compose_delta(
             row
             for row in new_service.get("secrets", [])
             if not (
-                isinstance(row, dict)
-                and (row.get("source"), row.get("target")) in expected_pairs
+                isinstance(row, dict) and (row.get("source"), row.get("target")) in expected_pairs
             )
         ]
         new_service.setdefault("environment", {}).pop("CYRENE_SECRET_FILE_MAP", None)
         old_service.setdefault("environment", {}).pop("CYRENE_SECRET_FILE_MAP", None)
 
-    if (
-        persistence_new_env.get("TEAMS_TASK_ACTOR_SUBJECTS_FILE")
-        != "/run/teams-authorization/teams-actor-subjects.json"
-        or persistence_old_env.get("TEAMS_TASK_ACTOR_SUBJECTS_FILE")
-        not in {None, "/run/teams-authorization/teams-actor-subjects.json"}
-    ):
-        raise StageTransitionError("Graph bootstrap Persistence must use the existing actor projection")
+    if persistence_new_env.get(
+        "TEAMS_TASK_ACTOR_SUBJECTS_FILE"
+    ) != "/run/teams-authorization/teams-actor-subjects.json" or persistence_old_env.get(
+        "TEAMS_TASK_ACTOR_SUBJECTS_FILE"
+    ) not in {None, "/run/teams-authorization/teams-actor-subjects.json"}:
+        raise StageTransitionError(
+            "Graph bootstrap Persistence must use the existing actor projection"
+        )
     for key, expected in nav_values.items():
         nav_new_env.pop(key, None)
         nav_old_env.pop(key, None)
@@ -2525,7 +2573,9 @@ def _validate_office_graph_personal_route_compose_delta(
     if ingress_new_env.get("TEAMS_PERSONAL_CHAT_ENABLED") != "true" or ingress_old_env.get(
         "TEAMS_PERSONAL_CHAT_ENABLED"
     ) not in {None, "false"}:
-        raise StageTransitionError("Graph bootstrap Teams ingress must enable only the personal chat route")
+        raise StageTransitionError(
+            "Graph bootstrap Teams ingress must enable only the personal chat route"
+        )
     ingress_old_env.pop("TEAMS_PERSONAL_CHAT_ENABLED", None)
     ingress_new_env.pop("TEAMS_PERSONAL_CHAT_ENABLED", None)
 
@@ -2536,7 +2586,9 @@ def _validate_office_graph_personal_route_compose_delta(
                 object_pairs_hook=preflight._unique_json_object,
             )
         except (TypeError, json.JSONDecodeError, ValueError) as error:
-            raise StageTransitionError(f"Graph bootstrap {label} configuration is malformed") from error
+            raise StageTransitionError(
+                f"Graph bootstrap {label} configuration is malformed"
+            ) from error
         if not isinstance(document, dict):
             raise StageTransitionError(f"Graph bootstrap {label} configuration is malformed")
         return document
@@ -2546,11 +2598,15 @@ def _validate_office_graph_personal_route_compose_delta(
     if old_provider.get("personal_chat_enabled", False) is not False:
         raise StageTransitionError("Graph bootstrap must begin with Teams personal chat disabled")
     if new_provider.get("personal_chat_enabled") is not True:
-        raise StageTransitionError("Graph bootstrap must enable the Teams provider personal handler")
+        raise StageTransitionError(
+            "Graph bootstrap must enable the Teams provider personal handler"
+        )
     old_provider.pop("personal_chat_enabled", None)
     new_provider.pop("personal_chat_enabled", None)
     if old_provider != new_provider:
-        raise StageTransitionError("Graph bootstrap changes Teams provider fields beyond its personal handler")
+        raise StageTransitionError(
+            "Graph bootstrap changes Teams provider fields beyond its personal handler"
+        )
     provider_new_env["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(
         new_provider, sort_keys=True, separators=(",", ":")
     )
@@ -2565,7 +2621,9 @@ def _validate_office_graph_personal_route_compose_delta(
         selected = [row for row in rows if row.get("target") in targets]
         selected_targets = {row.get("target") for row in selected}
         if not required <= selected_targets or len(selected) > len(targets):
-            raise StageTransitionError(f"Graph bootstrap {label} is missing its private config mount")
+            raise StageTransitionError(
+                f"Graph bootstrap {label} is missing its private config mount"
+            )
         for row in selected:
             if (
                 row.get("type") != "bind"
@@ -2574,22 +2632,24 @@ def _validate_office_graph_personal_route_compose_delta(
                 or not isinstance(row.get("source"), str)
                 or not Path(row["source"]).is_absolute()
             ):
-                raise StageTransitionError(f"Graph bootstrap {label} mount is not a fixed read-only bind")
+                raise StageTransitionError(
+                    f"Graph bootstrap {label} mount is not a fixed read-only bind"
+                )
         service["volumes"] = [row for row in rows if row.get("target") not in targets]
 
     try:
         if _volume_source_for_target(
             navigator_new, "/run/teams-authorization", kind="bind"
-        ) != _volume_source_for_target(
-            persistence_new, "/run/teams-authorization", kind="bind"
-        ):
+        ) != _volume_source_for_target(persistence_new, "/run/teams-authorization", kind="bind"):
             raise StageTransitionError(
                 "Graph bootstrap Navigator and Persistence must share one actor projection directory"
             )
     except StageTransitionError as error:
         if "share one actor projection" in str(error):
             raise
-        raise StageTransitionError("Graph bootstrap is missing the private actor projection bind") from error
+        raise StageTransitionError(
+            "Graph bootstrap is missing the private actor projection bind"
+        ) from error
 
     remove_overlay_mounts(
         persistence_new,
@@ -2622,8 +2682,14 @@ def _validate_office_graph_personal_route_compose_delta(
             for row in _mount_rows(service, "volumes")
             if row.get("target") == "/run/teams-authorization"
         ]
-        if len(matches) != 1 or matches[0].get("type") != "bind" or matches[0].get("read_only") is not True:
-            raise StageTransitionError("Graph bootstrap must preserve Navigator's private actor config bind")
+        if (
+            len(matches) != 1
+            or matches[0].get("type") != "bind"
+            or matches[0].get("read_only") is not True
+        ):
+            raise StageTransitionError(
+                "Graph bootstrap must preserve Navigator's private actor config bind"
+            )
         matches[0]["source"] = "${CYRENE_CONFIG_DIR}"
     operator_old = active_services.get("directory-operator")
     operator_new = candidate_services.get("directory-operator")
@@ -2642,7 +2708,7 @@ def _validate_office_graph_personal_route_compose_delta(
             ):
                 raise StageTransitionError(
                     "Graph bootstrap Directory operator must retain its private config bind"
-            )
+                )
             matches[0]["source"] = "${CYRENE_CONFIG_DIR}"
     for name in names:
         old_service = copy.deepcopy(active_services[name])
@@ -2697,7 +2763,9 @@ def _validate_office_graph_account_center_config_delta(
             or len(callers) != len(set(callers))
             or set(callers) != expected
         ):
-            raise StageTransitionError(f"Account Center Graph method callers are not exact for {method}")
+            raise StageTransitionError(
+                f"Account Center Graph method callers are not exact for {method}"
+            )
         return callers
 
     for method, expected_callers in {
@@ -2710,15 +2778,16 @@ def _validate_office_graph_account_center_config_delta(
         if method in new_methods:
             require_callers(method, expected_callers)
     if "list_provider_profiles" in new_methods:
-        callers = require_callers(
-            "list_provider_profiles", {exchange_caller, provider_caller}
-        )
+        callers = require_callers("list_provider_profiles", {exchange_caller, provider_caller})
         old_callers = old_methods.get("list_provider_profiles")
         if old_callers is not None and (
             not isinstance(old_callers, list)
-            or callers != [*old_callers, *([] if provider_caller in old_callers else [provider_caller])]
+            or callers
+            != [*old_callers, *([] if provider_caller in old_callers else [provider_caller])]
         ):
-            raise StageTransitionError("Account Center Graph profile listing may add only its provider caller")
+            raise StageTransitionError(
+                "Account Center Graph profile listing may add only its provider caller"
+            )
     old_redeem_callers = old_methods.get("redeem_provider_credential_lease")
     if (
         not isinstance(old_redeem_callers, list)
@@ -2726,7 +2795,9 @@ def _validate_office_graph_account_center_config_delta(
         or set(old_redeem_callers) != {"github-issues-service", "huggingface-provider"}
         or len(old_redeem_callers) != 2
     ):
-        raise StageTransitionError("Account Center credential lease roles differ from the live GitHub/HF callers")
+        raise StageTransitionError(
+            "Account Center credential lease roles differ from the live GitHub/HF callers"
+        )
     require_callers(
         "redeem_provider_credential_lease",
         {*old_redeem_callers, provider_caller},
@@ -2735,7 +2806,9 @@ def _validate_office_graph_account_center_config_delta(
         *old_redeem_callers,
         provider_caller,
     ]:
-        raise StageTransitionError("Graph provider must be appended to the existing lease redemption roles")
+        raise StageTransitionError(
+            "Graph provider must be appended to the existing lease redemption roles"
+        )
 
     def normalized(value: dict[str, Any]) -> dict[str, Any]:
         result = copy.deepcopy(value)
@@ -2744,9 +2817,7 @@ def _validate_office_graph_account_center_config_delta(
         for field in ("hostSecretRefs", "caller_key_refs"):
             mapping = result.get(field)
             if isinstance(mapping, dict):
-                for key in (
-                    graph_host_refs if field == "hostSecretRefs" else graph_callers
-                ):
+                for key in graph_host_refs if field == "hostSecretRefs" else graph_callers:
                     mapping.pop(key, None)
         methods = result.get("method_callers")
         if isinstance(methods, dict):
@@ -2820,9 +2891,9 @@ def _normalize_graph_cloud_memory_reallocation(
             raise StageTransitionError(
                 "Graph bootstrap must reallocate Cloud deploy memory exactly from 384 MiB to 256 MiB"
             )
-        candidate_normalized["deploy"]["resources"]["limits"]["memory"] = (
-            active_normalized["deploy"]["resources"]["limits"]["memory"]
-        )
+        candidate_normalized["deploy"]["resources"]["limits"]["memory"] = active_normalized[
+            "deploy"
+        ]["resources"]["limits"]["memory"]
     if active_normalized != candidate_normalized:
         raise StageTransitionError(
             "Graph bootstrap Cloud configuration changes fields beyond the memory limits"
@@ -2857,9 +2928,13 @@ def _validate_office_graph_exchange_config_delta(
         normalized_refs.pop("account-center/caller-hmac-keys/microsoft-graph-callback", None)
     for label, document in (("active", normalized_active), ("candidate", normalized)):
         connector_host = document.get("connectorHost")
-        teams_profile = connector_host.get("teamsMessages") if isinstance(connector_host, dict) else None
+        teams_profile = (
+            connector_host.get("teamsMessages") if isinstance(connector_host, dict) else None
+        )
         if not isinstance(teams_profile, dict):
-            raise StageTransitionError(f"Graph bootstrap {label} Teams message profile is malformed")
+            raise StageTransitionError(
+                f"Graph bootstrap {label} Teams message profile is malformed"
+            )
         if label == "candidate":
             subjects = teams_profile.get("personalActorSubjects")
             if (
@@ -2947,7 +3022,9 @@ def _validate_memory_update_topology(
     if _runtime_service_shape(old_services, "active memory update") != _runtime_service_shape(
         new_services, "candidate memory update"
     ):
-        raise StageTransitionError("memory update must preserve its exact 14/15/16-service topology")
+        raise StageTransitionError(
+            "memory update must preserve its exact 14/15/16-service topology"
+        )
     if target not in old_services or target not in new_services:
         raise StageTransitionError("memory update target is not active in the selected runtime")
     if active_lock != candidate_lock:
@@ -3252,7 +3329,9 @@ def _memory_update_actual_capacity(
     expected = _runtime_service_inventory(compose)
     expected_names = _runtime_service_shape(expected, "memory capacity Compose")
     if expected_names != _runtime_service_shape(services, "memory capacity read-back"):
-        raise StageTransitionError("memory capacity read-back service inventory differs from Compose")
+        raise StageTransitionError(
+            "memory capacity read-back service inventory differs from Compose"
+        )
     service_order = _runtime_service_order_for(expected)
     container_ids = [services[name].get("containerId") for name in service_order]
     if any(
@@ -3580,7 +3659,9 @@ def _validate_listener_repair_topology(
     old_shape = _runtime_service_shape(old_services, "active listener repair")
     new_shape = _runtime_service_shape(new_services, "candidate listener repair")
     if old_shape != new_shape:
-        raise StageTransitionError("provider listener repair must preserve the runtime service inventory")
+        raise StageTransitionError(
+            "provider listener repair must preserve the runtime service inventory"
+        )
     if not set(PROVIDER_LISTENER_REPAIR_TARGETS) <= set(old_services):
         raise StageTransitionError("provider listener repair requires both HF and Cloud services")
     active_definition = copy.deepcopy(active)
@@ -4375,10 +4456,14 @@ def _validate_active_candidate_configs(
             and not changed_config_is_scoped_principal
             and not changed_config_is_runpod_notification
             and not changed_config_is_office_graph
-            and not (office_graph_activation and name in {
-                "connector-bindings",
-                "connector-tool-catalog",
-            })
+            and not (
+                office_graph_activation
+                and name
+                in {
+                    "connector-bindings",
+                    "connector-tool-catalog",
+                }
+            )
         ):
             raise StageTransitionError(f"candidate changes unrelated Compose config {name}")
     if office_graph_activation:
@@ -4423,14 +4508,20 @@ def _validate_office_graph_activation_config_delta(
         path = directory / filename
         if optional and not path.exists():
             return None
-        if not isinstance(source, str) or Path(source).resolve(strict=True) != path.resolve(strict=True):
-            raise StageTransitionError(f"Office Graph {filename} is not mounted from its private config directory")
+        if not isinstance(source, str) or Path(source).resolve(strict=True) != path.resolve(
+            strict=True
+        ):
+            raise StageTransitionError(
+                f"Office Graph {filename} is not mounted from its private config directory"
+            )
         return _read_json(path, f"Office Graph {filename}")
 
     active_bindings = read_document(active_config_dir, active, "connector-bindings.json")
     candidate_bindings = read_document(candidate_config_dir, candidate, "connector-bindings.json")
     active_catalog = read_document(active_config_dir, active, "connector-tool-catalog.json")
-    candidate_catalog = read_document(candidate_config_dir, candidate, "connector-tool-catalog.json")
+    candidate_catalog = read_document(
+        candidate_config_dir, candidate, "connector-tool-catalog.json"
+    )
     active_notification = read_document(
         active_config_dir, active, "teams-credential-notifications.json", optional=True
     )
@@ -4443,8 +4534,10 @@ def _validate_office_graph_activation_config_delta(
         ("active catalog", active_catalog, "items"),
         ("candidate catalog", candidate_catalog, "items"),
     ):
-        if not isinstance(document, dict) or document.get("schemaVersion") != 1 or not isinstance(
-            document.get(field), list
+        if (
+            not isinstance(document, dict)
+            or document.get("schemaVersion") != 1
+            or not isinstance(document.get(field), list)
         ):
             raise StageTransitionError(f"Office Graph {name} document is malformed")
 
@@ -4453,17 +4546,22 @@ def _validate_office_graph_activation_config_delta(
         for row in rows:
             value = row.get(key) if isinstance(row, dict) else None
             if not isinstance(value, str) or not value or value in result:
-                raise StageTransitionError(f"Office Graph {label} contains duplicate or missing IDs")
+                raise StageTransitionError(
+                    f"Office Graph {label} contains duplicate or missing IDs"
+                )
             result[value] = row
         return result
 
     old_bindings = keyed(active_bindings["bindings"], "bindingId", "active bindings")
     new_bindings = keyed(candidate_bindings["bindings"], "bindingId", "candidate bindings")
-    graph_bindings = [row for row in new_bindings.values() if row.get("providerId") == "microsoft_graph"]
+    graph_bindings = [
+        row for row in new_bindings.values() if row.get("providerId") == "microsoft_graph"
+    ]
     if (
         len(graph_bindings) != 1
         or any(row.get("providerId") == "microsoft_graph" for row in old_bindings.values())
-        or {key: value for key, value in new_bindings.items() if key in old_bindings} != old_bindings
+        or {key: value for key, value in new_bindings.items() if key in old_bindings}
+        != old_bindings
         or set(new_bindings) - set(old_bindings) != {graph_bindings[0]["bindingId"]}
     ):
         raise StageTransitionError("Office Graph activation may add only one issued Graph binding")
@@ -4474,29 +4572,37 @@ def _validate_office_graph_activation_config_delta(
 
     old_catalog = keyed(active_catalog["items"], "bindingId", "active catalog")
     new_catalog = keyed(candidate_catalog["items"], "bindingId", "candidate catalog")
-    if (
-        {key: value for key, value in new_catalog.items() if key in old_catalog} != old_catalog
-        or set(new_catalog) - set(old_catalog) != {graph_binding["bindingId"]}
-    ):
+    if {
+        key: value for key, value in new_catalog.items() if key in old_catalog
+    } != old_catalog or set(new_catalog) - set(old_catalog) != {graph_binding["bindingId"]}:
         raise StageTransitionError("Office Graph activation changes catalog items beyond Graph")
 
     if candidate_notification is None:
-        raise StageTransitionError("Office Graph activation requires owner credential notification scope")
+        raise StageTransitionError(
+            "Office Graph activation requires owner credential notification scope"
+        )
     if active_notification is not None:
-        if (
-            {key: value for key, value in candidate_notification.items() if key != "connections"}
-            != {key: value for key, value in active_notification.items() if key != "connections"}
-        ):
-            raise StageTransitionError("Office Graph activation changes the owner notification route")
-        old_connections = keyed(active_notification.get("connections", []), "provider", "active notification")
-        new_connections = keyed(candidate_notification.get("connections", []), "provider", "candidate notification")
+        if {
+            key: value for key, value in candidate_notification.items() if key != "connections"
+        } != {key: value for key, value in active_notification.items() if key != "connections"}:
+            raise StageTransitionError(
+                "Office Graph activation changes the owner notification route"
+            )
+        old_connections = keyed(
+            active_notification.get("connections", []), "provider", "active notification"
+        )
+        new_connections = keyed(
+            candidate_notification.get("connections", []), "provider", "candidate notification"
+        )
         if (
             {key: value for key, value in new_connections.items() if key in old_connections}
             != old_connections
             or set(new_connections) - set(old_connections) != {"microsoft_graph"}
             or new_connections["microsoft_graph"].get("connectionId") != graph_connection_ref
         ):
-            raise StageTransitionError("Office Graph notification update may add only its issued connection")
+            raise StageTransitionError(
+                "Office Graph notification update may add only its issued connection"
+            )
     else:
         new_connections = keyed(
             candidate_notification.get("connections", []), "provider", "candidate notification"
@@ -4523,7 +4629,9 @@ def _validate_office_graph_owner_health_principal_delta(
 ) -> None:
     """Allow only the Directory owner's credential-health publishing grant."""
 
-    def read_principal(compose: dict[str, Any], directory: Path, label: str) -> tuple[str, dict[str, Any]]:
+    def read_principal(
+        compose: dict[str, Any], directory: Path, label: str
+    ) -> tuple[str, dict[str, Any]]:
         aliases = [
             name
             for name in compose.get("configs", {})
@@ -4536,8 +4644,12 @@ def _validate_office_graph_owner_health_principal_delta(
         row = compose["configs"].get(alias, {})
         source = row.get("file") if isinstance(row, dict) else None
         expected_path = directory / NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
-        if not isinstance(source, str) or Path(source).resolve(strict=True) != expected_path.resolve(strict=True):
-            raise StageTransitionError(f"Office Graph {label} principal config is outside its private version")
+        if not isinstance(source, str) or Path(source).resolve(
+            strict=True
+        ) != expected_path.resolve(strict=True):
+            raise StageTransitionError(
+                f"Office Graph {label} principal config is outside its private version"
+            )
         document = _read_json(expected_path, f"Office Graph {label} principal config")
         if not isinstance(document, dict) or not isinstance(document.get("principals"), list):
             raise StageTransitionError(f"Office Graph {label} principal config is malformed")
@@ -4549,12 +4661,8 @@ def _validate_office_graph_owner_health_principal_delta(
         raise StageTransitionError("Office Graph activation changes the principal config alias")
     old_rows = old.get("principals")
     new_rows = new.get("principals")
-    old_by_token = {
-        row.get("token_env"): row for row in old_rows if isinstance(row, dict)
-    }
-    new_by_token = {
-        row.get("token_env"): row for row in new_rows if isinstance(row, dict)
-    }
+    old_by_token = {row.get("token_env"): row for row in old_rows if isinstance(row, dict)}
+    new_by_token = {row.get("token_env"): row for row in new_rows if isinstance(row, dict)}
     expected_tokens = {
         "NAVIGATOR_SESSION_TOKEN",
         "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
@@ -4566,9 +4674,14 @@ def _validate_office_graph_owner_health_principal_delta(
         or set(old_by_token) != expected_tokens
         or set(new_by_token) != expected_tokens
     ):
-        raise StageTransitionError("Office Graph activation must preserve the existing seven Work principals")
-    owner = candidate.get("services", {}).get("directory-operator", {}).get("environment", {}).get(
-        "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID"
+        raise StageTransitionError(
+            "Office Graph activation must preserve the existing seven Work principals"
+        )
+    owner = (
+        candidate.get("services", {})
+        .get("directory-operator", {})
+        .get("environment", {})
+        .get("CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID")
     )
     old_session = old_by_token["NAVIGATOR_SESSION_TOKEN"]
     new_session = new_by_token["NAVIGATOR_SESSION_TOKEN"]
@@ -4578,7 +4691,9 @@ def _validate_office_graph_owner_health_principal_delta(
         or old_session.get("can_publish_credential_health", False) is not False
         or new_session.get("can_publish_credential_health") is not True
     ):
-        raise StageTransitionError("Office Graph activation must grant health publishing only to the owner session")
+        raise StageTransitionError(
+            "Office Graph activation must grant health publishing only to the owner session"
+        )
     normalized_new = copy.deepcopy(new)
     normalized_session = next(
         row
@@ -4592,7 +4707,9 @@ def _validate_office_graph_owner_health_principal_delta(
     else:
         normalized_session.pop("can_publish_credential_health", None)
     if normalized_new != old:
-        raise StageTransitionError("Office Graph activation changes principal grants beyond owner health publishing")
+        raise StageTransitionError(
+            "Office Graph activation changes principal grants beyond owner health publishing"
+        )
 
 
 def _recovered_principal_config_consumers(
@@ -6418,20 +6535,15 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError("memory updates require issued-connector-activation")
     if listener_repair and plan.get("phase") != "provider-bootstrap":
         raise StageTransitionError("provider listener repair is limited to provider-bootstrap")
-    if (
-        plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-        and (image_update_target is not None or memory_update_target is not None or listener_repair)
+    if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and (
+        image_update_target is not None or memory_update_target is not None or listener_repair
     ):
         raise StageTransitionError("Graph bootstrap cannot be combined with another update mode")
-    if (
-        plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-        and (image_update_target is not None or memory_update_target is not None or listener_repair)
+    if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and (
+        image_update_target is not None or memory_update_target is not None or listener_repair
     ):
         raise StageTransitionError("Graph provider bootstrap has one closed multi-image transition")
-    if (
-        plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-        and "cloudRunnerState" in plan
-    ):
+    if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and "cloudRunnerState" in plan:
         raise StageTransitionError("Graph provider bootstrap must not change the cloud runner")
     if (
         not isinstance(plan.get("targets"), list)
@@ -6469,9 +6581,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             "cloud-management-phase2",
         }
         expected_ordered_targets = [
-            name
-            for name in OFFICE_GRAPH_STAGE_TARGET_ORDER
-            if name in expected_targets
+            name for name in OFFICE_GRAPH_STAGE_TARGET_ORDER if name in expected_targets
         ]
         if (
             active_runtime_services != RUNTIME_SERVICE_SET
@@ -6491,7 +6601,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
                 or set(row) != {"active", "candidate", "added", "configChanged"}
                 or not isinstance(row.get("candidate"), dict)
             ):
-                raise StageTransitionError(f"Graph bootstrap target record is malformed for {service_name}")
+                raise StageTransitionError(
+                    f"Graph bootstrap target record is malformed for {service_name}"
+                )
             if service_name == "microsoft-graph":
                 if row.get("active") is not None or row.get("added") is not True:
                     raise StageTransitionError("Graph bootstrap plan must add the Graph image")
@@ -6528,7 +6640,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             != _runtime_service_shape(plan["candidateServices"], "listener repair candidate plan")
             or active_runtime_services != candidate_runtime_services
         ):
-            raise StageTransitionError("listener repair plan must retain the exact runtime inventory")
+            raise StageTransitionError(
+                "listener repair plan must retain the exact runtime inventory"
+            )
         for service_name, row in plan["candidateServices"].items():
             if (
                 not isinstance(row, dict)
@@ -7196,13 +7310,12 @@ def _assert_exchange_readiness_safe_shape(snapshot: dict[str, Any]) -> None:
         ):
             raise StageTransitionError("Exchange readiness account profile status is malformed")
         if provider == "microsoft_graph" and (
-            row.get("authStatus") not in {"healthy", "reauthorization_required", "revoked", "unavailable", "unknown"}
+            row.get("authStatus")
+            not in {"healthy", "reauthorization_required", "revoked", "unavailable", "unknown"}
             or row.get("authMode") != "delegated_oauth"
             or row.get("accessMode") != "actor_owned"
             or not isinstance(row.get("externalSubject"), str)
-            or not re.fullmatch(
-                r"[0-9a-fA-F-]{36}:[0-9a-fA-F-]{36}", row["externalSubject"]
-            )
+            or not re.fullmatch(r"[0-9a-fA-F-]{36}:[0-9a-fA-F-]{36}", row["externalSubject"])
             or row.get("scopeSchemaVersion") != 2
             or isinstance(row.get("scopeSchemaVersion"), bool)
             or not isinstance(row.get("credentialRevision"), int)
@@ -7212,10 +7325,7 @@ def _assert_exchange_readiness_safe_shape(snapshot: dict[str, Any]) -> None:
             or any(not isinstance(value, str) or not value for value in row["enabledFeatures"])
             or len(row["enabledFeatures"]) != len(set(row["enabledFeatures"]))
             or not isinstance(row.get("requiredOAuthScopes"), list)
-            or any(
-                not isinstance(value, str) or not value
-                for value in row["requiredOAuthScopes"]
-            )
+            or any(not isinstance(value, str) or not value for value in row["requiredOAuthScopes"])
             or len(row["requiredOAuthScopes"]) != len(set(row["requiredOAuthScopes"]))
             or not isinstance(row.get("targetRefCount"), int)
             or isinstance(row.get("targetRefCount"), bool)
@@ -7856,14 +7966,18 @@ def _verify_exchange_readiness_snapshot(
         profile = provider_profiles[0]
         connection = provider_connections[0]
         is_graph = provider_id == "microsoft_graph"
-        if not isinstance(profile.get("profileAlias"), str) or (
-            is_graph
-            and (connection.get("targetAlias") is not None or "targetScope" in connection)
-        ) or (
-            not is_graph
-            and (
-                not isinstance(connection.get("targetAlias"), str)
-                or not isinstance(connection.get("targetScope"), dict)
+        if (
+            not isinstance(profile.get("profileAlias"), str)
+            or (
+                is_graph
+                and (connection.get("targetAlias") is not None or "targetScope" in connection)
+            )
+            or (
+                not is_graph
+                and (
+                    not isinstance(connection.get("targetAlias"), str)
+                    or not isinstance(connection.get("targetScope"), dict)
+                )
             )
         ):
             raise StageTransitionError(
@@ -7887,7 +8001,9 @@ def _verify_exchange_readiness_snapshot(
             graph_alias, graph_host_profile = graph_profiles[0]
             graph_office_scope = graph_host_profile.get("officeV2")
             if not isinstance(graph_office_scope, dict):
-                raise StageTransitionError("candidate Exchange Graph Office v2 scope is unavailable")
+                raise StageTransitionError(
+                    "candidate Exchange Graph Office v2 scope is unavailable"
+                )
             try:
                 preflight._validate_office_v2_host_scope(graph_office_scope, compose)
                 graph_operations = preflight._graph_operations_for_office_scope(graph_office_scope)
@@ -7901,7 +8017,9 @@ def _verify_exchange_readiness_snapshot(
                     "Graph issued operation map differs from its Office v2 target scope"
                 ) from error
             if not graph_operations:
-                raise StageTransitionError("Graph activation must enable at least one Office feature")
+                raise StageTransitionError(
+                    "Graph activation must enable at least one Office feature"
+                )
             graph_read_only = not any(
                 preflight.CONNECTOR_OPERATION_POLICIES[operation][2]
                 for operation in graph_operations

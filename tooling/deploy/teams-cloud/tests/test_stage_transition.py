@@ -1183,7 +1183,9 @@ def test_exchange_graph_readiness_uses_unix_expiry_metadata() -> None:
     stage_transition._assert_exchange_readiness_safe_shape(snapshot)
 
     profile["credentialExpiresAt"] = "2027-01-15T00:00:00Z"
-    with pytest.raises(stage_transition.StageTransitionError, match="profile metadata is malformed"):
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="profile metadata is malformed"
+    ):
         stage_transition._assert_exchange_readiness_safe_shape(snapshot)
 
 
@@ -2959,7 +2961,9 @@ def test_image_update_rejects_unchanged_or_unknown_targets(tmp_path: Path) -> No
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("cloud-management-phase2", tmp_path)
+    active, candidate, active_lock, candidate_lock = _active_image_update(
+        "cloud-management-phase2", tmp_path
+    )
     with pytest.raises(
         stage_transition.StageTransitionError,
         match="phase must be provider-bootstrap or issued-connector-activation",
@@ -2973,7 +2977,9 @@ def test_image_update_rejects_unchanged_or_unknown_targets(tmp_path: Path) -> No
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("navigator-persistence", tmp_path)
+    active, candidate, active_lock, candidate_lock = _active_image_update(
+        "navigator-persistence", tmp_path
+    )
     with pytest.raises(
         stage_transition.StageTransitionError,
         match="Persistence image updates require issued-connector-activation",

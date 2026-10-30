@@ -595,8 +595,7 @@ def _sample_evidence(
                         host, totals = sample.get("host"), sample.get("resourceTotals")
                         if (
                             sample.get("serviceCount") != expected_service_count
-                            or sample.get("projectRunningServiceCount")
-                            != expected_service_count
+                            or sample.get("projectRunningServiceCount") != expected_service_count
                             or sorted(names) != expected_names
                             or failures
                             or any(row["failures"] for row in services)

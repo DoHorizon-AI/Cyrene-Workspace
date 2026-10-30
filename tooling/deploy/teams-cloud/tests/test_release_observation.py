@@ -303,7 +303,9 @@ def _versioned_profile_policy(
     contents[observation.POLICY] = _raw(template)
     wrapper = contents[observation.WRAPPER].decode()
     policy_sha = hashlib.sha256(contents[observation.POLICY]).hexdigest()
-    wrapper = re.sub(r"EXPECTED_SERVICE_COUNT=[0-9]+", f"EXPECTED_SERVICE_COUNT={service_count}", wrapper)
+    wrapper = re.sub(
+        r"EXPECTED_SERVICE_COUNT=[0-9]+", f"EXPECTED_SERVICE_COUNT={service_count}", wrapper
+    )
     wrapper = re.sub(
         r"EXPECTED_MEMORY_BYTES=[0-9]+",
         f"EXPECTED_MEMORY_BYTES={totals['memoryBytes']}",
