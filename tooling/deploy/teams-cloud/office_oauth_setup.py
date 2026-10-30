@@ -361,7 +361,7 @@ def _validate_authorization_url(
         or parsed.password is not None
         or parsed.fragment
         or len(path_parts) != 4
-        or path_parts[0].casefold() != tenant_id.casefold()
+        or path_parts[0].casefold() not in {tenant_id.casefold(), "organizations"}
         or path_parts[1:] != ["oauth2", "v2.0", "authorize"]
     ):
         raise OfficeSetupError("office_authorization_url_invalid")
@@ -970,6 +970,9 @@ class OfficeSetupService:
         targets = _validate_targets(targets_value)
         self._validate_target_features(targets, latest["enabledFeatures"])
         self._validate_discovery_selection(session, targets)
+        freebusy = session.discoveries.get("freebusy_subjects")
+        if freebusy is not None and freebusy.ids and not targets["freebusySubjects"]:
+            raise OfficeSetupError("office_freebusy_target_required")
         response = self.bridge.invoke(
             "select-targets",
             {"expectedCredentialRevision": expected_revision, "targets": targets},
@@ -1251,6 +1254,10 @@ document.getElementById('save').addEventListener('click',async()=>{
       if(item.kind.toLowerCase()==='list') values.sharePointListIds.push(item.id);
       else values.sharePointDriveIds.push(item.id);
     }else if(byType[type]) values[byType[type]].push(checkbox.value);
+  }
+  if((discovered.freebusy_subjects||[]).length&&!values.freebusySubjects.length){
+    document.getElementById('selection').textContent='Keep at least one free/busy person selected for the configured calendar capability.';
+    return;
   }
   try{
     const result=await api('/api/select-targets',{expectedCredentialRevision:revision,targets:values});

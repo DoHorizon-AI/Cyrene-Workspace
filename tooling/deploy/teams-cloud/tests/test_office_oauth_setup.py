@@ -97,7 +97,12 @@ def operator_context() -> setup.OperatorContext:
     )
 
 
-def authorization_url(port: int, *, scopes: str | None = None) -> str:
+def authorization_url(
+    port: int,
+    *,
+    scopes: str | None = None,
+    authority: str = "organizations",
+) -> str:
     """Return a test Microsoft authorize URL with the one registered loopback URI."""
 
     query = urllib.parse.urlencode(
@@ -113,7 +118,7 @@ def authorization_url(port: int, *, scopes: str | None = None) -> str:
             "code_challenge_method": "S256",
         }
     )
-    return f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0/authorize?{query}"
+    return f"https://login.microsoftonline.com/{authority}/oauth2/v2.0/authorize?{query}"
 
 
 class FakeBridge:
@@ -352,7 +357,7 @@ def test_authorization_url_accepts_only_loopback_and_no_mail_scope() -> None:
         )
     with pytest.raises(setup.OfficeSetupError, match="office_authorization_url_invalid"):
         setup._validate_authorization_url(
-            url.replace(TENANT, SUBJECT),
+            authorization_url(setup.DEFAULT_PORT, authority=SUBJECT),
             port=setup.DEFAULT_PORT,
             tenant_id=TENANT,
             enabled_features=ENABLED_FEATURES,
@@ -527,6 +532,27 @@ def test_cas_rejects_ids_not_returned_by_exchange_discovery(
         service.select_targets(session, expected_revision=0, targets_value=targets)
     assert len(bridge.calls) == before + 1
     assert bridge.calls[-1][0] == "status"
+
+
+def test_freebusy_selection_cannot_clear_a_nonempty_host_allowlist(
+    linked_service: tuple[setup.OfficeSetupService, FakeBridge, setup.SetupSession],
+) -> None:
+    """Keep at least one fixed host-authorized person when Calendar free/busy is enabled."""
+
+    service, bridge, session = linked_service
+    service.discover(session, "freebusy_subjects")
+    targets = {
+        "plannerPlanIds": [],
+        "sharePointListIds": [],
+        "sharePointDriveIds": [],
+        "toDoTaskListIds": [],
+        "calendarIds": [],
+        "freebusySubjects": [],
+    }
+    before = len(bridge.calls)
+    with pytest.raises(setup.OfficeSetupError, match="office_freebusy_target_required"):
+        service.select_targets(session, expected_revision=0, targets_value=targets)
+    assert not any(operation == "select-targets" for operation, _ in bridge.calls[before:])
 
 
 def _start_server(bridge: FakeBridge) -> tuple[setup.OfficeSetupServer, threading.Thread, int]:
