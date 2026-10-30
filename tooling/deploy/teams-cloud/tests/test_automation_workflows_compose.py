@@ -189,6 +189,8 @@ def test_actor_token_schema_accepts_slot_references_and_rejects_token_values() -
         ],
     }
     checker.validate(valid)
+    owner_only = {**valid, "actors": valid["actors"][:1]}
+    checker.validate(owner_only)
     invalid = {
         **valid,
         "actors": [
@@ -205,9 +207,18 @@ def test_actor_token_schema_accepts_slot_references_and_rejects_token_values() -
         ],
     }
     assert list(checker.iter_errors(invalid_slot))
+    empty_slots = {**valid, "actors": []}
+    assert list(checker.iter_errors(empty_slots))
+    noncontiguous_slots = {
+        **valid,
+        "actors": [
+            {**valid["actors"][1], "actorAadObjectId": valid["actors"][0]["actorAadObjectId"]}
+        ],
+    }
+    assert list(checker.iter_errors(noncontiguous_slots))
 
 
-def test_principal_patch_requires_five_private_writers_and_separate_bridge() -> None:
+def test_principal_patch_accepts_one_to_five_private_writers_and_separate_bridge() -> None:
     schema = _read_schema("automation-work-principals.patch.schema.json")
     checker = jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker())
     template = json.loads(
@@ -219,6 +230,9 @@ def test_principal_patch_requires_five_private_writers_and_separate_bridge() -> 
     assert "NAVIGATOR_SESSION_TOKEN" not in json.dumps(template)
 
     writers = template["privateWriterPrincipals"]
+    owner_only = json.loads(json.dumps(template))
+    owner_only["privateWriterPrincipals"] = writers[:1]
+    checker.validate(owner_only)
     assert [row["token_env"] for row in writers] == [
         f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}" for index in range(1, 6)
     ]
@@ -246,7 +260,7 @@ def test_principal_patch_requires_five_private_writers_and_separate_bridge() -> 
     )
 
     missing_writer = json.loads(json.dumps(template))
-    missing_writer["privateWriterPrincipals"].pop()
+    missing_writer["privateWriterPrincipals"] = []
     assert list(checker.iter_errors(missing_writer))
     shared_writer = json.loads(json.dumps(template))
     shared_writer["privateWriterPrincipals"][1]["actor_private_scope"] = False

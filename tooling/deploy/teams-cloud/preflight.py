@@ -706,7 +706,59 @@ def _validate_principal_configuration(
     expected_organization = operator_environment.get("CYRENE_ORGANIZATION_ID")
     principals = document.get("principals") if isinstance(document, dict) else None
     automation_overlay = _automation_workflow_markers_present(services)
-    expected_principal_count = 7 if automation_overlay else 1
+    navigator = services.get("navigator", {})
+    navigator_environment = navigator.get("environment", {}) if isinstance(navigator, dict) else {}
+    graph_personal_only = (
+        automation_overlay
+        and connector_auth_phase
+        in {OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE, "issued-connector-activation"}
+        and "microsoft-graph" in services
+        and navigator_environment.get("CYRENE_TEAMS_PERSONAL_CHAT_ENABLED") == "true"
+        and navigator_environment.get("CYRENE_WORKFLOWS_ENABLED") == "false"
+    )
+    writer_token_envs = [name for name, _secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS]
+    if graph_personal_only:
+        expected_map_path = "/run/teams-authorization/work-actor-token-map.json"
+        map_mounts = [
+            row
+            for row in navigator.get("volumes", [])
+            if isinstance(row, dict) and row.get("target") == "/run/teams-authorization"
+        ]
+        if (
+            navigator_environment.get("CYRENE_WORK_ACTOR_TOKEN_MAP_FILE") != expected_map_path
+            or len(map_mounts) != 1
+            or map_mounts[0].get("type") != "bind"
+            or map_mounts[0].get("read_only") is not True
+            or not isinstance(map_mounts[0].get("source"), str)
+        ):
+            raise PreflightError("Graph personal route requires the fixed private actor map bind")
+        actor_map = _private_runtime_json(
+            Path(map_mounts[0]["source"]) / "work-actor-token-map.json",
+            "work actor token map",
+        )
+        actor_rows = actor_map.get("actors") if isinstance(actor_map, dict) else None
+        if (
+            not isinstance(actor_rows, list)
+            or not 1 <= len(actor_rows) <= 5
+            or any(not isinstance(row, dict) for row in actor_rows)
+        ):
+            raise PreflightError("Graph personal route requires one to five Directory actor slots")
+        observed_slots = [row.get("tokenEnv") for row in actor_rows]
+        writer_token_envs = [
+            name for name, _secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS[: len(actor_rows)]
+        ]
+        if (
+            observed_slots != writer_token_envs
+            or any(not _uuid(row.get("actorAadObjectId")) for row in actor_rows)
+            or actor_rows[0].get("actorAadObjectId") != expected_actor
+            or len({row.get("actorAadObjectId") for row in actor_rows}) != len(actor_rows)
+        ):
+            raise PreflightError(
+                "Graph personal route actor slots must be contiguous and slot 01 must remain the owner"
+            )
+    expected_principal_count = (
+        2 + len(writer_token_envs) if graph_personal_only else 7 if automation_overlay else 1
+    )
     if (
         not isinstance(principals, list)
         or len(principals) != expected_principal_count
@@ -738,15 +790,15 @@ def _validate_principal_configuration(
     if automation_overlay:
         expected_tokens = {
             "NAVIGATOR_SESSION_TOKEN",
-            *(environment for environment, _secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS),
+            *writer_token_envs,
             "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
         }
         if set(by_token_env) != expected_tokens:
             raise PreflightError(
-                "automation Work principals must be the existing owner session, five private writers, and one bridge"
+                "automation Work principals must be the existing owner session, selected private writers, and one bridge"
             )
         writer_actor_ids: set[str] = set()
-        for index, (token_env, _secret) in enumerate(AUTOMATION_WORKFLOW_TOKEN_SLOTS, start=1):
+        for index, token_env in enumerate(writer_token_envs, start=1):
             principal = by_token_env[token_env]
             actor_id = principal.get("actor_id")
             if (
@@ -786,7 +838,10 @@ def _validate_principal_configuration(
         )
     if document.get("product_directory") != [] or document.get("product_service_credentials") != []:
         raise PreflightError("unconfigured Product proxy credentials must remain absent")
-    if connector_auth_phase in {"provider-bootstrap", "microsoft-graph-provider-bootstrap"}:
+    if (
+        connector_auth_phase in {"provider-bootstrap", "microsoft-graph-provider-bootstrap"}
+        and not graph_personal_only
+    ):
         if session.get("can_publish_credential_health") not in {None, False}:
             raise PreflightError(
                 "credential notification publishing must remain disabled during provider bootstrap"
@@ -1104,7 +1159,7 @@ def _validate_automation_workflow_configuration(
     if not _automation_workflow_markers_present(services, config.get("secrets")):
         if require_personal_delivery:
             raise PreflightError(
-                "Graph bootstrap requires the existing five-actor private chat overlay"
+                "Graph bootstrap requires the existing Directory-scoped private chat overlay"
             )
         return False
     navigator = services.get("navigator")
@@ -1236,10 +1291,11 @@ def _validate_automation_workflow_configuration(
         or actor_map.get("schemaVersion") != 1
         or actor_map.get("workspaceId") != workspace_id
         or not isinstance(actor_map.get("actors"), list)
-        or len(actor_map["actors"]) != 5
+        or not 1 <= len(actor_map["actors"]) <= 5
+        or (not require_personal_delivery and len(actor_map["actors"]) != 5)
     ):
         raise PreflightError(
-            "automation actor map must define exactly five private writer identities"
+            "automation actor map must define the supported private writer identity count"
         )
     actor_by_token: dict[str, str] = {}
     for row in actor_map["actors"]:
@@ -1256,13 +1312,21 @@ def _validate_automation_workflow_configuration(
                 "automation actor map contains a duplicate or unsafe identity reference"
             )
         actor_by_token[row["tokenEnv"]] = row["actorAadObjectId"]
-    expected_actor_tokens = {name for name, _secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS}
+    expected_actor_order = [
+        name
+        for name, _secret in AUTOMATION_WORKFLOW_TOKEN_SLOTS[
+            : len(actor_map["actors"]) if require_personal_delivery else None
+        ]
+    ]
+    expected_actor_tokens = set(expected_actor_order)
+    observed_actor_tokens = [row.get("tokenEnv") for row in actor_map["actors"]]
     if (
         set(actor_by_token) != expected_actor_tokens
+        or observed_actor_tokens != expected_actor_order
         or actor_by_token.get("CYRENE_WORK_ACTOR_TOKEN_01") != owner_id
     ):
         raise PreflightError(
-            "automation actor map must bind slot 01 to the owner and four pilot actors"
+            "automation actor map must bind slot 01 to the owner and use a contiguous slot prefix"
         )
     model_actor = environment.get("CYRENE_TEAMS_MODEL_ACTOR_SUBJECT", "")
     if not isinstance(model_actor, str) or model_actor not in ("", owner_id):
@@ -1285,7 +1349,7 @@ def _validate_automation_workflow_configuration(
         )
     if require_personal_delivery and set(projection_subjects) != set(actor_by_token.values()):
         raise PreflightError(
-            "Graph bootstrap pilot subjects must exactly match the current Directory projection"
+            "Graph bootstrap actors must exactly match the current Directory projection"
         )
 
     principal_document = _private_runtime_json(
@@ -1336,7 +1400,7 @@ def _validate_automation_workflow_configuration(
         or environment.get("CYRENE_TEAMS_MODEL_ACTOR_SUBJECT") != owner_id
     ):
         raise PreflightError(
-            "Graph bootstrap must enable the existing personal route for the five pilot actors, keep Workflows off, and bind model access to the owner"
+            "Graph bootstrap must enable the existing personal route for the selected Directory actors, keep Workflows off, and bind model access to the owner"
         )
     return True
 
@@ -7992,14 +8056,20 @@ def run_preflight(
         notification_provenance_file=notification_provenance_file,
         candidate_runpod_key_file=candidate_runpod_key_file,
     )
+    navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
+    graph_personal_route = connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE or (
+        connector_auth_phase == "issued-connector-activation"
+        and "microsoft-graph" in config.get("services", {})
+        and navigator_environment.get("CYRENE_TEAMS_PERSONAL_CHAT_ENABLED") == "true"
+        and navigator_environment.get("CYRENE_WORKFLOWS_ENABLED") == "false"
+    )
     automation_workflows_present = _validate_automation_workflow_configuration(
         config,
         config_dir=config_dir.resolve(),
         secrets_dir=secrets_dir.resolve(),
-        require_personal_delivery=connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        require_personal_delivery=graph_personal_route,
     )
     automation_providers_present = bool(_automation_provider_ids(config))
-    navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
     execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
     if execution_backend == "codebuddy-acp":
         _validate_codebuddy_acp_boundary(

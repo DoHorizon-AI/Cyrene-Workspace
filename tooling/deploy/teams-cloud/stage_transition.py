@@ -2528,15 +2528,16 @@ def _validate_office_graph_private_principal_delta(
         candidate_directory / "automation-source-bindings.json",
         "Graph bootstrap automation source bindings",
     )
-    writer_slots = [f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}" for index in range(1, 6)]
+    all_writer_slots = [f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}" for index in range(1, 6)]
     actor_rows = actor_map.get("actors")
     if (
         set(actor_map) != {"schemaVersion", "workspaceId", "actors"}
         or actor_map.get("schemaVersion") != 1
         or actor_map.get("workspaceId") != workspace
         or not isinstance(actor_rows, list)
-        or len(actor_rows) != 5
-        or [row.get("tokenEnv") for row in actor_rows if isinstance(row, dict)] != writer_slots
+        or not 1 <= len(actor_rows) <= 5
+        or [row.get("tokenEnv") for row in actor_rows if isinstance(row, dict)]
+        != all_writer_slots[: len(actor_rows)]
         or any(
             not isinstance(row, dict)
             or set(row) != {"actorAadObjectId", "tokenEnv"}
@@ -2545,11 +2546,12 @@ def _validate_office_graph_private_principal_delta(
         )
     ):
         raise StageTransitionError(
-            "Graph bootstrap Work actor map does not match the five fixed token slots"
+            "Graph bootstrap Work actor map does not match contiguous owner-first slots"
         )
+    writer_slots = all_writer_slots[: len(actor_rows)]
     actor_by_token = {row["tokenEnv"]: row["actorAadObjectId"] for row in actor_rows}
     actor_ids = list(actor_by_token.values())
-    if len(set(actor_ids)) != 5 or actor_by_token.get(writer_slots[0]) != owner:
+    if len(set(actor_ids)) != len(writer_slots) or actor_by_token.get(writer_slots[0]) != owner:
         raise StageTransitionError(
             "Graph bootstrap Work actor map has duplicate actors or a non-owner slot 01"
         )
@@ -2560,14 +2562,14 @@ def _validate_office_graph_private_principal_delta(
         or actor_projection.get("workspaceId") != workspace
         or actor_projection.get("issuer") != policy["issuer"]
         or not isinstance(subjects, list)
-        or len(subjects) != 5
+        or len(subjects) != len(writer_slots)
         or any(not preflight._uuid(subject) for subject in subjects)
-        or len(set(subjects)) != 5
+        or len(set(subjects)) != len(writer_slots)
         or set(subjects) != set(actor_ids)
         or source_bindings != {"schemaVersion": 1, "targets": []}
     ):
         raise StageTransitionError(
-            "Graph bootstrap Directory projection must match five actors and source bindings must be empty"
+            "Graph bootstrap Directory projection must match selected actors and source bindings must be empty"
         )
     connector_host = preflight._json_environment_object(
         services.get("exchange", {}),
@@ -2580,13 +2582,13 @@ def _validate_office_graph_private_principal_delta(
     if (
         not isinstance(teams_profile, dict)
         or not isinstance(teams_profile.get("personalActorSubjects"), list)
-        or len(teams_profile["personalActorSubjects"]) != 5
+        or len(teams_profile["personalActorSubjects"]) != len(writer_slots)
         or any(not preflight._uuid(subject) for subject in teams_profile["personalActorSubjects"])
-        or len(set(teams_profile["personalActorSubjects"])) != 5
+        or len(set(teams_profile["personalActorSubjects"])) != len(writer_slots)
         or set(teams_profile["personalActorSubjects"]) != set(subjects)
     ):
         raise StageTransitionError(
-            "Graph bootstrap personal chat subjects must match the five Directory-projected actors"
+            "Graph bootstrap personal chat subjects must match the selected Directory-projected actors"
         )
 
     old_rows = old.get("principals")
@@ -2610,7 +2612,7 @@ def _validate_office_graph_private_principal_delta(
         or new.get("teams_private_conversations") != policy
     ):
         raise StageTransitionError(
-            "Graph bootstrap must preserve the owner session and add only the five writers, bridge, and private-chat policy"
+            "Graph bootstrap must preserve the owner session and add only selected writers, bridge, and private-chat policy"
         )
 
     principal_fields = {
@@ -2631,7 +2633,7 @@ def _validate_office_graph_private_principal_delta(
         "can_publish_credential_health": False,
         "can_bind_teams_private_conversations": False,
     }
-    for token_env, principal in zip(writer_slots, new_rows[1:6], strict=True):
+    for token_env, principal in zip(writer_slots, new_rows[1:-1], strict=True):
         if (
             set(principal) != principal_fields
             or principal.get("actor_id") != actor_by_token[token_env]
@@ -3167,12 +3169,12 @@ def _validate_office_graph_exchange_config_delta(
             subjects = teams_profile.get("personalActorSubjects")
             if (
                 not isinstance(subjects, list)
-                or len(subjects) != 5
+                or not 1 <= len(subjects) <= 5
                 or any(not preflight._uuid(subject) for subject in subjects)
-                or len(set(subjects)) != 5
+                or len(set(subjects)) != len(subjects)
             ):
                 raise StageTransitionError(
-                    "Graph bootstrap Teams private route must use exactly the five pilot actor subjects"
+                    "Graph bootstrap Teams private route must use one to five valid actor subjects"
                 )
         teams_profile.pop("personalActorSubjects", None)
     if normalized != normalized_active:
@@ -4887,6 +4889,26 @@ def _validate_office_graph_owner_health_principal_delta(
     candidate_alias, new = read_principal(candidate, candidate_config_dir, "candidate")
     if active_alias != candidate_alias:
         raise StageTransitionError("Office Graph activation changes the principal config alias")
+    active_actor_map = _read_json(
+        active_config_dir / "work-actor-token-map.json", "active Graph Work actor map"
+    )
+    candidate_actor_map = _read_json(
+        candidate_config_dir / "work-actor-token-map.json", "candidate Graph Work actor map"
+    )
+    if active_actor_map != candidate_actor_map:
+        raise StageTransitionError("Office Graph activation changes its Directory actor map")
+    actor_rows = active_actor_map.get("actors")
+    writer_slots = [f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}" for index in range(1, 6)]
+    if (
+        not isinstance(actor_rows, list)
+        or not 1 <= len(actor_rows) <= 5
+        or any(not isinstance(row, dict) for row in actor_rows)
+        or [row.get("tokenEnv") for row in actor_rows] != writer_slots[: len(actor_rows)]
+    ):
+        raise StageTransitionError(
+            "Office Graph activation actor map must retain contiguous owner-first slots"
+        )
+    writer_slots = writer_slots[: len(actor_rows)]
     old_rows = old.get("principals")
     new_rows = new.get("principals")
     old_by_token = {row.get("token_env"): row for row in old_rows if isinstance(row, dict)}
@@ -4894,7 +4916,7 @@ def _validate_office_graph_owner_health_principal_delta(
     expected_tokens = {
         "NAVIGATOR_SESSION_TOKEN",
         "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
-        *(name for name, _secret in preflight.AUTOMATION_WORKFLOW_TOKEN_SLOTS),
+        *writer_slots,
     }
     if (
         len(old_by_token) != len(old_rows)
@@ -4903,7 +4925,7 @@ def _validate_office_graph_owner_health_principal_delta(
         or set(new_by_token) != expected_tokens
     ):
         raise StageTransitionError(
-            "Office Graph activation must preserve the existing seven Work principals"
+            "Office Graph activation must preserve the selected Work principals"
         )
     owner = (
         candidate.get("services", {})
@@ -4916,7 +4938,6 @@ def _validate_office_graph_owner_health_principal_delta(
     if (
         old_session.get("actor_id") != owner
         or new_session.get("actor_id") != owner
-        or old_session.get("can_publish_credential_health", False) is not False
         or new_session.get("can_publish_credential_health") is not True
     ):
         raise StageTransitionError(
