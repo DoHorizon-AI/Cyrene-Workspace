@@ -1314,7 +1314,8 @@ def test_office_graph_exchange_delta_allows_only_private_subject_projection() ->
     candidate["hostSecretRefs"] = {
         "account-center/caller-hmac-keys/microsoft-graph-callback": (
             "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY"
-        )
+        ),
+        "microsoft-graph/exchange-verification-key": "EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY",
     }
     candidate["connectorHost"]["teamsMessages"]["personalActorSubjects"] = [
         "11111111-1111-4111-8111-111111111111",
@@ -1335,6 +1336,43 @@ def test_office_graph_exchange_delta_allows_only_private_subject_projection() ->
     with pytest.raises(
         stage_transition.StageTransitionError, match="one to five valid actor subjects"
     ):
+        stage_transition._validate_office_graph_exchange_config_delta(active, candidate)
+
+
+def test_office_graph_exchange_delta_requires_exact_verification_hmac_ref() -> None:
+    active = {
+        "connectorHost": {"teamsMessages": {"connectionRef": "teams-connection"}},
+        "accountCenter": {},
+        "hostSecretRefs": {},
+    }
+    candidate = copy.deepcopy(active)
+    candidate["accountCenter"] = {
+        "callbackCallerId": "microsoft-entra-callback",
+        "callbackSigningKeyRef": "account-center/caller-hmac-keys/microsoft-graph-callback",
+    }
+    candidate["hostSecretRefs"] = {
+        "account-center/caller-hmac-keys/microsoft-graph-callback": (
+            "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY"
+        ),
+        "microsoft-graph/exchange-verification-key": "EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY",
+    }
+    candidate["connectorHost"]["teamsMessages"]["personalActorSubjects"] = [
+        "11111111-1111-4111-8111-111111111111"
+    ]
+
+    stage_transition._validate_office_graph_exchange_config_delta(active, candidate)
+
+    candidate["hostSecretRefs"]["microsoft-graph/exchange-verification-key"] = (
+        "EXCHANGE_WRONG_HMAC_KEY"
+    )
+    with pytest.raises(stage_transition.StageTransitionError, match="verification HMAC ref"):
+        stage_transition._validate_office_graph_exchange_config_delta(active, candidate)
+
+    candidate["hostSecretRefs"]["microsoft-graph/exchange-verification-key"] = (
+        "EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY"
+    )
+    candidate["hostSecretRefs"]["unexpected/secret"] = "UNEXPECTED_SECRET_ENV"
+    with pytest.raises(stage_transition.StageTransitionError, match="unrelated Exchange"):
         stage_transition._validate_office_graph_exchange_config_delta(active, candidate)
 
 
